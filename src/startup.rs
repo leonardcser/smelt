@@ -339,6 +339,8 @@ pub fn resolve_provisional(
     provisional.startup_overrides.model = None;
     provisional.startup_overrides.mode = None;
     provisional.startup_overrides.mode_cycle = None;
+    provisional.startup_overrides.reasoning_effort = None;
+    provisional.startup_overrides.reasoning_cycle = None;
     provisional.selections = smelt_core::RuntimeSelections::default();
     let mut resolved = resolve_inputs(provisional, cfg, registered_modes, false, false);
     resolved.startup_overrides = inputs.startup_overrides.clone();
@@ -353,6 +355,47 @@ mod tests {
 
     fn bootstrap(args: &[&str]) -> BootstrapArgs {
         scan_bootstrap_args(args.iter().copied())
+    }
+
+    #[test]
+    fn provisional_startup_defers_reasoning_until_custom_models_are_loaded() {
+        let inputs = StartupInputs {
+            startup_overrides: smelt_core::StartupOverrides {
+                model: Some("box/custom-model".into()),
+                reasoning_effort: Some(ReasoningEffort::Low),
+                reasoning_cycle: Some(vec![ReasoningEffort::Off, ReasoningEffort::Low]),
+                ..Default::default()
+            },
+            selections: smelt_core::RuntimeSelections::default(),
+        };
+        let mut config = smelt_core::config::Config::default();
+        config.defaults.model = Some("placeholder/model".into());
+        config.providers.push(smelt_core::config::ProviderConfig {
+            name: Some("placeholder".into()),
+            provider_type: Some("openai-compatible".into()),
+            api_base: Some("https://example.invalid/v1".into()),
+            api_key_env: None,
+            models: vec![protocol::ModelConfig {
+                name: Some("model".into()),
+                supports_reasoning: Some(false),
+                ..Default::default()
+            }],
+        });
+
+        let resolved = resolve_provisional(&inputs, config, &[]);
+        assert_eq!(resolved.runtime.reasoning_effort, ReasoningEffort::Off);
+        assert_eq!(
+            resolved.startup_overrides.model,
+            inputs.startup_overrides.model
+        );
+        assert_eq!(
+            resolved.startup_overrides.reasoning_effort,
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            resolved.startup_overrides.reasoning_cycle,
+            inputs.startup_overrides.reasoning_cycle
+        );
     }
 
     #[test]

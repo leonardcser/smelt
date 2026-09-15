@@ -691,6 +691,8 @@
 ---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
 ---@field context_window? integer Total context window, in tokens.
 ---@field supports_reasoning? boolean Whether this model supports reasoning/thinking parameters.
+---@field supported_reasoning_efforts? string[] Native reasoning labels for the picker and cycling, for example { "off", "low", "medium", "xhigh" }. Set supports_reasoning = true to enable request parameters. For OpenAI-compatible models, off sends reasoning_effort = "none".
+---@field default_reasoning_effort? string Fallback when the selected effort is unsupported. Must be in supported_reasoning_efforts when supplied.
 ---@field supports_fast_mode? boolean Whether this model supports accelerated inference.
 ---@field input_modalities? string[] Input modalities supported by this model, for example { "text", "image", "pdf" }.
 

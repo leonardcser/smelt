@@ -47,6 +47,10 @@ pub struct LuaProviderModel {
     pub context_window: Option<u32>,
     /// Whether this model supports reasoning/thinking parameters.
     pub supports_reasoning: Option<bool>,
+    /// Native reasoning labels for the picker and cycling, for example { "off", "low", "medium", "xhigh" }. Set supports_reasoning = true to enable request parameters. For OpenAI-compatible models, off sends reasoning_effort = "none".
+    pub supported_reasoning_efforts: Option<Vec<String>>,
+    /// Fallback when the selected effort is unsupported. Must be in supported_reasoning_efforts when supplied.
+    pub default_reasoning_effort: Option<String>,
     /// Whether this model supports accelerated inference.
     pub supports_fast_mode: Option<bool>,
     /// Input modalities supported by this model, for example { "text", "image", "pdf" }.
@@ -113,6 +117,30 @@ impl FromLua for LuaModelEntry {
             })),
             mlua::Value::Table(_) => {
                 let m: LuaProviderModel = FromLua::from_lua(value, lua)?;
+                let parse_effort = |label: String| {
+                    protocol::ReasoningEffort::parse(&label)
+                        .ok_or_else(|| mlua::Error::external("reasoning effort must not be empty"))
+                };
+                let supported_reasoning_efforts = m
+                    .supported_reasoning_efforts
+                    .map(|labels| {
+                        labels
+                            .into_iter()
+                            .map(parse_effort)
+                            .collect::<LuaResult<Vec<_>>>()
+                    })
+                    .transpose()?;
+                let default_reasoning_effort =
+                    m.default_reasoning_effort.map(parse_effort).transpose()?;
+                if let (Some(efforts), Some(default)) =
+                    (&supported_reasoning_efforts, &default_reasoning_effort)
+                {
+                    if !efforts.contains(default) {
+                        return Err(mlua::Error::external(
+                            "default_reasoning_effort must be in supported_reasoning_efforts",
+                        ));
+                    }
+                }
                 Ok(Self(ModelConfig {
                     name: m.name,
                     temperature: m.temperature,
@@ -129,6 +157,8 @@ impl FromLua for LuaModelEntry {
                     thinking_budgets: m.thinking_budgets.map(Into::into),
                     context_window: m.context_window,
                     supports_reasoning: m.supports_reasoning,
+                    supported_reasoning_efforts,
+                    default_reasoning_effort,
                     supports_fast_mode: m.supports_fast_mode,
                     input_modalities: m.input_modalities,
                 }))
@@ -246,6 +276,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         row.set("cache_read_cost", m.cache_read_cost)?;
                         row.set("cache_write_cost", m.cache_write_cost)?;
                         row.set("max_tokens", m.max_tokens)?;
+                        row.set("supports_reasoning", m.supports_reasoning)?;
+                        if let Some(efforts) = &m.supported_reasoning_efforts {
+                            row.set("supported_reasoning_efforts", efforts.iter().map(|effort| effort.label()).collect::<Vec<_>>())?;
+                        }
+                        row.set("default_reasoning_effort", m.default_reasoning_effort.as_ref().map(|effort| effort.label()))?;
                         if let Some(tb) = &m.thinking_budgets {
                             let t = lua.create_table()?;
                             t.set("low", tb.low)?;
@@ -288,4 +323,55 @@ For streaming observation use `smelt.events.on(\"stream_delta\", ...)` - synchro
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_reasoning_model_parses_native_levels() {
+        let lua = Lua::new();
+        let model: LuaModelEntry = lua
+            .load(
+                r#"return {
+            name = "orcarouter/Qwen3.8-27B-Uncensored-NVFP4",
+            supports_reasoning = true,
+            supported_reasoning_efforts = { "off", "low", "medium", "xhigh", "custom" },
+            default_reasoning_effort = "xhigh",
+        }"#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(model.0.supports_reasoning, Some(true));
+        assert_eq!(
+            model.0.default_reasoning_effort,
+            Some(protocol::ReasoningEffort::XHigh)
+        );
+        assert_eq!(
+            model.0.supported_reasoning_efforts.unwrap(),
+            vec![
+                protocol::ReasoningEffort::Off,
+                protocol::ReasoningEffort::Low,
+                protocol::ReasoningEffort::Medium,
+                protocol::ReasoningEffort::XHigh,
+                protocol::ReasoningEffort::Custom("custom".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_reasoning_model_rejects_empty_labels_and_invalid_default() {
+        let lua = Lua::new();
+        for source in [
+            r#"return { supported_reasoning_efforts = { " " } }"#,
+            r#"return { default_reasoning_effort = " " }"#,
+            r#"return { supported_reasoning_efforts = { "off", "low" }, default_reasoning_effort = "high" }"#,
+        ] {
+            assert!(
+                lua.load(source).eval::<LuaModelEntry>().is_err(),
+                "{source}"
+            );
+        }
+    }
 }

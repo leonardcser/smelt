@@ -44,7 +44,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "model_config",
-        "Resolved model-level sampling, capability, and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `context_window`, `supports_reasoning`, `supports_fast_mode`, `input_modalities`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.",
+        "Resolved model-level sampling, capability, and cost overrides as a table. Fields are `nil` when not explicitly set: `name`, `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `tool_calling`, `max_tokens`, `context_window`, `supports_reasoning`, `supported_reasoning_efforts`, `default_reasoning_effort`, `supports_fast_mode`, `input_modalities`, `thinking_budgets` (`{ low, medium, high, max }`), `input_cost`, `output_cost`, `cache_read_cost`, `cache_write_cost`.",
         &[],
         |lua, ()| -> LuaResult<Option<mlua::Table>> {
             let Some(cfg) =
@@ -82,6 +82,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
             if let Some(v) = cfg.supports_reasoning {
                 t.set("supports_reasoning", v)?;
+            }
+            if let Some(efforts) = cfg.supported_reasoning_efforts {
+                t.set("supported_reasoning_efforts", efforts.iter().map(|effort| effort.label()).collect::<Vec<_>>())?;
+            }
+            if let Some(default) = cfg.default_reasoning_effort {
+                t.set("default_reasoning_effort", default.label())?;
             }
             if let Some(v) = cfg.supports_fast_mode {
                 t.set("supports_fast_mode", v)?;

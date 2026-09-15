@@ -137,8 +137,42 @@ Per-model overrides:
 | `thinking_budgets`   | Per-level budgets for budget-based thinking: `{ low = 2048, medium = 8192, high = 16384, max = 16384 }`   |
 | `context_window`     | Total context window in tokens. Overrides provider/catalog metadata when set.                             |
 | `supports_reasoning` | Whether this model supports reasoning/thinking parameters. Overrides provider/catalog metadata when set.  |
+| `supported_reasoning_efforts` | Native reasoning labels for the picker and cycling. Overrides provider metadata. Set `supports_reasoning = true` to enable request parameters. |
+| `default_reasoning_effort` | Fallback for unsupported selections; must belong to `supported_reasoning_efforts` when supplied. |
 | `supports_fast_mode` | Whether this model supports accelerated inference. Enables `fast_mode` and `/fast` when true.              |
 | `input_modalities`   | Array of accepted inputs such as `{ "text", "image", "pdf" }`; overrides discovered metadata.         |
+
+#### Custom reasoning models
+
+For a custom endpoint that does not advertise reasoning capabilities, declare
+both support and the server's native levels. For example, a Qwen3.8 vLLM server
+using the `qwen3` reasoning parser can be configured as:
+
+```lua
+smelt.provider.register("box", {
+  type = "openai-compatible",
+  api_base = "http://localhost:8080/v1",
+  models = {
+    {
+      name = "orcarouter/Qwen3.8-27B-Uncensored-NVFP4",
+      supports_reasoning = true,
+      supported_reasoning_efforts = { "off", "low", "medium", "xhigh" },
+      default_reasoning_effort = "xhigh",
+    },
+  },
+})
+```
+
+`/reasoning` offers these levels; unsupported selections fall back to the declared
+default. Explicit model configuration takes precedence over provider metadata.
+Use the levels supported by your server and parser version, not generic presets:
+this server accepts `xhigh`, not `high`.
+
+For OpenAI-compatible models with `supports_reasoning = true`, `/reasoning off`
+sends `reasoning_effort = "none"`. Omitting the field would leave thinking at the
+server's default. Unknown or explicitly non-reasoning models receive no reasoning
+parameter when off. `/thinking off` only folds the displayed thinking blocks; it
+does not disable model reasoning.
 
 #### Pricing
 

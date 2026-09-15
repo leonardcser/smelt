@@ -1,6 +1,6 @@
 use protocol::{ModelCatalogMetadata, ModelConfig, ReasoningEffort};
 
-/// Provider-advertised levels take precedence over model-specific built-ins.
+/// Explicit configuration takes precedence over provider metadata and built-ins.
 /// An empty list means unknown, not that every known effort is available.
 pub fn reasoning_catalog(
     provider_type: &str,
@@ -10,6 +10,16 @@ pub fn reasoning_catalog(
     metadata: &ModelCatalogMetadata,
 ) -> ModelCatalogMetadata {
     let mut catalog = metadata.clone();
+    if let Some(efforts) = &config.supported_reasoning_efforts {
+        catalog.supported_reasoning_efforts = efforts.clone();
+        // A provider default may not belong to the explicitly configured levels.
+        catalog.default_reasoning_effort = catalog
+            .default_reasoning_effort
+            .filter(|effort| efforts.contains(effort));
+    }
+    if let Some(default) = &config.default_reasoning_effort {
+        catalog.default_reasoning_effort = Some(default.clone());
+    }
     if config.supports_reasoning == Some(false) {
         catalog.supported_reasoning_efforts = vec![ReasoningEffort::Off];
         catalog.default_reasoning_effort = Some(ReasoningEffort::Off);
@@ -66,6 +76,71 @@ pub fn effective_reasoning_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_catalog_uses_explicit_custom_model_levels() {
+        let efforts = vec![
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::XHigh,
+        ];
+        let config = ModelConfig {
+            supports_reasoning: Some(true),
+            supported_reasoning_efforts: Some(efforts.clone()),
+            default_reasoning_effort: Some(ReasoningEffort::XHigh),
+            ..Default::default()
+        };
+        let metadata = ModelCatalogMetadata {
+            supported_reasoning_efforts: vec![ReasoningEffort::High],
+            default_reasoning_effort: Some(ReasoningEffort::High),
+            ..Default::default()
+        };
+        let catalog =
+            reasoning_catalog("openai-compatible", "", "custom-model", &config, &metadata);
+        assert_eq!(catalog.supported_reasoning_efforts, efforts);
+        assert_eq!(
+            catalog.reconcile_reasoning_effort(ReasoningEffort::High),
+            ReasoningEffort::XHigh
+        );
+        assert_eq!(
+            catalog.reconcile_reasoning_effort(ReasoningEffort::Off),
+            ReasoningEffort::Off
+        );
+
+        let without_default = ModelConfig {
+            default_reasoning_effort: None,
+            ..config.clone()
+        };
+        let catalog = reasoning_catalog(
+            "openai-compatible",
+            "",
+            "custom-model",
+            &without_default,
+            &metadata,
+        );
+        assert_eq!(catalog.default_reasoning_effort, None);
+        assert_eq!(
+            catalog.reconcile_reasoning_effort(ReasoningEffort::High),
+            ReasoningEffort::Off
+        );
+
+        let disabled = ModelConfig {
+            supports_reasoning: Some(false),
+            ..config
+        };
+        let catalog = reasoning_catalog(
+            "openai-compatible",
+            "",
+            "custom-model",
+            &disabled,
+            &metadata,
+        );
+        assert_eq!(
+            catalog.supported_reasoning_efforts,
+            vec![ReasoningEffort::Off]
+        );
+    }
 
     #[test]
     fn reasoning_catalog_preserves_provider_labels_and_order() {

@@ -1064,6 +1064,72 @@ mod tests {
     }
 
     #[test]
+    fn custom_reasoning_config_drives_picker_cycle_and_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            smelt.provider.register("test", {
+                type = "openai-compatible",
+                api_base = "https://example.invalid/v1",
+                models = {{
+                    name = "test-model",
+                    supports_reasoning = true,
+                    supported_reasoning_efforts = { "off", "low", "medium", "xhigh" },
+                    default_reasoning_effort = "xhigh",
+                }},
+            })
+            smelt.remember.set({ reasoning_effort = false })
+        "#,
+        )
+        .unwrap();
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_init_lua(init)
+            .build();
+        app.run_lua_result(
+            r#"
+            local options = smelt.reasoning.options()
+            assert(table.concat(options.efforts, ",") == "off,low,medium,xhigh")
+            assert(options.default == "xhigh")
+            assert(table.concat(smelt.reasoning.cycle_list(), ",") == "off,low,medium,xhigh")
+            local config = smelt.config.model_config()
+            assert(table.concat(config.supported_reasoning_efforts, ",") == "off,low,medium,xhigh")
+            assert(config.default_reasoning_effort == "xhigh")
+            local model = smelt.provider.list()[1].models[1]
+            assert(table.concat(model.supported_reasoning_efforts, ",") == "off,low,medium,xhigh")
+            assert(model.default_reasoning_effort == "xhigh")
+        "#,
+        )
+        .unwrap();
+        app.run_lua_result(r#"smelt.reasoning.set("off")"#).unwrap();
+        for effort in ["low", "medium", "xhigh", "off"] {
+            let _ = app.drain_engine_sends();
+            app.run_lua_result("smelt.reasoning.cycle()").unwrap();
+            assert_eq!(app.app.core.config.reasoning_effort.label(), effort);
+            assert!(app.drain_engine_sends().iter().any(|command| matches!(
+                command,
+                protocol::UiCommand::SetReasoningEffort { effort: selected } if selected.label() == effort
+            )));
+        }
+        app.run_lua_result(r#"smelt.cmd.run("reasoning medium")"#)
+            .unwrap();
+        assert_eq!(
+            app.app.core.config.reasoning_effort,
+            protocol::ReasoningEffort::Medium
+        );
+        app.run_lua_result(r#"smelt.cmd.run("reasoning off")"#)
+            .unwrap();
+        assert_eq!(
+            app.app.core.config.reasoning_effort,
+            protocol::ReasoningEffort::Off
+        );
+        assert!(app
+            .run_lua_result(r#"smelt.reasoning.set("high")"#)
+            .is_err());
+    }
+
+    #[test]
     fn reasoning_pending_clears_when_cycling_back_to_applied_effort() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.core.config.reasoning_effort = protocol::ReasoningEffort::Off;

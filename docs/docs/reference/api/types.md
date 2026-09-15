@@ -1033,6 +1033,8 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
 | `context_window` | `integer` |  | Total context window, in tokens. |
 | `supports_reasoning` | `boolean` |  | Whether this model supports reasoning/thinking parameters. |
+| `supported_reasoning_efforts` | `string[]` |  | Native reasoning labels for the picker and cycling, for example { "off", "low", "medium", "xhigh" }. Set supports_reasoning = true to enable request parameters. For OpenAI-compatible models, off sends reasoning_effort = "none". |
+| `default_reasoning_effort` | `string` |  | Fallback when the selected effort is unsupported. Must be in supported_reasoning_efforts when supplied. |
 | `supports_fast_mode` | `boolean` |  | Whether this model supports accelerated inference. |
 | `input_modalities` | `string[]` |  | Input modalities supported by this model, for example { "text", "image", "pdf" }. |
 

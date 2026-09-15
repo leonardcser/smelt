@@ -96,9 +96,11 @@ pub fn build_body(
         body["max_tokens"] = serde_json::json!(v);
     }
 
-    let label = effort.label();
     if effort != ReasoningEffort::Off {
-        body["reasoning_effort"] = serde_json::json!(label);
+        body["reasoning_effort"] = serde_json::json!(effort.label());
+    } else if config.supports_reasoning == Some(true) {
+        // Omitting the parameter leaves thinking-enabled servers at their default.
+        body["reasoning_effort"] = serde_json::json!("none");
     }
 
     body
@@ -632,9 +634,35 @@ mod tests {
     }
 
     #[test]
+    fn build_body_explicitly_disables_supported_reasoning() {
+        for supports_reasoning in [None, Some(false), Some(true)] {
+            let config = ModelConfig {
+                supports_reasoning,
+                ..cfg()
+            };
+            let body = build_body(
+                &[user("hi")],
+                &[],
+                "custom-model",
+                ReasoningEffort::Off,
+                &config,
+            );
+            if supports_reasoning == Some(true) {
+                assert_eq!(body["reasoning_effort"], "none");
+            } else {
+                assert!(body.get("reasoning_effort").is_none());
+            }
+            assert!(body.get("chat_template_kwargs").is_none());
+        }
+    }
+
+    #[test]
     fn build_body_sets_reasoning_effort_when_effort_set() {
         for effort in [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::XHigh,
             ReasoningEffort::Custom("persistent".into()),
         ] {
             let label = effort.label().to_string();

@@ -54,6 +54,10 @@ pub struct ModelConfig {
     pub context_window: Option<u32>,
     /// Whether metadata says this model supports reasoning/thinking parameters.
     pub supports_reasoning: Option<bool>,
+    /// Explicit native reasoning levels, overriding provider/catalog metadata.
+    pub supported_reasoning_efforts: Option<Vec<ReasoningEffort>>,
+    /// Default used when the selected reasoning level is unsupported.
+    pub default_reasoning_effort: Option<ReasoningEffort>,
     /// Whether metadata says this model supports accelerated inference.
     pub supports_fast_mode: Option<bool>,
     /// Input modalities supported by this model, such as `text`, `image`, and `pdf`.
