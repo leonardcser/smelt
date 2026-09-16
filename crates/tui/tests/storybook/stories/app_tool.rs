@@ -36,6 +36,58 @@ app_story!(bash_tool_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
+app_story!(spawn_agent_tool_states, |ctx| {
+    ctx.run_lua("require('smelt.plugins.subagents')");
+    ctx.set_viewport(78, 20);
+    ctx.tool_started("spawn_agent", &[("prompt", json!("Review parser"))]);
+    ctx.tool_call(
+        "spawn_agent",
+        &[("prompt", json!("Review tests"))],
+        r#"[{"id":1,"status":"running","session_id":"child-session"}]"#,
+        Some(1),
+    );
+    ctx.tool_call_error("spawn_agent", &[], "subagent queue is full", Some(1));
+    ctx.assert_snapshot_named("expanded");
+    ctx.set_viewport(45, 20);
+    ctx.assert_snapshot_named("narrow");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(peek_agent_tool_states, |ctx| {
+    ctx.run_lua("require('smelt.plugins.subagents')");
+    ctx.set_viewport(78, 30);
+    ctx.tool_call(
+        "peek_agent",
+        &[("id", json!(1))],
+        "agent #1 - running\n\nReviewing the parser.\nFound a boundary case.",
+        Some(1),
+    );
+    ctx.tool_call(
+        "peek_agent",
+        &[("id", json!(2))],
+        "agent #2 - queued\n\n(no assistant output)",
+        Some(1),
+    );
+    ctx.tool_call(
+        "peek_agent",
+        &[("id", json!(3))],
+        "agent #3 - cancelled\n\nPartial findings.\n\nreason: subagent was cancelled",
+        Some(1),
+    );
+    ctx.tool_call_error(
+        "peek_agent",
+        &[("id", json!(99))],
+        "unknown subagent: 99",
+        Some(1),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.set_viewport(45, 30);
+    ctx.assert_snapshot_named("narrow");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
 app_story!(wait_agents_tool_states, |ctx| {
     ctx.run_lua("require('smelt.plugins.subagents')");
     ctx.set_viewport(78, 30);

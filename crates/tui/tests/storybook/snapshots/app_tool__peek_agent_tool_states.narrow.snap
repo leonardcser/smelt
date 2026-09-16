@@ -1,0 +1,34 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* peek_agent #1                     14:37:03
+  agent #1 - running
+
+  Reviewing the parser.
+  Found a boundary case.
+
+* peek_agent #2                     14:37:03
+  agent #2 - queued
+
+  (no assistant output)
+
+* peek_agent #3                     14:37:03
+  agent #3 - cancelled
+
+  Partial findings.
+
+  reason: subagent was cancelled
+
+* peek_agent #99                    14:37:03
+  unknown subagent: 99
+
+
+
+
+
+
+─ ✿ working… ────────────────────────────────
+
+─────────────────────────────────────────────
+ ○ normal                            1:1 100%

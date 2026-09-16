@@ -31,9 +31,18 @@ pub struct AgentInfo {
     pub usage: protocol::TokenUsage,
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct AgentOutput {
+    id: u64,
+    status: String,
+    output: String,
+    error: Option<String>,
+}
+
 pub struct Child {
     pub info: AgentInfo,
     pub session: crate::session::Session,
+    inherited_history_len: usize,
     execution: Option<ChildExecution>,
     completion: tokio::sync::watch::Sender<Option<AgentInfo>>,
     pub streaming_text: String,
@@ -66,7 +75,6 @@ struct ChildLaunch {
 
 struct RunningChild {
     core: Box<Core>,
-    inherited_history_len: usize,
 }
 
 impl Drop for RunningChild {
@@ -132,6 +140,41 @@ impl Agents {
                     .ok_or_else(|| format!("unknown subagent: {id}"))
             })
             .collect()
+    }
+
+    pub(crate) fn peek(&self, parent_id: &str, id: u64) -> Result<AgentOutput, String> {
+        let selected = self.selected(parent_id, &[id])?;
+        let child = selected[0];
+        let history = child
+            .session
+            .history
+            .get(child.inherited_history_len..)
+            .unwrap_or_default();
+        let messages = history.iter().filter_map(|item| match item {
+            protocol::HistoryItem::Assistant(step) => {
+                step.content.as_ref().map(protocol::Content::text_content)
+            }
+            _ => None,
+        });
+        let mut output = crate::output_limit::OutputLimiter::default();
+        for (index, text) in messages
+            .chain(std::iter::once(std::borrow::Cow::Borrowed(
+                child.streaming_text.as_str(),
+            )))
+            .filter(|text| !text.is_empty())
+            .enumerate()
+        {
+            if index > 0 {
+                output.push_line(String::new());
+            }
+            output.push_text(&text);
+        }
+        Ok(AgentOutput {
+            id,
+            status: child.info.status.clone(),
+            output: output.format_text_with_notice("[agent output truncated; showing tail]"),
+            error: child.info.error.clone(),
+        })
     }
 
     pub(crate) fn completions(
@@ -221,6 +264,7 @@ impl Core {
                 Child {
                     info,
                     session,
+                    inherited_history_len: snapshot.history().len(),
                     completion: tokio::sync::watch::channel(None).0,
                     streaming_text: String::new(),
                     streaming_reasoning: String::new(),
@@ -299,7 +343,6 @@ impl Core {
                     core.mcp = launch.mcp;
                     child.execution = Some(ChildExecution::Running(RunningChild {
                         core: Box::new(core),
-                        inherited_history_len: launch.snapshot.history().len(),
                     }));
                     child.info.status = "running".into();
                     running += 1;
@@ -556,7 +599,7 @@ impl Core {
                 let suffix = child
                     .session
                     .history
-                    .get(run.inherited_history_len..)
+                    .get(child.inherited_history_len..)
                     .unwrap_or_default();
                 child.info.result = if child.info.status == "completed" {
                     protocol::history_to_messages(suffix)
@@ -692,10 +735,10 @@ mod tests {
                     usage: protocol::TokenUsage::default(),
                 },
                 session,
+                inherited_history_len: 0,
                 completion: tokio::sync::watch::channel(None).0,
                 execution: Some(ChildExecution::Running(RunningChild {
                     core: Box::new(child_core),
-                    inherited_history_len: 0,
                 })),
                 streaming_text: String::new(),
                 streaming_reasoning: String::new(),
@@ -738,6 +781,142 @@ mod tests {
             lua.pump_task_events();
             lua.drive_tasks(now)
         })
+    }
+
+    #[test]
+    fn subagent_peek_excludes_inherited_context_reasoning_and_non_assistant_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut parent, _) = core(root.path());
+        let _commands = add_running_child(&mut parent, 1);
+        let message = |text| {
+            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text(text)),
+                Some("private reasoning".into()),
+                vec![],
+            ))
+        };
+        let child = parent.agents.children.get_mut(&1).unwrap();
+        child.session.history = vec![
+            message("inherited parent answer"),
+            protocol::HistoryItem::user(protocol::Content::text("private task")),
+            message("Checked the parser."),
+        ];
+        child.inherited_history_len = 1;
+        child.streaming_text = "Vérifying the boundary".into();
+        child.streaming_reasoning = "private in-flight reasoning".into();
+        for _ in 0..2 {
+            let peek = parent.agents.peek("parent", 1).unwrap();
+            assert_eq!(peek.status, "running");
+            assert_eq!(peek.output, "Checked the parser.\n\nVérifying the boundary");
+            assert!(peek.error.is_none());
+        }
+        let child = parent.agents.children.get_mut(&1).unwrap();
+        assert_eq!(child.streaming_text, "Vérifying the boundary");
+        child
+            .session
+            .history
+            .push(message("Vérifying the boundary"));
+        child.streaming_text.clear();
+        parent.handle_agent_event(
+            &LuaRuntime::new(),
+            1,
+            EngineEvent::TurnComplete {
+                turn_id: 1,
+                history: None,
+                meta: None,
+            },
+        );
+        let peek = parent.agents.peek("parent", 1).unwrap();
+        assert_eq!(peek.status, "completed");
+        assert_eq!(peek.output, "Checked the parser.\n\nVérifying the boundary");
+        assert_eq!(
+            parent.agents.children[&1].info.result,
+            "Vérifying the boundary"
+        );
+        assert!(parent.agents.peek("other parent", 1).is_err());
+        assert!(parent.agents.peek("parent", 99).is_err());
+    }
+
+    #[test]
+    fn subagent_peek_retains_partial_output_and_terminal_reasons() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut parent, _) = core(root.path());
+        let _commands = add_running_child(&mut parent, 1);
+        let _queued_commands = add_running_child(&mut parent, 2);
+        parent.agents.children.get_mut(&2).unwrap().info.status = "queued".into();
+        let queued = parent.agents.peek("parent", 2).unwrap();
+        assert_eq!(queued.status, "queued");
+        assert!(queued.output.is_empty());
+        parent.cancel_agent(2).unwrap();
+        let cancelled = parent.agents.peek("parent", 2).unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert!(cancelled.output.is_empty());
+        parent
+            .agents
+            .children
+            .get_mut(&1)
+            .unwrap()
+            .session
+            .history
+            .push(protocol::HistoryItem::assistant(
+                protocol::AssistantStep::terminal(
+                    Some(protocol::Content::text("Partial findings")),
+                    None,
+                    vec![],
+                ),
+            ));
+        let lua = LuaRuntime::new();
+        parent.handle_agent_event(
+            &lua,
+            1,
+            EngineEvent::TurnError {
+                message: "provider unavailable".into(),
+                kind: None,
+                retry_at_ms: None,
+            },
+        );
+        parent.handle_agent_event(
+            &lua,
+            1,
+            EngineEvent::TurnComplete {
+                turn_id: 1,
+                history: None,
+                meta: None,
+            },
+        );
+        let failed = parent.agents.peek("parent", 1).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.output, "Partial findings");
+        assert_eq!(failed.error.as_deref(), Some("provider unavailable"));
+        assert!(parent.agents.children[&1].info.result.is_empty());
+    }
+
+    #[test]
+    fn subagent_peek_bounds_assistant_output_with_the_shared_process_limiter() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut parent, _) = core(root.path());
+        let _commands = add_running_child(&mut parent, 1);
+        for text in [
+            format!(
+                "{}\nlast line",
+                "é".repeat(crate::output_limit::DEFAULT_MAX_BYTES)
+            ),
+            format!(
+                "{}last line",
+                "older line\n".repeat(crate::output_limit::DEFAULT_MAX_LINES + 1)
+            ),
+        ] {
+            parent.agents.children.get_mut(&1).unwrap().streaming_text = text;
+            let peek = parent.agents.peek("parent", 1).unwrap();
+            assert!(peek
+                .output
+                .starts_with("[agent output truncated; showing tail]"));
+            assert!(peek.output.ends_with("last line"));
+            assert!(peek.output.len() < crate::output_limit::DEFAULT_MAX_BYTES + 512);
+            assert!(peek.output.lines().count() <= crate::output_limit::DEFAULT_MAX_LINES + 2);
+            assert!(!peek.output.contains('\u{fffd}'));
+            assert_eq!(parent.agents.peek("parent", 1).unwrap().output, peek.output);
+        }
     }
 
     #[tokio::test(start_paused = true)]

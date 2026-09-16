@@ -8,20 +8,25 @@ use wiremock::matchers::method;
 use wiremock::{Mock, Request, ResponseTemplate};
 
 fn response(calls: Vec<(&str, &str, Value)>) -> ResponseTemplate {
+    response_with_text(calls, None)
+}
+
+fn response_with_text(calls: Vec<(&str, &str, Value)>, text: Option<&str>) -> ResponseTemplate {
     let tools = !calls.is_empty();
+    let text = text.or_else(|| (!tools).then_some("completed independently"));
     let mut events = vec![
         json!({"type":"message_start","message":{"id":"test","type":"message","role":"assistant","content":[],"model":"test-model","usage":{"input_tokens":10,"output_tokens":1}}}),
     ];
-    if tools {
-        for (index, (id, name, args)) in calls.into_iter().enumerate() {
-            events.push(json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}));
-            events.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":args.to_string()}}));
-            events.push(json!({"type":"content_block_stop","index":index}));
-        }
-    } else {
+    if let Some(text) = text {
         events.push(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}));
-        events.push(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"completed independently"}}));
+        events.push(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}));
         events.push(json!({"type":"content_block_stop","index":0}));
+    }
+    for (index, (id, name, args)) in calls.into_iter().enumerate() {
+        let index = index + usize::from(text.is_some());
+        events.push(json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}));
+        events.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":args.to_string()}}));
+        events.push(json!({"type":"content_block_stop","index":index}));
     }
     events.push(json!({"type":"message_delta","delta":{"stop_reason":if tools {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":10}}));
     events.push(json!({"type":"message_stop"}));
@@ -340,6 +345,115 @@ async fn ten_subagents_run_in_parallel_by_default() {
         runs.iter().all(|run| run["status"] == "completed"),
         "{runs:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peek_agent_reads_running_assistant_output_without_waiting_or_consuming_it() {
+    let harness = Harness::new().await;
+    harness.write_config("anthropic-compatible", "test-model");
+    harness.write_init_lua(
+        r#"
+require('smelt.plugins.subagents')
+for _, name in ipairs({ 'hold_child', 'await_child', 'release_child' }) do
+    smelt.tools.register({
+        name = name, description = 'Synchronize the child output fixture.', effect = 'read',
+        permission_defaults = { normal = 'allow', plan = 'allow', apply = 'allow' },
+        parameters = { type = 'object', properties = {} },
+        execute = function()
+            if name == 'hold_child' then
+                _G.peek_ready = true
+                while not _G.peek_release do smelt.sleep(5) end
+            elseif name == 'await_child' then
+                while not _G.peek_ready do smelt.sleep(5) end
+            else
+                _G.peek_release = true
+            end
+            return 'private fixture tool output'
+        end,
+    })
+end
+"#,
+    );
+    Mock::given(method("POST"))
+        .respond_with(|request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            if is_child(&body) {
+                return if tool_result(&body, "hold-call").is_some() {
+                    response(vec![])
+                } else {
+                    response_with_text(
+                        vec![("hold-call", "hold_child", json!({}))],
+                        Some("Reviewing the parser.\nFound a boundary case."),
+                    )
+                };
+            }
+            if let Some(spawned) = tool_result(&body, "spawn-call") {
+                let runs: Vec<Value> =
+                    serde_json::from_str(spawned["content"].as_str().unwrap()).unwrap();
+                let id = &runs[0]["id"];
+                for (call, name, args) in [
+                    ("ready-call", "await_child", json!({})),
+                    ("peek-call", "peek_agent", json!({"id":id})),
+                    ("release-call", "release_child", json!({})),
+                    ("wait-call", "wait_agents", json!({"ids":[id]})),
+                    ("peek-final-call", "peek_agent", json!({"id":id})),
+                ] {
+                    if tool_result(&body, call).is_none() {
+                        return response(vec![(call, name, args)]);
+                    }
+                }
+                return response(vec![]);
+            }
+            response(vec![(
+                "spawn-call",
+                "spawn_agent",
+                json!({"prompt":"Review parser independently"}),
+            )])
+        })
+        .mount(&harness.mock)
+        .await;
+    let output = harness.run_with_tool_calling(
+        "Inherited parent context must not appear in a peek",
+        "test/test-model",
+        true,
+    );
+    assert_eq!(output.status, 0, "{}\n{:?}", output.stderr, output.events);
+    let requests = harness.captured_request_bodies().await;
+    let peek = requests
+        .iter()
+        .find_map(|body| tool_result(body, "peek-call"))
+        .unwrap();
+    assert_ne!(peek["is_error"], true, "{peek}");
+    let text = peek["content"].as_str().unwrap();
+    assert!(text.contains("running"), "{text}");
+    assert!(
+        text.contains("Reviewing the parser.\nFound a boundary case."),
+        "{text}"
+    );
+    assert!(!text.contains("completed independently"), "{text}");
+    assert!(!text.contains("Inherited parent context"), "{text}");
+    assert!(!text.contains("private fixture tool output"), "{text}");
+    let finished = requests
+        .iter()
+        .find_map(|body| tool_result(body, "peek-final-call"))
+        .unwrap();
+    let text = finished["content"].as_str().unwrap();
+    assert!(text.contains("completed"), "{text}");
+    assert!(
+        text.contains("Reviewing the parser.\nFound a boundary case."),
+        "{text}"
+    );
+    assert!(text.contains("completed independently"), "{text}");
+    assert!(!text.contains("private fixture tool output"), "{text}");
+    let tool = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "peek_agent")
+        .unwrap();
+    let description = tool["description"].as_str().unwrap();
+    assert!(description.contains("Do not poll"), "{description}");
+    assert!(description.contains("wait_agents"), "{description}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

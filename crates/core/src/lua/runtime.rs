@@ -4615,7 +4615,13 @@ mod tests {
             .exec()
             .unwrap();
         assert!(rt.forks_enabled());
-        for name in ["spawn_agent", "swarm", "wait_agents", "stop_agent"] {
+        for name in [
+            "spawn_agent",
+            "swarm",
+            "peek_agent",
+            "wait_agents",
+            "stop_agent",
+        ] {
             assert!(rt.tool_available_for(name, ToolVisibility::Interactive));
             assert!(rt.tool_available_for(name, ToolVisibility::Headless));
         }

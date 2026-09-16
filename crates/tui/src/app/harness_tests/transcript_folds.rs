@@ -20,6 +20,124 @@ fn focus_transcript_in_normal_mode(app: &mut TestApp) {
 }
 
 #[test]
+fn spawn_agent_hides_success_output_but_preserves_errors() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "spawn",
+        "spawn_agent",
+        std::collections::HashMap::from([("prompt".into(), serde_json::json!("Review parser"))]),
+    );
+    app.tool_finished(
+        invocation_id,
+        "spawn",
+        protocol::ToolOutcome::new(
+            r#"[{"id":1,"status":"running","session_id":"child-session"}]"#.into(),
+            false,
+            None,
+        ),
+        Some(1),
+    );
+    let invocation_id = app.tool_started("failed-spawn", "spawn_agent", Default::default());
+    app.tool_finished(
+        invocation_id,
+        "failed-spawn",
+        protocol::ToolOutcome::new("subagent queue is full".into(), true, None),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        for state in ["open", "close"] {
+            app.run_lua_result(&format!("smelt.transcript.fold_all('{state}')"))
+                .unwrap();
+            app.follow_transcript_tail();
+            let text = app.render_to_frame().text();
+            assert!(text.contains("spawn_agent Review parser"), "{text}");
+            assert!(!text.contains("session_id"), "{text}");
+            assert!(!text.contains("child-session"), "{text}");
+            assert!(text.contains("subagent queue is full"), "{text}");
+            assert!(!text.contains("spawn_agent spawn_agent"), "{text}");
+            let timestamps: Vec<_> = text
+                .lines()
+                .filter(|line| line.starts_with("* spawn_agent"))
+                .map(|line| line.rfind(' ').unwrap())
+                .collect();
+            assert_eq!(timestamps.len(), 2, "{text}");
+            assert_eq!(timestamps[0], timestamps[1], "{text}");
+        }
+    }
+}
+
+#[test]
+fn peek_agent_output_is_capped_readable_and_copyable() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "peek",
+        "peek_agent",
+        std::collections::HashMap::from([("id".into(), serde_json::json!(7))]),
+    );
+    let output = format!(
+        "agent #7 - running\n\n{}",
+        (1..=30)
+            .map(|line| format!("report {line:02}: vérified"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    app.tool_finished(
+        invocation_id,
+        "peek",
+        protocol::ToolOutcome::new(output, false, None),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 32);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        assert!(text.contains("peek_agent #7"), "{text}");
+        assert!(text.contains("report 30: vérified"), "{text}");
+        assert!(!text.contains("report 01:"), "{text}");
+    }
+    focus_transcript_in_normal_mode(&mut app);
+    app.type_text("ggVGy");
+    assert!(app
+        .core_probe()
+        .clipboard
+        .kill_ring
+        .current()
+        .contains("report 30: vérified"));
+}
+
+#[test]
+fn wait_agents_header_does_not_repeat_fallback_tool_name() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    app.tool_started("empty-wait", "wait_agents", Default::default());
+    app.tool_rejected(
+        "unknown-wait",
+        "wait_agents",
+        std::collections::HashMap::from([("ids".into(), serde_json::json!([99]))]),
+        protocol::StyledLines::from_plain("wait_agents"),
+        protocol::ToolOutcome::new("unknown subagent: 99".into(), true, None),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        assert!(!text.contains("wait_agents wait_agents"), "{text}");
+        assert!(text.contains("wait_agents #99"), "{text}");
+        assert!(text.contains("unknown subagent: 99"), "{text}");
+    }
+}
+
+#[test]
 fn wait_agents_preview_shows_readable_final_reports_and_copies_them() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.run_lua_result("require('smelt.plugins.subagents')")

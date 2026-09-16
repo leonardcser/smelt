@@ -12,8 +12,9 @@ workspace and permission limits. They do not share subsequent messages. Concurre
 writes affect the same checkout: partition file ownership or delegate read-only
 analysis. Continue independent work after spawning, then call wait_agents once
 when you need the results. It stays pending until all selected agents finish;
-there is no polling or timeout. Review their final reports before relying on
-them; a child report is not verification. Children cannot create further agents.
+there is no polling or timeout. Use peek_agent only for an occasional progress
+check or diagnosis, never to poll for completion. Review final reports before
+relying on them; a child report is not verification. Children cannot create further agents.
 ]])
 
 local role = [[You are a subagent. The preceding conversation is inherited context,
@@ -28,9 +29,29 @@ Task:
 ]]
 
 local permissions = { normal = "allow", plan = "allow", apply = "allow" }
+local transcript_defaults = require("smelt.transcript.defaults")
 local function spawn(args, count)
   return smelt.json.encode(smelt.agent.fork(role .. args.prompt, count, args.prompt))
 end
+local function spawn_summary(args) return (args and args.prompt) or "" end
+local function agent_summary(args) return args and args.id and ("#" .. tostring(args.id)) or "" end
+local function wait_summary(args)
+  local ids = args and args.ids
+  if type(ids) ~= "table" then return "" end
+  local labels = {}
+  for _, id in ipairs(ids) do labels[#labels + 1] = "#" .. tostring(id) end
+  return table.concat(labels, ", ")
+end
+
+smelt.transcript.register_tool("spawn_agent", {
+  cache_key = "smelt.tool-presentation.spawn_agent:v1",
+  title = function(block) return spawn_summary(block.args) end,
+  body = function(block, ctx, opts)
+    if block.output and block.output.is_error then
+      return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)
+    end
+  end,
+})
 
 smelt.tools.register({
   name = "spawn_agent",
@@ -42,7 +63,7 @@ smelt.tools.register({
     properties = { prompt = { type = "string", description = "The child's specific task." } },
     required = { "prompt" },
   },
-  summary = function(args) return args.prompt or "" end,
+  summary = spawn_summary,
   execute = function(args) return spawn(args, 1) end,
 })
 
@@ -63,9 +84,35 @@ smelt.tools.register({
   execute = function(args) return spawn(args, args.n) end,
 })
 
-local transcript_defaults = require("smelt.transcript.defaults")
+smelt.transcript.register_tool("peek_agent", {
+  cache_key = "smelt.tool-presentation.peek_agent:v1",
+  title = function(block) return agent_summary(block.args) end,
+})
+smelt.tools.register({
+  name = "peek_agent",
+  description = "Read a bounded snapshot of one subagent's assistant output and current status without waiting or consuming it, like read_process_output. Includes child-written messages and any in-flight text, not inherited context, reasoning or tool results. Running output is partial, not a final report. Use only for an occasional progress check or diagnosis. Do not poll or call repeatedly to wait for completion; continue independent work, then use wait_agents once for final results.",
+  permission_defaults = permissions,
+  effect = "read",
+  elapsed_visible = true,
+  parameters = {
+    type = "object",
+    properties = { id = { type = "integer", minimum = 1, description = "Agent ID returned by spawn_agent or swarm." } },
+    required = { "id" },
+  },
+  summary = agent_summary,
+  execute = function(args, ctx)
+    local snapshot = __smelt_internal.agent.__peek(ctx.session_id, args.id)
+    local parts = { "agent #" .. snapshot.id .. " - " .. snapshot.status }
+    parts[#parts + 1] = snapshot.output ~= "" and snapshot.output or "(no assistant output)"
+    local reason = snapshot.error or (snapshot.status == "cancelled" and "subagent was cancelled")
+    if reason then parts[#parts + 1] = "reason: " .. reason end
+    return table.concat(parts, "\n\n")
+  end,
+})
+
 smelt.transcript.register_tool("wait_agents", {
-  cache_key = "smelt.tool-presentation.wait_agents:v1",
+  cache_key = "smelt.tool-presentation.wait_agents:v2",
+  title = function(block) return wait_summary(block.args) end,
   body = function(block, ctx, opts)
     local output = block.output
     if not output then return nil end
@@ -89,11 +136,7 @@ smelt.tools.register({
     },
     required = { "ids" },
   },
-  summary = function(args)
-    local ids = {}
-    for _, id in ipairs(args.ids or {}) do ids[#ids + 1] = "#" .. tostring(id) end
-    return table.concat(ids, ", ")
-  end,
+  summary = wait_summary,
   execute = function(args, ctx)
     local task_id = smelt.task.alloc()
     __smelt_internal.agent.__start_wait(task_id, ctx.session_id, args.ids)

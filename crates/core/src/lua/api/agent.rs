@@ -97,6 +97,18 @@ pub(super) fn register(
             crate::lua::json_to_lua(lua, &serde_json::to_value(agents).map_err(mlua::Error::external)?)
         },
     )?;
+    m.private_live_only_fn(
+        "__peek",
+        &["parent_id", "id"],
+        |lua, (parent_id, id): (String, u64)| -> LuaResult<mlua::Value> {
+            let output = crate::host::with_core(|core| core.agents.peek(&parent_id, id))
+                .map_err(mlua::Error::external)?;
+            crate::lua::json_to_lua(
+                lua,
+                &serde_json::to_value(output).map_err(mlua::Error::external)?,
+            )
+        },
+    )?;
     let wait_shared = Arc::clone(shared);
     m.private_live_only_fn(
         "__start_wait",

@@ -294,7 +294,7 @@ function M.render_tool_header(block, ctx, opts, presentation)
     }),
     {
       first = tool_header_prefix(block, hl, tail, has_summary),
-      rest = tool_header_rest_prefix(block),
+      rest = tool_header_rest_prefix(block, tail),
     }
   )
 
@@ -379,11 +379,11 @@ function tool_header_prefix(block, hl, tail, has_summary)
     { text = " " .. tool_name, dim = true },
   }
   if tail then spans[#spans + 1] = { text = " ", selectable = has_summary } end
-  return spans, display_width("* " .. tool_name .. " ")
+  return spans, display_width("* " .. tool_name .. (tail and " " or ""))
 end
 
-function tool_header_rest_prefix(block)
-  local _, width = tool_header_prefix(block, nil, true, false)
+function tool_header_rest_prefix(block, tail)
+  local _, width = tool_header_prefix(block, nil, tail, false)
   return { { text = string.rep(" ", width), selectable = false, dim = true } }
 end
 

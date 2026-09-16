@@ -1,0 +1,34 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* peek_agent #1                     14:37:03
+
+* peek_agent #2                     14:37:03
+
+* peek_agent #3                     14:37:03
+
+* peek_agent #99                    14:37:03
+  unknown subagent: 99
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ────────────────────────────────
+
+─────────────────────────────────────────────
+ ○ normal                            1:1 100%
