@@ -186,6 +186,9 @@ impl RuntimeState {
         selection: ModelSelectionState,
         startup: &StartupOverrides,
     ) {
+        if !same_context_target(self.active_model(), selection.active.as_ref()) {
+            self.context_window = None;
+        }
         self.reasoning_effort =
             reconcile_reasoning_effort(self.reasoning_effort.clone(), selection.active.as_ref());
         self.reasoning_cycle = resolve_reasoning_cycle(startup, selection.active.as_ref());
@@ -827,6 +830,48 @@ mod tests {
 
         assert_eq!(next.active_model().unwrap().key, "test/model-a");
         assert_eq!(next.context_window, None);
+    }
+
+    #[test]
+    fn model_selection_keeps_context_window_only_for_the_same_target() {
+        let config = provider_config();
+        let models = config.resolve_models();
+        let startup = StartupOverrides::default();
+        let mut initial = resolve_runtime(RuntimeInputs {
+            config: &config,
+            startup: &startup,
+            available_models: &models,
+            registered_modes: &[],
+            selections: &RuntimeSelections::default(),
+            previous: None,
+            headless: false,
+        })
+        .unwrap();
+        initial.context_window = Some(128_000);
+
+        let mut unchanged = initial.clone();
+        unchanged.set_model_selection(initial.model_selection.clone(), &startup);
+        assert_eq!(unchanged.context_window, Some(128_000));
+
+        let changes: [fn(&mut ActiveModel); 6] = [
+            |model| model.key = "test/model-b".into(),
+            |model| model.model_name = "model-b".into(),
+            |model| model.api_base = "https://changed.example/v1".into(),
+            |model| model.api_key_env = "OTHER_KEY".into(),
+            |model| model.provider_type = "anthropic-compatible".into(),
+            |model| model.config.context_window = Some(64_000),
+        ];
+        for change in changes {
+            let mut next = initial.clone();
+            let mut selection = initial.model_selection.clone();
+            change(selection.active.as_mut().unwrap());
+            next.set_model_selection(selection, &startup);
+            assert_eq!(next.context_window, None);
+        }
+
+        let mut cleared = initial;
+        cleared.set_model_selection(ModelSelectionState::default(), &startup);
+        assert_eq!(cleared.context_window, None);
     }
 
     #[test]

@@ -559,7 +559,7 @@ impl EngineProvider {
         smelt_provider::catalog::ensure_loaded(self.client.http(), Some(&catalog_cache_dir)).await;
     }
 
-    pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
+    pub async fn fetch_context_window(&self, model: &str) -> Result<Option<u32>, String> {
         let provider_label = self.kind.as_config_str();
         if let Some(v) = self.model_config.context_window {
             crate::log::entry(
@@ -572,50 +572,54 @@ impl EngineProvider {
                     "result": v,
                 }),
             );
-            return Some(v);
+            return Ok(Some(v));
         }
         // Hit the provider's own `/v1/models` first - that's the
         // authoritative source. Fall through to the models.dev catalog
         // if it doesn't expose a window field.
+        let http_error = |error: reqwest::Error| error.without_url().to_string();
         let from_provider = match self.kind {
-            ProviderKind::OpenAiCompatible => {
-                self.client
-                    .fetch_context_window_openai_compatible(&self.api_base, &self.api_key, model)
-                    .await
-            }
+            ProviderKind::OpenAiCompatible => self
+                .client
+                .fetch_context_window_openai_compatible(&self.api_base, &self.api_key, model)
+                .await
+                .map_err(http_error)?,
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
             ProviderKind::KimiCode => match kimi_code::cached_context_window(model) {
                 Some(v) => Some(v),
                 None => kimi_code::fetch_model_info(self.client.http())
                     .await
-                    .ok()
+                    .map_err(|_| "Kimi Code model discovery failed".to_owned())?
                     .into_iter()
-                    .flatten()
                     .find(|info| info.matches_name(model))
                     .and_then(|info| info.context_length),
             },
-            ProviderKind::Anthropic => {
-                self.client
-                    .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
-                    .await
-            }
+            ProviderKind::Anthropic => self
+                .client
+                .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
+                .await
+                .map_err(http_error)?,
             ProviderKind::AnthropicCompatible => {
                 match self
                     .client
                     .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
                     .await
                 {
-                    Some(v) => Some(v),
-                    None => {
-                        self.client
-                            .fetch_context_window_openai_compatible(
-                                &self.api_base,
-                                &self.api_key,
-                                model,
-                            )
-                            .await
-                    }
+                    Ok(Some(v)) => Some(v),
+                    primary => match self
+                        .client
+                        .fetch_context_window_openai_compatible(
+                            &self.api_base,
+                            &self.api_key,
+                            model,
+                        )
+                        .await
+                        .map_err(http_error)?
+                    {
+                        Some(value) => Some(value),
+                        None => primary.map_err(http_error)?,
+                    },
                 }
             }
             ProviderKind::Copilot => copilot::cached_context_window(model),
@@ -633,7 +637,7 @@ impl EngineProvider {
                 "result": result,
             }),
         );
-        result
+        Ok(result)
     }
 }
 
@@ -1463,6 +1467,133 @@ mod tests {
         )
         .with_model_config(cfg);
         assert!(!p.tool_calling());
+    }
+
+    #[tokio::test]
+    async fn context_window_discovery_handles_known_unknown_and_unsupported_metadata() {
+        for provider_type in ["anthropic", "openai-compatible"] {
+            for (status, body, expected) in [
+                (
+                    "200 OK",
+                    r#"{"max_input_tokens":32768,"data":[{"id":"test-model","max_model_len":32768}]}"#,
+                    Some(32_768),
+                ),
+                ("200 OK", r#"{"data":[{"id":"test-model"}]}"#, None),
+                (
+                    "200 OK",
+                    r#"{"data":[{"id":"other-model","max_model_len":65536}]}"#,
+                    None,
+                ),
+                ("404 Not Found", "", None),
+                ("405 Method Not Allowed", "", None),
+            ] {
+                let (api_base, server) = test_http::spawn_http_response(status, body).await;
+                let provider = EngineProvider::new(
+                    format!("{api_base}/v1"),
+                    "test-key".into(),
+                    provider_type,
+                    http_client(),
+                    std::sync::Arc::new(crate::clock::RealClock),
+                );
+
+                assert_eq!(
+                    provider.fetch_context_window("test-model").await.unwrap(),
+                    expected,
+                    "{provider_type}: {status}"
+                );
+                let request = server.await.unwrap().to_ascii_lowercase();
+                if provider_type == "anthropic" {
+                    assert!(request.starts_with("get /v1/models/test-model "));
+                    assert!(request.contains("x-api-key: test-key"));
+                    assert!(request.contains("anthropic-version: 2023-06-01"));
+                } else {
+                    assert!(request.starts_with("get /v1/models "));
+                    assert!(request.contains("authorization: bearer test-key"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn context_window_discovery_reports_http_and_json_errors_without_secrets() {
+        for provider_type in ["anthropic", "openai-compatible"] {
+            for status in ["401 Unauthorized", "503 Service Unavailable", "200 OK"] {
+                let (api_base, server) =
+                    test_http::spawn_http_response(status, "private-response-body").await;
+                let provider = EngineProvider::new(
+                    format!("{api_base}/private-endpoint-token/v1"),
+                    "private-api-key".into(),
+                    provider_type,
+                    http_client(),
+                    std::sync::Arc::new(crate::clock::RealClock),
+                );
+
+                let error = provider
+                    .fetch_context_window("test-model")
+                    .await
+                    .unwrap_err();
+                assert!(!error.contains(&api_base));
+                assert!(!error.contains("private-"));
+                assert!(!error.is_empty());
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn context_window_discovery_reports_timeouts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}/v1", listener.local_addr().unwrap());
+        for provider_type in ["anthropic", "openai-compatible"] {
+            let provider = EngineProvider::new(
+                api_base.clone(),
+                String::new(),
+                provider_type,
+                Client::builder()
+                    .timeout(Duration::from_millis(50))
+                    .build()
+                    .unwrap(),
+                std::sync::Arc::new(crate::clock::RealClock),
+            );
+
+            let error = provider
+                .fetch_context_window("test-model")
+                .await
+                .unwrap_err();
+            assert!(!error.contains(&api_base));
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_context_window_bypasses_discovery() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}/v1", listener.local_addr().unwrap());
+        for provider_type in ["anthropic", "anthropic-compatible", "openai-compatible"] {
+            let provider = EngineProvider::new(
+                api_base.clone(),
+                String::new(),
+                provider_type,
+                Client::builder()
+                    .timeout(Duration::from_millis(50))
+                    .build()
+                    .unwrap(),
+                std::sync::Arc::new(crate::clock::RealClock),
+            )
+            .with_model_config(ModelConfig {
+                context_window: Some(16_384),
+                ..Default::default()
+            });
+
+            assert_eq!(
+                provider.fetch_context_window("test-model").await,
+                Ok(Some(16_384))
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     // ---- context_window_from_models_entry ----

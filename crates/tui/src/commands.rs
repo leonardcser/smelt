@@ -1,5 +1,6 @@
 use crate::app::{
-    CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, QueueStage, QueuedInput, TuiApp,
+    CommandAction, ContextWindowRequest, ContextWindowUpdate, EventOutcome, InputOutcome,
+    QueueStage, QueuedInput, TuiApp,
 };
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
@@ -593,12 +594,12 @@ impl TuiApp {
             self.conversation
                 .clear_token_baseline_for_loaded_model(identity);
         }
-        self.refresh_context_window();
+        self.request_context_window(ContextWindowRequest::Reconcile);
     }
 
-    /// Kick off a background fetch for the current model's context window.
-    /// The platform owner rejects stale responses when model identity changes.
-    pub(crate) fn refresh_context_window(&mut self) {
+    /// Request background context discovery. Reconciliation deduplicates unchanged
+    /// targets; an explicit refresh starts a new revision even for the same model.
+    pub(crate) fn request_context_window(&mut self, request: ContextWindowRequest) {
         let Some(active) = self.core.config.active_model().cloned() else {
             if self.clear_context_window_target() {
                 self.core.config.context_window = None;
@@ -611,7 +612,7 @@ impl TuiApp {
             return;
         };
         let target = crate::app::ContextWindowTarget::from_active(&active);
-        let Some(refresh) = self.prepare_context_window_refresh(target) else {
+        let Some(refresh) = self.prepare_context_window_refresh(target, request) else {
             return;
         };
         let api_base = refresh.target.api_base.clone();
@@ -627,11 +628,11 @@ impl TuiApp {
                 clock,
             )
             .with_model_config(refresh.target.config.clone());
-            let value = provider.fetch_context_window(&model).await;
+            let result = provider.fetch_context_window(&model).await;
             let _ = refresh.sender.send(ContextWindowUpdate {
                 revision: refresh.revision,
                 target: refresh.target,
-                value,
+                result,
             });
         });
     }

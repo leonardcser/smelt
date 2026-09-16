@@ -44,7 +44,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/reflect [focus]`                       | Step back and rethink recent changes before moving on |
 | `/simplify [focus]`                      | Review changed code for reuse, quality, and efficiency |
 | `/trust`                                 | Trust the current project's `.smelt/` content |
-| `/reload`                                | Re-evaluate user Lua (init + plugins) without restarting (also `F5`) |
+| `/reload`                                | Reload Lua config, prompt inputs, and the active model's context-window limit without restarting (also `F5`) |
 | `/version`                               | Show the running build identity as a notification |
 | `/changelog`                             | Open the release notes for the latest cached build |
 | `/upgrade [check]`                       | Install the newest smelt build (or refresh the cache with `check`) |

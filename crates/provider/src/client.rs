@@ -28,7 +28,7 @@ impl ProviderClient {
         api_base: &str,
         api_key: &str,
         model: &str,
-    ) -> Option<u32> {
+    ) -> Result<Option<u32>, reqwest::Error> {
         let url = format!(
             "{}/models/{}",
             crate::endpoint::trim_api_base(api_base),
@@ -40,13 +40,12 @@ impl ProviderClient {
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            return None;
+            .await?;
+        if matches!(resp.status().as_u16(), 404 | 405) {
+            return Ok(None);
         }
-        let data: Value = resp.json().await.ok()?;
-        data["max_input_tokens"].as_u64().map(|v| v as u32)
+        let data: Value = resp.error_for_status()?.json().await?;
+        Ok(data["max_input_tokens"].as_u64().map(|v| v as u32))
     }
 
     pub async fn fetch_context_window_openai_compatible(
@@ -54,20 +53,25 @@ impl ProviderClient {
         api_base: &str,
         api_key: &str,
         model: &str,
-    ) -> Option<u32> {
+    ) -> Result<Option<u32>, reqwest::Error> {
         let url = format!("{}/models", crate::endpoint::trim_api_base(api_base));
         let mut req = self.client.get(&url);
         if !api_key.is_empty() {
             req = req.bearer_auth(api_key);
         }
-        let resp = req.send().await.ok()?;
-        if !resp.status().is_success() {
-            return None;
+        let resp = req.send().await?;
+        if matches!(resp.status().as_u16(), 404 | 405) {
+            return Ok(None);
         }
-        let data: Value = resp.json().await.ok()?;
-        let models = data["data"].as_array()?;
-        let entry = models.iter().find(|m| models_entry_matches(m, model))?;
-        context_window_from_models_entry(entry)
+        let data: Value = resp.error_for_status()?.json().await?;
+        Ok(data["data"]
+            .as_array()
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|entry| models_entry_matches(entry, model))
+            })
+            .and_then(context_window_from_models_entry))
     }
     pub async fn chat(
         &self,

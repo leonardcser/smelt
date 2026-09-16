@@ -227,6 +227,178 @@ smelt.mcp.register("stalled", {{
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_reload_refreshes_server_context_window() {
+    interactive_reload_context_window("openai-compatible").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_reload_refreshes_compatible_server_context_window() {
+    interactive_reload_context_window("anthropic-compatible").await;
+}
+
+async fn interactive_reload_context_window(provider_type: &str) {
+    use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    let home = tempfile::tempdir().expect("temporary home");
+    let provider = MockServer::start().await;
+    let context_window = Arc::new(AtomicU32::new(32_768));
+    let response_status = Arc::new(AtomicU16::new(200));
+    let primary_status = Arc::new(AtomicU16::new(404));
+    let server_primary_status = Arc::clone(&primary_status);
+    Mock::given(method("GET"))
+        .and(path("/v1/models/test-model"))
+        .respond_with(move |_: &Request| {
+            ResponseTemplate::new(server_primary_status.load(Ordering::SeqCst))
+        })
+        .mount(&provider)
+        .await;
+    let server_context_window = Arc::clone(&context_window);
+    let server_response_status = Arc::clone(&response_status);
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(move |_: &Request| {
+            ResponseTemplate::new(server_response_status.load(Ordering::SeqCst)).set_body_json(
+                serde_json::json!({
+                    "data": [{
+                        "id": "test-model",
+                        "max_model_len": server_context_window.load(Ordering::SeqCst),
+                    }],
+                }),
+            )
+        })
+        .mount(&provider)
+        .await;
+
+    let config = home.path().join("init.lua");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_reload = false
+smelt.settings.show_prediction = false
+smelt.provider.register("local", {{
+  type = "{provider_type}",
+  api_base = "{}/v1",
+  models = {{ "test-model" }},
+}})
+smelt.cmd.register("context-probe", function()
+  local file = assert(io.open("context-window", "w"))
+  file:write(smelt.json.encode({{
+    window = smelt.session.context_window(),
+    session_id = smelt.session.id(),
+    controller = smelt.config.runtime_status().controllers.context_window,
+  }}))
+  file:close()
+end)
+"#,
+            provider.uri()
+        ),
+    )
+    .expect("write init.lua");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
+    command
+        .args(["--config", config.to_str().unwrap(), "--ephemeral"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env("XDG_CACHE_HOME", home.path().join("cache"))
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1");
+    let (mut master, mut process) = spawn_in_pty(command);
+    let mut captured = Vec::new();
+    let mut session_id = None;
+    let mut observed_revision = 0;
+
+    for (index, (primary, status, expected)) in [
+        (404, 200, 32_768),
+        (404, 200, 131_072),
+        (404, 503, 131_072),
+        (503, 200, 16_384),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        primary_status.store(primary, Ordering::SeqCst);
+        response_status.store(status, Ordering::SeqCst);
+        context_window.store(expected, Ordering::SeqCst);
+        if index > 0 {
+            master.write_all(b"/reload\r").expect("reload in place");
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last_probe = None;
+        loop {
+            drain_pty(&mut master, &mut captured);
+            assert!(process.child.try_wait().unwrap().is_none(), "smelt exited");
+            let probe = std::fs::read(home.path().join("context-window"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if let Some(probe) = probe {
+                let controller = &probe["controller"];
+                if let Some(revision) = controller["observed_revision"].as_u64() {
+                    if probe["window"] == expected
+                        && revision > observed_revision
+                        && controller["desired_revision"] == revision
+                    {
+                        let id = probe["session_id"].as_str().expect("session id");
+                        assert_eq!(session_id.get_or_insert_with(|| id.to_owned()), id);
+                        if status == 200 {
+                            assert_eq!(controller["status"], "ready");
+                            assert!(controller["error"].is_null());
+                        } else {
+                            assert_eq!(controller["status"], "degraded");
+                            assert!(controller["error"].as_str().unwrap().contains("503"));
+                        }
+                        if index > 0 {
+                            assert_eq!(revision, observed_revision + 1);
+                        }
+                        observed_revision = revision;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "context window did not become {expected} after {index} reloads; probe: {:?}; requests: {}; terminal:\n{}",
+                std::fs::read_to_string(home.path().join("context-window")),
+                provider.received_requests().await.unwrap().len(),
+                String::from_utf8_lossy(&captured[captured.len().saturating_sub(4096)..])
+            );
+            if contains(&captured, b"local/test-model")
+                && last_probe
+                    .is_none_or(|last: Instant| last.elapsed() >= Duration::from_millis(100))
+            {
+                master
+                    .write_all(b"/context-probe\r")
+                    .expect("read live context window");
+                last_probe = Some(Instant::now());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let requests = provider.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/v1/models")
+                .count(),
+            index + 1,
+            "each reload should fetch the context window exactly once"
+        );
+        let requests_per_refresh = if provider_type == "anthropic-compatible" {
+            2
+        } else {
+            1
+        };
+        assert_eq!(requests.len(), (index + 1) * requests_per_refresh);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_first_message_rewind_can_resubmit() {
     interactive_first_message_recovery(FirstMessageRecovery::Rewind).await;
 }

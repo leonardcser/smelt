@@ -1,6 +1,6 @@
 //! Application operations exposed through the scoped Lua capability host.
 
-use crate::app::{LuaBringUpError, NotificationOperation, TuiApp};
+use crate::app::{ContextWindowRequest, LuaBringUpError, NotificationOperation, TuiApp};
 use smelt_core::transcript_model::ConfirmChoice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,9 +158,29 @@ struct LuaTuiGeneration {
     busy_stack: crate::app::BusyStack,
 }
 
-impl LuaReloadKind {
-    fn refresh_agent_inputs(&self) -> bool {
-        matches!(self, Self::Manual)
+#[derive(Clone, Copy)]
+enum LuaBringUpKind {
+    Reload(LuaReloadKind),
+    Cwd,
+}
+
+impl LuaBringUpKind {
+    fn lifecycle_kind(self) -> &'static str {
+        match self {
+            Self::Reload(_) => "reload",
+            Self::Cwd => "cwd",
+        }
+    }
+
+    fn refresh_agent_inputs(self) -> bool {
+        !matches!(self, Self::Reload(LuaReloadKind::AutoConfig))
+    }
+
+    fn context_window_request(self) -> ContextWindowRequest {
+        match self {
+            Self::Reload(LuaReloadKind::Manual) => ContextWindowRequest::Refresh,
+            _ => ContextWindowRequest::Reconcile,
+        }
     }
 }
 
@@ -211,7 +231,7 @@ impl TuiApp {
 
     fn reload_lua_inner(&mut self, kind: LuaReloadKind) {
         self.lua.clear_pending_reload();
-        let err = self.bring_up_lua("reload", kind.refresh_agent_inputs());
+        let err = self.bring_up_lua(LuaBringUpKind::Reload(kind));
         match err {
             Some(error) => {
                 let message = format!("lua reload: {error}");
@@ -400,7 +420,7 @@ impl TuiApp {
                     });
 
                     self.reconcile_auto_reload();
-                    self.reconcile_runtime_controllers();
+                    self.reconcile_runtime_controllers(ContextWindowRequest::Reconcile);
                     self.publish_diff_signals();
 
                     let lua_shared = std::sync::Arc::clone(self.lua.shared());
@@ -439,18 +459,15 @@ impl TuiApp {
     /// loading or pure runtime resolution fails. On success the old generation
     /// is retired, staged TUI state and declarations become live, synchronous
     /// effects run in explicit order, and only then are `ready` hooks drained.
-    /// Manual reloads additionally refresh AGENTS.md, skills, and explicit
-    /// system-prompt inputs; automatic reloads leave those inputs unchanged.
+    /// Manual reloads additionally refresh AGENTS.md, skills, explicit
+    /// system-prompt inputs, and the active model's context-window limit;
+    /// automatic reloads leave those inputs unchanged.
     ///
     /// Candidate scripts and lifecycle hooks receive frontend access only for
     /// their individual Lua entry scopes. Returns a load or resolution error
     /// without changing the committed generation.
-    pub(crate) fn bring_up_lua(
-        &mut self,
-        kind: &'static str,
-        refresh_agent_inputs: bool,
-    ) -> Option<LuaBringUpError> {
-        self.bring_up_lua_at(kind, refresh_agent_inputs, None, true, true)
+    fn bring_up_lua(&mut self, kind: LuaBringUpKind) -> Option<LuaBringUpError> {
+        self.bring_up_lua_at(kind, None, true, true)
     }
 
     pub(crate) fn bring_up_lua_for_cwd(
@@ -458,27 +475,30 @@ impl TuiApp {
         path: std::path::PathBuf,
         mark_session_dirty: bool,
     ) -> Option<LuaBringUpError> {
-        self.bring_up_lua_at("cwd", true, Some((path, mark_session_dirty)), true, true)
+        self.bring_up_lua_at(
+            LuaBringUpKind::Cwd,
+            Some((path, mark_session_dirty)),
+            true,
+            true,
+        )
     }
 
     fn bring_up_lua_at(
         &mut self,
-        kind: &'static str,
-        refresh_agent_inputs: bool,
+        kind: LuaBringUpKind,
         cwd_transition: Option<(std::path::PathBuf, bool)>,
         apply_runtime_effects: bool,
         run_ready_hooks: bool,
     ) -> Option<LuaBringUpError> {
-        if matches!(kind, "reload" | "cwd") {
-            let lua = self.lua.execution();
-            let flush_error = crate::lua::scope_app(self, move || lua.flush_persistent_state());
-            if let Some(error) = flush_error {
-                return Some(bring_up_error(
-                    "state_flush",
-                    None,
-                    format!("flush persistent state: {error}"),
-                ));
-            }
+        let refresh_agent_inputs = kind.refresh_agent_inputs();
+        let lua = self.lua.execution();
+        let flush_error = crate::lua::scope_app(self, move || lua.flush_persistent_state());
+        if let Some(error) = flush_error {
+            return Some(bring_up_error(
+                "state_flush",
+                None,
+                format!("flush persistent state: {error}"),
+            ));
         }
 
         let target_cwd = cwd_transition
@@ -607,7 +627,7 @@ impl TuiApp {
                 self.publish_agent_project_context();
             }
             self.publish_diff_signals();
-            self.reconcile_runtime_controllers();
+            self.reconcile_runtime_controllers(kind.context_window_request());
         } else {
             debug_assert!(staged_cwd.is_none());
         }
@@ -617,7 +637,7 @@ impl TuiApp {
         // until the first render, while resize/reload paths see the Lua layout.
         self.refresh_main_layout();
         if run_ready_hooks {
-            self.run_lua_ready_hooks(kind);
+            self.run_lua_ready_hooks(kind.lifecycle_kind());
         }
         None
     }
@@ -713,7 +733,7 @@ impl TuiApp {
         self.managed_models.replace_catalog(managed_models);
         self.commit_lua_runtime_config(next, permissions);
         self.submit_managed_model_refreshes();
-        self.reconcile_runtime_controllers();
+        self.reconcile_runtime_controllers(ContextWindowRequest::Reconcile);
         self.publish_diff_signals();
         self.drain_signals_pending();
         Ok(())
@@ -799,7 +819,6 @@ impl TuiApp {
                             .map(|model| model.key.clone()),
                     ),
                 );
-                self.refresh_context_window();
                 self.warn_if_api_base_normalized();
             }
         }
@@ -813,7 +832,8 @@ impl TuiApp {
     /// [`smelt_core::mcp::McpDispatcher`] reads tool defs live from the
     /// manager, so the engine's dispatch path picks up the new server
     /// set without further coordination.
-    fn reconcile_runtime_controllers(&mut self) {
+    fn reconcile_runtime_controllers(&mut self, context_window: ContextWindowRequest) {
+        self.request_context_window(context_window);
         self.reconcile_mcp_servers();
         self.lua.shared().lsp.configure_detached(
             self.core.config.lsp.clone(),

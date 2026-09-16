@@ -1040,8 +1040,10 @@ impl TestApp {
         self.app
             .platform
             .enable_context_window_refresh_for_harness();
-        self.app.refresh_context_window();
-        self.app.refresh_context_window();
+        self.app
+            .request_context_window(crate::app::ContextWindowRequest::Reconcile);
+        self.app
+            .request_context_window(crate::app::ContextWindowRequest::Reconcile);
     }
 
     pub(crate) fn active_context_token_identity(

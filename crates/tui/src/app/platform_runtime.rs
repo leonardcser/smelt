@@ -1,4 +1,7 @@
-use crate::app::{AppEvent, ContextWindowTarget, ContextWindowUpdate, ControllerRevisionStatus};
+use crate::app::{
+    AppEvent, ContextWindowRequest, ContextWindowTarget, ContextWindowUpdate,
+    ControllerRevisionStatus,
+};
 
 pub(super) enum PlatformEvent {
     App(AppEvent),
@@ -19,15 +22,21 @@ struct ContextWindowController {
     desired: Option<ContextWindowTarget>,
     desired_revision: u64,
     observed_revision: u64,
+    error: Option<String>,
 }
 
 impl ContextWindowController {
-    fn prepare(&mut self, desired: Option<ContextWindowTarget>) -> Option<u64> {
-        if self.desired == desired {
+    fn prepare(
+        &mut self,
+        desired: Option<ContextWindowTarget>,
+        request: ContextWindowRequest,
+    ) -> Option<u64> {
+        if request == ContextWindowRequest::Reconcile && self.desired == desired {
             return None;
         }
         self.desired_revision = self.desired_revision.wrapping_add(1);
         self.desired = desired;
+        self.error = None;
         Some(self.desired_revision)
     }
 
@@ -37,6 +46,7 @@ impl ContextWindowController {
             return false;
         }
         self.observed_revision = update.revision;
+        self.error = update.result.as_ref().err().cloned();
         true
     }
 
@@ -44,7 +54,7 @@ impl ContextWindowController {
         ControllerRevisionStatus {
             desired_revision: self.desired_revision,
             observed_revision: self.observed_revision,
-            error: None,
+            error: self.error.clone(),
         }
     }
 }
@@ -252,14 +262,17 @@ impl PlatformRuntime {
     }
 
     pub(super) fn clear_context_window_target(&mut self) -> bool {
-        self.context_window.prepare(None).is_some()
+        self.context_window
+            .prepare(None, ContextWindowRequest::Reconcile)
+            .is_some()
     }
 
     pub(super) fn prepare_context_window_refresh(
         &mut self,
         target: ContextWindowTarget,
+        request: ContextWindowRequest,
     ) -> Option<ContextWindowRefresh> {
-        let revision = self.context_window.prepare(Some(target.clone()))?;
+        let revision = self.context_window.prepare(Some(target.clone()), request)?;
         Some(ContextWindowRefresh {
             revision,
             target,
@@ -281,7 +294,8 @@ impl PlatformRuntime {
         &mut self,
         target: ContextWindowTarget,
     ) -> Option<u64> {
-        self.context_window.prepare(Some(target))
+        self.context_window
+            .prepare(Some(target), ContextWindowRequest::Reconcile)
     }
 
     pub(super) fn drain_job_completions(&mut self) -> Vec<smelt_core::process::JobCompletion> {
@@ -452,8 +466,10 @@ impl crate::app::TuiApp {
     pub(crate) fn prepare_context_window_refresh(
         &mut self,
         target: ContextWindowTarget,
+        request: ContextWindowRequest,
     ) -> Option<ContextWindowRefresh> {
-        self.platform.prepare_context_window_refresh(target)
+        self.platform
+            .prepare_context_window_refresh(target, request)
     }
 
     pub(crate) fn start_inspect_server(
@@ -529,21 +545,68 @@ mod tests {
     fn context_window_controller_rejects_stale_updates() {
         let mut controller = ContextWindowController::default();
         let old_target = target("old");
-        let old_revision = controller.prepare(Some(old_target.clone())).unwrap();
+        let old_revision = controller
+            .prepare(Some(old_target.clone()), ContextWindowRequest::Reconcile)
+            .unwrap();
         let new_target = target("new");
-        let new_revision = controller.prepare(Some(new_target.clone())).unwrap();
+        let new_revision = controller
+            .prepare(Some(new_target.clone()), ContextWindowRequest::Reconcile)
+            .unwrap();
 
         assert!(!controller.accept(&ContextWindowUpdate {
             revision: old_revision,
             target: old_target,
-            value: Some(1),
+            result: Ok(Some(1)),
         }));
         assert!(controller.accept(&ContextWindowUpdate {
             revision: new_revision,
             target: new_target,
-            value: Some(2),
+            result: Ok(Some(2)),
         }));
         assert_eq!(controller.status().observed_revision, new_revision);
+    }
+
+    #[test]
+    fn context_window_reconciliation_deduplicates_but_refresh_starts_one_revision() {
+        let mut controller = ContextWindowController::default();
+        let target = target("same-model");
+        let initial = controller
+            .prepare(Some(target.clone()), ContextWindowRequest::Reconcile)
+            .unwrap();
+        assert!(controller
+            .prepare(Some(target.clone()), ContextWindowRequest::Reconcile)
+            .is_none());
+        let refreshed = controller
+            .prepare(Some(target.clone()), ContextWindowRequest::Refresh)
+            .unwrap();
+        assert_eq!(refreshed, initial + 1);
+        assert!(!controller.accept(&ContextWindowUpdate {
+            revision: initial,
+            target: target.clone(),
+            result: Err("stale failure".into()),
+        }));
+        assert_eq!(controller.status().error, None);
+        assert!(controller.accept(&ContextWindowUpdate {
+            revision: refreshed,
+            target: target.clone(),
+            result: Err("discovery failed".into()),
+        }));
+        assert_eq!(
+            controller.status().error.as_deref(),
+            Some("discovery failed")
+        );
+        let retry = controller
+            .prepare(Some(target.clone()), ContextWindowRequest::Refresh)
+            .unwrap();
+        assert_eq!(retry, refreshed + 1);
+        assert_eq!(controller.status().error, None);
+        assert!(controller.accept(&ContextWindowUpdate {
+            revision: retry,
+            target,
+            result: Ok(Some(65_536)),
+        }));
+        assert_eq!(controller.status().observed_revision, retry);
+        assert_eq!(controller.status().error, None);
     }
 
     #[tokio::test]

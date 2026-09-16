@@ -53,6 +53,14 @@ app_story!(prompt_slash_command_refilter_keeps_best_on_bottom, |ctx| {
         r#"
       smelt.cmd.register("aaacx", function() end, { desc = "old first" })
       smelt.cmd.register("acx", function() end, { desc = "best match" })
+      local commands = {}
+      for _, command in ipairs(smelt.cmd.list()) do
+        if command.name == "aaacx" or command.name == "acx" then
+          commands[#commands + 1] = command
+        end
+      end
+      -- Keep unrelated built-in descriptions out of this ranking fixture.
+      smelt.cmd.list = function() return commands end
     "#,
     );
     ctx.type_prompt("/acx");

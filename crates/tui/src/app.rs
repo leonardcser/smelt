@@ -94,10 +94,16 @@ impl ContextWindowTarget {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContextWindowRequest {
+    Reconcile,
+    Refresh,
+}
+
 pub(crate) struct ContextWindowUpdate {
     pub(crate) revision: u64,
     pub(crate) target: ContextWindowTarget,
-    pub(crate) value: Option<u32>,
+    pub(crate) result: Result<Option<u32>, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1735,9 +1741,11 @@ impl TuiApp {
         if !self.platform.accept_context_window_update(&update) {
             return;
         }
-        if self.core.config.context_window != update.value {
-            self.core.config.revision = self.core.config.revision.wrapping_add(1);
-            self.core.config.context_window = update.value;
+        if let Ok(value) = update.result {
+            if self.core.config.context_window != value {
+                self.core.config.revision = self.core.config.revision.wrapping_add(1);
+                self.core.config.context_window = value;
+            }
         }
     }
 
@@ -3478,7 +3486,7 @@ impl TuiApp {
         let mut pre_first_frame_startup = smelt_perf::perf::begin("startup:pre_first_frame");
         let mut first_frame_pending = true;
         self.submit_managed_model_refreshes();
-        self.refresh_context_window();
+        self.request_context_window(ContextWindowRequest::Reconcile);
 
         if !self.session_is_empty() {
             if !self.conversation.has_live_session() {
@@ -4018,7 +4026,7 @@ mod tests {
         app.app.apply_context_window_update(ContextWindowUpdate {
             revision: stale_revision,
             target,
-            value: None,
+            result: Ok(None),
         });
 
         assert_eq!(app.app.core.config.context_window, Some(272_000));
@@ -4043,7 +4051,7 @@ mod tests {
         app.app.apply_context_window_update(ContextWindowUpdate {
             revision,
             target,
-            value: None,
+            result: Ok(None),
         });
 
         assert_eq!(app.app.core.config.context_window, None);
@@ -4068,28 +4076,38 @@ mod tests {
         app.app.apply_context_window_update(ContextWindowUpdate {
             revision,
             target: stale,
-            value: None,
+            result: Ok(None),
         });
 
         assert_eq!(app.app.core.config.context_window, Some(272_000));
     }
 
     #[test]
-    fn equal_context_window_target_does_not_start_another_revision() {
+    fn failed_context_window_update_keeps_the_known_limit_and_records_error() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.config.context_window = Some(32_768);
         let target = active_context_target(&app.app);
+        app.app
+            .request_context_window(ContextWindowRequest::Refresh);
         let revision = app
             .app
-            .prepare_context_window_for_test(target.clone())
-            .unwrap();
+            .runtime_controller_status()
+            .context_window
+            .desired_revision;
 
-        assert!(app.app.prepare_context_window_for_test(target).is_none());
+        app.app.apply_context_window_update(ContextWindowUpdate {
+            revision,
+            target,
+            result: Err("model discovery unavailable".into()),
+        });
+
+        assert_eq!(app.app.core.config.context_window, Some(32_768));
         assert_eq!(
             app.app.runtime_controller_status().context_window,
             ControllerRevisionStatus {
                 desired_revision: revision,
-                observed_revision: 0,
-                error: None,
+                observed_revision: revision,
+                error: Some("model discovery unavailable".into()),
             }
         );
     }

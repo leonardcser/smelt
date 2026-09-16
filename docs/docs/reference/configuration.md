@@ -52,6 +52,15 @@ controller work is revisioned, so an older connection or metadata result cannot
 replace newer config. Manual `/reload` also refreshes prompt inputs such as
 `AGENTS.md`, skills, and `--system-prompt`; automatic Lua config reloads do not.
 
+Manual reload also re-fetches the active model's context-window limit in the
+background, so server-side context-size changes take effect without restarting
+the session, even when the model and endpoint are unchanged. For an unchanged
+model target, the current limit stays in use while discovery runs and if discovery
+fails. A failed refresh is reported by
+`smelt.config.runtime_status().controllers.context_window`; another `/reload`
+retries it. An explicit model `context_window` setting still takes precedence
+over server metadata.
+
 Settings and background model metadata affect requests created after the commit.
 An active turn keeps its original target and static permission policy. Explicit
 model, mode, or reasoning changes made by the user take effect at the next

@@ -1152,6 +1152,94 @@ fn provider_reload_rebuilds_the_running_model_catalog() {
 }
 
 #[test]
+fn manual_reload_refreshes_context_window_without_restarting_session() {
+    use crate::app::{ContextWindowRequest, ContextWindowTarget, ContextWindowUpdate};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let init = tmp.path().join("init.lua");
+    std::fs::write(
+        &init,
+        r#"
+        smelt.provider.register("local", {
+            type = "openai-compatible",
+            api_base = "https://example.invalid/v1",
+            models = { "test-model" },
+        })
+        "#,
+    )
+    .unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "keep this conversation",
+    )));
+    let session_id = app.session_snapshot().id.clone();
+    let history = app.model_history();
+    let target = ContextWindowTarget::from_active(app.core_probe().config.active_model().unwrap());
+    app.app
+        .request_context_window(ContextWindowRequest::Reconcile);
+    let mut revision = app
+        .app
+        .runtime_controller_status()
+        .context_window
+        .desired_revision;
+    app.app.apply_context_window_update(ContextWindowUpdate {
+        revision,
+        target: target.clone(),
+        result: Ok(Some(32_768)),
+    });
+
+    for window in [131_072, 16_384] {
+        let previous = app.core_probe().config.context_window;
+        app.reload_lua();
+        assert!(app.app.lua_reload_failure().is_none());
+        let status = app.app.runtime_controller_status().context_window;
+        assert_eq!(status.desired_revision, revision + 1);
+        assert_eq!(status.observed_revision, revision);
+        assert_eq!(app.core_probe().config.context_window, previous);
+        assert_eq!(app.session_snapshot().id, session_id);
+        assert_eq!(app.model_history(), history);
+
+        app.app.apply_context_window_update(ContextWindowUpdate {
+            revision,
+            target: target.clone(),
+            result: Ok(Some(8_192)),
+        });
+        assert_eq!(app.core_probe().config.context_window, previous);
+
+        revision = status.desired_revision;
+        app.app.apply_context_window_update(ContextWindowUpdate {
+            revision,
+            target: target.clone(),
+            result: Ok(Some(window)),
+        });
+        assert!(app.run_lua(&format!(
+            "assert(smelt.session.context_window() == {window})"
+        )));
+        assert_eq!(
+            app.app
+                .runtime_controller_status()
+                .context_window
+                .observed_revision,
+            revision
+        );
+    }
+
+    let status = app.app.runtime_controller_status().context_window;
+    app.reload_lua_config();
+    assert!(app.app.lua_reload_failure().is_none());
+    assert_eq!(app.app.runtime_controller_status().context_window, status);
+    assert_eq!(app.core_probe().config.context_window, Some(16_384));
+
+    std::fs::write(&init, "error('invalid candidate')").unwrap();
+    app.reload_lua();
+    assert!(app.app.lua_reload_failure().is_some());
+    assert_eq!(app.app.runtime_controller_status().context_window, status);
+    assert_eq!(app.core_probe().config.context_window, Some(16_384));
+    assert_eq!(app.session_snapshot().id, session_id);
+    assert_eq!(app.model_history(), history);
+}
+
+#[test]
 fn setting_write_updates_desired_state_before_live_effects() {
     let mut app = TestApp::builder().build();
 
