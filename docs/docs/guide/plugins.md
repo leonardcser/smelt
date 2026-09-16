@@ -62,10 +62,11 @@ Subagents are disabled by default. Enable the bundled plugin in `init.lua`:
 require("smelt.plugins.subagents")
 ```
 
-The plugin exposes four model tools in both interactive and headless sessions:
+The plugin exposes five model tools in both interactive and headless sessions:
 
-- `spawn_agent`: start one independent agent for a task.
+- `spawn_agent`: start one independent agent for a task. Successful calls show only their header in the transcript; launch errors remain visible.
 - `swarm`: start 1-16 agents with the same task and identical parent-context snapshot.
+- `peek_agent`: read a nonblocking snapshot of one child's assistant output and current status for an occasional progress check, not polling.
 - `wait_agents`: wait once until every selected agent completes, fails, or is cancelled, then collect only final reports and terminal statuses.
 - `stop_agent`: cancel one queued or running agent, leaving siblings and the parent alone.
 
@@ -93,6 +94,15 @@ Session approvals are copied when a batch is spawned, with a separate store for
 each child, including queued children. Later session grants or revocations in the
 parent or a sibling do not change that child's approvals. Persisted workspace
 and repository approvals still refresh from their shared on-disk stores.
+
+`peek_agent({ id = 1 })` returns immediately without draining output or changing
+child execution, like `read_process_output`. It shows only the child's assistant
+messages and any in-flight text, plus its current status and terminal reason if
+applicable. Inherited context, reasoning, and tool results are excluded. Output
+is capped to the same 2,000-line / 100,000-byte tail as process output, with a
+truncation notice. Repeated reads preserve the output, including after completion.
+Use peeking for an occasional progress check or diagnosis, not a polling loop;
+continue independent work and use `wait_agents` once when final results are needed.
 
 `wait_agents({ ids = { 1, 2 } })` stays pending until every selected child reaches
 a terminal state, including children waiting for an execution slot. There is no
