@@ -1198,20 +1198,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_is_idempotent_and_releases_the_listener() {
+    async fn stop_is_idempotent_and_joins_the_accept_loop() {
         let state = IsolatedState::new();
         let mut server = Server::start_with_storage(state.sessions).await.unwrap();
-        let addr = server.local_addr;
-        TcpStream::connect(addr)
+        let accept_loop = server.handle.as_ref().unwrap().abort_handle();
+        TcpStream::connect(server.local_addr)
             .await
             .expect("inspect listener accepts connections while running");
+        assert!(!accept_loop.is_finished());
 
         server.stop().await;
         server.stop().await;
 
-        let rebound = TcpListener::bind(addr)
-            .await
-            .expect("stopped inspect server releases its listener");
-        drop(rebound);
+        // Completing the task drops its listener. A released ephemeral port may
+        // immediately be reused by another test or process.
+        assert!(accept_loop.is_finished());
+        assert!(server.handle.is_none());
+        assert!(server.shutdown_tx.is_none());
     }
 }

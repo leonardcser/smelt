@@ -1717,6 +1717,62 @@ mod tests {
     }
 
     #[test]
+    fn writer_open_waits_for_initialization_contention_without_changing_write_retries() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('0');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        writer.commit_session(&initial_commit(&id)).unwrap();
+        let lineage_id = writer.lineage_id().to_owned();
+        let database = writer.database_path();
+        writer.release().unwrap();
+
+        // Hold the database read lock needed by the opening connection's pragmas.
+        let blocker = Connection::open(database).unwrap();
+        blocker
+            .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN IMMEDIATE")
+            .unwrap();
+        let (opened, result) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let root = root.path();
+            scope.spawn(move || {
+                opened
+                    .send(OwnedLineageWriter::open_existing_in_lineage(
+                        root, lineage_id, id,
+                    ))
+                    .unwrap();
+            });
+
+            let early = result.recv_timeout(Duration::from_millis(100));
+            drop(blocker);
+            assert!(
+                matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+                "writer initialization must wait for the database lock: {early:?}"
+            );
+            let writer = result
+                .recv_timeout(Duration::from_secs(10))
+                .expect("writer initialization finishes once the lock is released")
+                .expect("open writer after initialization contention");
+            let busy_timeout: i64 = writer
+                .conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                busy_timeout, 0,
+                "write retries must retain their own deadline"
+            );
+            assert!(writer.conn.is_autocommit());
+            assert_eq!(
+                writer.store_head().unwrap().revision,
+                crate::Revision::new(1)
+            );
+            writer.release().unwrap();
+        });
+    }
+
+    #[test]
     fn canonical_lineage_layout_is_flat_and_ignores_the_nested_layout() {
         let root = tempfile::tempdir().unwrap();
         let id = session_id('0');

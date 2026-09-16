@@ -156,7 +156,9 @@ pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    conn.busy_timeout(std::time::Duration::ZERO)?;
+    // Opening a WAL database can race with another connection's recovery or
+    // final-close checkpoint before an explicit write transaction is acquired.
+    conn.busy_timeout(crate::write_transaction::WRITE_DEADLINE)?;
     if new_database {
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
     }
@@ -172,6 +174,8 @@ pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<
             lineage.as_str()
         )));
     }
+    // Transaction acquisition has its own cancellable retry loop and deadline.
+    conn.busy_timeout(std::time::Duration::ZERO)?;
     Ok(conn)
 }
 
