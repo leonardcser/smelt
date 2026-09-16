@@ -9,7 +9,7 @@
 --
 -- The built-in `core` source reads engine state from signals plus
 -- `smelt.session.status()` for values that carry pending/stale markers
--- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
+-- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`, `running_subagents`,
 -- `permission_pending`, `keymap_pending`, `vim_pending_input`, `cursor_pos`, `viewport_pos`). Plugins extend the line by
 -- registering additional sources via `M.add(name, fn)`.
 
@@ -149,6 +149,16 @@ local function core_compose()
     }
   end
 
+  local agents = signal("running_subagents") or 0
+  if agents > 0 then
+    items[#items + 1] = {
+      text = agents == 1 and "1 agent" or (agents .. " agents"),
+      style = { fg = "SmeltProcess", italic = false },
+      priority = 2,
+      separated = true,
+    }
+  end
+
   local cwd_worktree_path = signal("cwd_worktree_path")
   if signal("cwd_managed_worktree") and cwd_worktree_path and cwd_worktree_path ~= "" then
     items[#items + 1] = {
@@ -246,6 +256,7 @@ if M.win then
       "keymap_pending",
       "permission_pending",
       "running_procs",
+      "running_subagents",
       "session_epoch",
       "task_label",
       "tps",

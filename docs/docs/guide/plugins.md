@@ -66,11 +66,20 @@ The plugin exposes four model tools in both interactive and headless sessions:
 
 - `spawn_agent`: start one independent agent for a task.
 - `swarm`: start 1-16 agents with the same task and identical parent-context snapshot.
-- `wait_agents`: collect statuses and results, waiting up to 60 seconds without cancelling unfinished agents.
+- `wait_agents`: collect statuses and results, waiting indefinitely by default until every selected agent completes, fails, or is cancelled.
 - `stop_agent`: cancel one queued or running agent, leaving siblings and the parent alone.
 
-Four agents run concurrently, with at most 64 queued or running. Queued agents
-retain their original snapshot even if the parent continues working. Each child
+Up to 16 agents run concurrently by default, with at most 64 queued or running.
+To set a different concurrency limit (1-64), use:
+
+```lua
+require("smelt.plugins.subagents").setup({ max_concurrent = 8 })
+```
+
+The setting applies on the next spawn. Lowering it does not stop agents already
+running. Each swarm can contain at most 16 members; additional batches share the
+same concurrency limit. Queued agents retain their original snapshot even if the
+parent continues working. Each child
 inherits the provider-ready message prefix, system instructions, tool definitions,
 and model settings. Child-role instructions and the task follow that prefix.
 Children see the spawning tools, but runtime ownership prevents further spawning,
@@ -81,7 +90,21 @@ parent's cache breakpoint. Actual cache reuse depends on the provider, model,
 cache thresholds, and expiration; this does not share physical context memory.
 Each child has its own usage and cost, history, cancellation, and cwd state.
 
-In the terminal, `/subagents` opens a run list and native read-only transcript
+`wait_agents({ ids = { 1, 2 } })` returns an array of completed run records.
+An optional `timeout_ms` from 0 to 600000 sets a deadline; 0 checks immediately.
+If any selected runs are still queued or running, the result instead contains
+`status = "background"`, `runs`, and `pending_ids`. The parent receives a
+completion notification once all selected runs finish, then can call `wait_agents`
+with the same IDs to collect their results. There is no need to poll. Headless
+sessions also wait for this notification and resume the parent automatically.
+Timing out or cancelling a wait never stops the children; use `stop_agent` to do
+that explicitly.
+
+In the terminal, the main status line shows the running child count next to
+background processes, for example `2 procs · 10 agents`. Queued and finished
+children are not included, and zero counts are hidden.
+
+`/subagents` opens a run list and native read-only transcript
 side by side without pausing the parent. A status pane above them shows running,
 queued, and finished counts, combined cost, and total reported token usage across
 all children. Token totals include input, output, cache reads, and cache writes;
@@ -93,8 +116,11 @@ color. The panes share a single resizable divider, with no footer below them.
 Use Tab to switch panes, Enter to expand the transcript, and Alt-S to stop only
 the selected agent. Escape returns from an expanded transcript or closes the
 viewer. Narrow terminals show one pane at a time. Transcript updates follow the
-tail until you scroll away. Loading and rendering failures appear in the preview
-instead of leaving an unexplained blank pane.
+tail until you scroll away. The transcript supports mouse selection and Vim-style
+copying: select with `v` or `V` and yank with `y`, or use `ggVGy` to copy the whole
+transcript. Close the viewer and paste into the prompt with Ctrl-Y, or use your
+clipboard elsewhere. The preview itself remains read-only. Loading and rendering
+failures appear in the preview instead of leaving an unexplained blank pane.
 
 !!! warning "Shared files and approval"
 

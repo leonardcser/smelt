@@ -14,8 +14,8 @@ use crate::{
 use protocol::{EngineEvent, UiCommand};
 
 static NEXT_AGENT: AtomicU64 = AtomicU64::new(1);
-const MAX_RUNNING: usize = 4;
-const MAX_PENDING: usize = 64;
+pub const DEFAULT_MAX_CONCURRENT: usize = 16;
+pub const MAX_PENDING: usize = 64;
 
 #[derive(Clone, serde::Serialize)]
 pub struct AgentInfo {
@@ -35,6 +35,7 @@ pub struct Child {
     pub info: AgentInfo,
     pub session: crate::session::Session,
     execution: Option<ChildExecution>,
+    completion: tokio::sync::watch::Sender<Option<AgentInfo>>,
     pub streaming_text: String,
     pub streaming_reasoning: String,
     pub live_tools: Vec<(
@@ -93,16 +94,92 @@ impl Child {
     fn release_execution(&mut self) {
         self.execution = None;
         self.revision = self.revision.wrapping_add(1);
+        self.completion.send_replace(Some(self.info.clone()));
     }
 }
 
-#[derive(Default)]
 pub struct Agents {
     pub children: BTreeMap<u64, Child>,
+    max_concurrent: usize,
+    notifications: BTreeMap<(String, Vec<u64>), bool>,
+}
+
+impl Default for Agents {
+    fn default() -> Self {
+        Self {
+            children: BTreeMap::new(),
+            max_concurrent: DEFAULT_MAX_CONCURRENT,
+            notifications: BTreeMap::new(),
+        }
+    }
+}
+
+impl Agents {
+    pub fn running_count(&self) -> usize {
+        self.children
+            .values()
+            .filter(|child| child.info.status == "running")
+            .count()
+    }
+
+    fn selected(&self, parent_id: &str, ids: &[u64]) -> Result<Vec<&Child>, String> {
+        if ids.is_empty() || ids.len() > MAX_PENDING {
+            return Err(format!("provide between 1 and {MAX_PENDING} subagent IDs"));
+        }
+        ids.iter()
+            .map(|id| {
+                self.children
+                    .get(id)
+                    .filter(|child| child.info.parent_id == parent_id)
+                    .ok_or_else(|| format!("unknown subagent: {id}"))
+            })
+            .collect()
+    }
+
+    pub(crate) fn completions(
+        &self,
+        parent_id: &str,
+        ids: &[u64],
+    ) -> Result<Vec<tokio::sync::watch::Receiver<Option<AgentInfo>>>, String> {
+        Ok(self
+            .selected(parent_id, ids)?
+            .into_iter()
+            .map(|child| child.completion.subscribe())
+            .collect())
+    }
+
+    pub fn has_pending_notifications(&self) -> bool {
+        !self.notifications.is_empty()
+    }
+
+    pub fn take_completion_note(
+        &mut self,
+        parent_id: &str,
+        ids: &[u64],
+    ) -> Option<protocol::HistoryNote> {
+        let key = (parent_id.to_owned(), ids.to_vec());
+        if self.notifications.get(&key) != Some(&true) {
+            return None;
+        }
+        let children = self.selected(parent_id, ids).ok()?;
+        if children.iter().any(|child| child.execution.is_some()) {
+            return None;
+        }
+        let summary = children
+            .iter()
+            .map(|child| format!("#{} {}", child.info.id, child.info.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.notifications.remove(&key);
+        Some(protocol::HistoryNote::process_status(format!(
+            "Subagents finished: {summary}. Use wait_agents with these IDs to read their results."
+        )))
+    }
 }
 
 impl Core {
     pub fn cancel_agents(&mut self) {
+        self.agents.notifications.clear();
         let ids: Vec<_> = self.agents.children.keys().copied().collect();
         for id in ids {
             let _ = self.cancel_agent(id);
@@ -114,6 +191,7 @@ impl Core {
         input: String,
         count: usize,
         task: Option<String>,
+        max_concurrent: usize,
     ) -> Result<Vec<AgentInfo>, String> {
         let task = task.unwrap_or_else(|| input.clone());
         if crate::lua::current_subagent().is_some() {
@@ -122,6 +200,12 @@ impl Core {
         if input.trim().is_empty() || task.trim().is_empty() || !(1..=16).contains(&count) {
             return Err("provide a non-empty task and a count between 1 and 16".into());
         }
+        if !(1..=MAX_PENDING).contains(&max_concurrent) {
+            return Err(format!(
+                "max_concurrent must be between 1 and {MAX_PENDING}"
+            ));
+        }
+        self.agents.max_concurrent = max_concurrent;
         let pending = self
             .agents
             .children
@@ -168,6 +252,7 @@ impl Core {
                 Child {
                     info,
                     session,
+                    completion: tokio::sync::watch::channel(None).0,
                     streaming_text: String::new(),
                     streaming_reasoning: String::new(),
                     live_tools: Vec::new(),
@@ -196,21 +281,18 @@ impl Core {
     }
 
     fn start_queued_agents(&mut self) {
-        let running = self
-            .agents
-            .children
-            .values()
-            .filter(|child| child.info.status == "running")
-            .count();
+        let mut running = self.agents.running_count();
         let queued: Vec<u64> = self
             .agents
             .children
             .iter()
             .filter(|(_, child)| child.info.status == "queued")
-            .take(MAX_RUNNING.saturating_sub(running))
             .map(|(id, _)| *id)
             .collect();
         for id in queued {
+            if running >= self.agents.max_concurrent {
+                break;
+            }
             let child = self
                 .agents
                 .children
@@ -249,12 +331,48 @@ impl Core {
                         inherited_history_len: launch.snapshot.history().len(),
                     }));
                     child.info.status = "running".into();
+                    running += 1;
                 }
                 Err(error) => {
                     child.info.status = "failed".into();
                     child.info.error = Some(error.into());
                     child.release_execution();
                 }
+            }
+        }
+        self.notify_finished_agents();
+    }
+
+    pub(crate) fn notify_when_agents_finish(
+        &mut self,
+        parent_id: String,
+        mut ids: Vec<u64>,
+    ) -> Result<(), String> {
+        self.agents.selected(&parent_id, &ids)?;
+        ids.sort_unstable();
+        ids.dedup();
+        self.agents
+            .notifications
+            .entry((parent_id, ids))
+            .or_insert(false);
+        self.notify_finished_agents();
+        Ok(())
+    }
+
+    fn notify_finished_agents(&mut self) {
+        for ((parent_id, ids), sent) in &mut self.agents.notifications {
+            if !*sent
+                && ids.iter().all(|id| {
+                    self.agents
+                        .children
+                        .get(id)
+                        .is_some_and(|child| child.execution.is_none())
+                })
+            {
+                *sent = true;
+                self.engine
+                    .injector()
+                    .inject_subagents_finished(parent_id.clone(), ids.clone());
             }
         }
     }
@@ -273,6 +391,7 @@ impl Core {
                 core.engine.send(UiCommand::Cancel);
             }
         }
+        self.notify_finished_agents();
         Ok(())
     }
 
@@ -606,6 +725,287 @@ mod tests {
         )
     }
 
+    fn add_running_child(
+        parent: &mut Core,
+        id: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<UiCommand> {
+        let root = parent.env.cwd();
+        let (child_core, commands) = core(&root);
+        let mut session = crate::session::Session::new(1, root);
+        session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text(
+                "child task",
+            )));
+        parent.agents.children.insert(
+            id,
+            Child {
+                info: AgentInfo {
+                    id,
+                    group: 1,
+                    session_id: session.id.clone(),
+                    parent_id: "parent".into(),
+                    task: "child task".into(),
+                    status: "running".into(),
+                    result: String::new(),
+                    error: None,
+                    cost_usd: 0.0,
+                    usage: protocol::TokenUsage::default(),
+                },
+                session,
+                completion: tokio::sync::watch::channel(None).0,
+                execution: Some(ChildExecution::Running(RunningChild {
+                    core: Box::new(child_core),
+                    inherited_history_len: 0,
+                })),
+                streaming_text: String::new(),
+                streaming_reasoning: String::new(),
+                live_tools: Vec::new(),
+                revision: 0,
+                history_revision: 0,
+            },
+        );
+        commands
+    }
+
+    fn wait_tool(parent: &mut Core, lua: &LuaRuntime, args: serde_json::Value) -> ToolExecResult {
+        let args = serde_json::from_value(args).unwrap();
+        let root = parent.env.cwd();
+        crate::host::scope_core(parent, || {
+            lua.execute_tool(
+                "wait_agents",
+                &args,
+                crate::lua::ToolCallIds {
+                    invocation_id: protocol::InvocationId::new(1),
+                    request_id: 1,
+                    call_id: "wait",
+                },
+                crate::lua::ToolEnv {
+                    mode: protocol::AgentMode::normal(),
+                    session_id: "parent",
+                    artifact_dir: &root,
+                },
+                std::time::Instant::now(),
+            )
+        })
+    }
+
+    fn drive_wait(
+        parent: &mut Core,
+        lua: &LuaRuntime,
+        now: std::time::Instant,
+    ) -> Vec<TaskDriveOutput> {
+        crate::host::scope_core(parent, || {
+            lua.pump_task_events();
+            lua.drive_tasks(now)
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subagent_wait_is_indefinite_and_cancellation_only_releases_waiter() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut parent, _) = core(root.path());
+        let mut commands = add_running_child(&mut parent, 1);
+        let lua = LuaRuntime::new();
+        lua.lua
+            .load("require('smelt.plugins.subagents')")
+            .exec()
+            .unwrap();
+        assert!(matches!(
+            wait_tool(&mut parent, &lua, serde_json::json!({"ids": [1]})),
+            ToolExecResult::Pending
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        assert!(drive_wait(&mut parent, &lua, later).is_empty());
+        assert!(
+            lua.next_task_wakeup(later).is_none(),
+            "wait has no polling timer or watchdog"
+        );
+        assert_eq!(parent.agents.children[&1].completion.receiver_count(), 1);
+        lua.cancel_turn_tasks();
+        tokio::task::yield_now().await;
+        assert!(drive_wait(&mut parent, &lua, later).is_empty());
+        assert_eq!(parent.agents.children[&1].completion.receiver_count(), 0);
+        assert_eq!(parent.agents.running_count(), 1);
+        assert!(matches!(
+            commands.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!parent.agents.has_pending_notifications());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subagent_timed_wait_returns_pending_and_deduplicates_completion_notifications() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut parent, _) = core(root.path());
+        let mut commands = add_running_child(&mut parent, 1);
+        let _sibling_commands = add_running_child(&mut parent, 2);
+        let lua = LuaRuntime::new();
+        lua.lua
+            .load("require('smelt.plugins.subagents')")
+            .exec()
+            .unwrap();
+        assert!(matches!(
+            wait_tool(
+                &mut parent,
+                &lua,
+                serde_json::json!({"ids": [2, 1, 1], "timeout_ms": 1000})
+            ),
+            ToolExecResult::Pending
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(1000)).await;
+        tokio::task::yield_now().await;
+        let outputs = drive_wait(&mut parent, &lua, std::time::Instant::now());
+        let [TaskDriveOutput::ToolComplete {
+            content, is_error, ..
+        }] = outputs.as_slice()
+        else {
+            panic!("{outputs:?}")
+        };
+        assert!(!is_error);
+        let result: serde_json::Value = serde_json::from_str(content).unwrap();
+        assert_eq!(result["status"], "background");
+        assert_eq!(result["pending_ids"], serde_json::json!([2, 1, 1]));
+        assert_eq!(parent.agents.running_count(), 2);
+        assert!(matches!(
+            commands.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        parent
+            .notify_when_agents_finish("parent".into(), vec![1, 2])
+            .unwrap();
+        assert_eq!(parent.agents.notifications.len(), 1);
+        assert!(parent
+            .agents
+            .take_completion_note("parent", &[1, 2])
+            .is_none());
+        assert!(
+            parent.agents.has_pending_notifications(),
+            "an early event cannot discard an unfinished notification"
+        );
+        for id in [1, 2] {
+            parent.handle_agent_event(
+                &lua,
+                id,
+                EngineEvent::TurnComplete {
+                    turn_id: 1,
+                    history: None,
+                    meta: None,
+                },
+            );
+        }
+        let event = parent.engine.try_recv().unwrap();
+        let EngineEvent::SubagentsFinished { parent_id, ids } = event else {
+            panic!("{event:?}")
+        };
+        assert_eq!(ids, [1, 2]);
+        assert!(parent.engine.try_recv().is_err());
+        assert!(
+            parent.agents.has_pending_notifications(),
+            "retain until the frontend consumes it"
+        );
+        let note = parent
+            .agents
+            .take_completion_note(&parent_id, &ids)
+            .unwrap();
+        assert!(note.text().contains("#1 completed, #2 completed"));
+        assert!(parent
+            .agents
+            .take_completion_note(&parent_id, &ids)
+            .is_none());
+        assert!(!parent.agents.has_pending_notifications());
+
+        assert!(matches!(
+            wait_tool(
+                &mut parent,
+                &lua,
+                serde_json::json!({"ids": [1, 2], "timeout_ms": 0})
+            ),
+            ToolExecResult::Pending
+        ));
+        tokio::task::yield_now().await;
+        let outputs = drive_wait(&mut parent, &lua, std::time::Instant::now());
+        let [TaskDriveOutput::ToolComplete {
+            content, is_error, ..
+        }] = outputs.as_slice()
+        else {
+            panic!("{outputs:?}")
+        };
+        assert!(!is_error);
+        let runs: Vec<serde_json::Value> = serde_json::from_str(content).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|run| run["status"] == "completed"));
+        assert!(!parent.agents.has_pending_notifications());
+    }
+
+    #[test]
+    fn subagent_wait_validates_ids_owner_and_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut parent, _) = core(root.path());
+        let _commands = add_running_child(&mut parent, 1);
+        let lua = LuaRuntime::new();
+        lua.lua
+            .load("require('smelt.plugins.subagents')")
+            .exec()
+            .unwrap();
+        for args in [
+            serde_json::json!({"ids": []}),
+            serde_json::json!({"ids": vec![1; 65]}),
+            serde_json::json!({"ids": [2]}),
+            serde_json::json!({"ids": [1], "timeout_ms": -1}),
+            serde_json::json!({"ids": [1], "timeout_ms": 600001}),
+        ] {
+            assert!(matches!(
+                wait_tool(&mut parent, &lua, args),
+                ToolExecResult::Immediate { is_error: true, .. }
+            ));
+        }
+        assert!(parent.agents.completions("other parent", &[1]).is_err());
+        assert!(parent
+            .notify_when_agents_finish("other parent".into(), vec![1])
+            .is_err());
+        assert!(!parent.agents.has_pending_notifications());
+        assert_eq!(parent.agents.children[&1].completion.receiver_count(), 0);
+    }
+
+    #[test]
+    fn subagent_cancellation_discards_notifications_and_counts_only_running_children() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut parent, _) = core(root.path());
+        let mut commands = add_running_child(&mut parent, 1);
+        let _sibling_commands = add_running_child(&mut parent, 2);
+        parent.agents.children.get_mut(&2).unwrap().info.status = "queued".into();
+        assert_eq!(parent.agents.running_count(), 1);
+        let receivers = parent.agents.completions("parent", &[1, 2]).unwrap();
+        parent
+            .notify_when_agents_finish("parent".into(), vec![1, 2])
+            .unwrap();
+        parent.cancel_agents();
+        assert!(!parent.agents.has_pending_notifications());
+        assert!(matches!(commands.try_recv(), Ok(UiCommand::Cancel)));
+        assert_eq!(receivers[1].borrow().as_ref().unwrap().status, "cancelled");
+        parent.handle_agent_event(
+            &LuaRuntime::new(),
+            1,
+            EngineEvent::TurnComplete {
+                turn_id: 1,
+                history: None,
+                meta: Some(protocol::TurnMeta {
+                    interrupted: true,
+                    elapsed_ms: 0,
+                    avg_tps: None,
+                    display_tps: None,
+                }),
+            },
+        );
+        assert_eq!(receivers[0].borrow().as_ref().unwrap().status, "cancelled");
+        assert_eq!(parent.agents.running_count(), 0);
+        assert!(parent.engine.try_recv().is_err());
+    }
+
     #[test]
     fn cwd_reads_follow_the_active_parent_or_child_host() {
         let parent_root = tempfile::tempdir().unwrap();
@@ -650,42 +1050,13 @@ mod tests {
         ] {
             let root = tempfile::tempdir().unwrap();
             let (mut parent, mut parent_commands) = core(root.path());
-            let (child_core, mut commands) = core(root.path());
-            let mut session = crate::session::Session::new(1, root.path().into());
-            session
-                .history
-                .push(protocol::HistoryItem::user(protocol::Content::text(
-                    "child task",
-                )));
-            parent.agents.children.insert(
-                1,
-                Child {
-                    info: AgentInfo {
-                        id: 1,
-                        group: 1,
-                        session_id: session.id.clone(),
-                        parent_id: "parent".into(),
-                        task: "child task".into(),
-                        status: "running".into(),
-                        result: String::new(),
-                        error: None,
-                        cost_usd: 0.0,
-                        usage: protocol::TokenUsage::default(),
-                    },
-                    session,
-                    execution: Some(ChildExecution::Running(RunningChild {
-                        core: Box::new(child_core),
-                        inherited_history_len: 0,
-                    })),
-                    streaming_text: String::new(),
-                    streaming_reasoning: String::new(),
-                    live_tools: Vec::new(),
-                    revision: 0,
-                    history_revision: 0,
-                },
-            );
+            let mut commands = add_running_child(&mut parent, 1);
+            let receivers = parent.agents.completions("parent", &[1]).unwrap();
+            assert_eq!(parent.agents.running_count(), 1);
             let lua = LuaRuntime::new();
             parent.handle_agent_event(&lua, 1, event);
+            assert_eq!(receivers[0].borrow().as_ref().unwrap().status, status);
+            assert_eq!(parent.agents.running_count(), 0);
             let child = &parent.agents.children[&1];
             assert_eq!(child.info.status, status);
             assert!(child.execution.is_none());

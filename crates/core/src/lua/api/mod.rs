@@ -340,7 +340,7 @@ pub fn register_host_api(
     cache_root: &Path,
 ) -> LuaResult<()> {
     crate::lua::reg::register_class_doc();
-    agent::register(lua, smelt)?;
+    agent::register(lua, smelt, shared)?;
     auth::register(lua, smelt, shared)?;
     builtins::register(lua, smelt, shared)?;
     time::register(lua, smelt)?;

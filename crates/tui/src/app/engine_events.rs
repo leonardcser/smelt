@@ -254,12 +254,22 @@ impl TuiApp {
     /// scenario replay binary so all three drive identical state.
     pub fn dispatch_engine_event(&mut self, ev: EngineEvent) -> bool {
         let _perf = smelt_perf::perf::begin("tui:dispatch_engine_event");
-        if let EngineEvent::Subagent { id, event } = ev {
-            let lua = self.lua.execution();
-            self.core.handle_agent_event(&lua, id, *event);
-            return true;
+        match ev {
+            EngineEvent::Subagent { id, event } => {
+                let lua = self.lua.execution();
+                self.core.handle_agent_event(&lua, id, *event);
+                true
+            }
+            EngineEvent::SubagentsFinished { parent_id, ids } => {
+                if parent_id == self.conversation.session().id {
+                    if let Some(note) = self.core.agents.take_completion_note(&parent_id, &ids) {
+                        self.handle_background_completion(note);
+                    }
+                }
+                true
+            }
+            ev => self.dispatch_engine_event_inner(ev),
         }
-        self.dispatch_engine_event_inner(ev)
     }
 
     pub(crate) fn queue_engine_continuation(&mut self, event: EngineEvent) {
@@ -441,7 +451,7 @@ impl TuiApp {
     ) -> EngineEventResult {
         let mut assistant_output_started = false;
         let control = match ev {
-            EngineEvent::Subagent { .. } => {
+            EngineEvent::Subagent { .. } | EngineEvent::SubagentsFinished { .. } => {
                 unreachable!("child events are routed before parent events")
             }
             EngineEvent::Ready => SessionControl::Continue,

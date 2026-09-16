@@ -35,7 +35,12 @@ fn subagent_viewer_displays_selected_native_transcript() {
     session
         .history
         .push(protocol::HistoryItem::user(protocol::Content::text(
-            "subagent transcript fixture",
+            format!(
+                "subagent transcript fixture\npreview first line\n{}\nsubagent transcript fixture",
+                (0..150)
+                    .map(|i| format!("preview line {i}\n"))
+                    .collect::<String>()
+            ),
         )));
     let storage = app.app.conversation.sessions();
     storage.save_result(&session).unwrap();
@@ -144,6 +149,107 @@ fn subagent_viewer_displays_selected_native_transcript() {
     app.settle_lua();
     assert!(app.run_lua("assert(_G.stopped_agent == 2)"));
     app.press(KeyCode::Tab);
+    app.type_text("ggV");
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    app.type_text("G");
+    let preview_win = app
+        .ui_probe()
+        .named_win("smelt.subagents.transcript")
+        .unwrap();
+    let preview_state = app
+        .ui_probe()
+        .win(preview_win)
+        .unwrap()
+        .document_view_state();
+    assert!(
+        preview_state.cursor.row >= 150,
+        "preview cursor after G: {preview_state:?}"
+    );
+    assert!(
+        app.app.session_preview_is_attached_to(preview_win),
+        "preview binding after G: {preview_state:?}"
+    );
+    app.render_silent();
+    let preview_state = app
+        .ui_probe()
+        .win(preview_win)
+        .unwrap()
+        .document_view_state();
+    assert!(
+        app.app.session_preview_is_attached_to(preview_win),
+        "preview binding after render: {preview_state:?}"
+    );
+    assert!(
+        preview_state.cursor.row >= 150,
+        "preview cursor after render: {preview_state:?}"
+    );
+    app.type_text("y");
+    let copied = app.core_probe().clipboard.kill_ring.current().to_owned();
+    assert!(
+        copied.contains("preview first line"),
+        "keyboard yank must copy off-screen rows: {copied:?}"
+    );
+    assert!(
+        copied.contains("preview line 149"),
+        "keyboard yank must include the end of the preview: {copied:?}"
+    );
+    assert!(
+        copied.contains("subagent transcript fixture"),
+        "keyboard yank must copy the preview transcript: {copied:?}"
+    );
+    let frame = app.render_to_frame();
+    let row = frame
+        .rows
+        .iter()
+        .position(|line| line.contains("subagent transcript fixture"))
+        .unwrap_or_else(|| panic!("preview after copying:\n{}", frame.text()));
+    let col = smelt_buffer::text::byte_to_cell(
+        &frame.rows[row],
+        frame.rows[row].find("subagent transcript fixture").unwrap(),
+    );
+    app.press(KeyCode::Tab);
+    app.dispatch_ui_window_events(false);
+    app.render_silent();
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), col),
+        (
+            MouseEventKind::Drag(MouseButton::Left),
+            col + "subagent transcript fixture".len(),
+        ),
+        (
+            MouseEventKind::Up(MouseButton::Left),
+            col + "subagent transcript fixture".len(),
+        ),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row: row as u16,
+            column: column as u16,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current().trim(),
+        "subagent transcript fixture"
+    );
+    app.dispatch_ui_window_events(false);
+    app.render_silent();
+    app.settle_lua();
+    assert_eq!(app.ui_probe().focus(), Some(preview_win));
+    app.press(KeyCode::Tab);
+    app.settle_lua();
+    app.press(KeyCode::Up);
+    app.settle_lua();
+    let frame = app.render_to_frame();
+    assert!(
+        frame.text().contains("agent 1 - completed"),
+        "Tab follows mouse focus back to the run list:\n{}",
+        frame.text()
+    );
+    app.press(KeyCode::Tab);
     app.type_text("must not edit");
     assert!(app.run_lua("assert(smelt.prompt.text() == '')"));
     app.set_terminal_size(45, 18);
@@ -155,7 +261,12 @@ fn subagent_viewer_displays_selected_native_transcript() {
     app.app.tick_timers();
     app.settle_lua();
     let frame = app.render_to_frame();
-    assert!(frame.text().contains("subagent transcript fixture"));
+    assert!(
+        frame.text().contains("preview line")
+            || frame.text().contains("subagent transcript fixture"),
+        "{}",
+        frame.text()
+    );
     assert!(frame.text().contains("205 tokens"), "{}", frame.text());
     assert!(frame.text().contains("$0.0030"), "{}", frame.text());
     app.press(KeyCode::Esc);
@@ -165,6 +276,8 @@ fn subagent_viewer_displays_selected_native_transcript() {
     app.settle_lua();
     assert!(app.state().agent_running);
     assert!(app.state().active_modal.is_none());
+    app.press_mod(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert!(app.run_lua("assert(smelt.prompt.text():find('subagent transcript fixture', 1, true))"));
 }
 
 #[test]
