@@ -1,7 +1,10 @@
 -- Opt in with require("smelt.plugins.subagents") in init.lua.
 local M = smelt.plugin("subagents")
 
-smelt.agent.enable_forks()
+function M.setup(opts)
+  smelt.agent.enable_forks(opts)
+end
+M.setup()
 smelt.agent.add_system_prompt([[
 Use spawn_agent to delegate an independent task, or swarm to ask multiple agents
 to independently solve the same task. Children inherit your context, tools,
@@ -42,7 +45,7 @@ smelt.tools.register({
 
 smelt.tools.register({
   name = "swarm",
-  description = "Start n independent subagents with one identical prompt and one shared parent-context snapshot. At most four run concurrently; queued members retain the original snapshot.",
+  description = "Start n independent subagents with one identical prompt and one shared parent-context snapshot. Concurrency defaults to 16 and is user-configurable; queued members retain the original snapshot.",
   permission_defaults = permissions,
   effect = "process",
   parameters = {
@@ -59,32 +62,37 @@ smelt.tools.register({
 
 smelt.tools.register({
   name = "wait_agents",
-  description = "Wait up to 60 seconds for the selected agents to finish. Returns their individual statuses and results, including incomplete runs on timeout. Does not cancel them.",
+  description = "Wait until every selected agent finishes, fails, or is cancelled. No timeout by default. Optional timeout_ms returns unfinished runs in the background and arranges a completion notification; polling is unnecessary. Timing out or cancelling the wait does not stop agents; use stop_agent to cancel them.",
   permission_defaults = permissions,
   effect = "read",
-  watchdog_timeout_ms = 65000,
+  watchdog_timeout_ms = 0,
+  watchdog_timeout_arg = "",
   parameters = {
     type = "object",
     properties = {
-      ids = { type = "array", items = { type = "integer" }, minItems = 1 },
+      ids = { type = "array", items = { type = "integer" }, minItems = 1, maxItems = 64 },
+      timeout_ms = { type = "integer", minimum = 0, maximum = 600000,
+        description = "Optional wait deadline in milliseconds. Omit to wait indefinitely; 0 returns immediately. On timeout agents keep running and notify when all selected agents finish." },
     },
     required = { "ids" },
   },
   execute = function(args, ctx)
-    local deadline = smelt.time.monotonic_ms() + 60000
-    while true do
-      local by_id = {}
-      for _, run in ipairs(smelt.agent.runs(ctx.session_id)) do by_id[run.id] = run end
-      local result, done = {}, true
-      for _, id in ipairs(args.ids) do
-        local run = by_id[id]
-        if not run then return { content = "Unknown subagent: " .. tostring(id), is_error = true } end
-        result[#result + 1] = run
-        if run.status == "queued" or run.status == "running" then done = false end
-      end
-      if done or smelt.time.monotonic_ms() >= deadline then return smelt.json.encode(result) end
-      smelt.sleep(200)
+    local task_id = smelt.task.alloc()
+    __smelt_internal.agent.__start_wait(task_id, ctx.session_id, args.ids, args.timeout_ms)
+    local result = smelt.task.wait(task_id)
+    if result.error then return { content = result.error, is_error = true } end
+    if result.done then return smelt.json.encode(result.runs) end
+    local by_id, runs, pending = {}, {}, {}
+    for _, run in ipairs(smelt.agent.runs(ctx.session_id)) do by_id[run.id] = run end
+    for _, id in ipairs(args.ids) do
+      local run = by_id[id]
+      runs[#runs + 1] = run
+      if run.status == "queued" or run.status == "running" then pending[#pending + 1] = id end
     end
+    if #pending == 0 then return smelt.json.encode(runs) end
+    __smelt_internal.agent.__notify_when_done(ctx.session_id, args.ids)
+    return smelt.json.encode({ status = "background", runs = runs, pending_ids = pending,
+      message = "Agents are still running. You will be notified when all selected agents finish; polling is unnecessary." })
   end,
 })
 
@@ -111,12 +119,13 @@ function M.open()
     local buf = smelt.buf.new({ readonly = true })
     local win = smelt.win.new(buf, {
       name = "smelt.subagents." .. name, region = "subagents_overlay",
-      surface = surface, wrap = false, scrollbar = true, pad_left = 1, pad_right = 1,
+      surface = surface, vim_enabled = surface == "readonly_text",
+      wrap = false, scrollbar = true, pad_left = 1, pad_right = 1,
     })
     return win, buf
   end
   local sidebar, sidebar_buf = window("runs", "list_inert")
-  local preview, preview_buf = window("transcript", "selectable_text")
+  local preview, preview_buf = window("transcript", "readonly_text")
   local status, status_buf = window("status", "selectable_text")
   preview_buf:lines({ "Select an agent to view its transcript." })
   local split = layout.split("horizontal", { size = 34, min_first = 24, min_second = 32 })
@@ -262,6 +271,8 @@ function M.open()
   sidebar:key("down", function() nav(1) end)
   sidebar:key("ctrl-k", function() nav(-1) end)
   sidebar:key("ctrl-j", function() nav(1) end)
+  sidebar:on("focus", function() focused = "runs" end)
+  preview:on("focus", function() focused = "preview" end)
   sidebar:on("selection_changed", function() draw(); render_preview() end)
   sidebar:on("resized", function() draw(); render_preview() end)
   preview:on("resized", function() draw(); render_preview() end)

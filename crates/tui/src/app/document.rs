@@ -139,6 +139,9 @@ impl TuiApp {
                 )
             }
             None if handle.is_some() => None,
+            None if self.session_preview_is_attached_to(win) => {
+                self.with_session_preview_display_document(win, f)
+            }
             None => {
                 self.ui.win(win)?;
                 let mut document = BufferDisplayDocument::new(&mut self.ui, win);
@@ -838,6 +841,22 @@ impl TuiApp {
                     None,
                 );
             }
+        }
+        if self.session_preview_is_attached_to(win)
+            && (scroll_top != window_scroll_before
+                || (!selection_active_before && state.selection_anchor.is_some())
+                || matches!(
+                    command,
+                    DocumentCommand::BufferStart | DocumentCommand::BufferEnd
+                ))
+        {
+            let intent =
+                if matches!(command, DocumentCommand::BufferEnd) && !selection_active_before {
+                    TranscriptScrollIntent::Tail
+                } else {
+                    TranscriptScrollIntent::ApproximateRowSeek(scroll_top)
+                };
+            self.navigate_session_preview(win, intent);
         }
         if trace_transcript_command {
             let cursor_anchor = self.conversation.transcript_trace_anchor_at_row(

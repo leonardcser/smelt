@@ -549,6 +549,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("prompt_resize_chrome"),
     state("reasoning"),
     state("running_procs"),
+    state("running_subagents"),
     event("session_ended"),
     state("session_epoch"),
     event("session_started"),
@@ -868,6 +869,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("tps", 0.0f64);
     signals.declare("task_label", String::new());
     signals.declare("running_procs", 0u32);
+    signals.declare("running_subagents", 0u32);
     signals.declare("permission_pending", false);
     signals.declare("notification_visible", false);
     signals.declare("prompt_queue_revision", 0u64);

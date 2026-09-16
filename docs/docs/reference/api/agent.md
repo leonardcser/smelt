@@ -21,10 +21,10 @@ Append concise guidance to the system prompt while this Lua runtime is active. I
 ## `smelt.agent.enable_forks`
 
 ```lua
-fun(): nil
+fun(opts: table?): nil
 ```
 
-Enable immutable request snapshots for a subagent plugin. Disabled by default; children cannot enable or create forks.
+Enable immutable request snapshots for a subagent plugin. Optional opts.max_concurrent controls the shared child concurrency limit (default 16, range 1-64). Disabled by default; children cannot enable or create forks. Configuration applies on the next spawn; lowering the limit does not cancel running children.
 
 ## `smelt.agent.fork`
 

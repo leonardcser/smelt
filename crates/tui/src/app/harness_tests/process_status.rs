@@ -129,6 +129,93 @@ fn statusline_separates_first_inline_indicator_after_pills() {
 }
 
 #[test]
+fn statusline_shows_running_subagents_next_to_background_processes() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(120, 12);
+    assert!(app.run_lua(
+        r#"
+        local get = smelt.signal.get
+        _G.agent_count = 0
+        smelt.signal.get = function(name)
+            if name == "running_subagents" then return _G.agent_count end
+            if name == "running_procs" then return 2 end
+            return get(name)
+        end
+    "#
+    ));
+    for count in [0, 1, 10, 0] {
+        assert!(app.run_lua(&format!(
+            "_G.agent_count = {count}; require('smelt.statusline').invalidate()"
+        )));
+        let frame = app.render_to_frame();
+        let status = frame.rows.last().unwrap();
+        if count == 0 {
+            assert!(status.contains("2 procs"), "{status}");
+            assert!(!status.contains("agent"), "{status}");
+        } else {
+            let label = if count == 1 {
+                "1 agent".into()
+            } else {
+                format!("{count} agents")
+            };
+            assert!(status.contains(&format!("2 procs · {label}")), "{status}");
+            let col = smelt_buffer::text::byte_to_cell(status, status.find(&label).unwrap());
+            let color = app
+                .ui_probe()
+                .theme()
+                .resolve(smelt_core::theme::intern("SmeltProcess"))
+                .fg;
+            assert_eq!(frame.styles[11][col].fg, color);
+        }
+    }
+}
+
+#[test]
+fn subagent_completion_uses_background_notification_scheduling() {
+    for busy in [false, true] {
+        let mut app = TestApp::builder().build();
+        if busy {
+            app.start_turn(7);
+        }
+        app.app.handle_background_completion(protocol::HistoryNote::process_status(
+            "Subagents finished: #1 completed. Use wait_agents with these IDs to read their results.",
+        ));
+        if busy {
+            assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
+            assert!(app.finish_turn());
+        }
+        app.wait_for_session_lifecycle();
+        assert!(app.agent_running());
+        let commands = app.drain_engine_sends();
+        let mut commands = commands
+            .iter()
+            .chain(app.actions().iter().filter_map(|action| match action {
+                Action::EngineSend(command) => Some(command.as_ref()),
+                _ => None,
+            }));
+        assert!(commands.any(|command| matches!(
+            command,
+            protocol::UiCommand::StartTurn(payload)
+                if payload.input.note_ref().is_some_and(|note| note.text().starts_with("Subagents finished:"))
+        )), "busy={busy}");
+    }
+}
+
+#[test]
+fn subagent_completion_queues_while_prompt_work_is_busy() {
+    let mut app = TestApp::builder().build();
+    app.type_text("unfinished prompt");
+    assert!(app.run_lua("_G.busy = smelt.work.busy('syncing')"));
+    app.app
+        .handle_background_completion(protocol::HistoryNote::process_status(
+            "Subagents finished: #1 completed.",
+        ));
+    assert!(!app.agent_running());
+    assert!(!app.app.prompt.queue_is_empty());
+    assert!(app.run_lua("assert(smelt.prompt.text() == 'unfinished prompt')"));
+}
+
+#[test]
 fn spinner_redraw_restores_the_terminal_cursor_before_displaying_the_frame() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(48, 12);

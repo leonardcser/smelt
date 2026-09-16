@@ -493,6 +493,12 @@ pub struct EventInjector {
 }
 
 impl EventInjector {
+    pub fn inject_subagents_finished(&self, parent_id: String, ids: Vec<u64>) {
+        let _ = self
+            .event_tx
+            .send(EngineEvent::SubagentsFinished { parent_id, ids });
+    }
+
     pub fn inject_tool_output(
         &self,
         invocation_id: protocol::InvocationId,

@@ -12,8 +12,8 @@ local agent = {}
 ---@type fun(text: string): smelt.Reg
 agent.add_system_prompt = nil
 
---- Enable immutable request snapshots for a subagent plugin. Disabled by default; children cannot enable or create forks.
----@type fun(): nil
+--- Enable immutable request snapshots for a subagent plugin. Optional opts.max_concurrent controls the shared child concurrency limit (default 16, range 1-64). Disabled by default; children cannot enable or create forks. Configuration applies on the next spawn; lowering the limit does not cancel running children.
+---@type fun(opts: table?): nil
 agent.enable_forks = nil
 
 --- Queue one or more child agents from the current provider-ready request. Every batch member receives the same task and snapshot. Count defaults to one (maximum 16); label optionally supplies a short display task without changing model input. Only a parent model tool may call this API. Returns run records with id, group, session_id, parent_id, task, status, result, error, cost_usd and usage. Usage contains cumulative child-only prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens and reasoning_tokens when reported. Reasoning is included in completion tokens, not an additional bucket.

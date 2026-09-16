@@ -461,24 +461,27 @@ impl HeadlessApp {
             .fast_mode
             .unwrap_or(self.core.config.settings.fast_mode);
 
+        let mut payload = protocol::StartTurnPayload {
+            turn_id,
+            input: protocol::StartTurnInput::user(Content::text(content)),
+            mode: self.core.config.mode.clone(),
+            model_target,
+            request_config: self.core.config.request_runtime_config(),
+            reasoning_effort: self.core.config.reasoning_effort.clone(),
+            fast_mode,
+            history: protocol::ModelHistorySource::items(history.clone()),
+            session_id: self.session.id.clone(),
+            sessions_root: self.core.sessions.sessions_dir(),
+            persistence: protocol::PersistenceScope::default(),
+            permission_overrides: None,
+            system_prompt: Some(self.system_prompt.clone()),
+            tools,
+        };
         self.core
             .engine
-            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
-                turn_id,
-                input: protocol::StartTurnInput::user(Content::text(content)),
-                mode: self.core.config.mode.clone(),
-                model_target,
-                request_config: self.core.config.request_runtime_config(),
-                reasoning_effort: self.core.config.reasoning_effort.clone(),
-                fast_mode,
-                history: protocol::ModelHistorySource::items(history),
-                session_id: self.session.id.clone(),
-                sessions_root: self.core.sessions.sessions_dir(),
-                persistence: protocol::PersistenceScope::default(),
-                permission_overrides: None,
-                system_prompt: Some(self.system_prompt.clone()),
-                tools,
-            })));
+            .send(UiCommand::StartTurn(Box::new(payload.clone())));
+        let mut parent_running = true;
+        let mut completions = std::collections::VecDeque::new();
 
         let mut final_message = String::new();
         let mut total_usage = protocol::TokenUsage::default();
@@ -488,6 +491,21 @@ impl HeadlessApp {
             HashMap::new();
 
         let outcome = loop {
+            if !parent_running {
+                if let Some(note) = completions.pop_front() {
+                    payload.turn_id = self.next_turn_id;
+                    self.next_turn_id += 1;
+                    payload.input = protocol::StartTurnInput::note(note);
+                    payload.history = protocol::ModelHistorySource::items(history.clone());
+                    self.core
+                        .engine
+                        .send(UiCommand::StartTurn(Box::new(payload.clone())));
+                    parent_running = true;
+                    final_message.clear();
+                } else if !self.core.agents.has_pending_notifications() {
+                    break HeadlessExit::Success;
+                }
+            }
             self.drive_lua_tasks();
             let wakeup = self.next_lua_wakeup();
             let ev = tokio::select! {
@@ -590,7 +608,18 @@ impl HeadlessApp {
                 {
                     self.sink.log_retry(*attempt, *delay_ms);
                 }
-                EngineEvent::HistoryUpdated { .. } => {}
+                EngineEvent::SubagentsFinished { parent_id, ids }
+                    if parent_id == &self.session.id =>
+                {
+                    if let Some(note) = self.core.agents.take_completion_note(parent_id, ids) {
+                        completions.push_back(note);
+                    }
+                }
+                EngineEvent::HistoryUpdated { update: delta, .. }
+                | EngineEvent::HistoryAppended { delta, .. } => {
+                    history.truncate(delta.first_index.get());
+                    history.extend(delta.items.iter().cloned());
+                }
                 EngineEvent::RequestAuditError { message }
                     if self.sink.format == OutputFormat::Text =>
                 {
@@ -602,12 +631,19 @@ impl HeadlessApp {
                     }
                     break HeadlessExit::TurnError;
                 }
-                EngineEvent::TurnComplete { meta, .. } => {
-                    break if meta.as_ref().is_some_and(|meta| meta.interrupted) {
-                        HeadlessExit::Interrupted
-                    } else {
-                        HeadlessExit::Success
-                    };
+                EngineEvent::TurnComplete {
+                    meta,
+                    history: delta,
+                    ..
+                } => {
+                    if meta.as_ref().is_some_and(|meta| meta.interrupted) {
+                        break HeadlessExit::Interrupted;
+                    }
+                    if let Some(delta) = delta {
+                        history.truncate(delta.first_index.get());
+                        history.extend(delta.items.iter().cloned());
+                    }
+                    parent_running = false;
                 }
                 _ => {}
             }

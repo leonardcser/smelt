@@ -479,6 +479,14 @@ impl super::TuiApp {
             if active.follow_tail {
                 self.session_preview.live_follow_tail = true;
             }
+            if active
+                .render
+                .window
+                .and_then(|window| self.ui.win(window))
+                .is_some_and(|window| window.selection_active())
+            {
+                self.session_preview.live_follow_tail = false;
+            }
             active.follow_tail = self.session_preview.live_follow_tail;
             if self.session_preview.live_revision.as_ref() != Some(&revision) || cached.is_none() {
                 let history_revision = (child.session.id.clone(), child.history_revision);
@@ -638,6 +646,25 @@ impl super::TuiApp {
             })
     }
 
+    pub(crate) fn with_session_preview_display_document<R>(
+        &mut self,
+        window: crate::smelt_edit::WinId,
+        f: impl FnOnce(&mut dyn crate::smelt_edit::DisplayDocument) -> R,
+    ) -> Option<R> {
+        let render = self.session_preview.render_for_window(window)?;
+        let mut view = self.conversation.take_resume_preview(&render.cache_key)?;
+        let mut document = super::transcript::TranscriptDisplayDocument::new(
+            &mut view,
+            &self.lua,
+            render.width,
+            self.ui.theme(),
+        );
+        let result = f(&mut document);
+        self.conversation
+            .store_resume_preview(render.cache_key, view);
+        Some(result)
+    }
+
     pub(crate) fn navigate_session_preview(
         &mut self,
         window: crate::smelt_edit::WinId,
@@ -652,10 +679,19 @@ impl super::TuiApp {
         let Some(mut view) = self.conversation.take_resume_preview(&render.cache_key) else {
             return self.session_preview.active_for(&render.cache_key);
         };
-        self.session_preview.live_follow_tail = matches!(
-            intent,
-            crate::app::transcript_scroll_trace::TranscriptScrollIntent::Tail
-        );
+        use super::transcript_scroll_trace::{TranscriptScrollIntent, TranscriptTraceAnchor};
+        let intent = match intent {
+            TranscriptScrollIntent::ApproximateRowSeek(row) => {
+                match view.trace_anchor_at_row(&self.lua, render.width, row) {
+                    anchor @ TranscriptTraceAnchor::Content { .. } => {
+                        TranscriptScrollIntent::ExactContentAnchor(anchor)
+                    }
+                    _ => TranscriptScrollIntent::ApproximateRowSeek(row),
+                }
+            }
+            intent => intent,
+        };
+        self.session_preview.live_follow_tail = matches!(intent, TranscriptScrollIntent::Tail);
         view.set_pending_scroll_intent(intent);
         self.conversation
             .store_resume_preview(render.cache_key.clone(), view);

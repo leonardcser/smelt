@@ -4640,6 +4640,54 @@ mod tests {
     }
 
     #[test]
+    fn subagent_configuration_and_wait_watchdog() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load("require('smelt.plugins.subagents')")
+            .exec()
+            .unwrap();
+        let max = || {
+            rt.lua
+                .named_registry_value::<usize>("__smelt_agent_max_concurrent")
+                .unwrap()
+        };
+        assert_eq!(max(), 16);
+        rt.lua
+            .load("require('smelt.plugins.subagents').setup({ max_concurrent = 4 })")
+            .exec()
+            .unwrap();
+        assert_eq!(max(), 4);
+        for value in ["0", "-1", "65", "1.5", "'invalid'"] {
+            assert!(
+                rt.lua
+                    .load(format!(
+                        "require('smelt.plugins.subagents').setup({{ max_concurrent = {value} }})"
+                    ))
+                    .exec()
+                    .is_err(),
+                "{value}"
+            );
+            assert_eq!(max(), 4);
+        }
+        rt.lua
+            .load("require('smelt.plugins.subagents').setup({ max_concurrent = 64 })")
+            .exec()
+            .unwrap();
+        assert_eq!(max(), 64);
+        assert_eq!(rt.tool_timeout_ms("wait_agents", &HashMap::new()), None);
+        for timeout in [0, 1, 600000] {
+            assert_eq!(
+                rt.tool_timeout_ms(
+                    "wait_agents",
+                    &HashMap::from([("timeout_ms".into(), serde_json::json!(timeout))]),
+                ),
+                None,
+                "the explicit wait deadline must not enable the tool watchdog"
+            );
+        }
+    }
+
+    #[test]
     fn autoload_excludes_optional_plugins() {
         let modules = autoload_modules();
         for optional in OPTIONAL_PLUGINS {
