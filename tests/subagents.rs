@@ -194,9 +194,28 @@ smelt.tools.register({
         .iter()
         .all(|run| run["status"] == "completed" && run["result"] == "completed independently"));
     for run in &runs {
-        assert_eq!(run["usage"]["prompt_tokens"], 20, "{run}");
-        assert_eq!(run["usage"]["completion_tokens"], 20, "{run}");
-        assert!(run["usage"].get("context_tokens").is_none(), "{run}");
+        assert_eq!(
+            run.as_object().unwrap().len(),
+            3,
+            "only id, status and final report: {run}"
+        );
+        let usage: Vec<_> = output
+            .events
+            .iter()
+            .filter_map(|event| event.get("Subagent"))
+            .filter(|child| child["id"] == run["id"])
+            .filter_map(|child| child["event"].get("TokenUsage"))
+            .map(|event| &event["usage"])
+            .collect();
+        for field in ["prompt_tokens", "completion_tokens"] {
+            assert_eq!(
+                usage
+                    .iter()
+                    .map(|usage| usage[field].as_u64().unwrap_or(0))
+                    .sum::<u64>(),
+                20
+            );
+        }
     }
     let spawn = tool_result(final_parent, "swarm-call").unwrap()["content"]
         .as_str()
@@ -262,9 +281,15 @@ async fn stopping_one_child_keeps_siblings_and_parent_running() {
         .as_str()
         .unwrap();
     let runs: Vec<Value> = serde_json::from_str(result).unwrap();
-    assert_eq!(runs[0]["status"], "cancelled");
-    assert_eq!(runs[1]["status"], "completed");
-    assert_eq!(runs[1]["result"], "completed independently");
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        runs[0],
+        json!({"id":runs[0]["id"], "status":"cancelled", "error":"subagent was cancelled"})
+    );
+    assert_eq!(
+        runs[1],
+        json!({"id":runs[1]["id"], "status":"completed", "result":"completed independently"})
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -318,29 +343,23 @@ async fn ten_subagents_run_in_parallel_by_default() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn timed_wait_notifies_after_parent_turn_and_collects_without_cancelling_children() {
+async fn one_wait_returns_only_final_results_after_running_and_queued_children_finish() {
     let harness = Harness::new().await;
     harness.write_config("anthropic-compatible", "test-model");
-    harness.write_init_lua("require('smelt.plugins.subagents')");
+    harness.write_init_lua("require('smelt.plugins.subagents').setup({ max_concurrent = 1 })");
     Mock::given(method("POST"))
         .respond_with(|request: &Request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             if is_child(&body) {
-                return response(vec![]).set_delay(std::time::Duration::from_millis(700));
+                return response(vec![]).set_delay(std::time::Duration::from_millis(300));
             }
-            if tool_result(&body, "collect-call").is_some() {
+            if tool_result(&body, "wait-call").is_some() {
                 return response(vec![]);
             }
             if let Some(spawned) = tool_result(&body, "swarm-call") {
                 let runs: Vec<Value> =
                     serde_json::from_str(spawned["content"].as_str().unwrap()).unwrap();
                 let ids: Vec<_> = runs.iter().map(|run| run["id"].clone()).collect();
-                if body["messages"].to_string().contains("Subagents finished:") {
-                    return response(vec![("collect-call", "wait_agents", json!({"ids":ids}))]);
-                }
-                if tool_result(&body, "wait-call").is_some() {
-                    return response(vec![]);
-                }
                 return response(vec![(
                     "wait-call",
                     "wait_agents",
@@ -356,35 +375,72 @@ async fn timed_wait_notifies_after_parent_turn_and_collects_without_cancelling_c
         .mount(&harness.mock)
         .await;
     let output = harness.run_with_tool_calling(
-        "Delegate, detach the wait, then collect on notification",
+        "Delegate, then wait once for the final reports",
         "test/test-model",
         true,
     );
     assert_eq!(output.status, 0, "{}\n{:?}", output.stderr, output.events);
-    assert_eq!(
-        output
-            .events
-            .iter()
-            .filter(|event| event.get("SubagentsFinished").is_some())
-            .count(),
-        1
-    );
     let requests = harness.captured_request_bodies().await;
-    let timed = requests
+    let collected = requests
         .iter()
         .find_map(|body| tool_result(body, "wait-call"))
         .unwrap();
-    let timed: Value = serde_json::from_str(timed["content"].as_str().unwrap()).unwrap();
-    assert_eq!(timed["status"], "background");
-    assert_eq!(timed["pending_ids"].as_array().unwrap().len(), 2);
-    let collected = requests
+    let runs: Value = serde_json::from_str(collected["content"].as_str().unwrap()).unwrap();
+    let runs = runs
+        .as_array()
+        .expect("a wait returns terminal results, never a running snapshot");
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        assert_eq!(
+            *run,
+            json!({"id":run["id"], "status":"completed", "result":"completed independently"})
+        );
+    }
+    assert_eq!(
+        requests.iter().filter(|body| !is_child(body)).count(),
+        3,
+        "spawn, wait, final answer only"
+    );
+    let wait_finished = output
+        .events
         .iter()
-        .find_map(|body| tool_result(body, "collect-call"))
-        .expect("parent resumes on the completion notification");
-    let runs: Vec<Value> = serde_json::from_str(collected["content"].as_str().unwrap()).unwrap();
+        .position(|event| {
+            event
+                .get("ToolFinished")
+                .is_some_and(|tool| tool["call_id"] == "wait-call")
+        })
+        .unwrap();
+    assert_eq!(
+        output.events[..wait_finished]
+            .iter()
+            .filter(|event| {
+                event
+                    .get("Subagent")
+                    .is_some_and(|child| child["event"].get("TurnComplete").is_some())
+            })
+            .count(),
+        2,
+        "the wait cannot return before every child terminates"
+    );
+    let preview = runs
+        .iter()
+        .map(|run| format!("agent #{} - completed\ncompleted independently", run["id"]))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert_eq!(
+        output.events[wait_finished]["ToolFinished"]["result"]["display_content"],
+        json!([{"name":"results", "content":preview}])
+    );
+    let tool = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "wait_agents")
+        .unwrap();
     assert!(
-        runs.iter()
-            .all(|run| run["status"] == "completed" && run["result"] == "completed independently"),
-        "{runs:?}"
+        tool["input_schema"]["properties"]
+            .get("timeout_ms")
+            .is_none(),
+        "{tool}"
     );
 }

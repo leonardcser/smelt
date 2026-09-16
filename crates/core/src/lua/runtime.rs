@@ -4682,7 +4682,7 @@ mod tests {
                     &HashMap::from([("timeout_ms".into(), serde_json::json!(timeout))]),
                 ),
                 None,
-                "the explicit wait deadline must not enable the tool watchdog"
+                "unexpected timeout arguments must not enable the wait watchdog"
             );
         }
     }

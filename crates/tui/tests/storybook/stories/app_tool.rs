@@ -36,6 +36,34 @@ app_story!(bash_tool_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
+app_story!(wait_agents_tool_states, |ctx| {
+    ctx.run_lua("require('smelt.plugins.subagents')");
+    ctx.set_viewport(78, 30);
+    ctx.tool_started("wait_agents", &[("ids", json!([4]))]);
+    ctx.tool_call_with_display_content(
+        "wait_agents", &[("ids", json!([1, 2, 3]))],
+        &json!([
+            {"id":1, "status":"completed", "result":"Parser review complete.\nAll tests passed."},
+            {"id":2, "status":"failed", "error":"Provider unavailable."},
+            {"id":3, "status":"cancelled", "error":"subagent was cancelled"},
+        ]).to_string(),
+        json!({}),
+        &[("results", "agent #1 - completed\nParser review complete.\nAll tests passed.\n\nagent #2 - failed\nProvider unavailable.\n\nagent #3 - cancelled\nsubagent was cancelled")],
+        Some(1250),
+    );
+    ctx.tool_call_error(
+        "wait_agents",
+        &[("ids", json!([99]))],
+        "unknown subagent: 99",
+        Some(1),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.set_viewport(45, 24);
+    ctx.assert_snapshot_named("narrow");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
 app_story!(write_file_tool_states, |ctx| {
     ctx.set_viewport(78, 22);
     ctx.tool_draft(

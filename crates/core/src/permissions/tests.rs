@@ -4191,6 +4191,95 @@ fn approvals_load_workspace_replaces_existing_workspace_entries() {
 }
 
 #[test]
+fn forked_permissions_isolate_all_session_grants_from_parent_and_siblings() {
+    let parent = Permissions::load();
+    {
+        let mut approvals = parent.approvals.write().unwrap();
+        approvals.add_session_tool("bash", vec![pat("git *")]);
+        approvals.add_session_dir(PathBuf::from("/session/trusted"));
+        approvals.add_session_path_trust(
+            "read_file",
+            PathAccess::Read,
+            PathBuf::from("/session/reads"),
+        );
+        approvals.add_session_path_grant(
+            plan(),
+            "edit_file",
+            PathAccess::Write,
+            PathBuf::from("/session/plans"),
+        );
+    }
+    let batch = parent.fork_session();
+    let children = [(), ()].map(|_| PermissionsHandle::new(batch.fork_session()));
+    parent.approvals.write().unwrap().clear_session();
+    parent
+        .approvals
+        .write()
+        .unwrap()
+        .add_session_tool("bash", vec![pat("parent *")]);
+    for child in &children {
+        child.install_home(PathBuf::from("/child/home"));
+        let approvals = child.approvals();
+        assert!(!Arc::ptr_eq(&approvals, &parent.approvals));
+        let approvals = approvals.read().unwrap();
+        assert!(approvals.has_pattern("bash", "git *"));
+        assert!(!approvals.has_pattern("bash", "parent *"));
+        assert!(dirs_approved(&approvals, &["/session/trusted/file"]));
+        assert!(approvals.session_path_grant_approved_for_path(
+            &normal(),
+            "read_file",
+            &PathAccess::Read,
+            Path::new("/session/reads/file"),
+        ));
+        assert!(approvals.session_path_grant_approved_for_path(
+            &plan(),
+            "edit_file",
+            &PathAccess::Write,
+            Path::new("/session/plans/file"),
+        ));
+        assert!(approvals.session_path_write_exception_approved_for_path(
+            &plan(),
+            "edit_file",
+            Path::new("/session/plans/file"),
+        ));
+        assert!(!approvals.session_path_write_exception_approved_for_path(
+            &normal(),
+            "edit_file",
+            Path::new("/session/plans/file"),
+        ));
+    }
+    assert!(!Arc::ptr_eq(
+        &children[0].approvals(),
+        &children[1].approvals()
+    ));
+    let active_turn = children[0].snapshot();
+    children[0].approvals().write().unwrap().clear_session();
+    children[0]
+        .approvals()
+        .write()
+        .unwrap()
+        .add_session_tool("bash", vec![pat("child *")]);
+    let active_approvals = active_turn.approvals.read().unwrap();
+    assert!(
+        active_approvals.has_pattern("bash", "child *"),
+        "a child's own active turn still observes its live grants"
+    );
+    assert!(!active_approvals.has_pattern("bash", "git *"));
+    for approvals in [
+        &parent.approvals,
+        &batch.approvals,
+        &children[1].approvals(),
+    ] {
+        assert!(!approvals.read().unwrap().has_pattern("bash", "child *"));
+    }
+    let sibling = children[1].approvals();
+    let sibling = sibling.read().unwrap();
+    assert!(sibling.has_pattern("bash", "git *"));
+    assert_eq!(sibling.session_dirs().len(), 1);
+    assert_eq!(sibling.session_path_grants().len(), 2);
+}
+
+#[test]
 fn permissions_handle_snapshots_policy_and_shares_session_approvals() {
     let policy = |decision| {
         permissions_from_mode(
@@ -4375,13 +4464,17 @@ fn active_permission_snapshot_refreshes_persisted_additions_and_removals() {
         .unwrap(),
     );
     let active_turn = handle.snapshot();
+    let child = active_turn.fork_session();
+    let snapshots = [active_turn.as_ref(), &child];
     let args = args_with("command", "cargo test");
-    assert_eq!(
-        active_turn
-            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
-            .decision,
-        Decision::Ask
-    );
+    for snapshot in snapshots {
+        assert_eq!(
+            snapshot
+                .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+                .decision,
+            Decision::Ask
+        );
+    }
 
     store
         .add_grant(
@@ -4393,12 +4486,14 @@ fn active_permission_snapshot_refreshes_persisted_additions_and_removals() {
             },
         )
         .unwrap();
-    assert_eq!(
-        active_turn
-            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
-            .decision,
-        Decision::Allow
-    );
+    for snapshot in snapshots {
+        assert_eq!(
+            snapshot
+                .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+                .decision,
+            Decision::Allow
+        );
+    }
 
     store
         .remove(
@@ -4408,12 +4503,14 @@ fn active_permission_snapshot_refreshes_persisted_additions_and_removals() {
             "cargo test*",
         )
         .unwrap();
-    assert_eq!(
-        active_turn
-            .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
-            .decision,
-        Decision::Ask
-    );
+    for snapshot in snapshots {
+        assert_eq!(
+            snapshot
+                .evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "bash", &args)
+                .decision,
+            Decision::Ask
+        );
+    }
 }
 
 #[test]

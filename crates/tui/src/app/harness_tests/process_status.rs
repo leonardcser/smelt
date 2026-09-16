@@ -171,15 +171,16 @@ fn statusline_shows_running_subagents_next_to_background_processes() {
 }
 
 #[test]
-fn subagent_completion_uses_background_notification_scheduling() {
+fn background_completion_uses_notification_scheduling() {
     for busy in [false, true] {
         let mut app = TestApp::builder().build();
         if busy {
             app.start_turn(7);
         }
-        app.app.handle_background_completion(protocol::HistoryNote::process_status(
-            "Subagents finished: #1 completed. Use wait_agents with these IDs to read their results.",
-        ));
+        app.app
+            .handle_background_completion(protocol::HistoryNote::process_status(
+                "background process 42 exited with code 0",
+            ));
         if busy {
             assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
             assert!(app.finish_turn());
@@ -196,19 +197,19 @@ fn subagent_completion_uses_background_notification_scheduling() {
         assert!(commands.any(|command| matches!(
             command,
             protocol::UiCommand::StartTurn(payload)
-                if payload.input.note_ref().is_some_and(|note| note.text().starts_with("Subagents finished:"))
+                if payload.input.note_ref().is_some_and(|note| note.text() == "background process 42 exited with code 0")
         )), "busy={busy}");
     }
 }
 
 #[test]
-fn subagent_completion_queues_while_prompt_work_is_busy() {
+fn background_completion_queues_while_prompt_work_is_busy() {
     let mut app = TestApp::builder().build();
     app.type_text("unfinished prompt");
     assert!(app.run_lua("_G.busy = smelt.work.busy('syncing')"));
     app.app
         .handle_background_completion(protocol::HistoryNote::process_status(
-            "Subagents finished: #1 completed.",
+            "background process 42 exited with code 0",
         ));
     assert!(!app.agent_running());
     assert!(!app.app.prompt.queue_is_empty());
