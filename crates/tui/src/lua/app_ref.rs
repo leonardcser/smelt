@@ -1868,7 +1868,7 @@ pub(crate) fn scope_app<R>(app: &mut TuiApp, body: impl FnOnce() -> R) -> R {
 }
 
 pub(crate) fn ui_host_available() -> bool {
-    TUI_APP.is_set()
+    TUI_APP.is_set() && smelt_core::lua::current_subagent().is_none()
 }
 
 fn with_scoped_app<R>(callback: impl FnOnce(&mut TuiApp) -> R) -> R {

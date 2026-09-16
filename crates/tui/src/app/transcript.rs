@@ -6519,6 +6519,15 @@ impl TranscriptDocument {
         self.clear_transcript_layout_caches();
     }
 
+    pub(crate) fn push_tool_call(
+        &mut self,
+        block: Block,
+        state: smelt_core::transcript_model::ToolState,
+    ) {
+        self.content.transcript.push_tool_call(block, state);
+        self.clear_transcript_layout_caches();
+    }
+
     pub(crate) fn push_with_origin(
         &mut self,
         block: Block,

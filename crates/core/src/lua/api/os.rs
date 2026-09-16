@@ -97,10 +97,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return the current working directory as `(path, nil)`, or `(nil, err_string)` on failure.",
         &[],
         move |_, ()| {
-            Ok((
-                Some(cwd_context.evaluation_cwd().to_string_lossy().into_owned()),
-                None::<String>,
-            ))
+            let cwd = if cwd_context.external_effects_active() {
+                crate::host::try_with_core(|core| core.env.cwd())
+                    .unwrap_or_else(|| cwd_context.evaluation_cwd())
+            } else {
+                cwd_context.evaluation_cwd()
+            };
+            Ok((Some(cwd.to_string_lossy().into_owned()), None::<String>))
         },
     )?;
 

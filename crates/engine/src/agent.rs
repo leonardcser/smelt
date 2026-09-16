@@ -131,10 +131,11 @@ impl Drop for DispatcherTurnGuard<'_> {
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
 pub(crate) async fn engine_task(
     mut config: EngineConfig,
-    dispatcher: Box<dyn crate::tools::ToolDispatcher>,
+    dispatcher: std::sync::Arc<dyn crate::tools::ToolDispatcher>,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: crate::EngineEventSender,
     host_tx: crate::HostCallSender,
+    forks: crate::fork::ForkState,
 ) {
     // Some openai-compatible endpoints gate on User-Agent (e.g. api.kimi.com).
     // Per-request header() calls (Copilot, Codex) still override this.
@@ -237,6 +238,8 @@ pub(crate) async fn engine_task(
                             persistence,
                             started_at,
                             tps_samples: Vec::new(),
+                            forks: forks.clone(),
+                            sessions_root,
                         };
                         turn.run(input, loaded_history.items).await;
                     }
@@ -963,6 +966,8 @@ struct Turn<'a> {
     persistence: protocol::PersistenceScope,
     started_at: Instant,
     tps_samples: Vec<f64>,
+    forks: crate::fork::ForkState,
+    sessions_root: std::path::PathBuf,
 }
 
 enum HostCallResult<T> {
@@ -986,6 +991,45 @@ enum PrepareRequestOutcome {
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    fn request_messages(&self) -> crate::host::PreparedRequestMessages {
+        let messages = match &self.forks.inherited {
+            Some(prefix) => prefix.append_suffix(&self.history[prefix.history.len() + 1..]),
+            None => protocol::history_to_messages(&self.history),
+        };
+        crate::host::PreparedRequestMessages::new(messages, self.system_history_offset())
+    }
+
+    fn capture_fork(&self, messages: &[Message], tools: &[ToolDefinition]) {
+        if self.forks.inherited.is_some() || !self.forks.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let snapshot = crate::fork::ForkSnapshot {
+            messages: messages.to_vec(),
+            history: self.history.iter().skip(1).cloned().collect(),
+            tools: tools.to_vec(),
+            config: self.config.clone(),
+            dispatcher: self.dispatcher.fork(self.turn_id),
+            payload: protocol::StartTurnPayload {
+                turn_id: self.turn_id,
+                input: protocol::StartTurnInput::user(Content::text(String::new())),
+                mode: self.mode.clone(),
+                model_target: self.model_target.clone(),
+                request_config: self.request_config,
+                reasoning_effort: self.reasoning_effort.clone(),
+                fast_mode: self.fast_mode,
+                history: protocol::ModelHistorySource::default(),
+                session_id: self.session_id.clone(),
+                sessions_root: self.sessions_root.clone(),
+                persistence: protocol::PersistenceScope::default(),
+                permission_overrides: self.permission_overrides.clone(),
+                system_prompt: Some(self.system_prompt.clone()),
+                tools: self.tools.clone(),
+            },
+        };
+        *self.forks.latest.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::sync::Arc::new(snapshot));
     }
 
     fn public_history_len(&self) -> usize {
@@ -1363,10 +1407,7 @@ impl<'a> Turn<'a> {
         let _perf = smelt_perf::perf::begin("engine:request:prepare_with_host");
         let messages = {
             let _perf = smelt_perf::perf::begin("engine:request:prepare_messages");
-            crate::host::PreparedRequestMessages::new(
-                protocol::history_to_messages(&self.history),
-                self.system_history_offset(),
-            )
+            self.request_messages()
         };
         let history_revision = self.history_revision;
         let estimated_tokens =
@@ -1580,7 +1621,9 @@ impl<'a> Turn<'a> {
 
             // Sorted by name so the request prefix stays byte-identical
             // across turns. Anything that reorders tools busts the cache.
-            let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
+            let tool_defs: Vec<ToolDefinition> = if let Some(prefix) = &self.forks.inherited {
+                prefix.tools.clone()
+            } else if self.provider.tool_calling() {
                 let mut defs: Vec<ToolDefinition> = self
                     .dispatcher
                     .definitions()
@@ -2736,11 +2779,9 @@ impl<'a> Turn<'a> {
             // when its history revision is stale.
             let wire_messages = prepared_messages.unwrap_or_else(|| {
                 let _perf = smelt_perf::perf::begin("engine:request:provider_messages");
-                crate::host::PreparedRequestMessages::new(
-                    protocol::history_to_messages(&self.history),
-                    self.system_history_offset(),
-                )
+                self.request_messages()
             });
+            self.capture_fork(wire_messages.wire(), tool_defs);
             let on_attempt = move |info: RequestAttemptInfo<'_>| {
                 let ctx = crate::request_log::RequestContext {
                     request_id: turn_id,
@@ -2759,14 +2800,28 @@ impl<'a> Turn<'a> {
                     audit_mode,
                 );
             };
-            let request_opts = ChatRequestOptions {
+            let mut request_opts = ChatRequestOptions {
                 cache: self.provider.default_cache_config(
                     self.request_config.cache_ttl_long,
-                    Some(&self.session_id),
+                    Some(
+                        self.forks
+                            .inherited
+                            .as_ref()
+                            .map_or(self.session_id.as_str(), |prefix| {
+                                prefix.parent_session_id()
+                            }),
+                    ),
                 ),
                 fast_mode: self.fast_mode,
                 ..ChatRequestOptions::default()
             };
+            request_opts.cache.inherited_user_message =
+                self.forks.inherited.as_ref().and_then(|prefix| {
+                    prefix
+                        .messages()
+                        .iter()
+                        .rposition(|message| message.role == protocol::Role::User)
+                });
             let opts = ChatOptions {
                 cancel: &self.cancel,
                 on_retry: Some(&on_retry),
@@ -3744,6 +3799,8 @@ mod tests {
             persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
+            forks: crate::fork::ForkState::default(),
+            sessions_root: std::path::PathBuf::new(),
         };
 
         turn.push_turn_content(
@@ -3958,6 +4015,8 @@ mod tests {
             persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
+            forks: crate::fork::ForkState::default(),
+            sessions_root: std::path::PathBuf::new(),
         };
 
         cmd_tx

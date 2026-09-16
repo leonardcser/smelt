@@ -2372,6 +2372,7 @@ fn direct_cwd_request_is_not_committed_by_unrelated_tool_completion() {
             invocation_id: protocol::InvocationId::new(99),
             request_id: 99,
             execution_mode: protocol::ToolExecutionMode::Concurrent,
+            subagent_id: None,
         },
         "unrelated-tool".into(),
         "unrelated result".into(),

@@ -83,6 +83,21 @@ impl RuntimeEnv {
         }
     }
 
+    /// Snapshot host paths while giving an independent run its own cwd cell.
+    pub fn fork(&self, cwd: PathBuf) -> Self {
+        Self::scripted(
+            self.pid,
+            self.home.clone(),
+            self.config_dir.clone(),
+            self.state_dir.clone(),
+            self.cache_dir.clone(),
+            self.data_dir.clone(),
+            self.runtime_dir.clone(),
+            cwd,
+            self.available_parallelism,
+        )
+    }
+
     pub fn pid(&self) -> u32 {
         self.pid
     }

@@ -17,6 +17,7 @@ enum TaskWait {
 pub enum TaskScope {
     App,
     Turn,
+    Subagent(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,8 @@ pub struct ToolInvocationContext {
     pub invocation_id: protocol::InvocationId,
     pub request_id: u64,
     pub execution_mode: protocol::ToolExecutionMode,
+    /// Trusted routing owner, retained even after the child run has finished.
+    pub subagent_id: Option<u64>,
 }
 
 pub enum TaskCompletion {
@@ -89,7 +92,7 @@ pub(crate) struct LuaTask {
     thread: mlua::Thread,
     wait: TaskWait,
     completion: TaskCompletion,
-    scope: TaskScope,
+    pub(crate) scope: TaskScope,
     cancel: CancellationToken,
     deadline: Option<TaskDeadline>,
 }
@@ -176,6 +179,7 @@ impl LuaTaskRuntime {
         scope: TaskScope,
         deadline: Option<TaskDeadline>,
     ) -> LuaResult<u64> {
+        let scope = current_subagent().map_or(scope, TaskScope::Subagent);
         let thread = lua.create_thread(func)?;
         let id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         self.tasks.push(LuaTask {
@@ -535,6 +539,26 @@ pub fn current_tool_invocation() -> Option<ToolInvocationContext> {
     CURRENT_TOOL_INVOCATION.with(|current| *current.borrow())
 }
 
+/// Trusted execution owner, preserved independently of model-visible tool args.
+pub fn current_subagent() -> Option<u64> {
+    match current_task_scope() {
+        Some(TaskScope::Subagent(id)) => Some(id),
+        _ => None,
+    }
+}
+
+pub fn with_subagent<R>(id: u64, body: impl FnOnce() -> R) -> R {
+    struct Restore(Option<TaskScope>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT_TASK_SCOPE.with(|scope| scope.replace(self.0));
+        }
+    }
+    let _restore =
+        Restore(CURRENT_TASK_SCOPE.with(|scope| scope.replace(Some(TaskScope::Subagent(id)))));
+    body()
+}
+
 /// Current task scope; `None` outside the Lua task runtime.
 pub fn current_task_scope() -> Option<TaskScope> {
     CURRENT_TASK_SCOPE.with(|c| *c.borrow())
@@ -675,6 +699,7 @@ mod tests {
             invocation_id: protocol::InvocationId::new(request_id),
             request_id,
             execution_mode: protocol::ToolExecutionMode::Concurrent,
+            subagent_id: None,
         }
     }
 
