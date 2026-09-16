@@ -864,6 +864,9 @@ impl TuiApp {
         );
 
         let permissions = turn.permissions.clone();
+        if self.lua.forks_enabled() {
+            let _ = self.core.engine.enable_forks();
+        }
         let payload = protocol::StartTurnPayload {
             turn_id,
             input: turn.input,

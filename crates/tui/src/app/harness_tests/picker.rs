@@ -1,6 +1,208 @@
 use super::*;
 
 #[test]
+fn subagent_picker_opens_during_parent_turn_and_escape_only_closes_viewer() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, "require('smelt.plugins.subagents')").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.start_turn(1);
+    assert!(app.run_lua("smelt.cmd.run('subagents')"));
+    drive_lua_tasks(&mut app);
+    for (width, height) in [(80, 24), (40, 16), (120, 40)] {
+        app.set_terminal_size(width, height);
+        let frame = app.render_to_frame();
+        assert!(frame.text().contains("no subagents"), "{}", frame.text());
+    }
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+    assert!(!app.render_to_frame().text().contains("no subagents"));
+    assert!(
+        app.state().agent_running,
+        "Escape must not cancel the parent"
+    );
+    assert!(!app.quit_requested());
+}
+
+#[test]
+fn subagent_viewer_displays_selected_native_transcript() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, "require('smelt.plugins.subagents')").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.set_terminal_size(120, 32);
+    let mut session = smelt_core::session::Session::new(1, root.path().into());
+    session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text(
+            "subagent transcript fixture",
+        )));
+    let storage = app.app.conversation.sessions();
+    storage.save_result(&session).unwrap();
+    let resolved = storage
+        .resolve_session_for_read_result(&session.id)
+        .unwrap();
+    let address = crate::app::transcript::TranscriptStoreAddress::new(
+        resolved.sessions_root,
+        resolved.id,
+        resolved.lineage_id,
+    );
+    let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
+    crate::persist::write_transcript_record_suffix(
+        &address,
+        0,
+        &transcript.history.block_records(),
+    )
+    .unwrap();
+    assert!(app.run_lua(&format!("_G.subagent_fixture_id = {:?}", session.id)));
+    assert!(app.run_lua(r#"
+        local id = _G.subagent_fixture_id
+        _G.viewer_runs = {
+            { id = 1, group = 1, session_id = id, task = 'Review parser', status = 'running', cost_usd = 0,
+              usage = { prompt_tokens = 100, completion_tokens = 20, cache_read_tokens = 30, cache_write_tokens = 40, reasoning_tokens = 5, context_tokens = 999 } },
+            { id = 2, group = 1, session_id = id, task = 'Review parser', status = 'queued', cost_usd = 0,
+              usage = { prompt_tokens = 10, completion_tokens = 5 } },
+        }
+        smelt.agent.runs = function() return _G.viewer_runs end
+        smelt.agent.stop = function(id) _G.stopped_agent = id end
+        smelt.cmd.run('subagents')
+    "#));
+    app.settle_lua();
+    app.render_silent();
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    let frame = app.render_to_frame();
+    assert!(
+        frame.text().contains("subagent transcript fixture"),
+        "{}",
+        frame.text()
+    );
+    assert!(
+        frame.text().contains("Swarm 1: Review parser"),
+        "{}",
+        frame.text()
+    );
+    assert!(
+        frame.text().contains("1 running / 1 queued"),
+        "{}",
+        frame.text()
+    );
+    let text = frame.text();
+    assert!(text.contains("205 tokens"), "{text}");
+    assert!(!text.contains("$0.0000"), "{text}");
+    assert!(!text.contains("Tab: panes"), "{text}");
+    assert!(
+        text.find("1 running").unwrap() < text.find("Swarm 1").unwrap(),
+        "{text}"
+    );
+    let row = frame
+        .rows
+        .iter()
+        .position(|line| line.contains("#2"))
+        .unwrap();
+    assert_eq!(
+        frame.rows[row].matches('│').count(),
+        3,
+        "one separator between panes: {text}"
+    );
+    let col =
+        smelt_buffer::text::byte_to_cell(&frame.rows[row], frame.rows[row].find("#2").unwrap());
+    let pending = app
+        .ui_probe()
+        .theme()
+        .resolve(smelt_core::theme::intern("SmeltToolPending"))
+        .fg;
+    assert_eq!(frame.styles[row][col].fg, pending);
+    app.start_turn(1);
+    app.press(KeyCode::Down);
+    app.settle_lua();
+    assert!(app.render_to_frame().text().contains("agent 2 - queued"));
+    assert!(app.run_lua("_G.viewer_runs[1].status = 'completed'; _G.viewer_runs[1].cost_usd = 0.001; _G.viewer_runs[2].cost_usd = 0.002"));
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    assert!(
+        app.render_to_frame().text().contains("agent 2 - queued"),
+        "refresh preserves selection"
+    );
+    let frame = app.render_to_frame();
+    assert!(frame.text().contains("$0.0030"), "{}", frame.text());
+    assert!(frame.text().contains("$0.0010"), "{}", frame.text());
+    let row = frame
+        .rows
+        .iter()
+        .position(|line| line.contains("#1"))
+        .unwrap();
+    let col =
+        smelt_buffer::text::byte_to_cell(&frame.rows[row], frame.rows[row].find("#1").unwrap());
+    assert_ne!(
+        frame.styles[row][col].fg, pending,
+        "completed runs are no longer dimmed"
+    );
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::ALT);
+    app.settle_lua();
+    assert!(app.run_lua("assert(_G.stopped_agent == 2)"));
+    app.press(KeyCode::Tab);
+    app.type_text("must not edit");
+    assert!(app.run_lua("assert(smelt.prompt.text() == '')"));
+    app.set_terminal_size(45, 18);
+    app.render_silent();
+    app.press(KeyCode::Enter);
+    app.settle_lua();
+    app.render_silent();
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    let frame = app.render_to_frame();
+    assert!(frame.text().contains("subagent transcript fixture"));
+    assert!(frame.text().contains("205 tokens"), "{}", frame.text());
+    assert!(frame.text().contains("$0.0030"), "{}", frame.text());
+    app.press(KeyCode::Esc);
+    app.settle_lua();
+    assert!(app.render_to_frame().text().contains("Review parser"));
+    app.press(KeyCode::Esc);
+    app.settle_lua();
+    assert!(app.state().agent_running);
+    assert!(app.state().active_modal.is_none());
+}
+
+#[test]
+fn subagent_viewer_shows_preview_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, "require('smelt.plugins.subagents')").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.set_terminal_size(120, 32);
+    assert!(app.run_lua(r#"
+        smelt.agent.runs = function()
+            return { { id = 1, group = 1, session_id = 'unavailable', task = 'Review', status = 'running', cost_usd = 0 } }
+        end
+        smelt.session.render_preview_into = function() error('preview fixture failure') end
+        smelt.cmd.run('subagents')
+    "#));
+    app.settle_lua();
+    app.render_silent();
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    let frame = app.render_to_frame();
+    assert!(
+        frame.text().contains("Transcript unavailable:"),
+        "{}",
+        frame.text()
+    );
+    assert!(
+        frame.text().contains("preview fixture failure"),
+        "{}",
+        frame.text()
+    );
+    app.press(KeyCode::Esc);
+    app.settle_lua();
+    assert!(app.state().active_modal.is_none());
+}
+
+#[test]
 fn picker_open_focuses_overlay() {
     let mut app = TestApp::builder().build();
     let leaf = open_test_picker(&mut app, &["one", "two", "three"], 0);

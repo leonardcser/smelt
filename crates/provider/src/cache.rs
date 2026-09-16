@@ -15,6 +15,9 @@ pub struct CacheConfig {
     /// `prompt_cache_key`. Should be the same for every request in a
     /// session and differ across sessions. Clamped to 64 chars.
     pub prompt_cache_key: Option<String>,
+    /// Original user-message index whose Anthropic cache breakpoint a fork
+    /// preserves in addition to its own moving user breakpoint.
+    pub inherited_user_message: Option<usize>,
 }
 
 /// OpenAI accepts up to 256 chars but recommends shorter; pi-mono uses

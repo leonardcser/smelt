@@ -139,6 +139,7 @@ pub const OPTIONAL_PLUGINS: &[&str] = &[
     "smelt.plugins.which_key",
     "smelt.plugins.inspect",
     "smelt.plugins.lsp",
+    "smelt.plugins.subagents",
 ];
 
 /// Command metadata used by command-line completion UIs.
@@ -1958,6 +1959,12 @@ impl LuaRuntime {
         rt.cancel_scope(&self.lua, super::task::TaskScope::Turn);
     }
 
+    pub fn cancel_subagent_tasks(&self, id: u64) {
+        if let Ok(mut tasks) = self.shared.tasks.lock() {
+            tasks.cancel_scope(&self.lua, super::task::TaskScope::Subagent(id));
+        }
+    }
+
     pub fn set_wakeup_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<()>) {
         let _ = self.shared.wakeup_tx.set(tx);
     }
@@ -1984,7 +1991,22 @@ impl LuaRuntime {
     ) -> Result<(), ()> {
         // Keep the task mutex unlocked while resuming Lua; task code can re-enter
         // the runtime via `smelt.spawn`, cancellation handles, or task helpers.
-        if let Some(parked) = crate::lua::step_task_owned(&self.lua, task, now, outs) {
+        let parked = match task.scope {
+            super::task::TaskScope::Subagent(id) if super::task::current_subagent() != Some(id) => {
+                crate::host::with_core(|parent| {
+                    let child = parent
+                        .agents
+                        .children
+                        .get_mut(&id)
+                        .and_then(crate::agents::Child::core_mut)?;
+                    crate::host::scope_core(child, || {
+                        crate::lua::step_task_owned(&self.lua, task, now, outs)
+                    })
+                })
+            }
+            _ => crate::lua::step_task_owned(&self.lua, task, now, outs),
+        };
+        if let Some(parked) = parked {
             let Ok(mut rt) = self.shared.tasks.lock() else {
                 return Err(());
             };
@@ -2011,7 +2033,13 @@ impl LuaRuntime {
         let mut forward = Vec::with_capacity(outs.len());
         for out in outs {
             match out {
-                TaskDriveOutput::ToolComplete { .. } => forward.push(out),
+                TaskDriveOutput::ToolComplete { .. } => {
+                    if !crate::host::try_with_core(|core| core.complete_agent_tool(&out))
+                        .unwrap_or(false)
+                    {
+                        forward.push(out);
+                    }
+                }
                 TaskDriveOutput::NotifyError(msg) => self.record_error(msg),
             }
         }
@@ -2043,6 +2071,12 @@ impl LuaRuntime {
             .ok()
             .and_then(|v| v.as_boolean())
             .unwrap_or(true)
+    }
+
+    pub fn forks_enabled(&self) -> bool {
+        self.lua
+            .named_registry_value::<bool>("__smelt_agent_forks_enabled")
+            .unwrap_or(false)
     }
 
     pub fn system_prompt_fragments(&self) -> Vec<String> {
@@ -2415,6 +2449,36 @@ impl LuaRuntime {
         }
     }
 
+    /// Evaluate a Lua tool under the caller's host scope and pinned turn policy.
+    pub fn evaluate_tool_call(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        mode: protocol::AgentMode,
+        permissions: &crate::permissions::Permissions,
+    ) -> protocol::ToolEvaluation {
+        let metadata = self.evaluate_tool_metadata(tool_name, args);
+        let decision = if let Some(error) = &metadata.preflight_error {
+            protocol::Decision::Error(error.clone())
+        } else {
+            match self.tool_paths_for_workspace(tool_name, args) {
+                Ok(paths) => {
+                    permissions
+                        .evaluate_tool_with_paths_and_approvals(
+                            mode,
+                            crate::permissions::ToolOrigin::Lua,
+                            tool_name,
+                            args,
+                            paths.as_slice(),
+                        )
+                        .decision
+                }
+                Err(error) => protocol::Decision::Error(error),
+            }
+        };
+        protocol::ToolEvaluation { decision, metadata }
+    }
+
     pub fn evaluate_tool_metadata(
         &self,
         tool_name: &str,
@@ -2688,6 +2752,7 @@ impl LuaRuntime {
             invocation_id,
             request_id,
             execution_mode,
+            subagent_id: super::task::current_subagent(),
         }
     }
 
@@ -2825,7 +2890,10 @@ impl LuaRuntime {
                     invocation,
                     call_id: call_id.to_string(),
                 },
-                super::task::TaskScope::Turn,
+                super::task::current_subagent().map_or(
+                    super::task::TaskScope::Turn,
+                    super::task::TaskScope::Subagent,
+                ),
                 deadline,
             ) {
                 Ok(id) => id,
@@ -4535,6 +4603,40 @@ mod tests {
             .collect();
 
         assert_eq!(keys, vec!["file_path", "content"]);
+    }
+
+    #[test]
+    fn subagent_plugin_is_opt_in_and_declares_identical_tools_for_both_frontends() {
+        let rt = LuaRuntime::new();
+        assert!(!rt.forks_enabled());
+        assert!(!rt.has_tool("swarm"));
+        rt.lua
+            .load("require('smelt.plugins.subagents')")
+            .exec()
+            .unwrap();
+        assert!(rt.forks_enabled());
+        for name in ["spawn_agent", "swarm", "wait_agents", "stop_agent"] {
+            assert!(rt.tool_available_for(name, ToolVisibility::Interactive));
+            assert!(rt.tool_available_for(name, ToolVisibility::Headless));
+        }
+        assert_eq!(
+            serde_json::to_value(
+                rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive)
+            )
+            .unwrap(),
+            serde_json::to_value(
+                rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Headless)
+            )
+            .unwrap()
+        );
+        super::super::task::with_subagent(7, || {
+            let error = rt
+                .lua
+                .load("smelt.agent.enable_forks()")
+                .exec()
+                .unwrap_err();
+            assert!(error.to_string().contains("subagents cannot enable forks"));
+        });
     }
 
     #[test]

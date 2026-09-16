@@ -2,6 +2,7 @@ mod agent;
 pub mod auth;
 pub mod clock;
 pub mod env;
+pub mod fork;
 pub mod host;
 pub mod image;
 pub mod log;
@@ -204,6 +205,7 @@ mod system_prompt_tests {
     }
 }
 
+#[derive(Clone)]
 pub struct EngineConfig {
     pub instructions: Option<String>,
     /// When set, replaces the built-in system prompt template entirely.
@@ -314,9 +316,88 @@ pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: EngineEventSender,
     output_rx: mpsc::UnboundedReceiver<EngineOutput>,
+    forks: fork::ForkState,
+    dispatcher: Option<Arc<dyn tools::ToolDispatcher>>,
 }
 
 impl EngineHandle {
+    /// Enable request-boundary capture for an opt-in orchestration plugin.
+    pub fn enable_forks(&self) -> Result<(), &'static str> {
+        if self.forks.inherited.is_some() {
+            return Err("subagents cannot create subagents");
+        }
+        self.forks
+            .enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Capture the latest provider-ready request. Child engines cannot fork.
+    pub fn fork_snapshot(&self) -> Result<Arc<fork::ForkSnapshot>, &'static str> {
+        if self.forks.inherited.is_some() {
+            return Err("subagents cannot create subagents");
+        }
+        self.forks
+            .latest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or("no active request to inherit")
+    }
+
+    /// Start a child from a captured request using the same tool dispatcher.
+    pub fn start_fork(
+        &self,
+        snapshot: &Arc<fork::ForkSnapshot>,
+        session_id: String,
+        turn_id: u64,
+        task: String,
+    ) -> Result<Self, &'static str> {
+        if self.forks.inherited.is_some() {
+            return Err("subagents cannot create subagents");
+        }
+        let dispatcher = self.dispatcher.as_ref().ok_or("engine has no dispatcher")?;
+        Ok(snapshot.start(Arc::clone(dispatcher), session_id, turn_id, task))
+    }
+
+    /// Route a child's outputs through this engine's event queue. Its command
+    /// endpoint remains independent and is retained by the child's host.
+    pub fn forward_child(&self, id: u64, child: &mut EngineHandle) {
+        let (_, empty) = mpsc::unbounded_channel();
+        let mut outputs = std::mem::replace(&mut child.output_rx, empty);
+        let events = self.event_tx.clone();
+        let commands = child.cmd_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let output = tokio::select! {
+                    biased;
+                    output = outputs.recv() => output,
+                    _ = commands.closed() => None,
+                };
+                let Some(output) = output else { break };
+                if let EngineOutput::Event(event) = output {
+                    let finished = matches!(event, EngineEvent::TurnComplete { .. });
+                    if events
+                        .send(EngineEvent::Subagent {
+                            id,
+                            event: Box::new(event),
+                        })
+                        .is_err()
+                        || finished
+                    {
+                        return;
+                    }
+                }
+            }
+            let _ = events.send(EngineEvent::Subagent {
+                id,
+                event: Box::new(EngineEvent::Shutdown {
+                    reason: Some("subagent engine disconnected before completing its turn".into()),
+                }),
+            });
+        });
+    }
+
     pub fn send(&self, cmd: UiCommand) {
         let _ = self.try_send(cmd);
     }
@@ -383,6 +464,8 @@ impl EngineHandle {
             cmd_tx,
             event_tx: event_tx.clone(),
             output_rx,
+            forks: fork::ForkState::default(),
+            dispatcher: None,
         };
         (handle, cmd_rx, EngineOutputInjector { event_tx, host_tx })
     }
@@ -426,16 +509,26 @@ impl EventInjector {
 
 /// Start the engine. Must be called from within a tokio runtime.
 pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -> EngineHandle {
+    start_shared(config, Arc::from(dispatcher), fork::ForkState::default())
+}
+
+fn start_shared(
+    config: EngineConfig,
+    dispatcher: Arc<dyn tools::ToolDispatcher>,
+    forks: fork::ForkState,
+) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, host_tx, output_rx) = output_channel(config.host_callbacks);
     let handle = EngineHandle {
         cmd_tx,
         event_tx: event_tx.clone(),
         output_rx,
+        forks: forks.clone(),
+        dispatcher: Some(Arc::clone(&dispatcher)),
     };
 
     tokio::spawn(agent::engine_task(
-        config, dispatcher, cmd_rx, event_tx, host_tx,
+        config, dispatcher, cmd_rx, event_tx, host_tx, forks,
     ));
 
     handle
@@ -672,6 +765,21 @@ mod tests {
             output_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn child_disconnect_is_reported_without_waiting_for_retained_senders() {
+        let (mut parent, _parent_commands, _parent_events) = EngineHandle::for_test();
+        let (mut child, commands, _child_events) = EngineHandle::for_test();
+        parent.forward_child(7, &mut child);
+        drop(commands);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), parent.recv())
+            .await
+            .expect("child disconnect must wake the parent")
+            .unwrap();
+        assert!(
+            matches!(event, EngineEvent::Subagent { id: 7, event } if matches!(*event, EngineEvent::Shutdown { .. }))
+        );
     }
 
     #[tokio::test]

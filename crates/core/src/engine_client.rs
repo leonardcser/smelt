@@ -19,6 +19,28 @@ impl EngineClient {
         }
     }
 
+    pub fn enable_forks(&self) -> Result<(), &'static str> {
+        self.handle.enable_forks()
+    }
+
+    pub fn fork_snapshot(&self) -> Result<Arc<engine::fork::ForkSnapshot>, &'static str> {
+        self.handle.fork_snapshot()
+    }
+
+    pub fn start_fork(
+        &self,
+        snapshot: &Arc<engine::fork::ForkSnapshot>,
+        id: u64,
+        session_id: String,
+        task: String,
+    ) -> Result<EngineHandle, &'static str> {
+        let mut child = self
+            .handle
+            .start_fork(snapshot, session_id, u64::MAX - id, task)?;
+        self.handle.forward_child(id, &mut child);
+        Ok(child)
+    }
+
     pub fn send(&self, cmd: UiCommand) {
         self.handle.send(cmd);
     }

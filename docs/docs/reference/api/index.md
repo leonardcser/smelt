@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 88 namespace(s), 443 function(s), 108 class(es), 13 alias(es).
+**Coverage:** 88 namespace(s), 447 function(s), 108 class(es), 13 alias(es).
 
 `Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.
 
@@ -16,7 +16,7 @@ Stubs land in `runtime/lua/smelt/_meta/` (one file per namespace, plus `_types.l
 
 Available in every runtime, including headless mode.
 
-- [`smelt.agent`](agent.md) - 1 function(s)
+- [`smelt.agent`](agent.md) - 5 function(s)
 - [`smelt.auth`](auth.md) - 2 function(s)
 - [`smelt.build`](build.md) - 0 function(s)
 - [`smelt.builtins`](builtins.md) - 4 function(s)

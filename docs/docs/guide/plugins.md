@@ -54,6 +54,61 @@ For a real walkthrough, the bundled plugins under
 [`runtime/lua/smelt/plugins/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/plugins)
 are the canonical examples. Every pattern below comes straight from them.
 
+## Optional subagents
+
+Subagents are disabled by default. Enable the bundled plugin in `init.lua`:
+
+```lua
+require("smelt.plugins.subagents")
+```
+
+The plugin exposes four model tools in both interactive and headless sessions:
+
+- `spawn_agent`: start one independent agent for a task.
+- `swarm`: start 1-16 agents with the same task and identical parent-context snapshot.
+- `wait_agents`: collect statuses and results, waiting up to 60 seconds without cancelling unfinished agents.
+- `stop_agent`: cancel one queued or running agent, leaving siblings and the parent alone.
+
+Four agents run concurrently, with at most 64 queued or running. Queued agents
+retain their original snapshot even if the parent continues working. Each child
+inherits the provider-ready message prefix, system instructions, tool definitions,
+and model settings. Child-role instructions and the task follow that prefix.
+Children see the spawning tools, but runtime ownership prevents further spawning,
+including after a tool coroutine yields.
+
+Cache routing uses the parent's identity, and Anthropic requests preserve the
+parent's cache breakpoint. Actual cache reuse depends on the provider, model,
+cache thresholds, and expiration; this does not share physical context memory.
+Each child has its own usage and cost, history, cancellation, and cwd state.
+
+In the terminal, `/subagents` opens a run list and native read-only transcript
+side by side without pausing the parent. A status pane above them shows running,
+queued, and finished counts, combined cost, and total reported token usage across
+all children. Token totals include input, output, cache reads, and cache writes;
+reasoning is already included in output and is not counted twice. Usage updates
+as provider requests report it. Zero costs are hidden. Swarm members are grouped
+under their task; queued and running rows use the same muted color as pending
+tool groups, while completed rows use normal text. Failed rows use the error
+color. The panes share a single resizable divider, with no footer below them.
+Use Tab to switch panes, Enter to expand the transcript, and Alt-S to stop only
+the selected agent. Escape returns from an expanded transcript or closes the
+viewer. Narrow terminals show one pane at a time. Transcript updates follow the
+tail until you scroll away. Loading and rendering failures appear in the preview
+instead of leaving an unexplained blank pane.
+
+!!! warning "Shared files and approval"
+
+    Agents work in the same checkout, not separate worktrees. Partition file
+    ownership or delegate read-only analysis. A read-only transcript viewer does
+    not restrict the child's tools to reads. Existing permissions are inherited;
+    operations requiring new user approval are denied and must be delegated back
+    to the parent. Treat child reports as claims to verify, not proof of success.
+
+Run records and transcripts currently live in memory only. Successful Lua reloads
+and parent-session replacement cancel active children; completed records remain
+inspectable until process exit. Child sessions are not saved for later resume.
+Parent-global compaction and middleware callbacks do not run inside child engines.
+
 ## Virtual read-only views
 
 The bundled `/diff` plugin composes side-by-side panes, a collapsible file tree
@@ -390,6 +445,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | --- | --- |
 | `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
 | `smelt.plugins.lsp` | Optional LSP tool facade for agent code navigation. |
+| `smelt.plugins.subagents` | Opt in with require("smelt.plugins.subagents") in init.lua. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- BUNDLED_PLUGINS_END -->

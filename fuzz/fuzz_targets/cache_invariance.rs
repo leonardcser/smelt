@@ -78,6 +78,7 @@ fn cache_on() -> CacheConfig {
         anthropic_markers: true,
         ttl_long: false,
         prompt_cache_key: None,
+        inherited_user_message: None,
     }
 }
 

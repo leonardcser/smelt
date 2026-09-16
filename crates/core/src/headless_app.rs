@@ -154,34 +154,14 @@ impl HeadlessApp {
             });
             return;
         }
-        let metadata = crate::host::scope_core(&mut self.core, || {
-            lua.evaluate_tool_metadata(&tool_name, &args)
+        let permissions = self.core.permissions.snapshot();
+        let mode = self.core.config.mode.clone();
+        let evaluation = crate::host::scope_core(&mut self.core, || {
+            lua.evaluate_tool_call(&tool_name, &args, mode, &permissions)
         });
-        let decision = if let Some(err) = metadata.preflight_error.clone() {
-            protocol::Decision::Error(err)
-        } else {
-            match crate::host::scope_core(&mut self.core, || {
-                lua.tool_paths_for_workspace(&tool_name, &args)
-            }) {
-                Ok(tool_paths) => {
-                    self.core
-                        .permissions
-                        .snapshot()
-                        .evaluate_tool_with_paths_and_approvals(
-                            self.core.config.mode.clone(),
-                            crate::permissions::ToolOrigin::Lua,
-                            &tool_name,
-                            &args,
-                            tool_paths.as_slice(),
-                        )
-                        .decision
-                }
-                Err(error) => protocol::Decision::Error(error),
-            }
-        };
         self.core.engine.send(UiCommand::ToolEvaluationResponse {
             request_id,
-            evaluation: protocol::ToolEvaluation { decision, metadata },
+            evaluation,
         });
     }
 
@@ -362,6 +342,12 @@ impl HeadlessApp {
                 }
                 true
             }
+            EngineEvent::Subagent { id, event } => {
+                if let Some(lua) = self.lua.as_ref() {
+                    self.core.handle_agent_event(lua, *id, *event.clone());
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -459,6 +445,13 @@ impl HeadlessApp {
         )));
 
         let tools = self.tool_defs();
+        if self
+            .lua
+            .as_ref()
+            .is_some_and(crate::lua::LuaRuntime::forks_enabled)
+        {
+            let _ = self.core.engine.enable_forks();
+        }
         let Some(model_target) = self.model_target() else {
             eprintln!("error: no model is available for headless dispatch");
             return HeadlessExit::Error;

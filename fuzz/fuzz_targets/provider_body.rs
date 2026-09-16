@@ -63,6 +63,7 @@ fn run(input: Input) {
         anthropic_markers: true,
         ttl_long: input.ttl_long,
         prompt_cache_key: input.cache_key,
+        inherited_user_message: None,
     };
     let model = if input.model.is_empty() {
         "fuzz"

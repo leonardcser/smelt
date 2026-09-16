@@ -113,16 +113,22 @@ impl Harness {
     /// returned as `serde_json::Value` so snapshots own the structural
     /// shape.
     pub fn run(&self, message: &str, model_ref: &str) -> RunOutput {
+        self.run_with_tool_calling(message, model_ref, false)
+    }
+
+    pub fn run_with_tool_calling(
+        &self,
+        message: &str,
+        model_ref: &str,
+        tool_calling: bool,
+    ) -> RunOutput {
         let bin = env!("CARGO_BIN_EXE_smelt");
-        let out = Command::new(bin)
-            .args([
-                "--headless",
-                "--format",
-                "json",
-                "--no-tool-calling",
-                "-m",
-                model_ref,
-            ])
+        let mut command = Command::new(bin);
+        command.args(["--headless", "--format", "json", "-m", model_ref]);
+        if !tool_calling {
+            command.arg("--no-tool-calling");
+        }
+        let out = command
             .arg(message)
             .env("XDG_CONFIG_HOME", self.config_dir.path())
             .env("SMELT_TEST_API_KEY", "stub-key")

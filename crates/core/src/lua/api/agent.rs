@@ -48,6 +48,50 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
+    m.fn_(
+        "enable_forks",
+        "Enable immutable request snapshots for a subagent plugin. Disabled by default; children cannot enable or create forks.",
+        &[],
+        |lua, ()| -> LuaResult<()> {
+            if crate::lua::current_subagent().is_some() {
+                return Err(mlua::Error::external("subagents cannot enable forks"));
+            }
+            lua.set_named_registry_value("__smelt_agent_forks_enabled", true)
+        },
+    )?;
+    m.fn_(
+        "fork",
+        "Queue one or more child agents from the current provider-ready request. Every batch member receives the same task and snapshot. Count defaults to one (maximum 16); label optionally supplies a short display task without changing model input. Only a parent model tool may call this API. Returns run records with id, group, session_id, parent_id, task, status, result, error, cost_usd and usage. Usage contains cumulative child-only prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens and reasoning_tokens when reported. Reasoning is included in completion tokens, not an additional bucket.",
+        &["task", "count", "label"],
+        |lua, (task, count, label): (String, Option<usize>, Option<String>)| -> LuaResult<mlua::Value> {
+            if crate::lua::current_tool_invocation().is_none() {
+                return Err(mlua::Error::external("fork requires an active model tool invocation"));
+            }
+            let agents = crate::host::with_core(|core| core.spawn_agents(task, count.unwrap_or(1), label))
+                .map_err(mlua::Error::external)?;
+            crate::lua::json_to_lua(lua, &serde_json::to_value(agents).map_err(mlua::Error::external)?)
+        },
+    )?;
+    m.fn_(
+        "runs",
+        "List runtime-owned subagents in creation order, optionally restricted to a parent session. Status is queued, running, completed, cancelled or failed. Includes cumulative child-only cost_usd and usage as returned by fork. Records survive Lua reloads.",
+        &["parent_id"],
+        |lua, parent_id: Option<String>| -> LuaResult<mlua::Value> {
+            let agents = crate::host::with_core(|core| core.agents.children.values()
+                .filter(|child| parent_id.as_ref().is_none_or(|id| id == &child.info.parent_id))
+                .map(|child| child.info.clone()).collect::<Vec<_>>());
+            crate::lua::json_to_lua(lua, &serde_json::to_value(agents).map_err(mlua::Error::external)?)
+        },
+    )?;
+    m.fn_(
+        "stop",
+        "Cancel a queued or running child without cancelling its parent or siblings. Finished runs remain available for inspection.",
+        &["id"],
+        |_, id: u64| -> LuaResult<()> {
+            crate::host::with_core(|core| core.cancel_agent(id)).map_err(mlua::Error::external)
+        },
+    )?;
+
     Ok(())
 }
 

@@ -212,8 +212,9 @@ pub fn build_body(
     // Moving cache breakpoint: everything up through this user turn is
     // reused across in-turn assistant/tool round-trips.
     let mut last_user_idx: Option<usize> = None;
+    let mut inherited_user_idx = None;
 
-    for m in messages {
+    for (message_idx, m) in messages.iter().enumerate() {
         match m.role {
             Role::System => {
                 let text = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
@@ -228,6 +229,9 @@ pub fn build_body(
                     "content": anthropic_content_blocks(m.content.as_ref()),
                 }));
                 last_user_idx = Some(content.len() - 1);
+                if cache.inherited_user_message == Some(message_idx) {
+                    inherited_user_idx = last_user_idx;
+                }
             }
             Role::Assistant => {
                 let mut message_content = Vec::new();
@@ -291,7 +295,7 @@ pub fn build_body(
 
     // Stamp before body construction takes ownership of `content`.
     if cache.anthropic_markers {
-        if let Some(idx) = last_user_idx {
+        for idx in [inherited_user_idx, last_user_idx].into_iter().flatten() {
             if let Some(blocks) = content
                 .get_mut(idx)
                 .and_then(|m| m.get_mut("content"))
@@ -1029,6 +1033,7 @@ mod tests {
             anthropic_markers: true,
             ttl_long: false,
             prompt_cache_key: None,
+            inherited_user_message: None,
         }
     }
 
@@ -1037,6 +1042,7 @@ mod tests {
             anthropic_markers: true,
             ttl_long: true,
             prompt_cache_key: None,
+            inherited_user_message: None,
         }
     }
 
@@ -1086,6 +1092,47 @@ mod tests {
         );
         // Exactly three markers; well under the 4-cap.
         assert_eq!(count_cache_breakpoints(&body), 3);
+    }
+
+    #[test]
+    fn fork_preserves_parent_breakpoint_within_four_marker_limit() {
+        let tools = vec![ToolDefinition::new(FunctionSchema {
+            name: "probe".into(),
+            description: "tool".into(),
+            parameters: json!({"type": "object"}),
+        })];
+        let mut messages = vec![system("sys"), user("parent task")];
+        let parent = build_body(
+            &messages,
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache_on_long(),
+        );
+        messages.push(user("child task"));
+        let cache = CacheConfig {
+            inherited_user_message: Some(1),
+            ..cache_on_long()
+        };
+        let child = build_body(&messages, &tools, "m", ReasoningEffort::Off, &cfg(), &cache);
+        assert_eq!(parent["messages"][0], child["messages"][0]);
+        assert_eq!(parent["system"], child["system"]);
+        assert_eq!(parent["tools"], child["tools"]);
+        assert_eq!(count_cache_breakpoints(&child), 4);
+        assert_eq!(
+            child["messages"][1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        let same = build_body(
+            &messages[..2],
+            &tools,
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &cache,
+        );
+        assert_eq!(count_cache_breakpoints(&same), 3);
     }
 
     #[test]

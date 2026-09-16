@@ -333,6 +333,9 @@ impl CanonicalHistoryDelta {
 ///   ToolStarted → ToolOutput* → ToolFinished
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineEvent {
+    /// Output owned by a child run, never applied to the parent conversation.
+    Subagent { id: u64, event: Box<EngineEvent> },
+
     /// Engine has initialized and is ready to accept commands.
     Ready,
 
