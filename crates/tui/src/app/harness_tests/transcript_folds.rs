@@ -19,6 +19,46 @@ fn focus_transcript_in_normal_mode(app: &mut TestApp) {
     app.render_silent();
 }
 
+#[test]
+fn wait_agents_preview_shows_readable_final_reports_and_copies_them() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "wait",
+        "wait_agents",
+        std::collections::HashMap::from([("ids".into(), serde_json::json!([1, 2]))]),
+    );
+    let reports = "agent #1 - completed\nParser review complete.\nAll tests passed.\n\nagent #2 - failed\nProvider unavailable.";
+    app.tool_finished(
+        invocation_id, "wait",
+        protocol::ToolOutcome::new(serde_json::json!([
+            { "id":1, "status":"completed", "result":"Parser review complete.\nAll tests passed." },
+            { "id":2, "status":"failed", "error":"Provider unavailable." },
+        ]).to_string(), false, None).with_display_content(vec![
+            protocol::ToolDisplayContent::new("results", reports.into()),
+        ]),
+        Some(1250),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        for line in reports.lines().filter(|line| !line.is_empty()) {
+            assert!(text.contains(line), "{text}");
+        }
+        assert!(text.contains("wait_agents #1, #2"), "{text}");
+        assert!(!text.contains("\"result\""), "{text}");
+    }
+    focus_transcript_in_normal_mode(&mut app);
+    app.type_text("ggVGy");
+    let copied = app.core_probe().clipboard.kill_ring.current();
+    for line in reports.lines().filter(|line| !line.is_empty()) {
+        assert!(copied.contains(line), "{copied}");
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     let mut app = TestApp::builder().with_vim(true).build();

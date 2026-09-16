@@ -281,6 +281,147 @@ fn subagent_viewer_displays_selected_native_transcript() {
 }
 
 #[test]
+fn subagent_viewer_formats_token_totals_on_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, "require('smelt.plugins.subagents')").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    assert!(app.run_lua(
+        r#"
+        _G.viewer_usage = {}
+        smelt.agent.runs = function()
+            return { { id = 1, group = 1, session_id = 'unavailable', task = 'Review',
+                status = 'running', cost_usd = 0.0123, usage = _G.viewer_usage } }
+        end
+        smelt.cmd.run('subagents')
+    "#
+    ));
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        app.render_silent();
+        for (tokens, formatted) in [(0, "0"), (999, "999"), (1200, "1.2k"), (3_400_000, "3.4m")] {
+            assert!(app.run_lua(&format!("_G.viewer_usage.prompt_tokens = {tokens}")));
+            app.feed_one(SourceEvent::Tick(300));
+            app.app.tick_timers();
+            app.settle_lua();
+            let text = app.render_to_frame().text();
+            assert!(text.contains(&format!("{formatted} tokens")), "{text}");
+            assert!(text.contains("$0.0123"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn subagent_sidebar_vim_motions_skip_headers_and_preserve_pane_focus() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, "require('smelt.plugins.subagents')").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.set_terminal_size(120, 32);
+    assert!(app.run_lua(
+        r#"
+        _G.viewer_runs = {}
+        for id = 1, 41 do
+            _G.viewer_runs[id] = { id = id, group = math.floor(id / 2) + 1,
+                session_id = 'unavailable', task = 'Review', status = 'queued', cost_usd = 0 }
+        end
+        smelt.agent.runs = function() return _G.viewer_runs end
+        smelt.cmd.run('subagents')
+    "#
+    ));
+    app.settle_lua();
+    app.render_silent();
+    let sidebar = app.ui_probe().named_win("smelt.subagents.runs").unwrap();
+    let preview = app
+        .ui_probe()
+        .named_win("smelt.subagents.transcript")
+        .unwrap();
+    let selected_row = |app: &TestApp| app.ui_probe().win(sidebar).unwrap().cursor_abs_row();
+    for (keys, id) in [
+        ("j", 2),
+        ("k", 1),
+        ("2j", 3),
+        ("j", 4),
+        ("2k", 2),
+        ("k", 1),
+        ("99k", 1),
+        ("99j", 41),
+        ("gg", 1),
+        ("G", 41),
+        ("gg10j", 11),
+    ] {
+        app.type_text(keys);
+        app.settle_lua();
+        let text = app.render_to_frame().text();
+        assert!(
+            text.contains(&format!("agent {id} - queued")),
+            "{keys}: {text}"
+        );
+        assert_eq!(selected_row(&app), id - 1 + id / 2, "{keys}");
+        assert_eq!(app.ui_probe().focus(), Some(sidebar));
+    }
+    app.type_text("2");
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    app.type_text("k");
+    assert_eq!(selected_row(&app), 12, "counts survive a live refresh");
+    app.press(KeyCode::Tab);
+    app.dispatch_ui_window_events(false);
+    app.type_text("j");
+    assert_eq!(app.ui_probe().focus(), Some(preview));
+    assert_eq!(
+        selected_row(&app),
+        12,
+        "preview motions do not move the sidebar"
+    );
+    app.press(KeyCode::Tab);
+    app.dispatch_ui_window_events(false);
+    app.press(KeyCode::Home);
+    assert_eq!(selected_row(&app), 0);
+    app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    let half_page = selected_row(&app);
+    assert!(half_page > 0);
+    app.press_mod(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_eq!(selected_row(&app), 0);
+    for (down, up, modifiers) in [
+        (
+            KeyCode::Char('f'),
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ),
+        (KeyCode::PageDown, KeyCode::PageUp, KeyModifiers::empty()),
+    ] {
+        app.press_mod(down, modifiers);
+        assert!(selected_row(&app) > half_page);
+        app.press_mod(up, modifiers);
+        assert_eq!(selected_row(&app), 0);
+    }
+    app.set_terminal_size(45, 18);
+    app.render_silent();
+    app.press(KeyCode::End);
+    assert_eq!(selected_row(&app), 60);
+    app.type_text("gg2j");
+    assert_eq!(selected_row(&app), 3);
+    app.press_mod(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(selected_row(&app), 2);
+    app.press_mod(KeyCode::Char('j'), KeyModifiers::CONTROL);
+    assert_eq!(selected_row(&app), 3);
+    app.press(KeyCode::Up);
+    assert_eq!(selected_row(&app), 2);
+    app.press(KeyCode::Down);
+    assert_eq!(selected_row(&app), 3);
+    assert!(app.run_lua("_G.viewer_runs = {}"));
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    app.type_text("99jggGk");
+    let text = app.render_to_frame().text();
+    assert!(text.contains("no subagents"), "{text}");
+    assert!(app.run_lua("assert(smelt.prompt.text() == '')"));
+}
+
+#[test]
 fn subagent_viewer_shows_preview_errors() {
     let root = tempfile::tempdir().unwrap();
     let init = root.path().join("init.lua");
@@ -313,6 +454,230 @@ fn subagent_viewer_shows_preview_errors() {
     app.press(KeyCode::Esc);
     app.settle_lua();
     assert!(app.state().active_modal.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subagents_inherit_session_approvals_at_spawn_including_queued_children() {
+    use super::compaction::read_json_request;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::io::AsyncWriteExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, r#"
+        require('smelt.plugins.subagents').setup({ max_concurrent = 1 })
+        for _, name in ipairs({ 'inherited_probe', 'late_probe', 'approval_probe' }) do
+            local decision = name == 'approval_probe' and 'allow' or 'ask'
+            smelt.tools.register({
+                name = name, description = 'Test child session approval isolation.', effect = 'read',
+                permission_defaults = { normal = decision, plan = decision, apply = decision },
+                parameters = { type = 'object', properties = {} },
+                execute = function()
+                    if name == 'approval_probe' then return smelt.json.encode(smelt.permissions.list()) end
+                    return 'executed ' .. name
+                end,
+            })
+        end
+    "#).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let engine = engine::start(
+        engine::EngineConfig::new(root.path().into(), Arc::new(engine::clock::RealClock)),
+        Box::new(engine::tools::EmptyDispatcher),
+    );
+    let mut app = TestApp::builder()
+        .with_cwd(root.path())
+        .with_init_lua(&init)
+        .with_engine(engine)
+        .build();
+    app.use_model(smelt_core::config::ResolvedModel {
+        key: "mock/approvals".into(),
+        provider_name: "mock".into(),
+        model_name: "approvals".into(),
+        display_name: None,
+        api_base: format!("http://{address}"),
+        api_key_env: String::new(),
+        provider_type: "anthropic-compatible".into(),
+        config: Default::default(),
+        catalog: Default::default(),
+    });
+    assert!(app.run_lua(&format!(r#"
+        smelt.permissions.sync({{
+            session = {{ {{ tool = 'inherited_probe', pattern = '*' }}, {{ tool = 'directory', pattern = {path:?} }} }},
+            path_grants = {{
+                {{ kind = 'path', tool = 'read_file', access = 'read', path_prefix = {path:?} }},
+                {{ kind = 'path', mode = 'plan', tool = 'edit_file', access = 'write', path_prefix = {path:?} }},
+            }},
+        }})
+    "#, path = root.path().to_str().unwrap())));
+    app.start_submitted_turn("Delegate independent tasks");
+    let server = tokio::spawn(async move {
+        let mut results = Vec::new();
+        while results.len() < 2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut stream).await;
+            let parts: Vec<_> = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|message| message["content"].as_array())
+                .flatten()
+                .collect();
+            let child = parts.iter().any(|part| {
+                part["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("You are a subagent."))
+            });
+            let has_results = parts.iter().any(|part| part["type"] == "tool_result");
+            let calls = if has_results {
+                if child {
+                    results.push(request);
+                }
+                Vec::new()
+            } else if child {
+                vec![
+                    ("inherited_probe", json!({})),
+                    ("late_probe", json!({})),
+                    ("approval_probe", json!({})),
+                ]
+            } else {
+                vec![("swarm", json!({"prompt":"Test inherited approvals", "n":2}))]
+            };
+            let tools = !calls.is_empty();
+            let mut events = vec![json!({"type":"message_start","message":{
+                "id":"test","type":"message","role":"assistant","content":[],"model":"approvals",
+                "usage":{"input_tokens":10,"output_tokens":1}
+            }})];
+            if tools {
+                for (index, (name, args)) in calls.into_iter().enumerate() {
+                    events.push(
+                        json!({"type":"content_block_start","index":index,"content_block":{
+                            "type":"tool_use","id":name,"name":name,"input":{}
+                        }}),
+                    );
+                    events.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":args.to_string()}}));
+                    events.push(json!({"type":"content_block_stop","index":index}));
+                }
+            } else {
+                events.push(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}));
+                events.push(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}));
+                events.push(json!({"type":"content_block_stop","index":0}));
+            }
+            events.push(json!({"type":"message_delta","delta":{"stop_reason":if tools {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":10}}));
+            events.push(json!({"type":"message_stop"}));
+            let body: String = events
+                .into_iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect();
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        }
+        results
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while app.app.core.agents.children.len() < 2 {
+            let output = app
+                .app
+                .core
+                .engine
+                .recv_output()
+                .await
+                .expect("engine output");
+            app.app
+                .dispatch_selected_engine_output_in_render_loop_to(output, &mut std::io::sink());
+            app.settle_lua();
+        }
+    })
+    .await
+    .expect("parent model spawns the swarm");
+    app.run_lua_result(r#"
+        local runs = smelt.agent.runs()
+        assert(runs[1].status == 'running' and runs[2].status == 'queued')
+        smelt.permissions.sync({ session = { { tool = 'late_probe', pattern = '*' } }, path_grants = {} })
+    "#).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while app
+            .app
+            .core
+            .agents
+            .children
+            .values()
+            .any(|child| child.info.status != "completed")
+        {
+            let output = app
+                .app
+                .core
+                .engine
+                .recv_output()
+                .await
+                .expect("engine output");
+            app.app
+                .dispatch_selected_engine_output_in_render_loop_to(output, &mut std::io::sink());
+            app.settle_lua();
+        }
+    })
+    .await
+    .expect("both running and queued children complete");
+    let requests = server.await.unwrap();
+    app.app.core.engine.send(protocol::UiCommand::Cancel);
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let results: Vec<_> = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|part| part["type"] == "tool_result")
+            .collect();
+        let result = |name: &str| {
+            *results
+                .iter()
+                .find(|result| result["tool_use_id"] == name)
+                .unwrap()
+        };
+        let inherited = result("inherited_probe");
+        assert_ne!(
+            inherited["is_error"], true,
+            "spawn-time approvals survive parent revocation: {inherited}"
+        );
+        assert!(
+            inherited["content"]
+                .to_string()
+                .contains("executed inherited_probe"),
+            "spawn-time approvals survive parent revocation: {inherited}"
+        );
+        let late = result("late_probe");
+        assert!(
+            late["content"]
+                .to_string()
+                .contains("subagent requires explicit approval"),
+            "later parent grants must not authorize existing children: {late}"
+        );
+        let probe = result("approval_probe");
+        let approvals: serde_json::Value =
+            serde_json::from_str(probe["content"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            approvals["session"].as_array().unwrap().len(),
+            2,
+            "{approvals}"
+        );
+        assert!(approvals["session"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["tool"] == "directory"));
+        let paths = approvals["path_grants"].as_array().unwrap();
+        assert_eq!(paths.len(), 2, "{approvals}");
+        assert!(paths
+            .iter()
+            .any(|grant| grant["tool"] == "read_file" && grant["access"] == "read"));
+        assert!(paths
+            .iter()
+            .any(|grant| grant["tool"] == "edit_file" && grant["mode"] == "plan"));
+    }
 }
 
 #[test]

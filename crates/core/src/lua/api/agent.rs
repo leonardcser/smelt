@@ -100,15 +100,8 @@ pub(super) fn register(
     let wait_shared = Arc::clone(shared);
     m.private_live_only_fn(
         "__start_wait",
-        &["task_id", "parent_id", "ids", "timeout_ms"],
-        move |_,
-              (task_id, parent_id, ids, timeout_ms): (u64, String, Vec<u64>, Option<u64>)|
-              -> LuaResult<()> {
-            if timeout_ms.is_some_and(|ms| ms > 600000) {
-                return Err(mlua::Error::external(
-                    "timeout_ms must be between 0 and 600000",
-                ));
-            }
+        &["task_id", "parent_id", "ids"],
+        move |_, (task_id, parent_id, ids): (u64, String, Vec<u64>)| -> LuaResult<()> {
             let mut completions =
                 crate::host::with_core(|core| core.agents.completions(&parent_id, &ids))
                     .map_err(mlua::Error::external)?;
@@ -126,32 +119,17 @@ pub(super) fn register(
                     }
                     Ok::<_, &str>(runs)
                 };
-                let deadline = async {
-                    match timeout_ms {
-                        Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
-                        None => std::future::pending().await,
-                    }
-                };
                 let payload = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => serde_json::json!({ "__cancelled": true }),
                     result = completed => match result {
-                        Ok(runs) => serde_json::json!({ "done": true, "runs": runs }),
+                        Ok(runs) => serde_json::json!({ "runs": runs }),
                         Err(error) => serde_json::json!({ "error": error }),
                     },
-                    _ = deadline => serde_json::json!({ "done": false }),
                 };
                 sink.resolve_json(task_id, payload);
             });
             Ok(())
-        },
-    )?;
-    m.private_live_only_fn(
-        "__notify_when_done",
-        &["parent_id", "ids"],
-        |_, (parent_id, ids): (String, Vec<u64>)| -> LuaResult<()> {
-            crate::host::with_core(|core| core.notify_when_agents_finish(parent_id, ids))
-                .map_err(mlua::Error::external)
         },
     )?;
     m.fn_(

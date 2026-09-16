@@ -66,7 +66,7 @@ The plugin exposes four model tools in both interactive and headless sessions:
 
 - `spawn_agent`: start one independent agent for a task.
 - `swarm`: start 1-16 agents with the same task and identical parent-context snapshot.
-- `wait_agents`: collect statuses and results, waiting indefinitely by default until every selected agent completes, fails, or is cancelled.
+- `wait_agents`: wait once until every selected agent completes, fails, or is cancelled, then collect only final reports and terminal statuses.
 - `stop_agent`: cancel one queued or running agent, leaving siblings and the parent alone.
 
 Up to 16 agents run concurrently by default, with at most 64 queued or running.
@@ -89,16 +89,24 @@ Cache routing uses the parent's identity, and Anthropic requests preserve the
 parent's cache breakpoint. Actual cache reuse depends on the provider, model,
 cache thresholds, and expiration; this does not share physical context memory.
 Each child has its own usage and cost, history, cancellation, and cwd state.
+Session approvals are copied when a batch is spawned, with a separate store for
+each child, including queued children. Later session grants or revocations in the
+parent or a sibling do not change that child's approvals. Persisted workspace
+and repository approvals still refresh from their shared on-disk stores.
 
-`wait_agents({ ids = { 1, 2 } })` returns an array of completed run records.
-An optional `timeout_ms` from 0 to 600000 sets a deadline; 0 checks immediately.
-If any selected runs are still queued or running, the result instead contains
-`status = "background"`, `runs`, and `pending_ids`. The parent receives a
-completion notification once all selected runs finish, then can call `wait_agents`
-with the same IDs to collect their results. There is no need to poll. Headless
-sessions also wait for this notification and resume the parent automatically.
-Timing out or cancelling a wait never stops the children; use `stop_agent` to do
-that explicitly.
+`wait_agents({ ids = { 1, 2 } })` stays pending until every selected child reaches
+a terminal state, including children waiting for an execution slot. There is no
+timeout or polling mode. The parent can do independent work before calling it;
+the UI and children remain responsive during the wait. Cancelling the wait does
+not stop the children; use `stop_agent` to do that explicitly.
+
+The result is an array of `{ id, status, result }` records for completed children.
+`result` contains only the child's final assistant message. Failed or cancelled
+children return `{ id, status, error }` instead, without presenting partial
+commentary as a final report. Transcripts, task descriptions, usage, costs, and
+session metadata stay in `/subagents`, not in the wait result. The tool-call
+preview shows readable final reports with agent IDs and statuses, using the same
+capped, selectable output presentation as `read_process_output`.
 
 In the terminal, the main status line shows the running child count next to
 background processes, for example `2 procs · 10 agents`. Queued and finished
@@ -109,10 +117,15 @@ side by side without pausing the parent. A status pane above them shows running,
 queued, and finished counts, combined cost, and total reported token usage across
 all children. Token totals include input, output, cache reads, and cache writes;
 reasoning is already included in output and is not counted twice. Usage updates
-as provider requests report it. Zero costs are hidden. Swarm members are grouped
+as provider requests report it. Totals use the prompt bar's compact formatting,
+such as `1.2k` or `3.4m` tokens. Zero costs are hidden. Swarm members are grouped
 under their task; queued and running rows use the same muted color as pending
 tool groups, while completed rows use normal text. Failed rows use the error
 color. The panes share a single resizable divider, with no footer below them.
+In the run list, use `j`/`k` or arrow keys to move between agents, skipping swarm
+headers. Numeric prefixes repeat motions, such as `3j`. Use `gg`/Home and `G`/End
+for the first and last agent, Ctrl-U/Ctrl-D for half pages, and Ctrl-B/Ctrl-F or
+Page Up/Page Down for full pages.
 Use Tab to switch panes, Enter to expand the transcript, and Alt-S to stop only
 the selected agent. Escape returns from an expanded transcript or closes the
 viewer. Narrow terminals show one pane at a time. Transcript updates follow the

@@ -152,7 +152,7 @@ fn compaction_preserves_full_model_message_prefix() {
     }
 }
 
-async fn read_json_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+pub(super) async fn read_json_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
     use tokio::io::AsyncReadExt;
 
     let mut request = Vec::new();

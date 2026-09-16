@@ -336,9 +336,6 @@ pub enum EngineEvent {
     /// Output owned by a child run, never applied to the parent conversation.
     Subagent { id: u64, event: Box<EngineEvent> },
 
-    /// A timed wait detached; all selected children now have terminal results.
-    SubagentsFinished { parent_id: String, ids: Vec<u64> },
-
     /// Engine has initialized and is ready to accept commands.
     Ready,
 

@@ -10,13 +10,16 @@ Use spawn_agent to delegate an independent task, or swarm to ask multiple agents
 to independently solve the same task. Children inherit your context, tools,
 workspace and permission limits. They do not share subsequent messages. Concurrent
 writes affect the same checkout: partition file ownership or delegate read-only
-analysis. Use wait_agents to collect results before relying on them. Review their
-work; a child report is not verification. Children cannot create further agents.
+analysis. Continue independent work after spawning, then call wait_agents once
+when you need the results. It stays pending until all selected agents finish;
+there is no polling or timeout. Review their final reports before relying on
+them; a child report is not verification. Children cannot create further agents.
 ]])
 
 local role = [[You are a subagent. The preceding conversation is inherited context,
-not a new request to repeat the parent's work. Complete only the task below and
-return your findings to the parent. You cannot spawn agents or swarms. Do not
+not a new request to repeat the parent's work. Complete only the task below. Your
+final message is the report delivered to the parent: include your findings,
+changes, verification and any blockers there. You cannot spawn agents or swarms. Do not
 change global configuration, switch sessions or workspaces, or ask the user
 questions. If an operation needs approval, report that requirement to the parent.
 Other agents may work in the same checkout; do not overwrite their changes.
@@ -60,39 +63,54 @@ smelt.tools.register({
   execute = function(args) return spawn(args, args.n) end,
 })
 
+local transcript_defaults = require("smelt.transcript.defaults")
+smelt.transcript.register_tool("wait_agents", {
+  cache_key = "smelt.tool-presentation.wait_agents:v1",
+  body = function(block, ctx, opts)
+    local output = block.output
+    if not output then return nil end
+    local fields = output.content_fields
+    return transcript_defaults.render_tool_output_tail((fields and fields.results) or output, ctx, opts)
+  end,
+})
+
 smelt.tools.register({
   name = "wait_agents",
-  description = "Wait until every selected agent finishes, fails, or is cancelled. No timeout by default. Optional timeout_ms returns unfinished runs in the background and arranges a completion notification; polling is unnecessary. Timing out or cancelling the wait does not stop agents; use stop_agent to cancel them.",
+  description = "Wait once until every selected agent finishes, fails, or is cancelled. Stays pending with no timeout; do not poll. Returns only each agent's id, terminal status and final report, or an error/reason for failed or cancelled agents. No progress messages or transcripts. Continue independent work before calling this tool. Cancelling the wait does not stop agents; use stop_agent to cancel them.",
   permission_defaults = permissions,
   effect = "read",
+  elapsed_visible = true,
   watchdog_timeout_ms = 0,
   watchdog_timeout_arg = "",
   parameters = {
     type = "object",
     properties = {
       ids = { type = "array", items = { type = "integer" }, minItems = 1, maxItems = 64 },
-      timeout_ms = { type = "integer", minimum = 0, maximum = 600000,
-        description = "Optional wait deadline in milliseconds. Omit to wait indefinitely; 0 returns immediately. On timeout agents keep running and notify when all selected agents finish." },
     },
     required = { "ids" },
   },
+  summary = function(args)
+    local ids = {}
+    for _, id in ipairs(args.ids or {}) do ids[#ids + 1] = "#" .. tostring(id) end
+    return table.concat(ids, ", ")
+  end,
   execute = function(args, ctx)
     local task_id = smelt.task.alloc()
-    __smelt_internal.agent.__start_wait(task_id, ctx.session_id, args.ids, args.timeout_ms)
+    __smelt_internal.agent.__start_wait(task_id, ctx.session_id, args.ids)
     local result = smelt.task.wait(task_id)
     if result.error then return { content = result.error, is_error = true } end
-    if result.done then return smelt.json.encode(result.runs) end
-    local by_id, runs, pending = {}, {}, {}
-    for _, run in ipairs(smelt.agent.runs(ctx.session_id)) do by_id[run.id] = run end
-    for _, id in ipairs(args.ids) do
-      local run = by_id[id]
-      runs[#runs + 1] = run
-      if run.status == "queued" or run.status == "running" then pending[#pending + 1] = id end
+    local reports, previews = {}, {}
+    for _, run in ipairs(result.runs) do
+      local report = { id = run.id, status = run.status }
+      if run.status == "completed" then
+        report.result = run.result or ""
+      else
+        report.error = run.error or (run.status == "cancelled" and "subagent was cancelled" or "subagent failed")
+      end
+      reports[#reports + 1] = report
+      previews[#previews + 1] = "agent #" .. run.id .. " - " .. run.status .. "\n" .. (report.result or report.error)
     end
-    if #pending == 0 then return smelt.json.encode(runs) end
-    __smelt_internal.agent.__notify_when_done(ctx.session_id, args.ids)
-    return smelt.json.encode({ status = "background", runs = runs, pending_ids = pending,
-      message = "Agents are still running. You will be notified when all selected agents finish; polling is unnecessary." })
+    return { content = smelt.json.encode(reports), display_content = { results = table.concat(previews, "\n\n") } }
   end,
 })
 
@@ -114,6 +132,7 @@ function M.open()
   local rows, timer, overlay, layout_key = {}, nil, nil, nil
   local closed, detail = false, false
   local focused = "runs"
+  local sidebar_count
   local counts, totals = "no subagents", "0 tokens"
   local function window(name, surface)
     local buf = smelt.buf.new({ readonly = true })
@@ -226,7 +245,7 @@ function M.open()
       previous_group = run.group
     end
     counts = #runs == 0 and "no subagents" or string.format("%d running / %d queued / %d done", running, queued, finished)
-    totals = string.format("%d tokens", tokens) .. (cost > 0 and string.format("   $%.4f", cost) or "")
+    totals = smelt.text.format_tokens(tokens) .. " tokens" .. (cost > 0 and string.format("   $%.4f", cost) or "")
     list:set_items_preserve(rows, function(row) return row.key end)
     draw()
     render_preview()
@@ -239,16 +258,23 @@ function M.open()
     active = nil
   end
   local function focus(pane)
-    focused = pane
+    focused, sidebar_count = pane, nil
     if narrow() then detail = pane == "preview" end
     draw()
     if pane == "preview" then preview:focus() else sidebar:focus() end
     render_preview()
   end
   local function nav(delta)
-    local index = (list:selected_index() or 0) + delta
-    while rows[index + 1] and rows[index + 1].header do index = index + delta end
-    if rows[index + 1] then list:set_cursor(index) end
+    local index = list:selected_index()
+    if not index then return end
+    local step = delta < 0 and -1 or 1
+    for _ = 1, math.min(math.abs(delta), #rows) do
+      local next_index = index + step
+      while rows[next_index + 1] and rows[next_index + 1].header do next_index = next_index + step end
+      if not rows[next_index + 1] then break end
+      index = next_index
+    end
+    list:set_cursor(index)
     draw()
     render_preview()
   end
@@ -267,12 +293,44 @@ function M.open()
       if run then smelt.agent.stop(run.id); refresh() end
     end },
   }
-  sidebar:key("up", function() nav(-1) end)
-  sidebar:key("down", function() nav(1) end)
-  sidebar:key("ctrl-k", function() nav(-1) end)
-  sidebar:key("ctrl-j", function() nav(1) end)
-  sidebar:on("focus", function() focused = "runs" end)
-  preview:on("focus", function() focused = "preview" end)
+  local function sidebar_key(key, action)
+    sidebar:key(key, function()
+      local count = sidebar_count or 1
+      sidebar_count = nil
+      action(count)
+    end)
+  end
+  for digit = 0, 9 do
+    sidebar:key(tostring(digit), function()
+      if sidebar_count or digit > 0 then
+        sidebar_count = math.min((sidebar_count or 0) * 10 + digit, #rows)
+      end
+    end)
+  end
+  for _, binding in ipairs({
+    { "j", 1 }, { "k", -1 }, { "down", 1 }, { "up", -1 },
+    { "ctrl-j", 1 }, { "ctrl-k", -1 }, { "ctrl-n", 1 }, { "ctrl-p", -1 },
+  }) do
+    sidebar_key(binding[1], function(count) nav(binding[2] * count) end)
+  end
+  for _, key in ipairs({ "g", "home" }) do
+    sidebar_key(key, function() nav(-#rows) end)
+  end
+  for _, key in ipairs({ "G", "end" }) do
+    sidebar_key(key, function() nav(#rows) end)
+  end
+  for _, binding in ipairs({
+    { "ctrl-u", -0.5 }, { "ctrl-d", 0.5 },
+    { "ctrl-b", -1 }, { "ctrl-f", 1 }, { "pgup", -1 }, { "pgdn", 1 },
+  }) do
+    sidebar_key(binding[1], function(count)
+      local height = (sidebar:rect() or {}).height or 10
+      local delta = math.max(1, math.floor(height * math.abs(binding[2]))) * count
+      nav(binding[2] < 0 and -delta or delta)
+    end)
+  end
+  sidebar:on("focus", function() focused, sidebar_count = "runs", nil end)
+  preview:on("focus", function() focused, sidebar_count = "preview", nil end)
   sidebar:on("selection_changed", function() draw(); render_preview() end)
   sidebar:on("resized", function() draw(); render_preview() end)
   preview:on("resized", function() draw(); render_preview() end)
