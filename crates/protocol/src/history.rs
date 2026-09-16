@@ -178,6 +178,9 @@ pub enum HistoryNote {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         event: Option<ProcessStatusEvent>,
+        /// Captured process output for the transcript, separate from the model notification.
+        #[serde(skip_serializing_if = "String::is_empty", default)]
+        output: String,
     },
 }
 
@@ -407,20 +410,22 @@ impl HistoryNote {
         Self::ProcessStatus {
             text: text.into(),
             event: None,
+            output: String::new(),
         }
     }
 
     pub fn process_status_event(event: ProcessStatusEvent) -> Self {
+        Self::process_status_with_output(event, String::new())
+    }
+
+    pub fn process_status_with_output(
+        event: ProcessStatusEvent,
+        output: impl Into<String>,
+    ) -> Self {
         Self::ProcessStatus {
             text: event.display_text(),
             event: Some(event),
-        }
-    }
-
-    pub fn process_status_with_event(text: impl Into<String>, event: ProcessStatusEvent) -> Self {
-        Self::ProcessStatus {
-            text: text.into(),
-            event: Some(event),
+            output: output.into(),
         }
     }
 
@@ -465,6 +470,13 @@ impl HistoryNote {
         match self {
             HistoryNote::ProcessStatus { event, .. } => event.as_ref(),
             HistoryNote::ModeChange { .. } | HistoryNote::Context { .. } => None,
+        }
+    }
+
+    pub fn process_output(&self) -> Option<&str> {
+        match self {
+            HistoryNote::ProcessStatus { output, .. } if !output.is_empty() => Some(output),
+            _ => None,
         }
     }
 
@@ -1568,6 +1580,37 @@ mod tests {
         assert_eq!(json["event"]["exit_code"], 1);
         let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
         assert_eq!(back, item);
+    }
+
+    #[test]
+    fn process_status_output_round_trips_without_changing_model_notification() {
+        let note = HistoryNote::process_status_with_output(
+            ProcessStatusEvent::background_process_completed(
+                "proc_1",
+                Some(0),
+                JobTermination::Exited,
+            ),
+            "stdout\nstderr",
+        );
+        let json = serde_json::to_value(&note).unwrap();
+        assert_eq!(json["output"], "stdout\nstderr");
+        assert_eq!(serde_json::from_value::<HistoryNote>(json).unwrap(), note);
+        assert_eq!(note.process_output(), Some("stdout\nstderr"));
+        assert_eq!(
+            note.to_model_text(),
+            crate::note::process_status_note(note.text())
+        );
+
+        let legacy: HistoryNote = serde_json::from_value(serde_json::json!({
+            "note_kind": "process_status",
+            "text": "finished"
+        }))
+        .unwrap();
+        assert_eq!(legacy.process_output(), None);
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("output")
+            .is_none());
     }
 
     #[test]

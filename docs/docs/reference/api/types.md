@@ -1247,6 +1247,11 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `event_data` | `table` |  | Full typed process status event payload. |
 | `process_id` | `string` |  | Background process id for process status events. |
 | `exit_code` | `integer` |  | Background process exit code when known. |
+| `output_id` | `integer` |  | Stable shared-content id for exec or process-status output. |
+| `output_revision` | `integer` |  | Shared output revision. |
+| `output_bytes` | `integer` |  | Shared output size in bytes. |
+| `output_lines` | `integer` |  | Shared output logical line count. |
+| `output_preview` | `string` |  | Bounded output preview, not complete content. |
 | `command` | `string` |  | Exec command. |
 | `command_spans` | `table` |  | Exec command as one styled span line, including the `!` accent. |
 | `group_kind` | `string` |  | Registered semantic group name. |

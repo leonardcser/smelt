@@ -385,15 +385,13 @@ impl TestApp {
         self.app.update_compaction_preview(summary.to_string());
     }
 
-    /// Push a typed process-status block into the transcript. Mirrors the
-    /// display block produced when a background process completion is
-    /// committed to history, without needing to spawn a real process.
-    pub fn push_process_status(&mut self, text: &str, event: Option<protocol::ProcessStatusEvent>) {
-        self.app
-            .push_block(smelt_core::transcript_model::Block::ProcessStatus {
-                text: text.to_string(),
-                event,
-            });
+    /// Push a process-status block without spawning a subprocess.
+    pub fn push_process_status(&mut self, event: protocol::ProcessStatusEvent, output: &str) {
+        let note = protocol::HistoryNote::process_status_with_output(event, output);
+        let block = self
+            .history_note_to_block(&note)
+            .expect("process-status note has a transcript block");
+        self.app.push_block(block);
     }
 
     /// Push a `Block::Mode` into the transcript without restoring a fixture.
@@ -413,11 +411,6 @@ impl TestApp {
                 content: content.to_string(),
                 lang: lang.to_string(),
             });
-    }
-
-    /// Push an untyped process-status block into the transcript.
-    pub fn push_process_status_text(&mut self, text: &str) {
-        self.push_process_status(text, None);
     }
 
     /// Open a `Block::Exec` shell-escape block in the transcript with

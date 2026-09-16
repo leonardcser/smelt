@@ -1285,13 +1285,18 @@ fn group_child_compile_sources(
         .filter_map(|(offset, child)| {
             let block_index = group.child_range.start.saturating_add(offset);
             let block = history.block(child.id)?;
-            let view_state = policy.node_default_view_state(
-                history,
-                &RenderNode::Block {
-                    id: child.id,
-                    block_index,
-                },
-            );
+            let view_state = if matches!(block, Block::ProcessStatus { .. }) {
+                // Opening a process group reveals its captured output, not another fold.
+                ViewState::Expanded
+            } else {
+                policy.node_default_view_state(
+                    history,
+                    &RenderNode::Block {
+                        id: child.id,
+                        block_index,
+                    },
+                )
+            };
             Some(GroupChildCompileSource {
                 node: block_render_node(history, child.id, block_index)?,
                 view_state,
@@ -2116,6 +2121,7 @@ mod tests {
             Block::ProcessStatus {
                 text: "running a long process status that wraps on narrow terminals".into(),
                 event: None,
+                output: None,
             },
             Block::Thinking {
                 title: None,

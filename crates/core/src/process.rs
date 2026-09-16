@@ -938,6 +938,8 @@ pub struct JobCompletion {
     pub id: String,
     pub exit_code: Option<i32>,
     pub termination: JobTermination,
+    /// Bounded stdout and stderr captured before the completed job can be pruned.
+    pub output: String,
 }
 
 struct JobSupervisorInner {
@@ -1735,6 +1737,7 @@ fn completion_if_ready(id: &str, job: &mut Job) -> Option<JobCompletion> {
         id: id.to_string(),
         exit_code,
         termination,
+        output: job.output.format_text(),
     })
 }
 
@@ -2727,6 +2730,7 @@ mod tests {
             .unwrap();
         assert_eq!(completion.id, follower.id);
         assert_eq!(completion.termination, JobTermination::Exited);
+        assert_eq!(completion.output, "done");
         assert!(rx.try_recv().is_err());
         let _ = supervisor.drain_output(&follower.id).unwrap();
     }
@@ -2872,6 +2876,7 @@ mod tests {
         assert!(!snapshot.running);
         assert_eq!(snapshot.exit_code, Some(0));
         assert_eq!(snapshot.termination, Some(JobTermination::Exited));
+        assert_eq!(completion.output, snapshot.text);
         assert!(snapshot.text.contains("done"));
         assert_eq!(supervisor.running_count(), 0);
     }

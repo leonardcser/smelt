@@ -845,6 +845,11 @@
 ---@field event_data? table Full typed process status event payload.
 ---@field process_id? string Background process id for process status events.
 ---@field exit_code? integer Background process exit code when known.
+---@field output_id? integer Stable shared-content id for exec or process-status output.
+---@field output_revision? integer Shared output revision.
+---@field output_bytes? integer Shared output size in bytes.
+---@field output_lines? integer Shared output logical line count.
+---@field output_preview? string Bounded output preview, not complete content.
 ---@field command? string Exec command.
 ---@field command_spans? table Exec command as one styled span line, including the `!` accent.
 ---@field group_kind? string Registered semantic group name.

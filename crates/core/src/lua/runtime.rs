@@ -3024,6 +3024,15 @@ fn set_content_metadata(table: &mlua::Table, content: &TranscriptContentMetadata
     Ok(())
 }
 
+fn set_output_metadata(table: &mlua::Table, output: &TranscriptContentMetadata) -> LuaResult<()> {
+    table.set("output_id", output.content_id)?;
+    table.set("output_revision", output.content_revision)?;
+    table.set("output_bytes", output.content_bytes)?;
+    table.set("output_lines", output.content_lines)?;
+    table.set("output_preview", output.content_preview.as_str())?;
+    Ok(())
+}
+
 fn argument_fields_to_lua_table(
     lua: &Lua,
     fields: &[TranscriptArgumentFieldMetadata],
@@ -3090,8 +3099,15 @@ fn transcript_render_node_to_lua_table(
             table.set("icon", icon.as_str())?;
             table.set("hl_group", hl_group.as_str())?;
         }
-        TranscriptRenderFields::ProcessStatus { text, event } => {
+        TranscriptRenderFields::ProcessStatus {
+            text,
+            event,
+            output,
+        } => {
             table.set("text", text.as_str())?;
+            if let Some(output) = output {
+                set_output_metadata(&table, output)?;
+            }
             if let Some(event) = event {
                 table.set("event", event.event_type)?;
                 table.set("event_type", event.event_type)?;
@@ -3230,11 +3246,7 @@ fn transcript_render_node_to_lua_table(
                 "command_spans",
                 crate::lua::serde_to_lua(lua, command_spans)?,
             )?;
-            table.set("output_id", output.content_id)?;
-            table.set("output_revision", output.content_revision)?;
-            table.set("output_bytes", output.content_bytes)?;
-            table.set("output_lines", output.content_lines)?;
-            table.set("output_preview", output.content_preview.as_str())?;
+            set_output_metadata(&table, output)?;
         }
         TranscriptRenderFields::Summary { summary } => {
             table.set("summary", summary.as_str())?;
@@ -3411,6 +3423,7 @@ enum TranscriptRenderFields {
     ProcessStatus {
         text: String,
         event: Option<TranscriptProcessStatusMetadata>,
+        output: Option<TranscriptContentMetadata>,
     },
     Thinking {
         title: Option<String>,
@@ -3597,8 +3610,13 @@ pub fn transcript_block_render_node(
             icon: icon.clone(),
             hl_group: hl_group.clone(),
         },
-        Block::ProcessStatus { text, event } => TranscriptRenderFields::ProcessStatus {
+        Block::ProcessStatus {
+            text,
+            event,
+            output,
+        } => TranscriptRenderFields::ProcessStatus {
             text: text.clone(),
+            output: output.as_ref().map(transcript_content_metadata),
             event: event.as_ref().map(|event| TranscriptProcessStatusMetadata {
                 event_type: event.event_type(),
                 process_id: event.process_id().map(str::to_owned),
@@ -4622,6 +4640,7 @@ mod tests {
         let lua = Lua::new();
         let block = Block::ProcessStatus {
             text: "background process 42 exited with code 7".into(),
+            output: Some("captured output\n".repeat(2_000).into()),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "42",
                 Some(7),
@@ -4641,6 +4660,13 @@ mod tests {
             table.get::<String>("event_type").unwrap(),
             "background_process_completed"
         );
+        let output = block
+            .content(crate::transcript_model::ContentChannel::Primary)
+            .unwrap();
+        assert_eq!(table.get::<u64>("output_id").unwrap(), output.id().get());
+        assert_eq!(table.get::<usize>("output_lines").unwrap(), 2_000);
+        assert!(!table.contains_key("output").unwrap());
+        assert!(table.get::<String>("output_preview").unwrap().len() <= LUA_CONTENT_PREVIEW_BYTES);
         assert_eq!(table.get::<String>("process_id").unwrap(), "42");
         assert_eq!(table.get::<i32>("exit_code").unwrap(), 7);
         assert_eq!(table.get::<String>("termination").unwrap(), "exited");

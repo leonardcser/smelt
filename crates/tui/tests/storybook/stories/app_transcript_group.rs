@@ -157,16 +157,20 @@ app_story!(web_tool_group_states, |ctx| {
 
 app_story!(successful_background_process_group, |ctx| {
     ctx.set_viewport(76, 14);
-    ctx.push_background_process_completed("4210", Some(0));
-    ctx.push_background_process_completed("4211", Some(0));
+    ctx.push_background_process_completed("4210", Some(0), "tests passed");
+    ctx.push_background_process_completed("4211", Some(0), "build succeeded");
     ctx.assert_snapshot_named("collapsed");
 });
 
 app_story!(background_process_group_states, |ctx| {
     ctx.set_viewport(76, 14);
-    ctx.push_background_process_completed("4210", Some(0));
-    ctx.push_background_process_completed("4211", Some(1));
-    ctx.push_background_process_completed("4212", None);
+    ctx.push_background_process_completed("4210", Some(0), "tests passed");
+    ctx.push_background_process_completed(
+        "4211",
+        Some(1),
+        "error: compilation failed\nsee build.log",
+    );
+    ctx.push_background_process_completed("4212", None, "");
     ctx.assert_snapshot_named("collapsed");
 
     ctx.run_lua("smelt.transcript.fold_all('open')");

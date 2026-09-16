@@ -290,6 +290,7 @@ fn complete_background_job(app: &mut TestApp) {
             id: "quota-test-job".into(),
             exit_code: Some(0),
             termination: protocol::JobTermination::Exited,
+            output: String::new(),
         });
 }
 

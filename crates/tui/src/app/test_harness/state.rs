@@ -916,6 +916,7 @@ impl TestApp {
                 id,
                 exit_code,
                 termination,
+                output: String::new(),
             });
         self.wait_for_writer_startup();
     }

@@ -277,6 +277,8 @@ pub enum Block {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         event: Option<protocol::ProcessStatusEvent>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        output: Option<TranscriptContent>,
     },
     Thinking {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,7 +427,10 @@ impl Block {
         match self {
             Block::User { text, .. } => Some(text.clone()),
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
-            Block::ProcessStatus { text, .. } => Some(text.clone()),
+            Block::ProcessStatus { text, output, .. } => Some(match output {
+                Some(output) => format!("{text}\n{}", output.snapshot()),
+                None => text.clone(),
+            }),
             Block::Text { content } => Some(content.snapshot()),
             Block::Thinking {
                 title,
@@ -449,10 +454,13 @@ impl Block {
     pub fn raw_text_len(&self) -> Option<usize> {
         match self {
             Block::User { text, .. }
-            | Block::ProcessStatus { text, .. }
             | Block::Compacted { summary: text }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(text.len()),
+            Block::ProcessStatus { text, output, .. } => Some(
+                text.len()
+                    .saturating_add(output.as_ref().map_or(0, |output| 1 + output.len())),
+            ),
             Block::Mode { text, icon, .. } => Some(icon.len().saturating_add(text.len())),
             Block::Text { content } => Some(content.len()),
             Block::Thinking {
@@ -480,6 +488,7 @@ impl Block {
             (Self::Text { content } | Self::Thinking { content, .. }, ContentChannel::Primary) => {
                 Some(content)
             }
+            (Self::ProcessStatus { output, .. }, ContentChannel::Primary) => output.as_ref(),
             (Self::ToolDraft(draft), ContentChannel::DraftArguments) => Some(&draft.raw_arguments),
             (Self::Exec { output, .. }, ContentChannel::ExecOutput) => Some(output),
             _ => None,
@@ -489,6 +498,7 @@ impl Block {
     pub fn registered_contents(&self) -> Vec<&TranscriptContent> {
         match self {
             Self::Text { content } | Self::Thinking { content, .. } => vec![content],
+            Self::ProcessStatus { output, .. } => output.iter().collect(),
             Self::ToolDraft(draft) => draft.contents().collect(),
             Self::ToolCall { args, .. } => args.contents().collect(),
             Self::Exec { output, .. } => vec![output],
@@ -1143,7 +1153,6 @@ pub fn transcript_indexed_text(
 fn append_block_raw_indexed_text(text: &mut BoundedIndexedText, block: &Block) {
     match block {
         Block::User { text: source, .. }
-        | Block::ProcessStatus { text: source, .. }
         | Block::Compacted { summary: source }
         | Block::CompactionPreview { summary: source }
         | Block::CodeLine {
@@ -1154,6 +1163,17 @@ fn append_block_raw_indexed_text(text: &mut BoundedIndexedText, block: &Block) {
         } => {
             text.append(icon);
             text.append(source);
+        }
+        Block::ProcessStatus {
+            text: source,
+            output,
+            ..
+        } => {
+            text.append(source);
+            if let Some(output) = output {
+                text.append("\n");
+                append_raw_indexed_content(text, output);
+            }
         }
         Block::Text { content } => append_raw_indexed_content(text, content),
         Block::Thinking {
@@ -2037,15 +2057,22 @@ impl Block {
                 .capacity()
                 .saturating_add(icon.capacity())
                 .saturating_add(hl_group.capacity()),
-            Self::ProcessStatus { text, event } => {
-                text.capacity()
-                    .saturating_add(event.as_ref().map_or(0, |event| match event {
-                        protocol::ProcessStatusEvent::BackgroundProcessCompleted {
-                            process_id,
-                            ..
-                        } => process_id.capacity(),
-                    }))
-            }
+            Self::ProcessStatus {
+                text,
+                event,
+                output,
+            } => text
+                .capacity()
+                .saturating_add(event.as_ref().map_or(0, |event| match event {
+                    protocol::ProcessStatusEvent::BackgroundProcessCompleted {
+                        process_id, ..
+                    } => process_id.capacity(),
+                }))
+                .saturating_add(
+                    output
+                        .as_ref()
+                        .map_or(0, TranscriptContent::dynamic_retained_bytes),
+                ),
             Self::Thinking {
                 title,
                 summary_titles,
@@ -4636,15 +4663,22 @@ mod tests {
         let process_capacity = process_id.capacity();
         let process = Block::ProcessStatus {
             text: "complete".into(),
+            output: Some("output\n".repeat(2_000).into()),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 process_id,
                 Some(0),
                 protocol::JobTermination::Exited,
             )),
         };
+        let output_bytes = process
+            .content(ContentChannel::Primary)
+            .unwrap()
+            .dynamic_retained_bytes();
         assert!(
             block_retained_bytes(&process)
-                >= std::mem::size_of::<Block>().saturating_add(process_capacity)
+                >= std::mem::size_of::<Block>()
+                    .saturating_add(process_capacity)
+                    .saturating_add(output_bytes)
         );
     }
 
@@ -4772,6 +4806,23 @@ mod tests {
     }
 
     #[test]
+    fn process_status_output_is_registered_copyable_and_searchable() {
+        let block = Block::ProcessStatus {
+            text: "finished".into(),
+            event: None,
+            output: Some("stdout\nstderr".into()),
+        };
+        assert_eq!(
+            block.raw_text().as_deref(),
+            Some("finished\nstdout\nstderr")
+        );
+        let output = block.content(ContentChannel::Primary).unwrap();
+        assert_eq!(block.registered_contents(), vec![output]);
+        let indexed = transcript_indexed_text(&block, None);
+        assert!(indexed.indexed_text.contains("stdout\nstderr"));
+    }
+
+    #[test]
     fn raw_text_length_does_not_materialize_retained_content() {
         for block in [
             Block::Text {
@@ -4792,6 +4843,16 @@ mod tests {
             Block::Exec {
                 command: "printf hi".into(),
                 output: "hi".into(),
+            },
+            Block::ProcessStatus {
+                text: "finished".into(),
+                event: None,
+                output: Some("stdout\nstderr".into()),
+            },
+            Block::ProcessStatus {
+                text: "finished".into(),
+                event: None,
+                output: None,
             },
         ] {
             assert_eq!(

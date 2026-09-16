@@ -1840,11 +1840,7 @@ impl TuiApp {
             completion.exit_code,
             completion.termination,
         );
-        self.handle_process_status_event(event);
-    }
-
-    fn handle_process_status_event(&mut self, event: protocol::ProcessStatusEvent) {
-        let note = protocol::HistoryNote::process_status_event(event);
+        let note = protocol::HistoryNote::process_status_with_output(event, completion.output);
         if self.agent_is_running() || self.conversation.turn_pause().is_some() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
         } else if self.prompt_input_is_busy() || !self.prompt.queue_is_empty() {
@@ -4622,6 +4618,7 @@ mod tests {
                 id: "1234".into(),
                 exit_code: Some(0),
                 termination: protocol::JobTermination::Exited,
+                output: String::new(),
             });
 
         app.wait_for_session_lifecycle();
@@ -4642,6 +4639,7 @@ mod tests {
                 id: "proc_123".into(),
                 exit_code: None,
                 termination: protocol::JobTermination::OutOfMemory,
+                output: String::new(),
             });
 
         app.wait_for_session_lifecycle();
@@ -4661,6 +4659,7 @@ mod tests {
                 id: String::new(),
                 exit_code: None,
                 termination: protocol::JobTermination::Signaled,
+                output: String::new(),
             });
         app.render_silent();
         app.feed_one(crate::app::test_harness::SourceEvent::Resize {
@@ -4695,6 +4694,7 @@ mod tests {
                 id: "4242".into(),
                 exit_code: Some(9),
                 termination: protocol::JobTermination::Exited,
+                output: String::new(),
             });
 
         assert!(process_status_blocks(&app).is_empty());
@@ -4756,6 +4756,7 @@ mod tests {
                 id: "751225".into(),
                 exit_code: Some(1),
                 termination: protocol::JobTermination::Exited,
+                output: String::new(),
             });
         app.wait_for_session_lifecycle();
         let turn_id = app
@@ -4802,7 +4803,7 @@ mod tests {
 
         assert!(matches!(
             &app.app.conversation.session().history[1],
-            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event })
+            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event, .. })
                 if text == "background process 751225 exited with code 1"
                     && event.as_ref().and_then(protocol::ProcessStatusEvent::process_id) == Some("751225")
                     && event.as_ref().and_then(|event| event.exit_code()) == Some(1)

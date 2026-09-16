@@ -3,13 +3,13 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 background process 4210 finished successfully
+  tests passed
 
 background process 4211 exited with code 1
+  error: compilation failed
+  see build.log
 
 background process 4212 exited
-
-
-
 
   tip ctrl+enter / ctrl+q, steer the current response without waiting for…
 ────────────────────────────────────────────────────────────────────────────

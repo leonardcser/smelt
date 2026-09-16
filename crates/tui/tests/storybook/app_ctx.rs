@@ -157,18 +157,18 @@ impl AppStoryCtx {
     /// Push a typed background-process completion status block. This drives the
     /// same transcript block shape produced by the live job supervisor without
     /// spawning a subprocess in the story.
-    pub fn push_background_process_completed(&mut self, id: &str, exit_code: Option<i32>) {
+    pub fn push_background_process_completed(
+        &mut self,
+        id: &str,
+        exit_code: Option<i32>,
+        output: &str,
+    ) {
         let event = protocol::ProcessStatusEvent::background_process_completed(
             id,
             exit_code,
             protocol::JobTermination::Exited,
         );
-        let text = event.display_text();
-        self.app.push_process_status(&text, Some(event));
-    }
-
-    pub fn push_process_status_text(&mut self, text: &str) {
-        self.app.push_process_status_text(text);
+        self.app.push_process_status(event, output);
     }
 
     pub fn push_mode_block(&mut self, text: &str, icon: &str, hl_group: &str) {

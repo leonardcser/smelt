@@ -176,6 +176,9 @@ impl Default for TranscriptDefaultViewPolicy {
             .insert("compacted".to_string(), ViewState::Collapsed);
         policy
             .block_kinds
+            .insert("process_status".to_string(), ViewState::Collapsed);
+        policy
+            .block_kinds
             .insert("compaction_preview".to_string(), ViewState::Peek);
         for tool in [
             "load_skill",
@@ -1270,6 +1273,7 @@ mod tests {
         let mut transcript = smelt_core::content::transcript::Transcript::new();
         transcript.push(Block::ProcessStatus {
             text: "Background process 1 finished successfully.".into(),
+            output: None,
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "1",
                 Some(0),
@@ -1278,6 +1282,7 @@ mod tests {
         });
         transcript.push(Block::ProcessStatus {
             text: "Background process 2 finished successfully.".into(),
+            output: None,
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "2",
                 Some(0),
@@ -1287,6 +1292,7 @@ mod tests {
         transcript.push(Block::ProcessStatus {
             text: "legacy process status".into(),
             event: None,
+            output: None,
         });
         let spec = TranscriptGroupSpec {
             name: "background-processes".into(),

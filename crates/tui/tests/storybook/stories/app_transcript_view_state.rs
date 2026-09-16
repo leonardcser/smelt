@@ -58,11 +58,15 @@ app_story!(mode_block_states, |ctx| {
 
 app_story!(process_status_block_states, |ctx| {
     ctx.set_viewport(64, 10);
-    ctx.push_process_status_text("background process 4210 completed successfully");
-    ctx.assert_snapshot_named("expanded");
-
-    ctx.run_lua("smelt.transcript.fold_kind('process_status', 'close')");
+    ctx.push_background_process_completed(
+        "4210",
+        Some(0),
+        "Compiling project\n\x1b[32m12 tests passed\x1b[0m\nFinished successfully",
+    );
     ctx.assert_snapshot_named("collapsed");
+
+    ctx.run_lua("smelt.transcript.fold_kind('process_status', 'open')");
+    ctx.assert_snapshot_named("expanded");
 });
 
 app_story!(exec_block_states, |ctx| {

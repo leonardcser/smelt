@@ -5989,6 +5989,7 @@ pub(crate) mod tests {
         let mut transcript = Transcript::new();
         transcript.push(Block::ProcessStatus {
             text: "Background process 1 finished successfully.".into(),
+            output: None,
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "1",
                 Some(0),
@@ -5997,6 +5998,7 @@ pub(crate) mod tests {
         });
         transcript.push(Block::ProcessStatus {
             text: "Background process 2 exited with code 7.".into(),
+            output: None,
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "2",
                 Some(7),
@@ -6006,6 +6008,7 @@ pub(crate) mod tests {
         transcript.push(Block::ProcessStatus {
             text: "legacy process note".into(),
             event: None,
+            output: None,
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
@@ -7690,6 +7693,7 @@ pub(crate) mod tests {
             _ => Block::ProcessStatus {
                 text: format!("process status {i}: {}", randomish_text(seed, 6)),
                 event: None,
+                output: None,
             },
         }
     }
@@ -7994,7 +7998,7 @@ pub(crate) mod tests {
                     kind: protocol::ReasoningKind::Raw,
                 }),
                 4 => transcript.push(Block::Compacted { summary: text }),
-                _ => transcript.push(Block::ProcessStatus { text, event: None }),
+                _ => transcript.push(Block::ProcessStatus { text, event: None, output: None }),
             }
             i += 1;
         }

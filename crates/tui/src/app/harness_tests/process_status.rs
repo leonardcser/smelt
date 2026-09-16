@@ -166,6 +166,152 @@ fn tick_event_advances_virtual_clock() {
     assert_eq!(after - before, Duration::from_millis(500));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn completed_background_process_output_expands_in_transcript() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder()
+        .with_vim(true)
+        .build_with_test_home_guard(&guard);
+    app.set_terminal_size(90, 24);
+    let (completion_tx, mut completion_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app.core.jobs.set_completion_sender(completion_tx);
+    app.app
+        .core
+        .jobs
+        .spawn_background(
+            "printf '\\033[32mbackground stdout\\033[0m\\n'; printf 'background stderr\\n' >&2; exit 7",
+            &smelt_core::process::ShellSpec::default(),
+            &app.app.core.env.cwd(),
+            std::time::Instant::now(),
+        )
+        .await
+        .expect("spawn background process");
+    let completion = tokio::time::timeout(Duration::from_secs(5), completion_rx.recv())
+        .await
+        .expect("background process should complete")
+        .expect("completion notification");
+    app.app.core.jobs.clear();
+    app.app
+        .handle_platform_event(crate::app::platform_runtime::PlatformEvent::JobCompleted(
+            completion,
+        ));
+    app.wait_for_session_lifecycle();
+
+    let collapsed = app.render_to_frame().text();
+    assert!(collapsed.contains("exited with code 7"), "{collapsed}");
+    assert!(!collapsed.contains("background stdout"), "{collapsed}");
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.type_text("gg");
+    app.press(KeyCode::Enter);
+
+    let expanded = app.render_to_frame().text();
+    assert!(expanded.contains("background stdout"), "{expanded}");
+    assert!(expanded.contains("background stderr"), "{expanded}");
+    app.press(KeyCode::Enter);
+    assert!(!app.render_to_frame().text().contains("background stdout"));
+
+    assert!(app.finish_turn());
+    app.save_session_and_flush();
+    let session_id = app.session_snapshot().id;
+    drop(app);
+
+    let mut resumed = TestApp::builder()
+        .with_vim(true)
+        .build_without_test_home_reset(&guard);
+    resumed.set_terminal_size(90, 24);
+    assert!(resumed.load_session_by_id(&session_id));
+    assert!(!resumed
+        .render_to_frame()
+        .text()
+        .contains("background stdout"));
+    resumed.focus_transcript();
+    resumed.configure_transcript_vim(true, VimMode::Normal);
+    resumed.type_text("gg");
+    resumed.press(KeyCode::Enter);
+    let expanded = resumed.render_to_frame().text();
+    assert!(expanded.contains("background stdout"), "{expanded}");
+    assert!(expanded.contains("background stderr"), "{expanded}");
+}
+
+#[test]
+fn grouped_background_process_output_expands_with_keyboard() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(90, 24);
+    for (id, code, output) in [("proc_1", 0, "tests passed"), ("proc_2", 7, "build failed")] {
+        let event = protocol::ProcessStatusEvent::background_process_completed(
+            id,
+            Some(code),
+            protocol::JobTermination::Exited,
+        );
+        app.push_process_status(event, output);
+    }
+    let collapsed = app.render_to_frame().text();
+    assert!(
+        collapsed.contains("background processes finished: 2"),
+        "{collapsed}"
+    );
+    assert!(!collapsed.contains("tests passed"), "{collapsed}");
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.type_text("gg");
+    app.press(KeyCode::Enter);
+    let expanded = app.render_to_frame().text();
+    assert!(expanded.contains("tests passed"), "{expanded}");
+    assert!(expanded.contains("build failed"), "{expanded}");
+    app.press(KeyCode::Enter);
+    assert!(!app.render_to_frame().text().contains("tests passed"));
+}
+
+#[test]
+fn background_process_output_mouse_focus_and_enter_expand_beyond_preview_limit() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(90, 24);
+    assert!(app.run_lua("smelt.settings.transcript = { limits = { tool_output_rows = 3 } }"));
+    let event = protocol::ProcessStatusEvent::background_process_completed(
+        "proc_1",
+        Some(0),
+        protocol::JobTermination::Exited,
+    );
+    let output = (0..30)
+        .map(|n| format!("line {n:02}: café\n"))
+        .collect::<String>();
+    app.push_process_status(event, &output);
+    let collapsed = app.render_to_frame().text();
+    let row = collapsed
+        .lines()
+        .position(|line| line.contains("30 lines of output"))
+        .expect("collapsed output affordance") as u16;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row,
+            column: 3,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    assert!(
+        transcript_total_rows(&app) >= 31,
+        "expanded output must not be capped"
+    );
+
+    assert!(app.run_lua("smelt.transcript.fold_kind('process_status', 'peek')"));
+    let peek = app.render_to_frame().text();
+    assert!(peek.contains("line 29: café"), "{peek}");
+    assert!(!peek.contains("line 00: café"), "{peek}");
+    assert!(transcript_total_rows(&app) < 10);
+    app.set_terminal_size(28, 24);
+    app.render_silent();
+    app.assert_invariants();
+}
+
 #[test]
 fn job_completion_after_final_request_starts_follow_up_turn() {
     let mut app = TestApp::builder().build();
@@ -177,6 +323,7 @@ fn job_completion_after_final_request_starts_follow_up_turn() {
                 id: "4242".into(),
                 exit_code: Some(1),
                 termination: protocol::JobTermination::Exited,
+                output: "queued output".into(),
             },
         ));
     assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
@@ -191,7 +338,8 @@ fn job_completion_after_final_request_starts_follow_up_turn() {
                 command.as_ref(),
                 protocol::UiCommand::StartTurn(payload)
                     if payload.input.note_ref().is_some_and(|note|
-                        note.text() == "background process 4242 exited with code 1")
+                        note.text() == "background process 4242 exited with code 1"
+                            && note.process_output() == Some("queued output"))
             )
     )));
 }
@@ -213,6 +361,7 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
                 id: "4242".into(),
                 exit_code: Some(1),
                 termination: protocol::JobTermination::Exited,
+                output: "queued output".into(),
             },
         ));
     assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
@@ -229,7 +378,8 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
         command,
         protocol::UiCommand::StartTurn(payload)
             if payload.input.note_ref().is_some_and(|note|
-                note.text() == "background process 4242 exited with code 1")
+                note.text() == "background process 4242 exited with code 1"
+                    && note.process_output() == Some("queued output"))
     )));
 }
 
@@ -251,6 +401,7 @@ fn job_completion_consumed_mid_turn_does_not_start_follow_up_turn() {
                 id: "4242".into(),
                 exit_code: Some(0),
                 termination: protocol::JobTermination::Exited,
+                output: String::new(),
             },
         ));
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {

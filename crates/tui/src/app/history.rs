@@ -507,6 +507,7 @@ pub(crate) fn history_note_to_block(
         protocol::HistoryNoteKind::ProcessStatus => Some(Block::ProcessStatus {
             text: note.text().to_string(),
             event: note.process_status_event_ref().cloned(),
+            output: note.process_output().map(Into::into),
         }),
     }
 }
@@ -593,9 +594,11 @@ fn push_user_block(
         protocol::UserHistoryContent::ModeChange { text } => {
             crate::lua::mode_block(lua, None, &text)
         }
-        protocol::UserHistoryContent::ProcessStatus { text } => {
-            Block::ProcessStatus { text, event: None }
-        }
+        protocol::UserHistoryContent::ProcessStatus { text } => Block::ProcessStatus {
+            text,
+            event: None,
+            output: None,
+        },
         protocol::UserHistoryContent::Plain => {
             let text = content.text_content();
             let image_labels = content.image_labels();

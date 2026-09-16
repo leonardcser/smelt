@@ -743,11 +743,33 @@ end
 --- Render a process-status note.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render_process_status(block, ctx)
-  local _ = ctx
   local hl = block.hl_group or "SmeltProcess"
-  return layout.runs({ {
+  local header = layout.runs({ {
     { text = block.text or "", fg = hl, italic = true },
   } })
+  if not block.output_id then return header end
+  if ctx and ctx.view_state == "collapsed" then
+    local count = block.output_lines or 0
+    return layout.vbox({
+      header,
+      layout.gutter(layout.line({ {
+        text = tostring(count) .. (count == 1 and " line" or " lines") .. " of output (expand to view)",
+        dim = true,
+        selectable = false,
+      } }), { text = "  " }),
+    })
+  end
+
+  local output = layout.content(block.output_id, { format = "text", ansi = true })
+  if ctx and ctx.view_state == "peek" then
+    output = layout.cap(output, {
+      rows = (ctx.limits and ctx.limits.tool_output_rows) or 20,
+      keep = "tail",
+      marker = "above",
+      total_rows = block.output_lines,
+    })
+  end
+  return layout.vbox({ header, layout.gutter(output, { text = "  " }) })
 end
 
 local function render_compaction_summary(label, block, ctx)

@@ -6757,6 +6757,7 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
             _ => source.push(Block::ProcessStatus {
                 text: format!("{marker} background process finished"),
                 event: None,
+                output: None,
             }),
         };
     }
