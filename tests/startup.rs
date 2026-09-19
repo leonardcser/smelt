@@ -404,8 +404,18 @@ async fn interactive_first_message_rewind_can_resubmit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_first_message_rewind_before_dispatch_can_resubmit() {
+    interactive_first_message_recovery(FirstMessageRecovery::RewindBeforeDispatch).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_first_response_cancel_can_resubmit() {
     interactive_first_message_recovery(FirstMessageRecovery::CancelStreaming).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_completed_response_can_submit_follow_up() {
+    interactive_first_message_recovery(FirstMessageRecovery::Complete).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -413,24 +423,39 @@ async fn interactive_rewind_preserves_paused_queue_until_submission() {
     interactive_first_message_recovery(FirstMessageRecovery::RewindPausedQueue).await;
 }
 
+#[derive(Clone, Copy, Debug)]
 enum FirstMessageRecovery {
     Rewind,
+    RewindBeforeDispatch,
     CancelStreaming,
+    Complete,
     RewindPausedQueue,
 }
 
 async fn interactive_first_message_recovery(recovery: FirstMessageRecovery) {
+    for vim in [false, true] {
+        interactive_first_message_recovery_in_mode(recovery, vim).await;
+    }
+}
+
+async fn interactive_first_message_recovery_in_mode(recovery: FirstMessageRecovery, vim: bool) {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let paused_queue = matches!(recovery, FirstMessageRecovery::RewindPausedQueue);
-    let streaming = matches!(recovery, FirstMessageRecovery::CancelStreaming);
+    let before_dispatch = matches!(recovery, FirstMessageRecovery::RewindBeforeDispatch);
+    let complete = matches!(recovery, FirstMessageRecovery::Complete);
+    let streaming = matches!(recovery, FirstMessageRecovery::CancelStreaming) || complete;
     let home = tempfile::tempdir().expect("temporary home");
     let provider = MockServer::start().await;
     let stream_provider = TcpListener::bind("127.0.0.1:0").unwrap();
     stream_provider.set_nonblocking(true).unwrap();
     let mut streams = Vec::new();
-    let response = if streaming {
+    let response = if complete {
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Starting\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+    } else if streaming {
         ResponseTemplate::new(307).insert_header(
             "location",
             format!("http://{}/", stream_provider.local_addr().unwrap()),
@@ -454,6 +479,9 @@ async fn interactive_first_message_recovery(recovery: FirstMessageRecovery) {
             r#"
 smelt.settings.autoupgrade = "off"
 smelt.settings.auto_continue = "off"
+smelt.settings.auto_reload = false
+smelt.settings.show_prediction = false
+smelt.settings.vim = {vim}
 local submitted, cleared = false, false
 smelt.events.on("input_submit", function() submitted = true end)
 smelt.prompt.win():on("text_changed", function()
@@ -470,8 +498,8 @@ smelt.events.on("stream_delta", function()
   file:close()
 end)
 smelt.events.on("turn_end", function(ev)
-  if ev.cancelled then
-    local file = assert(io.open("turn-interrupted", "w"))
+  if not ev.error_kind then
+    local file = assert(io.open("turn-ended", "w"))
     file:write("ready")
     file:close()
   end
@@ -525,7 +553,12 @@ smelt.provider.register("local", {{
             streams.push(stream);
         }
         if !submitted && contains(&captured, b"local/test-model") {
-            master.write_all(b"first request\r").unwrap();
+            if before_dispatch {
+                master.write_all(b"first request\r\x1b\x1b").unwrap();
+                rewind_sent = true;
+            } else {
+                master.write_all(b"first request\r").unwrap();
+            }
             submitted = true;
         }
         let requests = provider.received_requests().await.unwrap();
@@ -542,12 +575,14 @@ smelt.provider.register("local", {{
             resubmitted || bodies.len() <= 1,
             "unexpected request before resubmission (rewind_sent={rewind_sent}, output_started={}, interrupted={}, requests={}): {}",
             home.path().join("output-started").exists(),
-            home.path().join("turn-interrupted").exists(),
+            home.path().join("turn-ended").exists(),
             bodies.len(),
             String::from_utf8_lossy(&captured[captured.len().saturating_sub(5000)..])
         );
         if bodies.len() == 1 && !rewind_sent {
-            if !paused_queue {
+            if complete {
+                rewind_sent = home.path().join("turn-ended").exists();
+            } else if !paused_queue {
                 if !streaming || home.path().join("output-started").exists() {
                     master.write_all(b"\x1b\x1b").unwrap();
                     rewind_sent = true;
@@ -565,7 +600,7 @@ smelt.provider.register("local", {{
             && home
                 .path()
                 .join(if streaming {
-                    "turn-interrupted"
+                    "turn-ended"
                 } else {
                     "prompt-restored"
                 })
@@ -577,27 +612,35 @@ smelt.provider.register("local", {{
                 if streaming {
                     master.write_all(b"first request").unwrap();
                 }
-                master.write_all(b"\r").unwrap();
+                master.write_all(b" edited\r").unwrap();
                 resubmitted = true;
             }
         }
-        if bodies.len() == 2 {
-            assert!(!bodies[1]["messages"]
-                .to_string()
-                .contains("queued follow-up"));
-            assert_eq!(
-                bodies[1]["messages"]
+        if resubmitted
+            && bodies.last().is_some_and(|body| {
+                body["messages"]
                     .to_string()
-                    .matches("first request")
-                    .count(),
+                    .contains("first request edited")
+            })
+        {
+            assert!(bodies.len() <= 2);
+            if !before_dispatch {
+                assert_eq!(bodies.len(), 2);
+            }
+            let messages = &bodies.last().unwrap()["messages"];
+            assert!(!messages.to_string().contains("queued follow-up"));
+            assert_eq!(
+                messages.to_string().matches("first request").count(),
                 if streaming { 2 } else { 1 }
             );
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "first message could not be resubmitted after rewind (requests: {}): {}",
+            "message recovery failed ({recovery:?}, vim={vim}, requests: {}, rewind_sent={rewind_sent}, resubmitted={resubmitted}, output_started={}, turn_ended={}): {}",
             bodies.len(),
+            home.path().join("output-started").exists(),
+            home.path().join("turn-ended").exists(),
             String::from_utf8_lossy(&captured[captured.len().saturating_sub(5000)..])
         );
         tokio::time::sleep(Duration::from_millis(10)).await;

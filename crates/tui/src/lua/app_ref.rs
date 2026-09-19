@@ -687,14 +687,7 @@ impl AgentLuaHost<'_> {
             let target = smelt_core::lua::current_command_queue_target()
                 .map(crate::app::QueueStage::from_command_target)
                 .unwrap_or(crate::app::QueueStage::Turn);
-            match target {
-                crate::app::QueueStage::Turn => {
-                    self.app.prompt.try_queue_turn(queued);
-                }
-                crate::app::QueueStage::Request => {
-                    self.app.queue_input_for_request(queued);
-                }
-            }
+            self.app.queue_explicit_submission(queued, target);
             return;
         }
         let turn = self.app.begin_custom_command_turn(command, sent_at_ms);

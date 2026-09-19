@@ -8,7 +8,7 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   local paused = continuation.paused and continuation.token ~= nil
     and continuation.error_kind ~= "cancelled"
   if paused or smelt.engine.has_active_turn() or smelt.work.is_busy() then
-    if smelt.engine.is_running() and __smelt_internal.session._rewind_active_turn_if_clean({ restore_vim_insert = restore_insert }) then
+    if __smelt_internal.session._rewind_active_turn_if_clean({ restore_vim_insert = restore_insert }) then
       return
     end
     smelt.engine.cancel()

@@ -389,14 +389,7 @@ impl TuiApp {
         match busy {
             smelt_core::lua::CommandBusyBehavior::QueueCommand => {
                 let queued = QueuedInput::command(normalized, sent_at_ms);
-                match queue_target {
-                    QueueStage::Turn => {
-                        self.prompt.try_queue_turn(queued);
-                    }
-                    QueueStage::Request => {
-                        self.queue_input_for_request(queued);
-                    }
-                }
+                self.queue_explicit_submission(queued, queue_target);
                 return Some(EventOutcome::Noop);
             }
             smelt_core::lua::CommandBusyBehavior::QueueRequest => {

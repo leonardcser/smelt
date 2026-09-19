@@ -423,7 +423,12 @@ pub(super) struct PendingTurnDispatch {
     command_id: crate::persist::CanonicalCommandId,
     dispatch: PreparedTurnDispatch,
     submit_state: PendingTurnSubmitState,
-    cancelled_meta: Option<protocol::TurnMeta>,
+    cancellation: Option<PendingTurnCancellation>,
+}
+
+pub(super) enum PendingTurnCancellation {
+    Cancelled(protocol::TurnMeta),
+    Rewound,
 }
 
 struct PreparedTurnDispatch {
@@ -776,7 +781,7 @@ impl TuiApp {
             command_id,
             dispatch,
             submit_state,
-            cancelled_meta: None,
+            cancellation: None,
         });
     }
 
@@ -915,6 +920,19 @@ impl TuiApp {
         self.pending_turn_dispatch.is_some()
     }
 
+    pub(super) fn turn_submission_is_active(&self) -> bool {
+        self.pending_turn_dispatch
+            .as_ref()
+            .is_some_and(|pending| pending.cancellation.is_none())
+    }
+
+    pub(super) fn pending_turn_rewind_history_index(&self) -> Option<usize> {
+        self.pending_turn_dispatch
+            .as_ref()
+            .filter(|pending| pending.cancellation.is_none())
+            .and_then(|pending| pending.dispatch.turn.rewind_history_idx)
+    }
+
     pub(super) fn abandon_pending_turn_submission(&mut self) {
         let Some(pending) = self.pending_turn_dispatch.take() else {
             return;
@@ -970,10 +988,13 @@ impl TuiApp {
             self.pending_turn_dispatch = Some(pending);
             return false;
         }
-        if let Some(meta) = pending.cancelled_meta {
-            self.record_finished_turn_state(meta);
-            self.sync_agent_mode_applied();
-            self.sync_reasoning_effort_applied();
+        if let Some(cancellation) = pending.cancellation {
+            // Rewind has already restored metadata at the surviving history boundary.
+            if let PendingTurnCancellation::Cancelled(meta) = cancellation {
+                self.record_finished_turn_state(meta);
+                self.sync_agent_mode_applied();
+                self.sync_reasoning_effort_applied();
+            }
             if let Err(cause) = self.enqueue_canonical_turn_transition(
                 acknowledgement.receipt.turn_id,
                 smelt_store::TurnState::Cancelled,
@@ -999,9 +1020,9 @@ impl TuiApp {
         true
     }
 
-    fn cancel_pending_turn_submission(
+    pub(super) fn cancel_pending_turn_submission(
         &mut self,
-        meta: protocol::TurnMeta,
+        cancellation: PendingTurnCancellation,
     ) -> Option<TerminalCommitStatus> {
         match self.pending_turn_dispatch.as_ref()?.submit_state {
             PendingTurnSubmitState::Preparation => {
@@ -1011,8 +1032,10 @@ impl TuiApp {
                     .expect("pending prepared turn submission");
                 self.conversation
                     .abandon_canonical_operation(pending.command_id);
-                if let Some(rollback) = pending.dispatch.turn.rollback.as_ref() {
-                    self.rollback_staged_turn(rollback);
+                if matches!(cancellation, PendingTurnCancellation::Cancelled(_)) {
+                    if let Some(rollback) = pending.dispatch.turn.rollback.as_ref() {
+                        self.rollback_staged_turn(rollback);
+                    }
                 }
                 Some(TerminalCommitStatus::Durable)
             }
@@ -1021,8 +1044,10 @@ impl TuiApp {
                     .pending_turn_dispatch
                     .as_mut()
                     .expect("pending persisted turn submission");
-                if pending.cancelled_meta.is_none() {
-                    pending.cancelled_meta = Some(meta);
+                if pending.cancellation.is_none()
+                    || matches!(cancellation, PendingTurnCancellation::Rewound)
+                {
+                    pending.cancellation = Some(cancellation);
                 }
                 Some(TerminalCommitStatus::Deferred)
             }
@@ -1522,7 +1547,7 @@ impl TuiApp {
             // Archive an interrupted outcome so the prompt bar shows
             // "interrupted" rather than falling back to idle/done.
             let meta = self.working.finish(TurnOutcome::Cancelled);
-            self.cancel_pending_turn_submission(meta)
+            self.cancel_pending_turn_submission(PendingTurnCancellation::Cancelled(meta))
                 .unwrap_or(TerminalCommitStatus::Durable)
         } else {
             TerminalCommitStatus::Durable

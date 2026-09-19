@@ -898,15 +898,17 @@ impl TuiApp {
         &mut self,
         restore_vim_insert: bool,
     ) -> bool {
-        let Some(turn) = self.conversation.active() else {
-            return false;
-        };
-        let Some(history_idx) = turn.rewind_history_idx else {
-            return false;
-        };
-        if !self.prompt.queue_is_empty() || turn.assistant_output_started {
+        if !self.prompt.queue_is_empty() {
             return false;
         }
+        let history_idx = match self.conversation.active() {
+            Some(turn) if !turn.assistant_output_started => turn.rewind_history_idx,
+            Some(_) => None,
+            None => self.pending_turn_rewind_history_index(),
+        };
+        let Some(history_idx) = history_idx else {
+            return false;
+        };
         self.rewind_to_history_index(Some(history_idx), restore_vim_insert);
         true
     }
@@ -927,11 +929,18 @@ impl TuiApp {
         restore_vim_insert: bool,
     ) {
         self.cancel_live_search(false);
+        if self.conversation.is_active() {
+            self.cancel_agent();
+            self.conversation.clear_active();
+        } else if self.turn_submission_is_pending() {
+            self.cancel_turn_work();
+            self.working
+                .finish(smelt_core::working::TurnOutcome::Cancelled);
+            self.cancel_pending_turn_submission(
+                crate::app::agent::PendingTurnCancellation::Rewound,
+            );
+        }
         if let Some(history_idx) = history_idx {
-            if self.conversation.is_active() {
-                self.cancel_agent();
-                self.conversation.clear_active();
-            }
             let rewound = if let Some((text, images)) = self.rewind_to_history(history_idx) {
                 self.clear_prompt_prediction();
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -945,10 +954,6 @@ impl TuiApp {
                 self.finish_rewind(restore_vim_insert);
             }
         } else {
-            if self.conversation.is_active() {
-                self.cancel_agent();
-                self.conversation.clear_active();
-            }
             self.clear_prompt_prediction();
             self.rewind_to_start();
             while self.core.engine.try_recv().is_ok() {}

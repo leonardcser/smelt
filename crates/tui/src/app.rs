@@ -1342,10 +1342,16 @@ impl TuiApp {
     }
 
     pub(crate) fn prompt_work_state(&self) -> PromptWorkState {
-        let turn_active = self.turn_lifecycle_is_active() || self.working.is_compacting();
+        let turn_active = self.agent_is_running()
+            || self.turn_submission_is_active()
+            || self.working.is_compacting();
         if turn_active {
             PromptWorkState::TurnActive
-        } else if self.busy_stack.is_busy() {
+        } else if self.busy_stack.is_busy()
+            || self.turn_submission_is_pending()
+            || self.conversation.canonical_operations_are_pending()
+        {
+            // Persistence delays dispatch, but there is no live response to steer or interrupt.
             PromptWorkState::BackgroundBusy
         } else if self
             .conversation
@@ -1409,8 +1415,38 @@ impl TuiApp {
         self.has_visible_session_history()
     }
 
+    /// Explicit submissions authorize accepted queued work after cancellation, not error recovery.
+    pub(crate) fn queue_explicit_submission(
+        &mut self,
+        queued: QueuedInput,
+        target: QueueStage,
+    ) -> bool {
+        let accepted = match target {
+            QueueStage::Turn => self.prompt.try_queue_turn(queued),
+            QueueStage::Request => self.queue_input_for_request(queued),
+        };
+        if accepted {
+            self.clear_cancelled_pause();
+        }
+        accepted
+    }
+
+    fn clear_cancelled_pause(&mut self) {
+        if self
+            .conversation
+            .turn_pause()
+            .is_some_and(|pause| pause.kind == Some(protocol::EngineAskErrorKind::Cancelled))
+        {
+            self.conversation.set_turn_pause(None);
+        }
+    }
+
     pub(crate) fn queue_input_for_request(&mut self, queued: QueuedInput) -> bool {
-        if self.conversation.turn_pause().is_some() {
+        if self
+            .conversation
+            .turn_pause()
+            .is_some_and(|pause| pause.kind != Some(protocol::EngineAskErrorKind::Cancelled))
+        {
             return self.prompt.try_queue_request(queued);
         }
         if !self.turn_input_is_active() {

@@ -249,14 +249,14 @@ impl TuiApp {
                         if content.is_empty() {
                             false
                         } else {
-                            self.clear_cancelled_pause();
-                            self.commit_prompt_submission(edit.take().expect("submit edit"));
-                            self.prompt.try_queue_turn(QueuedInput::request(
-                                display.clone(),
-                                content,
-                                sent_at_ms,
-                            ));
-                            true
+                            let accepted = self.queue_explicit_submission(
+                                QueuedInput::request(display.clone(), content, sent_at_ms),
+                                QueueStage::Turn,
+                            );
+                            if accepted {
+                                self.commit_prompt_submission(edit.take().expect("submit edit"));
+                            }
+                            accepted
                         }
                     }
                     PromptWorkState::Idle => {
@@ -723,10 +723,16 @@ impl TuiApp {
             code, modifiers, ..
         }) = ev
         {
+            let cancellable = self.turn_input_is_active()
+                || self.busy_stack.is_busy()
+                || self.conversation.turn_pause().is_some_and(|pause| {
+                    pause.kind != Some(protocol::EngineAskErrorKind::Cancelled)
+                });
             let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
-            let ctx = self.prompt.key_context(pctx_ref, true);
+            let ctx = self.prompt.key_context(pctx_ref, cancellable);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
+                    KeyAction::Quit => return EventOutcome::Quit,
                     KeyAction::CancelAgent => {
                         return EventOutcome::CancelAgent;
                     }
@@ -827,16 +833,9 @@ impl TuiApp {
             );
             return EventOutcome::Noop;
         }
-        self.clear_cancelled_pause();
-        self.commit_prompt_submission(edit);
         let queued = QueuedInput::request(display, content, sent_at_ms);
-        match target {
-            QueueStage::Turn => {
-                self.prompt.try_queue_turn(queued);
-            }
-            QueueStage::Request => {
-                self.queue_input_for_request(queued);
-            }
+        if self.queue_explicit_submission(queued, target) {
+            self.commit_prompt_submission(edit);
         }
         EventOutcome::Noop
     }
@@ -876,17 +875,6 @@ impl TuiApp {
             EventOutcome::ContinueTurn
         } else {
             EventOutcome::Noop
-        }
-    }
-
-    /// Explicit submission authorizes queued work after cancellation, but not error recovery.
-    fn clear_cancelled_pause(&mut self) {
-        if self
-            .conversation
-            .turn_pause()
-            .is_some_and(|pause| pause.kind == Some(protocol::EngineAskErrorKind::Cancelled))
-        {
-            self.conversation.set_turn_pause(None);
         }
     }
 
@@ -2376,6 +2364,238 @@ mod tests {
         ));
         assert!(app.agent_running());
         assert!(!app.app.turn_submission_is_pending());
+    }
+
+    #[test]
+    fn pending_submission_rewind_restores_input_and_cannot_dispatch_late() {
+        for vim in [false, true] {
+            for (persisting, resubmit_early) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let mut app = TestApp::builder().with_vim(vim).build();
+                let release = if persisting {
+                    app.ensure_writer_ready();
+                    Some(app.app.conversation.pause_persistence())
+                } else {
+                    app.app.conversation.claim_writer_access().unwrap();
+                    None
+                };
+                // Dispatch terminal input without the harness's eager writer-startup drain.
+                for code in "first request".chars().map(KeyCode::Char).chain([
+                    KeyCode::Enter,
+                    KeyCode::Esc,
+                    KeyCode::Esc,
+                ]) {
+                    app.app.dispatch_terminal_event(Event::Key(KeyEvent::new(
+                        code,
+                        KeyModifiers::NONE,
+                    )));
+                }
+                assert!(!app.agent_running());
+                assert_eq!(app.state().prompt_text, "first request");
+                assert!(app.state().active_modal.is_none());
+                if vim {
+                    assert_eq!(app.state().vim_mode, crate::smelt_edit::VimMode::Insert);
+                }
+                assert!(app
+                    .app
+                    .model_history()
+                    .iter()
+                    .all(|item| !matches!(item, protocol::HistoryItem::User { .. })));
+                if resubmit_early {
+                    app.app.dispatch_terminal_event(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    )));
+                }
+                if let Some(release) = release {
+                    release.send(()).unwrap();
+                }
+                app.ensure_writer_ready();
+                app.app.flush_persist();
+                // A late submit receipt schedules a separate cancellation commit.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while app.app.turn_submission_is_pending()
+                    || app.app.conversation.canonical_operations_are_pending()
+                {
+                    app.app.drain_persist_reports();
+                    app.app.save_deferred_session_batch_if_ready();
+                    app.app.start_next_queued_input_if_idle();
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "pending rewind did not settle"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                assert!(!app.session_is_read_only());
+                if !resubmit_early {
+                    assert!(!app.agent_running());
+                    assert_eq!(app.state().prompt_text, "first request");
+                    app.press(KeyCode::Enter);
+                    app.app.flush_persist();
+                }
+                assert!(
+                    app.agent_running(),
+                    "vim={vim}, persisting={persisting}, resubmit_early={resubmit_early}, queue={:?}, pause={:?}, canonical_pending={}, persistence={:?}, notification={:?}",
+                    app.state().queued_inputs,
+                    app.app.conversation.turn_pause(),
+                    app.app.conversation.canonical_operations_are_pending(),
+                    app.app.conversation.persistence_status(),
+                    app.state().notification,
+                );
+                assert!(app.state().queued_inputs.is_empty());
+                assert_eq!(
+                    app.app
+                        .model_history()
+                        .iter()
+                        .filter(|item| matches!(item, protocol::HistoryItem::User { .. }))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finalizing_turn_does_not_promote_new_input_to_a_stopped_request() {
+        for cancelled in [false, true] {
+            let mut app = TestApp::builder().build();
+            app.start_submitted_turn("initial request");
+            app.app.flush_persist();
+            let release = app.app.conversation.pause_persistence();
+            app.app.discard_turn(if cancelled {
+                crate::app::TurnEnd::Cancelled
+            } else {
+                crate::app::TurnEnd::Complete
+            });
+            assert!(!app.agent_running());
+            app.type_text("follow-up");
+            app.press(KeyCode::Enter);
+            app.clear_actions();
+            app.press(KeyCode::Enter);
+            assert_eq!(queue_stages(&app), vec!["turn"]);
+            assert!(app.actions().iter().all(|action| !matches!(
+                action,
+                Action::EngineSend(command)
+                    if matches!(command.as_ref(), protocol::UiCommand::Steer { .. } | protocol::UiCommand::Cancel)
+            )));
+            release.send(()).unwrap();
+            app.app.flush_persist();
+            assert!(app.agent_running());
+            assert!(app.state().queued_inputs.is_empty());
+        }
+    }
+
+    #[test]
+    fn ctrl_c_can_quit_while_a_stopped_turn_is_being_persisted() {
+        for cancelled in [false, true] {
+            let mut app = TestApp::builder().build();
+            app.start_submitted_turn("initial request");
+            app.app.flush_persist();
+            let release = app.app.conversation.pause_persistence();
+            app.app.discard_turn(if cancelled {
+                crate::app::TurnEnd::Cancelled
+            } else {
+                crate::app::TurnEnd::Complete
+            });
+            assert!(app.app.dispatch_terminal_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))));
+            release.send(()).unwrap();
+            app.app.flush_persist();
+        }
+    }
+
+    #[test]
+    fn explicit_queue_acceptance_only_clears_cancelled_pauses() {
+        use crate::app::agent::TurnPause;
+        use crate::app::{QueueStage, QueuedInput};
+        use protocol::EngineAskErrorKind;
+
+        for kind in [
+            Some(EngineAskErrorKind::Cancelled),
+            Some(EngineAskErrorKind::Quota),
+            Some(EngineAskErrorKind::RateLimited),
+            Some(EngineAskErrorKind::Network),
+            None,
+        ] {
+            for target in [QueueStage::Turn, QueueStage::Request] {
+                for full in [false, true] {
+                    let mut app = TestApp::builder().build();
+                    let pause = TurnPause {
+                        kind,
+                        retry_at_ms: Some(123_000),
+                    };
+                    app.app.conversation.set_turn_pause(Some(pause));
+                    if full {
+                        for _ in 0..crate::app::queue::MAX_QUEUED_MESSAGES {
+                            assert!(app.app.prompt.try_queue_turn(QueuedInput::request(
+                                "queued",
+                                protocol::Content::text("queued"),
+                                0,
+                            )));
+                        }
+                    }
+                    assert_eq!(
+                        app.app.queue_explicit_submission(
+                            QueuedInput::request(
+                                "follow-up",
+                                protocol::Content::text("follow-up"),
+                                0,
+                            ),
+                            target,
+                        ),
+                        !full,
+                    );
+                    assert_eq!(
+                        app.app.conversation.turn_pause(),
+                        if !full && kind == Some(EngineAskErrorKind::Cancelled) {
+                            None
+                        } else {
+                            Some(pause)
+                        },
+                    );
+                    if !full {
+                        let expected = if kind == Some(EngineAskErrorKind::Cancelled) {
+                            QueueStage::Turn
+                        } else {
+                            target
+                        };
+                        assert_eq!(queue_stages(&app), vec![expected.as_str()]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn command_after_cancellation_dispatches_without_an_extra_enter() {
+        let _guard = lua_command_queue_guard();
+        for (busy, modifiers) in [
+            ("queue_command", KeyModifiers::NONE),
+            ("queue_command", KeyModifiers::CONTROL),
+            ("queue_request", KeyModifiers::NONE),
+            ("queue_request", KeyModifiers::CONTROL),
+        ] {
+            let mut app = TestApp::builder().build();
+            assert!(app.run_lua(&format!(
+                r#"smelt.cmd.register("follow-up", function()
+                    smelt.engine.submit_command("follow-up", "next request", nil, "follow-up")
+                end, {{ busy = "{busy}" }})"#
+            )));
+            app.start_submitted_turn("initial request");
+            app.app.flush_persist();
+            let release = app.app.conversation.pause_persistence();
+            app.app.discard_turn(crate::app::TurnEnd::Cancelled);
+            app.type_text("/follow-up");
+            app.press_mod(KeyCode::Enter, modifiers);
+            assert_eq!(queue_stages(&app), vec!["turn"]);
+            release.send(()).unwrap();
+            app.app.flush_persist();
+            assert!(app.agent_running(), "command stayed paused: {busy}");
+            assert!(app.state().queued_inputs.is_empty());
+        }
     }
 
     #[test]
