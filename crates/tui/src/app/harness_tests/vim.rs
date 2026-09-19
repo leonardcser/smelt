@@ -74,6 +74,44 @@ fn vim_insert_double_esc_opens_rewind_dialog_when_idle() {
 }
 
 #[test]
+fn double_esc_can_rewind_after_cancelling_quota_pause() {
+    for vim in [false, true] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.start_submitted_turn("retry this request");
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+            message: "quota exceeded".into(),
+            kind: Some(protocol::EngineAskErrorKind::Quota),
+            retry_at_ms: Some(123_000),
+        }));
+
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+        drive_lua_tasks(&mut app);
+        assert!(
+            app.state().active_modal.is_none(),
+            "first Esc-Esc cancels quota recovery"
+        );
+        assert!(app
+            .eval_lua::<bool>(
+                r#"
+                local state = smelt.engine.continuation_state()
+                return state.paused and state.error_kind == "quota" and state.token == nil
+            "#,
+            )
+            .unwrap());
+
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+        drive_lua_tasks(&mut app);
+
+        assert!(
+            app.state().active_modal.is_some(),
+            "Esc-Esc should open rewind after quota recovery was cancelled (vim={vim})"
+        );
+    }
+}
+
+#[test]
 fn vim_insert_double_esc_cancels_running_agent_on_second_press() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.start_turn(1);
