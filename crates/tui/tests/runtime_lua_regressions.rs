@@ -1678,6 +1678,35 @@ fn scroll_pills_hide_bottom_when_already_at_bottom() {
 }
 
 #[test]
+fn scroll_pills_hide_bottom_while_transcript_follows_tail() {
+    let lua = mlua::Lua::new();
+    install_scroll_pills_fixture(&lua);
+
+    let bottom_while_following_tail: bool = lua
+        .load(
+            r#"
+            __set_focus("prompt")
+            __set_cursor(12)
+            __set_scroll({
+              viewport = 5,
+              overflow = true,
+              follow = true,
+              at_top = false,
+              at_bottom = false,
+            })
+            __publish()
+            return __active("smelt.scroll_pills.bottom")
+            "#,
+        )
+        .eval()
+        .expect("drive following-tail bottom pill refresh");
+    assert!(
+        !bottom_while_following_tail,
+        "tail-follow is already the action performed by the bottom pill"
+    );
+}
+
+#[test]
 fn turn_notifications_are_disabled_by_default() {
     let lua = mlua::Lua::new();
     install_explicit_api_fixtures(&lua);

@@ -45,6 +45,7 @@ end
 local function should_show_bottom(view)
   return view.viewport.height > 0
     and view.viewport.scrollable
+    and not view.viewport.following_tail
     and not view.viewport.at_bottom
 end
 

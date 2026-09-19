@@ -202,6 +202,88 @@ fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
 }
 
 #[test]
+fn collapsing_bottom_pinned_block_hides_jump_to_bottom_pill() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder()
+        .with_ephemeral(true)
+        .with_vim(true)
+        .build();
+    app.set_terminal_size(80, 12);
+    for i in 0..20 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("history {i}").into(),
+        });
+    }
+    let output = (0..80)
+        .map(|line| format!("streamed output line {line:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    finish_tool(&mut app, "bottom-collapse", "bash", &output);
+    app.render_silent();
+    app.focus_transcript();
+    assert!(app.run_lua("smelt.transcript.fold_all('open')"));
+    app.type_char('G');
+    app.render_silent();
+
+    let before = app.transcript_window();
+    let viewport = before.viewport.expect("expanded transcript viewport");
+    assert!(before.following_tail);
+    assert!(app
+        .ui_probe()
+        .named_win("smelt.scroll_pills.bottom.win")
+        .is_none());
+
+    let row = viewport.rect.bottom().saturating_sub(1);
+    let column = viewport
+        .rect
+        .left
+        .saturating_add(viewport.gutter_width)
+        .saturating_add(2);
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+    assert!(
+        !app.transcript_window().following_tail,
+        "clicking the bottom row should exercise the pinned-at-bottom state"
+    );
+
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let collapsed = app
+        .app
+        .transcript_node_at_row(transcript_row_cursor_row(&app))
+        .expect("collapsed bottom tool at cursor");
+    assert_eq!(collapsed.view_state, ViewState::Collapsed);
+    app.focus_prompt();
+    app.render_silent();
+
+    let after = app.transcript_window();
+    let viewport = after.viewport.expect("collapsed transcript viewport");
+    let max_scroll = viewport
+        .total_rows
+        .saturating_sub(crate::smelt_edit::RowIndex::from(viewport.rect.height));
+    assert_eq!(
+        after.scroll_top, max_scroll,
+        "collapsed viewport: {after:#?}"
+    );
+    assert!(
+        app.ui_probe()
+            .named_win("smelt.scroll_pills.bottom.win")
+            .is_none(),
+        "jump-to-bottom pill remained after collapsing the block at the transcript bottom: {after:#?}"
+    );
+}
+
+#[test]
 fn streaming_thinking_honors_peek_and_enter_toggles() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 24);
