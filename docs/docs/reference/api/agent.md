@@ -18,3 +18,35 @@ Types: [`smelt.Reg`](types.md#smeltreg)
 
 Append concise guidance to the system prompt while this Lua runtime is active. Intended for plugins that register tools needing extra usage policy. Returns a `Reg` whose `:remove()` removes the fragment.
 
+## `smelt.agent.enable_forks`
+
+```lua
+fun(opts: table?): nil
+```
+
+Enable immutable request snapshots for a subagent plugin. Optional opts.max_concurrent controls the shared child concurrency limit (default 16, range 1-64). Disabled by default; children cannot enable or create forks. Configuration applies on the next spawn; lowering the limit does not cancel running children.
+
+## `smelt.agent.fork`
+
+```lua
+fun(task: string, count: integer?, label: string?): any
+```
+
+Queue one or more child agents from the current provider-ready request. Every batch member receives the same task and snapshot. Count defaults to one (maximum 16); label optionally supplies a short display task without changing model input. Only a parent model tool may call this API. Returns run records with id, group, session_id, parent_id, task, status, result, error, cost_usd and usage. Usage contains cumulative child-only prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens and reasoning_tokens when reported. Reasoning is included in completion tokens, not an additional bucket.
+
+## `smelt.agent.runs`
+
+```lua
+fun(parent_id: string?): any
+```
+
+List runtime-owned subagents in creation order, optionally restricted to a parent session. Status is queued, running, completed, cancelled or failed. Includes cumulative child-only cost_usd and usage as returned by fork. Records survive Lua reloads.
+
+## `smelt.agent.stop`
+
+```lua
+fun(id: integer): nil
+```
+
+Cancel a queued or running child without cancelling its parent or siblings. Finished runs remain available for inspection.
+

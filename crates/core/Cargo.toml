@@ -49,3 +49,4 @@ tempfile.workspace = true
 [dev-dependencies]
 smelt-store = { workspace = true, features = ["test-util"] }
 smelt-test-support = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

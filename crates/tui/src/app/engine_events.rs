@@ -254,7 +254,14 @@ impl TuiApp {
     /// scenario replay binary so all three drive identical state.
     pub fn dispatch_engine_event(&mut self, ev: EngineEvent) -> bool {
         let _perf = smelt_perf::perf::begin("tui:dispatch_engine_event");
-        self.dispatch_engine_event_inner(ev)
+        match ev {
+            EngineEvent::Subagent { id, event } => {
+                let lua = self.lua.execution();
+                self.core.handle_agent_event(&lua, id, *event);
+                true
+            }
+            ev => self.dispatch_engine_event_inner(ev),
+        }
     }
 
     pub(crate) fn queue_engine_continuation(&mut self, event: EngineEvent) {
@@ -436,6 +443,9 @@ impl TuiApp {
     ) -> EngineEventResult {
         let mut assistant_output_started = false;
         let control = match ev {
+            EngineEvent::Subagent { .. } => {
+                unreachable!("child events are routed before parent events")
+            }
             EngineEvent::Ready => SessionControl::Continue,
             EngineEvent::TokenUsage {
                 usage,
@@ -903,30 +913,10 @@ impl TuiApp {
                 mode,
             } => {
                 let lua = self.lua.execution();
-                let metadata =
-                    crate::lua::scope_app(self, || lua.evaluate_tool_metadata(&tool_name, &args));
-                let decision = if let Some(err) = metadata.preflight_error.clone() {
-                    protocol::Decision::Error(err)
-                } else {
-                    let lua = self.lua.execution();
-                    match crate::lua::scope_app(self, || {
-                        lua.tool_paths_for_workspace(&tool_name, &args)
-                    }) {
-                        Ok(tool_paths) => {
-                            self.active_permissions()
-                                .evaluate_tool_with_paths_and_approvals(
-                                    mode,
-                                    smelt_core::permissions::ToolOrigin::Lua,
-                                    &tool_name,
-                                    &args,
-                                    tool_paths.as_slice(),
-                                )
-                                .decision
-                        }
-                        Err(error) => protocol::Decision::Error(error),
-                    }
-                };
-                let evaluation = protocol::ToolEvaluation { decision, metadata };
+                let permissions = self.active_permissions();
+                let evaluation = crate::lua::scope_app(self, || {
+                    lua.evaluate_tool_call(&tool_name, &args, mode, &permissions)
+                });
                 self.core
                     .engine
                     .send(protocol::UiCommand::ToolEvaluationResponse {

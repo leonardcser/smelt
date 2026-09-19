@@ -2570,6 +2570,10 @@ mod tests {
         })
         .await
         .expect("foreground job did not start");
+        wait_for_snapshot(&supervisor, &id, |snapshot| {
+            snapshot.text.contains("started")
+        })
+        .await;
 
         let stopped = supervisor.stop(&id).await.unwrap();
         let followed = handle.await.unwrap();
@@ -2603,13 +2607,20 @@ mod tests {
                     .await
             }
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while supervisor.list().is_empty() {
+        let id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(job) = supervisor.list().into_iter().next() {
+                    break job.id;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("foreground job did not start");
+        wait_for_snapshot(&supervisor, &id, |snapshot| {
+            snapshot.text.contains("started")
+        })
+        .await;
 
         supervisor.clear();
         assert!(supervisor.list().is_empty());

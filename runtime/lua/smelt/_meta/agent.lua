@@ -12,4 +12,20 @@ local agent = {}
 ---@type fun(text: string): smelt.Reg
 agent.add_system_prompt = nil
 
+--- Enable immutable request snapshots for a subagent plugin. Optional opts.max_concurrent controls the shared child concurrency limit (default 16, range 1-64). Disabled by default; children cannot enable or create forks. Configuration applies on the next spawn; lowering the limit does not cancel running children.
+---@type fun(opts: table?): nil
+agent.enable_forks = nil
+
+--- Queue one or more child agents from the current provider-ready request. Every batch member receives the same task and snapshot. Count defaults to one (maximum 16); label optionally supplies a short display task without changing model input. Only a parent model tool may call this API. Returns run records with id, group, session_id, parent_id, task, status, result, error, cost_usd and usage. Usage contains cumulative child-only prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens and reasoning_tokens when reported. Reasoning is included in completion tokens, not an additional bucket.
+---@type fun(task: string, count: integer?, label: string?): any
+agent.fork = nil
+
+--- List runtime-owned subagents in creation order, optionally restricted to a parent session. Status is queued, running, completed, cancelled or failed. Includes cumulative child-only cost_usd and usage as returned by fork. Records survive Lua reloads.
+---@type fun(parent_id: string?): any
+agent.runs = nil
+
+--- Cancel a queued or running child without cancelling its parent or siblings. Finished runs remain available for inspection.
+---@type fun(id: integer): nil
+agent.stop = nil
+
 return agent

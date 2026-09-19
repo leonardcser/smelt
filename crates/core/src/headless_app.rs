@@ -154,34 +154,14 @@ impl HeadlessApp {
             });
             return;
         }
-        let metadata = crate::host::scope_core(&mut self.core, || {
-            lua.evaluate_tool_metadata(&tool_name, &args)
+        let permissions = self.core.permissions.snapshot();
+        let mode = self.core.config.mode.clone();
+        let evaluation = crate::host::scope_core(&mut self.core, || {
+            lua.evaluate_tool_call(&tool_name, &args, mode, &permissions)
         });
-        let decision = if let Some(err) = metadata.preflight_error.clone() {
-            protocol::Decision::Error(err)
-        } else {
-            match crate::host::scope_core(&mut self.core, || {
-                lua.tool_paths_for_workspace(&tool_name, &args)
-            }) {
-                Ok(tool_paths) => {
-                    self.core
-                        .permissions
-                        .snapshot()
-                        .evaluate_tool_with_paths_and_approvals(
-                            self.core.config.mode.clone(),
-                            crate::permissions::ToolOrigin::Lua,
-                            &tool_name,
-                            &args,
-                            tool_paths.as_slice(),
-                        )
-                        .decision
-                }
-                Err(error) => protocol::Decision::Error(error),
-            }
-        };
         self.core.engine.send(UiCommand::ToolEvaluationResponse {
             request_id,
-            evaluation: protocol::ToolEvaluation { decision, metadata },
+            evaluation,
         });
     }
 
@@ -362,6 +342,12 @@ impl HeadlessApp {
                 }
                 true
             }
+            EngineEvent::Subagent { id, event } => {
+                if let Some(lua) = self.lua.as_ref() {
+                    self.core.handle_agent_event(lua, *id, *event.clone());
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -459,6 +445,13 @@ impl HeadlessApp {
         )));
 
         let tools = self.tool_defs();
+        if self
+            .lua
+            .as_ref()
+            .is_some_and(crate::lua::LuaRuntime::forks_enabled)
+        {
+            let _ = self.core.engine.enable_forks();
+        }
         let Some(model_target) = self.model_target() else {
             eprintln!("error: no model is available for headless dispatch");
             return HeadlessExit::Error;
@@ -468,24 +461,25 @@ impl HeadlessApp {
             .fast_mode
             .unwrap_or(self.core.config.settings.fast_mode);
 
+        let payload = protocol::StartTurnPayload {
+            turn_id,
+            input: protocol::StartTurnInput::user(Content::text(content)),
+            mode: self.core.config.mode.clone(),
+            model_target,
+            request_config: self.core.config.request_runtime_config(),
+            reasoning_effort: self.core.config.reasoning_effort.clone(),
+            fast_mode,
+            history: protocol::ModelHistorySource::items(history),
+            session_id: self.session.id.clone(),
+            sessions_root: self.core.sessions.sessions_dir(),
+            persistence: protocol::PersistenceScope::default(),
+            permission_overrides: None,
+            system_prompt: Some(self.system_prompt.clone()),
+            tools,
+        };
         self.core
             .engine
-            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
-                turn_id,
-                input: protocol::StartTurnInput::user(Content::text(content)),
-                mode: self.core.config.mode.clone(),
-                model_target,
-                request_config: self.core.config.request_runtime_config(),
-                reasoning_effort: self.core.config.reasoning_effort.clone(),
-                fast_mode,
-                history: protocol::ModelHistorySource::items(history),
-                session_id: self.session.id.clone(),
-                sessions_root: self.core.sessions.sessions_dir(),
-                persistence: protocol::PersistenceScope::default(),
-                permission_overrides: None,
-                system_prompt: Some(self.system_prompt.clone()),
-                tools,
-            })));
+            .send(UiCommand::StartTurn(Box::new(payload)));
 
         let mut final_message = String::new();
         let mut total_usage = protocol::TokenUsage::default();
@@ -597,7 +591,6 @@ impl HeadlessApp {
                 {
                     self.sink.log_retry(*attempt, *delay_ms);
                 }
-                EngineEvent::HistoryUpdated { .. } => {}
                 EngineEvent::RequestAuditError { message }
                     if self.sink.format == OutputFormat::Text =>
                 {
@@ -610,11 +603,10 @@ impl HeadlessApp {
                     break HeadlessExit::TurnError;
                 }
                 EngineEvent::TurnComplete { meta, .. } => {
-                    break if meta.as_ref().is_some_and(|meta| meta.interrupted) {
-                        HeadlessExit::Interrupted
-                    } else {
-                        HeadlessExit::Success
-                    };
+                    if meta.as_ref().is_some_and(|meta| meta.interrupted) {
+                        break HeadlessExit::Interrupted;
+                    }
+                    break HeadlessExit::Success;
                 }
                 _ => {}
             }

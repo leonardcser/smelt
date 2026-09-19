@@ -11,6 +11,7 @@ pub struct McpDispatcher {
     manager: Arc<McpManager>,
     permissions: crate::permissions::PermissionsHandle,
     turn_permissions: Mutex<HashMap<u64, Arc<crate::permissions::Permissions>>>,
+    frozen_tools: Option<Vec<McpToolDef>>,
 }
 
 impl McpDispatcher {
@@ -29,12 +30,18 @@ impl McpDispatcher {
             manager,
             permissions,
             turn_permissions: Mutex::new(HashMap::new()),
+            frozen_tools: None,
         }
     }
 
+    fn tool_defs(&self) -> Vec<McpToolDef> {
+        self.frozen_tools
+            .clone()
+            .unwrap_or_else(|| self.manager.tool_defs())
+    }
+
     fn def_for(&self, name: &str) -> Option<McpToolDef> {
-        self.manager
-            .tool_defs()
+        self.tool_defs()
             .into_iter()
             .find(|d| d.qualified_name() == name)
     }
@@ -50,9 +57,19 @@ impl McpDispatcher {
 }
 
 impl ToolDispatcher for McpDispatcher {
+    fn fork(&self, turn_id: u64) -> Option<Arc<dyn ToolDispatcher>> {
+        Some(Arc::new(Self {
+            manager: Arc::clone(&self.manager),
+            permissions: crate::permissions::PermissionsHandle::new(
+                self.permissions_for_turn(turn_id).as_ref().clone(),
+            ),
+            turn_permissions: Mutex::new(HashMap::new()),
+            frozen_tools: Some(self.tool_defs()),
+        }))
+    }
+
     fn definitions(&self) -> Vec<ToolDefinition> {
-        self.manager
-            .tool_defs()
+        self.tool_defs()
             .into_iter()
             .map(|d| {
                 ToolDefinition::new(FunctionSchema {
@@ -219,6 +236,32 @@ mod tests {
         assert!(
             dispatcher.is_visible(0, "demo_read", mode),
             "MCP permission evaluation must observe the replacement used by the live runtime"
+        );
+    }
+
+    #[test]
+    fn fork_pins_permissions_after_the_parent_turn_ends() {
+        let permissions =
+            crate::permissions::PermissionsHandle::new(permissions_for_mcp(Decision::Deny));
+        let dispatcher = McpDispatcher::new(manager_with_tool(), permissions.clone());
+        dispatcher.begin_turn(7);
+        let child = dispatcher.fork(7).unwrap();
+        dispatcher.end_turn(7);
+        permissions.replace(permissions_for_mcp(Decision::Allow));
+        child.begin_turn(8);
+        assert_eq!(
+            child
+                .evaluate_tool_call(8, "demo_read", &HashMap::new(), AgentMode::normal(), None)
+                .unwrap()
+                .decision,
+            Decision::Deny
+        );
+        assert_eq!(
+            dispatcher
+                .evaluate_tool_call(9, "demo_read", &HashMap::new(), AgentMode::normal(), None)
+                .unwrap()
+                .decision,
+            Decision::Allow
         );
     }
 

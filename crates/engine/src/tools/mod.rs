@@ -40,6 +40,12 @@ pub trait ToolDispatcher: Send + Sync {
 
     fn contains(&self, name: &str) -> bool;
 
+    /// Snapshot mutable dispatch policy for a child of this turn. Stateless
+    /// dispatchers may return `None` to share the original dispatcher.
+    fn fork(&self, _turn_id: u64) -> Option<std::sync::Arc<dyn ToolDispatcher>> {
+        None
+    }
+
     fn begin_turn(&self, _turn_id: u64) {}
 
     fn end_turn(&self, _turn_id: u64) {}

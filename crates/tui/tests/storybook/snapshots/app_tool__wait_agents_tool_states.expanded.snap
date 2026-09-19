@@ -1,0 +1,34 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* wait_agents #4                                                     14:37:03
+
+* wait_agents #1, #2, #3                                             14:37:03
+  agent #1 - completed
+  Parser review complete.
+  All tests passed.
+
+  agent #2 - failed
+  Provider unavailable.
+
+  agent #3 - cancelled
+  subagent was cancelled
+
+* wait_agents #99                                                    14:37:03
+  unknown subagent: 99
+
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                             1:1 100%

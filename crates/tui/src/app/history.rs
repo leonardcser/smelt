@@ -1418,6 +1418,7 @@ impl TuiApp {
         } else if self.turn_submission_is_pending() {
             self.discard_turn(crate::app::TurnEnd::Cancelled);
         }
+        self.core.cancel_agents();
         self.lua.cancel_tasks();
     }
 

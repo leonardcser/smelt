@@ -463,6 +463,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | --- | --- |
 | `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
 | `smelt.plugins.lsp` | Optional LSP tool facade for agent code navigation. |
+| `smelt.plugins.subagents` | Opt in with require("smelt.plugins.subagents") in init.lua. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- PLUGINS_END -->

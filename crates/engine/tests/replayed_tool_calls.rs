@@ -205,6 +205,164 @@ fn count_committed_invocations(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn forks_share_request_prefix_and_run_independent_tool_loops() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server = tokio::spawn(run_server(listener, Arc::clone(&requests), |index| {
+            if index == 0 || index % 2 == 1 {
+                tool_call_sse_for(&format!("call-{index}"))
+            } else {
+                terminal_sse()
+            }
+        }));
+        let config = EngineConfig {
+            host_callbacks: engine::HostCallbacks::Disabled,
+            ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
+        };
+        let mut parent = engine::start(
+            config,
+            Box::new(CountingDispatcher {
+                executions: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        assert!(parent.fork_snapshot().is_err());
+        parent.enable_forks().unwrap();
+        parent.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
+            turn_id: 1,
+            input: protocol::StartTurnInput::user(Content::text("parent task")),
+            mode: AgentMode::normal(),
+            model_target: ModelTarget {
+                model: "test-model".into(),
+                api_base: format!("http://{addr}"),
+                api_key: "test-key".into(),
+                provider_type: "anthropic-compatible".into(),
+                config: ModelConfig {
+                    max_tokens: Some(4096),
+                    ..ModelConfig::default()
+                },
+            },
+            request_config: RequestRuntimeConfig::default(),
+            reasoning_effort: ReasoningEffort::Off,
+            fast_mode: false,
+            history: protocol::ModelHistorySource::items(vec![HistoryItem::user(Content::text(
+                "earlier task",
+            ))]),
+            session_id: "root-session".into(),
+            sessions_root: PathBuf::from("/tmp"),
+            persistence: protocol::PersistenceScope::default(),
+            permission_overrides: None,
+            system_prompt: Some("unchanged system instructions".into()),
+            tools: vec![protocol::ToolDef {
+                name: TOOL_NAME.into(),
+                description: "a Lua tool".into(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+                modes: None,
+                execution_mode: protocol::ToolExecutionMode::Concurrent,
+                override_core: true,
+                hooks: protocol::ToolHookFlags::default(),
+                headless: true,
+            }],
+        })));
+        // Fork while the launching Lua tool is unresolved. It must never enter
+        // any child's inherited request as an unpaired assistant tool call.
+        loop {
+            match parent.recv().await.expect("parent engine connected") {
+                EngineEvent::ToolEvaluationRequest { request_id, .. } => {
+                    parent.send(UiCommand::ToolEvaluationResponse {
+                        request_id,
+                        evaluation: ToolEvaluation {
+                            decision: Decision::Allow,
+                            metadata: ToolMetadata::default(),
+                        },
+                    })
+                }
+                EngineEvent::ToolDispatch { .. } => break,
+                EngineEvent::TurnError { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        let snapshot = parent.fork_snapshot().unwrap();
+        assert_eq!(snapshot.parent_session_id(), "root-session");
+        assert!(!serde_json::to_string(snapshot.messages())
+            .unwrap()
+            .contains("call-0"));
+        for index in 0..2 {
+            let mut child = parent
+                .start_fork(
+                    &snapshot,
+                    format!("child-{index}"),
+                    100 + index,
+                    "identical child task".into(),
+                )
+                .unwrap();
+            assert!(child.enable_forks().is_err());
+            assert!(child.fork_snapshot().is_err());
+            assert!(child
+                .start_fork(&snapshot, "nested".into(), 200, "nested task".into())
+                .is_err());
+            let mut executed = 0;
+            let mut final_text = String::new();
+            loop {
+                match child.recv().await.expect("child engine connected") {
+                    EngineEvent::ToolEvaluationRequest { request_id, .. } => {
+                        child.send(UiCommand::ToolEvaluationResponse {
+                            request_id,
+                            evaluation: ToolEvaluation {
+                                decision: Decision::Allow,
+                                metadata: ToolMetadata::default(),
+                            },
+                        })
+                    }
+                    EngineEvent::ToolDispatch {
+                        request_id,
+                        invocation_id,
+                        call_id,
+                        ..
+                    } => {
+                        executed += 1;
+                        child.send(UiCommand::ToolResult {
+                            request_id,
+                            invocation_id,
+                            call_id,
+                            content: "child tool result".into(),
+                            is_error: false,
+                            metadata: None,
+                            display_content: Vec::new(),
+                            attachment: None,
+                        });
+                    }
+                    EngineEvent::Text { content } => final_text = content,
+                    EngineEvent::TextDelta { delta } => final_text.push_str(&delta),
+                    EngineEvent::TurnComplete { .. } => break,
+                    EngineEvent::TurnError { message, .. } => panic!("{message}"),
+                    _ => {}
+                }
+            }
+            assert_eq!(executed, 1);
+            assert_eq!(final_text, "done");
+        }
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        for child in [&requests[1], &requests[3]] {
+            assert_eq!(child["system"], requests[0]["system"]);
+            assert_eq!(child["tools"], requests[0]["tools"]);
+            assert_eq!(child["model"], requests[0]["model"]);
+            assert_eq!(child["max_tokens"], requests[0]["max_tokens"]);
+        }
+        assert_eq!(
+            requests[1], requests[3],
+            "batch members must have identical initial requests"
+        );
+        parent.send(UiCommand::Cancel);
+        server.abort();
+    })
+    .await
+    .expect("fork tool loops timed out");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -2275,6 +2275,9 @@ impl TuiApp {
         self.core
             .signals
             .publish_if_changed("running_procs", running_procs);
+        self.core
+            .signals
+            .publish_if_changed("running_subagents", self.core.agents.running_count() as u32);
 
         let permission_pending = self.overlays.has_deferred_dialog();
         self.core

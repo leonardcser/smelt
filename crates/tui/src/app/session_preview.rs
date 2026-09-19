@@ -181,6 +181,10 @@ pub(super) struct SessionPreviewRuntime {
     active: Option<ActiveSessionPreview>,
     binding: Option<SessionPreviewBinding>,
     next_generation: u64,
+    live_revision: Option<(String, u64)>,
+    live_history_revision: Option<(String, u64)>,
+    live_history_blocks: usize,
+    live_follow_tail: bool,
 }
 
 impl SessionPreviewRuntime {
@@ -460,10 +464,67 @@ impl super::TuiApp {
         &mut self,
         request: SessionPreviewRender,
     ) -> SessionPreviewRenderOutcome {
-        let active = self.session_preview.begin(request);
-        let cached = self
+        let mut active = self.session_preview.begin(request);
+        let mut cached = self
             .conversation
             .take_resume_preview(&active.render.cache_key);
+        if let Some(child) = self
+            .core
+            .agents
+            .children
+            .values()
+            .find(|child| child.session.id == active.render.id)
+        {
+            let revision = (child.session.id.clone(), child.revision);
+            if active.follow_tail {
+                self.session_preview.live_follow_tail = true;
+            }
+            if active
+                .render
+                .window
+                .and_then(|window| self.ui.win(window))
+                .is_some_and(|window| window.selection_active())
+            {
+                self.session_preview.live_follow_tail = false;
+            }
+            active.follow_tail = self.session_preview.live_follow_tail;
+            if self.session_preview.live_revision.as_ref() != Some(&revision) || cached.is_none() {
+                let history_revision = (child.session.id.clone(), child.history_revision);
+                if self.session_preview.live_history_revision.as_ref() != Some(&history_revision)
+                    || cached.is_none()
+                {
+                    let transcript =
+                        super::history::build_transcript_from_session(&self.lua, &child.session);
+                    self.session_preview.live_history_blocks = transcript.history.len();
+                    cached = Some(TranscriptDocument::from_transcript(transcript));
+                    self.session_preview.live_history_revision = Some(history_revision);
+                }
+                let transcript = cached.as_mut().expect("live history is materialized");
+                transcript.truncate_to(self.session_preview.live_history_blocks);
+                if !child.streaming_reasoning.is_empty() {
+                    transcript.push(smelt_core::Block::Thinking {
+                        title: None,
+                        summary_titles: Vec::new(),
+                        content: child.streaming_reasoning.clone().into(),
+                        kind: protocol::ReasoningKind::Raw,
+                    });
+                }
+                if !child.streaming_text.is_empty() {
+                    transcript.push(smelt_core::Block::Text {
+                        content: child.streaming_text.clone().into(),
+                    });
+                }
+                for (_, block, state) in &child.live_tools {
+                    transcript.push_tool_call(block.clone(), state.clone());
+                }
+                if let Some(error) = &child.info.error {
+                    transcript.push(smelt_core::Block::Text {
+                        content: format!("Subagent failed: {error}").into(),
+                    });
+                }
+                self.session_preview.live_revision = Some(revision);
+            }
+        }
         smelt_perf::perf::record_value(
             "session:render_preview_into:cache_hit",
             u64::from(cached.is_some()),
@@ -585,6 +646,25 @@ impl super::TuiApp {
             })
     }
 
+    pub(crate) fn with_session_preview_display_document<R>(
+        &mut self,
+        window: crate::smelt_edit::WinId,
+        f: impl FnOnce(&mut dyn crate::smelt_edit::DisplayDocument) -> R,
+    ) -> Option<R> {
+        let render = self.session_preview.render_for_window(window)?;
+        let mut view = self.conversation.take_resume_preview(&render.cache_key)?;
+        let mut document = super::transcript::TranscriptDisplayDocument::new(
+            &mut view,
+            &self.lua,
+            render.width,
+            self.ui.theme(),
+        );
+        let result = f(&mut document);
+        self.conversation
+            .store_resume_preview(render.cache_key, view);
+        Some(result)
+    }
+
     pub(crate) fn navigate_session_preview(
         &mut self,
         window: crate::smelt_edit::WinId,
@@ -599,6 +679,19 @@ impl super::TuiApp {
         let Some(mut view) = self.conversation.take_resume_preview(&render.cache_key) else {
             return self.session_preview.active_for(&render.cache_key);
         };
+        use super::transcript_scroll_trace::{TranscriptScrollIntent, TranscriptTraceAnchor};
+        let intent = match intent {
+            TranscriptScrollIntent::ApproximateRowSeek(row) => {
+                match view.trace_anchor_at_row(&self.lua, render.width, row) {
+                    anchor @ TranscriptTraceAnchor::Content { .. } => {
+                        TranscriptScrollIntent::ExactContentAnchor(anchor)
+                    }
+                    _ => TranscriptScrollIntent::ApproximateRowSeek(row),
+                }
+            }
+            intent => intent,
+        };
+        self.session_preview.live_follow_tail = matches!(intent, TranscriptScrollIntent::Tail);
         view.set_pending_scroll_intent(intent);
         self.conversation
             .store_resume_preview(render.cache_key.clone(), view);

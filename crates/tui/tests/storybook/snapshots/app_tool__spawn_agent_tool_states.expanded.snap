@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* spawn_agent Review parser                                          14:37:03
+
+* spawn_agent Review tests                                           14:37:03
+
+* spawn_agent                                                        14:37:03
+  subagent queue is full
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                             1:1 100%
