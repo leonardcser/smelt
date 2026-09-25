@@ -1227,6 +1227,43 @@ fn generic_prompt_buf_lines_setter_uses_prompt_install_path() {
 }
 
 #[test]
+fn idle_submit_restores_stash_without_a_blank_row() {
+    for after_turn in [false, true] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        if after_turn {
+            app.start_turn(1);
+        }
+        let draft = "first line";
+        app.type_text(draft);
+        app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(app.state().prompt_text, "");
+        let stashed = app.render_to_frame().text();
+        assert!(stashed.contains("Stashed"), "{stashed}");
+        if after_turn {
+            assert!(app.finish_turn());
+            assert!(!app.agent_running());
+        }
+
+        app.type_text("send this");
+        app.press(KeyCode::Enter);
+
+        assert_eq!(app.state().prompt_text, draft);
+        let frame = app.render_to_frame().text();
+        let top = app.ui_probe().named_win("smelt.prompt_bar.top").unwrap();
+        assert_eq!(app.ui_probe().split_rect(top).unwrap().height, 1, "{frame}");
+        let bar_row = frame
+            .lines()
+            .position(|line| line.contains("test/test-model"))
+            .unwrap();
+        assert_eq!(
+            frame.lines().nth(bar_row + 1),
+            Some(" first line"),
+            "{frame}"
+        );
+    }
+}
+
+#[test]
 fn multiline_stash_keeps_prompt_top_bar_visible() {
     for height in [8, 10, 12, 24] {
         let mut app = TestApp::builder().with_vim(false).build();

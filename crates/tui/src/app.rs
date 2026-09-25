@@ -289,6 +289,8 @@ pub(crate) struct MainLayoutInputs {
     terminal_width: u16,
     terminal_height: u16,
     prompt_input_rows: u16,
+    prompt_has_stash: bool,
+    prompt_queue_revision: u64,
     dialog: Option<crate::smelt_edit::ContainerId>,
     dialog_buffers: Vec<(crate::smelt_edit::BufId, u64)>,
 }

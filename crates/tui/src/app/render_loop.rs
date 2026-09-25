@@ -929,6 +929,8 @@ impl TuiApp {
             terminal_width: term_w,
             terminal_height: term_h,
             prompt_input_rows: input_rows,
+            prompt_has_stash: self.prompt.has_stash(),
+            prompt_queue_revision: self.prompt.queue_revision(),
             dialog,
             dialog_buffers,
         };
@@ -1998,9 +2000,12 @@ mod tests {
             .try_queue_turn(crate::app::QueuedInput::request_from_text(
                 "queued", "queued", 0
             )));
+        app.render_silent();
+        assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(2));
+        let top_before_signal = app.lua_int_global("prompt_top_renderer_calls").unwrap();
         app.app.publish_diff_signals();
         app.render_silent();
-        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(2));
+        assert!(app.lua_int_global("prompt_top_renderer_calls").unwrap() > top_before_signal);
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(2));
     }
 
