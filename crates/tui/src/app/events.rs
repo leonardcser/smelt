@@ -185,7 +185,10 @@ impl TuiApp {
             return false;
         }
 
-        let outcome = if self.prompt_work_state() != PromptWorkState::Idle {
+        let outcome = if matches!(
+            self.prompt_work_state(),
+            PromptWorkState::TurnActive | PromptWorkState::BackgroundBusy
+        ) {
             self.handle_event_running(ev)
         } else {
             self.handle_event_idle(ev)
@@ -665,7 +668,11 @@ impl TuiApp {
         }) = ev
         {
             if matches!(code, KeyCode::Esc) {
-                return self.handle_idle_prompt_esc(ev, modifiers);
+                return if self.prompt_work_state() == PromptWorkState::Paused {
+                    self.handle_running_prompt_esc(ev)
+                } else {
+                    self.handle_idle_prompt_esc(ev, modifiers)
+                };
             }
 
             // Placeholder routing: when the prompt is empty and a placeholder is set,
@@ -723,11 +730,8 @@ impl TuiApp {
             code, modifiers, ..
         }) = ev
         {
-            let cancellable = self.turn_input_is_active()
-                || self.busy_stack.is_busy()
-                || self.conversation.turn_pause().is_some_and(|pause| {
-                    pause.kind != Some(protocol::EngineAskErrorKind::Cancelled)
-                });
+            // A paused continuation has no active work to cancel; Ctrl-C can quit.
+            let cancellable = self.turn_input_is_active() || self.busy_stack.is_busy();
             let pctx_ref = crate::input::prompt_ctx_ref(&self.ui);
             let ctx = self.prompt.key_context(pctx_ref, cancellable);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
@@ -813,7 +817,22 @@ impl TuiApp {
         self.clear_prompt_prediction();
         self.redact_user_submission(&mut content, &mut display);
         let text = content.text_content().into_owned();
-        if content.image_count() == 0 {
+        if self.prompt_work_state() == PromptWorkState::Paused && content.image_count() == 0 {
+            if let InputOutcome::Command(line) = self.process_input(&text) {
+                self.commit_prompt_submission(edit);
+                self.apply_input_outcome(
+                    InputOutcome::Command(line),
+                    content,
+                    &display,
+                    sent_at_ms,
+                );
+                return if self.pending_quit {
+                    EventOutcome::Quit
+                } else {
+                    EventOutcome::Noop
+                };
+            }
+        } else if content.image_count() == 0 {
             if let Some(outcome) = self.try_command_while_running(
                 smelt_buffer::text::trim_whitespace(&text),
                 target,
@@ -1026,6 +1045,20 @@ impl TuiApp {
 
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
+            Action::Submit {
+                content,
+                display,
+                edit,
+            } if self.prompt_work_state() == PromptWorkState::Paused => {
+                self.handle_running_submit(content, display, edit, QueueStage::Turn)
+            }
+            Action::SubmitToRequestQueue {
+                content,
+                display,
+                edit,
+            } if self.prompt_work_state() == PromptWorkState::Paused => {
+                self.handle_running_submit(content, display, edit, QueueStage::Request)
+            }
             Action::Submit {
                 content,
                 display,

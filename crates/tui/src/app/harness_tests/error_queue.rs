@@ -86,6 +86,115 @@ fn public_status_cancelled_turn_is_idle_interrupted() {
 }
 
 #[test]
+fn ctrl_c_quits_from_interrupted_and_interrupted_paused() {
+    for paused in [false, true] {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        if paused {
+            app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+                message: "connection failed".to_string(),
+                kind: Some(protocol::EngineAskErrorKind::Network),
+                retry_at_ms: None,
+            }));
+            assert_eq!(
+                app.app.prompt_work_state(),
+                crate::app::PromptWorkState::Paused
+            );
+        } else {
+            app.discard_turn(crate::app::TurnEnd::Cancelled);
+            assert_eq!(
+                app.app.prompt_work_state(),
+                crate::app::PromptWorkState::Idle
+            );
+        }
+
+        app.type_text("draft");
+        app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!app.quit_requested(), "Ctrl-C should first clear the draft");
+        assert!(app.state().prompt_text.is_empty());
+
+        app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(
+            app.quit_requested(),
+            "Ctrl-C should quit when paused={paused}"
+        );
+    }
+}
+
+#[test]
+fn paused_commands_run_like_interrupted_commands() {
+    for paused in [false, true] {
+        for busy in ["reject", "queue_command", "queue_request"] {
+            let mut app = TestApp::builder().build();
+            assert!(app.run_lua(&format!(
+                r#"_G.paused_command_ran = false
+            smelt.cmd.register("paused-command-test", function()
+                _G.paused_command_ran = true
+            end, {{ busy = {busy:?} }})"#
+            )));
+            app.start_turn(1);
+            if paused {
+                app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+                    message: "connection failed".to_string(),
+                    kind: Some(protocol::EngineAskErrorKind::Network),
+                    retry_at_ms: None,
+                }));
+                assert_eq!(
+                    app.app.prompt_work_state(),
+                    crate::app::PromptWorkState::Paused
+                );
+            } else {
+                app.discard_turn(crate::app::TurnEnd::Cancelled);
+            }
+
+            app.type_text("/paused-command-test");
+            app.press(KeyCode::Enter);
+            assert!(
+                app.run_lua("assert(_G.paused_command_ran == true)"),
+                "paused={paused}, busy={busy}"
+            );
+            assert!(app.state().queued_inputs.is_empty());
+            assert!(
+                !app.render_to_frame()
+                    .text()
+                    .contains("while agent is working"),
+                "paused={paused}, busy={busy}"
+            );
+        }
+    }
+}
+
+#[test]
+fn paused_prompt_still_queues_messages_and_resumes_on_empty_enter() {
+    let mut app = TestApp::builder().build();
+    start_canonical_turn(&mut app);
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+        message: "connection failed".to_string(),
+        kind: Some(protocol::EngineAskErrorKind::Network),
+        retry_at_ms: None,
+    }));
+
+    app.type_text("queued turn");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.state().queued_inputs, vec!["queued turn"]);
+    assert_eq!(
+        app.app.prompt_work_state(),
+        crate::app::PromptWorkState::Paused
+    );
+
+    app.type_text("queued request");
+    app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+    assert!(app.app.prompt.has_queued_request());
+    assert_eq!(
+        app.app.prompt_work_state(),
+        crate::app::PromptWorkState::Paused
+    );
+
+    app.press(KeyCode::Enter);
+    assert!(app.agent_running());
+}
+
+#[test]
 fn public_status_turn_error_needs_attention() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);
