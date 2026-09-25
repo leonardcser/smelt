@@ -2011,6 +2011,7 @@ impl TuiApp {
                 ui.theme().is_light(),
                 Some(std::path::PathBuf::from(&cwd)),
             ),
+            math_graphics: runtime_state.settings.math_rendering == "graphics",
         };
         let mut transcript = crate::app::transcript::TranscriptDocument::new();
         transcript.set_inline_options(inline_options.clone());
@@ -3500,6 +3501,7 @@ impl TuiApp {
     }
 
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
+        crate::content::display_layout::set_kitty_probe_result(false);
         let platform_startup = smelt_perf::perf::begin("startup:platform");
         crate::theme::detect_background(self.ui.theme_mut());
         // Install the background-aware baked theme before Lua loads so a
@@ -3565,6 +3567,22 @@ impl TuiApp {
                 return;
             }
         };
+        #[cfg(unix)]
+        let kitty_supported = term_events
+            .probe_kitty(|query| self.platform.write_terminal_control(query))
+            .await;
+        #[cfg(unix)]
+        {
+            crate::content::display_layout::set_kitty_probe_result(kitty_supported);
+            if kitty_supported {
+                if let Some(pixels) = term_events
+                    .probe_cell_pixels(|query| self.platform.write_terminal_control(query))
+                    .await
+                {
+                    crate::content::display_layout::set_kitty_cell_pixels(Some(pixels));
+                }
+            }
+        }
         // Independent SIGWINCH listener: crossterm's Unix signal source intermittently
         // drops resize events (signal-hook-mio counter / mio readiness race), so we keep
         // our own tokio-native handler there. Both fire on resize; the duplicate just
@@ -3953,11 +3971,27 @@ impl TuiApp {
                 }
 
                 Some(_) = window_change => {
+                    #[cfg(unix)]
+                    if std::env::var_os("TMUX").is_some() && kitty_supported {
+                        // A font change can alter cell pixels without changing rows or columns.
+                        crate::content::display_layout::set_kitty_cell_pixels(None);
+                    }
+                    #[cfg(unix)]
+                    if kitty_supported {
+                        let pixels = term_events
+                            .probe_cell_pixels(|query| self.platform.write_terminal_control(query))
+                            .await;
+                        if std::env::var_os("TMUX").is_some() {
+                            crate::content::display_layout::set_kitty_cell_pixels(pixels);
+                        } else if let Some(pixels) = pixels {
+                            crate::content::display_layout::set_kitty_cell_pixels(Some(pixels));
+                        }
+                    }
                     if let Ok((w, h)) = terminal::size() {
                         if w != self.last_width || h != self.last_height {
                             self.handle_resize(w, h);
-                            self.render_normal();
                         }
+                        self.render_normal();
                     }
                 }
 

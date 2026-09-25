@@ -1,3 +1,4 @@
+use base64::Engine;
 use std::{
     borrow::Cow,
     cell::{OnceCell, RefCell},
@@ -5,7 +6,10 @@ use std::{
     hash::{Hash, Hasher},
     ops::Range,
     rc::Rc,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 
 use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
@@ -18,14 +22,307 @@ use smelt_core::content::highlight::{
 };
 use smelt_core::content::inline_line::BreakPolicy;
 use smelt_core::content::markdown_ir::{
-    markdown_nodes_retained_bytes, parse_markdown_with_options, MarkdownLine, MarkdownNode,
-    MarkdownTextKind,
+    markdown_nodes_retained_bytes, math_body, math_rows, parse_markdown_with_options, MarkdownLine,
+    MarkdownNode, MarkdownTextKind,
 };
 use smelt_core::content::{is_markdown_list_item, split_markdown_list_prefix};
 use smelt_core::theme::intern;
 use smelt_core::transcript_content::{
     ContentId, ContentRead, ContentTextWindow, TranscriptContent,
 };
+
+use smelt_core::buffer::{AtomicObject, AtomicSpan, SpanMeta};
+use smelt_term::{RasterImage, KITTY_IMAGE_ROWS};
+
+static NEXT_MATH_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
+const MIN_DISPLAY_MATH_SCALE: f32 = 0.8;
+
+#[derive(Clone, PartialEq, Eq)]
+struct MathImageKey {
+    source: String,
+    light: bool,
+    geometry: (u32, u32),
+    inline: bool,
+    fit_cols: Option<u16>,
+}
+
+struct MathRaster {
+    rows: Vec<String>,
+    id: u32,
+    cols: u16,
+    png: Arc<str>,
+    image: Option<Arc<RasterImage>>,
+}
+
+#[derive(Default)]
+struct MathImageCache {
+    // Front is least recently used. None memoizes unsupported/oversized input.
+    entries: VecDeque<(MathImageKey, Option<MathRaster>)>,
+}
+
+impl MathImageCache {
+    fn raster(
+        &mut self,
+        key: MathImageKey,
+        max_cols: usize,
+    ) -> Option<(Vec<String>, Arc<RasterImage>)> {
+        if let Some(image) = self.raster_variant(key.clone(), max_cols) {
+            return Some(image);
+        }
+        if key.inline {
+            return None;
+        }
+        let fit_cols = u16::try_from(max_cols).ok()?;
+        self.raster_variant(
+            MathImageKey {
+                fit_cols: Some(fit_cols),
+                ..key
+            },
+            max_cols,
+        )
+    }
+
+    fn raster_variant(
+        &mut self,
+        key: MathImageKey,
+        max_cols: usize,
+    ) -> Option<(Vec<String>, Arc<RasterImage>)> {
+        let entry = if let Some(index) = self.entries.iter().position(|(cached, _)| *cached == key)
+        {
+            self.entries.remove(index)?.1
+        } else {
+            render_math_png(
+                &key.source,
+                key.fit_cols.map_or(u16::MAX as usize, usize::from),
+                key.light,
+                key.geometry,
+                key.inline,
+                key.fit_cols.map_or(1.0, |_| MIN_DISPLAY_MATH_SCALE),
+            )
+            .and_then(|(png, cols, rows)| {
+                let png: Arc<str> = base64::engine::general_purpose::STANDARD.encode(png).into();
+                if png.len() > 2 * 1024 * 1024 {
+                    return None;
+                }
+                let id = NEXT_MATH_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
+                Some(MathRaster {
+                    rows: (0..rows)
+                        .map(|row| smelt_term::kitty_placeholder_row(row, cols))
+                        .collect(),
+                    id,
+                    cols,
+                    png,
+                    image: None,
+                })
+            })
+        };
+        self.entries.push_back((key, entry));
+        while self.entries.len() > 64 || self.retained_bytes() > 8 * 1024 * 1024 {
+            self.entries.pop_front();
+        }
+        let raster = self.entries.back_mut()?.1.as_mut()?;
+        if usize::from(raster.cols) > max_cols {
+            return None;
+        }
+        if raster.image.is_none() {
+            // A full live-asset budget does not discard the raster. Retry admission
+            // cheaply when rows or cache entries have released their handles.
+            raster.image = smelt_term::register_kitty_image(
+                raster.id,
+                Arc::clone(&raster.png),
+                raster.cols,
+                raster.rows.len() as u16,
+            );
+        }
+        Some((raster.rows.clone(), Arc::clone(raster.image.as_ref()?)))
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|(key, raster)| {
+                key.source.capacity()
+                    + raster.as_ref().map_or(0, |raster| {
+                        raster.png.len() + raster.rows.iter().map(String::capacity).sum::<usize>()
+                    })
+            })
+            .sum()
+    }
+}
+
+fn math_image_cache() -> &'static Mutex<MathImageCache> {
+    static CACHE: OnceLock<Mutex<MathImageCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(MathImageCache::default()))
+}
+
+fn graphic_math_rows(
+    source: &str,
+    max_cols: usize,
+    light: bool,
+    geometry: (u32, u32),
+) -> Option<(Vec<String>, Arc<RasterImage>)> {
+    raster_math_rows(source, max_cols, light, geometry, false)
+}
+
+fn raster_math_rows(
+    source: &str,
+    max_cols: usize,
+    light: bool,
+    (cell_w, cell_h): (u32, u32),
+    inline: bool,
+) -> Option<(Vec<String>, Arc<RasterImage>)> {
+    if max_cols == 0 || source.len() > 8192 || cell_w == 0 || cell_h == 0 {
+        return None;
+    }
+    let key = MathImageKey {
+        source: math_body(source).to_string(),
+        light,
+        geometry: (cell_w, cell_h),
+        inline,
+        fit_cols: None,
+    };
+    math_image_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .raster(key, max_cols)
+}
+
+fn render_math_png(
+    source: &str,
+    max_cols: usize,
+    light: bool,
+    (cell_w, cell_h): (u32, u32),
+    inline: bool,
+    min_scale: f32,
+) -> Option<(Vec<u8>, u16, usize)> {
+    if max_cols == 0 || source.len() > 8192 || cell_w == 0 || cell_h == 0 {
+        return None;
+    }
+    let ast = ratex_parser::parser::parse(math_body(source)).ok()?;
+    let ink = if light { 24.0 } else { 230.0 } / 255.0;
+    let layout = ratex_layout::layout(
+        &ast,
+        &ratex_layout::LayoutOptions::default()
+            .with_style(if inline {
+                ratex_types::math_style::MathStyle::Text
+            } else {
+                ratex_types::math_style::MathStyle::Display
+            })
+            .with_color(ratex_types::color::Color::rgb(ink, ink, ink)),
+    );
+    let display = ratex_layout::to_display_list(&layout);
+    let base_font_size = (cell_h as f32 * if inline { 0.7 } else { 1.0 }).clamp(8.0, 192.0);
+    let available_pixels = max_cols.min(u16::MAX as usize) as u64 * u64::from(cell_w);
+    let font_size = base_font_size.min(((available_pixels as f64 - 2.0) / display.width) as f32);
+    if !font_size.is_finite() || font_size < 8.0 || font_size < base_font_size * min_scale {
+        return None;
+    }
+    let options = ratex_render::RenderOptions {
+        font_size,
+        padding: 1.0,
+        background_color: ratex_types::color::Color::new(0.0, 0.0, 0.0, 0.0),
+        font_dir: String::new(),
+        device_pixel_ratio: 1.0,
+    };
+    let pixels_w = display.width * f64::from(font_size) + 2.0;
+    let pixels_h = display.total_height() * f64::from(font_size) + 2.0;
+    if !pixels_w.is_finite()
+        || !pixels_h.is_finite()
+        || pixels_w < 1.0
+        || pixels_h < 1.0
+        || pixels_w.ceil() * pixels_h.ceil() > 4_000_000.0
+        || pixels_w > (max_cols.min(u16::MAX as usize) as u64 * u64::from(cell_w)) as f64
+        || pixels_h > (if inline { 1 } else { KITTY_IMAGE_ROWS } as u64 * u64::from(cell_h)) as f64
+    {
+        return None;
+    }
+    let png = ratex_render::render_to_png(&display, &options).ok()?;
+    let image = tiny_skia::Pixmap::decode_png(&png).ok()?;
+    let cols = image.width().div_ceil(cell_w).max(1);
+    let rows = image.height().div_ceil(cell_h).max(1) as usize;
+    if cols > max_cols.min(u16::MAX as usize) as u32
+        || rows > if inline { 1 } else { KITTY_IMAGE_ROWS }
+    {
+        return None;
+    }
+    let width = cols.checked_mul(cell_w)?;
+    let height = (rows as u32).checked_mul(cell_h)?;
+    if u64::from(width) * u64::from(height) > 4_000_000 {
+        return None;
+    }
+    // Virtual placements occupy whole cells. Transparent padding prevents the
+    // terminal from stretching glyphs to the rounded placement dimensions.
+    let mut padded = tiny_skia::Pixmap::new(width, height)?;
+    let top = if inline {
+        (f64::from(cell_h) * 0.75 - (display.height * f64::from(font_size) + 1.0))
+            .round()
+            .clamp(0.0, f64::from(height - image.height())) as i32
+    } else {
+        0
+    };
+    padded.draw_pixmap(
+        0,
+        top,
+        image.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        tiny_skia::Transform::identity(),
+        None,
+    );
+    Some((padded.encode_png().ok()?, cols as u16, rows))
+}
+
+fn wrap_markdown_spans(
+    spans: &[InlineSpan],
+    max_cols: usize,
+    options: &InlineOptions,
+) -> Vec<Vec<InlineSpan>> {
+    if !options.math_graphics {
+        return wrap_inline_spans(spans, max_cols);
+    }
+    let Some(geometry) = crate::content::display_layout::kitty_cell_pixels() else {
+        return wrap_inline_spans(spans, max_cols);
+    };
+    let mut prepared = spans.to_vec();
+    prepare_inline_math(&mut prepared, max_cols, options.file_icons.light, geometry);
+    wrap_inline_spans(&prepared, max_cols)
+}
+
+fn prepare_inline_math(
+    spans: &mut [InlineSpan],
+    max_cols: usize,
+    light: bool,
+    geometry: (u32, u32),
+) {
+    for span in spans {
+        let Some(body) = &span.math else { continue };
+        if let Some((rows, image)) = raster_math_rows(body, max_cols, light, geometry, true) {
+            span.text = rows[0].clone();
+            span.break_policy = BreakPolicy::Unbreakable;
+            span.style = InlineStyle::default();
+            span.meta.atomic = Some(AtomicSpan {
+                object: AtomicObject::new(image),
+                row: 0,
+            });
+        }
+    }
+}
+
+fn markdown_math_rows(
+    source: &str,
+    width: usize,
+    options: &InlineOptions,
+) -> (Vec<String>, Option<Arc<RasterImage>>) {
+    if options.math_graphics {
+        if let Some(geometry) = crate::content::display_layout::kitty_cell_pixels() {
+            if let Some((rows, id)) =
+                graphic_math_rows(source, width, options.file_icons.light, geometry)
+            {
+                return (rows, Some(id));
+            }
+        }
+    }
+    (math_rows(source, width), None)
+}
 
 pub fn render_markdown_inner(
     out: &mut LineBuilder,
@@ -908,7 +1205,7 @@ fn shift_markdown_nodes(nodes: &mut [MarkdownNode], offset: usize) {
                     shift(line);
                 }
             }
-            MarkdownNode::Table { range, .. } => shift(range),
+            MarkdownNode::Math { range } | MarkdownNode::Table { range, .. } => shift(range),
         }
     }
 }
@@ -1156,6 +1453,33 @@ fn render_markdown_docs_from_state<'a>(
                     state.last_content_was_heading = false;
                     state.prev_was_block = true;
                 }
+                MarkdownNode::Math { range } => {
+                    render_block_gap(out, state, clip);
+                    let source = block.source.slice(range.clone());
+                    let (rows, image) = markdown_math_rows(&source, max_cols, inline_options);
+                    let object = image.map(AtomicObject::new);
+                    let first = out.line_count();
+                    for (index, row) in rows.iter().enumerate() {
+                        if should_emit(clip, state.rows) {
+                            out.print(indent);
+                            out.print_with_meta(
+                                row,
+                                SpanMeta {
+                                    atomic: object.as_ref().map(|object| AtomicSpan {
+                                        object: Arc::clone(object),
+                                        row: index as u16,
+                                    }),
+                                    ..SpanMeta::default()
+                                },
+                            );
+                            out.newline();
+                        }
+                        state.rows = state.rows.saturating_add(1);
+                    }
+                    out.stamp_atomic_copy_group(first, source.trim_end());
+                    state.last_content_was_heading = false;
+                    state.prev_was_block = true;
+                }
                 MarkdownNode::Table {
                     range,
                     alignments,
@@ -1309,6 +1633,7 @@ fn markdown_block_range_has_visible_text(
                     *kind,
                     max_cols,
                     dim,
+                    inline_options,
                     clip,
                     &mut state,
                 ) {
@@ -1324,6 +1649,19 @@ fn markdown_block_range_has_visible_text(
                 if clip.intersects(state.rows, rows)
                     && code_lines.iter().any(|line| !line.trim().is_empty())
                 {
+                    return true;
+                }
+                state.rows = state.rows.saturating_add(rows);
+                state.last_content_was_heading = false;
+                state.prev_was_block = true;
+            }
+            MarkdownNode::Math { range } => {
+                measure_block_gap(&mut state);
+                let source = block.source.slice(range.clone());
+                let rows = markdown_math_rows(&source, max_cols, inline_options)
+                    .0
+                    .len();
+                if clip.intersects(state.rows, rows) {
                     return true;
                 }
                 state.rows = state.rows.saturating_add(rows);
@@ -1429,7 +1767,15 @@ fn measure_markdown_doc(
                 );
             }
             MarkdownNode::Text { lines, kind, .. } => {
-                measure_text_lines(block.source, lines, *kind, max_cols, dim, state);
+                measure_text_lines(
+                    block.source,
+                    lines,
+                    *kind,
+                    max_cols,
+                    dim,
+                    inline_options,
+                    state,
+                );
             }
             MarkdownNode::Code { lang, body, .. } => {
                 measure_block_gap(state);
@@ -1439,6 +1785,17 @@ fn measure_markdown_doc(
                 state.rows = state
                     .rows
                     .saturating_add(measure_code_block(&code_block, width));
+                state.last_content_was_heading = false;
+                state.prev_was_block = true;
+            }
+            MarkdownNode::Math { range } => {
+                measure_block_gap(state);
+                let source = block.source.slice(range.clone());
+                state.rows = state.rows.saturating_add(
+                    markdown_math_rows(&source, max_cols, inline_options)
+                        .0
+                        .len(),
+                );
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
@@ -1557,6 +1914,7 @@ fn measure_text_lines(
     kind: MarkdownTextKind,
     max_cols: usize,
     dim: bool,
+    inline_options: &InlineOptions,
     state: &mut MeasureState,
 ) {
     let source_lines = markdown_source_lines(source, lines);
@@ -1565,6 +1923,7 @@ fn measure_text_lines(
         max_cols,
         dim,
         kind,
+        inline_options,
     };
     walk_text_lines(
         lines.len(),
@@ -1605,12 +1964,14 @@ fn source_lines_range_has_visible_text(
     sink.found
 }
 
+#[allow(clippy::too_many_arguments)]
 fn text_lines_range_has_visible_text(
     source: MarkdownSource<'_>,
     lines: &[MarkdownLine],
     kind: MarkdownTextKind,
     max_cols: usize,
     dim: bool,
+    inline_options: &InlineOptions,
     clip: RowClip,
     state: &mut FlowState,
 ) -> bool {
@@ -1620,6 +1981,7 @@ fn text_lines_range_has_visible_text(
         max_cols,
         dim,
         kind,
+        inline_options,
         clip,
         found: false,
     };
@@ -1810,7 +2172,7 @@ impl TextFlowSink for MeasureSourceSink<'_> {
         let spans = fallback_markdown_line_spans(line, self.kind, self.dim, self.inline_options);
         state.rows = state
             .rows
-            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len());
+            .saturating_add(wrap_markdown_spans(&spans, self.max_cols, self.inline_options).len());
     }
 }
 
@@ -1819,6 +2181,7 @@ struct MeasureIrSink<'a> {
     max_cols: usize,
     dim: bool,
     kind: MarkdownTextKind,
+    inline_options: &'a InlineOptions,
 }
 
 impl TextFlowSink for MeasureIrSink<'_> {
@@ -1835,7 +2198,7 @@ impl TextFlowSink for MeasureIrSink<'_> {
         let spans = markdown_line_spans(line, &self.lines[index].spans, self.kind, self.dim);
         state.rows = state
             .rows
-            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len());
+            .saturating_add(wrap_markdown_spans(&spans, self.max_cols, self.inline_options).len());
     }
 }
 
@@ -1860,7 +2223,14 @@ impl TextFlowSink for ProbeSourceSink<'_> {
 
     fn emit_line(&mut self, _index: usize, line: &str, state: &mut FlowState) {
         let spans = fallback_markdown_line_spans(line, self.kind, self.dim, self.inline_options);
-        probe_markdown_line(&spans, self.max_cols, self.clip, state, &mut self.found);
+        probe_markdown_line(
+            &spans,
+            self.max_cols,
+            self.inline_options,
+            self.clip,
+            state,
+            &mut self.found,
+        );
     }
 
     fn done(&self, state: &FlowState) -> bool {
@@ -1873,6 +2243,7 @@ struct ProbeIrSink<'a> {
     max_cols: usize,
     dim: bool,
     kind: MarkdownTextKind,
+    inline_options: &'a InlineOptions,
     clip: RowClip,
     found: bool,
 }
@@ -1889,7 +2260,14 @@ impl TextFlowSink for ProbeIrSink<'_> {
 
     fn emit_line(&mut self, index: usize, line: &str, state: &mut FlowState) {
         let spans = markdown_line_spans(line, &self.lines[index].spans, self.kind, self.dim);
-        probe_markdown_line(&spans, self.max_cols, self.clip, state, &mut self.found);
+        probe_markdown_line(
+            &spans,
+            self.max_cols,
+            self.inline_options,
+            self.clip,
+            state,
+            &mut self.found,
+        );
     }
 
     fn done(&self, state: &FlowState) -> bool {
@@ -1900,11 +2278,12 @@ impl TextFlowSink for ProbeIrSink<'_> {
 fn probe_markdown_line(
     spans: &[InlineSpan],
     max_cols: usize,
+    inline_options: &InlineOptions,
     clip: RowClip,
     state: &mut FlowState,
     found: &mut bool,
 ) {
-    for row_spans in wrap_inline_spans(spans, max_cols) {
+    for row_spans in wrap_markdown_spans(spans, max_cols, inline_options) {
         if clip.contains(state.rows) && inline_spans_have_visible_text(&row_spans) {
             *found = true;
         }
@@ -1986,7 +2365,7 @@ fn render_markdown_line(
     ctx: &RenderTextCtx<'_>,
     state: &mut RenderState,
 ) {
-    let wrapped = wrap_inline_spans(spans, ctx.max_cols);
+    let wrapped = wrap_markdown_spans(spans, ctx.max_cols, ctx.inline_options);
     for segment in wrapped_segments(out, &wrapped) {
         if should_emit(ctx.clip, state.rows) {
             segment.emit_with_source(out, line, |out, row_spans, _| {
@@ -2066,6 +2445,7 @@ fn markdown_line_spans(
                 },
                 meta: Default::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             });
         }
         if !prefix.is_empty() {
@@ -2077,6 +2457,7 @@ fn markdown_line_spans(
                 },
                 meta: Default::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             });
         }
         line_spans.extend(base_spans.iter().cloned().map(|mut span| {
@@ -2117,6 +2498,389 @@ fn render_horizontal_rule(
 mod tests {
     use super::*;
     use smelt_core::content::builder::test_util::render_test;
+
+    #[test]
+    fn math_block_projects_and_copies_from_original_source() {
+        let md = "The gradient is\n\n\\[\n\\frac{\\partial E}{\\partial\\theta_0}\\approx\\boxed{0.37062}\n\\]\n\nNext step.";
+        let options = InlineOptions::default();
+        let full = render_test(60, |sink| {
+            render_markdown_inner_with_options(sink, md, 60, "", false, None, &options);
+        });
+        let rows: Vec<&str> = full.lines.iter().map(|line| line.text.as_str()).collect();
+        assert!(rows.iter().any(|row| row.contains("⟦0.37062⟧")));
+        assert!(rows.iter().any(|row| row.contains("Next step.")));
+        assert_eq!(
+            measure_markdown_inner_with_options(md, 60, "", false, None, &options),
+            rows.len()
+        );
+        for (start, row) in rows.iter().enumerate() {
+            let range = render_test(60, |sink| {
+                render_markdown_inner_range_with_options(
+                    sink, md, 60, "", false, None, &options, start, 1,
+                );
+            });
+            assert_eq!(range.lines[0].text, *row);
+        }
+    }
+
+    #[test]
+    fn copying_any_part_of_display_math_yields_the_markdown_source() {
+        let source = "\\[\n\\frac{a}{b}\n\\]";
+        let (buf, _) = smelt_core::content::builder::render_into_fresh(
+            60,
+            &smelt_core::theme::Theme::default(),
+            |out| {
+                render_markdown_inner(out, source, 60, "", false, None);
+            },
+        );
+        let first_row = buf.get_line(0).unwrap();
+        assert_ne!(first_row, source);
+        assert_eq!(smelt_buffer::coords::copy_byte_range(&buf, 0, 1), source);
+        let later_row = first_row.len() + 1;
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(
+                &buf,
+                later_row,
+                later_row + buf.get_line(1).unwrap().len()
+            ),
+            source
+        );
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(
+                &buf,
+                0,
+                buf.lines().iter().map(|line| line.len() + 1).sum::<usize>(),
+            ),
+            source
+        );
+
+        let (buf, _) = smelt_core::content::builder::render_into_fresh(
+            60,
+            &smelt_core::theme::Theme::default(),
+            |out| {
+                render_markdown_inner(
+                    out,
+                    &format!("before\n\n{source}\n\nafter"),
+                    60,
+                    "",
+                    false,
+                    None,
+                );
+            },
+        );
+        let rendered = buf.lines().join("\n");
+        let start = rendered.find("before").unwrap();
+        let end = rendered.find("after").unwrap() + "after".len();
+        let copied = smelt_buffer::coords::copy_byte_range(&buf, start, end);
+        assert_eq!(copied.matches(source).count(), 1, "{copied:?}");
+        assert!(copied.starts_with("before"), "{copied:?}");
+        assert!(copied.ends_with("after"), "{copied:?}");
+    }
+
+    #[test]
+    fn mouse_range_copy_survives_virtual_row_replay() {
+        let source = r"\[\frac{a}{b}\]";
+        let (scratch, _) = smelt_core::content::builder::render_into_fresh(
+            60,
+            &smelt_core::theme::Theme::default(),
+            |out| {
+                render_markdown_inner(
+                    out,
+                    &format!("before\n\n{source}\n\nafter"),
+                    60,
+                    "",
+                    false,
+                    None,
+                );
+            },
+        );
+        let (projected, _) = smelt_core::content::builder::render_into_fresh(
+            60,
+            &smelt_core::theme::Theme::default(),
+            |out| {
+                emit_temp_rows(
+                    out,
+                    &scratch,
+                    60,
+                    0,
+                    scratch.line_count(),
+                    RowClip {
+                        start: 0,
+                        end: scratch.line_count(),
+                    },
+                    None,
+                );
+            },
+        );
+        let text = projected.lines().join("\n");
+        let start = text.find("before").unwrap() + 2;
+        let end = text.find("after").unwrap() + 3;
+        let copy = smelt_buffer::coords::copy_byte_range(&projected, start, end);
+        assert!(copy.starts_with("fore"), "{copy:?}");
+        assert_eq!(copy.matches(source).count(), 1, "{copy:?}");
+        assert!(copy.ends_with("aft"), "{copy:?}");
+        assert!(!copy.contains('\u{10eeee}'), "{copy:?}");
+    }
+
+    #[test]
+    fn narrow_transcript_keeps_fraction_intact_before_approximation() {
+        let md = r"\[\frac{0(0.5-0)+1(0.73106-0)+2(0.88080-1)}{3}\approx0.16422.\]";
+        let rendered = render_test(57, |sink| {
+            render_markdown_inner(sink, md, 57, "", false, None);
+        });
+        let rows: Vec<&str> = rendered
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        let bar = rows.iter().position(|row| row.contains('─')).unwrap();
+        assert!(rows[bar + 1].trim().contains('3'), "{rows:#?}");
+        assert!(rows[bar + 2].contains("≈ 0.16422"), "{rows:#?}");
+    }
+
+    #[test]
+    fn raster_is_reclaimed_after_the_last_cached_or_displayed_use() {
+        let key = MathImageKey {
+            source: "x=921".into(),
+            light: false,
+            geometry: (10, 20),
+            inline: false,
+            fit_cols: None,
+        };
+        let mut cache = MathImageCache::default();
+        let (_, image) = cache.raster(key, 80).unwrap();
+        let id = image.id;
+        drop(image);
+        assert!(smelt_term::kitty_image_exists(id));
+        drop(cache);
+        assert!(!smelt_term::kitty_image_exists(id));
+    }
+
+    #[test]
+    fn resizing_reuses_the_same_math_raster() {
+        let source = r"\[x=137\]";
+        let (_, first) = graphic_math_rows(source, 80, false, (10, 20)).unwrap();
+        for width in [40, 120, 60, 80] {
+            let (_, resized) = graphic_math_rows(source, width, false, (10, 20)).unwrap();
+            assert_eq!(
+                resized, first,
+                "viewport width {width} duplicated the raster"
+            );
+        }
+    }
+
+    #[test]
+    fn display_math_scales_moderately_before_falling_back_to_unicode() {
+        let source = r"\[a+b+c+d+e+f+g+h+i+j+k+l+m+n\]";
+        let (original_rows, original) = graphic_math_rows(source, 80, false, (10, 20)).unwrap();
+        let narrower = usize::from(original.cols) * 9 / 10;
+        assert!(narrower < usize::from(original.cols));
+        let (fitted_rows, fitted) = graphic_math_rows(source, narrower, false, (10, 20))
+            .expect("slightly oversized display math should be rerendered at a smaller font");
+        assert!(usize::from(fitted.cols) <= narrower);
+        assert_ne!(fitted.id, original.id);
+        assert!(fitted_rows.len() <= original_rows.len());
+        assert_eq!(
+            graphic_math_rows(source, narrower, false, (10, 20))
+                .unwrap()
+                .1
+                .id,
+            fitted.id
+        );
+        assert_eq!(
+            graphic_math_rows(source, 80, false, (10, 20)).unwrap().1.id,
+            original.id
+        );
+        assert!(
+            graphic_math_rows(source, usize::from(original.cols) / 2, false, (10, 20)).is_none()
+        );
+
+        let (_, inline) = raster_math_rows(source, 80, false, (10, 20), true).unwrap();
+        assert!(
+            raster_math_rows(source, usize::from(inline.cols) - 1, false, (10, 20), true).is_none()
+        );
+    }
+
+    #[test]
+    fn kitty_math_rasterizes_and_positions_rows() {
+        let (rows, id) = graphic_math_rows(
+            r"\[\frac{\partial E}{\partial\theta_0}\approx\boxed{0.37062}\]",
+            80,
+            false,
+            (10, 20),
+        )
+        .expect("RaTeX math PNG");
+        assert!(id.id > 0);
+        assert!(!rows.is_empty());
+        let (larger_cells, larger_id) = graphic_math_rows(
+            r"\[\frac{\partial E}{\partial\theta_0}\approx\boxed{0.37062}\]",
+            80,
+            false,
+            (12, 24),
+        )
+        .unwrap();
+        assert_ne!(larger_id, id);
+        assert!(larger_cells.len() <= rows.len());
+        assert!(rows[0].starts_with("\u{10eeee}\u{305}\u{305}"));
+        assert!(graphic_math_rows(r"\[\frac{a}{b}\]", 1, false, (10, 20)).is_none());
+        assert!(graphic_math_rows(r"\[\frac{a}{b}\]", 80, false, (0, 20)).is_none());
+        assert_eq!(
+            rows.len(),
+            graphic_math_rows(
+                r"\[\frac{\partial E}{\partial\theta_0}\approx\boxed{0.37062}\]",
+                80,
+                false,
+                (10, 20)
+            )
+            .unwrap()
+            .0
+            .len()
+        );
+        let mut compositor = smelt_term::Compositor::new(1, 1);
+        compositor
+            .render_with(&smelt_term::Theme::default(), &mut Vec::new(), |_, _| {})
+            .unwrap();
+        assert!(smelt_term::kitty_image_exists(id.id));
+        let (_, restored_id) = graphic_math_rows(
+            r"\[\frac{\partial E}{\partial\theta_0}\approx\boxed{0.37062}\]",
+            80,
+            false,
+            (10, 20),
+        )
+        .unwrap();
+        assert_eq!(restored_id, id);
+        for latex in [
+            r"\[h(0)=0.5,\qquad h(1)\approx0.73106,\qquad h(2)\approx0.88080.\]",
+            r"\[\frac{0(0.5)+1(0.73106)+2(0.88080-1)}{3}\approx0.16422.\]",
+            r"\[\theta_0^{(1)}=0-0.1(0.37062)\approx\boxed{-0.03706},\qquad\theta_1^{(1)}=1-0.1(1.16422)\approx\boxed{0.88358}.\]",
+        ] {
+            assert!(
+                graphic_math_rows(latex, 160, false, (10, 20)).is_some(),
+                "{latex}"
+            );
+        }
+    }
+
+    #[test]
+    fn graphic_matrix_rasterizes_to_multiline_alpha_png() {
+        let source = r"\[\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}\]";
+        let (rows, id) = graphic_math_rows(source, 80, false, (10, 20))
+            .expect("RaTeX should render a 3x3 matrix within the viewport");
+        assert!(rows.len() >= 3, "matrix must occupy multiple terminal rows");
+        assert!(rows.len() <= KITTY_IMAGE_ROWS);
+        assert!(rows.iter().all(|row| row.starts_with('\u{10eeee}')));
+        assert!(smelt_term::kitty_image_exists(id.id));
+
+        let (png, cols, height) = render_math_png(source, 80, false, (10, 20), false, 1.0).unwrap();
+        let image = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(image.width(), u32::from(cols) * 10);
+        assert_eq!(image.height(), height as u32 * 20);
+        assert!(image.pixels().iter().any(|pixel| pixel.alpha() == 0));
+        assert!(image.pixels().iter().any(|pixel| pixel.alpha() > 0));
+
+        // Parentheses must extend above and below every numeric row at either size.
+        let check_alignment = |image: &tiny_skia::Pixmap| {
+            let ink: Vec<_> = (0..image.height())
+                .flat_map(|y| {
+                    (0..image.width())
+                        .filter_map(move |x| (image.pixel(x, y)?.alpha() > 64).then_some((x, y)))
+                })
+                .collect();
+            let left = ink.iter().map(|&(x, _)| x).min().unwrap();
+            let right = ink.iter().map(|&(x, _)| x).max().unwrap();
+            let width = right - left;
+            let edge: Vec<_> = ink
+                .iter()
+                .filter(|&&(x, _)| x < left + width / 10 || x > right - width / 10)
+                .map(|&(_, y)| y)
+                .collect();
+            let numbers: Vec<_> = ink
+                .iter()
+                .filter(|&&(x, _)| x > left + width / 5 && x < right - width / 5)
+                .map(|&(_, y)| y)
+                .collect();
+            assert!(!edge.is_empty() && !numbers.is_empty());
+            assert!(
+                edge.iter().min() <= numbers.iter().min(),
+                "parentheses start below the numbers"
+            );
+            assert!(
+                edge.iter().max() >= numbers.iter().max(),
+                "bottom numbers extend below the parentheses"
+            );
+        };
+        check_alignment(&image);
+        let (_, narrow_cells, _) = render_math_png(source, 80, false, (5, 20), false, 1.0).unwrap();
+        let fit_cols = usize::from(narrow_cells) * 9 / 10;
+        let (scaled_png, scaled_cols, _) = render_math_png(
+            source,
+            fit_cols,
+            false,
+            (5, 20),
+            false,
+            MIN_DISPLAY_MATH_SCALE,
+        )
+        .unwrap();
+        assert!(usize::from(scaled_cols) <= fit_cols);
+        check_alignment(&tiny_skia::Pixmap::decode_png(&scaled_png).unwrap());
+    }
+
+    #[test]
+    fn inline_graphics_fit_one_row_wrap_atomically_and_copy_raw_markdown() {
+        let source = r"before $x=1$ and \(\alpha=2\) after";
+        let mut spans = parse_inline_spans_with_options(source, false, &InlineOptions::default());
+        prepare_inline_math(&mut spans, 80, false, (10, 20));
+        let graphics: Vec<_> = spans.iter().filter(|span| span.math.is_some()).collect();
+        assert_eq!(graphics.len(), 2);
+        assert!(graphics
+            .iter()
+            .all(|span| span.text.starts_with('\u{10eeee}')));
+        let theme = smelt_core::theme::Theme::default();
+        let (buf, _) = smelt_core::content::builder::render_into_fresh(80, &theme, |out| {
+            emit_inline_spans(out, &spans);
+            out.newline();
+        });
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(&buf, 0, buf.text().len()),
+            source
+        );
+        let marker = buf.get_line(0).unwrap().find('\u{10eeee}').unwrap();
+        let first_cell_bytes = smelt_buffer::cell_width::grapheme_indices(&graphics[0].text)
+            .next()
+            .unwrap()
+            .1
+            .len();
+        assert_eq!(
+            smelt_buffer::coords::copy_byte_range(&buf, marker, marker + first_cell_bytes),
+            "$x=1$"
+        );
+        let wrapped = wrap_inline_spans(&spans, 12);
+        for image in graphics {
+            assert_eq!(
+                wrapped
+                    .iter()
+                    .flatten()
+                    .filter(|span| span.text == image.text && span.math == image.math)
+                    .count(),
+                1
+            );
+        }
+        let (png, cols, rows) = render_math_png("x=1", 80, false, (10, 20), true, 1.0).unwrap();
+        let image = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(image.width(), u32::from(cols) * 10);
+        assert_eq!(image.height(), 20);
+        assert!(image.pixels().iter().any(|pixel| pixel.alpha() == 0));
+        assert!(render_math_png(
+            r"\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}",
+            80,
+            false,
+            (10, 20),
+            true,
+            1.0
+        )
+        .is_none());
+    }
 
     #[test]
     fn markdown_range_matches_full_render_slice() {
@@ -2276,7 +3040,7 @@ mod tests {
         let content = TranscriptContent::from("# café".to_string());
         content.append_owned(" heading\n\nParagraph with **bold** 東京.\n\n```rust\n".to_string());
         content.append_owned("fn main() {}\n```\n\n| col | value |\n| --- | --- |\n".to_string());
-        content.append_owned("| α | β |\n\nAfter table.".to_string());
+        content.append_owned("| α | β |\n\nAfter table.\n\n\\[\\frac{a}{b}\\]".to_string());
         let snapshot = content.snapshot();
         let options = InlineOptions::default();
 
@@ -2301,6 +3065,7 @@ mod tests {
         for (retained, contiguous) in retained.lines.iter().zip(&contiguous.lines) {
             assert_eq!(retained.text, contiguous.text);
             assert_eq!(retained.source_text, contiguous.source_text);
+            assert_eq!(retained.atomic_source_text, contiguous.atomic_source_text);
             assert_eq!(
                 retained.external_source_text,
                 contiguous.external_source_text

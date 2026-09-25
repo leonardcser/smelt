@@ -162,6 +162,7 @@ macro_rules! settings {
     };
     (@effect vim) => { SettingEffect::Input };
     (@effect system_clipboard) => { SettingEffect::Input };
+    (@effect math_rendering) => { SettingEffect::Render };
     (@effect show_tps) => { SettingEffect::Render };
     (@effect show_tokens) => { SettingEffect::Render };
     (@effect show_cost) => { SettingEffect::Render };
@@ -200,6 +201,8 @@ settings! {
     auto_compact:          Bool   = true;
     /// Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session.
     auto_continue:         String = "goal", choices: ["off", "goal", "always"];
+    /// Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported).
+    math_rendering:        String = "graphics", choices: ["unicode", "graphics"];
     /// Tokens/sec in status bar.
     show_tps:              Bool   = true;
     /// Context token count in status bar.
@@ -712,6 +715,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn math_rendering_defaults_to_graphics_and_validates_choices() {
+        let mut settings = ResolvedSettings::default();
+        assert_eq!(settings.math_rendering, "graphics");
+        settings
+            .set("math_rendering", &SettingValue::String("unicode".into()))
+            .unwrap();
+        assert_eq!(settings.math_rendering, "unicode");
+        assert!(settings
+            .set("math_rendering", &SettingValue::String("unknown".into()))
+            .is_err());
+    }
+
+    #[test]
     fn resolve_models_from_config() {
         let cfg = Config {
             providers: vec![
@@ -906,6 +922,7 @@ mod tests {
         let expected = [
             ("vim", SettingEffect::Input),
             ("system_clipboard", SettingEffect::Input),
+            ("math_rendering", SettingEffect::Render),
             ("show_tps", SettingEffect::Render),
             ("show_tokens", SettingEffect::Render),
             ("show_cost", SettingEffect::Render),

@@ -1139,6 +1139,7 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_resize(&mut self, w: u16, h: u16) {
+        crate::content::display_layout::update_kitty_geometry();
         let width_changed = w != self.last_width;
         self.last_width = w;
         self.last_height = h;

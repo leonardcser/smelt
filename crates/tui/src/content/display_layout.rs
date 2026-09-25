@@ -18,9 +18,55 @@ use smelt_core::transcript_model::{Block, BlockHistory, Status, ViewState};
 use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 12;
+// Zero means the terminal has not acknowledged the graphics probe or has no pixel geometry.
+static KITTY_CELL_PIXELS: AtomicU64 = AtomicU64::new(0);
+static KITTY_PROBED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_kitty_probe_result(supported: bool) {
+    KITTY_PROBED.store(supported, Ordering::Relaxed);
+    set_kitty_cell_pixels(None);
+    update_kitty_geometry();
+}
+
+pub(crate) fn set_kitty_cell_pixels(geometry: Option<(u32, u32)>) {
+    let packed = geometry.map_or(0, |(w, h)| (u64::from(w) << 32) | u64::from(h));
+    KITTY_CELL_PIXELS.store(packed, Ordering::Relaxed);
+}
+
+pub(crate) fn update_kitty_geometry() {
+    // tmux may report zero or synthesized pixel dimensions via ioctl. Only a
+    // cell-size reply from the outer terminal is authoritative there.
+    if !KITTY_PROBED.load(Ordering::Relaxed) || std::env::var_os("TMUX").is_some() {
+        return;
+    }
+    if let Some(geometry) = crossterm::terminal::window_size()
+        .ok()
+        .and_then(|size| cell_pixels(size.columns, size.rows, size.width, size.height))
+    {
+        set_kitty_cell_pixels(Some(geometry));
+    }
+}
+
+fn cell_pixels(columns: u16, rows: u16, width: u16, height: u16) -> Option<(u32, u32)> {
+    if columns == 0 || rows == 0 || width == 0 || height == 0 {
+        return None;
+    }
+    let w = u32::from(width) / u32::from(columns);
+    let h = u32::from(height) / u32::from(rows);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+pub(crate) fn kitty_cell_pixels() -> Option<(u32, u32)> {
+    let packed = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
+    (packed != 0).then_some(((packed >> 32) as u32, packed as u32))
+}
+
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 16;
 
 pub(crate) fn transcript_renderer_cache_key(
     lua: &LuaRuntime,
@@ -39,6 +85,10 @@ pub(crate) fn transcript_renderer_cache_key(
             Some(base) => base ^ hash.rotate_left(17),
             None => hash,
         });
+    }
+    if inline_options.math_graphics {
+        let geometry = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
+        key = Some(key.unwrap_or_default() ^ geometry.rotate_left(31));
     }
     key
 }
@@ -2021,6 +2071,15 @@ mod tests {
 
     fn rendered_rows(block: &LayoutIr, width: u16) -> u64 {
         rendered_buffer(block, width).line_count() as u64
+    }
+
+    #[test]
+    fn cell_geometry_rejects_missing_pixels_and_tracks_font_size() {
+        assert_eq!(cell_pixels(0, 24, 800, 480), None);
+        assert_eq!(cell_pixels(80, 24, 0, 480), None);
+        assert_eq!(cell_pixels(80, 24, 800, 0), None);
+        assert_eq!(cell_pixels(80, 24, 800, 480), Some((10, 20)));
+        assert_eq!(cell_pixels(80, 24, 960, 576), Some((12, 24)));
     }
 
     #[test]

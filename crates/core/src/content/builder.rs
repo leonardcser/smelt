@@ -425,33 +425,55 @@ impl<'a> LineBuilder<'a> {
         self.cur_decoration.external_source_text = Some(text.to_string());
     }
 
+    /// Copy the entire original block when any part of this rendered row is selected.
+    pub fn set_atomic_source_text(&mut self, source: std::sync::Arc<str>) {
+        self.cur_decoration.atomic_source_text = Some(source);
+    }
+
     /// Set `source_text` on the first row in `[start, end)` and `copy_continuation`
     /// on the remaining rows. Used by table renderers that want copy-coalescing
     /// without `soft_wrapped`.
     pub fn stamp_copy_group(&mut self, start: usize, source_text: &str) {
-        let end = self.buf.line_count();
+        let end = self.starting_line + self.lines_committed;
+        let start = self.starting_line + start;
         if start >= end {
             return;
         }
-        let mut first = self.buf.decoration_at(start).clone();
-        first.source_text = Some(source_text.to_string());
-        self.buf.set_decoration(start, first);
-        for r in (start + 1)..end {
-            let mut dec = self.buf.decoration_at(r).clone();
-            dec.copy_continuation = true;
-            self.buf.set_decoration(r, dec);
+        self.update_decoration(start, |dec| dec.source_text = Some(source_text.to_string()));
+        for row in (start + 1)..end {
+            self.update_decoration(row, |dec| dec.copy_continuation = true);
+        }
+    }
+
+    /// Treat every selected portion of a rendered block as a copy of its original source.
+    pub fn stamp_atomic_copy_group(&mut self, start: usize, source_text: &str) {
+        self.stamp_copy_group(start, source_text);
+        let source: std::sync::Arc<str> = source_text.into();
+        for row in (self.starting_line + start)..(self.starting_line + self.lines_committed) {
+            self.update_decoration(row, |dec| dec.atomic_source_text = Some(source.clone()));
         }
     }
 
     /// Mark all rows emitted since `start` as a chrome-delimited selectable
     /// block. This is used by structured renderers such as Markdown tables.
     pub fn stamp_chrome_delimited_block(&mut self, start: usize) {
-        let end = self.buf.line_count();
-        for r in start..end {
-            let mut dec = self.buf.decoration_at(r).clone();
-            dec.cell_selectable = true;
-            dec.block_selectable = true;
-            self.buf.set_decoration(r, dec);
+        for row in (self.starting_line + start)..(self.starting_line + self.lines_committed) {
+            self.update_decoration(row, |dec| {
+                dec.cell_selectable = true;
+                dec.block_selectable = true;
+            });
+        }
+    }
+
+    fn update_decoration(&mut self, row: usize, update: impl FnOnce(&mut LineDecoration)) {
+        if let Some(replacement) = &mut self.replacement {
+            if let Some(decoration) = replacement.metadata.decoration_at_mut(row) {
+                update(decoration);
+            }
+        } else {
+            let mut decoration = self.buf.decoration_at(row).clone();
+            update(&mut decoration);
+            self.buf.set_decoration(row, decoration);
         }
     }
 
@@ -937,6 +959,7 @@ pub mod test_util {
         pub text: String,
         pub source_text: Option<String>,
         pub external_source_text: Option<String>,
+        pub atomic_source_text: Option<String>,
         pub soft_wrapped: bool,
         pub cell_selectable: bool,
         pub block_selectable: bool,
@@ -1007,6 +1030,7 @@ pub mod test_util {
                     text,
                     source_text: dec.source_text,
                     external_source_text: dec.external_source_text,
+                    atomic_source_text: dec.atomic_source_text.map(|s| s.to_string()),
                     soft_wrapped: dec.soft_wrapped,
                     cell_selectable: dec.cell_selectable,
                     block_selectable: dec.block_selectable,
@@ -1268,6 +1292,33 @@ mod tests {
         assert_eq!(buf.decoration_at(0).source_text, None);
         assert!(!buf.decoration_at(0).soft_wrapped);
         assert_eq!(buf.get_line(0), Some("plain row"));
+    }
+
+    #[test]
+    fn replacing_stamps_atomic_copy_group_on_committed_rows() {
+        let theme = Theme::default();
+        let mut buf = fresh_buf();
+        buf.set_all_lines(vec!["old".into()]);
+        let mut out = LineBuilder::replacing(&mut buf, &theme, 80);
+        let first = out.line_count();
+        out.print("image row one");
+        out.newline();
+        out.print("image row two");
+        out.newline();
+        out.stamp_atomic_copy_group(first, r"\[\frac{a}{b}\]");
+        out.finish();
+
+        assert_eq!(
+            buf.decoration_at(0).source_text.as_deref(),
+            Some(r"\[\frac{a}{b}\]")
+        );
+        assert!(buf.decoration_at(1).copy_continuation);
+        for row in 0..2 {
+            assert_eq!(
+                buf.decoration_at(row).atomic_source_text.as_deref(),
+                Some(r"\[\frac{a}{b}\]")
+            );
+        }
     }
 
     #[test]

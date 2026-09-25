@@ -24,7 +24,10 @@ pub mod session;
 pub mod snapshot;
 pub mod surface;
 
-pub use compositor::Compositor;
+pub use compositor::{
+    kitty_control_sequence, kitty_image_exists, kitty_placeholder_row, register_kitty_image,
+    Compositor, KITTY_IMAGE_ROWS,
+};
 pub use flush::flush_diff;
 pub use geometry::Insets;
 pub use grid::{
@@ -41,6 +44,7 @@ pub use layout::{
 };
 pub use line::{Line, Span};
 pub use session::{SuspendScreen, TerminalSession, TerminalSessionBuilder};
+pub use smelt_style::image::RasterImage;
 pub use smelt_style::style::Color;
 pub use smelt_style::theme::Theme;
 pub use snapshot::SnapshotFrame;

@@ -657,7 +657,7 @@ impl TuiApp {
         if prediction_disabled {
             self.invalidate_prompt_prediction();
         }
-        if file_icons_changed {
+        if file_icons_changed || settings.math_rendering != old.math_rendering {
             self.sync_inline_options();
             self.sync_transcript_renderer_generation();
         }

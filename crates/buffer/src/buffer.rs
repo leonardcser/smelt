@@ -154,11 +154,38 @@ pub enum SpanAction {
     },
 }
 
+/// One selectable object occurrence. Repeated uses of the same raster have
+/// distinct identities, so adjacent equations never coalesce into one object.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AtomicObject {
+    id: u64,
+    pub image: Arc<smelt_style::image::RasterImage>,
+}
+
+impl AtomicObject {
+    pub fn new(image: Arc<smelt_style::image::RasterImage>) -> Arc<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Arc::new(Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            image,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AtomicSpan {
+    pub object: Arc<AtomicObject>,
+    /// Row within this object, independent of viewport clipping.
+    pub row: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpanMeta {
     pub selectable: bool,
     pub copy_as: Option<String>,
     pub action: Option<SpanAction>,
+    pub atomic: Option<AtomicSpan>,
 }
 
 impl Default for SpanMeta {
@@ -167,6 +194,7 @@ impl Default for SpanMeta {
             selectable: true,
             copy_as: None,
             action: None,
+            atomic: None,
         }
     }
 }
@@ -249,6 +277,9 @@ pub struct LineDecoration {
     /// selectable cells or source text. Copyable content from siblings wins.
     pub copy_excluded: bool,
     pub source_text: Option<String>,
+    /// Copy the entire source block whenever any selectable part of this row is selected.
+    /// Shared across rendered rows of one atomic block.
+    pub atomic_source_text: Option<Arc<str>>,
     /// Alternate row source used when a selection spans outside a structured
     /// copy group. Code blocks use this to preserve fenced markdown for full
     /// transcript copies while keeping contained copies fence-free.
@@ -349,6 +380,10 @@ impl RenderedRowMetadata {
 
     pub fn decoration_at(&self, row: usize) -> Option<&LineDecoration> {
         self.decorations.get(row)
+    }
+
+    pub fn decoration_at_mut(&mut self, row: usize) -> Option<&mut LineDecoration> {
+        self.decorations.get_mut(row)
     }
 
     fn clear(&mut self) {
@@ -1557,6 +1592,7 @@ impl Buffer {
             copy_continuation: false,
             copy_excluded: false,
             source_text: None,
+            atomic_source_text: None,
             external_source_text: None,
             source_line: None,
             pre_formatted: false,

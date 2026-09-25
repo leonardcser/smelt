@@ -1,10 +1,9 @@
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use rust_latex_parser::{parse_equation, EqNode};
 
-use crate::content::highlight::{
-    lower_inline_event_lines_with_options, InlineOptions, InlineSpan, InlineStyle,
-};
+use crate::content::highlight::{InlineOptions, InlineSpan, InlineStyle};
 use crate::content::inline_line::BreakPolicy;
 use crate::content::ColumnAlignment;
 
@@ -34,6 +33,9 @@ pub enum MarkdownNode {
         range: Range<usize>,
         lang: String,
         body: Vec<Range<usize>>,
+    },
+    Math {
+        range: Range<usize>,
     },
     Table {
         range: Range<usize>,
@@ -92,7 +94,7 @@ impl MarkdownLine {
 impl MarkdownNode {
     pub fn dynamic_retained_bytes(&self) -> usize {
         match self {
-            Self::Source { .. } | Self::Rule { .. } => 0,
+            Self::Source { .. } | Self::Math { .. } | Self::Rule { .. } => 0,
             Self::Text { lines, .. } => lines
                 .capacity()
                 .saturating_mul(std::mem::size_of::<MarkdownLine>())
@@ -156,6 +158,9 @@ enum SpecialBlock {
         lang: String,
         body: Vec<Range<usize>>,
     },
+    Math {
+        range: Range<usize>,
+    },
     Table {
         range: Range<usize>,
         alignments: Vec<ColumnAlignment>,
@@ -167,10 +172,32 @@ enum SpecialBlock {
 }
 
 impl SpecialBlock {
+    fn shift(mut self, offset: usize) -> Self {
+        match &mut self {
+            Self::Text { range, lines, .. } => {
+                shift_range(range, offset);
+                for line in lines {
+                    shift_range(&mut line.source, offset);
+                }
+            }
+            Self::Code { range, body, .. } => {
+                shift_range(range, offset);
+                for line in body {
+                    shift_range(line, offset);
+                }
+            }
+            Self::Math { range } | Self::Table { range, .. } | Self::Rule { range } => {
+                shift_range(range, offset);
+            }
+        }
+        self
+    }
+
     fn range(&self) -> Range<usize> {
         match self {
             SpecialBlock::Text { range, .. }
             | SpecialBlock::Code { range, .. }
+            | SpecialBlock::Math { range }
             | SpecialBlock::Table { range, .. }
             | SpecialBlock::Rule { range } => range.clone(),
         }
@@ -180,6 +207,7 @@ impl SpecialBlock {
         match self {
             SpecialBlock::Text { range, kind, lines } => MarkdownNode::Text { range, kind, lines },
             SpecialBlock::Code { range, lang, body } => MarkdownNode::Code { range, lang, body },
+            SpecialBlock::Math { range } => MarkdownNode::Math { range },
             SpecialBlock::Table {
                 range,
                 alignments,
@@ -194,6 +222,60 @@ impl SpecialBlock {
     }
 }
 
+fn shift_range(range: &mut Range<usize>, offset: usize) {
+    range.start += offset;
+    range.end += offset;
+}
+
+fn collect_math_blocks(source: &str) -> Vec<Range<usize>> {
+    let mut code_ranges = Vec::new();
+    let mut code_start = None;
+    for (event, range) in Parser::new_ext(source, markdown_options()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code_start = Some(range.start),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(start) = code_start.take() {
+                    code_ranges.push(start..range.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut ranges = Vec::new();
+    let mut code_index = 0;
+    let mut math: Option<(usize, &str)> = None;
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        while code_ranges
+            .get(code_index)
+            .is_some_and(|range| range.end <= offset)
+        {
+            code_index += 1;
+        }
+        if code_ranges
+            .get(code_index)
+            .is_some_and(|range| range.start <= offset && offset < range.end)
+        {
+            math = None;
+            offset += line.len();
+            continue;
+        }
+        let body = strip_markdown_indent(line.trim_end());
+        if let Some((start, closing)) = math {
+            if body == closing {
+                ranges.push(start..offset + line.len());
+                math = None;
+            }
+        } else if body.starts_with(r"\[") && body.ends_with(r"\]") && body.len() > 4 {
+            ranges.push(offset..offset + line.len());
+        } else if body == r"\[" || body == "$$" {
+            math = Some((offset, if body == "$$" { "$$" } else { r"\]" }));
+        }
+        offset += line.len();
+    }
+    ranges
+}
+
 pub fn parse_markdown(source: &str) -> MarkdownBlock<'_> {
     parse_markdown_with_options(source, &InlineOptions::default())
 }
@@ -202,7 +284,26 @@ pub fn parse_markdown_with_options<'a>(
     source: &'a str,
     inline_options: &InlineOptions,
 ) -> MarkdownBlock<'a> {
-    let mut specials = collect_special_blocks(source, inline_options);
+    let math_ranges = collect_math_blocks(source);
+    let mut specials = Vec::new();
+    let mut start = 0;
+    for range in math_ranges {
+        let fragment = &source[start..range.start];
+        specials.extend(
+            collect_special_blocks(fragment, inline_options)
+                .into_iter()
+                .map(|block| block.shift(start)),
+        );
+        specials.push(SpecialBlock::Math {
+            range: range.clone(),
+        });
+        start = range.end;
+    }
+    specials.extend(
+        collect_special_blocks(&source[start..], inline_options)
+            .into_iter()
+            .map(|block| block.shift(start)),
+    );
     specials.sort_by_key(|block| block.range().start);
     specials.dedup_by(|a, b| a.range() == b.range());
 
@@ -228,6 +329,218 @@ pub fn parse_markdown_with_options<'a>(
     }
 
     MarkdownBlock { source, nodes }
+}
+
+pub fn math_body(source: &str) -> &str {
+    let source = source.trim();
+    source
+        .strip_prefix(r"\[")
+        .and_then(|s| s.strip_suffix(r"\]"))
+        .or_else(|| source.strip_prefix("$$").and_then(|s| s.strip_suffix("$$")))
+        .unwrap_or(source)
+        .trim()
+}
+
+pub fn math_rows(source: &str, width: usize) -> Vec<String> {
+    let ast = parse_equation(&expand_math_boxes(math_body(source)));
+    let width = width.max(1);
+    let mut nodes = Vec::new();
+    flatten_sequence(ast, &mut nodes);
+    let mut current = Vec::new();
+    let mut rows = Vec::new();
+    for node in nodes {
+        if is_math_relation(&node) && !current.is_empty() && {
+            let block = term_maths::layout::layout(&EqNode::Seq(current.clone()));
+            block.height() > 1 || block.width() > width
+        } {
+            append_math_group(&mut rows, std::mem::take(&mut current), width);
+        }
+        current.push(node);
+    }
+    if !current.is_empty() {
+        append_math_group(&mut rows, current, width);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+fn flatten_sequence(node: EqNode, out: &mut Vec<EqNode>) {
+    match node {
+        EqNode::Seq(nodes) => {
+            for node in nodes {
+                flatten_sequence(node, out);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+fn is_math_relation(node: &EqNode) -> bool {
+    matches!(node, EqNode::Text(text) if matches!(text.as_str(), "=" | "≈" | "≃" | "≅" | "≡" | "≠" | "≤" | "≥" | "<" | ">" | "→" | "⇒"))
+}
+
+fn append_math_group(rows: &mut Vec<String>, group: Vec<EqNode>, width: usize) {
+    let mut block = term_maths::layout::layout(&EqNode::Seq(group.clone()));
+    if block.width() > width {
+        block = term_maths::layout::layout(&linearize_fractions(EqNode::Seq(group)));
+    }
+    for line in block.to_string().lines() {
+        if block.height() == 1 || block.width() > width {
+            rows.extend(wrap_math_line(line, width));
+        } else {
+            rows.push(line.to_owned());
+        }
+    }
+}
+
+fn wrap_math_line(line: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut cols = 0;
+    for grapheme in smelt_buffer::cell_width::graphemes(line) {
+        let n = smelt_buffer::cell_width::text_width(grapheme);
+        if cols + n > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            cols = 0;
+        }
+        if n <= width {
+            row.push_str(grapheme);
+            cols += n;
+        }
+    }
+    rows.push(row);
+    rows
+}
+
+fn linearize_fractions(node: EqNode) -> EqNode {
+    match node {
+        EqNode::Frac(numerator, denominator) => EqNode::Seq(vec![
+            EqNode::Text("(".into()),
+            linearize_fractions(*numerator),
+            EqNode::Text(")/(".into()),
+            linearize_fractions(*denominator),
+            EqNode::Text(")".into()),
+        ]),
+        EqNode::Seq(nodes) => EqNode::Seq(nodes.into_iter().map(linearize_fractions).collect()),
+        EqNode::Sup(base, sup) => EqNode::Sup(
+            Box::new(linearize_fractions(*base)),
+            Box::new(linearize_fractions(*sup)),
+        ),
+        EqNode::Sub(base, sub) => EqNode::Sub(
+            Box::new(linearize_fractions(*base)),
+            Box::new(linearize_fractions(*sub)),
+        ),
+        EqNode::SupSub(base, sup, sub) => EqNode::SupSub(
+            Box::new(linearize_fractions(*base)),
+            Box::new(linearize_fractions(*sup)),
+            Box::new(linearize_fractions(*sub)),
+        ),
+        EqNode::Sqrt(body) => EqNode::Sqrt(Box::new(linearize_fractions(*body))),
+        EqNode::Accent(body, kind) => EqNode::Accent(Box::new(linearize_fractions(*body)), kind),
+        EqNode::MathFont { kind, content } => EqNode::MathFont {
+            kind,
+            content: Box::new(linearize_fractions(*content)),
+        },
+        EqNode::Delimited {
+            left,
+            right,
+            content,
+        } => EqNode::Delimited {
+            left,
+            right,
+            content: Box::new(linearize_fractions(*content)),
+        },
+        EqNode::BigOp {
+            symbol,
+            lower,
+            upper,
+        } => EqNode::BigOp {
+            symbol,
+            lower: lower.map(|node| Box::new(linearize_fractions(*node))),
+            upper: upper.map(|node| Box::new(linearize_fractions(*node))),
+        },
+        EqNode::Limit { name, lower } => EqNode::Limit {
+            name,
+            lower: lower.map(|node| Box::new(linearize_fractions(*node))),
+        },
+        EqNode::Matrix { kind, rows } => EqNode::Matrix {
+            kind,
+            rows: rows
+                .into_iter()
+                .map(|row| row.into_iter().map(linearize_fractions).collect())
+                .collect(),
+        },
+        EqNode::Cases { rows } => EqNode::Cases {
+            rows: rows
+                .into_iter()
+                .map(|(value, condition)| {
+                    (
+                        linearize_fractions(value),
+                        condition.map(linearize_fractions),
+                    )
+                })
+                .collect(),
+        },
+        EqNode::Binom(top, bottom) => EqNode::Binom(
+            Box::new(linearize_fractions(*top)),
+            Box::new(linearize_fractions(*bottom)),
+        ),
+        EqNode::Brace {
+            content,
+            label,
+            over,
+        } => EqNode::Brace {
+            content: Box::new(linearize_fractions(*content)),
+            label: label.map(|node| Box::new(linearize_fractions(*node))),
+            over,
+        },
+        EqNode::StackRel {
+            base,
+            annotation,
+            over,
+        } => EqNode::StackRel {
+            base: Box::new(linearize_fractions(*base)),
+            annotation: Box::new(linearize_fractions(*annotation)),
+            over,
+        },
+        other => other,
+    }
+}
+
+fn expand_math_boxes(source: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(start) = rest.find(r"\boxed{") {
+        result.push_str(&rest[..start]);
+        let body = &rest[start + r"\boxed{".len()..];
+        let mut depth = 1;
+        let mut end = None;
+        for (i, ch) in body.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            result.push_str(rest);
+            return result;
+        };
+        result.push('⟦');
+        result.push_str(&expand_math_boxes(&body[..end]));
+        result.push('⟧');
+        rest = &body[end + 1..];
+    }
+    result.push_str(rest);
+    result
 }
 
 pub fn ends_with_heading(source: &str) -> bool {
@@ -372,6 +685,7 @@ fn markdown_options() -> Options {
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_MATH
 }
 
 fn collect_special_blocks(source: &str, inline_options: &InlineOptions) -> Vec<SpecialBlock> {
@@ -433,6 +747,9 @@ fn collect_special_blocks(source: &str, inline_options: &InlineOptions) -> Vec<S
                         lines,
                     });
                 }
+            }
+            Event::DisplayMath(_) if text_stack.is_empty() => {
+                out.push(SpecialBlock::Math { range });
             }
             Event::Text(_) => {
                 if let Some((_, _, body)) = code.as_mut() {
@@ -536,8 +853,12 @@ fn markdown_lines<'a>(
     inline_options: &InlineOptions,
 ) -> Vec<MarkdownLine> {
     let ranges = line_ranges(source, range);
-    let inline_lines = lower_inline_event_lines_with_options(
-        events.iter().cloned(),
+    let inline_lines = crate::content::highlight::inline::lower_inline_event_lines_with_source(
+        source,
+        crate::content::highlight::inline::normalize_inline_math_events(
+            source,
+            events.iter().cloned(),
+        ),
         &ranges,
         false,
         inline_options,
@@ -603,6 +924,7 @@ fn structural_prefix_spans<'a>(
             style: InlineStyle::default(),
             meta: Default::default(),
             break_policy: BreakPolicy::Normal,
+            math: None,
         }]
     }
 }
@@ -778,6 +1100,154 @@ mod tests {
         assert_eq!(list_lines.len(), 1);
         assert_eq!(list_lines[0].spans[0].text, "item");
         assert!(list_lines[0].spans[0].style.bold);
+    }
+
+    #[test]
+    fn display_math_is_a_block_but_fenced_math_is_code() {
+        let source = concat!(
+            "The gradient is\n\n\\[\n\\frac{\\partial E}{\\partial\\theta_0}\\approx\\boxed{0.37062}\n\\]\n\n",
+            "```text\n\\[\n\\frac{x}{y}\n\\]\n```\n\n",
+            "$$\n\\theta_1\\approx0.88358\n$$\n"
+        );
+        let nodes = parse_markdown(source).nodes;
+        let math = nodes
+            .iter()
+            .filter_map(|node| match node {
+                MarkdownNode::Math { range } => Some(&source[range.clone()]),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(math.len(), 2);
+        assert!(math[0].starts_with(r"\["));
+        assert!(math[1].starts_with("$$"));
+        assert!(nodes
+            .iter()
+            .any(|node| matches!(node, MarkdownNode::Code { .. })));
+    }
+
+    #[test]
+    fn unclosed_math_before_fence_does_not_capture_code_or_later_math() {
+        let source = "\\[\n1+2\n```text\n\\]\n```\n\\[\n3+4\n\\]\n";
+        let math = parse_markdown(source)
+            .nodes
+            .into_iter()
+            .filter(|node| matches!(node, MarkdownNode::Math { .. }))
+            .count();
+        assert_eq!(math, 1);
+    }
+
+    #[test]
+    fn unicode_math_preserves_boxes_and_fractions() {
+        let rows = math_rows(
+            r"\[\frac{\partial E}{\partial\theta_0}\approx\boxed{0.37062}\]",
+            80,
+        );
+        assert!(rows.iter().any(|row| row.contains('─')));
+        assert!(rows.iter().any(|row| row.contains("⟦0.37062⟧")));
+        assert!(rows.iter().any(|row| row.contains("∂θ₀")));
+    }
+
+    #[test]
+    fn narrow_display_math_preserves_fraction_alignment() {
+        let input = r"\[
+\frac{\partial E}{\partial\theta_0}
+=\frac{(0.5-0)+(0.73106-0)+(0.88080-1)}{3}
+\approx\boxed{0.37062}.
+\]";
+        let rows = math_rows(input, 56);
+        assert!(rows
+            .iter()
+            .all(|line| smelt_buffer::cell_width::text_width(line) <= 56));
+        assert!(rows.iter().any(|line| line.contains("⟦0.37062⟧")));
+        let fraction_rows = rows.iter().filter(|line| line.contains('─')).count();
+        assert_eq!(fraction_rows, 2, "{rows:#?}");
+        assert!(
+            rows.iter()
+                .all(|line| !line.trim_start().starts_with("+ (0.88080")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn slope_fraction_wraps_after_denominator() {
+        let input = r"\[\frac{0(0.5-0)+1(0.73106-0)+2(0.88080-1)}{3}\approx0.16422.\]";
+        assert!(parse_markdown(input)
+            .nodes
+            .iter()
+            .any(|node| matches!(node, MarkdownNode::Math { .. })));
+        for width in [56, 72, 90, 120] {
+            let rows = math_rows(input, width);
+            let bar = rows.iter().position(|line| line.contains('─')).unwrap();
+            assert!(rows[bar - 1].contains("0(0.5"), "width={width}: {rows:#?}");
+            assert!(
+                rows[bar + 1].trim().contains('3'),
+                "width={width}: {rows:#?}"
+            );
+            assert!(
+                rows[bar + 2].contains("≈ 0.16422"),
+                "width={width}: {rows:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_math_supports_both_inline_delimiters() {
+        let source = r"The contribution is \((\lambda/n)\theta_1\) and $\alpha=0.1$.";
+        let nodes = parse_markdown(source).nodes;
+        let text = nodes
+            .iter()
+            .find_map(|node| match node {
+                MarkdownNode::Text { lines, .. } => Some(
+                    lines[0]
+                        .spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .unwrap();
+        assert!(text.contains('λ'), "{text}");
+        assert!(text.contains('θ'), "{text}");
+        assert!(text.contains('α'), "{text}");
+        assert!(!text.contains(r"\("), "{text}");
+    }
+
+    #[test]
+    fn escaped_math_delimiters_and_entities_keep_markdown_text() {
+        let source = r"&amp; \\(literal\\) and \(x\)";
+        let spans = crate::content::highlight::parse_inline_spans(source, false);
+        let rendered: String = spans.iter().map(|span| span.text.as_str()).collect();
+        assert!(rendered.contains('&'), "{rendered:?}");
+        assert!(rendered.contains(r"\(literal\)"), "{rendered:?}");
+        assert!(rendered.contains('x'), "{rendered:?}");
+    }
+
+    #[test]
+    fn inline_math_coexists_with_code_and_emphasis() {
+        let source = "**value \\(\\alpha\\)** and `\\(literal\\)` then \\(\\beta\\).";
+        let nodes = parse_markdown(source).nodes;
+        let spans = nodes
+            .iter()
+            .find_map(|node| match node {
+                MarkdownNode::Text { lines, .. } => Some(&lines[0].spans),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text.contains('α') && span.style.bold),
+            "{spans:#?}"
+        );
+        assert!(
+            spans.iter().any(|span| span.text.contains(r"\(literal\)")),
+            "{spans:#?}"
+        );
+        assert!(
+            spans.iter().any(|span| span.text.contains('β')),
+            "{spans:#?}"
+        );
     }
 
     #[test]

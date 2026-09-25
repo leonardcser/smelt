@@ -19,30 +19,85 @@ use crossterm::event::{
 
 #[cfg(unix)]
 const ESC_TIMEOUT: Duration = Duration::from_millis(40);
+#[cfg(unix)]
+const KITTY_PROBE: &[u8] = b"\x1b_Gi=16777214,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\";
+#[cfg(unix)]
+const CELL_PIXEL_QUERY: &[u8] = b"\x1b[16t";
 
 pub(crate) struct TerminalInput {
     rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
     shutdown: Option<platform::Shutdown>,
+    #[cfg(unix)]
+    probe_rx: tokio::sync::mpsc::UnboundedReceiver<bool>,
+    #[cfg(unix)]
+    geometry_rx: tokio::sync::mpsc::UnboundedReceiver<(u32, u32)>,
 }
 
 impl TerminalInput {
     pub(crate) fn spawn() -> io::Result<Self> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(unix)]
+        let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(unix)]
+        let (geometry_tx, geometry_rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(unix)]
+        let shutdown = platform::spawn_reader(tx, probe_tx, geometry_tx)?;
+        #[cfg(not(unix))]
         let shutdown = platform::spawn_reader(tx)?;
         Ok(Self {
             rx,
             shutdown: Some(shutdown),
+            #[cfg(unix)]
+            probe_rx,
+            #[cfg(unix)]
+            geometry_rx,
         })
     }
 
     #[cfg(all(unix, test))]
     fn spawn_from_fd(fd: std::os::fd::RawFd) -> io::Result<Self> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let shutdown = platform::spawn_reader_from_fd(fd, tx)?;
+        let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (geometry_tx, geometry_rx) = tokio::sync::mpsc::unbounded_channel();
+        let shutdown = platform::spawn_reader_from_fd(fd, tx, probe_tx, geometry_tx)?;
         Ok(Self {
             rx,
             shutdown: Some(shutdown),
+            probe_rx,
+            geometry_rx,
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn probe_kitty(
+        &mut self,
+        write: impl FnOnce(&[u8]) -> io::Result<bool>,
+    ) -> bool {
+        if !matches!(
+            write(&smelt_term::kitty_control_sequence(KITTY_PROBE)),
+            Ok(true)
+        ) {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(Duration::from_millis(200), self.probe_rx.recv()).await,
+            Ok(Some(true))
+        )
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn probe_cell_pixels(
+        &mut self,
+        write: impl FnOnce(&[u8]) -> io::Result<bool>,
+    ) -> Option<(u32, u32)> {
+        let query = smelt_term::kitty_control_sequence(CELL_PIXEL_QUERY);
+        if !matches!(write(&query), Ok(true)) {
+            return None;
+        }
+        tokio::time::timeout(Duration::from_millis(200), self.geometry_rx.recv())
+            .await
+            .ok()
+            .flatten()
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Event> {
@@ -95,13 +150,17 @@ mod platform {
 
     pub(super) fn spawn_reader(
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
+        probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+        geometry_tx: tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
     ) -> io::Result<Shutdown> {
-        spawn_reader_from_fd(open_input_fd()?, tx)
+        spawn_reader_from_fd(open_input_fd()?, tx, probe_tx, geometry_tx)
     }
 
     pub(super) fn spawn_reader_from_fd(
         fd: RawFd,
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
+        probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+        geometry_tx: tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
     ) -> io::Result<Shutdown> {
         let (shutdown_read_fd, shutdown_write_fd) = match open_shutdown_pipe() {
             Ok(pipe) => pipe,
@@ -112,7 +171,7 @@ mod platform {
         };
         let thread = match std::thread::Builder::new()
             .name("smelt-terminal-input".into())
-            .spawn(move || reader_loop(fd, shutdown_read_fd, tx))
+            .spawn(move || reader_loop(fd, shutdown_read_fd, tx, probe_tx, geometry_tx))
         {
             Ok(thread) => thread,
             Err(e) => {
@@ -183,7 +242,13 @@ mod platform {
         }
     }
 
-    fn reader_loop(fd: RawFd, shutdown_fd: RawFd, tx: tokio::sync::mpsc::UnboundedSender<Event>) {
+    fn reader_loop(
+        fd: RawFd,
+        shutdown_fd: RawFd,
+        tx: tokio::sync::mpsc::UnboundedSender<Event>,
+        probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+        geometry_tx: tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
+    ) {
         let mut parser = Parser::new();
         let mut buf = [0u8; 1024];
         loop {
@@ -247,7 +312,14 @@ mod platform {
             if n == 0 {
                 break;
             }
-            for ev in parser.advance(&buf[..n as usize]) {
+            let events = parser.advance(&buf[..n as usize]);
+            if let Some(supported) = parser.probe_response.take() {
+                let _ = probe_tx.send(supported);
+            }
+            if let Some(geometry) = parser.cell_geometry.take() {
+                let _ = geometry_tx.send(geometry);
+            }
+            for ev in events {
                 if tx.send(ev).is_err() {
                     close_reader_fds(fd, shutdown_fd);
                     return;
@@ -312,6 +384,8 @@ struct Parser {
     drop_string_tail: bool,
     drop_string_prev_esc: bool,
     drop_bytes: usize,
+    probe_response: Option<bool>,
+    cell_geometry: Option<(u32, u32)>,
 }
 
 #[cfg(any(unix, test))]
@@ -323,6 +397,8 @@ impl Parser {
             drop_string_tail: false,
             drop_string_prev_esc: false,
             drop_bytes: 0,
+            probe_response: None,
+            cell_geometry: None,
         }
     }
 
@@ -367,7 +443,7 @@ impl Parser {
         } else if self.buf.starts_with(b"\x1b[") {
             self.buf.clear();
             self.drop_csi_tail = true;
-        } else if self.buf.starts_with(b"\x1b]") {
+        } else if self.buf.starts_with(b"\x1b]") || self.buf.starts_with(b"\x1b_") {
             self.drop_string_prev_esc = self.buf.last() == Some(&0x1b);
             self.buf.clear();
             self.drop_string_tail = true;
@@ -390,7 +466,26 @@ impl Parser {
                     out.push(event);
                 }
                 ParseResult::NeedMore => break,
+                ParseResult::Probe {
+                    supported,
+                    consumed,
+                } => {
+                    self.buf.drain(..consumed);
+                    self.probe_response = Some(supported);
+                }
+                ParseResult::CellGeometry {
+                    width,
+                    height,
+                    consumed,
+                } => {
+                    self.buf.drain(..consumed);
+                    self.cell_geometry = Some((width, height));
+                }
                 ParseResult::Invalid { consumed } => {
+                    if self.buf.starts_with(b"\x1b_") && self.buf.len() > 256 {
+                        self.drop_string_tail = true;
+                        self.drop_string_prev_esc = self.buf.last() == Some(&0x1b);
+                    }
                     self.buf.drain(..consumed.clamp(1, self.buf.len()));
                 }
             }
@@ -401,9 +496,23 @@ impl Parser {
 #[cfg(any(unix, test))]
 #[derive(Debug)]
 enum ParseResult {
-    Event { event: Event, consumed: usize },
+    Event {
+        event: Event,
+        consumed: usize,
+    },
     NeedMore,
-    Invalid { consumed: usize },
+    Probe {
+        supported: bool,
+        consumed: usize,
+    },
+    CellGeometry {
+        width: u32,
+        height: u32,
+        consumed: usize,
+    },
+    Invalid {
+        consumed: usize,
+    },
 }
 
 #[cfg(any(unix, test))]
@@ -443,6 +552,7 @@ fn parse_escape(buf: &[u8]) -> ParseResult {
     match buf[1] {
         b'[' => parse_csi(buf),
         b']' => parse_string_control(buf),
+        b'_' => parse_kitty_response(buf),
         b'O' => parse_ss3(buf),
         0x1b => event(key(KeyCode::Esc, KeyModifiers::empty()), 1),
         _ => match parse_one(&buf[1..]) {
@@ -460,6 +570,9 @@ fn parse_escape(buf: &[u8]) -> ParseResult {
             }
             ParseResult::NeedMore => ParseResult::NeedMore,
             ParseResult::Invalid { consumed } => invalid(consumed + 1),
+            ParseResult::Probe { consumed, .. } | ParseResult::CellGeometry { consumed, .. } => {
+                invalid(consumed + 1)
+            }
         },
     }
 }
@@ -537,6 +650,28 @@ fn parse_csi(buf: &[u8]) -> ParseResult {
         b'S' => event(key(KeyCode::F(4), csi_trailing_modifier(params)), consumed),
         b'M' => parse_rxvt_mouse(params, consumed),
         b'u' => parse_csi_u(params, consumed),
+        b't' => parse_cell_geometry(params, consumed),
+        _ => invalid(consumed),
+    }
+}
+
+#[cfg(any(unix, test))]
+fn parse_cell_geometry(params: &[u8], consumed: usize) -> ParseResult {
+    let Some(values) = std::str::from_utf8(params).ok() else {
+        return invalid(consumed);
+    };
+    let mut parts = values.split(';');
+    let (Some("6"), Some(height), Some(width), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return invalid(consumed);
+    };
+    match (height.parse::<u32>(), width.parse::<u32>()) {
+        (Ok(height @ 1..=512), Ok(width @ 1..=512)) => ParseResult::CellGeometry {
+            width,
+            height,
+            consumed,
+        },
         _ => invalid(consumed),
     }
 }
@@ -560,6 +695,24 @@ fn parse_string_control(buf: &[u8]) -> ParseResult {
             return invalid(i + 1);
         }
         prev_esc = b == 0x1b;
+    }
+    ParseResult::NeedMore
+}
+
+#[cfg(any(unix, test))]
+fn parse_kitty_response(buf: &[u8]) -> ParseResult {
+    if let Some(end) = find_subslice(&buf[2..], b"\x1b\\") {
+        let consumed = end + 4;
+        let payload = &buf[2..consumed - 2];
+        let supported = payload.starts_with(b"Gi=16777214;") && payload.ends_with(b"OK");
+        return ParseResult::Probe {
+            supported,
+            consumed,
+        };
+    }
+    // An unsolicited or malformed control string cannot grow the parser indefinitely.
+    if buf.len() > 256 {
+        return invalid(buf.len());
     }
     ParseResult::NeedMore
 }
@@ -972,6 +1125,64 @@ mod tests {
         let events = p.advance(b"\x1b[?25h");
         assert!(events.is_empty());
         assert_eq!(keys_text(&events), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_backed_cell_query_preserves_user_input() {
+        let (mut input, mut writer, _) = pipe_terminal_input();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let size = rt.block_on(input.probe_cell_pixels(|query| {
+            assert_eq!(query, smelt_term::kitty_control_sequence(CELL_PIXEL_QUERY));
+            writer.write_all(b"z\x1b[6;24;12t")?;
+            Ok(true)
+        }));
+        assert_eq!(size, Some((12, 24)));
+        assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_backed_kitty_probe_preserves_user_input() {
+        let (mut input, mut writer, _) = pipe_terminal_input();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let supported = rt.block_on(input.probe_kitty(|query| {
+            assert_eq!(query, smelt_term::kitty_control_sequence(KITTY_PROBE));
+            writer.write_all(b"z\x1b_Gi=16777214;OK\x1b\\")?;
+            Ok(true)
+        }));
+        assert!(supported);
+        assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
+        assert!(input.try_recv().is_err());
+    }
+
+    #[test]
+    fn cell_pixel_geometry_reply_is_consumed_without_typing_into_prompt() {
+        let mut p = Parser::new();
+        assert!(p.advance(b"\x1b[6;24;").is_empty());
+        assert_eq!(keys_text(&p.advance(b"12tx")), "x");
+        assert_eq!(p.cell_geometry, Some((12, 24)));
+        assert!(p.advance(b"\x1b[6;0;12t").is_empty());
+        assert_eq!(p.cell_geometry, Some((12, 24)));
+    }
+
+    #[test]
+    fn kitty_probe_response_is_consumed_without_typing_into_prompt() {
+        let mut p = Parser::new();
+        assert!(p.advance(b"x\x1b_Gi=16777214;").len() == 1);
+        assert!(p.advance(b"OK\x1b\\y").len() == 1);
+        assert_eq!(p.probe_response, Some(true));
+        p.probe_response = None;
+        assert!(p.advance(b"\x1b_Gi=16777214;ENOENT\x1b\\").is_empty());
+        assert_eq!(p.probe_response, Some(false));
+        assert!(p.advance(b"\x1b_Gi=22;OK\x1b\\").is_empty());
+        assert_eq!(p.probe_response, Some(false));
     }
 
     #[test]

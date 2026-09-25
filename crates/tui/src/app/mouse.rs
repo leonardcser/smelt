@@ -1918,6 +1918,58 @@ mod tests {
         );
     }
     #[test]
+    fn transcript_mouse_drag_copies_raw_math_after_virtual_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        let source = r"\[\frac{a}{b}\]";
+        app.push_block(smelt_core::Block::Text {
+            content: format!("before\n\n{source}\n\nafter").into(),
+        });
+        app.transcript_win_mut().follow_tail();
+        app.render_normal_to(&mut std::io::sink());
+        let win = app.transcript_win();
+        let viewport = win.viewport.expect("transcript viewport");
+        let top = win.scroll_top();
+        let buf = app.ui.buf(win.buf).unwrap();
+        let math_row = (0..buf.line_count())
+            .find(|&row| buf.decoration_at(row).atomic_source_text.as_deref() == Some(source))
+            .expect("projected equation retains its original Markdown");
+        let before_row = (0..math_row)
+            .rev()
+            .find(|&row| {
+                buf.get_line(row)
+                    .is_some_and(|line| line.contains("before"))
+            })
+            .unwrap();
+        let local_top = win.local_visual_row(top) as usize;
+        let row_at = |local: usize| viewport.rect.top + (local - local_top) as u16;
+        let column = viewport.rect.left + viewport.gutter_width + 2;
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: row_at(before_row),
+            column,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row: row_at(math_row),
+            ..down
+        };
+        app.handle_content_mouse(down, 1);
+        app.handle_content_mouse(drag, 1);
+        let copied = app
+            .handle_content_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    ..drag
+                },
+                1,
+            )
+            .expect("mouse drag copies text");
+        assert!(copied.clipboard.contains(source), "{:?}", copied.clipboard);
+        assert!(!copied.clipboard.contains('\u{10eeee}'));
+    }
+
+    #[test]
     fn transcript_click_uses_local_row_in_tail_projection() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         let buf_id = app.transcript_win().buf;

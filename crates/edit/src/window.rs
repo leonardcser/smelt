@@ -3459,6 +3459,7 @@ impl Window {
         let mut spans_buf: Vec<smelt_buffer::buffer::Span> = Vec::new();
         let mut vt_buf: Vec<smelt_buffer::buffer::VirtualText> = Vec::new();
         let mut mask_buf: Vec<bool> = Vec::with_capacity(content_width as usize);
+        let mut atomic_cells: Vec<(u16, std::ops::Range<u16>)> = Vec::new();
         for row in 0..height {
             if row >= viewport_height {
                 for col in 0..width {
@@ -3641,7 +3642,11 @@ impl Window {
                         &painted_graphemes,
                         style,
                         None,
+                        span.meta.atomic.as_ref().map(|atomic| &atomic.object.image),
                     );
+                    if span.meta.atomic.is_some() {
+                        atomic_cells.push((row, (content_offset + start)..(content_offset + end)));
+                    }
                 }
                 if span.hl_eol {
                     for c in end..content_width {
@@ -3696,6 +3701,7 @@ impl Window {
                                     &painted_graphemes,
                                     style,
                                     mask_slice,
+                                    None,
                                 );
                             }
                         }
@@ -3773,8 +3779,32 @@ impl Window {
                 if col >= self.scroll_left && screen_row < height {
                     let dst_col = col - self.scroll_left;
                     if dst_col < content_width {
-                        let under = slice.cell(content_offset + dst_col, screen_row).symbol;
-                        let cursor_col = content_offset + dst_col;
+                        let mut cursor_col = content_offset + dst_col;
+                        if let Some((_, range)) = atomic_cells
+                            .iter()
+                            .find(|(row, range)| *row == screen_row && range.contains(&cursor_col))
+                        {
+                            let before = range
+                                .start
+                                .checked_sub(1)
+                                .filter(|col| *col >= content_offset);
+                            let after =
+                                (range.end < content_offset + content_width).then_some(range.end);
+                            let candidates = if cursor_col == range.start {
+                                [before, after]
+                            } else {
+                                [after, before]
+                            };
+                            let Some(boundary) = candidates
+                                .into_iter()
+                                .flatten()
+                                .find(|col| slice.cell(*col, screen_row).image.is_none())
+                            else {
+                                return;
+                            };
+                            cursor_col = boundary;
+                        }
+                        let under = slice.cell(cursor_col, screen_row).symbol;
                         if under.is_continuation() || under == ' ' {
                             slice.set(cursor_col, screen_row, glyph, style);
                         } else {
@@ -3889,6 +3919,7 @@ fn paint_span_cells(
     painted_graphemes: &[&str],
     style: Style,
     mask: Option<&[bool]>,
+    image: Option<&std::sync::Arc<smelt_term::RasterImage>>,
 ) {
     for c in start..end {
         if let Some(mask) = mask {
@@ -3907,7 +3938,14 @@ fn paint_span_cells(
             .and_then(|index| painted_graphemes.get(index))
             .copied()
             .unwrap_or(" ");
-        slice.set_symbol(pad_left + c, row, grapheme, style);
+        let image = image
+            .cloned()
+            .or_else(|| slice.cell(pad_left + c, row).image.clone());
+        if let Some(image) = image {
+            slice.set_image_symbol(pad_left + c, row, grapheme, style, image);
+        } else {
+            slice.set_symbol(pad_left + c, row, grapheme, style);
+        }
     }
 }
 
@@ -7059,6 +7097,50 @@ mod tests {
     }
 
     #[test]
+    fn cursor_does_not_overwrite_graphics_placeholders() {
+        for (prefix, first, cursor) in [("", 0, 2), (" ", 1, 0)] {
+            let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+            buf.set_all_lines(vec![format!(
+                "{prefix}\u{10eeee}\u{0305}\u{0305}\u{10eeee}x"
+            )]);
+            let image_color = crate::grid::Color::Rgb { r: 1, g: 2, b: 3 };
+            let image = smelt_buffer::buffer::AtomicObject::new(std::sync::Arc::new(
+                smelt_term::RasterImage {
+                    id: 0x010203,
+                    png_base64: "".into(),
+                    cols: 2,
+                    rows: 1,
+                },
+            ));
+            buf.add_highlight_with_meta(
+                0,
+                first,
+                first + 2,
+                crate::SpanStyle::new(),
+                smelt_buffer::buffer::SpanMeta {
+                    atomic: Some(smelt_buffer::buffer::AtomicSpan {
+                        object: image,
+                        row: 0,
+                    }),
+                    ..Default::default()
+                },
+            );
+            let cursor_style = crate::grid::Style::new().bg(crate::grid::Color::White);
+            let mut ctx = ctx();
+            ctx.cursor_shape = CursorShape::Block {
+                glyph: ' ',
+                style: cursor_style,
+                pos: Some((first, 0)),
+            };
+            let mut grid = Grid::new(10, 1);
+            make_win().render(&buf, &mut grid.slice_mut(Rect::new(0, 0, 10, 1)), &ctx);
+            assert_eq!(grid.cell(first, 0).style.fg, Some(image_color));
+            assert_eq!(grid.cell(first + 1, 0).style.fg, Some(image_color));
+            assert_eq!(grid.terminal_cursor_position(), Some((cursor, 0)));
+        }
+    }
+
+    #[test]
     fn render_preserves_cursor_column_on_ghost_row() {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["ghost".into()]);
@@ -7853,6 +7935,64 @@ mod tests {
         assert!(!grid.cell(0, 0).style.bold);
         assert_eq!(grid.cell(2, 0).symbol, 'x');
         assert!(grid.cell(2, 0).style.bold);
+    }
+
+    #[test]
+    fn selection_preserves_kitty_placeholder_image_id_color() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["\u{10eeee}\u{0305}\u{0305}X".into()]);
+        let image_color = crate::grid::Color::Rgb { r: 1, g: 2, b: 3 };
+        let image =
+            smelt_buffer::buffer::AtomicObject::new(std::sync::Arc::new(smelt_term::RasterImage {
+                id: 0x010203,
+                png_base64: "".into(),
+                cols: 1,
+                rows: 1,
+            }));
+        buf.add_highlight_with_meta(
+            0,
+            0,
+            1,
+            crate::SpanStyle::new(),
+            smelt_buffer::buffer::SpanMeta {
+                atomic: Some(smelt_buffer::buffer::AtomicSpan {
+                    object: image,
+                    row: 0,
+                }),
+                ..Default::default()
+            },
+        );
+        buf.set_range_layer(
+            crate::RangeLayer::Selection,
+            vec![smelt_buffer::buffer::SelectionRange {
+                line: 0,
+                col_start: 0,
+                col_end: 2,
+            }],
+        );
+        let w = make_win();
+        let mut theme = Theme::default();
+        let selection_bg = crate::grid::Color::AnsiValue(60);
+        let selection_fg = crate::grid::Color::AnsiValue(61);
+        let mut visual = crate::grid::Style::new().fg(selection_fg).bg(selection_bg);
+        visual.reverse = true;
+        theme.set("Visual", visual);
+        let ctx = DrawContext {
+            terminal_width: 10,
+            terminal_height: 2,
+            focused: true,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
+        };
+        let mut grid = Grid::new(10, 1);
+        w.render(&buf, &mut grid.slice_mut(Rect::new(0, 0, 10, 1)), &ctx);
+        assert_eq!(grid.cell(0, 0).style.fg, Some(image_color));
+        assert!(grid.cell(0, 0).image.is_some());
+        assert_eq!(grid.cell(0, 0).style.bg, Some(selection_bg));
+        assert!(!grid.cell(0, 0).style.reverse);
+        assert_eq!(grid.cell(1, 0).style.fg, Some(selection_fg));
+        assert!(grid.cell(1, 0).style.reverse);
     }
 
     #[test]

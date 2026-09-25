@@ -988,6 +988,7 @@ impl TuiApp {
     /// every code path under `content/*` and `compositor:*` runs without
     /// dumping megabytes of ANSI per scenario into libFuzzer's log file.
     pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {
+        crate::content::display_layout::update_kitty_geometry();
         let frame_trace = self
             .frame_scheduler
             .begin_frame(self.core.clock.instant_now());

@@ -566,6 +566,7 @@ fn strip_markdown_markers(text: &str) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InlineOptions {
     pub file_icons: FileIconOptions,
+    pub math_graphics: bool,
 }
 
 impl InlineOptions {
@@ -595,6 +596,7 @@ pub struct InlineSpan {
     pub style: InlineStyle,
     pub meta: SpanMeta,
     pub break_policy: BreakPolicy,
+    pub math: Option<String>,
 }
 
 impl InlineSpan {
@@ -606,6 +608,7 @@ impl InlineSpan {
         self.text
             .capacity()
             .saturating_add(self.meta.copy_as.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.math.as_ref().map_or(0, String::capacity))
             .saturating_add(action_bytes)
     }
 
@@ -627,13 +630,150 @@ pub fn parse_inline_spans_with_options(
         return Vec::new();
     }
 
-    let parser_options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    parse_inline_fragment(text, dim, options)
+}
+
+fn parse_inline_fragment(text: &str, dim: bool, options: &InlineOptions) -> Vec<InlineSpan> {
+    let parser_options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_MATH;
     lower_inline_fragment_events(
         text,
-        Parser::new_ext(text, parser_options).into_offset_iter(),
+        normalize_inline_math_events(
+            text,
+            Parser::new_ext(text, parser_options).into_offset_iter(),
+        ),
         dim,
         options,
     )
+}
+
+pub(crate) fn normalize_inline_math_events<'a>(
+    source: &'a str,
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+) -> Vec<(Event<'a>, Range<usize>)> {
+    let mut out = Vec::new();
+    let mut text = Vec::new();
+    for (event, range) in events {
+        if matches!(event, Event::Text(_)) {
+            text.push((event, range));
+        } else {
+            append_inline_math_text(source, &mut text, &mut out);
+            out.push((event, range));
+        }
+    }
+    append_inline_math_text(source, &mut text, &mut out);
+    out
+}
+
+fn append_inline_math_text<'a>(
+    source: &'a str,
+    text: &mut Vec<(Event<'a>, Range<usize>)>,
+    out: &mut Vec<(Event<'a>, Range<usize>)>,
+) {
+    let (Some(first), Some(last)) = (text.first(), text.last()) else {
+        return;
+    };
+    let mut start = first.1.start;
+    if start > 0
+        && source.as_bytes()[start - 1] == b'\\'
+        && matches!(&first.0, Event::Text(value) if value.starts_with('('))
+    {
+        start -= 1;
+    }
+    let end = last.1.end;
+    let raw = smelt_buffer::text::slice(source, start..end);
+    if !raw.contains(r"\(") || !raw.contains(r"\)") {
+        out.append(text);
+        return;
+    }
+    let original_out_len = out.len();
+    let mut offset = 0;
+    let mut search = 0;
+    let mut found = false;
+    while let Some(open) = raw[search..].find(r"\(").map(|i| search + i) {
+        if escaped_math_delimiter(raw, open) {
+            search = open + 2;
+            continue;
+        }
+        let mut closing = open + 2;
+        let close = loop {
+            let Some(candidate) = raw[closing..].find(r"\)").map(|i| closing + i) else {
+                break None;
+            };
+            if !escaped_math_delimiter(raw, candidate) {
+                break Some(candidate);
+            }
+            closing = candidate + 2;
+        };
+        let Some(close) = close else { break };
+        if text.iter().any(|(event, range)| {
+            let Event::Text(value) = event else {
+                return false;
+            };
+            let splits_event = [start + open, start + close + 2]
+                .into_iter()
+                .any(|boundary| range.start < boundary && boundary < range.end);
+            splits_event && smelt_buffer::text::slice(source, range.clone()) != value.as_ref()
+        }) {
+            out.truncate(original_out_len);
+            out.append(text);
+            return;
+        }
+        append_inline_text_fragment(source, text, start + offset, start + open, out);
+        out.push((
+            Event::InlineMath(raw[open + 2..close].to_owned().into()),
+            start + open..start + close + 2,
+        ));
+        found = true;
+        offset = close + 2;
+        search = offset;
+    }
+    if found {
+        append_inline_text_fragment(source, text, start + offset, end, out);
+        text.clear();
+    } else {
+        out.append(text);
+    }
+}
+
+fn escaped_math_delimiter(raw: &str, offset: usize) -> bool {
+    raw.as_bytes()[..offset]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+fn append_inline_text_fragment<'a>(
+    source: &'a str,
+    text: &[(Event<'a>, Range<usize>)],
+    start: usize,
+    end: usize,
+    out: &mut Vec<(Event<'a>, Range<usize>)>,
+) {
+    for (event, range) in text {
+        let from = range.start.max(start);
+        let to = range.end.min(end);
+        if from >= to {
+            continue;
+        }
+        let Event::Text(value) = event else { continue };
+        let raw = smelt_buffer::text::slice(source, range.clone());
+        if from == range.start && to == range.end {
+            out.push((event.clone(), range.clone()));
+        } else if raw == value.as_ref() {
+            out.push((
+                Event::Text(
+                    smelt_buffer::text::slice(raw, from - range.start..to - range.start)
+                        .to_owned()
+                        .into(),
+                ),
+                from..to,
+            ));
+        }
+    }
 }
 
 pub fn lower_inline_events<'a>(
@@ -687,6 +827,7 @@ pub fn lower_inline_events_with_options<'a>(
                 &styles,
                 link_stack.last().and_then(|link| link.action.as_ref()),
                 options,
+                None,
             ),
         }
     }
@@ -703,6 +844,26 @@ pub fn lower_inline_event_lines<'a>(
 }
 
 pub fn lower_inline_event_lines_with_options<'a>(
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    line_ranges: &[Range<usize>],
+    dim: bool,
+    options: &InlineOptions,
+) -> Vec<Vec<InlineSpan>> {
+    lower_inline_event_lines_from_source(None, events, line_ranges, dim, options)
+}
+
+pub fn lower_inline_event_lines_with_source<'a>(
+    source: &str,
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    line_ranges: &[Range<usize>],
+    dim: bool,
+    options: &InlineOptions,
+) -> Vec<Vec<InlineSpan>> {
+    lower_inline_event_lines_from_source(Some(source), events, line_ranges, dim, options)
+}
+
+fn lower_inline_event_lines_from_source<'a>(
+    source: Option<&str>,
     events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
     line_ranges: &[Range<usize>],
     dim: bool,
@@ -754,6 +915,7 @@ pub fn lower_inline_event_lines_with_options<'a>(
                         &styles,
                         link_stack.last().and_then(|(link, _)| link.action.as_ref()),
                         options,
+                        source.map(|source| smelt_buffer::text::slice(source, range.clone())),
                     );
                     if let Some((_, link_line_index)) = link_stack.last_mut() {
                         *link_line_index = Some(line_index);
@@ -855,6 +1017,7 @@ fn lower_inline_fragment_events<'a>(
                     &styles,
                     link_stack.last().and_then(|link| link.action.as_ref()),
                     options,
+                    Some(smelt_buffer::text::slice(source, range)),
                 );
             }
         }
@@ -967,6 +1130,7 @@ fn lower_inline_event(
     styles: &[InlineStyle],
     link_action: Option<&SpanAction>,
     options: &InlineOptions,
+    math_source: Option<&str>,
 ) {
     match event {
         Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
@@ -977,6 +1141,23 @@ fn lower_inline_event(
                 push_actionable_link_span(out, text.as_ref(), style, options);
             } else {
                 push_inline_span(out, text.as_ref(), style);
+            }
+        }
+        Event::InlineMath(text) | Event::DisplayMath(text) => {
+            let rendered = term_maths::render(text.as_ref()).to_string();
+            let inline = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            let source = math_source
+                .filter(|raw| raw.starts_with('$') || raw.starts_with(r"\("))
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("${text}$"));
+            if !inline.is_empty() {
+                out.push(InlineSpan {
+                    text: inline,
+                    style: *styles.last().unwrap(),
+                    meta: SpanMeta::copy_as(source),
+                    break_policy: BreakPolicy::Normal,
+                    math: Some(text.to_string()),
+                });
             }
         }
         Event::Code(text) => {
@@ -1102,6 +1283,7 @@ fn push_inline_span_meta_with_policy(
             style,
             meta,
             break_policy,
+            math: None,
         });
     }
 }
@@ -1113,7 +1295,12 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
             .map(|span| {
                 InlineRun::new(
                     span.text.clone(),
-                    (span.style, span.meta.clone(), span.break_policy),
+                    (
+                        span.style,
+                        span.meta.clone(),
+                        span.break_policy,
+                        span.math.clone(),
+                    ),
                     span.break_policy,
                 )
             })
@@ -1128,6 +1315,7 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
                     style: run.meta.0,
                     meta: run.meta.1,
                     break_policy: run.meta.2,
+                    math: run.meta.3,
                 })
                 .collect()
         })
@@ -1168,6 +1356,7 @@ mod tests {
     fn file_icon_options(enabled: bool, base_dir: Option<PathBuf>) -> InlineOptions {
         InlineOptions {
             file_icons: FileIconOptions::new(enabled, false, false, base_dir),
+            math_graphics: false,
         }
     }
 
@@ -1354,12 +1543,14 @@ mod tests {
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
             InlineSpan {
                 text: "\u{e6b2} ".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::unselectable(),
                 break_policy: BreakPolicy::AttachNext,
+                math: None,
             },
             InlineSpan {
                 text: "verylongfilename.rs".into(),
@@ -1370,6 +1561,7 @@ mod tests {
                     col: None,
                 }),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
         ];
         let rows = wrap_inline_spans(&spans, 6);
@@ -1964,12 +2156,14 @@ mod tests {
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
             InlineSpan {
                 text: "cd".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
         ];
         assert_eq!(inline_spans_width(&spans), 4);
@@ -1982,6 +2176,7 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
+            math: None,
         }];
         let rows = wrap_inline_spans(&spans, 0);
         assert_eq!(rows.len(), 1);
@@ -2020,6 +2215,7 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
+            math: None,
         }];
         let rows = wrap_inline_spans(&spans, 3);
         assert!(rows.len() >= 3);

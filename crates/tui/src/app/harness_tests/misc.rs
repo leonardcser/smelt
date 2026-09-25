@@ -236,6 +236,67 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
 }
 
 #[test]
+fn narrow_math_in_assistant_transcript_keeps_fraction_together() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(58, 18);
+    assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
+    app.start_turn(42);
+    app.feed_one(SourceEvent::engine(EngineEvent::Text {
+        content: concat!(
+            "The slope is\n\n\\[\n",
+            "\\frac{0(0.5-0)+1(0.73106-0)+2(0.88080-1)}{3}\\approx0.16422.\n",
+            "\\]\n"
+        )
+        .into(),
+    }));
+    let text = app.render_to_frame().text();
+    let lines: Vec<&str> = text.lines().collect();
+    let bar = lines
+        .iter()
+        .position(|line| line.contains("────"))
+        .expect("fraction visible");
+    assert!(lines[bar + 1].trim().contains('3'), "{text}");
+    assert!(lines[bar + 2].contains("≈ 0.16422"), "{text}");
+}
+
+#[test]
+fn wide_math_in_assistant_transcript_keeps_approximation_after_denominator() {
+    for width in [72, 90, 120] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(width, 18);
+        assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
+        app.start_turn(42);
+        app.feed_one(SourceEvent::engine(EngineEvent::Text {
+            content: concat!(
+                "\\[\n",
+                "\\frac{0(0.5-0)+1(0.73106-0)+2(0.88080-1)}{3}\n",
+                "\\approx0.16422.\n",
+                "\\]\n"
+            )
+            .into(),
+        }));
+        let text = app.render_to_frame().text();
+        let lines: Vec<&str> = text.lines().collect();
+        let bar = lines
+            .iter()
+            .position(|line| line.contains("────"))
+            .expect("fraction visible");
+        let denominator = lines
+            .iter()
+            .position(|line| line.trim() == "3")
+            .expect("denominator visible");
+        let approximation = lines
+            .iter()
+            .position(|line| line.contains("≈ 0.16422"))
+            .expect("approximation visible");
+        assert!(
+            bar < denominator && denominator < approximation,
+            "width={width}: {text}"
+        );
+    }
+}
+
+#[test]
 fn empty_engine_output_is_a_transcript_noop() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);
