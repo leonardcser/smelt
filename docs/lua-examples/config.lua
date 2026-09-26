@@ -60,6 +60,10 @@ smelt.settings.auto_compact = true
 -- possible values: off, goal, always
 smelt.settings.auto_continue = "goal"
 
+-- Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported).
+-- possible values: unicode, graphics
+smelt.settings.math_rendering = "graphics"
+
 -- Tokens/sec in status bar.
 smelt.settings.show_tps = true
 

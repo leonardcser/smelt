@@ -188,7 +188,8 @@ impl DisplayDocument for MaterializedBufferDocument<'_> {
                 }
                 let local = self.materialized.local_row(row);
                 self.buf.get_line(row_to_usize(local)).map(|line| {
-                    let display_row = DisplayRow::new(line.to_string(), Vec::new());
+                    let display_row = DisplayRow::new(line.to_string(), Vec::new())
+                        .with_atomic_spans(&self.buf.highlights_at(row_to_usize(local)));
                     if row == start {
                         display_row
                     } else if self.buf.decoration_at(row_to_usize(local)).soft_wrapped
@@ -1362,6 +1363,21 @@ impl DocumentViewExecutor {
                 state.yank_flash = None;
             }
         }
+        if next != current {
+            if let Some((start, end)) = atomic_object_bounds(document, total_rows, next) {
+                if next != start && next != end {
+                    next = if (current.row, current.byte_col) < (start.row, start.byte_col) {
+                        start
+                    } else if (current.row, current.byte_col) > (end.row, end.byte_col)
+                        || (next.row, next.byte_col) > (current.row, current.byte_col)
+                    {
+                        end
+                    } else {
+                        start
+                    };
+                }
+            }
+        }
         if matches!(
             command,
             DocumentCommand::BufferStart
@@ -1436,7 +1452,7 @@ impl DocumentViewExecutor {
             return (Status::Consumed, None);
         }
 
-        let pos = document_position_at_mouse(
+        let raw_pos = document_position_at_mouse(
             document,
             event,
             viewport,
@@ -1445,6 +1461,40 @@ impl DocumentViewExecutor {
             scroll_left,
             total_rows,
         );
+        let pos = if let Some((start, end)) = atomic_object_bounds(document, total_rows, raw_pos) {
+            match event.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let anchor = state
+                        .selection_anchor
+                        .or(state.drag_endpoint)
+                        .unwrap_or(state.cursor);
+                    if (raw_pos.row, raw_pos.byte_col) >= (anchor.row, anchor.byte_col) {
+                        end
+                    } else {
+                        start
+                    }
+                }
+                _ => {
+                    let cell = document_position_cell(document, raw_pos).unwrap_or(0);
+                    let first = document_position_cell(document, start).unwrap_or(0);
+                    let last = document_position_cell(document, end).unwrap_or(0);
+                    if raw_pos.row == start.row && cell <= first {
+                        start
+                    } else if raw_pos.row == end.row && cell >= last {
+                        end
+                    } else if raw_pos.row - start.row < end.row - raw_pos.row
+                        || (raw_pos.row - start.row == end.row - raw_pos.row
+                            && cell < (first + last) / 2)
+                    {
+                        start
+                    } else {
+                        end
+                    }
+                }
+            }
+        } else {
+            raw_pos
+        };
         if let Some(cell) = document_position_cell(document, pos) {
             state.preferred_cell_col = Some(cell);
         }
@@ -1458,7 +1508,12 @@ impl DocumentViewExecutor {
                 state.selection_includes_cursor_cell = false;
                 match click_count {
                     2 => {
-                        if let Some(row) = document_row_string(document, pos.row) {
+                        if let Some((start, end)) =
+                            atomic_object_bounds(document, total_rows, raw_pos)
+                        {
+                            state.selection_anchor = Some(start);
+                            state.cursor = end;
+                        } else if let Some(row) = document_row_string(document, pos.row) {
                             let snap_col = text::snap_grapheme(&row, pos.byte_col.min(row.len()));
                             if let Some((start, end)) =
                                 text::big_word_range_at_transparent(&row, snap_col, &[])
@@ -1525,7 +1580,12 @@ impl DocumentViewExecutor {
                         (range.start.row, range.start.byte_col)
                             < (range.end.row, range.end.byte_col)
                     });
-                state.cursor = pos;
+                if state.selection_anchor.is_none() {
+                    state.cursor = pos;
+                }
+                if let Some(cell) = document_position_cell(document, state.cursor) {
+                    state.preferred_cell_col = Some(cell);
+                }
                 state.drag_endpoint = None;
                 state.selection_anchor = None;
                 state.selection_includes_cursor_cell = false;
@@ -1570,6 +1630,46 @@ fn document_position_at_mouse<D: DisplayDocument + ?Sized>(
         document_byte_col_at_cell(document, row, rel_col as usize + scroll_left as usize)
             .unwrap_or(0);
     DocPosition { row, byte_col }
+}
+
+fn atomic_object_bounds<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    total_rows: RowIndex,
+    position: DocPosition,
+) -> Option<(DocPosition, DocPosition)> {
+    let row = document
+        .materialize(position.row..position.row.saturating_add(1))
+        .rows
+        .into_iter()
+        .next()?;
+    let range = row
+        .atomic_ranges
+        .iter()
+        .find(|range| range.bytes.contains(&position.byte_col))
+        .or_else(|| {
+            row.atomic_ranges
+                .iter()
+                .find(|range| range.bytes.end == position.byte_col)
+        })?;
+    let first = position.row.checked_sub(u64::from(range.span.row))?;
+    let last = first.checked_add(u64::from(range.span.object.image.rows).checked_sub(1)?)?;
+    if last >= total_rows {
+        return None;
+    }
+    let start_col = text::byte_to_cell(&row.text, range.bytes.start);
+    let end_col = text::byte_to_cell(&row.text, range.bytes.end);
+    let first_line = document_row_string(document, first)?;
+    let last_line = document_row_string(document, last)?;
+    Some((
+        DocPosition {
+            row: first,
+            byte_col: text::cell_to_byte(&first_line, start_col),
+        },
+        DocPosition {
+            row: last,
+            byte_col: text::cell_to_byte(&last_line, end_col),
+        },
+    ))
 }
 
 fn document_copy_group_range<D: DisplayDocument + ?Sized>(
@@ -1681,6 +1781,10 @@ fn advance_document_position_if_on_char<D: DisplayDocument + ?Sized>(
 ) -> DocPosition {
     if !advance {
         return pos;
+    }
+    let total_rows = document.snapshot().total_rows;
+    if let Some((_, end)) = atomic_object_bounds(document, total_rows, pos) {
+        return end;
     }
     let Some(row) = document
         .materialize(pos.row..pos.row.saturating_add(1))
@@ -2006,6 +2110,159 @@ mod tests {
         );
     }
 
+    fn test_atomic_object(rows: u16) -> std::sync::Arc<smelt_buffer::buffer::AtomicObject> {
+        smelt_buffer::buffer::AtomicObject::new(std::sync::Arc::new(smelt_term::RasterImage {
+            id: 1,
+            png_base64: "".into(),
+            cols: 2,
+            rows,
+        }))
+    }
+
+    fn atomic_row(
+        text: String,
+        bytes: Range<usize>,
+        object: &std::sync::Arc<smelt_buffer::buffer::AtomicObject>,
+        row: u16,
+    ) -> DisplayRow {
+        let mut display = DisplayRow::new(text, vec![]);
+        display.atomic_ranges.push(crate::row::DisplayAtomicRange {
+            bytes,
+            span: smelt_buffer::buffer::AtomicSpan {
+                object: std::sync::Arc::clone(object),
+                row,
+            },
+        });
+        display
+    }
+
+    #[test]
+    fn graphic_rows_are_atomic_for_keyboard_and_mouse_selection() {
+        // Atomic behavior must not depend on terminal placeholder glyphs.
+        let image = "ab";
+        let object = test_atomic_object(2);
+        let mut doc = StaticRowsDocument::new(vec![
+            DisplayRow::new("before".into(), vec![]),
+            atomic_row(format!("  {image}"), 2..4, &object, 0).with_break_before(RowBreak::Hard),
+            atomic_row(format!("  {image}"), 2..4, &object, 1).with_break_before(RowBreak::Soft),
+            DisplayRow::new("after".into(), vec![]).with_break_before(RowBreak::Hard),
+        ]);
+        let start = DocPosition {
+            row: 1,
+            byte_col: 2,
+        };
+        let end = DocPosition {
+            row: 2,
+            byte_col: 2 + image.len(),
+        };
+        assert_eq!(
+            atomic_object_bounds(
+                &mut doc,
+                4,
+                DocPosition {
+                    row: 2,
+                    byte_col: 0,
+                },
+            ),
+            None,
+        );
+        let mut state = state_for_rows(4);
+        state.cursor = DocPosition {
+            row: 0,
+            byte_col: 0,
+        };
+        state.preferred_cell_col = Some(2);
+        execute(&mut doc, &mut state, DocumentCommand::MoveRows(1), 4);
+        assert_eq!(state.cursor, start);
+        execute(&mut doc, &mut state, DocumentCommand::MoveRows(1), 4);
+        assert_eq!(state.cursor, end);
+        execute(&mut doc, &mut state, DocumentCommand::MoveRows(-1), 4);
+        assert_eq!(state.cursor, start);
+        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(1), 4);
+        assert_eq!(state.cursor, end);
+        execute(&mut doc, &mut state, DocumentCommand::MoveRows(1), 4);
+        assert_eq!(state.cursor.row, 3);
+        execute(&mut doc, &mut state, DocumentCommand::MoveRows(-1), 4);
+        assert_eq!(state.cursor, end);
+
+        let mut mode = VimMode::Normal;
+        let mut mouse = |state: &mut DocumentViewState, kind, row, col| {
+            DocumentViewExecutor::handle_mouse(
+                state,
+                &mut doc,
+                mouse_event(kind, row, col),
+                test_viewport(4),
+                0,
+                0,
+                0,
+                1,
+                false,
+                &mut mode,
+                Instant::now(),
+            )
+            .1
+        };
+        mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 0, 2);
+        mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 1, 4);
+        assert_eq!(state.cursor, end);
+        mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 2, 2);
+        mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 1, 3);
+        assert_eq!(state.cursor, end);
+        let selection = mouse(&mut state, MouseEventKind::Up(MouseButton::Left), 1, 3).unwrap();
+        assert_eq!(state.cursor, end);
+        assert_eq!(state.preferred_cell_col, Some(4));
+        assert_eq!(
+            selection.start,
+            DocPosition {
+                row: 0,
+                byte_col: 2
+            }
+        );
+        assert_eq!(selection.end, end);
+
+        mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 3, 2);
+        mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 2, 2);
+        mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 1, 4);
+        assert_eq!(state.cursor, start);
+        let selection = mouse(&mut state, MouseEventKind::Up(MouseButton::Left), 1, 4).unwrap();
+        assert_eq!(state.cursor, start);
+        assert_eq!(state.preferred_cell_col, Some(2));
+        assert_eq!(selection.start, start);
+        assert_eq!(
+            selection.end,
+            DocPosition {
+                row: 3,
+                byte_col: 3
+            }
+        );
+
+        mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 0);
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 2,
+                byte_col: 0,
+            },
+        );
+
+        let (_, selection) = DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut doc,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 3),
+            test_viewport(4),
+            0,
+            0,
+            0,
+            2,
+            false,
+            &mut mode,
+            Instant::now(),
+        );
+        assert!(selection.is_none());
+        assert_eq!(state.selection_anchor, Some(start));
+        assert_eq!(state.cursor, end);
+    }
+
     #[test]
     fn document_executor_moves_by_rows_words_pages_and_edges() {
         let mut doc = StaticRowsDocument::from_text_rows(vec![
@@ -2037,6 +2294,120 @@ mod tests {
 
         execute(&mut doc, &mut state, DocumentCommand::BufferEnd, 2);
         assert_eq!(state.cursor.row, 3);
+    }
+
+    #[test]
+    fn inline_image_boundaries_do_not_include_adjacent_text() {
+        let image = "ab";
+        let line = format!("before {image} after {image} tail");
+        let first = test_atomic_object(1);
+        let second = test_atomic_object(1);
+        let start_byte = "before ".len();
+        let second_start = start_byte + image.len() + " after ".len();
+        let mut display = atomic_row(line, start_byte..start_byte + image.len(), &first, 0);
+        display.atomic_ranges.push(crate::row::DisplayAtomicRange {
+            bytes: second_start..second_start + image.len(),
+            span: smelt_buffer::buffer::AtomicSpan {
+                object: second,
+                row: 0,
+            },
+        });
+        let mut doc = StaticRowsDocument::new(vec![display]);
+        let start = DocPosition {
+            row: 0,
+            byte_col: "before ".len(),
+        };
+        let end = DocPosition {
+            byte_col: start.byte_col + image.len(),
+            ..start
+        };
+        let mut state = state_for_rows(1);
+        state.cursor = start;
+        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(1), 1);
+        assert_eq!(state.cursor, end);
+        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(-1), 1);
+        assert_eq!(state.cursor, start);
+        assert_eq!(
+            atomic_object_bounds(
+                &mut doc,
+                1,
+                DocPosition {
+                    row: 0,
+                    byte_col: end.byte_col + 2
+                }
+            ),
+            None
+        );
+        DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut doc,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 8),
+            test_viewport(1),
+            0,
+            0,
+            0,
+            2,
+            false,
+            &mut VimMode::Normal,
+            Instant::now(),
+        );
+        assert_eq!(state.selection_anchor, Some(start));
+        assert_eq!(state.cursor, end);
+    }
+
+    #[test]
+    fn adjacent_atomic_images_remain_separate_objects() {
+        let first = test_atomic_object(1);
+        let second = test_atomic_object(1);
+        let mut row = atomic_row("abab".into(), 0..2, &first, 0);
+        row.atomic_ranges.push(crate::row::DisplayAtomicRange {
+            bytes: 2..4,
+            span: smelt_buffer::buffer::AtomicSpan {
+                object: second,
+                row: 0,
+            },
+        });
+        let mut doc = StaticRowsDocument::new(vec![row]);
+        assert_eq!(
+            atomic_object_bounds(
+                &mut doc,
+                1,
+                DocPosition {
+                    row: 0,
+                    byte_col: 2
+                }
+            ),
+            Some((
+                DocPosition {
+                    row: 0,
+                    byte_col: 2
+                },
+                DocPosition {
+                    row: 0,
+                    byte_col: 4
+                }
+            ))
+        );
+        let mut state = state_for_rows(1);
+        state.cursor.byte_col = 2;
+        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(1), 1);
+        assert_eq!(state.cursor.byte_col, 4);
+        let (_, selection) = DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut doc,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            test_viewport(1),
+            0,
+            0,
+            0,
+            2,
+            false,
+            &mut VimMode::Normal,
+            Instant::now(),
+        );
+        assert!(selection.is_none());
+        assert_eq!(state.selection_anchor.unwrap().byte_col, 2);
+        assert_eq!(state.cursor.byte_col, 4);
     }
 
     #[test]

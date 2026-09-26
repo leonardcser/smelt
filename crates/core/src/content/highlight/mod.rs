@@ -87,8 +87,9 @@ pub use diff::{
 pub use inline::{
     emit_inline_spans, inline_spans_width, lower_inline_event_lines,
     lower_inline_event_lines_with_options, lower_inline_events, lower_inline_events_with_options,
-    measure_markdown_table, measure_markdown_table_with_options, parse_inline_spans,
-    parse_inline_spans_with_options, render_markdown_table, render_markdown_table_with_options,
+    measure_markdown_table, measure_markdown_table_with_options,
+    measure_markdown_table_with_prepare, parse_inline_spans, parse_inline_spans_with_options,
+    render_markdown_table, render_markdown_table_with_options, render_markdown_table_with_prepare,
     wrap_inline_spans, InlineOptions, InlineSpan, InlineStyle,
 };
 pub use syntax::{

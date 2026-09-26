@@ -293,6 +293,19 @@ impl CopyRangeAccumulator {
         }
 
         let unselectable_intervals = collect_unselectable(copy_row.highlights, line_width);
+        if let Some(source) = &copy_row.decoration.atomic_source_text {
+            let selected = (cell_start..cell_end).any(|col| {
+                !unselectable_intervals
+                    .iter()
+                    .any(|&(start, end)| start <= col && col < end)
+            });
+            if selected && !self.source_text_emitted {
+                self.out.push_str(source);
+                self.source_text_emitted = true;
+                self.started = true;
+            }
+            return;
+        }
         let all_selectable_covered =
             all_selectable_in_range(&unselectable_intervals, line_width, cell_start, cell_end);
 

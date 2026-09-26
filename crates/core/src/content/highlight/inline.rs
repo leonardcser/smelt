@@ -10,7 +10,7 @@ use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 /// Render a markdown table. `alignments` may be empty (defaults to left for all
 /// columns) or shorter than the column count (missing entries default to left).
@@ -48,6 +48,33 @@ pub fn render_markdown_table_with_options(
     indent: &str,
     options: &InlineOptions,
 ) -> u16 {
+    render_markdown_table_with_prepare(
+        out,
+        rows,
+        alignments,
+        width,
+        dim,
+        bctx,
+        indent,
+        options,
+        &mut |_, _| {},
+    )
+}
+
+/// Prepare parsed cell spans using the final assigned cell width. The same
+/// preparation callback must be used for measurement and rendering.
+#[allow(clippy::too_many_arguments)]
+pub fn render_markdown_table_with_prepare(
+    out: &mut LineBuilder,
+    rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
     if rows.is_empty() {
         return 0;
     }
@@ -61,7 +88,8 @@ pub fn render_markdown_table_with_options(
 
     let start = out.line_count();
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table, options) else {
-        let rendered = render_table_stacked(out, rows, max_table, dim, bctx, indent, options);
+        let rendered =
+            render_table_stacked(out, rows, max_table, dim, bctx, indent, options, prepare);
         out.stamp_chrome_delimited_block(start);
         return rendered;
     };
@@ -78,12 +106,22 @@ pub fn render_markdown_table_with_options(
             bctx,
             indent,
             options,
+            prepare,
         );
         total_rows += render_border(out, &col_widths, bctx, indent, "┣", "╋", "┫");
     }
     for row in rows.iter().skip(1) {
-        total_rows +=
-            render_table_row(out, row, &col_widths, align_for, dim, bctx, indent, options);
+        total_rows += render_table_row(
+            out,
+            row,
+            &col_widths,
+            align_for,
+            dim,
+            bctx,
+            indent,
+            options,
+            prepare,
+        );
     }
     total_rows += render_border(out, &col_widths, bctx, indent, "┗", "┻", "┛");
     out.stamp_chrome_delimited_block(start);
@@ -118,6 +156,29 @@ pub fn measure_markdown_table_with_options(
     indent: &str,
     options: &InlineOptions,
 ) -> u16 {
+    measure_markdown_table_with_prepare(
+        rows,
+        alignments,
+        width,
+        dim,
+        bctx,
+        indent,
+        options,
+        &mut |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn measure_markdown_table_with_prepare(
+    rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
     let _ = alignments;
     if rows.is_empty() {
         return 0;
@@ -129,17 +190,17 @@ pub fn measure_markdown_table_with_options(
 
     let max_table = markdown_table_width(width, bctx, indent);
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table, options) else {
-        return measure_table_stacked(rows, max_table, dim, options);
+        return measure_table_stacked(rows, max_table, dim, options, prepare);
     };
 
     let header_rows = rows
         .first()
-        .map(|header| measure_table_row(header, &col_widths, dim, options))
+        .map(|header| measure_table_row(header, &col_widths, dim, options, prepare))
         .unwrap_or(0);
     let body_rows: u16 = rows
         .iter()
         .skip(1)
-        .map(|row| measure_table_row(row, &col_widths, dim, options))
+        .map(|row| measure_table_row(row, &col_widths, dim, options, prepare))
         .sum();
     header_rows.saturating_add(body_rows).saturating_add(3) // top border, header separator, bottom border
 }
@@ -155,10 +216,24 @@ fn markdown_table_width(
     }
 }
 
-fn measure_table_row(row: &[String], widths: &[usize], dim: bool, options: &InlineOptions) -> u16 {
+fn measure_table_row(
+    row: &[String],
+    widths: &[usize],
+    dim: bool,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
     row.iter()
         .enumerate()
-        .map(|(c, cell)| measure_cell_rows(cell, widths.get(c).copied().unwrap_or(0), dim, options))
+        .map(|(c, cell)| {
+            measure_cell_rows(
+                cell,
+                widths.get(c).copied().unwrap_or(0),
+                dim,
+                options,
+                prepare,
+            )
+        })
         .max()
         .unwrap_or(1)
 }
@@ -168,6 +243,7 @@ fn measure_table_stacked(
     max_table: usize,
     dim: bool,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
@@ -190,26 +266,49 @@ fn measure_table_stacked(
         for (c, cell) in row.iter().enumerate() {
             let label = header.get(c).map(|s| s.as_str()).unwrap_or("");
             if side_by_side {
-                total_rows =
-                    total_rows.saturating_add(measure_cell_rows(cell, value_width, dim, options));
+                total_rows = total_rows.saturating_add(measure_cell_rows(
+                    cell,
+                    value_width,
+                    dim,
+                    options,
+                    prepare,
+                ));
             } else {
                 let inner_indent = content_width.min(2);
                 let text_width = content_width.saturating_sub(inner_indent).max(1);
                 if !label.is_empty() {
-                    total_rows = total_rows
-                        .saturating_add(measure_cell_rows(label, text_width, dim, options));
+                    total_rows = total_rows.saturating_add(measure_cell_rows(
+                        label, text_width, dim, options, prepare,
+                    ));
                 }
-                total_rows =
-                    total_rows.saturating_add(measure_cell_rows(cell, text_width, dim, options));
+                total_rows = total_rows
+                    .saturating_add(measure_cell_rows(cell, text_width, dim, options, prepare));
             }
         }
     }
     total_rows
 }
 
-fn measure_cell_rows(text: &str, max_width: usize, dim: bool, options: &InlineOptions) -> u16 {
-    let spans = parse_inline_spans_with_options(text, dim, options);
-    wrap_inline_spans(&spans, max_width).len() as u16
+fn measure_cell_rows(
+    text: &str,
+    max_width: usize,
+    dim: bool,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
+    cell_rows(text, max_width, dim, options, prepare).len() as u16
+}
+
+fn cell_rows(
+    text: &str,
+    max_width: usize,
+    dim: bool,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> Vec<Vec<InlineSpan>> {
+    let mut spans = parse_inline_spans_with_options(text, dim, options);
+    prepare(&mut spans, max_width);
+    wrap_inline_spans(&spans, max_width)
 }
 
 /// Pick a final width per column that fits within `max_table` (including the
@@ -325,12 +424,20 @@ fn render_table_row(
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> u16 {
     let wrapped: Vec<Vec<Vec<InlineSpan>>> = row
         .iter()
         .enumerate()
         .map(|(c, cell)| {
-            wrap_cell_spans(out, cell, widths.get(c).copied().unwrap_or(0), dim, options)
+            wrap_cell_spans(
+                out,
+                cell,
+                widths.get(c).copied().unwrap_or(0),
+                dim,
+                options,
+                prepare,
+            )
         })
         .collect();
     let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
@@ -375,6 +482,7 @@ fn render_table_row(
 /// Stacked fallback: each data row becomes "Header  value" lines, used when
 /// the table is too wide. The layout is still width-bounded; otherwise the
 /// fallback itself creates horizontal overflow in pre-formatted panes.
+#[allow(clippy::too_many_arguments)]
 fn render_table_stacked(
     out: &mut LineBuilder,
     rows: &[Vec<String>],
@@ -383,6 +491,7 @@ fn render_table_stacked(
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
@@ -416,7 +525,7 @@ fn render_table_stacked(
             if side_by_side {
                 let label_visual = inline_visual_width(label, options);
                 let pad = label_width.saturating_sub(label_visual);
-                let wrapped = wrap_cell_spans(out, cell, value_width, dim, options);
+                let wrapped = wrap_cell_spans(out, cell, value_width, dim, options, prepare);
                 for (li, spans) in wrapped.iter().enumerate() {
                     render_row_prefix(out, bctx, indent);
                     if li == 0 {
@@ -438,7 +547,7 @@ fn render_table_stacked(
                 let inner_indent = content_width.min(2);
                 let text_width = content_width.saturating_sub(inner_indent).max(1);
                 if !label.is_empty() {
-                    let labels = wrap_cell_spans(out, label, text_width, dim, options);
+                    let labels = wrap_cell_spans(out, label, text_width, dim, options, prepare);
                     for spans in &labels {
                         render_row_prefix(out, bctx, indent);
                         if inner_indent > 0 {
@@ -450,7 +559,7 @@ fn render_table_stacked(
                     }
                 }
 
-                let wrapped = wrap_cell_spans(out, cell, text_width, dim, options);
+                let wrapped = wrap_cell_spans(out, cell, text_width, dim, options, prepare);
                 for spans in &wrapped {
                     render_row_prefix(out, bctx, indent);
                     if inner_indent > 0 {
@@ -472,9 +581,9 @@ fn wrap_cell_spans(
     max_width: usize,
     dim: bool,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> Vec<Vec<InlineSpan>> {
-    let spans = parse_inline_spans_with_options(text, dim, options);
-    let rows = wrap_inline_spans(&spans, max_width);
+    let rows = cell_rows(text, max_width, dim, options, prepare);
     if rows.len() > 1 {
         out.mark_wrapped();
     }
@@ -566,6 +675,7 @@ fn strip_markdown_markers(text: &str) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InlineOptions {
     pub file_icons: FileIconOptions,
+    pub math_graphics: bool,
 }
 
 impl InlineOptions {
@@ -595,6 +705,7 @@ pub struct InlineSpan {
     pub style: InlineStyle,
     pub meta: SpanMeta,
     pub break_policy: BreakPolicy,
+    pub math: Option<String>,
 }
 
 impl InlineSpan {
@@ -606,6 +717,7 @@ impl InlineSpan {
         self.text
             .capacity()
             .saturating_add(self.meta.copy_as.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.math.as_ref().map_or(0, String::capacity))
             .saturating_add(action_bytes)
     }
 
@@ -627,13 +739,98 @@ pub fn parse_inline_spans_with_options(
         return Vec::new();
     }
 
-    let parser_options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    parse_inline_fragment(text, dim, options)
+}
+
+fn parse_inline_fragment(text: &str, dim: bool, options: &InlineOptions) -> Vec<InlineSpan> {
+    let parser_options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_MATH;
+    let protected = protected_math_source(text, parser_options);
     lower_inline_fragment_events(
         text,
-        Parser::new_ext(text, parser_options).into_offset_iter(),
+        Parser::new_ext(&protected, parser_options).into_offset_iter(),
         dim,
         options,
     )
+}
+
+/// Shield TeX delimiters from Markdown while keeping every source byte offset.
+/// The parser sees ordinary math tokens; lowering reads the original source.
+pub(crate) fn protected_math_source<'a>(source: &'a str, options: Options) -> Cow<'a, str> {
+    if !source.contains(r"\(") {
+        return Cow::Borrowed(source);
+    }
+    let mut code_ranges = Vec::new();
+    let mut code_start = None;
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code_start = Some(range.start),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(start) = code_start.take() {
+                    code_ranges.push(start..range.end);
+                }
+            }
+            Event::Code(_) | Event::InlineMath(_) | Event::DisplayMath(_) => {
+                code_ranges.push(range)
+            }
+            _ => {}
+        }
+    }
+    code_ranges.sort_by_key(|range| range.start);
+    let raw = source.as_bytes();
+    let mut protected = None::<Vec<u8>>;
+    let mut i = 0;
+    let mut code = 0;
+    while i + 1 < raw.len() {
+        while code_ranges.get(code).is_some_and(|range| range.end <= i) {
+            code += 1;
+        }
+        if let Some(range) = code_ranges.get(code).filter(|range| range.contains(&i)) {
+            i = range.end;
+            continue;
+        }
+        if &raw[i..i + 2] != br"\(" || escaped_math_delimiter(source, i) {
+            i += 1;
+            continue;
+        }
+        let mut close = i + 2;
+        while close + 1 < raw.len() && raw[close] != b'\n' {
+            if &raw[close..close + 2] == br"\)"
+                && !escaped_math_delimiter(source, close)
+                && !code_ranges.iter().any(|range| range.contains(&close))
+            {
+                break;
+            }
+            close += 1;
+        }
+        if close + 1 >= raw.len()
+            || &raw[close..close + 2] != br"\)"
+            || code_ranges
+                .iter()
+                .any(|range| range.start < close + 2 && range.end > i)
+        {
+            i += 2;
+            continue;
+        }
+        let bytes = protected.get_or_insert_with(|| raw.to_vec());
+        bytes[i..i + 2].copy_from_slice(b"$x");
+        bytes[i + 2..close].fill(b'x');
+        bytes[close..close + 2].copy_from_slice(b"x$");
+        i = close + 2;
+    }
+    protected.map_or(Cow::Borrowed(source), |bytes| {
+        Cow::Owned(String::from_utf8(bytes).expect("math protection preserves UTF-8"))
+    })
+}
+
+fn escaped_math_delimiter(source: &str, offset: usize) -> bool {
+    source.as_bytes()[..offset]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 pub fn lower_inline_events<'a>(
@@ -687,6 +884,7 @@ pub fn lower_inline_events_with_options<'a>(
                 &styles,
                 link_stack.last().and_then(|link| link.action.as_ref()),
                 options,
+                None,
             ),
         }
     }
@@ -703,6 +901,26 @@ pub fn lower_inline_event_lines<'a>(
 }
 
 pub fn lower_inline_event_lines_with_options<'a>(
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    line_ranges: &[Range<usize>],
+    dim: bool,
+    options: &InlineOptions,
+) -> Vec<Vec<InlineSpan>> {
+    lower_inline_event_lines_from_source(None, events, line_ranges, dim, options)
+}
+
+pub fn lower_inline_event_lines_with_source<'a>(
+    source: &str,
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    line_ranges: &[Range<usize>],
+    dim: bool,
+    options: &InlineOptions,
+) -> Vec<Vec<InlineSpan>> {
+    lower_inline_event_lines_from_source(Some(source), events, line_ranges, dim, options)
+}
+
+fn lower_inline_event_lines_from_source<'a>(
+    source: Option<&str>,
     events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
     line_ranges: &[Range<usize>],
     dim: bool,
@@ -754,6 +972,7 @@ pub fn lower_inline_event_lines_with_options<'a>(
                         &styles,
                         link_stack.last().and_then(|(link, _)| link.action.as_ref()),
                         options,
+                        source.map(|source| smelt_buffer::text::slice(source, range.clone())),
                     );
                     if let Some((_, link_line_index)) = link_stack.last_mut() {
                         *link_line_index = Some(line_index);
@@ -855,6 +1074,7 @@ fn lower_inline_fragment_events<'a>(
                     &styles,
                     link_stack.last().and_then(|link| link.action.as_ref()),
                     options,
+                    Some(smelt_buffer::text::slice(source, range)),
                 );
             }
         }
@@ -967,6 +1187,7 @@ fn lower_inline_event(
     styles: &[InlineStyle],
     link_action: Option<&SpanAction>,
     options: &InlineOptions,
+    math_source: Option<&str>,
 ) {
     match event {
         Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
@@ -977,6 +1198,25 @@ fn lower_inline_event(
                 push_actionable_link_span(out, text.as_ref(), style, options);
             } else {
                 push_inline_span(out, text.as_ref(), style);
+            }
+        }
+        Event::InlineMath(text) | Event::DisplayMath(text) => {
+            let body = math_source
+                .and_then(|raw| raw.strip_prefix(r"\(").and_then(|s| s.strip_suffix(r"\)")))
+                .unwrap_or(text.as_ref());
+            let inline = crate::content::markdown_ir::inline_math_text(body);
+            let source = math_source
+                .filter(|raw| raw.starts_with('$') || raw.starts_with(r"\("))
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("${body}$"));
+            if !inline.is_empty() {
+                out.push(InlineSpan {
+                    text: inline,
+                    style: *styles.last().unwrap(),
+                    meta: SpanMeta::copy_as(source),
+                    break_policy: BreakPolicy::Normal,
+                    math: Some(body.to_string()),
+                });
             }
         }
         Event::Code(text) => {
@@ -1102,6 +1342,7 @@ fn push_inline_span_meta_with_policy(
             style,
             meta,
             break_policy,
+            math: None,
         });
     }
 }
@@ -1113,7 +1354,12 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
             .map(|span| {
                 InlineRun::new(
                     span.text.clone(),
-                    (span.style, span.meta.clone(), span.break_policy),
+                    (
+                        span.style,
+                        span.meta.clone(),
+                        span.break_policy,
+                        span.math.clone(),
+                    ),
                     span.break_policy,
                 )
             })
@@ -1128,6 +1374,7 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
                     style: run.meta.0,
                     meta: run.meta.1,
                     break_policy: run.meta.2,
+                    math: run.meta.3,
                 })
                 .collect()
         })
@@ -1168,6 +1415,7 @@ mod tests {
     fn file_icon_options(enabled: bool, base_dir: Option<PathBuf>) -> InlineOptions {
         InlineOptions {
             file_icons: FileIconOptions::new(enabled, false, false, base_dir),
+            math_graphics: false,
         }
     }
 
@@ -1354,12 +1602,14 @@ mod tests {
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
             InlineSpan {
                 text: "\u{e6b2} ".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::unselectable(),
                 break_policy: BreakPolicy::AttachNext,
+                math: None,
             },
             InlineSpan {
                 text: "verylongfilename.rs".into(),
@@ -1370,6 +1620,7 @@ mod tests {
                     col: None,
                 }),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
         ];
         let rows = wrap_inline_spans(&spans, 6);
@@ -1964,12 +2215,14 @@ mod tests {
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
             InlineSpan {
                 text: "cd".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
                 break_policy: BreakPolicy::Normal,
+                math: None,
             },
         ];
         assert_eq!(inline_spans_width(&spans), 4);
@@ -1982,6 +2235,7 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
+            math: None,
         }];
         let rows = wrap_inline_spans(&spans, 0);
         assert_eq!(rows.len(), 1);
@@ -2020,6 +2274,7 @@ mod tests {
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
             break_policy: BreakPolicy::Normal,
+            math: None,
         }];
         let rows = wrap_inline_spans(&spans, 3);
         assert!(rows.len() >= 3);

@@ -2013,8 +2013,7 @@ fn render_separator_spec(
     let right = remaining - left;
     let fill_meta = SpanMeta {
         selectable: spec.selectable,
-        copy_as: None,
-        action: None,
+        ..Default::default()
     };
     out.print_with_meta(&"─".repeat(left), fill_meta.clone());
     print_styled_spans(out, &spec.label, None, None);

@@ -25,7 +25,7 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util
 crossterm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-base64 = { workspace = true }
+base64 = "0.22"
 libc = { workspace = true }
 glob = { workspace = true }
 futures-core = { workspace = true }
@@ -35,6 +35,11 @@ notify = { workspace = true }
 scoped-tls-hkt = "0.1.5"
 shlex = "2"
 tokio-util = { workspace = true, features = ["rt"] }
+ratex-render = { version = "0.1.14", features = ["embed-fonts"] }
+ratex-parser = "0.1.14"
+ratex-layout = "0.1.14"
+ratex-types = "0.1.14"
+tiny-skia = "0.11.4"
 
 [dev-dependencies]
 insta = { workspace = true }

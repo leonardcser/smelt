@@ -74,6 +74,12 @@ pub struct DisplayAction {
     pub action: SpanAction,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayAtomicRange {
+    pub bytes: Range<usize>,
+    pub span: smelt_buffer::buffer::AtomicSpan,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayRow {
     pub text: String,
@@ -84,6 +90,7 @@ pub struct DisplayRow {
     pub selectable_ranges: Vec<Range<usize>>,
     /// Cell ranges in `text` that trigger actions such as opening links/files.
     pub actions: Vec<DisplayAction>,
+    pub atomic_ranges: Vec<DisplayAtomicRange>,
 }
 
 impl DisplayRow {
@@ -93,7 +100,24 @@ impl DisplayRow {
             break_before: None,
             selectable_ranges,
             actions: Vec::new(),
+            atomic_ranges: Vec::new(),
         }
+    }
+
+    pub fn with_atomic_spans(mut self, spans: &[smelt_buffer::buffer::Span]) -> Self {
+        self.atomic_ranges = spans
+            .iter()
+            .filter_map(|span| {
+                let atomic = span.meta.atomic.as_ref()?;
+                let start = text::cell_to_byte(&self.text, usize::from(span.col_start));
+                let end = text::cell_to_byte(&self.text, usize::from(span.col_end));
+                (start < end).then(|| DisplayAtomicRange {
+                    bytes: start..end,
+                    span: atomic.clone(),
+                })
+            })
+            .collect();
+        self
     }
 
     pub fn with_actions(mut self, actions: Vec<DisplayAction>) -> Self {
@@ -502,7 +526,9 @@ impl DisplayDocument for RowSourceDocument<'_> {
             .into_iter()
             .map(|row| {
                 let selectable = crate::selectable_byte_ranges_for_line(&row.text, &row.spans);
-                DisplayRow::new(row.text, selectable).with_break_before(RowBreak::Hard)
+                DisplayRow::new(row.text, selectable)
+                    .with_atomic_spans(&row.spans)
+                    .with_break_before(RowBreak::Hard)
             })
             .collect();
         DisplayRows { rows }
@@ -582,7 +608,11 @@ impl DisplayDocument for BufferDocument<'_> {
             .buf
             .get_lines(start, end)
             .iter()
-            .map(|line| DisplayRow::new(line.clone(), std::iter::once(0..line.len()).collect()))
+            .enumerate()
+            .map(|(offset, line)| {
+                DisplayRow::new(line.clone(), std::iter::once(0..line.len()).collect())
+                    .with_atomic_spans(&self.buf.highlights_at(start + offset))
+            })
             .collect();
         DisplayRows { rows }
     }

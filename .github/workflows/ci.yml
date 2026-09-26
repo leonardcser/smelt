@@ -129,15 +129,15 @@ jobs:
             targets: --all-targets
             local_deps: ""
           - crate: smelt-style
-            rust: "1.70"
+            rust: "1.85"
             targets: --all-targets
             local_deps: ""
           - crate: smelt-ansi
-            rust: "1.70"
+            rust: "1.85"
             targets: --all-targets
             local_deps: smelt-style
           - crate: smelt-term
-            rust: "1.71"
+            rust: "1.85"
             targets: --lib
             local_deps: smelt-style smelt-ansi
     steps:

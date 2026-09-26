@@ -14,6 +14,9 @@ pub(super) fn apply_temp_decoration(
     if let Some(source) = dec.external_source_text.as_deref() {
         out.set_external_source_text(source);
     }
+    if let Some(source) = dec.atomic_source_text {
+        out.set_atomic_source_text(source);
+    }
     if let Some(source_line) = dec.source_line {
         out.set_source_line(source_line);
     }
@@ -151,6 +154,49 @@ mod tests {
     use smelt_core::buffer::LineDecoration;
 
     #[test]
+    fn temp_image_row_replay_retains_atomic_metadata() {
+        let theme = Theme::default();
+        let image = std::sync::Arc::new(smelt_term::RasterImage {
+            id: 7,
+            png_base64: "QUJDRA==".into(),
+            cols: 2,
+            rows: 1,
+        });
+        let object = smelt_core::buffer::AtomicObject::new(image);
+        let placeholder = smelt_term::kitty_placeholder_row(0, 2);
+        let mut source = Buffer::new(BufId(1), BufCreateOpts::default());
+        {
+            let mut out = LineBuilder::new(&mut source, &theme, 80);
+            out.print_with_meta(
+                &placeholder,
+                SpanMeta {
+                    atomic: Some(smelt_core::buffer::AtomicSpan {
+                        object: std::sync::Arc::clone(&object),
+                        row: 0,
+                    }),
+                    ..Default::default()
+                },
+            );
+            out.newline();
+            out.finish();
+        }
+        let mut destination = Buffer::new(BufId(2), BufCreateOpts::default());
+        {
+            let mut out = LineBuilder::new(&mut destination, &theme, 80);
+            emit_buffer_row_clipped(&source, 0, 80, &mut out, None);
+            out.newline();
+            out.finish();
+        }
+        drop(source);
+        let spans = destination.highlights_at(0);
+        assert_eq!(spans.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            &spans[0].meta.atomic.as_ref().unwrap().object,
+            &object
+        ));
+    }
+
+    #[test]
     fn temp_decoration_preserves_both_copy_sources() {
         let mut source = Buffer::new(BufId(1), BufCreateOpts::default());
         source.set_decoration(
@@ -158,6 +204,7 @@ mod tests {
             LineDecoration {
                 source_text: Some("line source".into()),
                 external_source_text: Some("external source".into()),
+                atomic_source_text: Some("\\[raw math\\]".into()),
                 ..LineDecoration::default()
             },
         );
@@ -176,6 +223,10 @@ mod tests {
         assert_eq!(
             decoration.external_source_text.as_deref(),
             Some("external source")
+        );
+        assert_eq!(
+            decoration.atomic_source_text.as_deref(),
+            Some("\\[raw math\\]")
         );
     }
 }

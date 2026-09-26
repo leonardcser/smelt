@@ -5875,13 +5875,25 @@ impl TranscriptDocument {
         };
         let mut exact_rows = rows;
         let local_total_rows = rows.total_rows;
-        let total_rows = if preserve_total_rows {
+        let mut row_offset = row_offset;
+        let mut total_rows = if preserve_total_rows {
             total_rows
         } else {
             total_rows
                 .saturating_sub(planned_loaded_rows)
                 .saturating_add(local_total_rows)
         };
+        if preserve_total_rows
+            && local_total_rows < RowIndex::from(viewport_rows.max(1))
+            && total_rows > local_total_rows
+        {
+            // A block can shrink after planning (for example, a streaming reply).
+            // The estimated rows cannot fill this viewport; use the exact loaded
+            // rows as the planner does for a short sparse transcript.
+            row_offset = 0;
+            total_rows = local_total_rows;
+        }
+        trace_ctx.row_offset = row_offset;
         self.observe_exact_loaded_record_rows();
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(row_offset);
         rows.row_base = rows.row_base.saturating_add(row_offset);
@@ -7569,6 +7581,53 @@ mod document_tests {
 
         assert!(total_rows > loaded_rows);
         assert!(document.approximate_sparse_prefix_row_offset(80) > 0);
+    }
+
+    #[test]
+    fn shrinking_a_loaded_transcript_during_projection_keeps_the_viewport_backed() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let mut source = Transcript::new();
+        source.push(Block::Text {
+            content: (0..40)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        });
+        source.push(Block::Text {
+            content: "not yet loaded".into(),
+        });
+        let records = source.history.block_records();
+        let loaded = loaded_transcript_with_window(&records[..1], 0, 8, None);
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let id = document.history().order[0];
+        let plan = plan_projection_after_hydration(
+            &mut document,
+            &lua,
+            80,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(0),
+            36,
+        );
+        assert!(plan.preserve_total_rows);
+        assert!(plan.total_rows >= 36);
+        assert!(plan.planned_loaded_rows >= 36);
+        document.history_mut().rewrite(
+            id,
+            Block::Text {
+                content: (0..21)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into(),
+            },
+        );
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(401), Default::default());
+        let applied = document.project_applied_viewport(&lua, &mut buf, &theme, plan);
+        assert_eq!(applied.materialized_rows.total_rows, 21);
+        assert_eq!(applied.materialized_rows.row_base, 0);
+        assert!(applied.has_exact_backing(36));
     }
 
     #[test]
@@ -10938,6 +10997,7 @@ impl TuiApp {
                 self.ui.theme().is_light(),
                 Some(self.workspace.cwd_path().to_owned()),
             ),
+            math_graphics: self.core.config.settings.math_rendering == "graphics",
         }
     }
 

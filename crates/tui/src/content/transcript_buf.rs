@@ -3921,38 +3921,21 @@ impl TranscriptProjection {
         }
         let texts = &materialized.rebuild.lines;
         let metadata = &materialized.rebuild.metadata;
-        let mut soft_wrapped = vec![false; texts.len()];
-        let mut actions = vec![Vec::new(); texts.len()];
-        let mut selectable_ranges: Vec<Vec<std::ops::Range<usize>>> = texts
-            .iter()
-            .map(|row| {
-                if row.is_empty() {
-                    Vec::new()
-                } else {
-                    std::iter::once(0..row.len()).collect()
-                }
-            })
-            .collect();
-        for (row_index, row) in texts.iter().enumerate() {
-            let highlights = metadata.highlights_at(row_index);
-            soft_wrapped[row_index] = metadata
-                .decoration_at(row_index)
-                .is_some_and(|decoration| decoration.soft_wrapped);
-            actions[row_index] = crate::smelt_edit::display_actions_for_spans(&highlights);
-            selectable_ranges[row_index] =
-                crate::smelt_edit::selectable_byte_ranges_for_line(row, &highlights);
-        }
-        let rows = texts[local_start..local_end]
-            .iter()
-            .cloned()
-            .zip(selectable_ranges[local_start..local_end].iter().cloned())
-            .zip(actions[local_start..local_end].iter().cloned())
-            .enumerate()
-            .map(|(offset, ((text, selectable_ranges), actions))| {
-                let row = DisplayRow::new(text, selectable_ranges).with_actions(actions);
-                if offset == 0 {
+        let rows = (local_start..local_end)
+            .map(|index| {
+                let text = &texts[index];
+                let highlights = metadata.highlights_at(index);
+                let selectable =
+                    crate::smelt_edit::selectable_byte_ranges_for_line(text, &highlights);
+                let row = DisplayRow::new(text.clone(), selectable)
+                    .with_actions(crate::smelt_edit::display_actions_for_spans(&highlights))
+                    .with_atomic_spans(&highlights);
+                if index == local_start {
                     row
-                } else if soft_wrapped[local_start + offset] {
+                } else if metadata
+                    .decoration_at(index)
+                    .is_some_and(|decoration| decoration.soft_wrapped)
+                {
                     row.with_break_before(RowBreak::Soft)
                 } else {
                     row.with_break_before(RowBreak::Hard)

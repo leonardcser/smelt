@@ -1,7 +1,8 @@
 use super::geometry::Rect;
 use compact_str::CompactString;
-use smelt_style::cell_width;
 pub use smelt_style::style::{Color, Style};
+use smelt_style::{cell_width, image::RasterImage};
+use std::sync::Arc;
 
 /// Convert `Color` to crossterm's `Color` at the SGR-emit boundary.
 /// A free function because the orphan rule prevents a `From` impl.
@@ -151,6 +152,8 @@ impl PartialEq<&str> for CellSymbol {
 pub struct Cell {
     pub symbol: CellSymbol,
     pub style: Style,
+    /// Retains the raster independently of document/cache lifetime.
+    pub image: Option<Arc<RasterImage>>,
 }
 
 impl Cell {
@@ -158,7 +161,20 @@ impl Cell {
         Self {
             symbol: CellSymbol::new(symbol),
             style,
+            image: None,
         }
+    }
+
+    fn with_image(mut self, image: Arc<RasterImage>) -> Self {
+        let id = image.id;
+        self.style.fg = Some(Color::Rgb {
+            r: (id >> 16) as u8,
+            g: (id >> 8) as u8,
+            b: id as u8,
+        });
+        self.style.reverse = false;
+        self.image = Some(image);
+        self
     }
 }
 
@@ -239,6 +255,17 @@ impl Grid {
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
         let mut buf = [0; 4];
         self.set_symbol(x, y, symbol.encode_utf8(&mut buf), style);
+    }
+
+    pub fn set_image_symbol(
+        &mut self,
+        x: u16,
+        y: u16,
+        symbol: &str,
+        style: Style,
+        image: Arc<RasterImage>,
+    ) {
+        self.write_cell_clipped(x, y, Cell::new(symbol, style).with_image(image), self.width);
     }
 
     pub fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style) {
@@ -362,6 +389,7 @@ impl Grid {
             self.cells[cont] = Cell {
                 symbol: CellSymbol::continuation(),
                 style: new_style,
+                image: None,
             };
         }
     }
@@ -567,6 +595,24 @@ impl<'a> GridSlice<'a> {
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
         let mut buf = [0; 4];
         self.set_symbol(x, y, symbol.encode_utf8(&mut buf), style);
+    }
+
+    pub fn set_image_symbol(
+        &mut self,
+        x: u16,
+        y: u16,
+        symbol: &str,
+        style: Style,
+        image: Arc<RasterImage>,
+    ) {
+        if x < self.area.width && y < self.area.height {
+            self.grid.write_cell_clipped(
+                self.area.left + x,
+                self.area.top + y,
+                Cell::new(symbol, style).with_image(image),
+                self.area.right(),
+            );
+        }
     }
 
     pub fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style) {

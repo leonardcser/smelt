@@ -338,7 +338,31 @@ smelt.settings.auto_continue = "goal"
 smelt.settings.compact_threshold = 0.65
 smelt.settings.compact_keep_recent_groups = 1
 smelt.settings.show_tps = true
+smelt.settings.math_rendering = "unicode" -- optional: "graphics" is the default
 ```
+
+Display math in Markdown uses `\[...\]` or `$$...$$`; inline math uses
+`\(...\)` or `$...$`. The `graphics` setting renders equations with Kitty graphics
+using RaTeX and embedded math fonts when the terminal acknowledges a Kitty
+graphics protocol probe and reports usable pixel dimensions for its cells.
+Display equations use a slightly smaller font than terminal text. Those that
+just exceed the available width are rerendered at up to 20% smaller font size;
+wider equations use Unicode rather than becoming too small to read. Simple inline
+expressions in paragraphs, headings, lists and Markdown table cells fit into one
+text row when they fit the assigned cell width. Inline formulas are not downscaled;
+taller or too-wide inline formulas use a one-line text fallback instead of
+shrinking until unreadable or expanding line heights. Fractions stay grouped as
+`(numerator)/(denominator)`; expressions that cannot be flattened faithfully
+retain their LaTeX source. If either terminal check fails, an equation cannot be
+rasterized, or the live image budget fills, smelt uses text instead. Cached and visible images keep their rasters
+alive for scroll-back; released images free capacity for later equations. The
+live-image budget is 256 images or 32 MiB of encoded PNGs, plus an 8 MiB recent
+raster cache. Inside tmux, enable graphics passthrough with
+`set -g allow-passthrough on` in `tmux.conf` and use a terminal that supports
+Kitty graphics and answers the cell-size query (`CSI 16t`). tmux without
+passthrough or without a cell-size reply uses Unicode. Selecting any part of a
+display equation copies its original Markdown source, including delimiters.
+Use `smelt.settings.math_rendering = "unicode"` to always use text rendering.
 
 Set settings from `init.lua`, the `--set` CLI flag, or any Lua context. Unknown
 keys raise at the access site; type mismatches raise on assignment.
@@ -354,6 +378,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `system_clipboard` | `boolean` | `true` | Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works. |
 | `auto_compact` | `boolean` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
 | `auto_continue` | `"off"` \| `"goal"` \| `"always"` | `"goal"` | Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session. |
+| `math_rendering` | `"unicode"` \| `"graphics"` | `"graphics"` | Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported). |
 | `show_tps` | `boolean` | `true` | Tokens/sec in status bar. |
 | `show_tokens` | `boolean` | `true` | Context token count in status bar. |
 | `show_cost` | `boolean` | `true` | Session cost in status bar. |

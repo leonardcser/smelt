@@ -16,7 +16,7 @@ Key entry points:
 
 Editor concepts like buffers, Vim, and overlays live in sibling crates.
 `smelt-term` owns rendering, layout geometry, and runtime-neutral split interaction.
-It supports Rust 1.71 and has no Lua, async-runtime, or agent dependencies.
+It supports Rust 1.85 and has no Lua, async-runtime, or agent dependencies.
 
 ## Resizable layouts
 
