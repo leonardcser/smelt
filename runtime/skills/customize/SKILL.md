@@ -480,6 +480,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `system_clipboard` | `boolean` | `true` | Sync prompt kills and yanks with the OS clipboard. Disable to keep `C-w`/`C-k`/`C-u`/`C-y` and vim `y`/`p` internal when OSC 52 clipboard writes are unreliable. Bracketed terminal paste still works. |
 | `auto_compact` | `boolean` | `true` | Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless). |
 | `auto_continue` | `"off"` \| `"goal"` \| `"always"` | `"goal"` | Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session. |
+| `math_rendering` | `"unicode"` \| `"graphics"` | `"graphics"` | Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported). |
 | `show_tps` | `boolean` | `true` | Tokens/sec in status bar. |
 | `show_tokens` | `boolean` | `true` | Context token count in status bar. |
 | `show_cost` | `boolean` | `true` | Session cost in status bar. |
