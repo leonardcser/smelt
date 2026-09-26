@@ -16,8 +16,8 @@ use super::temp_rows::{apply_temp_decoration, emit_buffer_row_clipped};
 use smelt_core::content::builder::{display_width, wrapped_segments, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
-    emit_inline_spans, inline_spans_width, measure_markdown_table_with_options,
-    parse_inline_spans_with_options, render_code_block, render_markdown_table_with_options,
+    emit_inline_spans, inline_spans_width, measure_markdown_table_with_prepare,
+    parse_inline_spans_with_options, render_code_block, render_markdown_table_with_prepare,
     wrap_inline_spans, InlineOptions, InlineSpan, InlineStyle,
 };
 use smelt_core::content::inline_line::BreakPolicy;
@@ -187,6 +187,28 @@ fn raster_math_rows(
         .raster(key, max_cols)
 }
 
+fn color_implicit_math_frames(value: &mut serde_json::Value, ink: &str) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                color_implicit_math_frames(item, ink);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            if fields.get("type").and_then(serde_json::Value::as_str) == Some("enclose")
+                && fields.get("label").and_then(serde_json::Value::as_str) == Some("\\fbox")
+                && !fields.contains_key("borderColor")
+            {
+                fields.insert("borderColor".into(), ink.into());
+            }
+            for item in fields.values_mut() {
+                color_implicit_math_frames(item, ink);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn render_math_png(
     source: &str,
     max_cols: usize,
@@ -200,6 +222,15 @@ fn render_math_png(
     }
     let ast = ratex_parser::parser::parse(math_body(source)).ok()?;
     let ink = if light { 24.0 } else { 230.0 } / 255.0;
+    // RaTeX defaults uncolored frame borders to black, independently of the
+    // layout ink. Keep explicitly colored borders untouched.
+    let ast = if source.contains("\\boxed") || source.contains("\\fbox") {
+        let mut value = serde_json::to_value(&ast).ok()?;
+        color_implicit_math_frames(&mut value, if light { "#181818" } else { "#e6e6e6" });
+        serde_json::from_value(value).ok()?
+    } else {
+        ast
+    };
     let layout = ratex_layout::layout(
         &ast,
         &ratex_layout::LayoutOptions::default()
@@ -211,9 +242,11 @@ fn render_math_png(
             .with_color(ratex_types::color::Color::rgb(ink, ink, ink)),
     );
     let display = ratex_layout::to_display_list(&layout);
-    let base_font_size = (cell_h as f32 * if inline { 0.7 } else { 1.0 }).clamp(8.0, 192.0);
+    let base_font_size = (cell_h as f32 * if inline { 0.7 } else { 0.9 }).clamp(8.0, 192.0);
     let available_pixels = max_cols.min(u16::MAX as usize) as u64 * u64::from(cell_w);
-    let font_size = base_font_size.min(((available_pixels as f64 - 2.0) / display.width) as f32);
+    // Round the fitted f32 down so raster rounding cannot cross the pixel budget.
+    let fit_font_size = ((available_pixels as f64 - 2.0) / display.width) as f32;
+    let font_size = base_font_size.min(fit_font_size.next_down());
     if !font_size.is_finite() || font_size < 8.0 || font_size < base_font_size * min_scale {
         return None;
     }
@@ -303,6 +336,18 @@ fn prepare_inline_math(
                 object: AtomicObject::new(image),
                 row: 0,
             });
+        }
+    }
+}
+
+fn table_math_preparer(options: &InlineOptions) -> impl FnMut(&mut [InlineSpan], usize) + '_ {
+    let geometry = options
+        .math_graphics
+        .then(crate::content::display_layout::kitty_cell_pixels)
+        .flatten();
+    move |spans, cols| {
+        if let Some(geometry) = geometry {
+            prepare_inline_math(spans, cols, options.file_icons.light, geometry);
         }
     }
 }
@@ -1486,8 +1531,9 @@ fn render_markdown_docs_from_state<'a>(
                     rows,
                 } => {
                     render_block_gap(out, state, clip);
+                    let mut prepare = table_math_preparer(inline_options);
                     if let Some(clip) = clip {
-                        let table_rows = usize::from(measure_markdown_table_with_options(
+                        let table_rows = usize::from(measure_markdown_table_with_prepare(
                             rows,
                             alignments,
                             width,
@@ -1495,6 +1541,7 @@ fn render_markdown_docs_from_state<'a>(
                             bctx,
                             indent,
                             inline_options,
+                            &mut prepare,
                         ));
                         if clip.intersects(state.rows, table_rows) {
                             let inherited_style = out.current_style();
@@ -1507,7 +1554,7 @@ fn render_markdown_docs_from_state<'a>(
                                     LineBuilder::new(&mut buf, out.theme(), width.max(1) as u16);
                                 col.push(None, inherited_style);
                                 let start = col.line_count();
-                                render_markdown_table_with_options(
+                                render_markdown_table_with_prepare(
                                     &mut col,
                                     rows,
                                     alignments,
@@ -1516,6 +1563,7 @@ fn render_markdown_docs_from_state<'a>(
                                     bctx,
                                     indent,
                                     inline_options,
+                                    &mut prepare,
                                 );
                                 let source = block.source.slice(range.clone());
                                 let source = source.trim_end_matches(['\r', '\n']);
@@ -1531,7 +1579,7 @@ fn render_markdown_docs_from_state<'a>(
                     } else {
                         let start = out.line_count();
                         state.rows = state.rows.saturating_add(usize::from(
-                            render_markdown_table_with_options(
+                            render_markdown_table_with_prepare(
                                 out,
                                 rows,
                                 alignments,
@@ -1540,6 +1588,7 @@ fn render_markdown_docs_from_state<'a>(
                                 bctx,
                                 indent,
                                 inline_options,
+                                &mut prepare,
                             ),
                         ));
                         let source = block.source.slice(range.clone());
@@ -1672,7 +1721,7 @@ fn markdown_block_range_has_visible_text(
                 alignments, rows, ..
             } => {
                 measure_block_gap(&mut state);
-                let table_rows = usize::from(measure_markdown_table_with_options(
+                let table_rows = usize::from(measure_markdown_table_with_prepare(
                     rows,
                     alignments,
                     width,
@@ -1680,6 +1729,7 @@ fn markdown_block_range_has_visible_text(
                     bctx,
                     indent,
                     inline_options,
+                    &mut table_math_preparer(inline_options),
                 ));
                 if clip.intersects(state.rows, table_rows)
                     && rows.iter().flatten().any(|cell| !cell.trim().is_empty())
@@ -1806,7 +1856,7 @@ fn measure_markdown_doc(
                 state.rows =
                     state
                         .rows
-                        .saturating_add(usize::from(measure_markdown_table_with_options(
+                        .saturating_add(usize::from(measure_markdown_table_with_prepare(
                             rows,
                             alignments,
                             width,
@@ -1814,6 +1864,7 @@ fn measure_markdown_doc(
                             bctx,
                             indent,
                             inline_options,
+                            &mut table_math_preparer(inline_options),
                         )));
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
@@ -2670,6 +2721,48 @@ mod tests {
     }
 
     #[test]
+    fn boxed_math_uses_light_ink_on_a_transparent_dark_mode_background() {
+        let (png, _, _) = render_math_png(r"\boxed{x}", 80, false, (10, 20), false, 1.0).unwrap();
+        let image = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert!(image.pixels().iter().any(|pixel| pixel.alpha() == 0));
+        assert!(image
+            .pixels()
+            .iter()
+            .any(|pixel| pixel.alpha() > 200 && pixel.red() > 180));
+        assert!(
+            !image
+                .pixels()
+                .iter()
+                .any(|pixel| pixel.alpha() > 200 && pixel.red() < 50),
+            "boxed math contains an opaque dark border in dark mode"
+        );
+        let (png, _, _) = render_math_png(r"\boxed{x}", 80, true, (10, 20), false, 1.0).unwrap();
+        let image = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert!(image
+            .pixels()
+            .iter()
+            .any(|pixel| pixel.alpha() > 200 && pixel.red() < 50));
+    }
+
+    #[test]
+    fn explicitly_colored_math_frames_keep_their_border_in_dark_mode() {
+        let (png, _, _) = render_math_png(
+            r"\fcolorbox{black}{yellow}{$x$}",
+            80,
+            false,
+            (10, 20),
+            false,
+            1.0,
+        )
+        .unwrap();
+        let image = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert!(image
+            .pixels()
+            .iter()
+            .any(|pixel| pixel.alpha() > 200 && pixel.red() < 50));
+    }
+
+    #[test]
     fn display_math_scales_moderately_before_falling_back_to_unicode() {
         let source = r"\[a+b+c+d+e+f+g+h+i+j+k+l+m+n\]";
         let (original_rows, original) = graphic_math_rows(source, 80, false, (10, 20)).unwrap();
@@ -2880,6 +2973,141 @@ mod tests {
             1.0
         )
         .is_none());
+    }
+
+    #[test]
+    fn table_math_uses_final_cell_width_and_keeps_measurement_in_sync() {
+        let options = InlineOptions::default();
+        let rows = vec![
+            vec!["Formula".into(), "Note".into()],
+            vec!["math $x=1$ done".into(), "ok".into()],
+        ];
+        let prepare = |spans: &mut [InlineSpan], cols| {
+            prepare_inline_math(spans, cols, false, (10, 20));
+        };
+        let theme = smelt_core::theme::Theme::default();
+        for width in [40, 23, 5] {
+            let expected = measure_markdown_table_with_prepare(
+                &rows,
+                &[],
+                width,
+                false,
+                None,
+                "",
+                &options,
+                &mut prepare.clone(),
+            );
+            let (buf, rendered) =
+                smelt_core::content::builder::render_into_fresh(width as u16, &theme, |out| {
+                    let start = out.line_count();
+                    assert_eq!(
+                        render_markdown_table_with_prepare(
+                            out,
+                            &rows,
+                            &[],
+                            width,
+                            false,
+                            None,
+                            "",
+                            &options,
+                            &mut prepare.clone(),
+                        ),
+                        expected
+                    );
+                    out.stamp_copy_group(
+                        start,
+                        "| Formula | Note |\n| --- | --- |\n| math $x=1$ done | ok |",
+                    );
+                });
+            assert_eq!(rendered.line_count, usize::from(expected), "width={width}");
+            let output = buf.text();
+            if width != 5 {
+                let border_width = display_width(output.lines().next().unwrap());
+                assert!(output
+                    .lines()
+                    .all(|line| display_width(line) == border_width));
+                assert!(border_width <= width);
+            }
+            if width == 40 {
+                assert!(output.contains('\u{10eeee}'), "{output:?}");
+                let marker = buf.text().find('\u{10eeee}').unwrap();
+                let next = marker
+                    + smelt_buffer::cell_width::grapheme_indices(&buf.text()[marker..])
+                        .next()
+                        .unwrap()
+                        .1
+                        .len();
+                assert_eq!(
+                    smelt_buffer::coords::copy_byte_range(&buf, marker, next),
+                    "$x=1$"
+                );
+                let (clipped, _) =
+                    smelt_core::content::builder::render_into_fresh(width as u16, &theme, |out| {
+                        emit_temp_rows(
+                            out,
+                            &buf,
+                            width,
+                            0,
+                            usize::from(expected),
+                            RowClip { start: 3, end: 4 },
+                            None,
+                        );
+                    });
+                let marker = clipped.text().find('\u{10eeee}').unwrap();
+                let end = marker
+                    + smelt_buffer::cell_width::grapheme_indices(&clipped.text()[marker..])
+                        .next()
+                        .unwrap()
+                        .1
+                        .len();
+                assert_eq!(
+                    smelt_buffer::coords::copy_byte_range(&clipped, marker, end),
+                    "$x=1$"
+                );
+            }
+            assert_eq!(output.contains('\u{10eeee}'), width != 5, "width={width}");
+        }
+    }
+
+    #[test]
+    fn tall_table_math_stays_unicode_even_with_a_wide_cell() {
+        let rows = vec![
+            vec!["Formula".into()],
+            vec![r"$\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}$".into()],
+        ];
+        let options = InlineOptions::default();
+        let prepare = |spans: &mut [InlineSpan], cols| {
+            prepare_inline_math(spans, cols, false, (10, 20));
+        };
+        let expected = measure_markdown_table_with_prepare(
+            &rows,
+            &[],
+            80,
+            false,
+            None,
+            "",
+            &options,
+            &mut prepare.clone(),
+        );
+        let (buf, rendered) = smelt_core::content::builder::render_into_fresh(
+            80,
+            &smelt_core::theme::Theme::default(),
+            |out| {
+                render_markdown_table_with_prepare(
+                    out,
+                    &rows,
+                    &[],
+                    80,
+                    false,
+                    None,
+                    "",
+                    &options,
+                    &mut prepare.clone(),
+                );
+            },
+        );
+        assert_eq!(rendered.line_count, usize::from(expected));
+        assert!(!buf.text().contains('\u{10eeee}'));
     }
 
     #[test]

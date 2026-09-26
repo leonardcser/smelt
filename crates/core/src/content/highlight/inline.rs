@@ -48,6 +48,33 @@ pub fn render_markdown_table_with_options(
     indent: &str,
     options: &InlineOptions,
 ) -> u16 {
+    render_markdown_table_with_prepare(
+        out,
+        rows,
+        alignments,
+        width,
+        dim,
+        bctx,
+        indent,
+        options,
+        &mut |_, _| {},
+    )
+}
+
+/// Prepare parsed cell spans using the final assigned cell width. The same
+/// preparation callback must be used for measurement and rendering.
+#[allow(clippy::too_many_arguments)]
+pub fn render_markdown_table_with_prepare(
+    out: &mut LineBuilder,
+    rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
     if rows.is_empty() {
         return 0;
     }
@@ -61,7 +88,8 @@ pub fn render_markdown_table_with_options(
 
     let start = out.line_count();
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table, options) else {
-        let rendered = render_table_stacked(out, rows, max_table, dim, bctx, indent, options);
+        let rendered =
+            render_table_stacked(out, rows, max_table, dim, bctx, indent, options, prepare);
         out.stamp_chrome_delimited_block(start);
         return rendered;
     };
@@ -78,12 +106,22 @@ pub fn render_markdown_table_with_options(
             bctx,
             indent,
             options,
+            prepare,
         );
         total_rows += render_border(out, &col_widths, bctx, indent, "┣", "╋", "┫");
     }
     for row in rows.iter().skip(1) {
-        total_rows +=
-            render_table_row(out, row, &col_widths, align_for, dim, bctx, indent, options);
+        total_rows += render_table_row(
+            out,
+            row,
+            &col_widths,
+            align_for,
+            dim,
+            bctx,
+            indent,
+            options,
+            prepare,
+        );
     }
     total_rows += render_border(out, &col_widths, bctx, indent, "┗", "┻", "┛");
     out.stamp_chrome_delimited_block(start);
@@ -118,6 +156,29 @@ pub fn measure_markdown_table_with_options(
     indent: &str,
     options: &InlineOptions,
 ) -> u16 {
+    measure_markdown_table_with_prepare(
+        rows,
+        alignments,
+        width,
+        dim,
+        bctx,
+        indent,
+        options,
+        &mut |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn measure_markdown_table_with_prepare(
+    rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
     let _ = alignments;
     if rows.is_empty() {
         return 0;
@@ -129,17 +190,17 @@ pub fn measure_markdown_table_with_options(
 
     let max_table = markdown_table_width(width, bctx, indent);
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table, options) else {
-        return measure_table_stacked(rows, max_table, dim, options);
+        return measure_table_stacked(rows, max_table, dim, options, prepare);
     };
 
     let header_rows = rows
         .first()
-        .map(|header| measure_table_row(header, &col_widths, dim, options))
+        .map(|header| measure_table_row(header, &col_widths, dim, options, prepare))
         .unwrap_or(0);
     let body_rows: u16 = rows
         .iter()
         .skip(1)
-        .map(|row| measure_table_row(row, &col_widths, dim, options))
+        .map(|row| measure_table_row(row, &col_widths, dim, options, prepare))
         .sum();
     header_rows.saturating_add(body_rows).saturating_add(3) // top border, header separator, bottom border
 }
@@ -155,10 +216,24 @@ fn markdown_table_width(
     }
 }
 
-fn measure_table_row(row: &[String], widths: &[usize], dim: bool, options: &InlineOptions) -> u16 {
+fn measure_table_row(
+    row: &[String],
+    widths: &[usize],
+    dim: bool,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
     row.iter()
         .enumerate()
-        .map(|(c, cell)| measure_cell_rows(cell, widths.get(c).copied().unwrap_or(0), dim, options))
+        .map(|(c, cell)| {
+            measure_cell_rows(
+                cell,
+                widths.get(c).copied().unwrap_or(0),
+                dim,
+                options,
+                prepare,
+            )
+        })
         .max()
         .unwrap_or(1)
 }
@@ -168,6 +243,7 @@ fn measure_table_stacked(
     max_table: usize,
     dim: bool,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
@@ -190,26 +266,49 @@ fn measure_table_stacked(
         for (c, cell) in row.iter().enumerate() {
             let label = header.get(c).map(|s| s.as_str()).unwrap_or("");
             if side_by_side {
-                total_rows =
-                    total_rows.saturating_add(measure_cell_rows(cell, value_width, dim, options));
+                total_rows = total_rows.saturating_add(measure_cell_rows(
+                    cell,
+                    value_width,
+                    dim,
+                    options,
+                    prepare,
+                ));
             } else {
                 let inner_indent = content_width.min(2);
                 let text_width = content_width.saturating_sub(inner_indent).max(1);
                 if !label.is_empty() {
-                    total_rows = total_rows
-                        .saturating_add(measure_cell_rows(label, text_width, dim, options));
+                    total_rows = total_rows.saturating_add(measure_cell_rows(
+                        label, text_width, dim, options, prepare,
+                    ));
                 }
-                total_rows =
-                    total_rows.saturating_add(measure_cell_rows(cell, text_width, dim, options));
+                total_rows = total_rows
+                    .saturating_add(measure_cell_rows(cell, text_width, dim, options, prepare));
             }
         }
     }
     total_rows
 }
 
-fn measure_cell_rows(text: &str, max_width: usize, dim: bool, options: &InlineOptions) -> u16 {
-    let spans = parse_inline_spans_with_options(text, dim, options);
-    wrap_inline_spans(&spans, max_width).len() as u16
+fn measure_cell_rows(
+    text: &str,
+    max_width: usize,
+    dim: bool,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> u16 {
+    cell_rows(text, max_width, dim, options, prepare).len() as u16
+}
+
+fn cell_rows(
+    text: &str,
+    max_width: usize,
+    dim: bool,
+    options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
+) -> Vec<Vec<InlineSpan>> {
+    let mut spans = parse_inline_spans_with_options(text, dim, options);
+    prepare(&mut spans, max_width);
+    wrap_inline_spans(&spans, max_width)
 }
 
 /// Pick a final width per column that fits within `max_table` (including the
@@ -325,12 +424,20 @@ fn render_table_row(
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> u16 {
     let wrapped: Vec<Vec<Vec<InlineSpan>>> = row
         .iter()
         .enumerate()
         .map(|(c, cell)| {
-            wrap_cell_spans(out, cell, widths.get(c).copied().unwrap_or(0), dim, options)
+            wrap_cell_spans(
+                out,
+                cell,
+                widths.get(c).copied().unwrap_or(0),
+                dim,
+                options,
+                prepare,
+            )
         })
         .collect();
     let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
@@ -375,6 +482,7 @@ fn render_table_row(
 /// Stacked fallback: each data row becomes "Header  value" lines, used when
 /// the table is too wide. The layout is still width-bounded; otherwise the
 /// fallback itself creates horizontal overflow in pre-formatted panes.
+#[allow(clippy::too_many_arguments)]
 fn render_table_stacked(
     out: &mut LineBuilder,
     rows: &[Vec<String>],
@@ -383,6 +491,7 @@ fn render_table_stacked(
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
@@ -416,7 +525,7 @@ fn render_table_stacked(
             if side_by_side {
                 let label_visual = inline_visual_width(label, options);
                 let pad = label_width.saturating_sub(label_visual);
-                let wrapped = wrap_cell_spans(out, cell, value_width, dim, options);
+                let wrapped = wrap_cell_spans(out, cell, value_width, dim, options, prepare);
                 for (li, spans) in wrapped.iter().enumerate() {
                     render_row_prefix(out, bctx, indent);
                     if li == 0 {
@@ -438,7 +547,7 @@ fn render_table_stacked(
                 let inner_indent = content_width.min(2);
                 let text_width = content_width.saturating_sub(inner_indent).max(1);
                 if !label.is_empty() {
-                    let labels = wrap_cell_spans(out, label, text_width, dim, options);
+                    let labels = wrap_cell_spans(out, label, text_width, dim, options, prepare);
                     for spans in &labels {
                         render_row_prefix(out, bctx, indent);
                         if inner_indent > 0 {
@@ -450,7 +559,7 @@ fn render_table_stacked(
                     }
                 }
 
-                let wrapped = wrap_cell_spans(out, cell, text_width, dim, options);
+                let wrapped = wrap_cell_spans(out, cell, text_width, dim, options, prepare);
                 for spans in &wrapped {
                     render_row_prefix(out, bctx, indent);
                     if inner_indent > 0 {
@@ -472,9 +581,9 @@ fn wrap_cell_spans(
     max_width: usize,
     dim: bool,
     options: &InlineOptions,
+    prepare: &mut dyn FnMut(&mut [InlineSpan], usize),
 ) -> Vec<Vec<InlineSpan>> {
-    let spans = parse_inline_spans_with_options(text, dim, options);
-    let rows = wrap_inline_spans(&spans, max_width);
+    let rows = cell_rows(text, max_width, dim, options, prepare);
     if rows.len() > 1 {
         out.mark_wrapped();
     }
