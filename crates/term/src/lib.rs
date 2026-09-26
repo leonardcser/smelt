@@ -25,8 +25,8 @@ pub mod snapshot;
 pub mod surface;
 
 pub use compositor::{
-    kitty_control_sequence, kitty_image_exists, kitty_placeholder_row, register_kitty_image,
-    Compositor, KITTY_IMAGE_ROWS,
+    kitty_control_sequence, kitty_image_exists, kitty_image_generation, kitty_placeholder_row,
+    register_kitty_image, Compositor, KITTY_IMAGE_ROWS,
 };
 pub use flush::flush_diff;
 pub use geometry::Insets;

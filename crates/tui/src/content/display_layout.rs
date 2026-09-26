@@ -66,7 +66,7 @@ pub(crate) fn kitty_cell_pixels() -> Option<(u32, u32)> {
     (packed != 0).then_some(((packed >> 32) as u32, packed as u32))
 }
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 16;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 17;
 
 pub(crate) fn transcript_renderer_cache_key(
     lua: &LuaRuntime,
@@ -88,7 +88,10 @@ pub(crate) fn transcript_renderer_cache_key(
     }
     if inline_options.math_graphics {
         let geometry = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
-        key = Some(key.unwrap_or_default() ^ geometry.rotate_left(31));
+        let images = (geometry != 0)
+            .then(smelt_term::kitty_image_generation)
+            .unwrap_or_default();
+        key = Some(key.unwrap_or_default() ^ geometry.rotate_left(31) ^ images.rotate_left(7));
     }
     key
 }

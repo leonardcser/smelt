@@ -350,10 +350,11 @@ just exceed the available width are rerendered at up to 20% smaller font size;
 wider equations use Unicode rather than becoming too small to read. Simple inline
 expressions in paragraphs, headings, lists and Markdown table cells fit into one
 text row when they fit the assigned cell width. Inline formulas are not downscaled;
-taller or too-wide inline formulas use Unicode instead of shrinking until
-unreadable or expanding line heights. If either terminal check fails, an equation
-cannot be rasterized, or the live image budget fills, smelt uses Unicode text
-instead. Cached and visible images keep their rasters
+taller or too-wide inline formulas use a one-line text fallback instead of
+shrinking until unreadable or expanding line heights. Fractions stay grouped as
+`(numerator)/(denominator)`; expressions that cannot be flattened faithfully
+retain their LaTeX source. If either terminal check fails, an equation cannot be
+rasterized, or the live image budget fills, smelt uses text instead. Cached and visible images keep their rasters
 alive for scroll-back; released images free capacity for later equations. The
 live-image budget is 256 images or 32 MiB of encoded PNGs, plus an 8 MiB recent
 raster cache. Inside tmux, enable graphics passthrough with

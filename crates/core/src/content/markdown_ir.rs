@@ -172,27 +172,6 @@ enum SpecialBlock {
 }
 
 impl SpecialBlock {
-    fn shift(mut self, offset: usize) -> Self {
-        match &mut self {
-            Self::Text { range, lines, .. } => {
-                shift_range(range, offset);
-                for line in lines {
-                    shift_range(&mut line.source, offset);
-                }
-            }
-            Self::Code { range, body, .. } => {
-                shift_range(range, offset);
-                for line in body {
-                    shift_range(line, offset);
-                }
-            }
-            Self::Math { range } | Self::Table { range, .. } | Self::Rule { range } => {
-                shift_range(range, offset);
-            }
-        }
-        self
-    }
-
     fn range(&self) -> Range<usize> {
         match self {
             SpecialBlock::Text { range, .. }
@@ -220,11 +199,6 @@ impl SpecialBlock {
             SpecialBlock::Rule { range } => MarkdownNode::Rule { range },
         }
     }
-}
-
-fn shift_range(range: &mut Range<usize>, offset: usize) {
-    range.start += offset;
-    range.end += offset;
 }
 
 fn collect_math_blocks(source: &str) -> Vec<Range<usize>> {
@@ -266,7 +240,10 @@ fn collect_math_blocks(source: &str) -> Vec<Range<usize>> {
                 ranges.push(start..offset + line.len());
                 math = None;
             }
-        } else if body.starts_with(r"\[") && body.ends_with(r"\]") && body.len() > 4 {
+        } else if ((body.starts_with(r"\[") && body.ends_with(r"\]"))
+            || (body.starts_with("$$") && body.ends_with("$$")))
+            && body.len() > 4
+        {
             ranges.push(offset..offset + line.len());
         } else if body == r"\[" || body == "$$" {
             math = Some((offset, if body == "$$" { "$$" } else { r"\]" }));
@@ -285,25 +262,16 @@ pub fn parse_markdown_with_options<'a>(
     inline_options: &InlineOptions,
 ) -> MarkdownBlock<'a> {
     let math_ranges = collect_math_blocks(source);
-    let mut specials = Vec::new();
-    let mut start = 0;
+    let protected =
+        crate::content::highlight::inline::protected_math_source(source, markdown_options());
+    let mut specials = collect_special_blocks(source, &protected, inline_options);
     for range in math_ranges {
-        let fragment = &source[start..range.start];
-        specials.extend(
-            collect_special_blocks(fragment, inline_options)
-                .into_iter()
-                .map(|block| block.shift(start)),
-        );
-        specials.push(SpecialBlock::Math {
-            range: range.clone(),
-        });
-        start = range.end;
-    }
-    specials.extend(
-        collect_special_blocks(&source[start..], inline_options)
+        specials = specials
             .into_iter()
-            .map(|block| block.shift(start)),
-    );
+            .flat_map(|block| without_math_range(block, &range))
+            .collect();
+        specials.push(SpecialBlock::Math { range });
+    }
     specials.sort_by_key(|block| block.range().start);
     specials.dedup_by(|a, b| a.range() == b.range());
 
@@ -331,6 +299,42 @@ pub fn parse_markdown_with_options<'a>(
     MarkdownBlock { source, nodes }
 }
 
+fn without_math_range(block: SpecialBlock, math: &Range<usize>) -> Vec<SpecialBlock> {
+    let range = block.range();
+    if range.end <= math.start || range.start >= math.end {
+        return vec![block];
+    }
+    if let SpecialBlock::Text { kind, lines, .. } = block {
+        let mut parts = Vec::new();
+        let before: Vec<_> = lines
+            .iter()
+            .filter(|line| line.source.end <= math.start)
+            .cloned()
+            .collect();
+        if !before.is_empty() {
+            parts.push(SpecialBlock::Text {
+                range: range.start..math.start,
+                kind,
+                lines: before,
+            });
+        }
+        let after: Vec<_> = lines
+            .into_iter()
+            .filter(|line| line.source.start >= math.end)
+            .collect();
+        if !after.is_empty() {
+            parts.push(SpecialBlock::Text {
+                range: math.end..range.end,
+                kind,
+                lines: after,
+            });
+        }
+        parts
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn math_body(source: &str) -> &str {
     let source = source.trim();
     source
@@ -339,6 +343,16 @@ pub fn math_body(source: &str) -> &str {
         .or_else(|| source.strip_prefix("$$").and_then(|s| s.strip_suffix("$$")))
         .unwrap_or(source)
         .trim()
+}
+
+pub fn inline_math_text(source: &str) -> String {
+    let ast = linearize_fractions(parse_equation(&expand_math_boxes(source)));
+    let rendered = term_maths::layout::layout(&ast).to_string();
+    if rendered.lines().count() > 1 {
+        source.to_owned()
+    } else {
+        rendered.trim().to_owned()
+    }
 }
 
 pub fn math_rows(source: &str, width: usize) -> Vec<String> {
@@ -688,9 +702,12 @@ fn markdown_options() -> Options {
         | Options::ENABLE_MATH
 }
 
-fn collect_special_blocks(source: &str, inline_options: &InlineOptions) -> Vec<SpecialBlock> {
-    let options = markdown_options();
-    let parser = Parser::new_ext(source, options).into_offset_iter();
+fn collect_special_blocks(
+    source: &str,
+    protected: &str,
+    inline_options: &InlineOptions,
+) -> Vec<SpecialBlock> {
+    let parser = Parser::new_ext(protected, markdown_options()).into_offset_iter();
     let mut out = Vec::new();
     let mut text_stack: Vec<OpenText> = Vec::new();
     let mut code: Option<(usize, String, Vec<Range<usize>>)> = None;
@@ -855,10 +872,7 @@ fn markdown_lines<'a>(
     let ranges = line_ranges(source, range);
     let inline_lines = crate::content::highlight::inline::lower_inline_event_lines_with_source(
         source,
-        crate::content::highlight::inline::normalize_inline_math_events(
-            source,
-            events.iter().cloned(),
-        ),
+        events.iter().cloned(),
         &ranges,
         false,
         inline_options,
@@ -1123,6 +1137,82 @@ mod tests {
         assert!(nodes
             .iter()
             .any(|node| matches!(node, MarkdownNode::Code { .. })));
+    }
+
+    #[test]
+    fn math_block_preserves_markdown_references_across_it() {
+        for math in [r"\[x=1\]", "$$x=1$$"] {
+            let source =
+                format!("[details][equation]\n\n{math}\n\n[equation]: https://example.test/math\n");
+            let nodes = parse_markdown(&source).nodes;
+            let spans = nodes
+                .iter()
+                .find_map(|node| match node {
+                    MarkdownNode::Text { lines, .. } => Some(&lines[0].spans),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                spans
+                    .iter()
+                    .any(|span| span.text == "details" && span.meta.action.is_some()),
+                "{math}: {spans:#?}"
+            );
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| matches!(node, MarkdownNode::Math { .. })),
+                "{math}: {nodes:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn math_block_keeps_adjacent_paragraph_lines() {
+        let source = "before\n\\[x=1\\]\nafter\n";
+        let nodes = parse_markdown(source).nodes;
+        let text = nodes
+            .iter()
+            .filter_map(|node| match node {
+                MarkdownNode::Text { lines, .. } => Some(
+                    lines
+                        .iter()
+                        .flat_map(|line| &line.spans)
+                        .map(|span| span.text.as_str())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            text.iter().any(|line| line.contains("before")),
+            "{nodes:#?}"
+        );
+        assert!(text.iter().any(|line| line.contains("after")), "{nodes:#?}");
+        assert!(nodes
+            .iter()
+            .any(|node| matches!(node, MarkdownNode::Math { .. })));
+    }
+
+    #[test]
+    fn math_operators_are_not_markdown_emphasis() {
+        for source in [r"\(a*b*c\)", r"$a*b*c$"] {
+            let spans = crate::content::highlight::parse_inline_spans(source, false);
+            let math: Vec<_> = spans.iter().filter(|span| span.math.is_some()).collect();
+            assert_eq!(math.len(), 1, "{source}: {spans:#?}");
+            assert_eq!(
+                math[0].math.as_deref(),
+                Some("a*b*c"),
+                "{source}: {spans:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_fraction_fallback_preserves_numerator_and_denominator() {
+        let spans = crate::content::highlight::parse_inline_spans(r"$\frac{a}{b}$", false);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].text.contains("(a)/(b)"), "{spans:#?}");
     }
 
     #[test]

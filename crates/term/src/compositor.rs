@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 #[derive(Default)]
 struct ImageRegistry {
     images: HashMap<u32, Weak<RasterImage>>,
+    generation: u64,
 }
 
 impl ImageRegistry {
@@ -32,15 +33,7 @@ impl ImageRegistry {
         if let Some(image) = self.images.get(&id).and_then(Weak::upgrade) {
             return Some(image);
         }
-        let mut bytes = 0usize;
-        self.images.retain(|_, weak| {
-            if let Some(image) = weak.upgrade() {
-                bytes += image.png_base64.len();
-                true
-            } else {
-                false
-            }
-        });
+        let bytes = self.live_bytes();
         if self.images.len() >= 256 || bytes.saturating_add(png_base64.len()) > 32 * 1024 * 1024 {
             return None;
         }
@@ -51,13 +44,38 @@ impl ImageRegistry {
             rows,
         });
         self.images.insert(id, Arc::downgrade(&image));
+        self.generation = self.generation.wrapping_add(1);
         Some(image)
+    }
+
+    fn live_bytes(&mut self) -> usize {
+        let count = self.images.len();
+        let mut bytes = 0;
+        self.images.retain(|_, weak| {
+            if let Some(image) = weak.upgrade() {
+                bytes += image.png_base64.len();
+                true
+            } else {
+                false
+            }
+        });
+        if self.images.len() != count {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        bytes
     }
 }
 
 fn kitty_images() -> &'static Mutex<ImageRegistry> {
     static IMAGES: OnceLock<Mutex<ImageRegistry>> = OnceLock::new();
     IMAGES.get_or_init(|| Mutex::new(ImageRegistry::default()))
+}
+
+/// Changes when live image ownership changes, including after released handles are reclaimed.
+pub fn kitty_image_generation() -> u64 {
+    let mut registry = kitty_images().lock().unwrap_or_else(|e| e.into_inner());
+    registry.live_bytes();
+    registry.generation
 }
 
 pub fn kitty_image_exists(id: u32) -> bool {
@@ -231,7 +249,8 @@ impl Compositor {
         let result = (|| {
             w.queue(BeginSynchronizedUpdate)?;
             for id in &removed {
-                let command = format!("\x1b_Ga=d,d=i,i={id},q=2;\x1b\\");
+                // Offscreen images are retransmitted when needed, so release their terminal data.
+                let command = format!("\x1b_Ga=d,d=I,i={id},q=2;\x1b\\");
                 w.write_all(&kitty_control_sequence(command.as_bytes()))?;
             }
             for id in &uploads {
@@ -378,9 +397,11 @@ mod tests {
         let retained: Vec<_> = (1..=256)
             .map(|id| registry.register(id, "QUJDRA==".into(), 1, 1).unwrap())
             .collect();
+        assert_eq!(registry.generation, 256);
         assert!(registry.register(257, "QUJDRA==".into(), 1, 1).is_none());
         drop(retained);
         let replacement = registry.register(257, "QUJDRA==".into(), 1, 1).unwrap();
+        assert_eq!(registry.generation, 258);
         assert_eq!(registry.images.len(), 1);
         assert!(registry.images.get(&257).and_then(Weak::upgrade).is_some());
         drop(replacement);
@@ -512,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn offscreen_image_placement_is_deleted_but_data_is_retained() {
+    fn offscreen_image_frees_terminal_data_but_retains_raster_handle() {
         let _lock = registry_test_lock();
         let id = 0x0a0b0c;
         let image = register_kitty_image(id, "QUJDRA==".into(), 1, 1).unwrap();
@@ -541,8 +562,8 @@ mod tests {
             .unwrap();
         assert!(kitty_image_exists(id));
         assert!(cleared
-            .windows(b"a=d,d=i,i=658188,q=2;".len())
-            .any(|w| w == b"a=d,d=i,i=658188,q=2;"));
+            .windows(b"a=d,d=I,i=658188,q=2;".len())
+            .any(|w| w == b"a=d,d=I,i=658188,q=2;"));
         assert!(compositor.uploaded_images.is_empty());
     }
 

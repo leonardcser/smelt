@@ -297,6 +297,20 @@ fn wide_math_in_assistant_transcript_keeps_approximation_after_denominator() {
 }
 
 #[test]
+fn assistant_inline_math_keeps_operators_and_fraction_structure() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 18);
+    assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
+    app.start_turn(42);
+    app.feed_one(SourceEvent::engine(EngineEvent::Text {
+        content: r"The product is \(a*b*c\) and the ratio is $\frac{a}{b}$.".into(),
+    }));
+    let text = app.render_to_frame().text();
+    assert!(text.contains("a · b · c"), "{text}");
+    assert!(text.contains("(a)/(b)"), "{text}");
+}
+
+#[test]
 fn empty_engine_output_is_a_transcript_noop() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);

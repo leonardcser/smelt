@@ -10,7 +10,7 @@ use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 /// Render a markdown table. `alignments` may be empty (defaults to left for all
 /// columns) or shorter than the column count (missing entries default to left).
@@ -745,144 +745,92 @@ pub fn parse_inline_spans_with_options(
 fn parse_inline_fragment(text: &str, dim: bool, options: &InlineOptions) -> Vec<InlineSpan> {
     let parser_options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_MATH;
+    let protected = protected_math_source(text, parser_options);
     lower_inline_fragment_events(
         text,
-        normalize_inline_math_events(
-            text,
-            Parser::new_ext(text, parser_options).into_offset_iter(),
-        ),
+        Parser::new_ext(&protected, parser_options).into_offset_iter(),
         dim,
         options,
     )
 }
 
-pub(crate) fn normalize_inline_math_events<'a>(
-    source: &'a str,
-    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
-) -> Vec<(Event<'a>, Range<usize>)> {
-    let mut out = Vec::new();
-    let mut text = Vec::new();
-    for (event, range) in events {
-        if matches!(event, Event::Text(_)) {
-            text.push((event, range));
-        } else {
-            append_inline_math_text(source, &mut text, &mut out);
-            out.push((event, range));
+/// Shield TeX delimiters from Markdown while keeping every source byte offset.
+/// The parser sees ordinary math tokens; lowering reads the original source.
+pub(crate) fn protected_math_source<'a>(source: &'a str, options: Options) -> Cow<'a, str> {
+    if !source.contains(r"\(") {
+        return Cow::Borrowed(source);
+    }
+    let mut code_ranges = Vec::new();
+    let mut code_start = None;
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code_start = Some(range.start),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(start) = code_start.take() {
+                    code_ranges.push(start..range.end);
+                }
+            }
+            Event::Code(_) | Event::InlineMath(_) | Event::DisplayMath(_) => {
+                code_ranges.push(range)
+            }
+            _ => {}
         }
     }
-    append_inline_math_text(source, &mut text, &mut out);
-    out
-}
-
-fn append_inline_math_text<'a>(
-    source: &'a str,
-    text: &mut Vec<(Event<'a>, Range<usize>)>,
-    out: &mut Vec<(Event<'a>, Range<usize>)>,
-) {
-    let (Some(first), Some(last)) = (text.first(), text.last()) else {
-        return;
-    };
-    let mut start = first.1.start;
-    if start > 0
-        && source.as_bytes()[start - 1] == b'\\'
-        && matches!(&first.0, Event::Text(value) if value.starts_with('('))
-    {
-        start -= 1;
-    }
-    let end = last.1.end;
-    let raw = smelt_buffer::text::slice(source, start..end);
-    if !raw.contains(r"\(") || !raw.contains(r"\)") {
-        out.append(text);
-        return;
-    }
-    let original_out_len = out.len();
-    let mut offset = 0;
-    let mut search = 0;
-    let mut found = false;
-    while let Some(open) = raw[search..].find(r"\(").map(|i| search + i) {
-        if escaped_math_delimiter(raw, open) {
-            search = open + 2;
+    code_ranges.sort_by_key(|range| range.start);
+    let raw = source.as_bytes();
+    let mut protected = None::<Vec<u8>>;
+    let mut i = 0;
+    let mut code = 0;
+    while i + 1 < raw.len() {
+        while code_ranges.get(code).is_some_and(|range| range.end <= i) {
+            code += 1;
+        }
+        if let Some(range) = code_ranges.get(code).filter(|range| range.contains(&i)) {
+            i = range.end;
             continue;
         }
-        let mut closing = open + 2;
-        let close = loop {
-            let Some(candidate) = raw[closing..].find(r"\)").map(|i| closing + i) else {
-                break None;
-            };
-            if !escaped_math_delimiter(raw, candidate) {
-                break Some(candidate);
-            }
-            closing = candidate + 2;
-        };
-        let Some(close) = close else { break };
-        if text.iter().any(|(event, range)| {
-            let Event::Text(value) = event else {
-                return false;
-            };
-            let splits_event = [start + open, start + close + 2]
-                .into_iter()
-                .any(|boundary| range.start < boundary && boundary < range.end);
-            splits_event && smelt_buffer::text::slice(source, range.clone()) != value.as_ref()
-        }) {
-            out.truncate(original_out_len);
-            out.append(text);
-            return;
+        if &raw[i..i + 2] != br"\(" || escaped_math_delimiter(source, i) {
+            i += 1;
+            continue;
         }
-        append_inline_text_fragment(source, text, start + offset, start + open, out);
-        out.push((
-            Event::InlineMath(raw[open + 2..close].to_owned().into()),
-            start + open..start + close + 2,
-        ));
-        found = true;
-        offset = close + 2;
-        search = offset;
+        let mut close = i + 2;
+        while close + 1 < raw.len() && raw[close] != b'\n' {
+            if &raw[close..close + 2] == br"\)"
+                && !escaped_math_delimiter(source, close)
+                && !code_ranges.iter().any(|range| range.contains(&close))
+            {
+                break;
+            }
+            close += 1;
+        }
+        if close + 1 >= raw.len()
+            || &raw[close..close + 2] != br"\)"
+            || code_ranges
+                .iter()
+                .any(|range| range.start < close + 2 && range.end > i)
+        {
+            i += 2;
+            continue;
+        }
+        let bytes = protected.get_or_insert_with(|| raw.to_vec());
+        bytes[i..i + 2].copy_from_slice(b"$x");
+        bytes[i + 2..close].fill(b'x');
+        bytes[close..close + 2].copy_from_slice(b"x$");
+        i = close + 2;
     }
-    if found {
-        append_inline_text_fragment(source, text, start + offset, end, out);
-        text.clear();
-    } else {
-        out.append(text);
-    }
+    protected.map_or(Cow::Borrowed(source), |bytes| {
+        Cow::Owned(String::from_utf8(bytes).expect("math protection preserves UTF-8"))
+    })
 }
 
-fn escaped_math_delimiter(raw: &str, offset: usize) -> bool {
-    raw.as_bytes()[..offset]
+fn escaped_math_delimiter(source: &str, offset: usize) -> bool {
+    source.as_bytes()[..offset]
         .iter()
         .rev()
         .take_while(|&&byte| byte == b'\\')
         .count()
         % 2
         == 1
-}
-
-fn append_inline_text_fragment<'a>(
-    source: &'a str,
-    text: &[(Event<'a>, Range<usize>)],
-    start: usize,
-    end: usize,
-    out: &mut Vec<(Event<'a>, Range<usize>)>,
-) {
-    for (event, range) in text {
-        let from = range.start.max(start);
-        let to = range.end.min(end);
-        if from >= to {
-            continue;
-        }
-        let Event::Text(value) = event else { continue };
-        let raw = smelt_buffer::text::slice(source, range.clone());
-        if from == range.start && to == range.end {
-            out.push((event.clone(), range.clone()));
-        } else if raw == value.as_ref() {
-            out.push((
-                Event::Text(
-                    smelt_buffer::text::slice(raw, from - range.start..to - range.start)
-                        .to_owned()
-                        .into(),
-                ),
-                from..to,
-            ));
-        }
-    }
 }
 
 pub fn lower_inline_events<'a>(
@@ -1253,19 +1201,21 @@ fn lower_inline_event(
             }
         }
         Event::InlineMath(text) | Event::DisplayMath(text) => {
-            let rendered = term_maths::render(text.as_ref()).to_string();
-            let inline = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            let body = math_source
+                .and_then(|raw| raw.strip_prefix(r"\(").and_then(|s| s.strip_suffix(r"\)")))
+                .unwrap_or(text.as_ref());
+            let inline = crate::content::markdown_ir::inline_math_text(body);
             let source = math_source
                 .filter(|raw| raw.starts_with('$') || raw.starts_with(r"\("))
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("${text}$"));
+                .unwrap_or_else(|| format!("${body}$"));
             if !inline.is_empty() {
                 out.push(InlineSpan {
                     text: inline,
                     style: *styles.last().unwrap(),
                     meta: SpanMeta::copy_as(source),
                     break_policy: BreakPolicy::Normal,
-                    math: Some(text.to_string()),
+                    math: Some(body.to_string()),
                 });
             }
         }

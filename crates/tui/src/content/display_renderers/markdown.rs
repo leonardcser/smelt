@@ -878,10 +878,21 @@ struct RetainedParsedMarkdown {
 
 struct RetainedMarkdownLayout {
     width: usize,
+    cell_pixels: Option<(u32, u32)>,
+    // Image admission can change a math block's height by switching to Unicode.
+    image_generation: u64,
     completed_states: Vec<FlowState>,
     suffix_revision: Option<u64>,
     total_state: FlowState,
     last_used: u64,
+}
+
+impl RetainedMarkdownLayout {
+    fn matches(&self, width: usize, cell_pixels: Option<(u32, u32)>, generation: u64) -> bool {
+        self.width == width
+            && self.cell_pixels == cell_pixels
+            && self.image_generation == generation
+    }
 }
 
 impl RetainedParsedMarkdown {
@@ -1268,13 +1279,20 @@ fn ensure_retained_markdown_layout(
         .layout_clock
         .checked_add(1)
         .expect("retained Markdown layout clock overflow");
+    let cell_pixels = inline_options
+        .math_graphics
+        .then(crate::content::display_layout::kitty_cell_pixels)
+        .flatten();
+    let image_generation = cell_pixels.map_or(0, |_| smelt_term::kitty_image_generation());
     let mut layout = parsed
         .layouts
         .iter()
-        .position(|layout| layout.width == width)
+        .position(|layout| layout.matches(width, cell_pixels, image_generation))
         .map(|index| parsed.layouts.swap_remove(index))
         .unwrap_or_else(|| RetainedMarkdownLayout {
             width,
+            cell_pixels,
+            image_generation,
             completed_states: vec![FlowState::default()],
             suffix_revision: None,
             total_state: FlowState::default(),
@@ -1316,6 +1334,7 @@ fn ensure_retained_markdown_layout(
         layout.total_state = state;
         layout.suffix_revision = parsed.revision;
     }
+    layout.image_generation = cell_pixels.map_or(0, |_| smelt_term::kitty_image_generation());
     layout.last_used = parsed.layout_clock;
 
     if parsed.layouts.len() >= RETAINED_MARKDOWN_LAYOUT_WIDTHS {
@@ -3224,6 +3243,23 @@ mod tests {
             assert_eq!(cache.retained_bytes, 0);
         });
         assert!(!parsed.borrow().completed.is_empty());
+    }
+
+    #[test]
+    fn retained_math_layout_invalidates_on_font_or_image_budget_change() {
+        let layout = RetainedMarkdownLayout {
+            width: 40,
+            cell_pixels: Some((10, 20)),
+            image_generation: 7,
+            completed_states: vec![FlowState::default()],
+            suffix_revision: Some(1),
+            total_state: FlowState::default(),
+            last_used: 0,
+        };
+        assert!(layout.matches(40, Some((10, 20)), 7));
+        assert!(!layout.matches(40, Some((12, 24)), 7));
+        assert!(!layout.matches(40, None, 0));
+        assert!(!layout.matches(40, Some((10, 20)), 8));
     }
 
     #[test]
