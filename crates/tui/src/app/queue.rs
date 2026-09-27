@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use protocol::Content;
 
-use crate::input::PromptState;
+use crate::input::{PromptReplay, PromptState, PromptSubmission};
 
 /// Hard cap on how many user submissions stack up while a background
 /// plugin holds the spinner busy. Sensible bursts are under 10; anything
@@ -205,15 +205,26 @@ pub(crate) struct QueuedRequest {
     pub(crate) content: Content,
     pub(crate) sent_at_ms: u64,
     pub(crate) turn_options: QueuedTurnOptions,
+    replay: Option<PromptReplay>,
 }
 
 impl QueuedRequest {
+    pub(crate) fn image_placement(&self) -> Option<protocol::history::ImagePlacement> {
+        self.replay.as_ref().map(PromptReplay::image_placement)
+    }
+
     pub(crate) fn prompt(display: impl Into<String>, content: Content, sent_at_ms: u64) -> Self {
+        assert_eq!(
+            content.image_count(),
+            0,
+            "image requests require prompt replay"
+        );
         Self {
             display: display.into(),
             content,
             sent_at_ms,
             turn_options: QueuedTurnOptions::Default,
+            replay: None,
         }
     }
 
@@ -230,6 +241,7 @@ impl QueuedRequest {
             turn_options: QueuedTurnOptions::CustomCommand {
                 overrides: Box::new(overrides),
             },
+            replay: None,
         }
     }
 }
@@ -250,6 +262,35 @@ impl QueuedInput {
         QueuedInput::Request(Box::new(QueuedRequest::prompt(
             display, content, sent_at_ms,
         )))
+    }
+
+    pub(crate) fn from_prompt(submission: PromptSubmission, sent_at_ms: u64) -> Self {
+        let request = QueuedRequest {
+            display: submission.display,
+            content: submission.content,
+            sent_at_ms,
+            turn_options: QueuedTurnOptions::Default,
+            replay: submission.replay,
+        };
+        if request.content.image_count() > 0 {
+            let replay = request
+                .replay
+                .as_ref()
+                .expect("image requests require prompt replay");
+            assert_eq!(
+                replay
+                    .source
+                    .matches(crate::input::ATTACHMENT_MARKER)
+                    .count(),
+                replay.ids.len()
+            );
+            assert_eq!(replay.ids.len(), replay.image_indices.len());
+            assert!(replay
+                .image_indices
+                .iter()
+                .all(|&index| index < request.content.image_count()));
+        }
+        Self::Request(Box::new(request))
     }
 
     #[cfg(any(test, feature = "harness"))]
@@ -295,10 +336,7 @@ impl QueuedInput {
     }
 
     pub(crate) fn can_queue_for_request(&self) -> bool {
-        matches!(
-            self,
-            QueuedInput::Request(req) if req.content.image_count() == 0
-        ) || matches!(self, QueuedInput::Command { .. })
+        matches!(self, QueuedInput::Request(_) | QueuedInput::Command { .. })
     }
 
     pub(crate) fn sent_at_ms(&self) -> Option<u64> {
@@ -313,6 +351,13 @@ impl QueuedInput {
         let input = match self {
             QueuedInput::Request(req) if self.is_command() => {
                 protocol::StartTurnInput::user_command(req.content.clone(), req.display.clone())
+            }
+            QueuedInput::Request(req) if req.content.image_count() > 0 => {
+                protocol::StartTurnInput::user_with_display(
+                    req.content.clone(),
+                    req.display.clone(),
+                )
+                .with_image_placement(req.image_placement())
             }
             QueuedInput::Request(req) => protocol::StartTurnInput::user(req.content.clone()),
             QueuedInput::Command { display, line, .. } => {
@@ -332,7 +377,16 @@ impl QueuedInput {
             )
     }
 
-    pub(crate) fn prompt_replay_text(&self) -> String {
-        PromptState::strip_attachment_markers(&self.display())
+    pub(crate) fn prompt_replay(&self) -> PromptReplay {
+        if let Self::Request(req) = self {
+            if let Some(replay) = &req.replay {
+                return replay.clone();
+            }
+        }
+        PromptReplay {
+            source: PromptState::strip_attachment_markers(&self.display()),
+            ids: Vec::new(),
+            image_indices: Vec::new(),
+        }
     }
 }

@@ -1734,6 +1734,7 @@ fn lua_context_note_updates_named_history_notes_independently() {
         display: None,
         command: false,
         sent_at_ms: None,
+        image_placement: None,
     });
 
     assert!(app.run_lua(

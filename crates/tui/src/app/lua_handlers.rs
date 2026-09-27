@@ -941,10 +941,15 @@ impl TuiApp {
             );
         }
         if let Some(history_idx) = history_idx {
-            let rewound = if let Some((text, images)) = self.rewind_to_history(history_idx) {
+            let rewound = if let Some(input) = self.rewind_to_history_with_placement(history_idx) {
                 self.clear_prompt_prediction();
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.prompt.restore_from_rewind(&mut pctx, text, images);
+                self.prompt.restore_from_rewind(
+                    &mut pctx,
+                    input.text,
+                    input.images,
+                    input.placement,
+                );
                 true
             } else {
                 false

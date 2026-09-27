@@ -1099,10 +1099,37 @@ impl<'a> Turn<'a> {
         display: Option<String>,
         command: bool,
         sent_at_ms: Option<u64>,
+        image_placement: Option<protocol::history::ImagePlacement>,
     ) {
+        let mut image_placement = image_placement;
         let display = if self.request_config.redact_secrets {
             crate::redact::redact_content(&mut content);
-            display.map(|text| crate::redact::redact(&text))
+            let labels = content.image_labels();
+            let restored_display = image_placement.as_mut().and_then(|placement| {
+                placement.source = crate::redact::redact_with_markers(&placement.source);
+                let mut indices = placement.image_indices.iter();
+                if placement
+                    .source
+                    .matches(smelt_buffer::ATTACHMENT_MARKER)
+                    .count()
+                    != indices.len()
+                {
+                    return None;
+                }
+                let mut result = String::new();
+                for (index, segment) in placement
+                    .source
+                    .split(smelt_buffer::ATTACHMENT_MARKER)
+                    .enumerate()
+                {
+                    if index > 0 {
+                        result.push_str(&crate::redact::redact(labels.get(*indices.next()?)?));
+                    }
+                    result.push_str(segment);
+                }
+                Some(result)
+            });
+            restored_display.or_else(|| display.map(|text| crate::redact::redact(&text)))
         } else {
             display
         };
@@ -1113,11 +1140,13 @@ impl<'a> Turn<'a> {
         if let HistoryItem::User {
             display: slot,
             command: is_command,
+            image_placement: placement,
             ..
         } = &mut item
         {
             *slot = display;
             *is_command = command;
+            *placement = image_placement;
         }
         self.mark_append_history_changed();
         self.history.push(item);
@@ -1542,8 +1571,9 @@ impl<'a> Turn<'a> {
                 display,
                 command,
                 sent_at_ms,
+                image_placement,
             } if !content.is_empty() => {
-                self.push_turn_content(content, display, command, sent_at_ms);
+                self.push_turn_content(content, display, command, sent_at_ms, image_placement);
             }
             protocol::StartTurnInput::Note { note } => {
                 self.mark_append_history_changed();
@@ -3753,11 +3783,13 @@ mod tests {
             None,
             false,
             None,
+            None,
         );
         turn.push_turn_content(
             Content::text(protocol::mode_change_note("now in apply mode.")),
             None,
             false,
+            None,
             None,
         );
 
@@ -3799,7 +3831,33 @@ mod tests {
                 display: Some(display),
                 command: true,
                 sent_at_ms: Some(1_742_567_823_000),
+                ..
             } if content.text_content() == "expanded command body" && display == "/reflect"
+        ));
+
+        turn.request_config.redact_secrets = true;
+        let marker = smelt_buffer::ATTACHMENT_MARKER;
+        turn.push_current_turn_input(
+            protocol::StartTurnInput::user_with_display(
+                Content::with_images(
+                    "password=1234567812345678".into(),
+                    vec![("pic.png".into(), "data:image/png;base64,AAA".into())],
+                ),
+                "password=12345678[pic.png]12345678",
+            )
+            .with_image_placement(Some(protocol::history::ImagePlacement {
+                source: format!("password=12345678{marker}12345678"),
+                image_indices: vec![0],
+            })),
+        );
+        assert!(matches!(
+            &turn.history[5],
+            HistoryItem::User {
+                display: Some(display),
+                image_placement: Some(placement),
+                ..
+            } if display == "password=[REDACTED:password][pic.png]"
+                && placement.source == format!("password=[REDACTED:password]{marker}")
         ));
     }
 

@@ -573,6 +573,8 @@ pub enum StartTurnInput {
         /// Original submission time, when captured by the frontend.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sent_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_placement: Option<crate::history::ImagePlacement>,
     },
     Note {
         note: crate::history::HistoryNote,
@@ -586,6 +588,17 @@ impl StartTurnInput {
             display: None,
             command: false,
             sent_at_ms: None,
+            image_placement: None,
+        }
+    }
+
+    pub fn user_with_display(content: Content, display: impl Into<String>) -> Self {
+        Self::User {
+            content,
+            display: Some(display.into()),
+            command: false,
+            sent_at_ms: None,
+            image_placement: None,
         }
     }
 
@@ -595,7 +608,21 @@ impl StartTurnInput {
             display: Some(display.into()),
             command: true,
             sent_at_ms: None,
+            image_placement: None,
         }
+    }
+
+    pub fn with_image_placement(
+        mut self,
+        placement: Option<crate::history::ImagePlacement>,
+    ) -> Self {
+        if let Self::User {
+            image_placement, ..
+        } = &mut self
+        {
+            *image_placement = placement;
+        }
+        self
     }
 
     pub fn with_sent_at_ms(mut self, timestamp_ms: u64) -> Self {

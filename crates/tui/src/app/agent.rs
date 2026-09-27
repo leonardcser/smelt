@@ -602,6 +602,16 @@ impl TuiApp {
         content: Content,
         sent_at_ms: u64,
     ) -> Option<TurnState> {
+        self.begin_agent_turn_with_placement(display, content, sent_at_ms, None)
+    }
+
+    pub(crate) fn begin_agent_turn_with_placement(
+        &mut self,
+        display: &str,
+        content: Content,
+        sent_at_ms: u64,
+        placement: Option<protocol::history::ImagePlacement>,
+    ) -> Option<TurnState> {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
         if self.block_read_only_mutation("submit a turn to this read-only session") {
             return None;
@@ -646,8 +656,22 @@ impl TuiApp {
             .first_user_message
             .is_none()
             .then(|| text.clone().into_owned());
+        let has_images = content.image_count() > 0;
+        let mut user_item =
+            protocol::history_item_from_user_content(content.clone()).with_sent_at_ms(sent_at_ms);
+        if has_images {
+            if let protocol::HistoryItem::User {
+                display: slot,
+                image_placement,
+                ..
+            } = &mut user_item
+            {
+                *slot = Some(display.to_string());
+                *image_placement = placement.clone();
+            }
+        }
         let history = self.stage_request_history_item_with_first_user(
-            protocol::history_item_from_user_content(content.clone()).with_sent_at_ms(sent_at_ms),
+            user_item,
             Some(Block::User {
                 text: display.to_string(),
                 image_labels: content.image_labels(),
@@ -660,7 +684,13 @@ impl TuiApp {
         let rewind_history_idx = Some(submitted_history_idx);
         self.publish_turn_input(submitted);
         self.dispatch_prepared_turn(PreparedTurn {
-            input: protocol::StartTurnInput::user(content).with_sent_at_ms(sent_at_ms),
+            input: if has_images {
+                protocol::StartTurnInput::user_with_display(content, display)
+                    .with_image_placement(placement)
+            } else {
+                protocol::StartTurnInput::user(content)
+            }
+            .with_sent_at_ms(sent_at_ms),
             history,
             kind: smelt_store::TurnKind::User,
             submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),

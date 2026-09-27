@@ -23,6 +23,14 @@ use serde::{Deserialize, Serialize};
 
 pub const COMPACTION_SUMMARY_PREFIX: &str = include_str!("compact_summary_prefix.md");
 
+/// Editable prompt source and the index of each marker into the content's image parts.
+/// Image bytes remain stored only in `Content`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImagePlacement {
+    pub source: String,
+    pub image_indices: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryItem {
@@ -39,6 +47,8 @@ pub enum HistoryItem {
         /// Submission time as Unix epoch milliseconds, absent for undated history.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sent_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_placement: Option<ImagePlacement>,
     },
     Assistant(AssistantStep),
     Note(HistoryNote),
@@ -609,6 +619,7 @@ impl HistoryItem {
             display: None,
             command: false,
             sent_at_ms: None,
+            image_placement: None,
         }
     }
 
@@ -618,6 +629,7 @@ impl HistoryItem {
             display: Some(display.into()),
             command: true,
             sent_at_ms: None,
+            image_placement: None,
         }
     }
 
@@ -1120,6 +1132,39 @@ pub fn history_item_message_count(item: &HistoryItem) -> usize {
 mod tests {
     use super::*;
     use crate::message::FunctionCall;
+
+    #[test]
+    fn image_placement_round_trips_and_legacy_user_omits_it() {
+        let mut item = HistoryItem::user(Content::with_images(
+            "look".into(),
+            vec![("pic.png".into(), "data:image/png;base64,AAA".into())],
+        ));
+        let legacy = serde_json::to_value(&item).unwrap();
+        assert!(legacy.get("image_placement").is_none());
+        assert_eq!(serde_json::from_value::<HistoryItem>(legacy).unwrap(), item);
+
+        let placement = ImagePlacement {
+            source: format!(
+                "look {} then {}",
+                smelt_buffer::ATTACHMENT_MARKER,
+                smelt_buffer::ATTACHMENT_MARKER
+            ),
+            image_indices: vec![0, 0],
+        };
+        if let HistoryItem::User {
+            image_placement, ..
+        } = &mut item
+        {
+            *image_placement = Some(placement.clone());
+        }
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(
+            json["image_placement"]["image_indices"],
+            serde_json::json!([0, 0])
+        );
+        assert!(!json["image_placement"].to_string().contains("base64"));
+        assert_eq!(serde_json::from_value::<HistoryItem>(json).unwrap(), item);
+    }
 
     fn tc(id: &str, name: &str) -> ToolCall {
         ToolCall::new(

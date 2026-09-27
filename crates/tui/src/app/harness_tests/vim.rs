@@ -501,27 +501,40 @@ fn vim_visual_ctrl_q_steers_selection_only() {
 }
 
 #[test]
-fn vim_visual_ctrl_q_with_image_leaves_prompt_unchanged() {
+fn vim_visual_ctrl_q_with_image_steers_and_restores_selection() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.start_turn(1);
     app.drain_engine_sends();
-    app.type_text("send ");
+    app.type_text("keep ");
+    insert_image(&mut app, "keep.png", "data:image/png;base64,KEEP");
+    app.type_text("\nsend ");
     insert_image(&mut app, "send.png", "data:image/png;base64,SEND");
-    let prompt = app.state().prompt_text;
     app.press(KeyCode::Esc);
     app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
     app.clear_actions();
 
     app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
 
-    assert_eq!(app.queued_message_count(), 0);
-    assert_eq!(app.state().prompt_text, prompt);
+    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(
+        app.state().prompt_text,
+        format!("keep {}", crate::input::ATTACHMENT_MARKER)
+    );
     assert_eq!(app.prompt_attachment_count(), 1);
-    assert_eq!(app.state().vim_mode, VimMode::VisualLine);
-    assert!(!app.actions().iter().any(|action| matches!(
+    assert!(app.actions().iter().any(|action| matches!(
         action,
-        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })
+        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+            if input.provider_content().image_count() == 1)
     )));
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(
+        app.state().prompt_text,
+        format!("send {0}\nkeep {0}", crate::input::ATTACHMENT_MARKER)
+    );
+    assert_eq!(app.prompt_attachment_count(), 2);
 }
 
 #[test]

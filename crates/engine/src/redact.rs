@@ -187,10 +187,53 @@ struct RedactRange {
 }
 
 pub fn redact(input: &str) -> String {
-    if input.is_empty() {
-        return String::new();
+    let ranges = redact_ranges(input);
+    let mut result = String::with_capacity(input.len());
+    let mut pos = 0;
+    for (range, label) in ranges {
+        result.push_str(&input[pos..range.start]);
+        result.push_str(&placeholder(label));
+        pos = range.end;
     }
+    result.push_str(&input[pos..]);
+    result
+}
 
+/// Redact the logical text while retaining every out-of-band attachment marker.
+pub fn redact_with_markers(input: &str) -> String {
+    let logical = input.replace(smelt_buffer::ATTACHMENT_MARKER, "");
+    let ranges = redact_ranges(&logical);
+    let mut source = String::with_capacity(input.len());
+    let mut logical_pos = 0;
+    let mut matches = ranges.iter().peekable();
+    for c in input.chars() {
+        if c == smelt_buffer::ATTACHMENT_MARKER {
+            source.push(c);
+            continue;
+        }
+        while matches
+            .peek()
+            .is_some_and(|(range, _)| range.end <= logical_pos)
+        {
+            matches.next();
+        }
+        if let Some((range, label)) = matches.peek() {
+            if logical_pos == range.start {
+                source.push_str(&placeholder(label));
+            }
+            if logical_pos < range.start {
+                source.push(c);
+            }
+        } else {
+            source.push(c);
+        }
+        logical_pos += c.len_utf8();
+    }
+    source
+}
+
+/// Merged byte ranges and labels used to redact text with out-of-band markers.
+fn redact_ranges(input: &str) -> Vec<(std::ops::Range<usize>, &'static str)> {
     let mut ranges: Vec<RedactRange> = Vec::new();
     let pats = patterns();
 
@@ -247,7 +290,7 @@ pub fn redact(input: &str) -> String {
     }
 
     if ranges.is_empty() {
-        return input.to_string();
+        return Vec::new();
     }
 
     // A matched scalar can share a terminal glyph with adjacent text. Redact the
@@ -271,15 +314,10 @@ pub fn redact(input: &str) -> String {
         merged.push(r);
     }
 
-    let mut result = String::with_capacity(input.len());
-    let mut pos = 0;
-    for r in &merged {
-        result.push_str(&input[pos..r.start]);
-        result.push_str(&placeholder(r.label));
-        pos = r.end;
-    }
-    result.push_str(&input[pos..]);
-    result
+    merged
+        .into_iter()
+        .map(|r| (r.start..r.end, r.label))
+        .collect()
 }
 
 fn keyword_label(key: &str) -> &'static str {
@@ -440,6 +478,17 @@ mod tests {
             result.contains(&expected),
             "expected {expected} in: {result}"
         );
+    }
+
+    #[test]
+    fn redacts_across_image_marker_without_removing_it() {
+        let marker = smelt_buffer::ATTACHMENT_MARKER;
+        let result = redact_with_markers(&format!("pré password=12345678{marker}12345678 end"));
+        assert_eq!(
+            result,
+            format!("pré password=[REDACTED:password]{marker} end")
+        );
+        assert_eq!(redact_with_markers(&result), result);
     }
 
     #[test]

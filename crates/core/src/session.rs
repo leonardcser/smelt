@@ -3111,6 +3111,7 @@ mod tests {
             display: None,
             command: false,
             sent_at_ms: None,
+            image_placement: None,
         }
     }
     fn assistant_text_item(text: &str) -> HistoryItem {
@@ -3542,6 +3543,7 @@ mod tests {
             display: Some("/reflect".into()),
             command: true,
             sent_at_ms: Some(1_742_567_823_000),
+            image_placement: None,
         });
 
         let json = serde_json::to_value(&s).expect("serialize session");
@@ -3559,6 +3561,7 @@ mod tests {
                 display: Some(display),
                 command: true,
                 sent_at_ms: Some(1_742_567_823_000),
+                ..
             } if content.text_content() == "expanded command body" && display == "/reflect"
         ));
     }
@@ -4107,6 +4110,7 @@ mod tests {
             display: None,
             command: false,
             sent_at_ms: None,
+            image_placement: None,
         }
     }
 

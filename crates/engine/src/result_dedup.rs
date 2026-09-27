@@ -128,6 +128,7 @@ mod tests {
             display: None,
             command: false,
             sent_at_ms: None,
+            image_placement: None,
         }];
         assert!(duplicate_of(&body, false, &history).is_none());
     }

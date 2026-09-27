@@ -159,6 +159,7 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
                 display,
                 command,
                 sent_at_ms,
+                ..
             } => {
                 entry.set("kind", "user")?;
                 entry.set("content", content.text_content())?;

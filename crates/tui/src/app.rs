@@ -933,8 +933,7 @@ pub(crate) enum EventOutcome {
     /// Start a new turn without adding prompt text.
     ContinueTurn,
     Submit {
-        content: Content,
-        display: String,
+        submission: crate::input::PromptSubmission,
         edit: SubmitEdit,
     },
     Exec(crate::commands::ExecHandle),
@@ -1476,15 +1475,20 @@ impl TuiApp {
         }
 
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        let mut prefix = queued
-            .iter()
-            .map(QueuedInput::prompt_replay_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut prefix = String::new();
+        let mut ids = Vec::new();
+        for (index, input) in queued.into_iter().enumerate() {
+            if index > 0 {
+                prefix.push('\n');
+            }
+            let replay = input.prompt_replay();
+            prefix.push_str(&replay.source);
+            ids.extend(replay.ids);
+        }
         if !prefix.is_empty() && !pctx.buf.source().is_empty() {
             prefix.push('\n');
         }
-        self.prompt.prepend_text(&mut pctx, prefix);
+        self.prompt.prepend_attached(&mut pctx, prefix, ids);
     }
 
     pub(crate) fn clear_prompt_prediction(&mut self) {
@@ -1726,7 +1730,13 @@ impl TuiApp {
                         started
                     }
                     QueuedTurnOptions::Default if !req.content.is_empty() => {
-                        let turn = self.begin_agent_turn(&req.display, req.content, req.sent_at_ms);
+                        let placement = req.image_placement();
+                        let turn = self.begin_agent_turn_with_placement(
+                            &req.display,
+                            req.content,
+                            req.sent_at_ms,
+                            placement,
+                        );
                         let started = turn.is_some() || self.turn_submission_is_pending();
                         self.conversation.set_active(turn);
                         started

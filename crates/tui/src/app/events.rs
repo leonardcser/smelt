@@ -3,7 +3,7 @@ use crate::app::{
     TuiApp,
 };
 
-use crate::input::Action;
+use crate::input::{Action, PromptSubmission};
 use crate::keymap::{self, KeyAction};
 use crate::smelt_edit::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -235,13 +235,12 @@ impl TuiApp {
                 false
             }
             EventOutcome::Submit {
-                mut content,
-                mut display,
+                mut submission,
                 edit,
             } => {
                 let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
                 self.clear_prompt_prediction();
-                self.redact_user_submission(&mut content, &mut display);
+                self.redact_prompt_submission(&mut submission);
                 let mut edit = Some(edit);
                 let accepted = match self.prompt_work_state() {
                     PromptWorkState::TurnActive
@@ -249,11 +248,11 @@ impl TuiApp {
                     | PromptWorkState::Paused => {
                         // Queue while an active turn or background plugin owns the
                         // input lifecycle so messages run against the next stable state.
-                        if content.is_empty() {
+                        if submission.content.is_empty() {
                             false
                         } else {
                             let accepted = self.queue_explicit_submission(
-                                QueuedInput::request(display.clone(), content, sent_at_ms),
+                                QueuedInput::from_prompt(submission, sent_at_ms),
                                 QueueStage::Turn,
                             );
                             if accepted {
@@ -263,8 +262,8 @@ impl TuiApp {
                         }
                     }
                     PromptWorkState::Idle => {
-                        let text = content.text_content().into_owned();
-                        let has_images = content.image_count() > 0;
+                        let text = submission.content.text_content().into_owned();
+                        let has_images = submission.content.image_count() > 0;
                         if !text.is_empty() || has_images {
                             let outcome = if has_images && text.trim().is_empty() {
                                 InputOutcome::StartAgent
@@ -273,7 +272,16 @@ impl TuiApp {
                             };
                             let accepted = match outcome {
                                 InputOutcome::StartAgent => {
-                                    match self.begin_agent_turn(&display, content, sent_at_ms) {
+                                    let placement = submission
+                                        .replay
+                                        .as_ref()
+                                        .map(crate::input::PromptReplay::image_placement);
+                                    match self.begin_agent_turn_with_placement(
+                                        &submission.display,
+                                        submission.content,
+                                        sent_at_ms,
+                                        placement,
+                                    ) {
                                         Some(turn) => {
                                             self.commit_prompt_submission(
                                                 edit.take().expect("submit edit"),
@@ -295,7 +303,10 @@ impl TuiApp {
                                         edit.take().expect("submit edit"),
                                     );
                                     self.apply_input_outcome(
-                                        outcome, content, &display, sent_at_ms,
+                                        outcome,
+                                        submission.content,
+                                        &submission.display,
+                                        sent_at_ms,
                                     );
                                     true
                                 }
@@ -316,6 +327,32 @@ impl TuiApp {
                     self.prompt.restore_stash(&mut pctx);
                 }
                 false
+            }
+        }
+    }
+
+    fn redact_prompt_submission(&self, submission: &mut PromptSubmission) {
+        self.redact_user_submission(&mut submission.content, &mut submission.display);
+        if self.core.config.settings.redact_secrets {
+            if let Some(replay) = &mut submission.replay {
+                replay.redact();
+                let store = self.prompt.attachment_store();
+                let store = store.lock().unwrap();
+                let mut ids = replay.ids.iter();
+                let mut display = String::new();
+                for (index, segment) in replay
+                    .source
+                    .split(crate::input::ATTACHMENT_MARKER)
+                    .enumerate()
+                {
+                    if index > 0 {
+                        if let Some(id) = ids.next() {
+                            display.push_str(&engine::redact::redact(&store.display_label(*id)));
+                        }
+                    }
+                    display.push_str(segment);
+                }
+                submission.display = display;
             }
         }
     }
@@ -771,19 +808,11 @@ impl TuiApp {
 
     fn dispatch_running_input_action(&mut self, input_action: Action) -> EventOutcome {
         match input_action {
-            Action::Submit {
-                content,
-                display,
-                edit,
-            } => {
-                return self.handle_running_submit(content, display, edit, QueueStage::Turn);
+            Action::Submit { submission, edit } => {
+                return self.handle_running_submit(submission, edit, QueueStage::Turn);
             }
-            Action::SubmitToRequestQueue {
-                content,
-                display,
-                edit,
-            } => {
-                return self.handle_running_submit(content, display, edit, QueueStage::Request);
+            Action::SubmitToRequestQueue { submission, edit } => {
+                return self.handle_running_submit(submission, edit, QueueStage::Request);
             }
             Action::SubmitEmpty => {
                 return self.handle_empty_submit();
@@ -808,22 +837,23 @@ impl TuiApp {
 
     fn handle_running_submit(
         &mut self,
-        mut content: protocol::Content,
-        mut display: String,
+        mut submission: PromptSubmission,
         edit: crate::input::SubmitEdit,
         target: QueueStage,
     ) -> EventOutcome {
         let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
         self.clear_prompt_prediction();
-        self.redact_user_submission(&mut content, &mut display);
-        let text = content.text_content().into_owned();
-        if self.prompt_work_state() == PromptWorkState::Paused && content.image_count() == 0 {
+        self.redact_prompt_submission(&mut submission);
+        let text = submission.content.text_content().into_owned();
+        if self.prompt_work_state() == PromptWorkState::Paused
+            && submission.content.image_count() == 0
+        {
             if let InputOutcome::Command(line) = self.process_input(&text) {
                 self.commit_prompt_submission(edit);
                 self.apply_input_outcome(
                     InputOutcome::Command(line),
-                    content,
-                    &display,
+                    submission.content,
+                    &submission.display,
                     sent_at_ms,
                 );
                 return if self.pending_quit {
@@ -832,7 +862,7 @@ impl TuiApp {
                     EventOutcome::Noop
                 };
             }
-        } else if content.image_count() == 0 {
+        } else if submission.content.image_count() == 0 {
             if let Some(outcome) = self.try_command_while_running(
                 smelt_buffer::text::trim_whitespace(&text),
                 target,
@@ -842,18 +872,11 @@ impl TuiApp {
                 return outcome;
             }
         }
-        if content.is_empty() {
+        if submission.content.is_empty() {
             return EventOutcome::Noop;
         }
-        if target == QueueStage::Request && content.image_count() > 0 {
-            self.notify_error(
-                "cannot use image attachments to steer the current response; prompt left unchanged"
-                    .into(),
-            );
-            return EventOutcome::Noop;
-        }
-        let queued = QueuedInput::request(display, content, sent_at_ms);
-        if self.queue_explicit_submission(queued, target) {
+        if self.queue_explicit_submission(QueuedInput::from_prompt(submission, sent_at_ms), target)
+        {
             self.commit_prompt_submission(edit);
         }
         EventOutcome::Noop
@@ -1045,34 +1068,20 @@ impl TuiApp {
 
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
-            Action::Submit {
-                content,
-                display,
-                edit,
-            } if self.prompt_work_state() == PromptWorkState::Paused => {
-                self.handle_running_submit(content, display, edit, QueueStage::Turn)
+            Action::Submit { submission, edit }
+                if self.prompt_work_state() == PromptWorkState::Paused =>
+            {
+                self.handle_running_submit(submission, edit, QueueStage::Turn)
             }
-            Action::SubmitToRequestQueue {
-                content,
-                display,
-                edit,
-            } if self.prompt_work_state() == PromptWorkState::Paused => {
-                self.handle_running_submit(content, display, edit, QueueStage::Request)
+            Action::SubmitToRequestQueue { submission, edit }
+                if self.prompt_work_state() == PromptWorkState::Paused =>
+            {
+                self.handle_running_submit(submission, edit, QueueStage::Request)
             }
-            Action::Submit {
-                content,
-                display,
-                edit,
+            Action::Submit { submission, edit }
+            | Action::SubmitToRequestQueue { submission, edit } => {
+                EventOutcome::Submit { submission, edit }
             }
-            | Action::SubmitToRequestQueue {
-                content,
-                display,
-                edit,
-            } => EventOutcome::Submit {
-                content,
-                display,
-                edit,
-            },
             Action::SubmitEmpty => self.handle_empty_submit(),
             Action::EditInEditor => {
                 self.edit_in_editor();
@@ -2089,7 +2098,7 @@ mod tests {
         app.app.prompt.insert_image_for_harness(
             &mut pctx,
             label.to_string(),
-            "data:image/png;base64,AAAA".to_string(),
+            format!("data:image/png;base64,{label}"),
         );
     }
 
@@ -2199,7 +2208,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_queues_image_prompt_for_next_turn_without_dropping_attachment() {
+    fn enter_promotes_queued_image_prompt_to_current_request() {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
         app.type_text("see ");
@@ -2213,15 +2222,36 @@ mod tests {
         app.clear_actions();
         app.press(KeyCode::Enter);
 
-        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
-        assert!(!app.actions().iter().any(|action| matches!(
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                if input.provider_content().image_count() == 1)
         )));
     }
 
     #[test]
-    fn request_queue_with_image_restores_prompt_instead_of_dropping_attachment() {
+    fn queued_image_starts_next_turn_with_attachment() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.type_text("inspect ");
+        insert_prompt_image(&mut app, "pic.png");
+        app.press(KeyCode::Enter);
+
+        app.clear_actions();
+        assert!(app.finish_turn());
+        let _ = app.app.flush_persist();
+        app.app.start_next_queued_input_if_idle();
+
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
+                if payload.input.provider_content().image_count() == 1)
+        )));
+    }
+
+    #[test]
+    fn request_queue_with_image_steers_and_unqueues_attachment() {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
         app.type_text("see ");
@@ -2229,13 +2259,339 @@ mod tests {
 
         app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
 
-        let state = app.state();
-        assert!(state.queued_inputs.is_empty());
+        assert_eq!(app.state().queued_inputs, vec!["see [pic.png]".to_string()]);
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert_eq!(app.state().prompt_text, "");
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                if matches!(input, protocol::StartTurnInput::User {
+                    content,
+                    display: Some(display),
+                    image_placement: Some(placement),
+                    command: false,
+                    ..
+                } if content.image_count() == 1
+                    && display == "see [pic.png]"
+                    && placement.source == format!("see {}", crate::input::ATTACHMENT_MARKER)
+                    && placement.image_indices == [0]))
+        )));
+
+        app.clear_actions();
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+
+        assert!(app.agent_running());
+        assert!(app.state().queued_inputs.is_empty());
         assert_eq!(
-            state.prompt_text,
+            app.state().prompt_text,
             format!("see {}", crate::input::ATTACHMENT_MARKER)
         );
-        assert!(app.app.overlays.notification().is_some());
+        assert_eq!(
+            app.app
+                .prompt
+                .render_input()
+                .build_content(app.app.prompt_buf())
+                .image_count(),
+            1
+        );
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Unsteer { count: 1 })
+        )));
+    }
+
+    #[test]
+    fn unqueue_preserves_image_order_and_existing_prompt() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.type_text("first ");
+        insert_prompt_image(&mut app, "one.png");
+        app.press(KeyCode::Enter);
+        app.type_text("second ");
+        insert_prompt_image(&mut app, "two.png");
+        app.press(KeyCode::Enter);
+        app.type_text("draft");
+        insert_prompt_image(&mut app, "draft.png");
+
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+
+        let marker = crate::input::ATTACHMENT_MARKER;
+        assert_eq!(
+            app.state().prompt_text,
+            format!("first {marker}\nsecond {marker}\ndraft{marker}")
+        );
+        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
+        let store = app.app.prompt.attachment_store();
+        let store = store.lock().unwrap();
+        assert_eq!(pctx.buf.attachment_ids.len(), 3);
+        assert_eq!(store.display_label(pctx.buf.attachment_ids[0]), "[one.png]");
+        assert_eq!(store.display_label(pctx.buf.attachment_ids[1]), "[two.png]");
+        assert_eq!(
+            store.display_label(pctx.buf.attachment_ids[2]),
+            "[draft.png]"
+        );
+    }
+
+    #[test]
+    fn image_only_prompt_survives_queue_unqueue_and_requeue() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        insert_prompt_image(&mut app, "pic.png");
+        app.press(KeyCode::Enter);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+        assert_eq!(
+            app.state().prompt_text,
+            crate::input::ATTACHMENT_MARKER.to_string()
+        );
+
+        app.clear_actions();
+        app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { input }
+                if input.provider_content().image_count() == 1)
+        )));
+    }
+
+    #[test]
+    fn redacted_image_queue_preserves_marker_on_unqueue() {
+        let mut app = TestApp::builder().build();
+        app.app.core.config.settings.redact_secrets = true;
+        app.start_turn(1);
+        app.type_text("password=abcdefghijklmnop");
+        insert_prompt_image(&mut app, "pic.png");
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+
+        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
+        assert_eq!(pctx.buf.attachment_ids.len(), 1);
+        assert_eq!(
+            pctx.buf
+                .source()
+                .matches(crate::input::ATTACHMENT_MARKER)
+                .count(),
+            1
+        );
+        assert!(!pctx.buf.source().contains("abcdefghijklmnop"));
+        assert_eq!(
+            app.app
+                .prompt
+                .render_input()
+                .build_content(pctx.buf)
+                .image_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn image_request_without_replay_is_rejected() {
+        let image = protocol::Content::with_images(
+            "see ".into(),
+            vec![("pic.png".into(), "data:image/png;base64,pic".into())],
+        );
+        assert!(std::panic::catch_unwind(|| {
+            crate::app::queue::QueuedInput::request("see [pic.png]", image, 0)
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn redacted_secret_spanning_image_marker_is_not_restored_on_unqueue() {
+        let mut app = TestApp::builder().build();
+        app.app.core.config.settings.redact_secrets = true;
+        app.start_turn(1);
+        app.type_text("password=12345678");
+        insert_prompt_image(&mut app, "pic.png");
+        app.type_text("12345678");
+        app.press(KeyCode::Enter);
+        assert!(app.state().queued_inputs[0].contains("[pic.png]"));
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+
+        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
+        assert!(!pctx.buf.source().contains("12345678"));
+        assert_eq!(
+            pctx.buf
+                .source()
+                .matches(crate::input::ATTACHMENT_MARKER)
+                .count(),
+            1
+        );
+        assert_eq!(pctx.buf.attachment_ids.len(), 1);
+        assert_eq!(
+            app.app
+                .prompt
+                .render_input()
+                .build_content(pctx.buf)
+                .image_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn repeated_image_and_literal_label_rewind_to_exact_positions() {
+        let mut app = TestApp::builder().build();
+        app.type_text("original");
+        app.press(KeyCode::Enter);
+        let _ = app.app.flush_persist();
+        app.type_text("literal [pic.png] before ");
+        insert_prompt_image(&mut app, "pic.png");
+        let id = app.app.prompt_buf().attachment_ids[0];
+        app.type_text(" between ");
+        {
+            let pctx = crate::input::prompt_ctx_mut(&mut app.app.ui);
+            let pos = pctx.buf.source().len();
+            pctx.buf.text_mut().insert_marker(pos, id);
+            pctx.win.set_cpos(pctx.buf.source().len());
+        }
+        app.type_text(" after");
+        let expected = app.state().prompt_text;
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+
+        assert_eq!(app.state().prompt_text, expected);
+        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
+        assert_eq!(pctx.buf.attachment_ids.len(), 2);
+        assert_eq!(pctx.buf.attachment_ids[0], pctx.buf.attachment_ids[1]);
+        assert_eq!(
+            app.app
+                .prompt
+                .render_input()
+                .build_content(pctx.buf)
+                .image_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn promoted_image_interrupts_into_new_message_and_can_rewind() {
+        let mut app = TestApp::builder().build();
+        app.type_text("original");
+        app.press(KeyCode::Enter);
+        let _ = app.app.flush_persist();
+        app.type_text("inspect ");
+        insert_prompt_image(&mut app, "first.png");
+        app.type_text(" then ");
+        insert_prompt_image(&mut app, "second.png");
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Enter);
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
+                if payload.input.provider_content().image_count() == 2)
+        )));
+        assert!(app.state().queued_inputs.is_empty());
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+        assert_eq!(
+            app.state().prompt_text,
+            format!("inspect {0} then {0}", crate::input::ATTACHMENT_MARKER)
+        );
+        let content = app
+            .app
+            .prompt
+            .render_input()
+            .build_content(app.app.prompt_buf());
+        assert_eq!(content.image_count(), 2);
+        assert_eq!(content.image_labels(), vec!["[first.png]", "[second.png]"]);
+    }
+
+    #[test]
+    fn paused_turn_resumes_then_sends_queued_image_and_rewinds_it() {
+        let mut app = TestApp::builder().build();
+        app.type_text("original");
+        app.press(KeyCode::Enter);
+        let _ = app.app.flush_persist();
+        app.feed_one(crate::app::test_harness::SourceEvent::engine(
+            protocol::EngineEvent::TurnError {
+                message: "connection failed".into(),
+                kind: Some(protocol::EngineAskErrorKind::Network),
+                retry_at_ms: None,
+            },
+        ));
+        assert_eq!(
+            app.app.prompt_work_state(),
+            crate::app::PromptWorkState::Paused
+        );
+        app.type_text("retry with ");
+        insert_prompt_image(&mut app, "pic.png");
+        app.press(KeyCode::Enter);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+        assert!(app.agent_running() || app.app.turn_submission_is_pending());
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+        assert!(!app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
+                if payload.input.provider_content().image_count() == 1)
+        )));
+
+        assert!(app.finish_turn());
+        let _ = app.app.flush_persist();
+        app.app.start_next_queued_input_if_idle();
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
+                if payload.input.provider_content().image_count() == 1)
+        )));
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+        assert_eq!(
+            app.state().prompt_text,
+            format!("retry with {}", crate::input::ATTACHMENT_MARKER)
+        );
+        assert_eq!(
+            app.app
+                .prompt
+                .render_input()
+                .build_content(app.app.prompt_buf())
+                .image_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn full_queue_keeps_image_in_prompt() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        for _ in 0..crate::app::queue::MAX_QUEUED_MESSAGES {
+            app.push_queued_message("waiting".to_string());
+        }
+        insert_prompt_image(&mut app, "pic.png");
+        app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+
+        assert_eq!(
+            app.app.prompt.queued_len(),
+            crate::app::queue::MAX_QUEUED_MESSAGES
+        );
+        assert_eq!(
+            app.state().prompt_text,
+            crate::input::ATTACHMENT_MARKER.to_string()
+        );
+        assert_eq!(
+            app.app
+                .prompt
+                .render_input()
+                .build_content(app.app.prompt_buf())
+                .image_count(),
+            1
+        );
         assert!(!app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })

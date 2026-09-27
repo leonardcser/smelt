@@ -80,8 +80,13 @@ impl PromptRuntime {
         self.input.apply_submit_edit(ctx, edit);
     }
 
-    pub(crate) fn prepend_text(&mut self, ctx: &mut PromptCtx<'_>, prefix: String) {
-        self.input.prepend_text(ctx, prefix);
+    pub(crate) fn prepend_attached(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        prefix: String,
+        ids: Vec<smelt_buffer::attachment::AttachmentId>,
+    ) {
+        self.input.prepend_attached(ctx, prefix, ids);
     }
 
     pub(crate) fn replace_text(&mut self, ctx: &mut PromptCtx<'_>, text: String) {
@@ -106,8 +111,9 @@ impl PromptRuntime {
         ctx: &mut PromptCtx<'_>,
         text: String,
         images: Vec<(String, String)>,
+        placement: Option<protocol::history::ImagePlacement>,
     ) {
-        self.input.restore_from_rewind(ctx, text, images);
+        self.input.restore_from_rewind(ctx, text, images, placement);
     }
 
     pub(crate) fn has_stash(&self) -> bool {

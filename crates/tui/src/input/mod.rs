@@ -95,13 +95,11 @@ pub(crate) struct PromptState {
 pub(crate) enum Action {
     Redraw,
     Submit {
-        content: Content,
-        display: String,
+        submission: PromptSubmission,
         edit: SubmitEdit,
     },
     SubmitToRequestQueue {
-        content: Content,
-        display: String,
+        submission: PromptSubmission,
         edit: SubmitEdit,
     },
     SubmitEmpty,
@@ -117,9 +115,30 @@ pub(crate) enum SubmitEdit {
     DeleteRange { range: std::ops::Range<usize> },
 }
 
-struct PromptSubmission {
-    content: Content,
-    display: String,
+pub(crate) struct PromptSubmission {
+    pub(crate) content: Content,
+    pub(crate) display: String,
+    pub(crate) replay: Option<PromptReplay>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PromptReplay {
+    pub(crate) source: String,
+    pub(crate) ids: Vec<AttachmentId>,
+    pub(crate) image_indices: Vec<usize>,
+}
+
+impl PromptReplay {
+    pub(crate) fn image_placement(&self) -> protocol::history::ImagePlacement {
+        protocol::history::ImagePlacement {
+            source: self.source.clone(),
+            image_indices: self.image_indices.clone(),
+        }
+    }
+
+    pub(crate) fn redact(&mut self) {
+        self.source = engine::redact::redact_with_markers(&self.source);
+    }
 }
 
 fn rewind_source_and_attachments(
@@ -383,17 +402,22 @@ impl PromptState {
         self.install_source(ctx, text, cpos, Vec::new());
     }
 
-    /// Prepend `prefix` to the buffer, snapshot undo, shift cpos forward.
-    /// Existing source bytes (including ATTACHMENT_MARKERs) and their
-    /// `attachment_ids` are preserved - unlike `replace_text`, which wipes
-    /// attachments by assuming the new text fully supplants the old.
-    pub(crate) fn prepend_text(&mut self, ctx: &mut PromptCtx<'_>, prefix: String) {
+    /// Prepend source and attachment ids, snapshot undo, and shift the cursor.
+    /// Existing markers and ids remain paired after the inserted prefix.
+    pub(crate) fn prepend_attached(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        prefix: String,
+        mut ids: Vec<AttachmentId>,
+    ) {
         if prefix.is_empty() {
             return;
         }
         self.save_undo(ctx);
         let inserted = prefix.len();
-        ctx.buf.text_mut().insert_str(0, &prefix);
+        let source = format!("{prefix}{}", ctx.buf.source());
+        ids.extend_from_slice(&ctx.buf.attachment_ids);
+        ctx.buf.text_mut().install(source, ids);
         let cpos = smelt_buffer::text::ceil_grapheme(ctx.buf.source(), ctx.win.cpos() + inserted);
         ctx.win.set_cpos(cpos);
         ctx.win.clear_selection_anchor();
@@ -459,8 +483,29 @@ impl PromptState {
         ctx: &mut PromptCtx<'_>,
         text: String,
         images: Vec<(String, String)>,
+        placement: Option<protocol::history::ImagePlacement>,
     ) {
-        let (text, attachments) = rewind_source_and_attachments(text, images);
+        let exact = placement.and_then(|placement| {
+            (placement.source.matches(ATTACHMENT_MARKER).count() == placement.image_indices.len())
+                .then(|| {
+                    placement
+                        .image_indices
+                        .iter()
+                        .map(|&index| {
+                            images
+                                .get(index)
+                                .map(|(label, data_url)| Attachment::Image {
+                                    label: label.clone(),
+                                    data_url: data_url.clone(),
+                                })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .map(|attachments| (placement.source, attachments))
+                })
+                .flatten()
+        });
+        let (text, attachments) =
+            exact.unwrap_or_else(|| rewind_source_and_attachments(text, images));
         let ids = attachments
             .into_iter()
             .map(|attachment| self.store.lock().unwrap().insert(attachment))
@@ -485,18 +530,24 @@ impl PromptState {
         let mut text = String::new();
         let mut display = String::new();
         let mut images = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut attachment_ids = Vec::new();
+        let mut image_indices = Vec::new();
+        let mut seen = std::collections::HashMap::new();
         let store = self.store.lock().unwrap();
 
         for c in selected.chars() {
             if c == ATTACHMENT_MARKER {
                 if let Some(&id) = buf.attachment_ids.get(marker_idx) {
+                    attachment_ids.push(id);
                     text.push_str(store.expanded_text(id));
                     display.push_str(&store.display_label(id));
-                    if seen.insert(id) {
-                        if let Some(Attachment::Image { label, data_url }) = store.get(id) {
-                            images.push((label.clone(), data_url.clone()));
-                        }
+                    if let Some(&index) = seen.get(&id) {
+                        image_indices.push(index);
+                    } else if let Some(Attachment::Image { label, data_url }) = store.get(id) {
+                        let index = images.len();
+                        seen.insert(id, index);
+                        image_indices.push(index);
+                        images.push((label.clone(), data_url.clone()));
                     }
                 }
                 marker_idx += 1;
@@ -506,9 +557,15 @@ impl PromptState {
             }
         }
 
+        let replay = (!attachment_ids.is_empty()).then(|| PromptReplay {
+            source: selected.to_string(),
+            ids: attachment_ids,
+            image_indices,
+        });
         PromptSubmission {
             content: Content::with_images(text, images),
             display,
+            replay,
         }
     }
 
@@ -575,17 +632,9 @@ impl PromptState {
         };
 
         Some(if to_request_queue {
-            Action::SubmitToRequestQueue {
-                content: submission.content,
-                display: submission.display,
-                edit,
-            }
+            Action::SubmitToRequestQueue { submission, edit }
         } else {
-            Action::Submit {
-                content: submission.content,
-                display: submission.display,
-                edit,
-            }
+            Action::Submit { submission, edit }
         })
     }
 
@@ -606,14 +655,12 @@ impl PromptState {
             let submission = self.submission_from_range(ctx.buf, 0..ctx.buf.source().len());
             if to_request_queue {
                 Action::SubmitToRequestQueue {
-                    content: submission.content,
-                    display: submission.display,
+                    submission,
                     edit: SubmitEdit::Clear,
                 }
             } else {
                 Action::Submit {
-                    content: submission.content,
-                    display: submission.display,
+                    submission,
                     edit: SubmitEdit::Clear,
                 }
             }
@@ -1356,7 +1403,7 @@ mod tests {
     }
 
     #[test]
-    fn prepend_text_places_cursors_after_a_joined_grapheme() {
+    fn prepend_attached_places_cursors_after_a_joined_grapheme() {
         let mut input = Harness::new();
         input.state.replace_text(
             &mut PromptCtx {
@@ -1367,12 +1414,13 @@ mod tests {
         );
         input.win.set_cpos(0);
 
-        input.state.prepend_text(
+        input.state.prepend_attached(
             &mut PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             },
             "e".into(),
+            Vec::new(),
         );
 
         assert_eq!(input.buf.source(), "e\u{301}x");
@@ -1427,6 +1475,7 @@ mod tests {
             },
             "look".into(),
             vec![("shot.png".into(), "data:image/png;base64,AAA".into())],
+            None,
         );
 
         assert_eq!(input.buf.source(), &format!("look {ATTACHMENT_MARKER}"));
@@ -1986,16 +2035,12 @@ mod tests {
             false,
         );
 
-        let Action::Submit {
-            content,
-            display,
-            edit,
-        } = action
-        else {
+        let Action::Submit { submission, edit } = action else {
             panic!("expected selected submit");
         };
-        assert_eq!(display, "send [send.png]");
-        match content {
+        assert_eq!(submission.display, "send [send.png]");
+        assert_eq!(submission.replay.as_ref().unwrap().ids, vec![send]);
+        match submission.content {
             Content::Parts(parts) => {
                 assert!(matches!(
                     &parts[0],
@@ -2037,10 +2082,10 @@ mod tests {
             false,
         );
 
-        let Action::Submit { content, edit, .. } = action else {
+        let Action::Submit { submission, edit } = action else {
             panic!("expected whole prompt submit");
         };
-        assert_eq!(content.text_content(), "alpha beta");
+        assert_eq!(submission.content.text_content(), "alpha beta");
         assert!(matches!(edit, SubmitEdit::Clear));
         assert_eq!(input.buf.source(), "alpha beta");
     }
@@ -2952,6 +2997,7 @@ mod tests {
             },
             "hi".to_string(),
             Vec::new(),
+            None,
         );
         assert_eq!(input.win.selection_anchor(), None);
         assert_eq!(input.buf.source(), "hi");

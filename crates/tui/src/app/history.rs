@@ -17,9 +17,10 @@ pub(crate) struct RewindTurn {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RewindInput {
-    text: String,
-    images: Vec<(String, String)>,
+pub(crate) struct RewindInput {
+    pub(crate) text: String,
+    pub(crate) images: Vec<(String, String)>,
+    pub(crate) placement: Option<protocol::history::ImagePlacement>,
 }
 
 enum TranscriptRewindTarget {
@@ -256,6 +257,7 @@ pub(crate) fn build_transcript_from_session(
                 display,
                 command,
                 sent_at_ms,
+                ..
             } => push_user_block(
                 &mut transcript,
                 lua,
@@ -559,9 +561,16 @@ fn rewind_input(item: &HistoryItem) -> Option<RewindInput> {
             .collect(),
         Content::Text(_) => Vec::new(),
     };
+    let placement = match item {
+        HistoryItem::User {
+            image_placement, ..
+        } => image_placement.clone(),
+        _ => None,
+    };
     Some(RewindInput {
         text: rewind_text(content, display).into_owned(),
         images,
+        placement,
     })
 }
 
@@ -602,16 +611,14 @@ fn push_user_block(
         protocol::UserHistoryContent::Plain => {
             let text = content.text_content();
             let image_labels = content.image_labels();
-            let display_source = display.unwrap_or(&text);
-            let display_text = if image_labels.is_empty() {
-                display_source.to_string()
+            let display_text = if let Some(display) = display {
+                display.to_string()
+            } else if image_labels.is_empty() {
+                text.into_owned()
+            } else if text.is_empty() {
+                image_labels.join(" ")
             } else {
-                let suffix = image_labels.join(" ");
-                if display_source.is_empty() {
-                    suffix
-                } else {
-                    format!("{display_source} {suffix}")
-                }
+                format!("{text} {}", image_labels.join(" "))
             };
             Block::User {
                 text: display_text,
@@ -1610,6 +1617,7 @@ impl TuiApp {
                     display,
                     command,
                     sent_at_ms,
+                    ..
                 } => push_user_block(
                     &mut transcript,
                     &lua,
@@ -2472,6 +2480,14 @@ impl TuiApp {
         &mut self,
         history_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
+        self.rewind_to_history_with_placement(history_idx)
+            .map(|input| (input.text, input.images))
+    }
+
+    pub(crate) fn rewind_to_history_with_placement(
+        &mut self,
+        history_idx: usize,
+    ) -> Option<RewindInput> {
         let rewind_item =
             match self.session_history_range(history_idx..history_idx.saturating_add(1)) {
                 Ok(item) => item,
@@ -2526,7 +2542,7 @@ impl TuiApp {
         self.sync_session_snapshot();
         self.publish_history_delta(HistoryDeltaKind::Rewound);
 
-        Some((input.text, input.images))
+        Some(input)
     }
 
     pub(crate) fn rewind_to_start(&mut self) {
@@ -3379,6 +3395,7 @@ mod checkpoint_tests {
                 display: Some("/inspect".into()),
                 command: true,
                 sent_at_ms: None,
+                image_placement: None,
             },
             assistant("done"),
         ];
@@ -3747,6 +3764,7 @@ mod checkpoint_tests {
                 display: Some("/reflect".into()),
                 command: true,
                 sent_at_ms: None,
+                image_placement: None,
             }]);
 
         app.app.restore_screen();
