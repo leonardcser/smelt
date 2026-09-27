@@ -311,6 +311,41 @@ fn assistant_inline_math_keeps_operators_and_fraction_structure() {
 }
 
 #[test]
+fn assistant_math_renders_top_in_unicode_mode() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 18);
+    assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
+    app.start_turn(42);
+    app.feed_one(SourceEvent::engine(EngineEvent::Text {
+        content: "The transpose is $A^\\top$.\n\n\\[\\top\\]".into(),
+    }));
+    let text = app.render_to_frame().text();
+    assert!(text.contains("A^⊤"), "{text}");
+    assert!(text.matches('⊤').count() >= 2, "{text}");
+    assert!(!text.contains(r"\top"), "{text}");
+}
+
+#[test]
+fn assistant_unicode_math_keeps_script_grouping_and_unary_minus() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 18);
+    assert!(app.run_lua("smelt.settings.math_rendering = 'unicode'"));
+    app.start_turn(42);
+    app.feed_one(SourceEvent::engine(EngineEvent::Text {
+        content: "The power is $x^{n+1}$.\n\n\\[\n-x=1\n\\]".into(),
+    }));
+    let text = app.render_to_frame().text();
+    assert!(
+        text.contains("xⁿ⁺¹") || text.contains("x^(n + 1)"),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|line| line.starts_with("−x = 1")),
+        "{text}"
+    );
+}
+
+#[test]
 fn empty_engine_output_is_a_transcript_noop() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);

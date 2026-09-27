@@ -47,6 +47,8 @@ atomic-write-file = "0.3.1"
 tempfile.workspace = true
 term-maths = "1.0.0"
 rust-latex-parser = "0.1.0"
+ratex-parser = "0.1.14"
+ratex-font = "0.1.14"
 
 [dev-dependencies]
 smelt-store = { workspace = true, features = ["test-util"] }

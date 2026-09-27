@@ -1,7 +1,9 @@
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use rust_latex_parser::{parse_equation, EqNode};
+use ratex_font::symbols::{get_symbol, Mode as SymbolMode};
+use ratex_parser::parse_node::{AtomFamily, ParseNode};
+use rust_latex_parser::{AccentKind, EqNode, MathFontKind, MatrixKind};
 
 use crate::content::highlight::{InlineOptions, InlineSpan, InlineStyle};
 use crate::content::inline_line::BreakPolicy;
@@ -346,17 +348,33 @@ pub fn math_body(source: &str) -> &str {
 }
 
 pub fn inline_math_text(source: &str) -> String {
-    let ast = linearize_fractions(parse_equation(&expand_math_boxes(source)));
-    let rendered = term_maths::layout::layout(&ast).to_string();
-    if rendered.lines().count() > 1 {
-        source.to_owned()
+    let Some(ast) = parse_unicode_math(source) else {
+        return source.to_owned();
+    };
+    let rendered = term_maths::layout::layout(&linearize_fractions(ast.clone())).to_string();
+    if rendered.lines().count() == 1 {
+        return rendered.trim().to_owned();
+    }
+    let flattened = term_maths::layout::layout(&flatten_inline_math(ast)).to_string();
+    if flattened.lines().count() == 1 {
+        flattened.trim().to_owned()
     } else {
-        rendered.trim().to_owned()
+        source.to_owned()
     }
 }
 
 pub fn math_rows(source: &str, width: usize) -> Vec<String> {
-    let ast = parse_equation(&expand_math_boxes(math_body(source)));
+    let Some(ast) = parse_unicode_math(math_body(source)) else {
+        let rows: Vec<_> = source
+            .lines()
+            .flat_map(|line| wrap_math_line(line, width.max(1)))
+            .collect();
+        return if rows.is_empty() {
+            vec![String::new()]
+        } else {
+            rows
+        };
+    };
     let width = width.max(1);
     let mut nodes = Vec::new();
     flatten_sequence(ast, &mut nodes);
@@ -523,38 +541,352 @@ fn linearize_fractions(node: EqNode) -> EqNode {
     }
 }
 
-fn expand_math_boxes(source: &str) -> String {
-    let mut result = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(start) = rest.find(r"\boxed{") {
-        result.push_str(&rest[..start]);
-        let body = &rest[start + r"\boxed{".len()..];
-        let mut depth = 1;
-        let mut end = None;
-        for (i, ch) in body.char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(i);
-                        break;
+fn parse_unicode_math(source: &str) -> Option<EqNode> {
+    if source.len() > 8192 {
+        return None;
+    }
+    let nodes = ratex_parser::parse(source).ok()?;
+    // Never display a partially converted formula: an unsupported node can change its meaning.
+    unicode_nodes(&nodes)
+}
+
+fn unicode_nodes(nodes: &[ParseNode]) -> Option<EqNode> {
+    let mut result = Vec::with_capacity(nodes.len());
+    let mut previous_is_operand = false;
+    for node in nodes {
+        if let ParseNode::Atom {
+            family: AtomFamily::Bin | AtomFamily::Rel,
+            ..
+        } = node
+        {
+            if previous_is_operand {
+                result.push(EqNode::Space(4.0));
+            }
+            result.push(unicode_node(node)?);
+            if previous_is_operand {
+                result.push(EqNode::Space(4.0));
+            }
+            previous_is_operand = false;
+        } else {
+            result.push(unicode_node(node)?);
+            previous_is_operand = match node {
+                ParseNode::SpacingNode { .. } => previous_is_operand,
+                ParseNode::Atom {
+                    family: AtomFamily::Open | AtomFamily::Punct,
+                    ..
+                } => false,
+                _ => true,
+            };
+        }
+    }
+    Some(EqNode::Seq(result))
+}
+
+fn unicode_array_rows(rows: &[Vec<ParseNode>]) -> Option<Vec<Vec<EqNode>>> {
+    rows.iter()
+        .map(|row| row.iter().map(unicode_node).collect())
+        .collect()
+}
+
+fn unicode_symbol(text: &str) -> Option<String> {
+    if matches!(text, "*" | r"\cdot") {
+        return Some("·".into());
+    }
+    get_symbol(text, SymbolMode::Math)
+        .and_then(|symbol| symbol.codepoint)
+        .map(|ch| ch.to_string())
+        .or_else(|| (!text.starts_with('\\')).then(|| text.to_owned()))
+}
+
+fn unicode_delimiter(text: &str) -> Option<String> {
+    if text == "." {
+        Some(String::new())
+    } else if text == r"\{" {
+        Some("{".into())
+    } else if text == r"\}" {
+        Some("}".into())
+    } else {
+        unicode_symbol(text)
+    }
+}
+
+fn unicode_node(node: &ParseNode) -> Option<EqNode> {
+    Some(match node {
+        ParseNode::Atom { text, .. }
+        | ParseNode::MathOrd { text, .. }
+        | ParseNode::TextOrd { text, .. }
+        | ParseNode::OpToken { text, .. }
+        | ParseNode::AccentToken { text, .. } => EqNode::Text(unicode_symbol(text)?),
+        ParseNode::SpacingNode { text, .. } => {
+            EqNode::Space(if matches!(text.as_str(), r"\quad" | r"\qquad") {
+                18.0
+            } else {
+                4.0
+            })
+        }
+        ParseNode::OrdGroup { body, .. }
+        | ParseNode::Text { body, .. }
+        | ParseNode::Styling { body, .. }
+        | ParseNode::Sizing { body, .. }
+        | ParseNode::Color { body, .. }
+        | ParseNode::HBox { body, .. }
+        | ParseNode::MClass { body, .. }
+        | ParseNode::OperatorName { body, .. } => unicode_nodes(body)?,
+        ParseNode::SupSub { base, sup, sub, .. } => {
+            if let Some(base) = base {
+                if let ParseNode::HorizBrace {
+                    base: content,
+                    is_over,
+                    ..
+                } = base.as_ref()
+                {
+                    if (if *is_over { sub } else { sup }).is_none() {
+                        return Some(EqNode::Brace {
+                            content: Box::new(unicode_node(content)?),
+                            label: match if *is_over { sup } else { sub } {
+                                Some(node) => Some(Box::new(unicode_node(node)?)),
+                                None => None,
+                            },
+                            over: *is_over,
+                        });
                     }
                 }
-                _ => {}
+                if let ParseNode::Op {
+                    body: Some(body), ..
+                } = base.as_ref()
+                {
+                    if let (Some(annotation), None) | (None, Some(annotation)) = (sup, sub) {
+                        return Some(EqNode::StackRel {
+                            base: Box::new(unicode_nodes(body)?),
+                            annotation: Box::new(unicode_node(annotation)?),
+                            over: sup.is_some(),
+                        });
+                    }
+                }
+                if let ParseNode::Op {
+                    name: Some(name),
+                    symbol: true,
+                    ..
+                } = base.as_ref()
+                {
+                    return Some(EqNode::BigOp {
+                        symbol: unicode_symbol(name)?,
+                        lower: match sub {
+                            Some(node) => Some(Box::new(unicode_node(node)?)),
+                            None => None,
+                        },
+                        upper: match sup {
+                            Some(node) => Some(Box::new(unicode_node(node)?)),
+                            None => None,
+                        },
+                    });
+                }
+            }
+            let base = Box::new(match base {
+                Some(base) => unicode_node(base)?,
+                None => EqNode::Text(String::new()),
+            });
+            match (sup, sub) {
+                (Some(sup), Some(sub)) => EqNode::SupSub(
+                    base,
+                    Box::new(unicode_node(sup)?),
+                    Box::new(unicode_node(sub)?),
+                ),
+                (Some(sup), None) => EqNode::Sup(base, Box::new(unicode_node(sup)?)),
+                (None, Some(sub)) => EqNode::Sub(base, Box::new(unicode_node(sub)?)),
+                (None, None) => *base,
             }
         }
-        let Some(end) = end else {
-            result.push_str(rest);
-            return result;
-        };
-        result.push('⟦');
-        result.push_str(&expand_math_boxes(&body[..end]));
-        result.push('⟧');
-        rest = &body[end + 1..];
+        ParseNode::GenFrac {
+            numer,
+            denom,
+            has_bar_line,
+            left_delim,
+            right_delim,
+            ..
+        } => {
+            let numer = Box::new(unicode_node(numer)?);
+            let denom = Box::new(unicode_node(denom)?);
+            if !*has_bar_line {
+                if left_delim.as_deref() == Some("(") && right_delim.as_deref() == Some(")") {
+                    EqNode::Binom(numer, denom)
+                } else {
+                    return None;
+                }
+            } else if left_delim.is_some() || right_delim.is_some() {
+                let frac = EqNode::Frac(numer, denom);
+                EqNode::Delimited {
+                    left: left_delim
+                        .as_deref()
+                        .map(unicode_delimiter)
+                        .unwrap_or(Some(String::new()))?,
+                    right: right_delim
+                        .as_deref()
+                        .map(unicode_delimiter)
+                        .unwrap_or(Some(String::new()))?,
+                    content: Box::new(frac),
+                }
+            } else {
+                EqNode::Frac(numer, denom)
+            }
+        }
+        ParseNode::Sqrt {
+            body, index: None, ..
+        } => EqNode::Sqrt(Box::new(unicode_node(body)?)),
+        ParseNode::Accent { label, base, .. } => {
+            let kind = match label.as_str() {
+                r"\hat" | r"\widehat" => AccentKind::Hat,
+                r"\bar" | r"\overline" => AccentKind::Bar,
+                r"\dot" => AccentKind::Dot,
+                r"\ddot" => AccentKind::DoubleDot,
+                r"\tilde" | r"\widetilde" => AccentKind::Tilde,
+                r"\vec" => AccentKind::Vec,
+                _ => return None,
+            };
+            EqNode::Accent(Box::new(unicode_node(base)?), kind)
+        }
+        ParseNode::Overline { body, .. } => {
+            EqNode::Accent(Box::new(unicode_node(body)?), AccentKind::Bar)
+        }
+        ParseNode::HorizBrace { base, is_over, .. } => EqNode::Brace {
+            content: Box::new(unicode_node(base)?),
+            label: None,
+            over: *is_over,
+        },
+        ParseNode::Op {
+            body: Some(body), ..
+        } => unicode_nodes(body)?,
+        ParseNode::Op {
+            name: Some(name),
+            symbol,
+            body: None,
+            ..
+        } => {
+            if *symbol {
+                EqNode::Text(unicode_symbol(name)?)
+            } else {
+                EqNode::Text(name.trim_start_matches('\\').into())
+            }
+        }
+        ParseNode::Font { font, body, .. } => {
+            let kind = match font.as_str() {
+                "mathbf" | "boldsymbol" => MathFontKind::Bold,
+                "mathbb" => MathFontKind::Blackboard,
+                "mathcal" | "mathscr" => MathFontKind::Calligraphic,
+                "mathrm" => MathFontKind::Roman,
+                "mathfrak" => MathFontKind::Fraktur,
+                "mathsf" => MathFontKind::SansSerif,
+                "mathtt" => MathFontKind::Monospace,
+                _ => return None,
+            };
+            EqNode::MathFont {
+                kind,
+                content: Box::new(unicode_node(body)?),
+            }
+        }
+        ParseNode::LeftRight {
+            body, left, right, ..
+        } => {
+            let left = unicode_delimiter(left)?;
+            let right = unicode_delimiter(right)?;
+            if let [ParseNode::Array { body: rows, .. }] = body.as_slice() {
+                let rows = unicode_array_rows(rows)?;
+                if left == "{"
+                    && right.is_empty()
+                    && rows.iter().all(|row| (1..=2).contains(&row.len()))
+                {
+                    EqNode::Cases {
+                        rows: rows
+                            .into_iter()
+                            .map(|mut row| (row.remove(0), row.pop()))
+                            .collect(),
+                    }
+                } else {
+                    let kind = match (left.as_str(), right.as_str()) {
+                        ("(", ")") => MatrixKind::Paren,
+                        ("[", "]") => MatrixKind::Bracket,
+                        ("|", "|") => MatrixKind::VBar,
+                        ("‖", "‖") => MatrixKind::DoubleVBar,
+                        ("{", "}") => MatrixKind::Brace,
+                        ("", "") => MatrixKind::Plain,
+                        _ => return None,
+                    };
+                    EqNode::Matrix { kind, rows }
+                }
+            } else {
+                EqNode::Delimited {
+                    left,
+                    right,
+                    content: Box::new(unicode_nodes(body)?),
+                }
+            }
+        }
+        ParseNode::Array { body, .. } => EqNode::Matrix {
+            kind: MatrixKind::Plain,
+            rows: unicode_array_rows(body)?,
+        },
+        ParseNode::Enclose { label, body, .. } if label == r"\fbox" => EqNode::Delimited {
+            left: "⟦".into(),
+            right: "⟧".into(),
+            content: Box::new(unicode_node(body)?),
+        },
+        ParseNode::Kern { dimension, .. } => {
+            EqNode::Space(dimension.number as f32 * if dimension.unit == "em" { 18.0 } else { 1.0 })
+        }
+        ParseNode::Verb { body, .. } => EqNode::TextBlock(body.clone()),
+        _ => return None,
+    })
+}
+
+fn inline_script(node: EqNode) -> EqNode {
+    let node = flatten_inline_math(node);
+    fn single_symbol(node: &EqNode) -> bool {
+        match node {
+            EqNode::Text(text) => text.chars().count() == 1,
+            EqNode::Seq(nodes) if nodes.len() == 1 => single_symbol(&nodes[0]),
+            _ => false,
+        }
     }
-    result.push_str(rest);
-    result
+    if single_symbol(&node) {
+        node
+    } else {
+        EqNode::Seq(vec![
+            EqNode::Text("(".into()),
+            node,
+            EqNode::Text(")".into()),
+        ])
+    }
+}
+
+fn flatten_inline_math(node: EqNode) -> EqNode {
+    match node {
+        EqNode::Frac(numer, denom) => EqNode::Seq(vec![
+            EqNode::Text("(".into()),
+            flatten_inline_math(*numer),
+            EqNode::Text(")/(".into()),
+            flatten_inline_math(*denom),
+            EqNode::Text(")".into()),
+        ]),
+        EqNode::Sup(base, sup) => EqNode::Seq(vec![
+            flatten_inline_math(*base),
+            EqNode::Text("^".into()),
+            inline_script(*sup),
+        ]),
+        EqNode::Sub(base, sub) => EqNode::Seq(vec![
+            flatten_inline_math(*base),
+            EqNode::Text("_".into()),
+            inline_script(*sub),
+        ]),
+        EqNode::SupSub(base, sup, sub) => EqNode::Seq(vec![
+            flatten_inline_math(*base),
+            EqNode::Text("^".into()),
+            inline_script(*sup),
+            EqNode::Text("_".into()),
+            inline_script(*sub),
+        ]),
+        EqNode::Seq(nodes) => EqNode::Seq(nodes.into_iter().map(flatten_inline_math).collect()),
+        other => other,
+    }
 }
 
 pub fn ends_with_heading(source: &str) -> bool {
@@ -1224,6 +1556,62 @@ mod tests {
             .filter(|node| matches!(node, MarkdownNode::Math { .. }))
             .count();
         assert_eq!(math, 1);
+    }
+
+    #[test]
+    fn unicode_math_uses_ratex_symbols_and_structures() {
+        assert_eq!(inline_math_text(r"\top"), "⊤");
+        assert_eq!(inline_math_text(r"A^\top"), "A^⊤");
+        assert_eq!(inline_math_text(r"\mathbb{R}"), "ℝ");
+        assert_eq!(inline_math_text(r"\def\truth{\top}\truth"), "⊤");
+        assert_eq!(inline_math_text(r"\not_a_command{x}"), r"\not_a_command{x}");
+        let matrix = math_rows(r"\[\begin{pmatrix}1&2\\3&4\end{pmatrix}\]", 80).join("\n");
+        assert!(matrix.contains('1') && matrix.contains('4'), "{matrix}");
+        assert!(!matrix.contains(r"\begin"), "{matrix}");
+        let sum = math_rows(r"\[\sum_{i=1}^n x_i\]", 80).join("\n");
+        assert!(sum.contains('∑') && sum.contains('n'), "{sum}");
+        let stacked = math_rows(r"\[\overset{def}{=}\quad\overbrace{a+b}^{n}\]", 80).join("\n");
+        assert!(
+            stacked.contains("def") && stacked.contains('n'),
+            "{stacked}"
+        );
+        assert!(!stacked.contains(r"\overset"), "{stacked}");
+    }
+
+    #[test]
+    fn unicode_math_groups_inline_scripts() {
+        assert_eq!(inline_math_text(r"x^{n+1}"), "xⁿ⁺¹");
+        assert_eq!(inline_math_text(r"x_{i+1}"), "xᵢ₊₁");
+        assert_eq!(inline_math_text(r"x^{n^2+1}"), "x^(n^2 + 1)");
+        assert_eq!(inline_math_text(r"x^{\frac{n+1}{2}}"), "x^((n + 1)/(2))");
+        assert_eq!(inline_math_text(r"A^\top"), "A^⊤");
+        let flattened = flatten_inline_math(parse_unicode_math(r"x^{n+1}").unwrap());
+        assert_eq!(
+            term_maths::layout::layout(&flattened).to_string(),
+            "x^(n + 1)"
+        );
+    }
+
+    #[test]
+    fn unicode_math_spaces_infix_but_not_unary_operators() {
+        for (source, expected) in [
+            ("-x", "−x"),
+            ("x-y", "x − y"),
+            ("a+-b", "a + −b"),
+            ("(-x)", "(−x)"),
+            ("x=-y", "x = −y"),
+        ] {
+            let rows = math_rows(source, 80);
+            assert_eq!(rows, [expected], "{source}");
+        }
+    }
+
+    #[test]
+    fn unicode_math_preserves_unsupported_formula_source() {
+        let source = r"\sqrt[3]{x}+\top";
+        assert_eq!(inline_math_text(source), source);
+        let display = format!(r"\[{source}\]");
+        assert_eq!(math_rows(&display, 80), [display]);
     }
 
     #[test]

@@ -3653,6 +3653,8 @@ dependencies = [
  "notify",
  "process-wrap",
  "pulldown-cmark",
+ "ratex-font",
+ "ratex-parser",
  "reqwest",
  "rmcp",
  "rust-latex-parser",

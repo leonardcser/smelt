@@ -345,6 +345,8 @@ Display math in Markdown uses `\[...\]` or `$$...$$`; inline math uses
 `\(...\)` or `$...$`. The `graphics` setting renders equations with Kitty graphics
 using RaTeX and embedded math fonts when the terminal acknowledges a Kitty
 graphics protocol probe and reports usable pixel dimensions for its cells.
+Both graphics and Unicode text use the RaTeX parser; Unicode approximates the
+layout on a terminal character grid.
 Display equations use a slightly smaller font than terminal text. Those that
 just exceed the available width are rerendered at up to 20% smaller font size;
 wider equations use Unicode rather than becoming too small to read. Simple inline
@@ -353,8 +355,11 @@ text row when they fit the assigned cell width. Inline formulas are not downscal
 taller or too-wide inline formulas use a one-line text fallback instead of
 shrinking until unreadable or expanding line heights. Fractions stay grouped as
 `(numerator)/(denominator)`; expressions that cannot be flattened faithfully
-retain their LaTeX source. If either terminal check fails, an equation cannot be
-rasterized, or the live image budget fills, smelt uses text instead. Cached and visible images keep their rasters
+retain their LaTeX source. In Unicode mode, a formula containing an unsupported
+RaTeX construct (for example, an indexed root) retains its entire LaTeX source
+rather than silently omitting part of the expression. If either terminal check
+fails, an equation cannot be rasterized, or the live image budget fills, smelt
+uses text instead. Cached and visible images keep their rasters
 alive for scroll-back; released images free capacity for later equations. The
 live-image budget is 256 images or 32 MiB of encoded PNGs, plus an 8 MiB recent
 raster cache. Inside tmux, enable graphics passthrough with
