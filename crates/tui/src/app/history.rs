@@ -2476,6 +2476,7 @@ impl TuiApp {
         })
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn rewind_to_history(
         &mut self,
         history_idx: usize,

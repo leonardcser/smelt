@@ -8,9 +8,8 @@ never edits `main`, creates commits, pushes generated changes, or moves tags.
 ## Rules
 
 - Do not prepare or commit an agent version bump. CI owns release versioning.
-- Every `0.x` agent release is beta-quality, but uses a normal SemVer version
-  such as `0.6.0`, a `v0.6.0` tag, and a non-prerelease GitHub release. Do not
-  append a `-beta` prerelease suffix.
+- Agent releases use SemVer tags such as `v0.5.0-alpha.13` or `v0.6.0`.
+  Tags with prerelease suffixes produce GitHub prereleases.
 - Tag the exact commit that passed CI, from a clean and up-to-date `main`.
 - Never move, force-push, delete, or reuse a release tag.
 - If publishing fails after a version becomes externally visible, prepare a new
@@ -41,7 +40,7 @@ never edits `main`, creates commits, pushes generated changes, or moves tags.
    git push origin v<X.Y.Z>
    ```
 
-The release workflow rejects prerelease suffixes on `0.x` agent tags, verifies
+The release workflow verifies
 the immutable source commit, and runs `cargo xtask prepare-release <version>` in
 each ephemeral build checkout. That command updates non-independent package
 versions, internal path dependency requirements, and both lockfiles without

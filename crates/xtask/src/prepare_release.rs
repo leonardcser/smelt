@@ -35,13 +35,7 @@ fn prepare(root: &Path, version: &str, refresh_locks: bool) -> Result<(), String
 }
 
 fn validate_version(version: &str) -> Result<(), String> {
-    let parsed =
-        Version::parse(version).map_err(|error| format!("invalid release version: {error}"))?;
-    if parsed.major == 0 && !parsed.pre.is_empty() {
-        return Err(
-            "0.x releases are beta-quality normal releases; remove the prerelease suffix".into(),
-        );
-    }
+    Version::parse(version).map_err(|error| format!("invalid release version: {error}"))?;
     Ok(())
 }
 
@@ -440,10 +434,9 @@ library = { path = "../crates/library" }
     }
 
     #[test]
-    fn rejects_prerelease_suffixes_for_beta_releases() {
-        assert!(validate_version("0.6.0-beta.1")
-            .unwrap_err()
-            .contains("remove the prerelease suffix"));
+    fn accepts_semver_releases() {
+        assert!(validate_version("0.5.0-alpha.13").is_ok());
         assert!(validate_version("0.6.0").is_ok());
+        assert!(validate_version("not-a-version").is_err());
     }
 }

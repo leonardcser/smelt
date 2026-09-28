@@ -3,8 +3,18 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
+      - "!crates/perf/**"
   pull_request:
     branches: [main]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
+      - "!crates/perf/**"
   pull_request_target:
     types: [opened, reopened, edited]
 
@@ -212,6 +222,8 @@ jobs:
       - name: Build and run release archive
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $artifact = Join-Path $env:RUNNER_TEMP "smelt-x86_64-pc-windows-msvc.tar.gz"
           $extractRoot = Join-Path $env:RUNNER_TEMP "smelt release"
           cargo build --profile dist --bin smelt --target x86_64-pc-windows-msvc
