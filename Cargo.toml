@@ -107,6 +107,7 @@ codegen-units = 1
 inherits = "release"
 lto = false
 codegen-units = 16
+incremental = false
 
 # Maximum-optimization profile for packaged release artifacts. This costs more
 # compile time than `release`, but produces a smaller binary and gives LLVM the
@@ -131,7 +132,6 @@ debug = true
 # usable while drastically cutting link time and dSYM generation on macOS.
 [profile.dev]
 debug = "line-tables-only"
-split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
 debug = false

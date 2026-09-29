@@ -188,6 +188,12 @@ test = false
 doc = false
 bench = false
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 debug = 1
 lto = false

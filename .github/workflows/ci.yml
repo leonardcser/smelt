@@ -94,6 +94,8 @@ jobs:
         run: cargo test -p smelt-tui --features "harness transcript-bench" --no-run
 
       - name: Run tests with coverage floor
+        env:
+          CARGO_INCREMENTAL: "0"
         run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80
 
       - name: Check Lua API docs are in sync
