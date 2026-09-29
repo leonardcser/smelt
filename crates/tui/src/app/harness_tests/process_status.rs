@@ -282,7 +282,7 @@ fn background_process_output_mouse_focus_and_enter_expand_beyond_preview_limit()
     let collapsed = app.render_to_frame().text();
     let row = collapsed
         .lines()
-        .position(|line| line.contains("30 lines of output"))
+        .position(|line| line.trim() == "30 lines")
         .expect("collapsed output affordance") as u16;
     for kind in [
         MouseEventKind::Down(MouseButton::Left),

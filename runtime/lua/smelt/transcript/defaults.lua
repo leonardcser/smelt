@@ -753,7 +753,7 @@ function M.render_process_status(block, ctx)
     return layout.vbox({
       header,
       layout.gutter(layout.line({ {
-        text = tostring(count) .. (count == 1 and " line" or " lines") .. " of output (expand to view)",
+        text = tostring(count) .. (count == 1 and " line" or " lines"),
         dim = true,
         selectable = false,
       } }), { text = "  " }),

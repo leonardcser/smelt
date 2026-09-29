@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 background process 4210 finished successfully
-  3 lines of output (expand to view)
+  3 lines
 
 
 
