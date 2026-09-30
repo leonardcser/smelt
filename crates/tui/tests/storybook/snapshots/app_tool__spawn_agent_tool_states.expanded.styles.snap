@@ -9,10 +9,14 @@ dim: 78 20
   2   0   1 fg=AnsiValue(77)
   2   1  12 attrs=dim
   2  67  10 attrs=dim
-  4   0   1 fg=AnsiValue(9)
-  4   1  12 attrs=dim
-  4  67  10 attrs=dim
-  5   2  22 fg=AnsiValue(9)
+  3   2   7 attrs=bold
+  3   9  24 fg=AnsiValue(8)
+  4   2  12 attrs=dim
+  5   2  12 attrs=dim
+  7   0   1 fg=AnsiValue(9)
+  7   1  12 attrs=dim
+  7  67  10 attrs=dim
+  8   2  22 fg=AnsiValue(9)
  16   0   1 fg=AnsiValue(237)
  16   1   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
  16   2   1 fg=Rgb { r: 175, g: 175, b: 175 } attrs=bold

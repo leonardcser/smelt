@@ -375,18 +375,22 @@ impl EngineHandle {
                     _ = commands.closed() => None,
                 };
                 let Some(output) = output else { break };
-                if let EngineOutput::Event(event) = output {
-                    let finished = matches!(event, EngineEvent::TurnComplete { .. });
-                    if events
-                        .send(EngineEvent::Subagent {
-                            id,
-                            event: Box::new(event),
-                        })
-                        .is_err()
-                        || finished
-                    {
-                        return;
-                    }
+                let finished = matches!(
+                    &output,
+                    EngineOutput::Event(EngineEvent::TurnComplete { .. })
+                );
+                let output = match output {
+                    EngineOutput::Event(event) => EngineOutput::Event(EngineEvent::Subagent {
+                        id,
+                        event: Box::new(event),
+                    }),
+                    EngineOutput::HostCall(call) => EngineOutput::HostCall(HostCall::Subagent {
+                        id,
+                        call: Box::new(call),
+                    }),
+                };
+                if events.output_tx.send(output).is_err() || finished {
+                    return;
                 }
             }
             let _ = events.send(EngineEvent::Subagent {

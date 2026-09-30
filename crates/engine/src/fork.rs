@@ -30,6 +30,49 @@ pub struct ForkSnapshot {
 }
 
 impl ForkSnapshot {
+    pub fn system_prompt(&self) -> &str {
+        self.payload.system_prompt.as_deref().unwrap_or_default()
+    }
+
+    pub fn model_target(&self) -> &protocol::ModelTarget {
+        &self.payload.model_target
+    }
+
+    pub fn request_config(&self) -> protocol::RequestRuntimeConfig {
+        self.payload.request_config
+    }
+
+    pub fn with_history(
+        &self,
+        history: Vec<HistoryItem>,
+        coordinates: protocol::ModelHistoryCoordinates,
+    ) -> Self {
+        let messages = if history.starts_with(&self.history) {
+            self.append_suffix(&history[self.history.len()..])
+        } else {
+            let mut messages: Vec<_> = self
+                .messages
+                .first()
+                .filter(|message| message.role == protocol::Role::System)
+                .cloned()
+                .into_iter()
+                .collect();
+            messages.extend(protocol::history_to_messages(&history));
+            messages
+        };
+        let mut payload = self.payload.clone();
+        // The template holds coordinates; history is installed when the child starts.
+        payload.history = protocol::ModelHistorySource::projected_items(Vec::new(), coordinates);
+        Self {
+            messages,
+            history,
+            tools: self.tools.clone(),
+            payload,
+            config: self.config.clone(),
+            dispatcher: self.dispatcher.clone(),
+        }
+    }
+
     pub fn parent_session_id(&self) -> &str {
         &self.payload.session_id
     }
@@ -64,8 +107,8 @@ impl ForkSnapshot {
         task: String,
     ) -> EngineHandle {
         let mut config = self.config.clone();
-        // Parent hooks have session-global authority. A child never invokes them.
-        config.host_callbacks = HostCallbacks::Disabled;
+        // Child callbacks are routed to its own host, not parent-global hooks.
+        config.host_callbacks = HostCallbacks::Enabled;
         let handle = crate::start_shared(
             config,
             self.dispatcher.as_ref().map_or(dispatcher, Arc::clone),
@@ -78,7 +121,10 @@ impl ForkSnapshot {
         payload.session_id = session_id;
         payload.turn_id = turn_id;
         payload.input = protocol::StartTurnInput::user(protocol::Content::text(task));
-        payload.history = protocol::ModelHistorySource::items(self.history.clone());
+        payload.history = protocol::ModelHistorySource::projected_items(
+            self.history.clone(),
+            self.payload.history.coordinates(),
+        );
         payload.persistence = protocol::PersistenceScope::default();
         handle.send(protocol::UiCommand::StartTurn(Box::new(payload)));
         handle

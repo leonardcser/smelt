@@ -276,6 +276,7 @@ pub fn build_body(
                         "type": "tool_result",
                         "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
                         "content": anthropic_tool_result_content(m),
+                        "is_error": m.is_error,
                     }],
                 }));
             }
@@ -1418,6 +1419,25 @@ mod tests {
         assert_eq!(block["type"], "tool_result");
         assert_eq!(block["tool_use_id"], "call-7");
         assert_eq!(block["content"], "result body");
+        assert_eq!(block["is_error"], false);
+    }
+
+    #[test]
+    fn build_body_preserves_tool_result_errors() {
+        let mut message = tool_msg(Some("call-7"), "session catalog unavailable");
+        message.is_error = true;
+        let body = build_body(
+            &[message],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["is_error"], true);
+        assert_eq!(block["tool_use_id"], "call-7");
+        assert_eq!(block["content"], "session catalog unavailable");
     }
 
     #[test]

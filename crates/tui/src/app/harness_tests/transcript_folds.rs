@@ -71,6 +71,108 @@ fn spawn_agent_hides_success_output_but_preserves_errors() {
 }
 
 #[test]
+fn subagent_cards_show_live_activity_and_mark_missing_runtime_as_archived() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_bundled_lua(
+        r#"
+        require('smelt.plugins.subagents')
+        _G.card = { status = 'running', elapsed_ms = 1200, cost_usd = 0.0123,
+            activity = 'Running grep' }
+        __smelt_internal.agent.__card = function() return _G.card end
+    "#,
+    ));
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "spawn",
+        "spawn_agent",
+        std::collections::HashMap::from([
+            ("title".into(), serde_json::json!("Review tests")),
+            (
+                "prompt".into(),
+                serde_json::json!("Review the test suite independently"),
+            ),
+        ]),
+    );
+    app.tool_finished(
+        invocation_id,
+        "spawn",
+        protocol::ToolOutcome::new(
+            "handle".into(),
+            false,
+            Some(serde_json::json!({
+                "agents": [{ "id":1, "name":"cedar-1", "title":"Review tests", "status":"queued", "session_id":"child-session" }]
+            })),
+        ),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        assert!(text.contains("cedar-1  running  1.2s  $0.0123"), "{text}");
+        assert!(text.contains("Running grep"), "{text}");
+        assert!(
+            !text.contains("Review the test suite independently"),
+            "{text}"
+        );
+    }
+    app.run_lua_result("_G.card = nil").unwrap();
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    let text = app.render_to_frame().text();
+    assert!(text.contains("cedar-1  archived"), "{text}");
+    assert!(!text.contains("queued"), "{text}");
+    assert!(!text.contains("Running grep"), "{text}");
+}
+
+#[test]
+fn historical_subagent_cards_do_not_show_another_parents_worker() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_bundled_lua(
+        r#"
+        require('smelt.plugins.subagents')
+        __smelt_internal.agent.__card = function(session_id)
+            if session_id and session_id ~= 'other-child' then return nil end
+            return { status = 'running', elapsed_ms = 1200, cost_usd = 0.0123,
+                activity = 'Other parent activity' }
+        end
+        "#,
+    ));
+    app.start_turn(1);
+    for (call_id, identity) in [("historical", Some("saved-child")), ("legacy", None)] {
+        let invocation_id = app.tool_started(call_id, "spawn_agent", Default::default());
+        let mut saved = serde_json::json!({ "id":1, "name":call_id, "status":"running" });
+        if let Some(identity) = identity {
+            saved["session_id"] = identity.into();
+        }
+        app.tool_finished(
+            invocation_id,
+            call_id,
+            protocol::ToolOutcome::new(
+                "handle".into(),
+                false,
+                Some(serde_json::json!({ "agents": [saved] })),
+            ),
+            Some(1),
+        );
+    }
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        for state in ["open", "close"] {
+            app.run_lua_result(&format!("smelt.transcript.fold_all('{state}')"))
+                .unwrap();
+            app.follow_transcript_tail();
+            let text = app.render_to_frame().text();
+            assert!(text.contains("historical  archived"), "{text}");
+            assert!(text.contains("legacy  archived"), "{text}");
+            assert!(!text.contains("Other parent activity"), "{text}");
+            assert!(!text.contains("$0.0123"), "{text}");
+        }
+    }
+}
+
+#[test]
 fn peek_agent_output_is_capped_readable_and_copyable() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.run_lua_result("require('smelt.plugins.subagents')")

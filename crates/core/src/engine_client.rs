@@ -2,7 +2,18 @@
 
 use engine::{EngineDisconnected, EngineHandle, EngineOutput};
 use protocol::{EngineEvent, UiCommand};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+pub(crate) fn next_agent_request_id() -> u64 {
+    static NEXT_REQUEST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    NEXT_REQUEST.fetch_max(now, Ordering::Relaxed);
+    NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+}
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -34,9 +45,9 @@ impl EngineClient {
         session_id: String,
         task: String,
     ) -> Result<EngineHandle, &'static str> {
-        let mut child = self
-            .handle
-            .start_fork(snapshot, session_id, u64::MAX - id, task)?;
+        let mut child =
+            self.handle
+                .start_fork(snapshot, session_id, next_agent_request_id(), task)?;
         self.handle.forward_child(id, &mut child);
         Ok(child)
     }

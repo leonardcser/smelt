@@ -125,7 +125,8 @@ impl TestApp {
         self.run_lua_result(snippet).is_ok()
     }
 
-    pub(crate) fn run_bundled_lua(&mut self, snippet: &str) -> bool {
+    /// Run a trusted bundled-plugin fixture with internal capabilities available.
+    pub fn run_bundled_lua(&mut self, snippet: &str) -> bool {
         let lua = self.app.lua.lua().clone();
         let result = crate::lua::scope_app(&mut self.app, || {
             let environment = smelt_core::lua::module::bundled_chunk_environment(&lua)

@@ -995,8 +995,12 @@ impl<'a> Turn<'a> {
 
     fn request_messages(&self) -> crate::host::PreparedRequestMessages {
         let messages = match &self.forks.inherited {
-            Some(prefix) => prefix.append_suffix(&self.history[prefix.history.len() + 1..]),
-            None => protocol::history_to_messages(&self.history),
+            Some(prefix)
+                if self.history_coordinates == protocol::ModelHistoryCoordinates::canonical() =>
+            {
+                prefix.append_suffix(&self.history[prefix.history.len() + 1..])
+            }
+            _ => protocol::history_to_messages(&self.history),
         };
         crate::host::PreparedRequestMessages::new(messages, self.system_history_offset())
     }

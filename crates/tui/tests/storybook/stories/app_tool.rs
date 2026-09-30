@@ -40,10 +40,23 @@ app_story!(spawn_agent_tool_states, |ctx| {
     ctx.run_lua("require('smelt.plugins.subagents')");
     ctx.set_viewport(78, 20);
     ctx.tool_started("spawn_agent", &[("prompt", json!("Review parser"))]);
-    ctx.tool_call(
+    ctx.run_bundled_lua(
+        r#"
+        __smelt_internal.agent.__card = function(id)
+            return { status = 'running', elapsed_ms = 1200, cost_usd = 0.0123,
+                activity = 'Running grep' }
+        end
+    "#,
+    );
+    ctx.tool_call_with_display_content(
         "spawn_agent",
-        &[("prompt", json!("Review tests"))],
-        r#"[{"id":1,"status":"running","session_id":"child-session"}]"#,
+        &[
+            ("title", json!("Review tests")),
+            ("prompt", json!("Review the test suite independently")),
+        ],
+        r#"[{"id":1,"name":"cedar-1","title":"Review tests","status":"running"}]"#,
+        json!({"agents":[{"id":1,"name":"cedar-1","title":"Review tests","status":"running","session_id":"child-session"}]}),
+        &[],
         Some(1),
     );
     ctx.tool_call_error("spawn_agent", &[], "subagent queue is full", Some(1));

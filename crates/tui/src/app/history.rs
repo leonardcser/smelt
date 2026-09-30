@@ -237,19 +237,37 @@ pub(crate) fn build_transcript_from_session(
     lua: &smelt_core::lua::LuaRuntime,
     session: &session::Session,
 ) -> Transcript {
+    build_transcript(
+        lua,
+        &session.history,
+        checkpoint_markers_by_completion_index(session),
+    )
+}
+
+pub(crate) fn build_transcript_from_history(
+    lua: &smelt_core::lua::LuaRuntime,
+    history: &[HistoryItem],
+) -> Transcript {
+    build_transcript(lua, history, BTreeMap::new())
+}
+
+fn build_transcript(
+    lua: &smelt_core::lua::LuaRuntime,
+    history: &[HistoryItem],
+    mut checkpoint_markers: BTreeMap<usize, Vec<String>>,
+) -> Transcript {
     let summary_resolver = ToolSummaryResolver::new(lua);
     let _perf = smelt_perf::perf::begin("transcript:build_from_session");
     smelt_perf::perf::record_value(
         "transcript:build_from_session:history_items",
-        session.history.len() as u64,
+        history.len() as u64,
     );
     let mut transcript = Transcript::new();
-    if session.history.is_empty() {
+    if history.is_empty() {
         return transcript;
     }
 
-    let mut checkpoint_markers = checkpoint_markers_by_completion_index(session);
-    for (idx, item) in session.history.iter().enumerate() {
+    for (idx, item) in history.iter().enumerate() {
         insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, idx);
         match item {
             HistoryItem::User {
@@ -274,11 +292,7 @@ pub(crate) fn build_transcript_from_session(
             HistoryItem::System { .. } => {}
         }
     }
-    insert_checkpoint_markers(
-        &mut transcript,
-        &mut checkpoint_markers,
-        session.history.len(),
-    );
+    insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, history.len());
 
     smelt_perf::perf::record_value(
         "transcript:build_from_session:blocks",
@@ -782,6 +796,51 @@ mod tests {
             }
             other => panic!("expected tool call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn history_slice_preview_matches_session_projection_without_inherited_markers() {
+        let lua = crate::lua::LuaRuntime::new();
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            HistoryItem::user(Content::text("parent task")),
+            HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("parent response")),
+                None,
+                Vec::new(),
+            )),
+            HistoryItem::user(Content::text("child assignment")),
+            HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("child report")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        assert!(session.install_context_checkpoint_at_history_index(
+            "compaction".into(),
+            "parent checkpoint".into(),
+            2,
+            None,
+            2,
+        ));
+        let full = build_transcript_from_session(&lua, &session);
+        assert!(full
+            .history
+            .order
+            .iter()
+            .any(|id| matches!(full.history.block(*id), Some(Block::Compacted { .. }))));
+
+        let own_work = build_transcript_from_history(&lua, &session.history[2..]);
+        session.history.drain(..2);
+        session.checkpoint = None;
+        session.checkpoint_events.clear();
+        let expected = build_transcript_from_session(&lua, &session);
+        assert_eq!(
+            serde_json::to_value(own_work.history.block_records()).unwrap(),
+            serde_json::to_value(expected.history.block_records()).unwrap()
+        );
+        assert_eq!(own_work.history.len(), 2);
+        assert!(build_transcript_from_history(&lua, &[]).history.is_empty());
     }
 
     #[test]

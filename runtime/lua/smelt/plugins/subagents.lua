@@ -1,26 +1,33 @@
 -- Opt in with require("smelt.plugins.subagents") in init.lua.
 local M = smelt.plugin("subagents")
 
+local swarm_registration
+local swarm_tool
 function M.setup(opts)
+  opts = opts or {}
   smelt.agent.enable_forks(opts)
+  if swarm_registration then swarm_registration:remove(); swarm_registration = nil end
+  if opts.swarm then swarm_registration = smelt.tools.register(swarm_tool) end
 end
-M.setup()
 smelt.agent.add_system_prompt([[
-Use spawn_agent to delegate an independent task, or swarm to ask multiple agents
-to independently solve the same task. Children inherit your context, tools,
-workspace and permission limits. They do not share subsequent messages. Concurrent
-writes affect the same checkout: partition file ownership or delegate read-only
-analysis. Continue independent work after spawning, then call wait_agents once
-when you need the results. It stays pending until all selected agents finish;
-there is no polling or timeout. Use peek_agent only for an occasional progress
-check or diagnosis, never to poll for completion. Review final reports before
-relying on them; a child report is not verification. Children cannot create further agents.
+Subagents inherit a snapshot of your context, tools, workspace and permission
+limits, not subsequent messages. Concurrent writes affect the same checkout:
+partition file ownership or delegate read-only analysis. After assigning parallel
+work, continue your own work and collect the selected reports with wait_agents
+when needed. It waits for terminal results without polling. peek_agent is for
+occasional diagnosis. follow_up_agent continues a finished worker with its own
+context. Review reports before relying on them; a report is not verification.
+Children cannot create further agents. stop_agents cancels the whole delegated
+batch without interrupting your own work.
 ]])
 
 local role = [[You are a subagent. The preceding conversation is inherited context,
 not a new request to repeat the parent's work. Complete only the task below. Your
 final message is the report delivered to the parent: include your findings,
-changes, verification and any blockers there. You cannot spawn agents or swarms. Do not
+changes, verification and any blockers there. Use report_agent to explicitly record
+whether your assignment is completed or blocked, including the report, then end
+your response. A denied operation is a blocker unless you can complete the task
+another way. You cannot spawn agents or swarms. Do not
 change global configuration, switch sessions or workspaces, or ask the user
 questions. If an operation needs approval, report that requirement to the parent.
 Other agents may work in the same checkout; do not overwrite their changes.
@@ -30,59 +37,117 @@ Task:
 
 local permissions = { normal = "allow", plan = "allow", apply = "allow" }
 local transcript_defaults = require("smelt.transcript.defaults")
-local function spawn(args, count)
-  return smelt.json.encode(smelt.agent.fork(role .. args.prompt, count, args.prompt))
+local agent_target = { oneOf = { { type = "integer", minimum = 1 }, { type = "string", minLength = 1 } }, description = "Readable agent name or numeric run ID." }
+local function handle(run)
+  return { id = run.id, name = run.name, title = run.task, status = run.status }
 end
-local function spawn_summary(args) return (args and args.prompt) or "" end
-local function agent_summary(args) return args and args.id and ("#" .. tostring(args.id)) or "" end
+local function card_handle(run)
+  local info = handle(run)
+  info.session_id = run.session_id
+  return info
+end
+local function ready(ctx)
+  smelt.agent.restore(ctx.session_id)
+end
+local function spawn(args, count)
+  local runs = smelt.agent.fork(role .. args.prompt, count, args.title or args.prompt)
+  local handles, metadata = {}, {}
+  for _, run in ipairs(runs) do
+    handles[#handles + 1] = handle(run)
+    metadata[#metadata + 1] = card_handle(run)
+  end
+  return { content = smelt.json.encode(handles), metadata = { agents = metadata } }
+end
+local function spawn_summary(args) return args and (args.title or args.prompt) or "" end
+local function agent_label(id) return type(id) == "number" and ("#" .. id) or tostring(id) end
+local function agent_summary(args) return args and args.id and agent_label(args.id) or "" end
 local function wait_summary(args)
   local ids = args and args.ids
   if type(ids) ~= "table" then return "" end
   local labels = {}
-  for _, id in ipairs(ids) do labels[#labels + 1] = "#" .. tostring(id) end
+  for _, id in ipairs(ids) do labels[#labels + 1] = agent_label(id) end
   return table.concat(labels, ", ")
 end
 
-smelt.transcript.register_tool("spawn_agent", {
-  cache_key = "smelt.tool-presentation.spawn_agent:v1",
-  title = function(block) return spawn_summary(block.args) end,
-  body = function(block, ctx, opts)
-    if block.output and block.output.is_error then
-      return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)
-    end
-  end,
-})
+local function cards(block)
+  local output = block.output
+  if not output or output.is_error then return nil end
+  local agents = output.metadata and output.metadata.agents
+  if type(agents) ~= "table" then return nil end
+  local items, live = {}, false
+  for _, saved in ipairs(agents) do
+    local run = type(saved.session_id) == "string" and saved.session_id ~= ""
+      and __smelt_internal.agent.__card(saved.session_id) or nil
+    local status = run and run.status or "archived"
+    local pending = status == "running" or status == "queued"
+    live = live or pending or (run and run.archive_pending)
+    local elapsed = run and string.format("  %.1fs", (run.elapsed_ms or 0) / 1000) or ""
+    local cost = run and run.cost_usd > 0 and string.format("  $%.4f", run.cost_usd) or ""
+    local hl = pending and "SmeltToolPending" or ((status == "failed" or status == "blocked") and "ErrorMsg") or "Comment"
+    items[#items + 1] = smelt.layout.runs({
+      { { text = saved.name or ("#" .. saved.id), bold = true }, { text = "  " .. status .. elapsed .. cost, hl = hl } },
+      { { text = saved.title or "", dim = true } },
+      pending and { { text = run.activity or "", dim = true } }
+        or (run and run.persistence_error and { { text = "Archive failed: " .. run.persistence_error, hl = "ErrorMsg" } }) or nil,
+    })
+  end
+  local node = smelt.layout.vbox(items)
+  if live then node = smelt.layout.refresh(node, { after_ms = 250 }) end
+  return node
+end
+
+local function agent_body(block, ctx, opts)
+  if block.output and block.output.is_error then
+    return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)
+  end
+  return cards(block)
+end
+
+for _, tool in ipairs({ "spawn_agent", "swarm", "follow_up_agent" }) do
+  smelt.transcript.register_tool(tool, {
+    cache_key = "smelt.tool-presentation." .. tool .. ":v3",
+    compact = agent_body,
+    title = function(block)
+      return tool == "follow_up_agent" and agent_summary(block.args) or spawn_summary(block.args)
+    end,
+    body = agent_body,
+  })
+end
 
 smelt.tools.register({
   name = "spawn_agent",
-  description = "Start an independent subagent with the current context and tools. Returns a run ID immediately; use wait_agents for results.",
-  permission_defaults = permissions,
-  effect = "process",
-  parameters = {
-    type = "object",
-    properties = { prompt = { type = "string", description = "The child's specific task." } },
-    required = { "prompt" },
-  },
-  summary = spawn_summary,
-  execute = function(args) return spawn(args, 1) end,
-})
-
-smelt.tools.register({
-  name = "swarm",
-  description = "Start n independent subagents with one identical prompt and one shared parent-context snapshot. Concurrency defaults to 16 and is user-configurable; queued members retain the original snapshot.",
+  description = "Delegate a substantial, self-contained task that can make progress in parallel with other useful work, or a task the user explicitly asks to assign to a subagent. Specify the scope and expected report. Returns a run ID and readable name immediately. Continue independent work, then use wait_agents when you need the result.",
   permission_defaults = permissions,
   effect = "process",
   parameters = {
     type = "object",
     properties = {
-      prompt = { type = "string", description = "The same task for every member." },
+      title = { type = "string", maxLength = 80, description = "Short task label, such as Audit permissions." },
+      prompt = { type = "string", description = "The child's specific scope, expected deliverable, and file ownership when editing." },
+    },
+    required = { "title", "prompt" },
+  },
+  summary = spawn_summary,
+  execute = function(args) return spawn(args, 1) end,
+})
+
+swarm_tool = {
+  name = "swarm",
+  description = "Run multiple independent reviews or explorations of the same task when the user explicitly requests redundant agents. All members inherit the same snapshot and task; this does not guarantee diverse findings. They share the checkout, so assign analysis rather than overlapping edits. Use spawn_agent for distinct parallel tasks.",
+  permission_defaults = permissions,
+  effect = "process",
+  parameters = {
+    type = "object",
+    properties = {
+      title = { type = "string", maxLength = 80, description = "Short label for the independent reviews." },
+      prompt = { type = "string", description = "The same analysis task for every member, including the expected report." },
       n = { type = "integer", minimum = 1, maximum = 16, description = "Number of independent agents." },
     },
-    required = { "prompt", "n" },
+    required = { "title", "prompt", "n" },
   },
-  summary = function(args) return tostring(args.n or "?") .. " agents: " .. (args.prompt or "") end,
+  summary = function(args) return tostring(args.n or "?") .. " agents: " .. spawn_summary(args) end,
   execute = function(args) return spawn(args, args.n) end,
-})
+}
 
 smelt.transcript.register_tool("peek_agent", {
   cache_key = "smelt.tool-presentation.peek_agent:v1",
@@ -96,7 +161,7 @@ smelt.tools.register({
   elapsed_visible = true,
   parameters = {
     type = "object",
-    properties = { id = { type = "integer", minimum = 1, description = "Agent ID returned by spawn_agent or swarm." } },
+    properties = { id = agent_target },
     required = { "id" },
   },
   summary = agent_summary,
@@ -132,26 +197,27 @@ smelt.tools.register({
   parameters = {
     type = "object",
     properties = {
-      ids = { type = "array", items = { type = "integer" }, minItems = 1, maxItems = 64 },
+      ids = { type = "array", items = agent_target, minItems = 1, maxItems = 64 },
     },
     required = { "ids" },
   },
   summary = wait_summary,
   execute = function(args, ctx)
+    ready(ctx)
     local task_id = smelt.task.alloc()
     __smelt_internal.agent.__start_wait(task_id, ctx.session_id, args.ids)
     local result = smelt.task.wait(task_id)
     if result.error then return { content = result.error, is_error = true } end
     local reports, previews = {}, {}
     for _, run in ipairs(result.runs) do
-      local report = { id = run.id, status = run.status }
-      if run.status == "completed" then
-        report.result = run.result or ""
-      else
-        report.error = run.error or (run.status == "cancelled" and "subagent was cancelled" or "subagent failed")
+      local report = handle(run)
+      if run.status == "completed" or run.status == "blocked" then report.result = run.result or "" end
+      if run.status ~= "completed" then
+        report.error = run.error or (run.status == "cancelled" and "subagent was cancelled" or run.status == "blocked" and "assignment blocked" or "subagent failed")
       end
+      if run.persistence_error then report.persistence_error = run.persistence_error end
       reports[#reports + 1] = report
-      previews[#previews + 1] = "agent #" .. run.id .. " - " .. run.status .. "\n" .. (report.result or report.error)
+      previews[#previews + 1] = (run.name or ("#" .. run.id)) .. " - " .. run.status .. "\n" .. (report.result or report.error)
     end
     return { content = smelt.json.encode(reports), display_content = { results = table.concat(previews, "\n\n") } }
   end,
@@ -162,8 +228,48 @@ smelt.tools.register({
   description = "Cancel one queued or running subagent. Other agents and the parent continue; the cancelled transcript remains available.",
   permission_defaults = permissions,
   effect = "process",
-  parameters = { type = "object", properties = { id = { type = "integer" } }, required = { "id" } },
-  execute = function(args) smelt.agent.stop(args.id); return "Cancellation requested." end,
+  parameters = { type = "object", properties = { id = agent_target }, required = { "id" } },
+  execute = function(args, ctx) __smelt_internal.agent.__stop(ctx.session_id, args.id); return "Cancellation requested." end,
+})
+
+smelt.tools.register({
+  name = "stop_agents",
+  description = "Cancel every queued or running subagent assigned by this conversation without interrupting the parent. Reports and transcripts remain available.",
+  permission_defaults = permissions, effect = "process",
+  parameters = { type = "object", properties = {} },
+  execute = function(_, ctx) smelt.agent.stop_all(ctx.session_id); return "Cancellation requested for all subagents." end,
+})
+
+smelt.tools.register({
+  name = "report_agent",
+  description = "Subagents only: explicitly report whether your assignment is completed or blocked. Include findings, changes, verification and blockers. A completed engine response alone does not prove the assignment is complete. After this tool, end your response.",
+  permission_defaults = permissions, effect = "read",
+  parameters = { type = "object", properties = {
+    status = { type = "string", enum = { "completed", "blocked" } },
+    report = { type = "string", minLength = 1 },
+  }, required = { "status", "report" } },
+  summary = function(args) return args.status end,
+  execute = function(args) smelt.agent.report(args.status, args.report); return "Assignment report recorded. End your response." end,
+})
+
+smelt.tools.register({
+  name = "follow_up_agent",
+  description = "Continue a finished subagent with its own retained context and a specific follow-up assignment. Reuses its name and session without adding subsequent parent messages. Wait for the previous assignment before using this tool. Returns immediately after the follow-up is queued.",
+  permission_defaults = permissions, effect = "process", watchdog_timeout_ms = 0,
+  parameters = { type = "object", properties = {
+    id = agent_target, prompt = { type = "string", minLength = 1 },
+  }, required = { "id", "prompt" } },
+  summary = agent_summary,
+  execute = function(args, ctx)
+    ready(ctx)
+    local task_id = smelt.task.alloc()
+    __smelt_internal.agent.__start_follow_up(task_id, ctx.session_id, args.id)
+    local result = smelt.task.wait(task_id)
+    if result.error then return { content = result.error, is_error = true } end
+    local run = __smelt_internal.agent.__follow_up(ctx.session_id, args.id, role .. args.prompt)
+    local info = handle(run)
+    return { content = smelt.json.encode(info), metadata = { agents = { card_handle(run) } } }
+  end,
 })
 
 local active
@@ -173,7 +279,7 @@ function M.open()
   local parent_id = smelt.session.info().id
   local layout = smelt.ui.layout
   local rows, timer, overlay, layout_key = {}, nil, nil, nil
-  local closed, detail = false, false
+  local closed, detail, inherited = false, false, false
   local focused = "runs"
   local sidebar_count
   local counts, totals = "no subagents", "0 tokens"
@@ -198,9 +304,10 @@ function M.open()
       local run = row.run
       local task = row.grouped and "" or "  " .. run.task:gsub("%s+", " ")
       local cost = run.cost_usd > 0 and string.format("  $%.4f", run.cost_usd) or ""
-      local text = string.format("  #%d %-9s%s%s", run.id, run.status, cost, task)
+      local elapsed = run.elapsed_ms and string.format("  %.1fs", run.elapsed_ms / 1000) or ""
+      local text = string.format("  %s %-9s%s%s%s", run.name or ("#" .. run.id), run.status, elapsed, cost, task)
       local hl = (run.status == "queued" or run.status == "running") and "SmeltToolPending"
-        or (run.status == "failed" and "ErrorMsg")
+        or ((run.status == "failed" or run.status == "blocked") and "ErrorMsg")
         or (run.status == "cancelled" and "Comment") or nil
       return { text = text, marks = hl and { { col = 0, opts = { end_col = #text, hl_group = hl } } } }
     end,
@@ -220,10 +327,13 @@ function M.open()
   }
   local function draw()
     local run = selected()
-    local title = run and string.format(" agent %d - %s - %s ", run.id, run.status,
-      run.task:gsub("%s+", " ")) or " transcript "
+    local title = run and string.format(" %s - %s - %s ", run.name or ("#" .. run.id), run.status,
+      run.activity or run.task:gsub("%s+", " ")) or " transcript "
+    title = title .. (inherited and " full context " or " own work ")
     local compact = narrow()
-    status_buf:lines(compact and { counts, totals } or { counts .. "   " .. totals })
+    local status_lines = compact and { counts, totals } or { counts .. "   " .. totals }
+    status_lines[#status_lines + 1] = compact and "Alt-S stop  Alt-A all  Alt-I context" or "Tab panes   Enter expand   Alt-S stop selected   Alt-A stop all   Alt-I context"
+    status_buf:lines(status_lines)
     local key = title .. tostring(compact) .. tostring(detail)
     if key == layout_key then return end
     layout_key = key
@@ -237,7 +347,7 @@ function M.open()
     })
     local body = detail and right or (compact and left or split:layout(left, right))
     opts.layout = layout.vbox({
-      { layout.leaf(status, { border = { all = "Comment" }, title = smelt.dialog.title(" subagents ") }), height = compact and 4 or 3 },
+      { layout.leaf(status, { border = { all = "Comment" }, title = smelt.dialog.title(" subagents ") }), height = compact and 5 or 4 },
       { body, height = "fill" },
     })
     overlay = smelt.overlay.new(opts)
@@ -251,6 +361,7 @@ function M.open()
     if not rect or rect.height < 1 then return end
     local ok, result = pcall(smelt.session.render_preview_into, run.session_id, {
       buf = preview_buf, win = preview, width = preview:content_width() or 80, height = rect.height,
+      include_inherited_context = inherited,
     })
     if not ok then
       preview_buf:lines({ "Transcript unavailable:", tostring(result) })
@@ -266,11 +377,15 @@ function M.open()
     if closed then return end
     local runs = smelt.agent.runs(parent_id)
     local groups, running, queued, finished = {}, 0, 0, 0
+    local failed, cancelled, blocked = 0, 0, 0
     local cost, tokens = 0, 0
     for _, run in ipairs(runs) do
       groups[run.group] = (groups[run.group] or 0) + 1
       if run.status == "running" then running = running + 1
       elseif run.status == "queued" then queued = queued + 1
+      elseif run.status == "failed" then failed = failed + 1
+      elseif run.status == "cancelled" then cancelled = cancelled + 1
+      elseif run.status == "blocked" then blocked = blocked + 1
       else finished = finished + 1 end
       cost = cost + run.cost_usd
       local usage = run.usage or {}
@@ -288,6 +403,9 @@ function M.open()
       previous_group = run.group
     end
     counts = #runs == 0 and "no subagents" or string.format("%d running / %d queued / %d done", running, queued, finished)
+    if blocked > 0 then counts = counts .. string.format(" / %d blocked", blocked) end
+    if failed > 0 then counts = counts .. string.format(" / %d failed", failed) end
+    if cancelled > 0 then counts = counts .. string.format(" / %d cancelled", cancelled) end
     totals = smelt.text.format_tokens(tokens) .. " tokens" .. (cost > 0 and string.format("   $%.4f", cost) or "")
     list:set_items_preserve(rows, function(row) return row.key end)
     draw()
@@ -335,6 +453,8 @@ function M.open()
       local run = selected()
       if run then smelt.agent.stop(run.id); refresh() end
     end },
+    { key = "alt-a", on_press = function() smelt.agent.stop_all(parent_id); refresh() end },
+    { key = "alt-i", on_press = function() inherited = not inherited; layout_key = nil; draw(); render_preview() end },
   }
   local function sidebar_key(key, action)
     sidebar:key(key, function()
@@ -388,4 +508,5 @@ if smelt.frontend.is_interactive() then
   smelt.cmd.register("subagents", M.open, { desc = "Inspect subagents and their live read-only transcripts", busy = "run" })
 end
 
+M.setup()
 return M

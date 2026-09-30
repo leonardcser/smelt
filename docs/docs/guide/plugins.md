@@ -62,13 +62,36 @@ Subagents are disabled by default. Enable the bundled plugin in `init.lua`:
 require("smelt.plugins.subagents")
 ```
 
-The plugin exposes five model tools in both interactive and headless sessions:
+Delegate substantial, self-contained work that can progress in parallel with
+other useful work, or an assignment the user explicitly asks to delegate. Give
+it a short `title` and a specific `prompt` describing scope, the expected report,
+and file ownership if it involves editing. A run has a readable name such as
+`cedar-42`, a numeric runtime ID, and its own session. Names and session identity
+survive restoration; numeric IDs can be reassigned if another parent's archived
+run already occupies that ID. Verify its report before
+relying on it.
 
-- `spawn_agent`: start one independent agent for a task. Successful calls show only their header in the transcript; launch errors remain visible.
-- `swarm`: start 1-16 agents with the same task and identical parent-context snapshot.
-- `peek_agent`: read a nonblocking snapshot of one child's assistant output and current status for an occasional progress check, not polling.
-- `wait_agents`: wait once until every selected agent completes, fails, or is cancelled, then collect only final reports and terminal statuses.
-- `stop_agent`: cancel one queued or running agent, leaving siblings and the parent alone.
+The plugin exposes these model tools in both frontends:
+
+- `spawn_agent`: assign one task and return its handle immediately. Live inline cards show its name, task, status, elapsed time and reported cost.
+- `peek_agent`: inspect bounded child-written assistant output without waiting or consuming it. This is for occasional diagnosis, not polling.
+- `wait_agents`: wait once for selected terminal reports, including blocked assignments. There is no timeout or polling mode.
+- `follow_up_agent`: continue a finished worker in the same session, with its own history and without later parent messages.
+- `report_agent`: children explicitly report a `completed` or `blocked` assignment, then end their response. An engine turn finishing alone does not verify task completion. Without an explicit report, the final assistant response remains the fallback report.
+- `stop_agent`: cancel one worker without stopping its siblings or parent.
+- `stop_agents`: cancel all workers owned by the current conversation.
+
+Selection tools accept readable names or numeric IDs, scoped to the current
+parent session. Redundant work is separately opt-in:
+
+```lua
+require("smelt.plugins.subagents").setup({ swarm = true })
+```
+
+This adds `swarm`, which starts 1-16 workers with the **same task**, not distinct
+subtasks. Use it for redundant reviews or exploration that the user explicitly
+requests. Identical context does not guarantee diverse findings. Concurrent
+editing still affects one shared checkout.
 
 Up to 16 agents run concurrently by default, with at most 64 queued or running.
 To set a different concurrency limit (1-64), use:
@@ -110,13 +133,12 @@ timeout or polling mode. The parent can do independent work before calling it;
 the UI and children remain responsive during the wait. Cancelling the wait does
 not stop the children; use `stop_agent` to do that explicitly.
 
-The result is an array of `{ id, status, result }` records for completed children.
-`result` contains only the child's final assistant message. Failed or cancelled
-children return `{ id, status, error }` instead, without presenting partial
-commentary as a final report. Transcripts, task descriptions, usage, costs, and
-session metadata stay in `/subagents`, not in the wait result. The tool-call
-preview shows readable final reports with agent IDs and statuses, using the same
-capped, selectable output presentation as `read_process_output`.
+The result contains compact handles (`id`, `name`, `title`), terminal `status`,
+and `result` for completed or blocked assignments. Failed and cancelled workers
+return an `error` rather than presenting partial commentary as a final report.
+Blocked reports include the blocker. Persistence errors are explicit and do not
+strand waiters. Full transcripts and detailed accounting stay in `/subagents`.
+The tool-call preview shows selectable final reports with names and statuses.
 
 In the terminal, the main status line shows the running child count next to
 background processes, for example `2 procs · 10 agents`. Queued and finished
@@ -136,9 +158,11 @@ In the run list, use `j`/`k` or arrow keys to move between agents, skipping swar
 headers. Numeric prefixes repeat motions, such as `3j`. Use `gg`/Home and `G`/End
 for the first and last agent, Ctrl-U/Ctrl-D for half pages, and Ctrl-B/Ctrl-F or
 Page Up/Page Down for full pages.
-Use Tab to switch panes, Enter to expand the transcript, and Alt-S to stop only
-the selected agent. Escape returns from an expanded transcript or closes the
-viewer. Narrow terminals show one pane at a time. Transcript updates follow the
+The preview defaults to the child's own work; Alt-I toggles inherited context.
+Use Tab to switch panes, Enter to expand the transcript, Alt-S to stop the
+selected agent, and Alt-A to stop every worker owned by this conversation. The
+status pane distinguishes completed, blocked, failed and cancelled runs. Escape
+returns from an expanded transcript or closes the viewer. Narrow terminals show one pane at a time. Transcript updates follow the
 tail until you scroll away. The transcript supports mouse selection and Vim-style
 copying: select with `v` or `V` and yank with `y`, or use `ggVGy` to copy the whole
 transcript. Close the viewer and paste into the prompt with Ctrl-Y, or use your
@@ -153,10 +177,52 @@ failures appear in the preview instead of leaving an unexplained blank pane.
     operations requiring new user approval are denied and must be delegated back
     to the parent. Treat child reports as claims to verify, not proof of success.
 
-Run records and transcripts currently live in memory only. Successful Lua reloads
-and parent-session replacement cancel active children; completed records remain
-inspectable until process exit. Child sessions are not saved for later resume.
-Parent-global compaction and middleware callbacks do not run inside child engines.
+Child history, usage, context checkpoints and request audits are written through
+the existing session store on background workers. Terminal waits resolve after
+flushing and releasing the child writer, so a follow-up can safely reuse the
+session. Model tools await restoration through `smelt.agent.restore(parent_id)`;
+`smelt.agent.fork` also awaits it automatically, including in custom tools without
+the bundled plugin. Restoration failures remain explicit and can be retried.
+`/subagents` restores archived workers for the current parent in the background.
+Interrupted runs are marked cancelled, not silently treated as
+completed. Restored follow-ups use the current model/tool configuration and
+permissions, while in-process follow-ups preserve their worker configuration and
+approval snapshot. No model credentials or approval stores are saved in run
+metadata.
+
+Interactive children continue when a parent response ends. Closing the viewer
+or cancelling a wait does not cancel them. Successful Lua reloads and parent
+session replacement cancel active children. A headless invocation drains
+unfinished children before returning to the shell; parent interruption or failure
+cancels them, then flushes every archive, independent of the model-facing selection
+limit. Shutdown allows a five-second archive grace period and reports persistence
+failures rather than returning success. Headless usage totals include children.
+
+Optional budget and compaction settings:
+
+```lua
+require("smelt.plugins.subagents").setup({
+  max_concurrent = 8,
+  max_cost_usd = 5,
+  max_tokens = 200000,
+  max_requests = 20,
+  compact_at_tokens = 100000,
+})
+```
+
+Budgets are disabled by default. Cost/token gates consider observed parent usage
+in the current process plus all its children. They prevent new child requests,
+not parent work. Request limits apply to main requests per worker assignment;
+auxiliary compaction still contributes usage and cost. These are soft,
+provider-reported limits: already in-flight requests can exceed a threshold,
+and missing provider pricing or usage cannot enforce an exact monetary limit.
+
+Children compact locally at the configured token threshold (otherwise at 80%
+of a known context window) and try local compaction on context-limit errors.
+Canonical history stays intact; only the model view is replaced with a checkpoint
+and recent work. Parent-global compaction and middleware hooks never run on
+child requests. `smelt.agent.totals(parent_id)` exposes child-only and combined
+parent/child accounting observed in the current process.
 
 ## Virtual read-only views
 

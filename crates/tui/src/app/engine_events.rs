@@ -260,7 +260,19 @@ impl TuiApp {
                 self.core.handle_agent_event(&lua, id, *event);
                 true
             }
-            ev => self.dispatch_engine_event_inner(ev),
+            ev => {
+                if let EngineEvent::TokenUsage {
+                    usage, cost_usd, ..
+                } = &ev
+                {
+                    self.core.agents.record_parent_usage(
+                        &self.conversation.session().id,
+                        usage,
+                        *cost_usd,
+                    );
+                }
+                self.dispatch_engine_event_inner(ev)
+            }
         }
     }
 

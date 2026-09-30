@@ -975,7 +975,7 @@ pub(super) fn register(
     )?;
     m.advanced_fn(
         "render_preview_into",
-        "Bind persisted session or live subagent session `id` to `opts.buf` and `opts.win` as a virtualized read-only transcript preview. Live subagent previews refresh from runtime revisions and follow new output until the user scrolls away from the tail. `opts.width` controls wrapping; `opts.height` is the viewport height; a new binding opens at the tail while resize refreshes preserve its viewport; `opts.updated_at_ms` identifies cached session revisions. Once bound, wheel and scrollbar navigation use the same stateful viewport projection as the open transcript. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'pending' }` while the background preview service reads or hydrates persisted content, or `{ status = 'unavailable', reason }` when persisted content cannot be hydrated.",
+        "Bind persisted session or live subagent session `id` to `opts.buf` and `opts.win` as a virtualized read-only transcript preview. Live subagent previews show only the child's own work by default; set `opts.include_inherited_context = true` to include its parent snapshot. They refresh from runtime revisions and follow new output until the user scrolls away from the tail. `opts.width` controls wrapping; `opts.height` is the viewport height; a new binding opens at the tail while resize refreshes preserve its viewport; `opts.updated_at_ms` identifies cached session revisions. Once bound, wheel and scrollbar navigation use the same stateful viewport projection as the open transcript. Returns `{ status = 'ready', total_rows, scroll_top, row_base, materialized_rows }`, `{ status = 'pending' }` while the background preview service reads or hydrates persisted content, or `{ status = 'unavailable', reason }` when persisted content cannot be hydrated.",
         &["id", "opts"],
         |lua, (id, opts): (String, mlua::Table)| -> LuaResult<Option<mlua::Table>> {
             let _perf = smelt_perf::perf::begin("session:render_preview_into");
@@ -996,12 +996,15 @@ pub(super) fn register(
                 .ok()
                 .map(|ts| format!("{id}:{ts}"));
 
+            let include_inherited_context = opts.get::<Option<bool>>("include_inherited_context")?.unwrap_or(false);
             let cache_key = cache_key_hint.unwrap_or_else(|| id.clone());
+            let cache_key = if include_inherited_context { format!("{cache_key}:inherited") } else { cache_key };
             let outcome = crate::lua::with_session_host(|host| {
                 let _perf = smelt_perf::perf::begin("session:render_preview_into:app");
                 host.render_session_preview(
                     crate::app::session_preview::SessionPreviewRender {
                         id,
+                        include_inherited_context,
                         cache_key,
                         width,
                         height,

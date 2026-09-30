@@ -246,9 +246,21 @@ async fn forks_share_request_prefix_and_run_independent_tool_loops() {
             request_config: RequestRuntimeConfig::default(),
             reasoning_effort: ReasoningEffort::Off,
             fast_mode: false,
-            history: protocol::ModelHistorySource::items(vec![HistoryItem::user(Content::text(
-                "earlier task",
-            ))]),
+            history: protocol::ModelHistorySource::items(vec![
+                HistoryItem::user(Content::text("earlier task")),
+                HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                    Some(Content::text("earlier response")),
+                    Some("earlier reasoning".into()),
+                    vec![protocol::ReasoningBlock {
+                        provider: protocol::ReasoningBlock::ANTHROPIC.into(),
+                        data: serde_json::json!({
+                            "type": "thinking",
+                            "thinking": "earlier reasoning",
+                            "signature": "provider-signed-reasoning",
+                        }),
+                    }],
+                )),
+            ]),
             session_id: "root-session".into(),
             sessions_root: PathBuf::from("/tmp"),
             persistence: protocol::PersistenceScope::default(),
@@ -288,12 +300,39 @@ async fn forks_share_request_prefix_and_run_independent_tool_loops() {
         assert!(!serde_json::to_string(snapshot.messages())
             .unwrap()
             .contains("call-0"));
-        for index in 0..2 {
+        let own_work = HistoryItem::user(Content::text("retained worker context"));
+        let mut history = snapshot.history().to_vec();
+        history.push(own_work.clone());
+        let continued = Arc::new(snapshot.with_history(
+            history.clone(),
+            protocol::ModelHistoryCoordinates::canonical(),
+        ));
+        assert_eq!(continued.history(), history);
+        assert_eq!(
+            &continued.messages()[..snapshot.messages().len()],
+            snapshot.messages(),
+            "follow-ups preserve the exact provider-ready prefix"
+        );
+        let projected_history = vec![HistoryItem::system("worker checkpoint"), own_work];
+        let projected = Arc::new(continued.with_history(
+            projected_history.clone(),
+            protocol::ModelHistoryCoordinates::projected(1, 9),
+        ));
+        assert_eq!(projected.history(), projected_history);
+        assert_eq!(projected.messages()[0], snapshot.messages()[0]);
+        assert_eq!(
+            &projected.messages()[1..],
+            protocol::history_to_messages(&projected_history)
+        );
+        for (index, launch) in [&snapshot, &snapshot, &continued, &projected]
+            .into_iter()
+            .enumerate()
+        {
             let mut child = parent
                 .start_fork(
-                    &snapshot,
+                    launch,
                     format!("child-{index}"),
-                    100 + index,
+                    100 + index as u64,
                     "identical child task".into(),
                 )
                 .unwrap();
@@ -344,7 +383,16 @@ async fn forks_share_request_prefix_and_run_independent_tool_loops() {
             assert_eq!(final_text, "done");
         }
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 9);
+        assert!(requests[5].to_string().contains("retained worker context"));
+        assert!(requests[5]
+            .to_string()
+            .contains("provider-signed-reasoning"));
+        assert!(requests[7].to_string().contains("worker checkpoint"));
+        assert!(!requests[7]
+            .to_string()
+            .contains("provider-signed-reasoning"));
+        assert!(!requests[7].to_string().contains("parent task"));
         for child in [&requests[1], &requests[3]] {
             assert_eq!(child["system"], requests[0]["system"]);
             assert_eq!(child["tools"], requests[0]["tools"]);

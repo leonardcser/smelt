@@ -175,6 +175,7 @@ impl TranscriptGroupRegistry {
 
 /// All shared state between Lua closures and the app loop.
 pub struct LuaShared {
+    pub(crate) agent_cards: Mutex<HashMap<String, crate::agents::AgentCard>>,
     pub commands: Mutex<HashMap<String, RegisteredCommand>>,
     /// Send+Sync mirror of `commands`' key set. Host code can recognize a
     /// command without touching the `!Send` Lua handler stored with it.
@@ -382,6 +383,7 @@ impl Default for LuaHostServices {
 impl Default for LuaShared {
     fn default() -> Self {
         Self {
+            agent_cards: Mutex::new(HashMap::new()),
             commands: Mutex::new(HashMap::new()),
             command_names: Arc::new(Mutex::new(HashSet::new())),
             keymaps: Mutex::new(HashMap::new()),
@@ -440,6 +442,12 @@ impl Default for LuaShared {
 }
 
 impl LuaShared {
+    pub(crate) fn publish_agent(&self, child: &crate::agents::Child) {
+        if let Ok(mut cards) = self.agent_cards.lock() {
+            cards.insert(child.info.session_id.clone(), child.card());
+        }
+    }
+
     pub fn with_host_services(host: LuaHostServices) -> Self {
         Self {
             lsp: host.lsp,

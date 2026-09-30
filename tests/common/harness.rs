@@ -131,6 +131,7 @@ impl Harness {
         let out = command
             .arg(message)
             .env("XDG_CONFIG_HOME", self.config_dir.path())
+            .env("XDG_STATE_HOME", self.config_dir.path().join("state"))
             .env("SMELT_TEST_API_KEY", "stub-key")
             .env("NO_COLOR", "1")
             .current_dir("/")

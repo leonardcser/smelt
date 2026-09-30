@@ -46,7 +46,7 @@ impl TokenUsage {
     pub fn accumulate(&mut self, other: &TokenUsage) {
         fn add(a: &mut Option<u32>, b: Option<u32>) {
             if let Some(v) = b {
-                *a = Some(a.unwrap_or(0) + v);
+                *a = Some(a.unwrap_or(0).saturating_add(v));
             }
         }
         add(&mut self.prompt_tokens, other.prompt_tokens);
@@ -179,6 +179,32 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(acc.prompt_tokens, Some(10));
+    }
+
+    #[test]
+    fn accumulate_saturates_all_cumulative_fields_on_overflow() {
+        let mut acc = TokenUsage {
+            context_tokens: Some(99),
+            prompt_tokens: Some(u32::MAX - 1),
+            completion_tokens: Some(u32::MAX),
+            cache_read_tokens: Some(u32::MAX - 1),
+            cache_write_tokens: Some(u32::MAX),
+            reasoning_tokens: Some(u32::MAX - 1),
+        };
+        acc.accumulate(&TokenUsage {
+            context_tokens: Some(199),
+            prompt_tokens: Some(2),
+            completion_tokens: Some(2),
+            cache_read_tokens: Some(2),
+            cache_write_tokens: Some(2),
+            reasoning_tokens: Some(2),
+        });
+        assert_eq!(acc.context_tokens, Some(99));
+        assert_eq!(acc.prompt_tokens, Some(u32::MAX));
+        assert_eq!(acc.completion_tokens, Some(u32::MAX));
+        assert_eq!(acc.cache_read_tokens, Some(u32::MAX));
+        assert_eq!(acc.cache_write_tokens, Some(u32::MAX));
+        assert_eq!(acc.reasoning_tokens, Some(u32::MAX));
     }
 
     #[test]

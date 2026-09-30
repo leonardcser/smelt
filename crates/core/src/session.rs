@@ -1308,6 +1308,37 @@ impl SessionStorage {
         create_private_dir_all_in(self.state_root(), path)
     }
 
+    pub(crate) fn read_private_file(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        reject_filesystem_symlink_in(self.state_root(), path)?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "private storage path is not a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            return Err(std::io::Error::other(
+                "private storage file exceeds its size limit",
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub fn write_private_file(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         write_private_file_in(self.state_root(), path, contents)
     }
@@ -2535,6 +2566,14 @@ impl SessionStorage {
         if let Ok(catalog) = self.catalog() {
             catalog.request_repair(id, minimum_revision);
         }
+    }
+
+    pub(crate) fn wait_for_catalog_ready(
+        &self,
+        timeout: std::time::Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(), String> {
+        self.catalog()?.wait_until_ready(timeout, cancelled)
     }
 
     pub fn wait_for_session_catalog(&self, timeout: std::time::Duration) -> bool {

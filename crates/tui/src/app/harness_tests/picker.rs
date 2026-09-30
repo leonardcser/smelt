@@ -122,13 +122,13 @@ fn subagent_viewer_displays_selected_native_transcript() {
     app.start_turn(1);
     app.press(KeyCode::Down);
     app.settle_lua();
-    assert!(app.render_to_frame().text().contains("agent 2 - queued"));
+    assert!(app.render_to_frame().text().contains("#2 - queued"));
     assert!(app.run_lua("_G.viewer_runs[1].status = 'completed'; _G.viewer_runs[1].cost_usd = 0.001; _G.viewer_runs[2].cost_usd = 0.002"));
     app.feed_one(SourceEvent::Tick(300));
     app.app.tick_timers();
     app.settle_lua();
     assert!(
-        app.render_to_frame().text().contains("agent 2 - queued"),
+        app.render_to_frame().text().contains("#2 - queued"),
         "refresh preserves selection"
     );
     let frame = app.render_to_frame();
@@ -245,7 +245,7 @@ fn subagent_viewer_displays_selected_native_transcript() {
     app.settle_lua();
     let frame = app.render_to_frame();
     assert!(
-        frame.text().contains("agent 1 - completed"),
+        frame.text().contains("#1 - completed"),
         "Tab follows mouse focus back to the run list:\n{}",
         frame.text()
     );
@@ -353,10 +353,7 @@ fn subagent_sidebar_vim_motions_skip_headers_and_preserve_pane_focus() {
         app.type_text(keys);
         app.settle_lua();
         let text = app.render_to_frame().text();
-        assert!(
-            text.contains(&format!("agent {id} - queued")),
-            "{keys}: {text}"
-        );
+        assert!(text.contains(&format!("#{id} - queued")), "{keys}: {text}");
         assert_eq!(selected_row(&app), id - 1 + id / 2, "{keys}");
         assert_eq!(app.ui_probe().focus(), Some(sidebar));
     }
@@ -422,6 +419,51 @@ fn subagent_sidebar_vim_motions_skip_headers_and_preserve_pane_focus() {
 }
 
 #[test]
+fn subagent_viewer_distinguishes_terminal_states_and_stops_only_its_parent_batch() {
+    let root = tempfile::tempdir().unwrap();
+    let init = root.path().join("init.lua");
+    std::fs::write(&init, "require('smelt.plugins.subagents')").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.set_terminal_size(140, 32);
+    assert!(app.run_lua(
+        r#"
+        _G.viewer_parent = smelt.session.info().id
+        smelt.agent.runs = function()
+            local runs = {}
+            for i, status in ipairs({ 'completed', 'blocked', 'failed', 'cancelled' }) do
+                runs[i] = { id = i, name = 'cedar-' .. i, group = i, session_id = 'unavailable',
+                    task = 'Review', status = status, cost_usd = 0 }
+            end
+            return runs
+        end
+        smelt.agent.stop_all = function(parent) _G.stopped_parent = parent end
+        smelt.session.render_preview_into = function(_, opts)
+            _G.preview_inherited = opts.include_inherited_context
+            return { status = 'ready', total_rows = 0 }
+        end
+        smelt.cmd.run('subagents')
+    "#
+    ));
+    app.settle_lua();
+    let text = app.render_to_frame().text();
+    assert!(
+        text.contains("1 done / 1 blocked / 1 failed / 1 cancelled"),
+        "{text}"
+    );
+    assert!(text.contains("cedar-1"), "{text}");
+    assert!(text.contains("own work"), "{text}");
+    assert!(app.run_lua("assert(_G.preview_inherited == false)"));
+    app.press_mod(KeyCode::Char('i'), KeyModifiers::ALT);
+    app.settle_lua();
+    let text = app.render_to_frame().text();
+    assert!(text.contains("full context"), "{text}");
+    assert!(app.run_lua("assert(_G.preview_inherited == true)"));
+    app.press_mod(KeyCode::Char('a'), KeyModifiers::ALT);
+    app.settle_lua();
+    assert!(app.run_lua("assert(_G.stopped_parent == _G.viewer_parent)"));
+}
+
+#[test]
 fn subagent_viewer_shows_preview_errors() {
     let root = tempfile::tempdir().unwrap();
     let init = root.path().join("init.lua");
@@ -466,7 +508,7 @@ async fn subagents_inherit_session_approvals_at_spawn_including_queued_children(
     let root = tempfile::tempdir().unwrap();
     let init = root.path().join("init.lua");
     std::fs::write(&init, r#"
-        require('smelt.plugins.subagents').setup({ max_concurrent = 1 })
+        require('smelt.plugins.subagents').setup({ swarm = true, max_concurrent = 1 })
         for _, name in ipairs({ 'inherited_probe', 'late_probe', 'approval_probe' }) do
             local decision = name == 'approval_probe' and 'allow' or 'ask'
             smelt.tools.register({
@@ -578,15 +620,13 @@ async fn subagents_inherit_session_approvals_at_spawn_including_queued_children(
     });
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while app.app.core.agents.children.len() < 2 {
-            let output = app
-                .app
-                .core
-                .engine
-                .recv_output()
-                .await
-                .expect("engine output");
-            app.app
-                .dispatch_selected_engine_output_in_render_loop_to(output, &mut std::io::sink());
+            tokio::select! {
+                output = app.app.core.engine.recv_output() => {
+                    let output = output.expect("engine output");
+                    app.app.dispatch_selected_engine_output_in_render_loop_to(output, &mut std::io::sink());
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => { app.feed_one(SourceEvent::Tick(10)); }
+            }
             app.settle_lua();
         }
     })
@@ -604,17 +644,15 @@ async fn subagents_inherit_session_approvals_at_spawn_including_queued_children(
             .agents
             .children
             .values()
-            .any(|child| child.info.status != "completed")
+            .any(|child| matches!(child.info.status.as_str(), "queued" | "running"))
         {
-            let output = app
-                .app
-                .core
-                .engine
-                .recv_output()
-                .await
-                .expect("engine output");
-            app.app
-                .dispatch_selected_engine_output_in_render_loop_to(output, &mut std::io::sink());
+            tokio::select! {
+                output = app.app.core.engine.recv_output() => {
+                    let output = output.expect("engine output");
+                    app.app.dispatch_selected_engine_output_in_render_loop_to(output, &mut std::io::sink());
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => { app.feed_one(SourceEvent::Tick(10)); }
+            }
             app.settle_lua();
         }
     })

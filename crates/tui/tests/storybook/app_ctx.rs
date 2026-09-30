@@ -562,6 +562,13 @@ impl AppStoryCtx {
             .expect("story Lua snippet failed");
     }
 
+    pub fn run_bundled_lua(&mut self, snippet: &str) {
+        assert!(
+            self.app.run_bundled_lua(snippet),
+            "bundled story Lua snippet failed"
+        );
+    }
+
     /// Pump spawned Lua coroutines to their next yield point.
     pub fn pump_lua(&mut self) {
         self.app.settle_lua();

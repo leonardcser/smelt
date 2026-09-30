@@ -1959,6 +1959,10 @@ impl LuaRuntime {
         rt.cancel_scope(&self.lua, super::task::TaskScope::Turn);
     }
 
+    pub(crate) fn publish_agent(&self, child: &crate::agents::Child) {
+        self.shared.publish_agent(child);
+    }
+
     pub fn cancel_subagent_tasks(&self, id: u64) {
         if let Ok(mut tasks) = self.shared.tasks.lock() {
             tasks.cancel_scope(&self.lua, super::task::TaskScope::Subagent(id));
@@ -4615,12 +4619,15 @@ mod tests {
             .exec()
             .unwrap();
         assert!(rt.forks_enabled());
+        assert!(!rt.has_tool("swarm"));
         for name in [
             "spawn_agent",
-            "swarm",
             "peek_agent",
             "wait_agents",
             "stop_agent",
+            "stop_agents",
+            "report_agent",
+            "follow_up_agent",
         ] {
             assert!(rt.tool_available_for(name, ToolVisibility::Interactive));
             assert!(rt.tool_available_for(name, ToolVisibility::Headless));
@@ -4654,7 +4661,9 @@ mod tests {
             .unwrap();
         let max = || {
             rt.lua
-                .named_registry_value::<usize>("__smelt_agent_max_concurrent")
+                .named_registry_value::<mlua::Table>("__smelt_agent_options")
+                .unwrap()
+                .get::<usize>("max_concurrent")
                 .unwrap()
         };
         assert_eq!(max(), 16);
@@ -4674,6 +4683,36 @@ mod tests {
                 "{value}"
             );
             assert_eq!(max(), 4);
+        }
+        for key in [
+            "max_cost_usd",
+            "max_tokens",
+            "max_requests",
+            "compact_at_tokens",
+        ] {
+            for value in ["0", "-1", "math.huge", "0/0", "true", "'invalid'"] {
+                assert!(
+                    rt.lua
+                        .load(format!(
+                            "require('smelt.plugins.subagents').setup({{ {key} = {value} }})"
+                        ))
+                        .exec()
+                        .is_err(),
+                    "{key} = {value}"
+                );
+                assert_eq!(max(), 4);
+            }
+        }
+        for key in ["max_tokens", "max_requests", "compact_at_tokens"] {
+            assert!(
+                rt.lua
+                    .load(format!(
+                        "require('smelt.plugins.subagents').setup({{ {key} = 1.5 }})"
+                    ))
+                    .exec()
+                    .is_err(),
+                "{key}"
+            );
         }
         rt.lua
             .load("require('smelt.plugins.subagents').setup({ max_concurrent = 64 })")

@@ -9,6 +9,7 @@ use super::transcript_hydration::{TranscriptHydrationRequest, TranscriptHydratio
 #[derive(Clone)]
 pub(crate) struct SessionPreviewRender {
     pub(crate) id: String,
+    pub(crate) include_inherited_context: bool,
     pub(crate) cache_key: String,
     pub(crate) width: u16,
     pub(crate) height: u16,
@@ -493,8 +494,16 @@ impl super::TuiApp {
                 if self.session_preview.live_history_revision.as_ref() != Some(&history_revision)
                     || cached.is_none()
                 {
-                    let transcript =
-                        super::history::build_transcript_from_session(&self.lua, &child.session);
+                    let transcript = if active.render.include_inherited_context {
+                        super::history::build_transcript_from_session(&self.lua, &child.session)
+                    } else {
+                        let history = child
+                            .session
+                            .history
+                            .get(child.inherited_history_len()..)
+                            .unwrap_or_default();
+                        super::history::build_transcript_from_history(&self.lua, history)
+                    };
                     self.session_preview.live_history_blocks = transcript.history.len();
                     cached = Some(TranscriptDocument::from_transcript(transcript));
                     self.session_preview.live_history_revision = Some(history_revision);
@@ -519,7 +528,7 @@ impl super::TuiApp {
                 }
                 if let Some(error) = &child.info.error {
                     transcript.push(smelt_core::Block::Text {
-                        content: format!("Subagent failed: {error}").into(),
+                        content: format!("Subagent {}: {error}", child.info.status).into(),
                     });
                 }
                 self.session_preview.live_revision = Some(revision);
@@ -842,6 +851,7 @@ mod tests {
     fn render_binding(cache_key: &str, width: u16) -> SessionPreviewRender {
         SessionPreviewRender {
             id: cache_key.into(),
+            include_inherited_context: false,
             cache_key: cache_key.into(),
             width,
             height: 20,
