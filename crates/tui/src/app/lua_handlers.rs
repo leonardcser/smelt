@@ -588,6 +588,7 @@ impl TuiApp {
                 format!("activate Lua candidate: {error}"),
             ));
         }
+        self.core.cancel_agents();
         self.core.signals.clear_lua_generation(retired_generation);
         self.core.timers.clear_generation(retired_generation);
         self.lua.commit_generation(candidate);

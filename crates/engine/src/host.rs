@@ -82,6 +82,8 @@ impl PreparedRequestMessages {
 /// carry their originating turn, which the host validates before running hooks.
 /// They fall back to their default when the host drops `reply` without sending.
 pub enum HostCall {
+    /// Callback owned by an in-process child, never by the parent conversation.
+    Subagent { id: u64, call: Box<HostCall> },
     /// Run `smelt.provider.middleware{on_response=...}` hooks against
     /// the assembled assistant message. `Some(msg)` replaces it before
     /// it's pushed to history; `None` keeps the original.

@@ -57,6 +57,10 @@ impl OutputLimiter {
     }
 
     pub fn format_text(&self) -> String {
+        self.format_text_with_notice(TRUNCATION_NOTICE)
+    }
+
+    pub fn format_text_with_notice(&self, notice: &str) -> String {
         let body = self
             .lines
             .iter()
@@ -81,7 +85,7 @@ impl OutputLimiter {
                 self.retained_bytes, self.total_bytes
             ));
         }
-        format!("{TRUNCATION_NOTICE}: {}\n\n{body}", parts.join(", "))
+        format!("{notice}: {}\n\n{body}", parts.join(", "))
     }
 
     pub(crate) fn retained_memory_bytes(&self) -> usize {

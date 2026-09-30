@@ -686,6 +686,19 @@ impl Permissions {
         }
     }
 
+    /// Copy policy and current approvals into an independent session store.
+    /// Persisted workspace/repository scopes retain their disk refresh source.
+    pub(crate) fn fork_session(&self) -> Self {
+        let mut fork = self.clone();
+        let approvals = self
+            .approvals
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        fork.approvals = Arc::new(RwLock::new(approvals));
+        fork
+    }
+
     /// Create a clone with per-turn permission overrides layered on top.
     /// Override rules are prepended (checked first) to the existing rules
     /// for every mode.

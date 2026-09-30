@@ -19,6 +19,266 @@ fn focus_transcript_in_normal_mode(app: &mut TestApp) {
     app.render_silent();
 }
 
+#[test]
+fn spawn_agent_hides_success_output_but_preserves_errors() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "spawn",
+        "spawn_agent",
+        std::collections::HashMap::from([("prompt".into(), serde_json::json!("Review parser"))]),
+    );
+    app.tool_finished(
+        invocation_id,
+        "spawn",
+        protocol::ToolOutcome::new(
+            r#"[{"id":1,"status":"running","session_id":"child-session"}]"#.into(),
+            false,
+            None,
+        ),
+        Some(1),
+    );
+    let invocation_id = app.tool_started("failed-spawn", "spawn_agent", Default::default());
+    app.tool_finished(
+        invocation_id,
+        "failed-spawn",
+        protocol::ToolOutcome::new("subagent queue is full".into(), true, None),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        for state in ["open", "close"] {
+            app.run_lua_result(&format!("smelt.transcript.fold_all('{state}')"))
+                .unwrap();
+            app.follow_transcript_tail();
+            let text = app.render_to_frame().text();
+            assert!(text.contains("spawn_agent Review parser"), "{text}");
+            assert!(!text.contains("session_id"), "{text}");
+            assert!(!text.contains("child-session"), "{text}");
+            assert!(text.contains("subagent queue is full"), "{text}");
+            assert!(!text.contains("spawn_agent spawn_agent"), "{text}");
+            let timestamps: Vec<_> = text
+                .lines()
+                .filter(|line| line.starts_with("* spawn_agent"))
+                .map(|line| line.rfind(' ').unwrap())
+                .collect();
+            assert_eq!(timestamps.len(), 2, "{text}");
+            assert_eq!(timestamps[0], timestamps[1], "{text}");
+        }
+    }
+}
+
+#[test]
+fn subagent_cards_show_live_activity_and_mark_missing_runtime_as_archived() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_bundled_lua(
+        r#"
+        require('smelt.plugins.subagents')
+        _G.card = { status = 'running', elapsed_ms = 1200, cost_usd = 0.0123,
+            activity = 'Running grep' }
+        __smelt_internal.agent.__card = function() return _G.card end
+    "#,
+    ));
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "spawn",
+        "spawn_agent",
+        std::collections::HashMap::from([
+            ("title".into(), serde_json::json!("Review tests")),
+            (
+                "prompt".into(),
+                serde_json::json!("Review the test suite independently"),
+            ),
+        ]),
+    );
+    app.tool_finished(
+        invocation_id,
+        "spawn",
+        protocol::ToolOutcome::new(
+            "handle".into(),
+            false,
+            Some(serde_json::json!({
+                "agents": [{ "id":1, "name":"cedar-1", "title":"Review tests", "status":"queued", "session_id":"child-session" }]
+            })),
+        ),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        assert!(text.contains("cedar-1  running  1.2s  $0.0123"), "{text}");
+        assert!(text.contains("Running grep"), "{text}");
+        assert!(
+            !text.contains("Review the test suite independently"),
+            "{text}"
+        );
+    }
+    app.run_lua_result("_G.card = nil").unwrap();
+    app.feed_one(SourceEvent::Tick(300));
+    app.app.tick_timers();
+    app.settle_lua();
+    let text = app.render_to_frame().text();
+    assert!(text.contains("cedar-1  archived"), "{text}");
+    assert!(!text.contains("queued"), "{text}");
+    assert!(!text.contains("Running grep"), "{text}");
+}
+
+#[test]
+fn historical_subagent_cards_do_not_show_another_parents_worker() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_bundled_lua(
+        r#"
+        require('smelt.plugins.subagents')
+        __smelt_internal.agent.__card = function(session_id)
+            if session_id and session_id ~= 'other-child' then return nil end
+            return { status = 'running', elapsed_ms = 1200, cost_usd = 0.0123,
+                activity = 'Other parent activity' }
+        end
+        "#,
+    ));
+    app.start_turn(1);
+    for (call_id, identity) in [("historical", Some("saved-child")), ("legacy", None)] {
+        let invocation_id = app.tool_started(call_id, "spawn_agent", Default::default());
+        let mut saved = serde_json::json!({ "id":1, "name":call_id, "status":"running" });
+        if let Some(identity) = identity {
+            saved["session_id"] = identity.into();
+        }
+        app.tool_finished(
+            invocation_id,
+            call_id,
+            protocol::ToolOutcome::new(
+                "handle".into(),
+                false,
+                Some(serde_json::json!({ "agents": [saved] })),
+            ),
+            Some(1),
+        );
+    }
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        for state in ["open", "close"] {
+            app.run_lua_result(&format!("smelt.transcript.fold_all('{state}')"))
+                .unwrap();
+            app.follow_transcript_tail();
+            let text = app.render_to_frame().text();
+            assert!(text.contains("historical  archived"), "{text}");
+            assert!(text.contains("legacy  archived"), "{text}");
+            assert!(!text.contains("Other parent activity"), "{text}");
+            assert!(!text.contains("$0.0123"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn peek_agent_output_is_capped_readable_and_copyable() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "peek",
+        "peek_agent",
+        std::collections::HashMap::from([("id".into(), serde_json::json!(7))]),
+    );
+    let output = format!(
+        "agent #7 - running\n\n{}",
+        (1..=30)
+            .map(|line| format!("report {line:02}: vérified"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    app.tool_finished(
+        invocation_id,
+        "peek",
+        protocol::ToolOutcome::new(output, false, None),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 32);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        assert!(text.contains("peek_agent #7"), "{text}");
+        assert!(text.contains("report 30: vérified"), "{text}");
+        assert!(!text.contains("report 01:"), "{text}");
+    }
+    focus_transcript_in_normal_mode(&mut app);
+    app.type_text("ggVGy");
+    assert!(app
+        .core_probe()
+        .clipboard
+        .kill_ring
+        .current()
+        .contains("report 30: vérified"));
+}
+
+#[test]
+fn wait_agents_header_does_not_repeat_fallback_tool_name() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    app.tool_started("empty-wait", "wait_agents", Default::default());
+    app.tool_rejected(
+        "unknown-wait",
+        "wait_agents",
+        std::collections::HashMap::from([("ids".into(), serde_json::json!([99]))]),
+        protocol::StyledLines::from_plain("wait_agents"),
+        protocol::ToolOutcome::new("unknown subagent: 99".into(), true, None),
+        Some(1),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        assert!(!text.contains("wait_agents wait_agents"), "{text}");
+        assert!(text.contains("wait_agents #99"), "{text}");
+        assert!(text.contains("unknown subagent: 99"), "{text}");
+    }
+}
+
+#[test]
+fn wait_agents_preview_shows_readable_final_reports_and_copies_them() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.run_lua_result("require('smelt.plugins.subagents')")
+        .unwrap();
+    app.start_turn(1);
+    let invocation_id = app.tool_started(
+        "wait",
+        "wait_agents",
+        std::collections::HashMap::from([("ids".into(), serde_json::json!([1, 2]))]),
+    );
+    let reports = "agent #1 - completed\nParser review complete.\nAll tests passed.\n\nagent #2 - failed\nProvider unavailable.";
+    app.tool_finished(
+        invocation_id, "wait",
+        protocol::ToolOutcome::new(serde_json::json!([
+            { "id":1, "status":"completed", "result":"Parser review complete.\nAll tests passed." },
+            { "id":2, "status":"failed", "error":"Provider unavailable." },
+        ]).to_string(), false, None).with_display_content(vec![
+            protocol::ToolDisplayContent::new("results", reports.into()),
+        ]),
+        Some(1250),
+    );
+    for width in [120, 45] {
+        app.set_terminal_size(width, 24);
+        app.follow_transcript_tail();
+        let text = app.render_to_frame().text();
+        for line in reports.lines().filter(|line| !line.is_empty()) {
+            assert!(text.contains(line), "{text}");
+        }
+        assert!(text.contains("wait_agents #1, #2"), "{text}");
+        assert!(!text.contains("\"result\""), "{text}");
+    }
+    focus_transcript_in_normal_mode(&mut app);
+    app.type_text("ggVGy");
+    let copied = app.core_probe().clipboard.kill_ring.current();
+    for line in reports.lines().filter(|line| !line.is_empty()) {
+        assert!(copied.contains(line), "{copied}");
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     let mut app = TestApp::builder().with_vim(true).build();

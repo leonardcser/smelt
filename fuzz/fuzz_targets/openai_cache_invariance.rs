@@ -69,6 +69,7 @@ fn cache_with_key(key: &str) -> CacheConfig {
         anthropic_markers: false,
         ttl_long: false,
         prompt_cache_key: Some(key.to_string()),
+        inherited_user_message: None,
     }
 }
 

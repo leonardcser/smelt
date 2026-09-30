@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -116,6 +116,7 @@ enum PendingAction {
 struct WorkBatch {
     actions: HashMap<String, PendingAction>,
     reconcile_all: bool,
+    startup: bool,
     barriers: Vec<mpsc::Sender<()>>,
 }
 
@@ -132,6 +133,7 @@ impl PendingWork {
         WorkBatch {
             actions: std::mem::take(&mut self.actions),
             reconcile_all: std::mem::take(&mut self.reconcile_all),
+            startup: false,
             barriers,
         }
     }
@@ -156,6 +158,7 @@ struct ServiceHandle {
     pending: Arc<Mutex<PendingWork>>,
     overlays: Arc<Mutex<Overlays>>,
     status: Arc<Mutex<ServiceStatus>>,
+    status_changed: Arc<Condvar>,
     wake: SyncSender<()>,
 }
 
@@ -188,15 +191,22 @@ impl ServiceOwner {
             startup_actions.clear();
         }
         let has_startup_work = reconcile_all || !startup_actions.is_empty();
-        let pending = Arc::new(Mutex::new(PendingWork {
-            actions: startup_actions,
-            reconcile_all,
-            ..PendingWork::default()
-        }));
+        let mut pending = PendingWork::default();
+        if has_startup_work {
+            pending.batches.push_back(WorkBatch {
+                actions: startup_actions,
+                reconcile_all,
+                startup: true,
+                barriers: Vec::new(),
+            });
+        }
+        let pending = Arc::new(Mutex::new(pending));
         let overlays = Arc::new(Mutex::new(Overlays::default()));
-        let status = Arc::new(Mutex::new(
-            reusable.map(|reusable| reusable.status).unwrap_or_default(),
-        ));
+        let mut status = reusable.map(|reusable| reusable.status).unwrap_or_default();
+        if has_startup_work {
+            status.state = ServiceState::Reconciling;
+        }
+        let status = Arc::new(Mutex::new(status));
         let (wake, wakes) = mpsc::sync_channel(1);
         let handle = ServiceHandle {
             sessions_root,
@@ -204,6 +214,7 @@ impl ServiceOwner {
             pending,
             overlays,
             status,
+            status_changed: Arc::new(Condvar::new()),
             wake,
         };
         let worker_handle = handle.clone();
@@ -393,6 +404,38 @@ impl SessionCatalog {
         Ok(ids)
     }
 
+    pub(crate) fn wait_until_ready(
+        &self,
+        timeout: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let handle = &self.owner.handle;
+        let mut status = handle
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        loop {
+            if cancelled() {
+                return Err("session catalog readiness cancelled".into());
+            }
+            if status.state == ServiceState::Ready {
+                return Ok(());
+            }
+            if let Some(error) = &status.last_error {
+                return Err(format!("session catalog: {error}"));
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| "session catalog readiness deadline elapsed".to_owned())?;
+            status = handle
+                .status_changed
+                .wait_timeout(status, remaining.min(Duration::from_millis(100)))
+                .unwrap_or_else(|poison| poison.into_inner())
+                .0;
+        }
+    }
+
     pub(crate) fn wait_for_queued_work(&self, timeout: Duration) -> bool {
         self.owner.handle.wait_for_barrier(timeout)
     }
@@ -566,11 +609,30 @@ impl ServiceHandle {
         overlays.deleted.remove(id);
     }
 
+    fn finish_startup(&self) {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if pending.reconcile_all || pending.batches.iter().any(|batch| batch.reconcile_all) {
+            return;
+        }
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if status.last_error.is_none() {
+            status.state = ServiceState::Ready;
+            self.status_changed.notify_all();
+        }
+    }
+
     fn set_reconciling(&self) {
         self.status
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .state = ServiceState::Reconciling;
+        self.status_changed.notify_all();
     }
 
     fn set_ready(&self, completed_scan_id: u64, reconciled_at: Option<i64>) {
@@ -583,6 +645,7 @@ impl ServiceHandle {
             reconciled_at,
             last_error: None,
         };
+        self.status_changed.notify_all();
     }
 
     fn set_degraded(&self, error: String) {
@@ -592,6 +655,7 @@ impl ServiceHandle {
             .unwrap_or_else(|poison| poison.into_inner());
         status.state = ServiceState::Degraded;
         status.last_error = Some(error);
+        self.status_changed.notify_all();
     }
 }
 
@@ -877,6 +941,13 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
                 continue;
             }
 
+            if let Err(error) = locate_repairs(&handle, &mut batch.actions) {
+                warning.warn(&error);
+                handle.set_degraded(error);
+                batch.reconcile_all = true;
+                requeue_failed_batch(&handle, batch, RETRY_DELAY);
+                break;
+            }
             let mut needs_reconciliation = false;
             for (id, action) in std::mem::take(&mut batch.actions) {
                 let result = match action {
@@ -897,9 +968,41 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
                 requeue_failed_batch(&handle, batch, RETRY_DELAY);
                 break;
             }
+            if batch.startup {
+                handle.finish_startup();
+            }
             complete_barriers(batch.barriers);
         }
     }
+}
+
+fn locate_repairs(
+    handle: &ServiceHandle,
+    actions: &mut HashMap<String, PendingAction>,
+) -> Result<(), String> {
+    let unresolved = actions
+        .values()
+        .filter(
+            |action| matches!(action, PendingAction::Repair(repair) if repair.lineage_id.is_none()),
+        )
+        .count();
+    if unresolved < 2 {
+        return Ok(());
+    }
+    // Resolve a batch once instead of rescanning every lineage for each dirty session.
+    let locations: HashMap<_, _> = smelt_store::lineage_session_locations(&handle.sessions_root)
+        .map_err(|error| format!("locate session catalog repairs: {error}"))?
+        .into_iter()
+        .map(|location| (location.session_id, location.lineage_id))
+        .collect();
+    for (id, action) in actions {
+        if let PendingAction::Repair(repair) = action {
+            if repair.lineage_id.is_none() {
+                repair.lineage_id = locations.get(id).cloned();
+            }
+        }
+    }
+    Ok(())
 }
 
 fn requeue_failed_batch(handle: &ServiceHandle, batch: WorkBatch, retry_delay: Duration) {
@@ -1248,6 +1351,7 @@ mod tests {
             pending: Arc::new(Mutex::new(PendingWork::default())),
             overlays: Arc::new(Mutex::new(Overlays::default())),
             status: Arc::new(Mutex::new(ServiceStatus::default())),
+            status_changed: Arc::new(Condvar::new()),
             wake,
         };
         let worker_handle = handle.clone();
@@ -1264,6 +1368,49 @@ mod tests {
         // The worker may observe shutdown and disconnect before the wake is sent.
         let _ = handle.signal();
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn catalog_readiness_waits_for_initialization_and_reports_degradation() {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = SessionCatalog::open(root.path().to_owned()).unwrap();
+        catalog
+            .wait_until_ready(Duration::from_secs(5), || false)
+            .unwrap();
+        catalog
+            .owner
+            .handle
+            .set_degraded("catalog unavailable".into());
+        assert_eq!(
+            catalog
+                .wait_until_ready(Duration::ZERO, || false)
+                .unwrap_err(),
+            "session catalog: catalog unavailable"
+        );
+        assert!(catalog
+            .wait_until_ready(Duration::ZERO, || true)
+            .unwrap_err()
+            .contains("cancelled"));
+    }
+
+    #[test]
+    fn catalog_readiness_deadline_and_notification_do_not_require_page_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = SessionCatalog::open(root.path().to_owned()).unwrap();
+        catalog
+            .wait_until_ready(Duration::from_secs(5), || false)
+            .unwrap();
+        catalog.owner.handle.set_reconciling();
+        assert!(catalog
+            .wait_until_ready(Duration::ZERO, || false)
+            .unwrap_err()
+            .contains("deadline"));
+        let handle = catalog.owner.handle.clone();
+        let notify = thread::spawn(move || handle.set_ready(0, None));
+        catalog
+            .wait_until_ready(Duration::from_secs(5), || false)
+            .unwrap();
+        notify.join().unwrap();
     }
 
     #[test]
@@ -1356,7 +1503,16 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0], SESSION_ID);
 
+        let marker = CatalogMarkerLock::acquire(&sessions_root, SESSION_ID).unwrap();
         let service = SessionCatalog::open(temp.path().to_path_buf()).unwrap();
+        assert!(service
+            .wait_until_ready(Duration::ZERO, || false)
+            .unwrap_err()
+            .contains("deadline"));
+        drop(marker);
+        service
+            .wait_until_ready(Duration::from_secs(2), || false)
+            .unwrap();
         assert!(service.wait_for_queued_work(Duration::from_secs(2)));
         drop(service);
 
@@ -1541,6 +1697,7 @@ mod tests {
             pending: Arc::new(Mutex::new(PendingWork::default())),
             overlays: Arc::new(Mutex::new(Overlays::default())),
             status: Arc::new(Mutex::new(ServiceStatus::default())),
+            status_changed: Arc::new(Condvar::new()),
             wake,
         };
 

@@ -323,6 +323,7 @@ impl TuiApp {
 
     pub(crate) fn dispatch_host_call(&mut self, call: HostCall) {
         match call {
+            HostCall::Subagent { id, call } => self.core.handle_agent_host_call(id, *call),
             HostCall::ProviderResponse {
                 turn_id,
                 message,

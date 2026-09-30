@@ -18,3 +18,67 @@ Types: [`smelt.Reg`](types.md#smeltreg)
 
 Append concise guidance to the system prompt while this Lua runtime is active. Intended for plugins that register tools needing extra usage policy. Returns a `Reg` whose `:remove()` removes the fragment.
 
+## `smelt.agent.enable_forks`
+
+```lua
+fun(opts: table?): nil
+```
+
+Enable immutable request snapshots for a subagent plugin. Optional opts.max_concurrent controls shared child concurrency (default 16, range 1-64). opts.max_cost_usd and opts.max_tokens gate new child requests using observed parent-plus-child totals. opts.max_requests limits main requests per worker assignment. Budgets are disabled by default and in-flight requests can exceed them. opts.compact_at_tokens sets the child-local compaction threshold; otherwise 80% of a known context window is used. Disabled by default; children cannot enable or create forks. Configuration applies on the next spawn or follow-up; lowering the limit does not cancel running children.
+
+## `smelt.agent.fork`
+
+```lua
+fun(task: string, count: integer?, label: string?): any
+```
+
+Queue one or more child agents from the current provider-ready request. Every batch member receives the same task and snapshot. Count defaults to one (maximum 16); label optionally supplies a short display task without changing model input. Only a parent model tool may call this API. Awaits archive restoration before allocation; must run inside a Lua task. Returns records with numeric id, readable name, group, session_id, parent_id, short task, status, result, error, activity, elapsed_ms, requests, persistence_error, cost_usd and usage. Usage contains cumulative child-only prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens and reasoning_tokens when reported. Reasoning is included in completion tokens, not an additional bucket.
+
+## `smelt.agent.report`
+
+```lua
+fun(status: string, report: string): nil
+```
+
+Record a completed or blocked assignment report from the active child tool. This does not end its engine turn; the child must finish its response. Only subagents may report.
+
+## `smelt.agent.restore`
+
+```lua
+fun(parent_id: string): boolean
+```
+
+Wait for native worker records belonging to parent_id to restore. Must run inside a Lua task; failures and cancellation remain explicit. Does not launch workers.
+
+## `smelt.agent.runs`
+
+```lua
+fun(parent_id: string?): any
+```
+
+List runtime-owned subagents in creation order, optionally restricted to a parent session. Status is queued, running, completed, blocked, cancelled or failed. Records include readable name, short task, recent activity, elapsed_ms and request counts. With parent_id, archived workers load in the background and appear on subsequent calls. Includes cumulative child-only cost_usd and usage as returned by fork. Records survive Lua reloads.
+
+## `smelt.agent.stop`
+
+```lua
+fun(id: integer): nil
+```
+
+Cancel a queued or running child without cancelling its parent or siblings. Finished runs remain available for inspection.
+
+## `smelt.agent.stop_all`
+
+```lua
+fun(parent_id: string): nil
+```
+
+Cancel every queued or running child owned by the specified parent session. Does not interrupt the parent.
+
+## `smelt.agent.totals`
+
+```lua
+fun(parent_id: string): any
+```
+
+Return child-only and parent-plus-child usage and costs observed in this process. Reasoning tokens are already included in completion tokens.
+

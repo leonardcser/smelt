@@ -864,6 +864,9 @@ impl TuiApp {
         );
 
         let permissions = turn.permissions.clone();
+        if self.lua.forks_enabled() {
+            let _ = self.core.engine.enable_forks();
+        }
         let payload = protocol::StartTurnPayload {
             turn_id,
             input: turn.input,
@@ -1896,6 +1899,10 @@ impl TuiApp {
             completion.termination,
         );
         let note = protocol::HistoryNote::process_status_with_output(event, completion.output);
+        self.handle_background_completion(note);
+    }
+
+    pub(crate) fn handle_background_completion(&mut self, note: protocol::HistoryNote) {
         if self.agent_is_running() || self.conversation.turn_pause().is_some() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
         } else if self.prompt_input_is_busy() || !self.prompt.queue_is_empty() {

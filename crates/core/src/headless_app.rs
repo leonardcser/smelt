@@ -154,34 +154,10 @@ impl HeadlessApp {
             });
             return;
         }
-        let metadata = crate::host::scope_core(&mut self.core, || {
-            lua.evaluate_tool_metadata(&tool_name, &args)
-        });
-        let decision = if let Some(err) = metadata.preflight_error.clone() {
-            protocol::Decision::Error(err)
-        } else {
-            match crate::host::scope_core(&mut self.core, || {
-                lua.tool_paths_for_workspace(&tool_name, &args)
-            }) {
-                Ok(tool_paths) => {
-                    self.core
-                        .permissions
-                        .snapshot()
-                        .evaluate_tool_with_paths_and_approvals(
-                            self.core.config.mode.clone(),
-                            crate::permissions::ToolOrigin::Lua,
-                            &tool_name,
-                            &args,
-                            tool_paths.as_slice(),
-                        )
-                        .decision
-                }
-                Err(error) => protocol::Decision::Error(error),
-            }
-        };
+        let evaluation = self.core.evaluate_model_tool(lua, &tool_name, &args);
         self.core.engine.send(UiCommand::ToolEvaluationResponse {
             request_id,
-            evaluation: protocol::ToolEvaluation { decision, metadata },
+            evaluation,
         });
     }
 
@@ -219,48 +195,17 @@ impl HeadlessApp {
             });
             return;
         }
-        let mode = self.core.config.mode.clone();
-        let session_id = self.session.id.clone();
-        let artifact_dir = self.core.sessions.artifact_dir_for(&self.session);
-        let now = self.core.clock.instant_now();
-        let result = crate::host::scope_core(&mut self.core, || {
-            lua.execute_tool(
-                &tool_name,
-                &args,
-                crate::lua::ToolCallIds {
-                    invocation_id,
-                    request_id,
-                    call_id: &call_id,
-                },
-                crate::lua::ToolEnv {
-                    mode,
-                    session_id: &session_id,
-                    artifact_dir: &artifact_dir,
-                },
-                now,
-            )
-        });
-        match result {
-            crate::lua::ToolExecResult::Immediate {
-                content,
-                is_error,
-                metadata,
-                display_content,
-                attachment,
-            } => {
-                self.core.engine.send(UiCommand::ToolResult {
-                    request_id,
-                    invocation_id,
-                    call_id,
-                    content,
-                    is_error,
-                    metadata,
-                    display_content,
-                    attachment: attachment.map(|attachment| *attachment),
-                });
-            }
-            crate::lua::ToolExecResult::Pending => {}
-        }
+        self.core.dispatch_model_tool(
+            lua,
+            &self.session,
+            &tool_name,
+            &args,
+            crate::lua::ToolCallIds {
+                invocation_id,
+                request_id,
+                call_id: &call_id,
+            },
+        );
     }
 
     fn drive_lua_tasks(&mut self) {
@@ -362,6 +307,12 @@ impl HeadlessApp {
                 }
                 true
             }
+            EngineEvent::Subagent { id, event } => {
+                if let Some(lua) = self.lua.as_ref() {
+                    self.core.handle_agent_event(lua, *id, *event.clone());
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -459,6 +410,13 @@ impl HeadlessApp {
         )));
 
         let tools = self.tool_defs();
+        if self
+            .lua
+            .as_ref()
+            .is_some_and(crate::lua::LuaRuntime::forks_enabled)
+        {
+            let _ = self.core.engine.enable_forks();
+        }
         let Some(model_target) = self.model_target() else {
             eprintln!("error: no model is available for headless dispatch");
             return HeadlessExit::Error;
@@ -468,24 +426,25 @@ impl HeadlessApp {
             .fast_mode
             .unwrap_or(self.core.config.settings.fast_mode);
 
+        let payload = protocol::StartTurnPayload {
+            turn_id,
+            input: protocol::StartTurnInput::user(Content::text(content)),
+            mode: self.core.config.mode.clone(),
+            model_target,
+            request_config: self.core.config.request_runtime_config(),
+            reasoning_effort: self.core.config.reasoning_effort.clone(),
+            fast_mode,
+            history: protocol::ModelHistorySource::items(history),
+            session_id: self.session.id.clone(),
+            sessions_root: self.core.sessions.sessions_dir(),
+            persistence: protocol::PersistenceScope::default(),
+            permission_overrides: None,
+            system_prompt: Some(self.system_prompt.clone()),
+            tools,
+        };
         self.core
             .engine
-            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
-                turn_id,
-                input: protocol::StartTurnInput::user(Content::text(content)),
-                mode: self.core.config.mode.clone(),
-                model_target,
-                request_config: self.core.config.request_runtime_config(),
-                reasoning_effort: self.core.config.reasoning_effort.clone(),
-                fast_mode,
-                history: protocol::ModelHistorySource::items(history),
-                session_id: self.session.id.clone(),
-                sessions_root: self.core.sessions.sessions_dir(),
-                persistence: protocol::PersistenceScope::default(),
-                permission_overrides: None,
-                system_prompt: Some(self.system_prompt.clone()),
-                tools,
-            })));
+            .send(UiCommand::StartTurn(Box::new(payload)));
 
         let mut final_message = String::new();
         let mut total_usage = protocol::TokenUsage::default();
@@ -494,7 +453,7 @@ impl HeadlessApp {
         let mut pending_tools: HashMap<protocol::InvocationId, (String, String, Vec<String>)> =
             HashMap::new();
 
-        let outcome = loop {
+        let mut outcome = loop {
             self.drive_lua_tasks();
             let wakeup = self.next_lua_wakeup();
             let ev = tokio::select! {
@@ -503,8 +462,13 @@ impl HeadlessApp {
                     self.core.engine.send(protocol::UiCommand::Cancel);
                     break HeadlessExit::Interrupted;
                 }
-                ev = self.core.engine.recv() => match ev {
-                    Some(ev) => ev,
+                ev = self.core.engine.recv_output() => match ev {
+                    Some(engine::EngineOutput::Event(ev)) => ev,
+                    Some(engine::EngineOutput::HostCall(engine::HostCall::Subagent { id, call })) => {
+                        self.core.handle_agent_host_call(id, *call);
+                        continue;
+                    }
+                    Some(engine::EngineOutput::HostCall(_)) => continue,
                     None => {
                         self.report_engine_disconnect();
                         break HeadlessExit::TurnError;
@@ -590,6 +554,9 @@ impl HeadlessApp {
                 } => {
                     total_cost += cost_usd.unwrap_or(0.0);
                     total_usage.accumulate(usage);
+                    self.core
+                        .agents
+                        .record_parent_usage(&self.session.id, usage, *cost_usd);
                     last_tps = tokens_per_sec.or(last_tps);
                 }
                 EngineEvent::Retrying { delay_ms, attempt }
@@ -597,7 +564,6 @@ impl HeadlessApp {
                 {
                     self.sink.log_retry(*attempt, *delay_ms);
                 }
-                EngineEvent::HistoryUpdated { .. } => {}
                 EngineEvent::RequestAuditError { message }
                     if self.sink.format == OutputFormat::Text =>
                 {
@@ -610,16 +576,58 @@ impl HeadlessApp {
                     break HeadlessExit::TurnError;
                 }
                 EngineEvent::TurnComplete { meta, .. } => {
-                    break if meta.as_ref().is_some_and(|meta| meta.interrupted) {
-                        HeadlessExit::Interrupted
-                    } else {
-                        HeadlessExit::Success
-                    };
+                    if meta.as_ref().is_some_and(|meta| meta.interrupted) {
+                        break HeadlessExit::Interrupted;
+                    }
+                    break HeadlessExit::Success;
                 }
                 _ => {}
             }
         };
 
+        if outcome != HeadlessExit::Success {
+            self.core.cancel_agents_for(&self.session.id);
+        }
+        // A headless invocation owns its child lifetime. Finish or cancel every child
+        // and flush their transcripts before returning to the shell.
+        while self.core.agents.children.values().any(|child| {
+            child.info.parent_id == self.session.id
+                && matches!(child.info.status.as_str(), "queued" | "running")
+        }) {
+            self.drive_lua_tasks();
+            let wakeup = self.next_lua_wakeup();
+            tokio::select! {
+                biased;
+                _ = cancel.notified() => { outcome = HeadlessExit::Interrupted; self.core.cancel_agents_for(&self.session.id); }
+                output = self.core.engine.recv_output() => match output {
+                    Some(engine::EngineOutput::Event(event @ EngineEvent::Subagent { .. })) => {
+                        if self.sink.format == OutputFormat::Json { self.sink.emit_json(&event); }
+                        self.handle_control_event(&event);
+                    }
+                    Some(engine::EngineOutput::HostCall(engine::HostCall::Subagent { id, call })) => self.core.handle_agent_host_call(id, *call),
+                    None => { self.core.abandon_agents(&self.session.id, "parent engine disconnected"); break; }
+                    _ => {}
+                },
+                _ = Self::wait_for_lua_wakeup(self.lua_wakeup_rx.as_mut(), wakeup), if self.lua.is_some() => {}
+            }
+        }
+        if let Err(message) = self.core.agents.flush(&self.session.id).await {
+            if self.sink.format == OutputFormat::Json {
+                self.sink.emit_json(&EngineEvent::TurnError {
+                    message,
+                    kind: None,
+                    retry_at_ms: None,
+                });
+            } else {
+                self.sink.log_error(&message);
+            }
+            if outcome == HeadlessExit::Success {
+                outcome = HeadlessExit::TurnError;
+            }
+        }
+        let (child_usage, child_cost) = self.core.agents.totals(&self.session.id);
+        total_usage.accumulate(&child_usage);
+        total_cost += child_cost;
         if self.sink.format == OutputFormat::Text {
             self.sink
                 .log_token_usage(&total_usage, last_tps, total_cost);
