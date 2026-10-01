@@ -2308,6 +2308,47 @@ fn tool_evaluation_uses_the_mode_carried_by_the_turn_event() {
 }
 
 #[test]
+fn tool_evaluation_denies_commands_inside_nested_shells() {
+    let mut app = TestApp::builder().build();
+    let permissions = app.core_probe().permissions.snapshot().as_ref().clone();
+    let permissions = permissions.with_overrides(&protocol::PermissionOverrides {
+        tools: None,
+        subcommands: std::collections::HashMap::from([(
+            "bash".to_string(),
+            protocol::RuleSetOverride {
+                allow: vec!["bash *".into(), "flock *".into()],
+                deny: vec!["rm *".into()],
+                ask: vec![],
+            },
+        )]),
+    });
+    app.replace_permissions_for_harness(permissions);
+    app.start_turn(1);
+    let _ = app.drain_engine_sends();
+
+    for (id, command) in [
+        (301, "bash -c 'rm scratch.txt'"),
+        (302, "flock lockfile bash -c 'rm scratch.txt'"),
+        (303, "flock lockfile -c 'rm scratch.txt'"),
+        (304, "env -i bash -c 'rm scratch.txt'"),
+        (305, "flock lockfile env -i bash -c 'rm scratch.txt'"),
+    ] {
+        let decision = evaluate_tool(
+            &mut app,
+            id,
+            "nested-command",
+            "bash",
+            std::collections::HashMap::from([(
+                "command".to_string(),
+                serde_json::Value::String(command.to_string()),
+            )]),
+            protocol::AgentMode::parse("yolo").unwrap(),
+        );
+        assert_eq!(decision, protocol::Decision::Deny, "command={command}");
+    }
+}
+
+#[test]
 fn switch_cwd_outside_workspace_requires_destination_permission() {
     let environment_guard = test_environment_guard();
     let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);

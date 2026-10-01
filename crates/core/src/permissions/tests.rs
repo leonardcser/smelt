@@ -271,6 +271,32 @@ fn deny_rm_simple() {
 }
 
 #[test]
+fn nested_shell_rules_check_executed_commands() {
+    let p = perms_with_bash(&["bash *", "flock *", "env *"], &[], &["rm *"]);
+    for command in [
+        "bash -c 'rm scratch.txt'",
+        "flock lockfile bash -c 'rm scratch.txt'",
+        "flock lockfile -c 'rm scratch.txt'",
+        "env -i bash -c 'rm scratch.txt'",
+        "flock lockfile rm scratch.txt",
+        "env -i rm scratch.txt",
+    ] {
+        assert_eq!(
+            p.check_subcommand(normal(), "bash", command),
+            Decision::Deny,
+            "command={command}"
+        );
+        let outer =
+            glob::Pattern::new(&format!("{} *", command.split_whitespace().next().unwrap()))
+                .unwrap();
+        assert!(
+            !command_patterns_satisfy("bash", &[&outer], command, None),
+            "pattern for wrapper must not approve nested command: {command}"
+        );
+    }
+}
+
+#[test]
 fn deny_rm_after_ls() {
     assert_bash(
         &["ls *"],
@@ -1848,10 +1874,14 @@ fn workspace_path_unsupported_brace_sequence_fails_closed() {
 
     assert_eq!(
         outcome.missing_requirements,
-        vec![PermissionRequirement::PathPrefix {
-            dir: resolved_filesystem_path(Path::new("/"))
+        vec![PermissionRequirement::UnresolvedPath {
+            path: PathBuf::from("/tmp/smelt-part-{01..03}.txt")
         }]
     );
+    assert!(p
+        .approval_options("bash", &[], &outcome)
+        .grant_sets
+        .is_empty());
 }
 
 #[test]
@@ -1867,10 +1897,14 @@ fn workspace_path_oversized_brace_expansion_fails_closed() {
 
     assert_eq!(
         outcome.missing_requirements,
-        vec![PermissionRequirement::PathPrefix {
-            dir: resolved_filesystem_path(Path::new("/"))
+        vec![PermissionRequirement::UnresolvedPath {
+            path: PathBuf::from(format!("/tmp/file-{}", "{a,b}".repeat(9)))
         }]
     );
+    assert!(p
+        .approval_options("bash", &[], &outcome)
+        .grant_sets
+        .is_empty());
 }
 
 #[test]
@@ -2144,7 +2178,12 @@ fn workspace_path_symlink_loop_fails_closed() {
     };
 
     assert!(matches!(path.resolution, PathResolution::Unresolved(_)));
-    assert_eq!(decide(&p, normal(), "read_file", &args), Decision::Ask);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "read_file", &args);
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert!(p
+        .approval_options("read_file", &[], &outcome)
+        .grant_sets
+        .is_empty());
 }
 
 #[cfg(unix)]
@@ -3759,6 +3798,126 @@ fn shell_treats_env_split_strings_as_opaque() {
         vec![OpaqueShellCommand {
             command: "env *".to_string(),
         }]
+    );
+}
+
+#[test]
+fn shell_analyzes_literal_scripts_through_flock_and_nested_shells() {
+    for command in [
+        "flock -w 3 target/lock bash -lc 'cat /tmp/input; rm /var/cache/output'",
+        "flock target/lock -c 'cat /tmp/input; rm /var/cache/output'",
+        "bash -c 'cat /tmp/input; rm /var/cache/output'",
+        "sh -c 'cat /tmp/input; rm /var/cache/output'",
+        "bash --rcfile=/tmp/bashrc -c 'cat /tmp/input; rm /var/cache/output'",
+        "flock -n /tmp/lock /usr/bin/bash -c 'cat /tmp/input; rm /var/cache/output'",
+        "env -i bash -c 'cat /tmp/input; rm /var/cache/output'",
+    ] {
+        let analysis = analyze_shell_command(command, Path::new("/workspace"));
+        let paths: Vec<_> = analysis
+            .paths
+            .iter()
+            .map(|path| path.raw_path.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"/tmp/input"),
+            "command={command}: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"/var/cache/output"),
+            "command={command}: {paths:?}"
+        );
+        assert!(analysis.opaque_commands.is_empty(), "command={command}");
+    }
+}
+
+#[test]
+fn shell_does_not_guess_paths_from_dynamic_or_interpreter_scripts() {
+    for (command, opaque) in [
+        ("bash -c \"$@\"", "bash *"),
+        ("sh -c \"$@\" /tmp/argument", "sh *"),
+        ("flock target/lock bash -c \"$@\"", "bash *"),
+        ("env -i bash -c \"$@\"", "bash *"),
+        ("python3 -c 'print(\"/tmp/input\")'", "python3 *"),
+        ("python3 -c'print(\"/tmp/input\")'", "python3 *"),
+        ("node --eval 'console.log(\"/tmp/input\")'", "node *"),
+        ("node -p 'process.env.PATH.split(\"/\")'", "node *"),
+        ("ruby -e 'puts \"/tmp/input\"'", "ruby *"),
+        ("perl -pe 's!/tmp/input!x!'", "perl *"),
+    ] {
+        let analysis = analyze_shell_command(command, Path::new("/workspace"));
+        assert!(
+            analysis
+                .paths
+                .iter()
+                .all(|path| path.raw_path == "target/lock"),
+            "command={command}: {analysis:?}"
+        );
+        assert_eq!(
+            analysis.opaque_commands,
+            vec![OpaqueShellCommand {
+                command: opaque.to_string()
+            }],
+            "command={command}"
+        );
+    }
+}
+
+#[test]
+fn nested_shell_outside_paths_require_targeted_approvals() {
+    let p = perms_with_workspace("/home/user/project");
+    for command in [
+        "bash -c 'cat /etc/passwd'",
+        "flock lockfile bash -c 'cat /etc/passwd'",
+        "flock lockfile -c 'cat /etc/passwd'",
+    ] {
+        let outcome = p.evaluate_tool(
+            yolo(),
+            ToolOrigin::Lua,
+            "bash",
+            &args_with("command", command),
+        );
+        assert_eq!(
+            outcome.missing_requirements,
+            vec![PermissionRequirement::PathPrefix {
+                dir: canonical_abs("/etc")
+            }],
+            "command={command}"
+        );
+        assert_eq!(
+            p.approval_options("bash", &[], &outcome).grant_sets,
+            vec![vec![PermissionGrant::PathPrefix {
+                dir: canonical_abs("/etc")
+            }]],
+            "command={command}"
+        );
+    }
+}
+
+#[test]
+fn unresolved_shell_paths_do_not_offer_persistent_root_approval() {
+    let p = perms_with_workspace("/home/user/project");
+    let long_argument = format!("/tmp/{}/etc/passwd", "x".repeat(300));
+    let args = args_with("command", &format!("unknown-tool '{long_argument}'"));
+    let outcome = p.evaluate_tool(yolo(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::UnresolvedPath {
+            path: PathBuf::from(long_argument),
+        }]
+    );
+    assert!(p
+        .approval_options("bash", &[], &outcome)
+        .grant_sets
+        .is_empty());
+    p.approvals
+        .write()
+        .unwrap()
+        .add_session_dir(PathBuf::from("/"));
+    assert_eq!(
+        p.evaluate_tool_with_approvals(yolo(), ToolOrigin::Lua, "bash", &args)
+            .decision,
+        Decision::Ask
     );
 }
 

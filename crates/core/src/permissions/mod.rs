@@ -176,6 +176,7 @@ pub enum ToolEffect {
         command: String,
         risk: ShellRisk,
         paths: Vec<PathEffect>,
+        commands: Vec<String>,
         opaque_commands: Vec<OpaqueShellCommand>,
     },
     Network,
@@ -203,6 +204,7 @@ pub enum PermissionRequirement {
     Command { tool: String, command: String },
     OpaqueCommand { tool: String, command: String },
     PathPrefix { dir: PathBuf },
+    UnresolvedPath { path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -868,6 +870,7 @@ impl Permissions {
                     command,
                     risk: analysis.risk,
                     paths: analysis.paths,
+                    commands: analysis.commands,
                     opaque_commands: analysis.opaque_commands,
                 }];
                 if args
@@ -922,8 +925,14 @@ impl Permissions {
             }) {
                 continue;
             }
-            let dir = display_dir_for_effect(effect);
-            let req = PermissionRequirement::PathPrefix { dir };
+            let req = match &effect.resolution {
+                PathResolution::Resolved(_) => PermissionRequirement::PathPrefix {
+                    dir: display_dir_for_effect(effect),
+                },
+                PathResolution::Unresolved(path) => {
+                    PermissionRequirement::UnresolvedPath { path: path.clone() }
+                }
+            };
             if !out
                 .iter()
                 .any(|existing| requirements_equivalent(existing, &req))
@@ -1208,7 +1217,8 @@ impl Permissions {
                     grants.push(vec![PermissionGrant::PathPrefix { dir: dir.clone() }]);
                 }
                 PermissionRequirement::Command { .. }
-                | PermissionRequirement::OpaqueCommand { .. } => {}
+                | PermissionRequirement::OpaqueCommand { .. }
+                | PermissionRequirement::UnresolvedPath { .. } => {}
             }
         }
 
@@ -1304,13 +1314,13 @@ pub(super) fn command_patterns_satisfy(
         return command_text_satisfied(command, patterns, config_subpatterns);
     }
 
-    let subcommands = split_shell_commands(command);
-    if subcommands.is_empty() {
+    let analysis = bash::analyze_shell_command(command, Path::new(""));
+    if analysis.commands.is_empty() {
         return false;
     }
 
     let mut checked_command = false;
-    for subcommand in subcommands {
+    for subcommand in analysis.commands {
         if is_cd_command(&subcommand) {
             continue;
         }
@@ -1386,18 +1396,6 @@ fn dedupe_requirements(requirements: &mut Vec<PermissionRequirement>) {
 
 fn display_dir_for_effect(effect: &PathEffect) -> PathBuf {
     let path = effect.resolution.path();
-    if !effect.resolution.is_resolved() {
-        let absolute = if path.is_absolute() {
-            path
-        } else {
-            &effect.base_dir
-        };
-        return absolute
-            .ancestors()
-            .last()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
-    }
     if effect.target_kind == PathTargetKind::Directory || path.is_dir() {
         return path.to_path_buf();
     }
@@ -1467,7 +1465,14 @@ fn bash_evaluation(
     let command = args.get("command").and_then(Value::as_str).unwrap_or("");
     let pattern = permissions
         .subcommand_ruleset(mode.clone(), "bash")
-        .and_then(|rs| shell_parser_decide_match(rs, command));
+        .and_then(|rs| {
+            effects.iter().find_map(|effect| match effect {
+                ToolEffect::Shell { commands, .. } => {
+                    shell_parser_decide_commands(rs, command, commands)
+                }
+                _ => None,
+            })
+        });
     if pattern == Some(Decision::Deny) {
         return BaseEvaluation {
             decision: Decision::Deny,
@@ -1576,7 +1581,7 @@ fn path_grant_satisfied(
     dir: &std::path::Path,
     approvals: &RuntimeApprovals,
 ) -> bool {
-    if path.access == PathAccess::Unknown {
+    if path.access == PathAccess::Unknown || !path.resolution.is_resolved() {
         return false;
     }
     let effect_dir = display_dir_for_effect(path);
@@ -1616,9 +1621,17 @@ pub fn shell_parser_decide(rs: &RuleSet, command: &str, _mode: AgentMode) -> Dec
 }
 
 fn shell_parser_decide_match(rs: &RuleSet, command: &str) -> Option<Decision> {
-    let command = smelt_buffer::text::trim_whitespace(command);
-    let subcmds = split_shell_commands(command);
-    if subcmds.len() <= 1 {
+    let commands = bash::analyze_shell_command(command, Path::new("")).commands;
+    shell_parser_decide_commands(rs, command, &commands)
+}
+
+fn shell_parser_decide_commands(
+    rs: &RuleSet,
+    command: &str,
+    commands: &[String],
+) -> Option<Decision> {
+    if commands.len() <= 1 {
+        let command = smelt_buffer::text::trim_whitespace(command);
         if is_cd_command(command) {
             return Some(Decision::Allow);
         }
@@ -1626,11 +1639,11 @@ fn shell_parser_decide_match(rs: &RuleSet, command: &str) -> Option<Decision> {
     }
     let mut worst = None;
     let mut unmatched = false;
-    for subcmd in subcmds {
-        if is_cd_command(&subcmd) {
+    for subcmd in commands {
+        if is_cd_command(subcmd) {
             continue;
         }
-        let Some(d) = check_ruleset_match(rs, &subcmd) else {
+        let Some(d) = check_ruleset_match(rs, subcmd) else {
             unmatched = true;
             continue;
         };

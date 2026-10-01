@@ -27,6 +27,7 @@ const MAX_BRACE_EXPANSIONS: usize = 256;
 pub(super) struct ShellAnalysis {
     pub risk: ShellRisk,
     pub paths: Vec<PathEffect>,
+    pub commands: Vec<String>,
     pub opaque_commands: Vec<OpaqueShellCommand>,
 }
 
@@ -294,6 +295,7 @@ pub(super) fn analyze_shell_command_in(
     let mut analysis = ShellAnalysis {
         risk: ShellRisk::ReadOnly,
         paths: Vec::new(),
+        commands: split_shell_commands(command),
         opaque_commands: Vec::new(),
     };
     let initial_state = ShellState::new(base_dir, home);
@@ -463,15 +465,232 @@ fn eval_simple_command(
             Some(_) => {
                 let mut command_state = state.clone();
                 apply_assignments(&mut command_state, &command_words.assignments);
-                let effects = command_effects(effective_words, &command_state);
-                analysis.paths.extend(effects.paths);
-                analysis.opaque_commands.extend(effects.opaque_commands);
+                analyze_executed_command(effective_words, &command_state, analysis, depth);
             }
             None => {}
         }
         output.push(state);
     }
     normalize_states(output)
+}
+
+fn analyze_executed_command(
+    words: &[ShellWord],
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    if depth >= MAX_SHELL_NESTING {
+        opaque_command(words, analysis);
+        return;
+    }
+    match words.first().map(command_name) {
+        Some("flock") => analyze_flock(words, state, analysis, depth),
+        Some("env") => analyze_env(words, state, analysis, depth),
+        Some("bash" | "sh") => analyze_shell_invocation(words, state, analysis, depth),
+        Some("python" | "python3" | "node" | "ruby" | "perl") => {
+            analyze_interpreter(words, state, analysis);
+        }
+        _ => {
+            let effects = command_effects(words, state);
+            analysis.paths.extend(effects.paths);
+            analysis.opaque_commands.extend(effects.opaque_commands);
+        }
+    }
+}
+
+fn opaque_command(words: &[ShellWord], analysis: &mut ShellAnalysis) {
+    let name = words.first().map(command_name).unwrap_or_default();
+    analysis.opaque_commands.push(OpaqueShellCommand {
+        command: format!("{name} *"),
+    });
+}
+
+fn analyze_shell_script(
+    script: &ShellWord,
+    words: &[ShellWord],
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    let Some(script) = script.expanded.as_deref() else {
+        opaque_command(words, analysis);
+        return;
+    };
+    let Some(program) = shell_parse::parse(script) else {
+        opaque_command(words, analysis);
+        return;
+    };
+    analysis.commands.extend(split_shell_commands(script));
+    eval_program(&program, vec![state.clone()], analysis, depth + 1);
+}
+
+fn analyze_shell_invocation(
+    words: &[ShellWord],
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    let mut i = 1;
+    while let Some(word) = words.get(i) {
+        let option = word.raw();
+        if option == "--" {
+            i += 1;
+            break;
+        }
+        if matches!(option, "-o" | "+o") {
+            i += 2;
+            continue;
+        }
+        if matches!(option, "--rcfile" | "--init-file") {
+            if let Some(path) = words.get(i + 1) {
+                push_path(
+                    &mut analysis.paths,
+                    path,
+                    &state.cwd,
+                    PathAccess::Read,
+                    PathTargetKind::File,
+                );
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(path) = word
+            .strip_literal_prefix("--rcfile=")
+            .or_else(|| word.strip_literal_prefix("--init-file="))
+        {
+            push_path(
+                &mut analysis.paths,
+                &path,
+                &state.cwd,
+                PathAccess::Read,
+                PathTargetKind::File,
+            );
+            i += 1;
+            continue;
+        }
+        if option == "-c"
+            || (option.starts_with('-') && !option.starts_with("--") && option[1..].contains('c'))
+        {
+            if let Some(script) = words.get(i + 1) {
+                analyze_shell_script(script, words, state, analysis, depth);
+            } else {
+                opaque_command(words, analysis);
+            }
+            return;
+        }
+        if option.starts_with('-') || option.starts_with('+') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    for word in words.iter().skip(i) {
+        maybe_push_explicit_path(&mut analysis.paths, word, &state.cwd, PathAccess::Unknown);
+    }
+}
+
+fn analyze_interpreter(words: &[ShellWord], state: &ShellState, analysis: &mut ShellAnalysis) {
+    let name = words.first().map(command_name).unwrap_or_default();
+    let short_option = if matches!(name, "python" | "python3") {
+        "-c"
+    } else {
+        "-e"
+    };
+    let mut i = 1;
+    while let Some(word) = words.get(i) {
+        let option = word.raw();
+        if option.starts_with(short_option)
+            || (name == "node" && (option.starts_with("-p") || option == "--print"))
+            || (matches!(name, "node" | "ruby" | "perl") && option == "--eval")
+            || (name == "perl"
+                && option.starts_with('-')
+                && !option.starts_with("--")
+                && option[1..].chars().any(|ch| matches!(ch, 'e' | 'E')))
+        {
+            opaque_command(words, analysis);
+            return;
+        }
+        if let Some(code) = option.strip_prefix("--eval=") {
+            if !code.is_empty() && matches!(name, "node" | "ruby" | "perl") {
+                opaque_command(words, analysis);
+                return;
+            }
+        }
+        if !option.starts_with('-') || option == "--" {
+            break;
+        }
+        i += 1;
+    }
+    let effects = command_effects(words, state);
+    analysis.paths.extend(effects.paths);
+    analysis.opaque_commands.extend(effects.opaque_commands);
+}
+
+fn analyze_flock(
+    words: &[ShellWord],
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
+    let mut i = 1;
+    let mut script = None;
+    while let Some(word) = words.get(i) {
+        match word.raw() {
+            "--" => {
+                i += 1;
+                break;
+            }
+            "-c" | "--command" => {
+                script = words.get(i + 1);
+                i += 2;
+            }
+            "-w" | "--wait" | "-E" | "--conflict-exit-code" => i += 2,
+            "-s" | "--shared" | "-x" | "--exclusive" | "-n" | "--nonblock" | "-u" | "--unlock"
+            | "-o" | "--close" | "-F" | "--no-fork" | "--verbose" => i += 1,
+            option if option.starts_with('-') => {
+                opaque_command(words, analysis);
+                return;
+            }
+            _ => break,
+        }
+    }
+    let Some(lock) = words.get(i) else {
+        opaque_command(words, analysis);
+        return;
+    };
+    push_path(
+        &mut analysis.paths,
+        lock,
+        &state.cwd,
+        PathAccess::Unknown,
+        PathTargetKind::File,
+    );
+    if let Some(script) = script {
+        analyze_shell_script(script, words, state, analysis, depth);
+    } else if matches!(
+        words.get(i + 1).map(ShellWord::raw),
+        Some("-c" | "--command")
+    ) {
+        if let Some(script) = words.get(i + 2) {
+            analyze_shell_script(script, words, state, analysis, depth);
+        } else {
+            opaque_command(words, analysis);
+        }
+    } else if words.len() > i + 1 {
+        let command = &words[i + 1..];
+        analysis.commands.push(executed_command_text(command));
+        analysis.risk = merge_risk(analysis.risk.clone(), classify_risk(command));
+        analyze_executed_command(command, state, analysis, depth + 1);
+    }
+}
+
+fn executed_command_text(words: &[ShellWord]) -> String {
+    words
+        .iter()
+        .map(ShellWord::raw)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn analyze_simple_item(
@@ -1023,7 +1242,6 @@ enum OperandPolicy {
     UnknownExplicit,
     Specialized(fn(&[ShellWord], &PathResolution) -> Vec<PathEffect>),
     Awk,
-    Env,
 }
 
 impl CommandRisk {
@@ -1083,7 +1301,6 @@ impl OperandPolicy {
             Self::UnknownExplicit => explicit_paths(words, &state.cwd, PathAccess::Unknown),
             Self::Specialized(analyze) => analyze(words, &state.cwd),
             Self::Awk => return awk::analyze(words, state),
-            Self::Env => return env_effects(words, state),
         };
         CommandEffects {
             paths,
@@ -1127,10 +1344,6 @@ fn command_spec(command: &str) -> CommandSpec {
         "cargo" => CommandSpec {
             risk: CommandRisk::Cargo,
             operands: Specialized(cargo_paths),
-        },
-        "env" => CommandSpec {
-            risk: CommandRisk::Fixed(ShellRisk::Unknown),
-            operands: Env,
         },
         "[" | "[[" | "test" => CommandSpec {
             risk: CommandRisk::Fixed(ShellRisk::ReadOnly),
@@ -1179,7 +1392,7 @@ fn command_spec(command: &str) -> CommandSpec {
             operands: None,
         },
         "curl" | "wget" | "scp" | "rsync" | "python" | "python3" | "node" | "ruby" | "bash"
-        | "sh" => CommandSpec {
+        | "sh" | "flock" => CommandSpec {
             risk: CommandRisk::Fixed(ShellRisk::Unknown),
             operands: UnknownExplicit,
         },
@@ -1268,7 +1481,12 @@ fn cwd_after_chdir(current: &PathResolution, target: &PathResolution) -> PathRes
     }
 }
 
-fn env_effects(words: &[ShellWord], state: &ShellState) -> CommandEffects {
+fn analyze_env(
+    words: &[ShellWord],
+    state: &ShellState,
+    analysis: &mut ShellAnalysis,
+    depth: usize,
+) {
     let cwd = &state.cwd;
     let mut paths = Vec::new();
     let mut command_state = state.clone();
@@ -1365,16 +1583,14 @@ fn env_effects(words: &[ShellWord], state: &ShellState) -> CommandEffects {
                 i += 1;
             }
             "-h" | "--help" | "-V" | "--version" => {
-                return CommandEffects {
-                    paths,
-                    opaque_commands: Vec::new(),
-                };
+                analysis.paths.extend(paths);
+                return;
             }
-            "-S" | "--split-string" => return opaque_env_effects(words, paths),
+            "-S" | "--split-string" => return opaque_env_effects(words, paths, analysis),
             option if option.starts_with("--split-string=") => {
-                return opaque_env_effects(words, paths);
+                return opaque_env_effects(words, paths, analysis);
             }
-            option if option.starts_with('-') => return opaque_env_effects(words, paths),
+            option if option.starts_with('-') => return opaque_env_effects(words, paths, analysis),
             _ => {
                 if let Some((name, value)) = words[i].assignment() {
                     command_state.set_variable(name, value);
@@ -1386,20 +1602,18 @@ fn env_effects(words: &[ShellWord], state: &ShellState) -> CommandEffects {
         }
     }
     command_state.cwd = command_cwd;
-    let mut effects = command_effects(&words[i..], &command_state);
-    paths.append(&mut effects.paths);
-    effects.paths = paths;
-    effects
+    analysis.paths.extend(paths);
+    let command = &words[i..];
+    if !command.is_empty() {
+        analysis.commands.push(executed_command_text(command));
+        analysis.risk = merge_risk(analysis.risk.clone(), classify_risk(command));
+        analyze_executed_command(command, &command_state, analysis, depth + 1);
+    }
 }
 
-fn opaque_env_effects(words: &[ShellWord], paths: Vec<PathEffect>) -> CommandEffects {
-    let command = words.first().map(command_name).unwrap_or("env");
-    CommandEffects {
-        paths,
-        opaque_commands: vec![OpaqueShellCommand {
-            command: format!("{command} *"),
-        }],
-    }
+fn opaque_env_effects(words: &[ShellWord], paths: Vec<PathEffect>, analysis: &mut ShellAnalysis) {
+    analysis.paths.extend(paths);
+    opaque_command(words, analysis);
 }
 
 fn git_paths(words: &[ShellWord], cwd: &PathResolution) -> Vec<PathEffect> {

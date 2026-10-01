@@ -427,6 +427,7 @@ impl RuntimeApprovals {
                 self.explicit_command_approved(tool, command, None)
             }
             PermissionRequirement::PathPrefix { dir } => self.dir_approved_for_path(dir),
+            PermissionRequirement::UnresolvedPath { .. } => false,
         }
     }
 
