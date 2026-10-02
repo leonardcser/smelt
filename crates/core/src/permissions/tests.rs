@@ -105,6 +105,8 @@ fn mode_perms(tools: HashMap<String, Decision>, buckets: &[(&str, RuleSet)]) -> 
     ModePerms {
         tools,
         effects: EffectPerms::default(),
+        allowed_paths: vec![],
+        resolved_paths: vec![],
         patterns,
     }
 }
@@ -2442,6 +2444,172 @@ fn workspace_bash_ignores_standard_stream_devices() {
 
     assert_eq!(outcome.decision, Decision::Allow);
     assert!(outcome.missing_requirements.is_empty());
+}
+
+#[test]
+fn declarative_paths_allow_shell_and_file_tools_without_session_grants() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let trusted = temp.path().join("trusted");
+    let other = temp.path().join("trusted-other");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&trusted).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let mut raw = RawPerms::default();
+    raw.default.paths.allow.push(trusted.display().to_string());
+    raw.default.tools.allow.push("read_file".into());
+    raw.default.patterns.insert(
+        "bash".into(),
+        RawRuleSet {
+            allow: vec!["cat *".into()],
+            ..Default::default()
+        },
+    );
+    raw.modes.insert("plan".into(), RawModePerms::default());
+    let defaults = ToolDefaults {
+        tool_effects: test_tool_effects(),
+        ..Default::default()
+    };
+    let mut p = Permissions::from_raw(&raw, &defaults);
+    p.set_workspace(workspace);
+    p.set_paths_fn(stub_paths_fn());
+
+    for tool in ["read_file", "bash"] {
+        let args = if tool == "bash" {
+            args_with("command", &format!("cat {}/file.txt", trusted.display()))
+        } else {
+            args_with("file_path", &format!("{}/file.txt", trusted.display()))
+        };
+        assert_eq!(
+            p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, tool, &args)
+                .decision,
+            Decision::Allow
+        );
+        assert_eq!(
+            p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, tool, &args)
+                .decision,
+            Decision::Allow
+        );
+
+        let args = if tool == "bash" {
+            args_with("command", &format!("cat {}/file.txt", other.display()))
+        } else {
+            args_with("file_path", &format!("{}/file.txt", other.display()))
+        };
+        assert_eq!(
+            p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, tool, &args)
+                .decision,
+            Decision::Ask
+        );
+    }
+
+    raw.default.tools.deny.push("read_file".into());
+    raw.default
+        .patterns
+        .get_mut("bash")
+        .unwrap()
+        .deny
+        .push("cat *".into());
+    let mut denied = Permissions::from_raw(&raw, &defaults);
+    denied.set_workspace(temp.path().join("workspace"));
+    denied.set_paths_fn(stub_paths_fn());
+    assert_eq!(
+        denied
+            .evaluate_tool_with_approvals(
+                normal(),
+                ToolOrigin::Lua,
+                "read_file",
+                &args_with("file_path", &format!("{}/file.txt", trusted.display()))
+            )
+            .decision,
+        Decision::Deny
+    );
+    assert_eq!(
+        denied
+            .evaluate_tool_with_approvals(
+                normal(),
+                ToolOrigin::Lua,
+                "bash",
+                &args_with("command", &format!("cat {}/file.txt", trusted.display()))
+            )
+            .decision,
+        Decision::Deny
+    );
+}
+
+#[test]
+fn declarative_paths_resolve_tilde_symlinks_and_mode_specific_prefixes() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    let trusted = home.join("trusted");
+    let extra = temp.path().join("extra");
+    for dir in [&home, &workspace, &trusted, &extra] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let mut raw = RawPerms::default();
+    raw.default.paths.allow.push("~/trusted".into());
+    raw.modes.insert(
+        "plan".into(),
+        RawModePerms {
+            paths: RawPathRules {
+                allow: vec![extra.display().to_string()],
+            },
+            ..Default::default()
+        },
+    );
+    let mut p = Permissions::from_raw(
+        &raw,
+        &ToolDefaults {
+            tool_effects: test_tool_effects(),
+            ..Default::default()
+        },
+    );
+    p.set_home(home);
+    p.set_workspace(workspace);
+    p.set_paths_fn(stub_paths_fn());
+    let path = trusted.join("file");
+    let outcome = p.evaluate_tool(
+        normal(),
+        ToolOrigin::Lua,
+        "read_file",
+        &args_with("file_path", &path.display().to_string()),
+    );
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::Tool {
+            tool: "read_file".into()
+        }]
+    );
+
+    #[cfg(unix)]
+    {
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&trusted, &link).unwrap();
+        let outcome = p.evaluate_tool(
+            normal(),
+            ToolOrigin::Lua,
+            "read_file",
+            &args_with("file_path", &link.join("file").display().to_string()),
+        );
+        assert_eq!(
+            outcome.missing_requirements,
+            vec![PermissionRequirement::Tool {
+                tool: "read_file".into()
+            }]
+        );
+    }
+    let args = args_with("file_path", &extra.join("file").display().to_string());
+    assert!(p
+        .evaluate_tool(normal(), ToolOrigin::Lua, "read_file", &args)
+        .missing_requirements
+        .iter()
+        .any(|r| matches!(r, PermissionRequirement::PathPrefix { .. })));
+    assert!(!p
+        .evaluate_tool(plan(), ToolOrigin::Lua, "read_file", &args)
+        .missing_requirements
+        .iter()
+        .any(|r| matches!(r, PermissionRequirement::PathPrefix { .. })));
 }
 
 #[test]

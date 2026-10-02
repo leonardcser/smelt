@@ -22,8 +22,15 @@ pub struct RawRuleSet {
 pub struct RawModePerms {
     pub tools: RawRuleSet,
     pub effects: RawEffectRules,
+    pub paths: RawPathRules,
     #[serde(default)]
     pub patterns: HashMap<String, RawRuleSet>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct RawPathRules {
+    pub allow: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -87,6 +94,15 @@ pub(super) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawMode
     RawModePerms {
         tools: merge_ruleset(&default.tools, &mode.tools),
         effects: merge_effect_rules(&default.effects, &mode.effects),
+        paths: RawPathRules {
+            allow: default
+                .paths
+                .allow
+                .iter()
+                .chain(&mode.paths.allow)
+                .cloned()
+                .collect(),
+        },
         patterns,
     }
 }
@@ -125,6 +141,8 @@ impl Default for ModeBehavior {
 pub(super) struct ModePerms {
     pub(super) tools: HashMap<String, Decision>,
     pub(super) effects: EffectPerms,
+    pub(super) allowed_paths: Vec<std::path::PathBuf>,
+    pub(super) resolved_paths: Vec<std::path::PathBuf>,
     pub(super) patterns: HashMap<String, RuleSet>,
 }
 
@@ -270,6 +288,13 @@ pub(super) fn build_mode(
     ModePerms {
         tools,
         effects: raw.effects.clone().into(),
+        allowed_paths: raw
+            .paths
+            .allow
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect(),
+        resolved_paths: Vec::new(),
         patterns,
     }
 }

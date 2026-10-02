@@ -528,7 +528,13 @@
 ---@class smelt.permissions.ModePerms
 ---@field tools? smelt.permissions.RuleSet Exact tool-name `allow`/`ask`/`deny` entries.
 ---@field effects? smelt.permissions.EffectRules Effect-level decisions keyed by effect name.
+---@field paths? smelt.permissions.PathRules Trusted directory prefixes for path-aware tool calls in this mode.
 ---@field patterns? table<string, smelt.permissions.RuleSet> Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …).
+
+--- Directory prefixes trusted for path-aware tools and shell commands outside the workspace.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.permissions.PathRules
+---@field allow? string[] Directory prefixes to trust without a path prompt (supports `~` and symlinks).
 
 --- Spec for `smelt.permissions.extend`. Each mode falls back to `default`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

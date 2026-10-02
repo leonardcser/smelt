@@ -1667,6 +1667,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn headless_lua_policy_paths_cover_registered_file_and_shell_tools() {
+        use smelt_core::permissions::{
+            resolve_permissions, store::PermissionStore, PermissionRuntimePaths, PermissionsHandle,
+            ToolOrigin,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        let trusted = root.path().join("trusted");
+        let config_dir = root.path().join("config");
+        for path in [&cwd, &trusted, &config_dir] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(
+            config_dir.join("init.lua"),
+            format!(
+                r#"smelt.permissions.extend({{
+                    default = {{
+                        tools = {{ allow = {{ "read_file" }} }},
+                        patterns = {{ bash = {{ allow = {{ "cat *" }} }} }},
+                        paths = {{ allow = {{ "{}" }} }},
+                    }},
+                }})"#,
+                trusted.display()
+            ),
+        )
+        .unwrap();
+        let env = engine::env::RuntimeEnv::scripted(
+            4242,
+            root.path().join("home"),
+            config_dir.clone(),
+            root.path().join("state"),
+            root.path().join("cache"),
+            root.path().join("data"),
+            root.path().join("runtime"),
+            cwd.clone(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        );
+        let mut lua = LuaRuntime::new_for_runtime(&env, Some(config_dir), None, Some(cwd.clone()));
+        lua.load_host_bootstrap();
+        lua.load_host_autoload();
+        lua.load_user_config();
+        assert!(
+            lua.load_error.is_none(),
+            "headless startup: {:?}",
+            lua.load_error
+        );
+        let permissions = PermissionsHandle::from_resolution(
+            resolve_permissions(
+                &lua.permission_rules_snapshot().unwrap(),
+                &lua.tool_defaults(),
+                lua.mode_behaviors(),
+                &smelt_core::config::ResolvedSettings::default(),
+                PermissionRuntimePaths {
+                    cwd: &cwd,
+                    home: env.home(),
+                },
+                &PermissionStore::new(env.state_dir().clone()),
+                None,
+            )
+            .unwrap(),
+        );
+        let path = trusted.join("file.txt");
+        let args = std::collections::HashMap::from([("file_path".into(), serde_json::json!(path))]);
+        let paths = lua.tool_paths_for_workspace("read_file", &args).unwrap();
+        assert!(matches!(
+            paths,
+            smelt_core::lua::ToolWorkspacePaths::Declared(_)
+        ));
+        assert_eq!(
+            permissions
+                .evaluate_tool_with_paths_and_approvals(
+                    protocol::AgentMode::normal(),
+                    ToolOrigin::Lua,
+                    "read_file",
+                    &args,
+                    paths.as_slice(),
+                )
+                .decision,
+            protocol::Decision::Allow,
+        );
+        let args = std::collections::HashMap::from([(
+            "command".into(),
+            serde_json::json!(format!("cat {}", path.display())),
+        )]);
+        assert_eq!(
+            permissions
+                .evaluate_tool_with_approvals(
+                    protocol::AgentMode::normal(),
+                    ToolOrigin::Lua,
+                    "bash",
+                    &args,
+                )
+                .decision,
+            protocol::Decision::Allow,
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn headless_notebook_tool_applies_edits_with_the_core_host() {
         let root = tempfile::tempdir().expect("runtime root");

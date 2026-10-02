@@ -673,7 +673,7 @@ impl Permissions {
                 build_mode(&merge_mode(def, &raw_mode), &mode, behavior, tool_defaults),
             );
         }
-        Self {
+        let mut permissions = Self {
             modes,
             mode_behaviors,
             restrict_to_workspace: true,
@@ -685,7 +685,9 @@ impl Permissions {
             tool_effects: tool_defaults.tool_effects.clone(),
             subpattern_parsers: tool_defaults.subpattern_parsers.clone(),
             approvals: Arc::new(RwLock::new(RuntimeApprovals::new())),
-        }
+        };
+        permissions.set_home(permissions.home.clone());
+        permissions
     }
 
     /// Create a clone with per-turn permission overrides layered on top.
@@ -735,6 +737,17 @@ impl Permissions {
 
     fn set_home(&mut self, home: PathBuf) {
         self.home = home;
+        for mode in self.modes.values_mut() {
+            mode.resolved_paths = mode
+                .allowed_paths
+                .iter()
+                .filter_map(|path| {
+                    workspace::resolve_approval_path_from(path, &self.home)
+                        .resolved()
+                        .map(Path::to_path_buf)
+                })
+                .collect();
+        }
     }
 
     pub fn set_allowed_roots(&mut self, active: PathBuf, roots: Vec<PathBuf>) {
@@ -922,6 +935,12 @@ impl Permissions {
                     .iter()
                     .filter_map(PathResolution::resolved)
                     .any(|root| path.starts_with(root))
+                    || self.mode_perms(mode).is_some_and(|perms| {
+                        perms
+                            .resolved_paths
+                            .iter()
+                            .any(|prefix| path.starts_with(prefix))
+                    })
             }) {
                 continue;
             }

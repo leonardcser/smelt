@@ -61,7 +61,15 @@ pub(super) fn normalize_approval_path(path: &Path) -> PathBuf {
 }
 
 fn resolve_approval_path(path: &Path) -> PathResolution {
-    resolve_filesystem_path(&engine::paths::expand_tilde(path))
+    resolve_approval_path_from(path, &engine::paths::home_dir())
+}
+
+pub(super) fn resolve_approval_path_from(path: &Path, home: &Path) -> PathResolution {
+    let expanded = path
+        .strip_prefix("~")
+        .map(|rest| home.join(rest))
+        .unwrap_or_else(|_| path.to_path_buf());
+    resolve_filesystem_path(&expanded)
 }
 
 fn comparable_path(path: &Path) -> Option<PathBuf> {

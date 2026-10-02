@@ -16,7 +16,7 @@ permissions.check = nil
 ---@type fun(mode_str: string, name: string): string
 permissions.check_tool = nil
 
---- Extend the generated permission policy with user rules. Supports `tools`, `effects`, and `patterns` sections under `default` or any mode name.
+--- Extend the generated permission policy with user rules. Supports `tools`, `effects`, `paths`, and `patterns` sections under `default` or any mode name.
 ---@type fun(spec: smelt.permissions.PolicySpec): nil
 permissions.extend = nil
 

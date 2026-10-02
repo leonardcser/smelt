@@ -3175,6 +3175,7 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
                 default = {
                     tools = { ask = { "*" } },
                     effects = { read = "ask" },
+                    paths = { allow = { "/tmp", "~/.cargo" } },
                 },
             })
             assert(not pcall(function()

@@ -38,7 +38,7 @@ Types: [`smelt.permissions.PolicySpec`](types.md#smeltpermissionspolicyspec)
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Extend the generated permission policy with user rules. Supports `tools`, `effects`, and `patterns` sections under `default` or any mode name.
+Extend the generated permission policy with user rules. Supports `tools`, `effects`, `paths`, and `patterns` sections under `default` or any mode name.
 
 ## `smelt.permissions.grant_session`
 

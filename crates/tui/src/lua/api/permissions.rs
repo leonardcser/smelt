@@ -262,6 +262,15 @@ impl From<LuaEffectRules> for crate::permissions::rules::RawEffectRules {
     }
 }
 
+/// Directory prefixes trusted for path-aware tools and shell commands outside the workspace.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.PathRules")]
+pub struct LuaPathRules {
+    /// Directory prefixes to trust without a path prompt (supports `~` and symlinks).
+    #[lua(default)]
+    pub allow: Vec<String>,
+}
+
 /// Permission slots that apply within a single agent mode.
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.ModePerms")]
@@ -270,6 +279,8 @@ pub struct LuaModePerms {
     pub tools: Option<LuaRuleSet>,
     /// Effect-level decisions keyed by effect name.
     pub effects: Option<LuaEffectRules>,
+    /// Trusted directory prefixes for path-aware tool calls in this mode.
+    pub paths: Option<LuaPathRules>,
     /// Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …).
     pub patterns: Option<std::collections::HashMap<String, LuaRuleSet>>,
 }
@@ -279,6 +290,9 @@ impl From<LuaModePerms> for crate::permissions::rules::RawModePerms {
         Self {
             tools: m.tools.map(Into::into).unwrap_or_default(),
             effects: m.effects.map(Into::into).unwrap_or_default(),
+            paths: crate::permissions::rules::RawPathRules {
+                allow: m.paths.map(|paths| paths.allow).unwrap_or_default(),
+            },
             patterns: m
                 .patterns
                 .unwrap_or_default()
@@ -431,7 +445,7 @@ pub(super) fn register(
         let shared = Arc::clone(shared);
         m.fn_(
             "extend",
-            "Extend the generated permission policy with user rules. Supports `tools`, `effects`, and `patterns` sections under `default` or any mode name.",
+            "Extend the generated permission policy with user rules. Supports `tools`, `effects`, `paths`, and `patterns` sections under `default` or any mode name.",
             &["spec"],
             move |_, spec: LuaPermissionPolicySpec| -> LuaResult<()> {
                 let incoming = crate::permissions::rules::RawPerms {
@@ -576,6 +590,7 @@ fn merge_mode(
 ) {
     merge_ruleset(&mut base.tools, incoming.tools);
     merge_effects(&mut base.effects, incoming.effects);
+    base.paths.allow.extend(incoming.paths.allow);
     for (name, rules) in incoming.patterns {
         merge_ruleset(base.patterns.entry(name).or_default(), rules);
     }

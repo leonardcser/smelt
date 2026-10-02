@@ -785,7 +785,18 @@ Permission slots that apply within a single agent mode.
 | --- | --- | --- | --- |
 | `tools` | [smelt.permissions.RuleSet](types.md#smeltpermissionsruleset) |  | Exact tool-name `allow`/`ask`/`deny` entries. |
 | `effects` | [smelt.permissions.EffectRules](types.md#smeltpermissionseffectrules) |  | Effect-level decisions keyed by effect name. |
+| `paths` | [smelt.permissions.PathRules](types.md#smeltpermissionspathrules) |  | Trusted directory prefixes for path-aware tool calls in this mode. |
 | `patterns` | `table<string, smelt.permissions.RuleSet>` |  | Tool-specific argument patterns keyed by tool name (`"bash"`, `"web_fetch"`, …). |
+
+### `smelt.permissions.PathRules`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Directory prefixes trusted for path-aware tools and shell commands outside the workspace.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `allow` | `string[]` |  | Directory prefixes to trust without a path prompt (supports `~` and symlinks). |
 
 ### `smelt.permissions.PolicySpec`
 
