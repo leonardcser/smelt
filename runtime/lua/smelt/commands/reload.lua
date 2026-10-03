@@ -3,7 +3,7 @@
 
 smelt.cmd.register("reload", function()
   smelt.engine.reload()
-end, { desc = "reload config and model context limit", busy = "reject" })
+end, { desc = "reload config and model context limit", busy = "run" })
 
 smelt.keymap.set("", "<F5>", function()
   smelt.engine.reload()

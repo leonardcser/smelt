@@ -4412,9 +4412,33 @@ async fn reload_lua_via_engine_dismisses_open_modal() {
         "modal should be open after /open_modal"
     );
 
-    // Drive the reload through the Lua binding (the gate lives there,
-    // not in `TuiApp::reload_lua`). The binding should dismiss the
-    // modal and call through to `reload_lua` instead of bailing out.
+    app.start_turn(1);
+    app.exec_lua_entry("smelt.engine.reload()").unwrap();
+    assert!(app.pending_lua_reload());
+    app.drain_idle_work();
+    assert!(app.ui_probe().active_modal().is_some());
+
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        history: None,
+        meta: None,
+    }));
+    assert!(app.pending_lua_reload(), "open modal keeps reload deferred");
+    assert!(app.ui_probe().active_modal().is_some());
+
+    app.press(KeyCode::Esc);
+    app.drain_idle_work();
+    assert!(app.ui_probe().active_modal().is_none());
+    assert!(
+        !app.pending_lua_reload(),
+        "closing the modal releases reload"
+    );
+
+    app.apply_lua_command("open_modal");
+    app.drive_lua_tasks();
+    assert!(app.ui_probe().active_modal().is_some());
+
+    // An explicit reload while idle dismisses the modal before scheduling.
     app.exec_lua_entry("smelt.engine.reload()")
         .expect("reload succeeds even with modal open");
     assert!(app.pending_lua_reload());
@@ -4476,6 +4500,48 @@ fn reload_lua_preserves_user_size_override() {
         Some((50, 18)),
         "user resize preserved across reload"
     );
+}
+
+#[test]
+fn manual_reload_waits_for_active_turn() {
+    for entry in ["command", "keymap", "api"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, "_G.reload_version = 1\n").unwrap();
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        app.start_turn(1);
+        std::fs::write(&init, "_G.reload_version = 2\n").unwrap();
+
+        assert!(app.app.schedule_lua_config_reload());
+        for _ in 0..2 {
+            match entry {
+                "command" => {
+                    app.type_text("/reload");
+                    app.press(KeyCode::Enter);
+                }
+                "keymap" => app.press(KeyCode::F(5)),
+                "api" => app.exec_lua_entry("smelt.engine.reload()").unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(app.pending_lua_reload(), "{entry} must queue reload");
+            app.drain_idle_work();
+            assert!(app.agent_running());
+            assert_eq!(app.lua_int_global("reload_version"), Some(1));
+            assert!(app.state().queued_inputs.is_empty());
+            assert_eq!(
+                app.overlays_probe().notification().unwrap().summary,
+                "reload queued until agent is idle"
+            );
+        }
+
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id: 1,
+            history: None,
+            meta: None,
+        }));
+        assert!(!app.pending_lua_reload());
+        assert_eq!(app.lua_int_global("reload_version"), Some(2));
+    }
 }
 
 #[test]

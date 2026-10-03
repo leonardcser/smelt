@@ -417,7 +417,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     m.live_only_fn(
         "reload",
-        "Queue a transactional Lua reload for the next safe point. The candidate evaluates in a fresh Lua runtime and replaces commands, keymaps, tools, hooks, timers, signals, providers, settings, and generation-owned UI resources only after loading and runtime resolution succeed. An open modal is dismissed before the request is queued.",
+        "Queue a transactional Lua reload for the next safe point. The candidate evaluates in a fresh Lua runtime and replaces commands, keymaps, tools, hooks, timers, signals, providers, settings, and generation-owned UI resources only after loading and runtime resolution succeed. Includes prompt inputs such as AGENTS.md, skills, and `--system-prompt`. While the agent is working, the reload waits until idle without dismissing open modals. When idle, an open modal is dismissed before the request is queued.",
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_agent_host(|host| host.reload_lua_now());

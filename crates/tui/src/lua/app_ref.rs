@@ -647,11 +647,10 @@ impl AgentLuaHost<'_> {
 
     pub(crate) fn reload_lua_now(&mut self) {
         if self.app.prompt_input_is_busy() {
-            self.app
-                .notify_error("cannot reload while agent is working".into());
-            return;
+            self.app.notify("reload queued until agent is idle".into());
+        } else {
+            while self.app.close_active_modal() {}
         }
-        while self.app.close_active_modal() {}
         self.app.schedule_lua_reload();
     }
 

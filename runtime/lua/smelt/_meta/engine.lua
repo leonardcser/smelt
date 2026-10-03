@@ -43,7 +43,7 @@ engine.on_context_limit = nil
 ---@type fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: any))): smelt.Reg
 engine.on_prepare_request = nil
 
---- Queue a transactional Lua reload for the next safe point. The candidate evaluates in a fresh Lua runtime and replaces commands, keymaps, tools, hooks, timers, signals, providers, settings, and generation-owned UI resources only after loading and runtime resolution succeed. An open modal is dismissed before the request is queued.
+--- Queue a transactional Lua reload for the next safe point. The candidate evaluates in a fresh Lua runtime and replaces commands, keymaps, tools, hooks, timers, signals, providers, settings, and generation-owned UI resources only after loading and runtime resolution succeed. Includes prompt inputs such as AGENTS.md, skills, and `--system-prompt`. While the agent is working, the reload waits until idle without dismissing open modals. When idle, an open modal is dismissed before the request is queued.
 ---@type fun(): nil
 engine.reload = nil
 
