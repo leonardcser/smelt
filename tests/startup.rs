@@ -1992,6 +1992,481 @@ fn run_headless_config(source: &str) -> std::process::Output {
         .expect("run headless CLI")
 }
 
+#[derive(Clone, Copy)]
+enum StreamEnding {
+    Eof,
+    NetworkFailure,
+    Cancel,
+}
+
+struct StreamingTrial {
+    status: std::process::ExitStatus,
+    events: Vec<serde_json::Value>,
+    requests: usize,
+    tool_effect: Option<String>,
+    stderr: String,
+}
+
+fn run_headless_stream(bodies: &[String], ending: StreamEnding) -> StreamingTrial {
+    let home = tempfile::tempdir().unwrap();
+    let provider = TcpListener::bind("127.0.0.1:0").unwrap();
+    provider.set_nonblocking(true).unwrap();
+    let config = home.path().join("init.lua");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_continue = "off"
+smelt.provider.register("test", {{
+  type = "openai-compatible",
+  api_base = "http://{}/v1",
+  api_key_env = "SMELT_STREAM_TEST_KEY",
+  models = {{ "test-model" }},
+}})
+smelt.tools.register({{
+  name = "stream_probe",
+  description = "Record a test side effect",
+  permission_defaults = {{ normal = "allow" }},
+  parameters = {{ type = "object", properties = {{ value = {{ type = "string" }} }} }},
+  execute = function(args)
+    local file = assert(io.open("tool-executed", "a"))
+    file:write(args.value or "missing")
+    file:close()
+    return {{ content = "recorded" }}
+  end,
+}})
+"#,
+            provider.local_addr().unwrap()
+        ),
+    )
+    .unwrap();
+    let stdout = home.path().join("events.jsonl");
+    let stderr = home.path().join("stderr");
+    let child = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env("XDG_CACHE_HOME", home.path().join("cache"))
+        .env("SMELT_STREAM_TEST_KEY", "test-only")
+        .current_dir(home.path())
+        .args([
+            "--headless",
+            "--format",
+            "json",
+            "--color",
+            "never",
+            "--model",
+            "test/test-model",
+            "--config",
+        ])
+        .arg(config)
+        .arg("exercise the stream")
+        .stdin(Stdio::null())
+        .stdout(File::create(&stdout).unwrap())
+        .stderr(File::create(&stderr).unwrap())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let mut process = ChildProcessGroup {
+        id: child.id() as i32,
+        child,
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut requests = 0;
+    let mut held_streams = Vec::new();
+    let mut cancelled = false;
+    let status = loop {
+        if let Some(status) = process.child.try_wait().unwrap() {
+            break status;
+        }
+        while let Ok((mut stream, _)) = provider.accept() {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let post = line.starts_with("POST ");
+            let mut length = 0;
+            loop {
+                line.clear();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse::<u64>().unwrap();
+                    }
+                }
+            }
+            std::io::copy(&mut reader.take(length), &mut std::io::sink()).unwrap();
+            if !post {
+                let body = r#"{"data":[]}"#;
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+                continue;
+            }
+            let body = &bodies[requests.min(bodies.len() - 1)];
+            requests += 1;
+            assert!(requests <= bodies.len() + 3, "unexpected retries");
+            if requests < bodies.len() || matches!(ending, StreamEnding::Eof) {
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).unwrap();
+                // Small writes exercise arbitrary transport boundaries; decoder tests
+                // separately check every split, including mid-codepoint UTF-8.
+                for byte in body.as_bytes() {
+                    if stream.write_all(&[*byte]).is_err() {
+                        break;
+                    }
+                }
+            } else {
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{body}\r\n", body.len()).unwrap();
+                if matches!(ending, StreamEnding::Cancel) {
+                    held_streams.push(stream);
+                }
+                // Dropping a chunked response without its zero chunk is a transport error.
+            }
+        }
+        if matches!(ending, StreamEnding::Cancel)
+            && !cancelled
+            && std::fs::read_to_string(&stdout)
+                .unwrap()
+                .contains("TextDelta")
+        {
+            assert_eq!(unsafe { libc::kill(process.id, libc::SIGINT) }, 0);
+            cancelled = true;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "headless stream timed out: {}",
+            std::fs::read_to_string(&stderr).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let events = std::fs::read_to_string(stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("structured CLI event"))
+        .collect();
+    StreamingTrial {
+        status,
+        events,
+        requests,
+        tool_effect: std::fs::read_to_string(home.path().join("tool-executed")).ok(),
+        stderr: std::fs::read_to_string(stderr).unwrap(),
+    }
+}
+
+fn stream_event(value: serde_json::Value) -> String {
+    format!("data: {value}\n\n")
+}
+
+fn stream_content() -> String {
+    stream_event(
+        serde_json::json!({"choices": [{"delta": {"content": "partial 界", "reasoning_content": "thinking"}}]}),
+    )
+}
+
+fn stream_finish() -> String {
+    stream_event(serde_json::json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}))
+}
+
+fn stream_tool(arguments: &str, start: bool) -> String {
+    let mut tool = serde_json::json!({"index": 0, "function": {"arguments": arguments}});
+    if start {
+        tool["id"] = serde_json::json!("probe-1");
+        tool["function"]["name"] = serde_json::json!("stream_probe");
+    }
+    stream_event(serde_json::json!({"choices": [{"delta": {"tool_calls": [tool]}}]}))
+}
+
+fn assert_stream_failure(trial: &StreamingTrial, cause: &str) {
+    assert_eq!(trial.status.code(), Some(3), "{}", trial.stderr);
+    assert_eq!(trial.requests, 1, "failed stream was retried");
+    assert!(trial.tool_effect.is_none());
+    let error = trial
+        .events
+        .iter()
+        .find_map(|ev| ev.get("TurnError"))
+        .expect("TurnError");
+    assert!(
+        error["message"].as_str().unwrap().contains(cause),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("sensitive-fixture"));
+    assert!(!error.to_string().contains("partial 界"));
+    assert!(!trial.stderr.contains("sensitive-fixture"));
+    assert!(!trial
+        .events
+        .iter()
+        .any(|ev| ev.get("TurnComplete").is_some() || ev.get("ToolStarted").is_some()));
+    assert!(!trial
+        .events
+        .iter()
+        .filter_map(|ev| ev.get("HistoryAppended"))
+        .any(|ev| ev.to_string().contains("\"kind\":\"assistant\"")));
+}
+
+#[test]
+fn headless_stream_valid_content_and_usage() {
+    let usage = stream_event(
+        serde_json::json!({"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}),
+    );
+    let body = format!(
+        ": keepalive\n\n{}{}{}data: [DONE]\n\n",
+        stream_content(),
+        stream_finish(),
+        usage
+    )
+    .replace("data: ", "data:")
+    .replace('\n', "\r\n");
+    let trial = run_headless_stream(&[body], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 1);
+    assert!(trial.events.iter().any(|ev| ev
+        .get("TextDelta")
+        .is_some_and(|v| v.to_string().contains("界"))));
+    assert!(trial
+        .events
+        .iter()
+        .any(|ev| ev.get("TurnComplete").is_some()));
+    assert!(trial.events.iter().any(|ev| ev.get("TokenUsage").is_some()));
+}
+
+#[test]
+fn headless_stream_valid_fragmented_tool_call() {
+    let body = format!(
+        "{}{}{}data: [DONE]\n\n",
+        stream_tool("{\"value\":", true),
+        stream_tool("\"recorded\"}", false),
+        stream_finish()
+    );
+    let trial = run_headless_stream(
+        &[body, format!("{}{}", stream_content(), stream_finish())],
+        StreamEnding::Eof,
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 2);
+    assert_eq!(
+        trial.tool_effect.as_deref(),
+        Some("recorded"),
+        "{:?}",
+        trial.events
+    );
+    assert!(trial
+        .events
+        .iter()
+        .any(|ev| ev.get("ToolStarted").is_some()));
+    assert!(trial
+        .events
+        .iter()
+        .any(|ev| ev.get("ToolFinished").is_some()));
+}
+
+#[test]
+fn headless_stream_upstream_error() {
+    for (error, cause) in [
+        (
+            stream_event(
+                serde_json::json!({"error": {"message": "sensitive-fixture", "code": "server_error"}}),
+            ),
+            "upstream error event",
+        ),
+        (
+            "event: error\ndata: sensitive-fixture\n\n".into(),
+            "upstream error event",
+        ),
+        ("event: error\ndata:\n\n".into(), "upstream error event"),
+        (
+            stream_event(
+                serde_json::json!({"error": {"message": "sensitive-fixture", "code": "insufficient_quota"}}),
+            ),
+            "API quota exceeded",
+        ),
+        (
+            stream_event(
+                serde_json::json!({"error": {"message": "sensitive-fixture", "code": "rate_limit_exceeded", "resets_at": 0}}),
+            ),
+            "rate limited",
+        ),
+    ] {
+        assert_stream_failure(
+            &run_headless_stream(
+                &[format!("{}{}{error}", stream_content(), stream_finish())],
+                StreamEnding::Eof,
+            ),
+            cause,
+        );
+    }
+}
+
+#[test]
+fn headless_stream_malformed_json() {
+    assert_stream_failure(
+        &run_headless_stream(
+            &[format!(
+                "{}{}data: {{sensitive-fixture}}\n\n",
+                stream_content(),
+                stream_finish()
+            )],
+            StreamEnding::Eof,
+        ),
+        "malformed JSON",
+    );
+}
+
+#[test]
+fn headless_stream_eof_during_event() {
+    for tail in ["data: {\"sensitive-fixture\":", "data: {\"ok\":true}\n"] {
+        assert_stream_failure(
+            &run_headless_stream(
+                &[format!("{}{}{tail}", stream_content(), stream_finish())],
+                StreamEnding::Eof,
+            ),
+            "incomplete SSE event",
+        );
+    }
+}
+
+#[test]
+fn headless_stream_eof_without_finish_reason() {
+    assert_stream_failure(
+        &run_headless_stream(&[stream_content()], StreamEnding::Eof),
+        "without finish_reason",
+    );
+}
+
+#[test]
+fn headless_stream_done_without_finish_reason() {
+    let trial = run_headless_stream(
+        &[format!("{}data: [DONE]\n\n", stream_content())],
+        StreamEnding::Eof,
+    );
+    assert_stream_failure(&trial, "without finish_reason");
+    let error = trial
+        .events
+        .iter()
+        .find_map(|ev| ev.get("TurnError"))
+        .unwrap();
+    assert!(error["message"].as_str().unwrap().contains("done=true"));
+}
+
+#[test]
+fn headless_stream_network_interruption() {
+    assert_stream_failure(
+        &run_headless_stream(&[stream_content()], StreamEnding::NetworkFailure),
+        "network error",
+    );
+}
+
+#[test]
+fn headless_stream_cancellation() {
+    let trial = run_headless_stream(
+        &[format!("{}data: {{", stream_content())],
+        StreamEnding::Cancel,
+    );
+    assert_eq!(trial.status.code(), Some(130), "{}", trial.stderr);
+    assert_eq!(trial.requests, 1);
+    assert!(trial.tool_effect.is_none());
+    assert!(!trial.events.iter().any(|ev| ev.get("TurnError").is_some()));
+}
+
+#[test]
+fn headless_stream_incomplete_tool_is_not_executed() {
+    for finish in [false, true] {
+        let body = format!(
+            "{}{}data: [DONE]\n\n",
+            stream_tool("{\"value\":", true),
+            if finish {
+                stream_finish()
+            } else {
+                String::new()
+            }
+        );
+        assert_stream_failure(
+            &run_headless_stream(&[body], StreamEnding::Eof),
+            if finish {
+                "tool-call arguments"
+            } else {
+                "without finish_reason"
+            },
+        );
+    }
+}
+
+#[test]
+fn headless_stream_tool_finish_does_not_execute_before_stream_validation() {
+    let tool = format!(
+        "{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish()
+    );
+    for tail in [
+        "data: {\"error\":{\"message\":\"sensitive-fixture\"}}\n\n",
+        "data: {sensitive-fixture}\n\n",
+        "data: {",
+    ] {
+        let trial = run_headless_stream(&[format!("{tool}{tail}")], StreamEnding::Eof);
+        assert_stream_failure(
+            &trial,
+            if tail.contains("error") {
+                "upstream error event"
+            } else if tail.ends_with("\n\n") {
+                "malformed JSON"
+            } else {
+                "incomplete SSE event"
+            },
+        );
+        assert!(trial
+            .events
+            .iter()
+            .any(|ev| ev.get("ToolCallDraftFinished").is_some()));
+        assert!(!trial
+            .events
+            .iter()
+            .any(|ev| ev.get("ToolDispatch").is_some()));
+    }
+}
+
+#[test]
+fn headless_stream_failure_after_tool_effect_does_not_replay() {
+    let tool = format!(
+        "{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish()
+    );
+    let trial = run_headless_stream(&[tool, stream_content()], StreamEnding::NetworkFailure);
+    assert_eq!(trial.status.code(), Some(3), "{}", trial.stderr);
+    assert_eq!(trial.requests, 2, "failed response was retried");
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    let error = trial
+        .events
+        .iter()
+        .find_map(|ev| ev.get("TurnError"))
+        .unwrap();
+    assert!(error["message"].as_str().unwrap().contains("network error"));
+    assert!(!trial
+        .events
+        .iter()
+        .any(|ev| ev.get("TurnComplete").is_some()));
+}
+
+#[test]
+fn headless_stream_multiline_data() {
+    let body = format!("data: {{\"choices\": [\n: keepalive\ndata: {{\"delta\": {{\"content\": \"multiline\"}}}}]}}\n\n{}", stream_finish());
+    let trial = run_headless_stream(&[body], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert!(trial.events.iter().any(|ev| ev
+        .get("TextDelta")
+        .is_some_and(|v| v.to_string().contains("multiline"))));
+}
+
 #[test]
 fn headless_settings_load_before_shell_dispatch() {
     let output = run_headless_config(

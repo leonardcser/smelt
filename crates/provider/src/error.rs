@@ -124,6 +124,43 @@ pub(crate) fn classify_openai_error(
     }
 }
 
+pub(crate) fn classify_openai_stream_error(value: &serde_json::Value) -> ProviderError {
+    let value = value
+        .get("error")
+        .filter(|error| !error.is_null())
+        .unwrap_or(value);
+    let payload = OpenAiErrorPayload::from_value(value);
+    let message = if payload.code == "context_length_exceeded" {
+        "upstream error event: context_length_exceeded"
+    } else {
+        "upstream error event"
+    };
+    let payload = OpenAiErrorPayload { message, ..payload };
+    classify_openai_error(&payload, None, crate::unix_now())
+        .unwrap_or_else(|| ProviderError::InvalidResponse(message.into()))
+}
+
+pub(crate) fn check_openai_stream_error(value: &serde_json::Value) -> Result<(), ProviderError> {
+    if value.get("error").is_some_and(|error| !error.is_null())
+        || value["type"].as_str() == Some("error")
+    {
+        return Err(classify_openai_stream_error(value));
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_openai_stream_event(
+    event: &crate::sse::Event,
+) -> Result<serde_json::Value, ProviderError> {
+    if event.name == "error" {
+        let value = serde_json::from_slice(&event.data).unwrap_or_default();
+        return Err(classify_openai_stream_error(&value));
+    }
+    let value = event.json()?;
+    check_openai_stream_error(&value)?;
+    Ok(value)
+}
+
 fn classify_openai_error_body(
     body: &str,
     retry_after: Option<Duration>,

@@ -417,12 +417,17 @@ impl ProviderClient {
                 .map(str::to_string);
             let noop_delta: &(dyn Fn(ProviderStreamEvent<'_>) + Send + Sync) = &|_| {};
             let on_delta = opts.on_delta.unwrap_or(noop_delta);
+            let streamed = std::sync::atomic::AtomicBool::new(false);
+            let tracked_delta = |delta: ProviderStreamEvent<'_>| {
+                streamed.store(true, std::sync::atomic::Ordering::Relaxed);
+                on_delta(delta);
+            };
 
             let parsed_result = if request.use_stream {
                 (
                     request
                         .wire_api
-                        .read_stream(resp, opts.cancel, on_delta, unix_now())
+                        .read_stream(resp, opts.cancel, &tracked_delta, unix_now())
                         .await,
                     None,
                     http_status,
@@ -464,6 +469,11 @@ impl ProviderClient {
                         http_status: status,
                         error_body: error_body.as_deref(),
                     });
+                    // Once deltas are visible, replaying the request could duplicate
+                    // partial output or tool-call drafts.
+                    if streamed.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(err);
+                    }
                     if let Some(delay) = retry_state.schedule_provider_retry(
                         &err,
                         max_stream_retries,

@@ -140,8 +140,17 @@ fn count_delta(summary: &mut FuzzProviderSummary, event: ProviderStreamEvent<'_>
 }
 
 #[cfg(any(test, feature = "fuzz"))]
-pub fn fuzz_drain_sse_bytes(buf: &mut Vec<u8>) -> Vec<serde_json::Value> {
-    sse::drain_sse_bytes(buf)
+pub use sse::{Decoder as FuzzSseDecoder, Event as FuzzSseEvent, StreamSummary as FuzzSseSummary};
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_parse_sse_event(
+    wire: u8,
+    event: &FuzzSseEvent,
+) -> Result<serde_json::Value, ProviderError> {
+    match wire % 3 {
+        0 | 1 => error::parse_openai_stream_event(event),
+        _ => anthropic::parse_stream_event(event),
+    }
 }
 
 #[cfg(any(test, feature = "fuzz"))]

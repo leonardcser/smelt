@@ -522,6 +522,49 @@ fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderErr
     Ok(state.finalize())
 }
 
+fn stream_error(value: &serde_json::Value) -> ProviderError {
+    let error = value
+        .get("error")
+        .filter(|error| !error.is_null())
+        .unwrap_or(value);
+    match error["type"].as_str() {
+        Some("rate_limit_error") => ProviderError::RateLimited { resets_at: None },
+        Some("authentication_error") => {
+            ProviderError::Auth("upstream error event: authentication_error".into())
+        }
+        Some("permission_error") => {
+            ProviderError::Auth("upstream error event: permission_error".into())
+        }
+        Some("not_found_error") => {
+            ProviderError::NotFound("upstream error event: not_found_error".into())
+        }
+        Some("overloaded_error" | "api_error") => ProviderError::Server {
+            status: 0,
+            body: "upstream error event".into(),
+        },
+        _ => ProviderError::InvalidResponse("upstream error event".into()),
+    }
+}
+
+pub(crate) fn parse_stream_event(event: &sse::Event) -> Result<serde_json::Value, ProviderError> {
+    if event.name == "error" {
+        let value = serde_json::from_slice(&event.data).unwrap_or_default();
+        return Err(stream_error(&value));
+    }
+    let value = event.json()?;
+    check_stream_error(&value)?;
+    Ok(value)
+}
+
+fn check_stream_error(value: &serde_json::Value) -> Result<(), ProviderError> {
+    if value["type"].as_str() == Some("error")
+        || value.get("error").is_some_and(|error| !error.is_null())
+    {
+        return Err(stream_error(value));
+    }
+    Ok(())
+}
+
 #[cfg_attr(not(any(test, feature = "fuzz")), allow(dead_code))]
 pub fn parse_stream_events<'a>(
     events: impl IntoIterator<Item = &'a serde_json::Value>,
@@ -529,6 +572,7 @@ pub fn parse_stream_events<'a>(
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
     for ev in events {
+        check_stream_error(ev)?;
         apply_sse_event(&mut state, ev, on_delta);
     }
     finish_stream_state(state)
@@ -739,8 +783,10 @@ pub async fn read_stream(
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
 
-    sse::read_events(resp, cancel, |ev| {
-        apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
+    sse::read_events(resp, cancel, |event| {
+        let ev = parse_stream_event(event)?;
+        apply_sse_event(&mut state, &ev, &mut |d| on_delta(d));
+        Ok(())
     })
     .await?;
 

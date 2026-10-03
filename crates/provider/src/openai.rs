@@ -451,7 +451,11 @@ pub fn parse_stream_events<'a>(
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
     for ev in events {
+        crate::error::check_openai_stream_error(ev)?;
         apply_sse_event(&mut state, ev, on_delta, unix_now());
+        if let Some(error) = state.error.take() {
+            return Err(error);
+        }
     }
     state.finalize()
 }
@@ -706,8 +710,13 @@ pub async fn read_stream(
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
 
-    sse::read_events(resp, cancel, |ev| {
-        apply_sse_event(&mut state, ev, &mut |d| on_delta(d), now_secs);
+    sse::read_events(resp, cancel, |event| {
+        let ev = crate::error::parse_openai_stream_event(event)?;
+        apply_sse_event(&mut state, &ev, &mut |d| on_delta(d), now_secs);
+        if let Some(error) = state.error.take() {
+            return Err(error);
+        }
+        Ok(())
     })
     .await?;
 

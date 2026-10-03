@@ -211,11 +211,28 @@ impl StreamState {
     }
 }
 
-fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderError> {
+fn finish_stream_state(
+    state: StreamState,
+    summary: sse::StreamSummary,
+) -> Result<ParsedResponse, ProviderError> {
     if !state.saw_finish_reason {
-        return Err(ProviderError::InvalidResponse(
-            "stream ended without finish_reason".into(),
-        ));
+        return Err(ProviderError::InvalidResponse(format!(
+            "stream ended without finish_reason (data_events={}, done={})",
+            summary.data_events, summary.saw_done
+        )));
+    }
+    for (index, (id, name, args)) in &state.tool_calls {
+        if id.is_empty() || name.is_empty() {
+            return Err(ProviderError::InvalidResponse(format!(
+                "incomplete tool-call metadata (index={index})"
+            )));
+        }
+        if serde_json::from_str::<serde_json::Value>(args).is_err() {
+            return Err(ProviderError::InvalidResponse(format!(
+                "invalid or incomplete tool-call arguments (index={index}, bytes={})",
+                args.len()
+            )));
+        }
     }
     Ok(state.finalize())
 }
@@ -226,10 +243,13 @@ pub fn parse_stream_events<'a>(
     on_delta: &mut dyn FnMut(ProviderStreamEvent),
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
+    let mut summary = sse::StreamSummary::default();
     for ev in events {
+        summary.data_events += 1;
+        crate::error::check_openai_stream_error(ev)?;
         apply_sse_event(&mut state, ev, on_delta);
     }
-    finish_stream_state(state)
+    finish_stream_state(state, summary)
 }
 
 /// Apply one SSE event to the accumulator. Pure (modulo `on_delta`).
@@ -351,7 +371,10 @@ fn emit_tool_finishes(
     }
     state.emitted_tool_finishes = true;
     for (idx, (call_id, name, args)) in &state.tool_calls {
-        if call_id.is_empty() || name.is_empty() {
+        if call_id.is_empty()
+            || name.is_empty()
+            || serde_json::from_str::<serde_json::Value>(args).is_err()
+        {
             continue;
         }
         let stream_id = idx.to_string();
@@ -373,12 +396,14 @@ pub async fn read_stream(
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
 
-    sse::read_events(resp, cancel, |ev| {
-        apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
+    let summary = sse::read_events(resp, cancel, |event| {
+        let ev = crate::error::parse_openai_stream_event(event)?;
+        apply_sse_event(&mut state, &ev, &mut |d| on_delta(d));
+        Ok(())
     })
     .await?;
 
-    finish_stream_state(state)
+    finish_stream_state(state, summary)
 }
 
 #[cfg(test)]
@@ -1081,6 +1106,47 @@ mod tests {
         step(&mut state, json!({"usage": {"prompt_tokens": 5}}));
         assert_eq!(state.usage.prompt_tokens, Some(5));
         assert!(state.content.is_empty());
+    }
+
+    #[test]
+    fn incomplete_tool_arguments_never_emit_finished_or_finalize() {
+        let events = [
+            json!({"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "c1", "function": {
+                    "name": "f", "arguments": "{\"sensitive-fixture\":"
+                }
+            }]}}]}),
+            json!({"choices": [{"finish_reason": "tool_calls"}]}),
+        ];
+        let mut finishes = 0;
+        let error = parse_stream_events(&events, &mut |event| {
+            if matches!(
+                event,
+                ProviderStreamEvent::ToolCall(ToolCallStreamEvent::Finished { .. })
+            ) {
+                finishes += 1;
+            }
+        })
+        .err()
+        .expect("stream must fail")
+        .to_string();
+        assert_eq!(finishes, 0);
+        assert!(error.contains("tool-call arguments"));
+        assert!(!error.contains("sensitive-fixture"));
+    }
+
+    #[test]
+    fn finish_reason_does_not_hide_upstream_error() {
+        let events = [
+            json!({"choices": [{"delta": {"content": "partial"}, "finish_reason": "stop"}]}),
+            json!({"error": {"message": "sensitive-fixture"}}),
+        ];
+        let error = parse_stream_events(&events, &mut |_| {})
+            .err()
+            .expect("stream must fail")
+            .to_string();
+        assert!(error.contains("upstream error event"));
+        assert!(!error.contains("sensitive-fixture"));
     }
 
     // ---- finalize ----

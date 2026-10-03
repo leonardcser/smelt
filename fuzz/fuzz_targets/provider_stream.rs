@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use smelt_provider::{
-    fuzz_drain_sse_bytes, fuzz_parse_provider_response, fuzz_parse_provider_stream,
-    FuzzProviderSummary,
+    fuzz_parse_provider_response, fuzz_parse_provider_stream, fuzz_parse_sse_event,
+    CancellationToken, FuzzProviderSummary, FuzzSseDecoder, FuzzSseSummary, ProviderError,
 };
 
 #[derive(Debug)]
@@ -205,6 +205,7 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
     };
     match wire % 3 {
         0 => {
+            let mut tools = std::collections::HashMap::new();
             for event in events {
                 match event {
                     Event::ChatText(text) if !text.is_empty() => {
@@ -215,13 +216,33 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                         summary.reasoning_len += text.len();
                         summary.thinking_deltas += 1;
                     }
-                    Event::ChatTool { args, .. } if !args.is_empty() => {
-                        summary.tool_arg_deltas += 1;
+                    Event::ChatTool {
+                        idx,
+                        id,
+                        name,
+                        args,
+                    } => {
+                        let tool = tools.entry(*idx).or_insert(("", "", String::new()));
+                        if tool.0.is_empty() {
+                            tool.0 = id.as_str();
+                        }
+                        if tool.1.is_empty() {
+                            tool.1 = name.as_str();
+                        }
+                        tool.2.push_str(args);
+                        if !args.is_empty() {
+                            summary.tool_arg_deltas += 1;
+                        }
                     }
                     Event::ChatDone => summary.ok = true,
                     _ => {}
                 }
             }
+            summary.ok &= tools.values().all(|(id, name, args)| {
+                !id.is_empty()
+                    && !name.is_empty()
+                    && serde_json::from_str::<serde_json::Value>(args).is_ok()
+            });
         }
         1 => {
             let mut active_tools = std::collections::HashSet::new();
@@ -316,51 +337,61 @@ fn terminal_event(wire: u8) -> Event {
     }
 }
 
-fn assert_sse_partition_invariance(wire: u8, events: &[serde_json::Value], partitions: &[u8]) {
-    let mut raw = Vec::new();
-    for event in events {
-        raw.extend_from_slice(b"data: ");
-        raw.extend_from_slice(
-            serde_json::to_string(event)
-                .expect("serialize controlled SSE event")
-                .as_bytes(),
-        );
-        raw.push(b'\n');
+fn decode_sse<'a>(
+    wire: u8,
+    chunks: impl IntoIterator<Item = &'a [u8]>,
+) -> (
+    Vec<serde_json::Value>,
+    FuzzSseSummary,
+    Option<std::mem::Discriminant<ProviderError>>,
+) {
+    let mut decoder = FuzzSseDecoder::default();
+    let cancel = CancellationToken::new();
+    let mut events = Vec::new();
+    for chunk in chunks {
+        let result = decoder.feed(chunk, &cancel, &mut |event| {
+            events.push(fuzz_parse_sse_event(wire, event)?);
+            Ok(())
+        });
+        if let Err(error) = result {
+            let summary = decoder.summary();
+            let buffered = decoder.buffered_bytes();
+            let terminal = decoder.feed(b"data: {}\n\n", &cancel, &mut |_| {
+                panic!("event after failure")
+            });
+            assert_eq!(
+                std::mem::discriminant(&terminal.unwrap_err()),
+                std::mem::discriminant(&error)
+            );
+            assert_eq!(decoder.summary(), summary);
+            assert_eq!(decoder.buffered_bytes(), buffered);
+            return (events, summary, Some(std::mem::discriminant(&error)));
+        }
     }
-    raw.extend_from_slice(b"data: [DONE]\n");
+    let error = decoder
+        .finish()
+        .err()
+        .map(|error| std::mem::discriminant(&error));
+    (events, decoder.summary(), error)
+}
 
-    let mut one_shot_buf = raw.clone();
-    let one_shot = fuzz_drain_sse_bytes(&mut one_shot_buf);
-    assert!(one_shot_buf.is_empty());
-
-    let mut offset = 0usize;
-    let mut chunked_buf = Vec::new();
-    let mut chunked = Vec::new();
+fn assert_sse_partition_invariance(wire: u8, raw: &[u8], partitions: &[u8]) {
+    let mut chunks = Vec::new();
+    let mut offset = 0;
     for partition in partitions {
         let remaining = raw.len() - offset;
         if remaining == 0 {
             break;
         }
-        let advance = usize::from(*partition) % remaining + 1;
-        let end = offset + advance;
-        chunked_buf.extend_from_slice(&raw[offset..end]);
+        let end = offset + usize::from(*partition) % remaining + 1;
+        chunks.push(&raw[offset..end]);
         offset = end;
-        chunked.extend(fuzz_drain_sse_bytes(&mut chunked_buf));
     }
-    if offset < raw.len() {
-        chunked_buf.extend_from_slice(&raw[offset..]);
-        chunked.extend(fuzz_drain_sse_bytes(&mut chunked_buf));
-    }
-
-    assert!(chunked_buf.is_empty());
+    chunks.push(&raw[offset..]);
     assert_eq!(
-        chunked, one_shot,
-        "SSE event decoding depends on chunk boundaries"
-    );
-    assert_eq!(
-        fuzz_parse_provider_stream(wire, &chunked),
-        fuzz_parse_provider_stream(wire, &one_shot),
-        "provider lifecycle depends on SSE chunk boundaries"
+        decode_sse(wire, chunks),
+        decode_sse(wire, [raw]),
+        "SSE prefix, error, or termination depends on chunk boundaries"
     );
 }
 
@@ -371,20 +402,24 @@ fuzz_target!(|input: Input| {
         partitions,
         events: input_events,
     } = input;
-    let mut sse_buf = Vec::new();
-    let mut drained = Vec::new();
-    for chunk in chunks {
-        sse_buf.extend_from_slice(&chunk);
-        drained.extend(fuzz_drain_sse_bytes(&mut sse_buf));
-        if sse_buf.len() > 4096 {
-            sse_buf.clear();
-        }
-    }
-
+    let raw = chunks.concat();
+    let decoded = decode_sse(wire, chunks.iter().map(Vec::as_slice));
+    assert_eq!(decoded, decode_sse(wire, [raw.as_slice()]));
+    assert_sse_partition_invariance(wire, &raw, &partitions);
+    let (drained, _, _) = decoded;
     for event in &drained {
         let _ = fuzz_parse_provider_response(wire, event);
     }
 
+    let mut uncontrolled: Vec<_> = input_events
+        .iter()
+        .filter(|event| matches!(event, Event::Raw(_)))
+        .map(event_json)
+        .collect();
+    let input_events: Vec<_> = input_events
+        .into_iter()
+        .filter(|event| !matches!(event, Event::Raw(_)))
+        .collect();
     let controlled: Vec<_> = input_events.iter().map(event_json).collect();
     let expected = expected_stream_summary(wire, &input_events);
     let controlled_summary = fuzz_parse_provider_stream(wire, &controlled);
@@ -396,13 +431,21 @@ fuzz_target!(|input: Input| {
     let complete_expected = expected_stream_summary(wire, &complete_events);
     let complete_summary = fuzz_parse_provider_stream(wire, &complete);
     assert_controlled_summary(&complete_summary, complete_expected);
-    assert!(
-        complete_summary.ok,
-        "terminal provider event did not complete lifecycle"
-    );
-    assert_sse_partition_invariance(wire, &complete, &partitions);
+    if wire % 3 != 0 {
+        assert!(
+            complete_summary.ok,
+            "terminal provider event did not complete lifecycle"
+        );
+    }
+    let mut raw = Vec::new();
+    for event in complete.iter().chain(&uncontrolled) {
+        raw.extend_from_slice(format!("data: {event}\n\n").as_bytes());
+    }
+    raw.extend_from_slice(b"data: [DONE]\n\n");
+    assert_sse_partition_invariance(wire, &raw, &partitions);
 
     let mut all_events = drained;
+    all_events.append(&mut uncontrolled);
     all_events.extend(controlled);
     let summary = fuzz_parse_provider_stream(wire, &all_events);
     assert!(summary.content_len <= 4096 * all_events.len().max(1));
