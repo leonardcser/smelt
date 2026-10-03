@@ -1,5 +1,7 @@
 //! `smelt.provider` - config-time provider and model registration.
 
+use crate::lua::api::lua_value_to_json;
+use crate::lua::json_to_lua;
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -29,6 +31,8 @@ pub struct LuaProviderModel {
     pub min_p: Option<f64>,
     /// Default repeat penalty.
     pub repeat_penalty: Option<f64>,
+    /// JSON-compatible chat-template options forwarded to OpenAI-compatible servers, for example { enable_thinking = true }. Independent of reasoning_effort.
+    pub chat_template_kwargs: Option<mlua::Table>,
     /// Whether the model supports tool calls.
     pub tool_calling: Option<bool>,
     /// Cost per 1M input tokens in USD.
@@ -148,6 +152,17 @@ impl FromLua for LuaModelEntry {
                     top_k: m.top_k,
                     min_p: m.min_p,
                     repeat_penalty: m.repeat_penalty,
+                    chat_template_kwargs: m
+                        .chat_template_kwargs
+                        .map(|table| {
+                            lua_value_to_json(lua, &mlua::Value::Table(table))
+                                .as_object()
+                                .cloned()
+                                .ok_or_else(|| {
+                                    mlua::Error::external("chat_template_kwargs must be an object")
+                                })
+                        })
+                        .transpose()?,
                     tool_calling: m.tool_calling,
                     input_cost: m.input_cost,
                     output_cost: m.output_cost,
@@ -270,6 +285,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         row.set("top_k", m.top_k)?;
                         row.set("min_p", m.min_p)?;
                         row.set("repeat_penalty", m.repeat_penalty)?;
+                        if let Some(kwargs) = &m.chat_template_kwargs {
+                            row.set("chat_template_kwargs", json_to_lua(lua, &serde_json::json!(kwargs))?)?;
+                        }
                         row.set("tool_calling", m.tool_calling)?;
                         row.set("input_cost", m.input_cost)?;
                         row.set("output_cost", m.output_cost)?;

@@ -37,6 +37,8 @@ pub struct ModelConfig {
     pub top_k: Option<u32>,
     pub min_p: Option<f64>,
     pub repeat_penalty: Option<f64>,
+    /// Chat-template options forwarded to OpenAI-compatible chat completions.
+    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     pub tool_calling: Option<bool>,
     /// Cost per 1M input tokens in USD. Overrides built-in pricing.
     pub input_cost: Option<f64>,
@@ -297,6 +299,10 @@ mod tests {
         let config = ModelConfig {
             top_p: Some(0.25),
             input_cost: Some(2.0),
+            chat_template_kwargs: Some(serde_json::Map::from_iter([(
+                "enable_thinking".into(),
+                serde_json::json!(true),
+            )])),
             ..Default::default()
         }
         .with_overrides(&ModelConfigOverrides {
@@ -332,5 +338,9 @@ mod tests {
             })
         );
         assert_eq!(config.input_cost, Some(2.0));
+        assert_eq!(
+            config.chat_template_kwargs.unwrap()["enable_thinking"],
+            serde_json::json!(true)
+        );
     }
 }

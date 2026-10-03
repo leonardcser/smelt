@@ -688,6 +688,7 @@
 ---@field top_k? integer Default top-k sampling cutoff.
 ---@field min_p? number Default minimum-probability cutoff.
 ---@field repeat_penalty? number Default repeat penalty.
+---@field chat_template_kwargs? table JSON-compatible chat-template options forwarded to OpenAI-compatible servers, for example { enable_thinking = true }. Independent of reasoning_effort.
 ---@field tool_calling? boolean Whether the model supports tool calls.
 ---@field input_cost? number Cost per 1M input tokens in USD.
 ---@field output_cost? number Cost per 1M output tokens in USD.

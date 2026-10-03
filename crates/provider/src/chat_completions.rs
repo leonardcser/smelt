@@ -95,6 +95,9 @@ pub fn build_body(
     if let Some(v) = config.max_tokens {
         body["max_tokens"] = serde_json::json!(v);
     }
+    if let Some(kwargs) = &config.chat_template_kwargs {
+        body["chat_template_kwargs"] = serde_json::json!(kwargs);
+    }
 
     if effort != ReasoningEffort::Off {
         body["reasoning_effort"] = serde_json::json!(effort.label());
@@ -425,6 +428,25 @@ mod tests {
         assert_eq!(body["model"], "model-x");
         assert!(body["messages"].is_array());
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn build_body_preserves_explicit_chat_template_options() {
+        for enabled in [true, false] {
+            let kwargs = serde_json::Map::from_iter([
+                ("enable_thinking".into(), json!(enabled)),
+                ("template_option".into(), json!({"value": "custom"})),
+            ]);
+            let config = ModelConfig {
+                chat_template_kwargs: Some(kwargs.clone()),
+                ..Default::default()
+            };
+            let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &config);
+            assert_eq!(body["chat_template_kwargs"], json!(kwargs));
+            assert!(body.get("reasoning_effort").is_none());
+        }
+        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        assert!(body.get("chat_template_kwargs").is_none());
     }
 
     #[test]
