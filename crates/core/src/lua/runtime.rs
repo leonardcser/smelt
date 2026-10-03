@@ -4009,8 +4009,8 @@ fn load_bootstrap_group_with_roots(
 
 /// Extract the embedded `runtime/lua/smelt/` tree to
 /// `<data_dir>/builtins/lua/smelt/` so the agent (and humans) can inspect
-/// the built-in source as worked examples. Versioned by `CARGO_PKG_VERSION`:
-/// re-extracts on smelt upgrade, skips otherwise.
+/// the built-in source as worked examples. Re-extracts when the package
+/// version or embedded Lua and skills content changes.
 ///
 /// Best-effort. Returns the target directory on success, or the I/O
 /// error on failure - callers should log and continue, since the
@@ -4022,7 +4022,7 @@ fn load_bootstrap_group_with_roots(
 pub fn ensure_builtins_extracted(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
     let target = data_dir.join("builtins");
     let version_file = target.join(".version");
-    let expected = env!("CARGO_PKG_VERSION");
+    let expected = embedded_builtins_cache_key();
     if let Ok(found) = std::fs::read_to_string(&version_file) {
         let has_lua = target.join("lua").join("smelt").exists();
         let has_skills = target.join("skills").exists();
@@ -4043,6 +4043,46 @@ pub fn ensure_builtins_extracted(data_dir: &std::path::Path) -> std::io::Result<
 
     std::fs::write(&version_file, expected)?;
     Ok(target)
+}
+
+fn embedded_builtins_cache_key() -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for (name, dir) in [("lua/smelt", &EMBEDDED_LUA), ("skills", &EMBEDDED_SKILLS)] {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hash_embedded_dir(&mut hasher, dir);
+    }
+    format!(
+        "{}:{}",
+        env!("CARGO_PKG_VERSION"),
+        crate::utils::hex_lower(&hasher.finalize())
+    )
+}
+
+fn hash_embedded_dir(hasher: &mut sha2::Sha256, dir: &Dir<'_>) {
+    use sha2::Digest;
+
+    let mut entries: Vec<_> = dir.entries().iter().collect();
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        match entry {
+            DirEntry::File(file) => {
+                hasher.update(b"file\0");
+                hasher.update(file.path().to_string_lossy().as_bytes());
+                hasher.update([0]);
+                hasher.update((file.contents().len() as u64).to_le_bytes());
+                hasher.update(file.contents());
+            }
+            DirEntry::Dir(dir) => {
+                hasher.update(b"dir\0");
+                hasher.update(dir.path().to_string_lossy().as_bytes());
+                hasher.update([0]);
+                hash_embedded_dir(hasher, dir);
+            }
+        }
+    }
 }
 
 fn write_dir_recursive(dir: &Dir<'_>, target: &std::path::Path) -> std::io::Result<()> {
@@ -4303,6 +4343,58 @@ fn build_tool_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtins_refresh_when_same_version_mirror_has_old_content() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let target = ensure_builtins_extracted(data_dir.path()).unwrap();
+        let meta = target.join("lua/smelt/_meta/_types.lua");
+        let embedded = EMBEDDED_LUA
+            .get_file("_meta/_types.lua")
+            .unwrap()
+            .contents();
+        std::fs::write(&meta, "old build").unwrap();
+        std::fs::write(target.join(".version"), env!("CARGO_PKG_VERSION")).unwrap();
+
+        ensure_builtins_extracted(data_dir.path()).unwrap();
+        assert_eq!(std::fs::read(meta).unwrap(), embedded);
+    }
+
+    #[test]
+    fn embedded_dir_hash_changes_with_file_contents() {
+        use include_dir::File;
+        use sha2::{Digest, Sha256};
+
+        let first_entries = [DirEntry::File(File::new("example.lua", b"first"))];
+        let second_entries = [DirEntry::File(File::new("example.lua", b"second"))];
+        let first = Dir::new("", &first_entries);
+        let second = Dir::new("", &second_entries);
+        let mut first_hash = Sha256::new();
+        let mut second_hash = Sha256::new();
+        hash_embedded_dir(&mut first_hash, &first);
+        hash_embedded_dir(&mut second_hash, &second);
+        assert_ne!(first_hash.finalize(), second_hash.finalize());
+    }
+
+    #[test]
+    fn builtins_refresh_when_embedded_content_hash_changes() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let target = ensure_builtins_extracted(data_dir.path()).unwrap();
+        let old_file = target.join("skills/removed-in-new-build.md");
+        std::fs::write(&old_file, "old build").unwrap();
+        std::fs::write(
+            target.join(".version"),
+            format!("{}:{}", env!("CARGO_PKG_VERSION"), "0".repeat(64)),
+        )
+        .unwrap();
+
+        ensure_builtins_extracted(data_dir.path()).unwrap();
+        assert!(!old_file.exists());
+        assert_eq!(
+            std::fs::read_to_string(target.join(".version")).unwrap(),
+            embedded_builtins_cache_key()
+        );
+    }
 
     #[test]
     fn stored_command_semantics_accent_only_the_slash_token() {
