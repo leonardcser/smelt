@@ -54,6 +54,7 @@ Available in every runtime, including headless mode.
 - [`smelt.provider`](provider.md) - 8 function(s)
 - [`smelt.reg`](reg.md) - 2 function(s)
 - [`smelt.remember`](remember.md) - 1 function(s)
+- [`smelt.settings`](settings.md) - 1 function(s)
 - [`smelt.shell`](shell.md) - 6 function(s)
 - [`smelt.signal`](signal.md) - 5 function(s)
 - [`smelt.skills`](skills.md) - 3 function(s)
@@ -91,7 +92,6 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.session.messages`](session_messages.md) - 1 function(s)
 - [`smelt.session.slug`](session_slug.md) - 1 function(s)
 - [`smelt.session.title`](session_title.md) - 2 function(s)
-- [`smelt.settings`](settings.md) - 1 function(s)
 - [`smelt.terminal`](terminal.md) - 7 function(s)
 - [`smelt.ui`](ui.md) - 1 function(s)
 - [`smelt.ui.layout`](ui_layout.md) - 11 function(s) - Advanced namespace

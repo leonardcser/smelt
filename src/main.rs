@@ -1178,15 +1178,16 @@ async fn async_main() {
         lua_runtime.load_user_config();
         lua_runtime.load_global_plugins();
         let project_trust = lua_runtime.load_project_config(&cwd);
+        if let Some(err) = lua_runtime.load_error() {
+            eprintln!("error: lua init: {err}");
+            std::process::exit(1);
+        }
         let resolved = startup::resolve(
             &args,
             lua_runtime.to_config(),
             &lua_runtime.mode_names(),
             &env,
         );
-        if let Some(err) = lua_runtime.load_error() {
-            eprintln!("warning: lua init: {err}");
-        }
         (resolved, project_trust)
     } else {
         let inputs = startup::parse(&args, &env);

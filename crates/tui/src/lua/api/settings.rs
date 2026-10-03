@@ -9,7 +9,7 @@
 //! of its own.
 
 use mlua::prelude::*;
-use smelt_core::config::{setting_decl, SettingKind, SettingValue, SETTINGS};
+use smelt_core::config::{setting_decl, ResolvedSettings, SettingKind, SettingValue, SETTINGS};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
@@ -121,14 +121,14 @@ pub(super) fn register(
         lua,
         smelt,
         "settings",
-        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. UiHost-only.",
-        Tier::UiHost,
+        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. Available during configuration loading and in headless mode.",
+        Tier::Host,
     )?;
     for decl in TABLE_SETTINGS {
         settings_tbl.tbl.raw_set(decl.key, (decl.init)(lua)?)?;
     }
     let mt_tbl = lua.create_table()?;
-    let mt = LuaMod::extend_supported(lua, mt_tbl.clone(), "smelt.settings", Tier::UiHost);
+    let mt = LuaMod::extend_supported(lua, mt_tbl.clone(), "smelt.settings", Tier::Host);
 
     {
         let shared = Arc::clone(shared);
@@ -136,23 +136,20 @@ pub(super) fn register(
             "__index",
             &["_", "key"],
             move |lua, (_, key): (mlua::Value, String)| -> LuaResult<mlua::Value> {
-                if setting_decl(&key).is_none() {
-                    return Err(unknown_key_err(&key));
-                }
+                let decl = setting_decl(&key).ok_or_else(|| unknown_key_err(&key))?;
                 let desired = shared
                     .settings_overrides
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .get(&key)
                     .cloned();
-                if let Some(value) = desired
+                let value = desired
+                    .or_else(|| {
+                        smelt_core::host::try_with_core(|core| (decl.read)(&core.config.settings))
+                    })
                     .or_else(|| crate::lua::try_with_runtime_host(|host| host.setting_value(&key))?)
-                {
-                    return setting_to_lua(lua, &value);
-                }
-                Err(LuaError::external(format!(
-                    "smelt.settings.{key}: app not initialized"
-                )))
+                    .unwrap_or_else(|| (decl.read)(&ResolvedSettings::default()));
+                setting_to_lua(lua, &value)
             },
         )?;
     }
@@ -225,15 +222,20 @@ pub(super) fn register(
                                 .unwrap_or_else(|error| error.into_inner())
                                 .get(key)
                                 .cloned();
-                            let value = desired.or_else(|| {
-                                crate::lua::try_with_runtime_host(|host| {
-                                    host.setting_value(decl.key)
-                                })?
-                            });
-                            let value = match value {
-                                Some(ref value) => setting_to_lua(lua, value)?,
-                                None => mlua::Value::Nil,
-                            };
+                            let value = desired
+                                .or_else(|| {
+                                    smelt_core::host::try_with_core(|core| {
+                                        (decl.read)(&core.config.settings)
+                                    })
+                                })
+                                .or_else(|| {
+                                    crate::lua::try_with_runtime_host(|host| {
+                                        host.setting_value(decl.key)
+                                    })?
+                                });
+                            let value =
+                                value.unwrap_or_else(|| (decl.read)(&ResolvedSettings::default()));
+                            let value = setting_to_lua(lua, &value)?;
                             return Ok((mlua::Value::String(lua.create_string(key)?), value));
                         }
                         let value = settings.raw_get::<mlua::Value>(key.as_str())?;

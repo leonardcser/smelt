@@ -1549,6 +1549,37 @@ mod tests {
     }
 
     #[test]
+    fn settings_are_available_without_an_active_tui_entry() {
+        let runtime = LuaRuntime::new();
+        runtime
+            .lua
+            .load(
+                r#"
+                assert(smelt.settings.restrict_to_workspace == true)
+                assert(smelt.settings.fast_mode == false)
+                smelt.settings.autoupgrade = "off"
+                smelt.settings.fast_mode = true
+                smelt.settings.restrict_to_workspace = false
+                assert(smelt.settings.fast_mode == true)
+                local count = 0
+                for key, value in pairs(smelt.settings) do
+                    assert(value ~= nil, key)
+                    count = count + 1
+                end
+                assert(count >= #smelt.settings.schema())
+                assert(not pcall(function() smelt.settings.fast_mode = "true" end))
+                assert(not pcall(function() smelt.settings.unknown_setting = true end))
+                "#,
+            )
+            .exec()
+            .expect("headless settings retain defaults, overrides, iteration, and validation");
+        let config = runtime.to_config();
+        assert_eq!(config.settings.autoupgrade, "off");
+        assert!(config.settings.fast_mode);
+        assert!(!config.settings.restrict_to_workspace);
+    }
+
+    #[test]
     fn ui_host_apis_return_lua_errors_without_an_active_tui_entry() {
         let runtime = LuaRuntime::new();
 

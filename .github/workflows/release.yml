@@ -90,10 +90,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             artifact: smelt-x86_64-unknown-linux-gnu.tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             artifact: smelt-aarch64-unknown-linux-gnu.tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -144,6 +144,31 @@ jobs:
         env:
           SMELT_RELEASE_TAG: ${{ github.ref_name }}
         run: cargo build --locked --profile dist --bin smelt --target ${{ matrix.target }}
+
+      - name: Verify Linux glibc baseline
+        if: endsWith(matrix.target, '-linux-gnu')
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          binary = f"target/{os.environ['RELEASE_TARGET']}/dist/smelt"
+          versions = subprocess.check_output(["readelf", "--version-info", binary], text=True)
+          required = set(re.findall(r"Name: (GLIBC_[^\s]+)", versions))
+          unsupported = []
+          for version in required:
+              suffix = version.removeprefix("GLIBC_")
+              if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", suffix):
+                  unsupported.append(version)
+              elif tuple(map(int, suffix.split("."))) > (2, 35):
+                  unsupported.append(version)
+          if unsupported:
+              raise SystemExit(f"binary exceeds glibc 2.35 baseline: {sorted(unsupported)}")
+          print(f"Verified glibc requirements: {sorted(required)}")
+          PY
 
       - name: Smoke-test native binary identity
         if: matrix.target == 'x86_64-unknown-linux-gnu'

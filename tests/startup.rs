@@ -1949,3 +1949,85 @@ smelt.provider.register("local", {
         );
     }
 }
+
+fn run_headless_config(source: &str) -> std::process::Output {
+    let home = tempfile::tempdir().expect("temporary headless home");
+    let config = home.path().join("init.lua");
+    std::fs::write(
+        &config,
+        format!(
+            r#"smelt.provider.register("test", {{
+  type = "openai-compatible",
+  api_base = "http://127.0.0.1:9/v1",
+  api_key_env = "SMELT_HEADLESS_TEST_KEY",
+  models = {{ "test-model" }},
+}})
+{source}
+"#
+        ),
+    )
+    .expect("write headless config");
+    Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env("XDG_CACHE_HOME", home.path().join("cache"))
+        .env("SMELT_HEADLESS_TEST_KEY", "test-only")
+        .current_dir(home.path())
+        .args([
+            "--headless",
+            "--color",
+            "never",
+            "--model",
+            "test/test-model",
+            "--config",
+        ])
+        .arg(config)
+        .arg("!printf headless-config-ok")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run headless CLI")
+}
+
+#[test]
+fn headless_settings_load_before_shell_dispatch() {
+    let output = run_headless_config(
+        r#"
+assert(smelt.settings.restrict_to_workspace == true)
+smelt.settings.autoupgrade = "off"
+smelt.settings.fast_mode = true
+smelt.settings.restrict_to_workspace = false
+assert(smelt.settings.autoupgrade == "off")
+assert(smelt.settings.fast_mode == true)
+assert(smelt.settings.restrict_to_workspace == false)
+"#,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"headless-config-ok");
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn headless_config_errors_prevent_shell_dispatch() {
+    for source in [
+        "error('invalid headless config')",
+        "smelt.settings.unknown_setting = true",
+        "smelt.settings.fast_mode = 'true'",
+    ] {
+        let output = run_headless_config(source);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("error: lua init:"));
+    }
+}

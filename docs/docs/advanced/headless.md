@@ -56,6 +56,31 @@ See the [CLI reference](../reference/cli.md) for the full flag list. Sampling,
 reasoning effort, system prompt overrides, and `--set` all work in headless
 mode.
 
+## Configuration
+
+Lua settings work without a terminal UI. Reads during startup return the built-in
+defaults or values already assigned by the config:
+
+```lua
+smelt.settings.autoupgrade = "off"
+smelt.settings.restrict_to_workspace = false
+```
+
+Only disable workspace restrictions when the process runs inside an isolated
+sandbox. UI-only APIs still require a terminal UI.
+
+For per-run settings, use `--set`; CLI overrides take precedence over Lua config:
+
+```bash
+smelt --headless --mode yolo \
+  --set autoupgrade=off \
+  "fix the failing tests"
+```
+
+Headless startup exits 1 if Lua configuration fails, including syntax errors,
+unknown settings, invalid setting types, and UI-only calls. It does not run tools
+or dispatch the requested model turn with a partially loaded configuration.
+
 ## Output Format
 
 ### Text (default)
@@ -148,7 +173,7 @@ Stream structured events for programmatic consumption:
 
 ```bash
 smelt --headless --format json "fix the bug" \
-  | jq -c 'select(.type == "TurnComplete")'
+  | jq -c 'select(has("TurnComplete"))'
 ```
 
 Use in a CI pipeline, logging stderr for inspection:

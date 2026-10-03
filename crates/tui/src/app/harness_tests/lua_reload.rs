@@ -454,6 +454,7 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     std::fs::write(
         &init,
         r#"
+        smelt.settings.autoupgrade = "off"
         local buffer = smelt.buf.new({ name = "phase3.transaction.buffer" })
         buffer:source("committed")
         smelt.cmd.register("committed_command", function()
@@ -474,6 +475,7 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     std::fs::write(
         &init,
         r#"
+        smelt.settings.autoupgrade = "off"
         local buffer = smelt.buf.new({ name = "phase3.transaction.buffer" })
         buffer:source("discarded")
         smelt.settings.show_slug = false
@@ -542,6 +544,7 @@ fn failed_lua_reload_preserves_the_committed_command_generation() {
     std::fs::write(
         &init,
         r#"
+        smelt.settings.autoupgrade = "off"
         smelt.cmd.register("replacement_command", function() end)
         "#,
     )
@@ -625,6 +628,7 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
     std::fs::write(
         &init,
         r#"
+        smelt.settings.autoupgrade = "off"
         smelt.cmd.register("committed_external_guard", function()
             _G.__committed_external_guard = true
         end)
@@ -640,6 +644,7 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
         &init,
         format!(
             r#"
+            smelt.settings.autoupgrade = "off"
             smelt.notify.info("discarded candidate notice", "phase3-candidate")
             smelt.log.info("discarded_candidate_log")
             smelt.lifecycle.on("ready", function()
@@ -673,6 +678,7 @@ fn failed_candidate_rejects_external_effects_and_recovers() {
         &init,
         format!(
             r#"
+            smelt.settings.autoupgrade = "off"
             smelt.cmd.register("recovered_external_guard", function() end)
             smelt.notify.info("committed candidate notice", "phase3-committed")
             smelt.log.info("committed_candidate_log")

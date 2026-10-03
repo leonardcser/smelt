@@ -597,6 +597,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.provider` - List built-in model providers and register custom ones.
 - `smelt.reg` - Helpers for constructing `Reg` handles.
 - `smelt.remember` - Per-key opt-in to last-used recall on launch.
+- `smelt.settings` - Metatable-backed proxy table for preferences.
 - `smelt.shell` - Shell command splitting and interactive/background-operator validators.
 - `smelt.signal` - Named reactive values.
 - `smelt.skills` - List and load skill content from the SkillLoader populated at startup.
@@ -632,7 +633,6 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.session.messages` - Session messages.
 - `smelt.session.slug` - Session slug.
 - `smelt.session.title` - Session title.
-- `smelt.settings` - Metatable-backed proxy table for preferences.
 - `smelt.terminal` - Terminal integration helpers.
 - `smelt.ui` - Screen-composition primitives: main layout composer and per-window renderer registration.
 - `smelt.ui.layout` - Composable layout-tree primitives for the retained main TUI layout.
