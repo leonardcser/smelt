@@ -1318,6 +1318,7 @@ fn delayed_host_calls_cannot_claim_a_replacement_turn() {
                 app.press(KeyCode::Enter);
                 app.press(KeyCode::Enter);
                 app.press(KeyCode::Enter);
+                app.wait_for_turn_persistence();
                 assert_ne!(app.current_turn_id(), Some(42));
                 let (reply, response) = tokio::sync::oneshot::channel();
                 current_response = Some(response);
@@ -1648,13 +1649,17 @@ async fn real_engine_compaction_preserves_queued_inputs() {
             let mut terminal_output = Vec::new();
             tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 while completed < expected_turns {
-                    let output = app
-                        .app
-                        .core
-                        .engine
-                        .recv_output()
-                        .await
-                        .expect("engine output");
+                    let output = tokio::select! {
+                        output = app.app.core.engine.recv_output() => output.expect("engine output"),
+                        _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                            while let Some(event) = app.try_recv_app_event() {
+                                app.handle_app_event(event);
+                            }
+                            app.app.drain_persist_reports();
+                            app.pump_lua();
+                            continue;
+                        }
+                    };
                     let summary_delta = matches!(&output, engine::EngineOutput::Event(
                         protocol::EngineEvent::EngineAskDelta { delta, .. }
                     ) if delta.contains("CHECKPOINT_READY"));

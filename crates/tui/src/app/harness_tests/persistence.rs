@@ -5,6 +5,771 @@ use protocol::{
 };
 use smelt_core::transcript_model::Block;
 
+#[test]
+fn title_catalog_refresh_does_not_materialize_retained_archive_values() {
+    let mut app = TestApp::builder().build();
+    let mut session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.title = Some("seed title".into());
+    session.first_user_message = Some("synthetic retained message ".repeat(512).into());
+    session.history = (0..4)
+        .map(|index| HistoryItem::user(Content::text(format!("request {index}"))))
+        .collect();
+    session.snapshot_metadata_at(1);
+    session.first_user_message = Some("synthetic active message ".repeat(512).into());
+    session.snapshot_metadata_at(4);
+    app.app.load_session(session);
+    app.ensure_writer_ready();
+    save_record_backed_session(&mut app);
+    let outcome = app.app.flush_persist();
+    let crate::persist::PersistenceFlushOutcome::Durable {
+        receipt: Some(receipt),
+        ..
+    } = outcome
+    else {
+        panic!("initial catalog fixture was not persisted: {outcome:?}");
+    };
+    assert!(app
+        .app
+        .core
+        .sessions
+        .wait_for_session_catalog(Duration::from_secs(5)));
+    let id = app.session_snapshot().id.clone();
+    assert_eq!(receipt.session_id, id);
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        app.app.core.sessions.sessions_dir(),
+        receipt.lineage_id.as_deref().expect("fixture lineage"),
+        &id,
+    )
+    .unwrap();
+    let initial = reader.snapshot().unwrap();
+    assert_eq!(
+        initial.metadata.first_user_message,
+        Some("synthetic active message ".repeat(512)),
+        "fixture active message must differ from the retained snapshot"
+    );
+    let conn = rusqlite::Connection::open(reader.database_path()).unwrap();
+    assert_eq!(
+        conn.execute(
+            "UPDATE objects SET bytes = zeroblob(stored_size)
+             WHERE hash = (
+                 SELECT payload.object_hash FROM lineage_revision_state_roots archive
+                 JOIN lineage_revisions revision ON revision.lineage_id = archive.lineage_id
+                   AND revision.state_payload_id = archive.state_payload_id
+                 JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+                   AND root.root_id = archive.root_id AND root.item_count = 4 AND root.depth = 1
+                 JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+                   AND entry.node_id = root.root_node_id AND entry.entry_index = 1
+                 JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+                   AND payload.payload_id = entry.payload_id
+                 WHERE revision.revision_id = ?1 AND archive.role = 'metadata_snapshots'
+             )",
+            [&initial.revision_id],
+        )
+        .unwrap(),
+        1,
+        "fixture must corrupt only the retained metadata snapshot body"
+    );
+    assert!(reader.snapshot().is_err());
+    assert!(app.run_lua("smelt.session.title.set('durable new title')"));
+    app.save_session_and_flush();
+    let head = reader.store_head().unwrap();
+    assert!(head.revision > initial.head.revision);
+    assert_eq!(head.history_len, initial.head.history_len);
+    assert!(app
+        .app
+        .core
+        .sessions
+        .wait_for_session_catalog(Duration::from_secs(5)));
+    let row =
+        smelt_store::CatalogReader::open_existing(app.app.core.sessions.layout().catalog_path())
+            .unwrap()
+            .unwrap()
+            .session(&id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        row.availability,
+        smelt_store::CatalogAvailability::Available
+    );
+    assert_eq!(row.source_revision, head.revision.get());
+    assert_eq!(row.title.as_deref(), Some("durable new title"));
+    assert_eq!(
+        row.first_user_message.as_deref(),
+        initial.metadata.first_user_message.as_deref()
+    );
+    assert!(
+        reader.snapshot().is_err(),
+        "cold archive integrity checks remain mandatory"
+    );
+}
+
+#[test]
+fn title_save_uses_metadata_boundary_coordinates_without_hydrating_old_header_fields() {
+    let mut app = TestApp::builder().build();
+    let mut session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.title = Some("boundary seed title".into());
+    session.history = (0..4)
+        .map(|index| HistoryItem::user(Content::text(format!("request {index}"))))
+        .collect();
+    session.snapshot_metadata_at(1);
+    session.snapshot_metadata_at(4);
+    let id = session.id.clone();
+    let root = app.app.core.sessions.sessions_dir().to_path_buf();
+    let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
+    command.side_tables.metadata_snapshots[0].1["future_field"] =
+        serde_json::json!({"preserved": "synthetic retained non-message field"});
+    command.side_tables.metadata_snapshots[1].1["future_field"] =
+        serde_json::Value::String("synthetic unknown header field α\n".repeat(16 * 1024));
+    let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
+    command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+        start: smelt_store::TranscriptRecordIndex::ZERO,
+        records: transcript
+            .history
+            .block_records_with_ids_from(0)
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                    index,
+                    record.block_id.get(),
+                    &record.record,
+                )
+                .unwrap()
+            })
+            .collect(),
+    });
+    let mut writer = smelt_store::OwnedLineageWriter::open(&root, &id).unwrap();
+    let receipt = writer.commit_session(&command).unwrap();
+    let initial = writer.snapshot().unwrap();
+    writer.refresh_catalog().unwrap();
+    writer.release().unwrap();
+    assert!(app.resume_session(&id));
+    app.ensure_writer_ready();
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &root,
+        receipt.lineage_id.as_deref().unwrap(),
+        &id,
+    )
+    .unwrap();
+    assert_eq!(reader.snapshot().unwrap(), initial);
+    let conn = rusqlite::Connection::open(reader.database_path()).unwrap();
+    let header: (String, Vec<u8>, i64) = conn
+        .query_row(
+            "SELECT object.hash, object.bytes, payload.byte_count
+             FROM lineage_revision_state_roots archive
+             JOIN lineage_revisions revision ON revision.lineage_id = archive.lineage_id
+               AND revision.state_payload_id = archive.state_payload_id
+             JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+               AND root.root_id = archive.root_id AND root.item_count = 4 AND root.depth = 1
+             JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+               AND entry.node_id = root.root_node_id AND entry.entry_index = 2
+             JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+               AND payload.payload_id = entry.payload_id
+             JOIN objects object ON object.hash = payload.object_hash
+             WHERE revision.revision_id = ?1 AND archive.role = 'metadata_snapshots'",
+            [&initial.revision_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(
+        header.2 > 512 * 1024,
+        "fixture needs a large non-message header"
+    );
+    assert_eq!(
+        conn.execute(
+            "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
+            [&header.0],
+        )
+        .unwrap(),
+        1
+    );
+    assert!(reader.snapshot().is_err());
+    assert!(app.run_lua("smelt.session.title.set('bounded boundary title')"));
+    app.save_session_and_flush();
+    let head = reader.store_head().unwrap();
+    conn.execute(
+        "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
+        (&header.1, &header.0),
+    )
+    .unwrap();
+    let saved = reader.snapshot().unwrap();
+    assert!(app.run_lua("smelt.session.title.set('restored boundary title')"));
+    let _ = retry_persistence_via_lua(&mut app);
+    app.save_session_and_flush();
+    let restored = reader.snapshot().unwrap();
+    assert!(
+        restored.head.revision > initial.head.revision,
+        "restoring the old header must restore ordinary title saves: {:?}",
+        app.app.conversation.persistence_status().unwrap().state
+    );
+    assert_eq!(
+        restored.metadata.title.as_deref(),
+        Some("restored boundary title")
+    );
+    assert_eq!(
+        restored.side_tables.metadata_snapshots[0],
+        initial.side_tables.metadata_snapshots[0]
+    );
+    assert!(
+        head.revision > initial.head.revision,
+        "title save must use verified boundary coordinates, not read old non-message header fields"
+    );
+    assert_eq!(head.history_len, initial.head.history_len);
+    assert_eq!(
+        head.transcript_record_count,
+        initial.head.transcript_record_count
+    );
+    assert_eq!(
+        saved.metadata.title.as_deref(),
+        Some("bounded boundary title")
+    );
+    assert_eq!(
+        saved.side_tables.metadata_snapshots[0],
+        initial.side_tables.metadata_snapshots[0]
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT bytes FROM objects WHERE hash = ?1",
+            [&header.0],
+            |row| row.get::<_, Vec<u8>>(0)
+        )
+        .unwrap(),
+        header.1,
+        "historical header bytes must remain exact"
+    );
+}
+
+#[test]
+fn legacy_projection_survives_noop_and_avoids_retained_metadata_reads_on_title_save() {
+    let mut app = TestApp::builder().build();
+    let mut session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.title = Some("legacy seed title".into());
+    session.first_user_message = Some("synthetic retained message ".repeat(512).into());
+    session.history = (0..4)
+        .map(|index| HistoryItem::user(Content::text(format!("request {index}"))))
+        .collect();
+    session.snapshot_metadata_at(1);
+    session.first_user_message = Some("synthetic active message".into());
+    session.snapshot_metadata_at(4);
+    let id = session.id.clone();
+    let root = app.app.core.sessions.sessions_dir().to_path_buf();
+    let mut writer = smelt_store::OwnedLineageWriter::open(&root, &id).unwrap();
+    let source = rusqlite::Connection::open_in_memory().unwrap();
+    source
+        .execute_batch(include_str!("../../../../store/src/lineage_v3.sql"))
+        .unwrap();
+    source
+        .execute_batch(
+            "PRAGMA user_version = 3;
+         INSERT INTO store_meta (key, value) VALUES ('schema_version', '3');",
+        )
+        .unwrap();
+    source
+        .execute(
+            "INSERT INTO lineage_identity VALUES (1, ?1, 1)",
+            [writer.lineage_id()],
+        )
+        .unwrap();
+    let mut conn = rusqlite::Connection::open(writer.database_path()).unwrap();
+    rusqlite::backup::Backup::new(&source, &mut conn)
+        .unwrap()
+        .run_to_completion(128, std::time::Duration::ZERO, None)
+        .unwrap();
+    let mut command = smelt_store::SessionCommit {
+        session_id: id.clone(),
+        expected: smelt_store::StoreHead::default(),
+        identity: smelt_core::session::store_identity_from_session(&session).unwrap(),
+        metadata: smelt_core::session::store_metadata_from_session(&session, 4).unwrap(),
+        history: smelt_store::HistorySuffix {
+            start: smelt_store::HistoryIndex::ZERO,
+            final_len: smelt_store::HistoryLen::new(4),
+            items: session.history.clone(),
+        },
+        side_tables: smelt_core::session::store_side_table_suffixes_from_session(&session, 0)
+            .unwrap(),
+        transcript_records: None,
+    };
+    let initial_receipt = writer.commit_session(&command).unwrap();
+    assert_eq!(initial_receipt.session_id, id);
+    let initial = writer.snapshot().unwrap();
+    let state_object = conn
+        .query_row(
+            "SELECT object.hash, object.bytes FROM lineage_revisions revision
+             JOIN lineage_payload_object_refs payload ON payload.lineage_id = revision.lineage_id
+               AND payload.payload_id = revision.state_payload_id
+             JOIN objects object ON object.hash = payload.object_hash
+             WHERE revision.revision_id = ?1",
+            [&initial.revision_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))
+            .unwrap(),
+        3
+    );
+    writer.refresh_catalog().unwrap();
+    writer.release().unwrap();
+    let mut writer = smelt_store::OwnedLineageWriter::open_existing_in_lineage(
+        &root,
+        initial_receipt.lineage_id.as_deref().unwrap(),
+        &id,
+    )
+    .unwrap();
+    command.expected = initial_receipt.current;
+    command.history.start = smelt_store::HistoryIndex::new(4);
+    command.history.items.clear();
+    command.side_tables =
+        smelt_core::session::store_side_table_suffixes_from_session(&session, 4).unwrap();
+    let noop = writer.commit_session(&command).unwrap();
+    assert_eq!(noop.current, initial_receipt.current);
+    assert_eq!(writer.snapshot().unwrap(), initial);
+    assert_eq!(
+        conn.query_row(
+            "SELECT bytes FROM objects WHERE hash = ?1",
+            [&state_object.0],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .unwrap(),
+        state_object.1,
+        "projection must not rewrite the legacy state"
+    );
+    writer.release().unwrap();
+    let owned = app
+        .app
+        .core
+        .sessions
+        .load_full_result(&id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owned.archive_base().unwrap().revision_id,
+        initial.revision_id
+    );
+    app.app.load_session(owned);
+    app.ensure_writer_ready();
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &root,
+        initial_receipt.lineage_id.as_deref().unwrap(),
+        &id,
+    )
+    .unwrap();
+    assert_eq!(reader.store_head().unwrap(), initial_receipt.current);
+    assert_eq!(reader.snapshot().unwrap(), initial);
+    assert_eq!(
+        conn.execute(
+            "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = (
+                 SELECT payload.object_hash FROM lineage_revision_state_roots archive
+                 JOIN lineage_revision_state_projections projection
+                   ON projection.lineage_id = archive.lineage_id
+                   AND projection.projected_payload_id = archive.state_payload_id
+                 JOIN lineage_revisions revision ON revision.lineage_id = projection.lineage_id
+                   AND revision.state_payload_id = projection.original_payload_id
+                 JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+                   AND root.root_id = archive.root_id AND root.item_count = 4 AND root.depth = 1
+                 JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+                   AND entry.node_id = root.root_node_id AND entry.entry_index = 1
+                 JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+                   AND payload.payload_id = entry.payload_id
+                 WHERE revision.revision_id = ?1 AND archive.role = 'metadata_snapshots'
+             )",
+            [&initial.revision_id],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        reader.snapshot().unwrap(),
+        initial,
+        "legacy snapshots remain original-authoritative"
+    );
+    assert!(!reader.doctor_report().unwrap().healthy);
+    assert!(app.run_lua("smelt.session.title.set('projected title')"));
+    app.save_session_and_flush();
+    let head = reader.store_head().unwrap();
+    assert!(
+        head.revision > initial.head.revision,
+        "title save must not rehydrate the retained legacy metadata value"
+    );
+    assert_eq!(head.history_len, initial.head.history_len);
+    assert_eq!(
+        reader.catalog_session().unwrap().title.as_deref(),
+        Some("projected title")
+    );
+    assert!(
+        reader.snapshot().is_err(),
+        "full shared snapshots verify retained projected bodies"
+    );
+}
+
+#[test]
+fn canonical_enter_projects_records_before_dispatch_and_does_not_reproject_them() {
+    let mut app = TestApp::builder().build();
+    app.ensure_writer_ready();
+    let release = app.app.conversation.pause_persistence();
+    smelt_perf::perf::set_enabled(true);
+    smelt_perf::perf::clear();
+    let projection_count = || {
+        smelt_perf::perf::snapshot()
+            .durations
+            .iter()
+            .find(|row| row.label == "session:project_transcript_record")
+            .map_or(0, |row| row.count)
+    };
+    app.type_text("projected submitted request α");
+    app.press(KeyCode::Enter);
+    let prepared_count = projection_count();
+    let pending = app.app.turn_submission_is_pending();
+    let running = app.agent_running();
+    release.send(()).unwrap();
+    app.wait_for_turn_persistence();
+    let durable_count = projection_count();
+    smelt_perf::perf::set_enabled(false);
+    assert!(pending);
+    assert!(!running);
+    assert!(
+        prepared_count > 0,
+        "record projection belongs to preparation, not storage dispatch"
+    );
+    assert_eq!(
+        durable_count, prepared_count,
+        "dispatch must reuse prepared canonical rows"
+    );
+    assert_eq!(
+        app.drain_engine_sends()
+            .iter()
+            .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
+            .count(),
+        1,
+    );
+    let id = app.session_snapshot().id.clone();
+    let reader =
+        smelt_store::LineageSessionReader::open_existing(app.app.core.sessions.sessions_dir(), &id)
+            .unwrap();
+    let head = reader.store_head().unwrap();
+    let total = head.transcript_record_count.as_usize().unwrap();
+    let records = reader
+        .transcript_record_slice_with_total((0..total).into(), total)
+        .unwrap();
+    assert!(records
+        .records
+        .iter()
+        .any(|row| row.indexed_text.contains("projected submitted request α")));
+}
+
+#[test]
+fn canonical_enter_returns_and_repaints_while_storage_is_paused() {
+    let mut app = TestApp::builder().build();
+    app.ensure_writer_ready();
+    let release = app.app.conversation.pause_persistence();
+    app.type_text("submitted request");
+    let started = std::time::Instant::now();
+    app.press(KeyCode::Enter);
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    assert!(app.app.turn_submission_is_pending());
+    assert!(!app.agent_running());
+    assert_eq!(app.state().prompt_text, "");
+    assert!(app
+        .drain_engine_sends()
+        .iter()
+        .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+
+    let started = std::time::Instant::now();
+    app.type_text("draft while saving");
+    assert!(app.render_to_frame().text().contains("draft while saving"));
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    release.send(()).unwrap();
+    app.wait_for_turn_persistence();
+    assert!(app.agent_running());
+    assert_eq!(app.state().prompt_text, "draft while saving");
+    assert_eq!(
+        app.drain_engine_sends()
+            .iter()
+            .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn rejected_async_submission_restores_attachments_without_losing_new_draft() {
+    for image in [false, true] {
+        for draft in [false, true] {
+            let mut app = TestApp::builder().build();
+            app.ensure_writer_ready();
+            app.app.conversation.inject_commit_failure(
+                smelt_store::SessionCommitFailure::InvalidCommand {
+                    message: "injected submission rejection".into(),
+                },
+            );
+            let release = app.app.conversation.pause_persistence();
+            app.type_text("submitted request");
+            if image {
+                app.insert_attachment("pic.png".into());
+            }
+            let submitted = app.state().prompt_text;
+            app.press(KeyCode::Enter);
+            assert!(app.state().prompt_text.is_empty());
+            if draft {
+                app.type_text("new draft 界");
+            }
+            release.send(()).unwrap();
+            app.app.flush_persist();
+            app.wait_for_turn_persistence();
+            assert_eq!(
+                app.state().prompt_text,
+                if draft {
+                    format!("{submitted}\nnew draft 界")
+                } else {
+                    submitted
+                }
+            );
+            assert_eq!(app.prompt_attachment_count(), usize::from(image));
+            assert!(!app.agent_running());
+            assert!(app
+                .drain_engine_sends()
+                .iter()
+                .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+            assert!(app
+                .session_history()
+                .iter()
+                .all(|item| !matches!(item, HistoryItem::User { .. })));
+            app.assert_invariants();
+        }
+    }
+}
+
+#[test]
+fn rejected_visual_submission_restores_its_original_range() {
+    for (original, linewise, move_up, remaining) in [
+        ("alpha beta gamma", false, false, "alpha  gamma"),
+        ("界 beta 界", false, false, "界  界"),
+        ("one\ntwo\nthree", true, true, "one\nthree"),
+        ("one\ntwo", true, false, "one"),
+    ] {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.ensure_writer_ready();
+        app.app.conversation.inject_commit_failure(
+            smelt_store::SessionCommitFailure::InvalidCommand {
+                message: "injected selection rejection".into(),
+            },
+        );
+        let release = app.app.conversation.pause_persistence();
+        app.type_text(original);
+        app.press(KeyCode::Esc);
+        if linewise {
+            if move_up {
+                app.type_char('k');
+            }
+            app.type_char('0');
+            app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
+        } else {
+            app.type_char('0');
+            app.type_char('w');
+            app.type_char('v');
+            app.type_char('e');
+        }
+        app.press(KeyCode::Enter);
+        assert_eq!(app.state().prompt_text, remaining);
+        app.render_silent();
+        release.send(()).unwrap();
+        app.app.flush_persist();
+        app.wait_for_turn_persistence();
+        assert_eq!(app.state().prompt_text, original);
+        app.type_char('u');
+        assert_eq!(app.state().prompt_text, remaining);
+        app.press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(app.state().prompt_text, original);
+        assert!(!app.agent_running());
+        assert!(app
+            .drain_engine_sends()
+            .iter()
+            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+        app.assert_invariants();
+    }
+}
+
+#[test]
+fn rejected_visual_line_submission_restores_attachment_order_and_separator() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.ensure_writer_ready();
+    app.app
+        .conversation
+        .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+            message: "injected attachment selection rejection".into(),
+        });
+    let release = app.app.conversation.pause_persistence();
+    app.type_text("keep 界 ");
+    app.insert_attachment("keep.png".into());
+    app.type_text("\nsend 界 ");
+    app.insert_attachment("send.png".into());
+    let original = app.state().prompt_text;
+    let original_ids = crate::input::prompt_ctx_ref(&app.app.ui)
+        .buf
+        .attachment_ids
+        .clone();
+    app.press(KeyCode::Esc);
+    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
+    app.press(KeyCode::Enter);
+    assert_eq!(app.prompt_attachment_count(), 1);
+    app.render_silent();
+    release.send(()).unwrap();
+    app.app.flush_persist();
+    app.wait_for_turn_persistence();
+    assert_eq!(app.state().prompt_text, original);
+    assert_eq!(
+        crate::input::prompt_ctx_ref(&app.app.ui).buf.attachment_ids,
+        original_ids
+    );
+    assert_eq!(app.prompt_attachment_count(), 2);
+    app.assert_invariants();
+}
+
+#[test]
+fn rejected_visual_submission_preserves_a_changed_draft() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.ensure_writer_ready();
+    app.app
+        .conversation
+        .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+            message: "injected edited selection rejection".into(),
+        });
+    let release = app.app.conversation.pause_persistence();
+    app.type_text("alpha beta gamma");
+    app.press(KeyCode::Esc);
+    app.type_text("0wve");
+    app.press(KeyCode::Enter);
+    app.type_char('A');
+    app.type_text(" newer draft 界");
+    let draft = app.state().prompt_text;
+    release.send(()).unwrap();
+    app.app.flush_persist();
+    app.wait_for_turn_persistence();
+    assert_eq!(app.state().prompt_text, format!("beta\n{draft}"));
+    assert!(!app.agent_running());
+    app.assert_invariants();
+}
+
+#[test]
+fn rejected_submission_preserves_paste_provenance_of_both_inputs() {
+    for submitted_paste in [false, true] {
+        for draft_paste in [false, true] {
+            let mut app = TestApp::builder().with_vim(false).build();
+            app.ensure_writer_ready();
+            app.app.conversation.inject_commit_failure(
+                smelt_store::SessionCommitFailure::InvalidCommand {
+                    message: "injected submission rejection".into(),
+                },
+            );
+            let release = app.app.conversation.pause_persistence();
+            if submitted_paste {
+                app.feed_one(SourceEvent::Term(Event::Paste("submitted request".into())));
+            } else {
+                app.type_text("submitted request");
+            }
+            app.press(KeyCode::Enter);
+            assert!(app.app.turn_submission_is_pending());
+            if draft_paste {
+                app.feed_one(SourceEvent::Term(Event::Paste(
+                    "!new draft from paste".into(),
+                )));
+            } else {
+                app.type_text("new typed draft");
+            }
+            let draft = app.state().prompt_text;
+            release.send(()).unwrap();
+            app.wait_for_turn_persistence();
+            assert_eq!(
+                app.state().prompt_text,
+                format!("submitted request\n{draft}")
+            );
+            assert_eq!(
+                app.app.prompt.skip_shell_escape(),
+                submitted_paste || draft_paste,
+                "submitted_paste={submitted_paste}, draft_paste={draft_paste}"
+            );
+            assert!(!app.agent_running());
+            app.assert_invariants();
+        }
+    }
+}
+
+#[test]
+fn rejected_paste_keeps_shell_escape_disabled_on_resubmission() {
+    let mut app = TestApp::builder().build();
+    app.ensure_writer_ready();
+    app.app
+        .conversation
+        .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
+            message: "injected paste rejection".into(),
+        });
+    app.feed_one(SourceEvent::Term(Event::Paste(
+        "!this is pasted text".into(),
+    )));
+    app.press(KeyCode::Enter);
+    app.app.flush_persist();
+    app.wait_for_turn_persistence();
+    assert_eq!(app.state().prompt_text, "!this is pasted text");
+    assert!(app.app.prompt.skip_shell_escape());
+    assert!(app.app.retry_blocked_persistence());
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    assert!(app.agent_running());
+    assert!(app
+        .drain_engine_sends()
+        .iter()
+        .any(|command| matches!(command,
+        protocol::UiCommand::StartTurn(payload)
+            if payload.input.provider_content().text_content() == "!this is pasted text")));
+}
+
+#[test]
+fn canonical_completion_repaints_before_receipt_and_gates_queued_dispatch() {
+    for queued in [false, true] {
+        let mut app = TestApp::builder().build();
+        app.start_submitted_turn("initial request");
+        app.drain_engine_sends();
+        if queued {
+            app.push_queued_message("next request".into());
+        }
+        let release = app.app.conversation.pause_persistence();
+        let started = std::time::Instant::now();
+        assert!(app.finish_turn());
+        app.render_silent();
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert!(!app.agent_running());
+        assert!(!app.working_probe().is_animating());
+        assert_eq!(
+            app.working_probe().last_outcome(),
+            Some(smelt_core::working::TurnOutcome::Done)
+        );
+        assert!(app.app.conversation.canonical_operations_are_pending());
+        assert!(app
+            .drain_engine_sends()
+            .iter()
+            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+        app.type_text("draft after completion");
+        assert!(app
+            .render_to_frame()
+            .text()
+            .contains("draft after completion"));
+        release.send(()).unwrap();
+        app.wait_for_turn_persistence();
+        assert_eq!(app.agent_running(), queued);
+        assert_eq!(app.state().prompt_text, "draft after completion");
+        assert_eq!(
+            app.drain_engine_sends()
+                .iter()
+                .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
+                .count(),
+            usize::from(queued)
+        );
+    }
+}
+
 fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
     crate::app::history::materialize_full_session(
         &app.core_probe().sessions,
@@ -225,14 +990,12 @@ fn user_timestamp_survives_submission_save_resume_and_history_rebuild() {
         assert!(app.run_lua("smelt.settings.transcript.show_timestamps = false"));
         app.type_text("Preserve this message's submission time.");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         let input = app
-            .actions()
-            .iter()
-            .find_map(|action| match action {
-                Action::EngineSend(cmd) => match cmd.as_ref() {
-                    protocol::UiCommand::StartTurn(payload) => Some(&payload.input),
-                    _ => None,
-                },
+            .drain_engine_sends()
+            .into_iter()
+            .find_map(|command| match command {
+                protocol::UiCommand::StartTurn(payload) => Some(payload.input),
                 _ => None,
             })
             .expect("start turn dispatched");
@@ -607,6 +1370,7 @@ fn process_status_session_accepts_persisted_follow_up() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.handle_job_completed("4242".into(), Some(0), protocol::JobTermination::Exited);
+        app.wait_for_turn_persistence();
         let turn_id = app.current_turn_id().expect("process-status turn started");
         app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
             turn_id,
@@ -969,7 +1733,7 @@ fn failed_canonical_submit_dispatches_once_after_explicit_retry() {
         protocol::UiCommand::StartTurn(payload)
             if payload.input.provider_content().text_content() == "retry this exact turn"
     )));
-    app.app.drain_persist_reports();
+    let _ = app.flush_persist();
     assert!(app
         .overlays_probe()
         .notification()
@@ -1291,6 +2055,73 @@ fn deleting_source_branch_leaves_active_fork_intact() {
         fork.history_range(0, 1).unwrap(),
         vec![HistoryItem::user(Content::text("shared fork history"))]
     );
+}
+
+#[test]
+fn lua_save_retry_reconciles_committed_title_before_publishing_newer_edits() {
+    let mut app = TestApp::builder().build();
+    app.session_append_history(HistoryItem::user(Content::text(
+        "synthetic save retry history",
+    )));
+    app.save_session_and_flush();
+    app.ensure_writer_ready();
+    let session_id = app.session_snapshot().id.clone();
+    let reader = smelt_store::LineageSessionReader::open_existing(
+        app.core_probe().sessions.sessions_dir(),
+        &session_id,
+    )
+    .unwrap();
+    let initial = reader.snapshot().unwrap();
+
+    app.app.conversation.inject_publish_failure();
+    assert!(app.run_lua("smelt.session.title.set('committed title awaiting acknowledgement')"));
+    app.save_session_and_flush();
+    assert!(matches!(
+        app.flush_persist(),
+        crate::persist::PersistenceFlushOutcome::Blocked { .. }
+    ));
+    let committed = reader.snapshot().unwrap();
+    assert_eq!(
+        committed.metadata.title.as_deref(),
+        Some("committed title awaiting acknowledgement")
+    );
+    assert!(committed.head.revision > initial.head.revision);
+    assert!(app.session_document_has_unflushed_work());
+
+    assert!(app.run_lua("smelt.session.title.set('newer pending title')"));
+    app.save_session();
+    assert!(matches!(
+        app.flush_persist(),
+        crate::persist::PersistenceFlushOutcome::Blocked { .. }
+    ));
+    assert_eq!(
+        reader.store_head().unwrap(),
+        committed.head,
+        "new edits must not implicitly retry a blocked publication"
+    );
+    assert!(retry_persistence_via_lua(&mut app));
+    let outcome = app.flush_persist();
+    assert!(matches!(outcome, crate::persist::PersistenceFlushOutcome::Durable { .. }),
+        "explicit retry must reconcile the unchanged committed save before publishing newer edits: {outcome:?}");
+    assert!(!app.session_document_has_unflushed_work());
+    let latest = reader.snapshot().unwrap();
+    assert_eq!(
+        latest.metadata.title.as_deref(),
+        Some("newer pending title")
+    );
+    assert_eq!(
+        latest.head.revision,
+        committed.head.revision.checked_add(1).unwrap()
+    );
+    assert_eq!(latest.history_root_id, initial.history_root_id);
+    assert_eq!(latest.transcript_root_id, initial.transcript_root_id);
+    assert_eq!(
+        reader.history_range(0, 1).unwrap(),
+        vec![HistoryItem::user(Content::text(
+            "synthetic save retry history"
+        ))]
+    );
+    assert!(!has_sticky_session_save_failure(&app, &session_id));
 }
 
 #[test]
@@ -1914,7 +2745,7 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
                 .iter()
                 .map(|event| {
                     (
-                        event.summary.as_str(),
+                        event.summary.as_ref(),
                         event.first_live_index,
                         event.completed_at_history_len,
                     )
@@ -2043,6 +2874,7 @@ fn resumed_rewind_restores_prior_turn_context_before_next_request() {
         "context pill disappeared after submission:\n{submitted_frame}"
     );
 
+    resumed.wait_for_turn_persistence();
     let mut settings = resumed.core_probe().config.settings.clone();
     settings.auto_compact = true;
     settings.compact_threshold = 0.8;

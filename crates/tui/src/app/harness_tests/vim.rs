@@ -86,6 +86,7 @@ fn double_esc_can_rewind_after_cancelling_quota_pause() {
 
         app.press(KeyCode::Esc);
         app.press(KeyCode::Esc);
+        app.wait_for_turn_persistence();
         drive_lua_tasks(&mut app);
         assert!(
             app.state().active_modal.is_none(),
@@ -412,6 +413,32 @@ fn vim_esc_from_visual_returns_to_normal() {
 
     app.press(KeyCode::Esc);
     assert_eq!(app.state().vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn ctrl_r_searches_history_outside_vim_normal_mode() {
+    for vim in [false, true] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.push_history_entry("current draft from history".into());
+        app.type_text("current draft");
+        app.render_silent();
+        app.press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        app.feed_one(SourceEvent::LuaWakeup);
+        let frame = app.render_to_frame();
+        assert!(
+            frame.text().contains("current draft from history"),
+            "vim={vim}, frame:\n{}",
+            frame.text()
+        );
+        app.press(KeyCode::Esc);
+        app.feed_one(SourceEvent::LuaWakeup);
+        assert_eq!(app.state().prompt_text, "current draft");
+        assert!(!app
+            .render_to_frame()
+            .text()
+            .contains("current draft from history"));
+        app.assert_invariants();
+    }
 }
 
 #[test]

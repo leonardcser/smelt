@@ -1,6 +1,6 @@
 use super::*;
 
-const SEQUENCE_FANOUT: usize = 32;
+pub(super) const SEQUENCE_FANOUT: usize = 32;
 pub(super) const LEAF_TARGET_BYTES: u64 = 2 * 1024 * 1024;
 
 macro_rules! string_id {
@@ -79,6 +79,7 @@ pub(crate) fn validate_lower_hex(value: &str, len: usize, field: &str) -> Result
 pub(crate) enum SequenceKind {
     History,
     Transcript,
+    Data,
 }
 
 impl SequenceKind {
@@ -86,6 +87,7 @@ impl SequenceKind {
         match self {
             Self::History => "history",
             Self::Transcript => "transcript",
+            Self::Data => "data",
         }
     }
 
@@ -93,6 +95,7 @@ impl SequenceKind {
         match value {
             "history" => Ok(Self::History),
             "transcript" => Ok(Self::Transcript),
+            "data" => Ok(Self::Data),
             other => Err(StoreError::Integrity(format!(
                 "unknown sequence kind {other:?}"
             ))),
@@ -105,6 +108,7 @@ pub(crate) enum PayloadKind {
     History,
     Transcript,
     RevisionState,
+    Data,
 }
 
 impl PayloadKind {
@@ -112,6 +116,7 @@ impl PayloadKind {
         match self {
             Self::History => "history",
             Self::Transcript => "transcript",
+            Self::Data => "data",
             Self::RevisionState => "revision_state",
         }
     }
@@ -120,6 +125,7 @@ impl PayloadKind {
         match value {
             "history" => Ok(Self::History),
             "transcript" => Ok(Self::Transcript),
+            "data" => Ok(Self::Data),
             "revision_state" => Ok(Self::RevisionState),
             other => Err(StoreError::Integrity(format!(
                 "unknown lineage payload kind {other:?}"
@@ -133,6 +139,7 @@ impl From<SequenceKind> for PayloadKind {
         match value {
             SequenceKind::History => Self::History,
             SequenceKind::Transcript => Self::Transcript,
+            SequenceKind::Data => Self::Data,
         }
     }
 }
@@ -423,7 +430,7 @@ pub(crate) fn payload_nested_object_refs(
                 collect_nested_object_refs(&tool_state, "metadata", &mut refs)?;
             }
         }
-        PayloadKind::RevisionState => {}
+        PayloadKind::RevisionState | PayloadKind::Data => {}
     }
     Ok(refs)
 }
@@ -516,6 +523,11 @@ pub(crate) fn put_payload(
     if matches!(kind, PayloadKind::History | PayloadKind::Transcript) {
         put_payload_nested_object_refs(conn, lineage, &expected.id, kind, bytes)?;
     }
+    if kind == PayloadKind::RevisionState
+        && crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION
+    {
+        register_revision_archive_roots(conn, lineage, &expected.id, bytes)?;
+    }
     if kind == PayloadKind::Transcript {
         #[cfg(not(test))]
         install_transcript_record_profile(conn, lineage, &expected.id, bytes)?;
@@ -577,10 +589,19 @@ pub(crate) fn hydrate_payload(
     stats: &mut OperationStats,
 ) -> Result<Vec<u8>> {
     let payload = load_payload_ref(conn, lineage, id)?;
+    hydrate_payload_ref(conn, &payload, expected_kind, stats)
+}
+
+pub(crate) fn hydrate_payload_ref(
+    conn: &Connection,
+    payload: &PayloadRef,
+    expected_kind: PayloadKind,
+    stats: &mut OperationStats,
+) -> Result<Vec<u8>> {
     if payload.kind != expected_kind {
         return Err(StoreError::Integrity(format!(
             "payload {} has kind {}, expected {}",
-            id.as_str(),
+            payload.id.as_str(),
             payload.kind.as_str(),
             expected_kind.as_str()
         )));
@@ -591,7 +612,7 @@ pub(crate) fn hydrate_payload(
     if stored.raw_size() != payload.byte_count || stored.bytes.len() as u64 != payload.byte_count {
         return Err(StoreError::Integrity(format!(
             "payload {} byte extent does not match object {}",
-            id.as_str(),
+            payload.id.as_str(),
             payload.object_hash
         )));
     }
@@ -671,7 +692,10 @@ pub(crate) fn create_node(
         "INSERT OR IGNORE INTO lineage_sequence_nodes (
              lineage_id, node_id, sequence_kind, node_kind, level,
              entry_count, item_count, byte_count
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+           WHERE NOT EXISTS (
+               SELECT 1 FROM lineage_sequence_nodes WHERE lineage_id = ?1 AND node_id = ?2
+           )",
         rusqlite::params![
             lineage.as_str(),
             id.as_str(),
@@ -686,29 +710,38 @@ pub(crate) fn create_node(
     if inserted > 0 {
         stats.nodes_written += 1;
     }
-    for (index, entry) in entries.iter().enumerate() {
-        let (entry_kind, payload_id, child_node_id) = match &entry.target {
-            EntryTarget::Item(id) => ("item", Some(id.as_str()), None),
-            EntryTarget::Child(id) => ("child", None, Some(id.as_str())),
-        };
-        conn.execute(
-            "INSERT OR IGNORE INTO lineage_sequence_entries (
+    let needs_repair = inserted == 0
+        && !conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM lineage_completed_sequence_nodes
+                            WHERE lineage_id = ?1 AND node_id = ?2)",
+            (lineage.as_str(), id.as_str()),
+            |row| row.get::<_, bool>(0),
+        )?;
+    if inserted > 0 || needs_repair {
+        for (index, entry) in entries.iter().enumerate() {
+            let (entry_kind, payload_id, child_node_id) = match &entry.target {
+                EntryTarget::Item(id) => ("item", Some(id.as_str()), None),
+                EntryTarget::Child(id) => ("child", None, Some(id.as_str())),
+            };
+            conn.execute(
+                "INSERT OR IGNORE INTO lineage_sequence_entries (
                  lineage_id, node_id, entry_index, entry_kind, payload_id, child_node_id,
                  item_count, byte_count, cumulative_item_count, cumulative_byte_count
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                lineage.as_str(),
-                id.as_str(),
-                checked_i64(index as u64, "entry_index")?,
-                entry_kind,
-                payload_id,
-                child_node_id,
-                checked_i64(entry.item_count, "entry item_count")?,
-                checked_i64(entry.byte_count, "entry byte_count")?,
-                checked_i64(entry.cumulative_item_count, "entry cumulative_item_count")?,
-                checked_i64(entry.cumulative_byte_count, "entry cumulative_byte_count")?
-            ],
-        )?;
+                rusqlite::params![
+                    lineage.as_str(),
+                    id.as_str(),
+                    checked_i64(index as u64, "entry_index")?,
+                    entry_kind,
+                    payload_id,
+                    child_node_id,
+                    checked_i64(entry.item_count, "entry item_count")?,
+                    checked_i64(entry.byte_count, "entry byte_count")?,
+                    checked_i64(entry.cumulative_item_count, "entry cumulative_item_count")?,
+                    checked_i64(entry.cumulative_byte_count, "entry cumulative_byte_count")?
+                ],
+            )?;
+        }
     }
     let expected = SequenceNode {
         id,
@@ -724,6 +757,18 @@ pub(crate) fn create_node(
             "sequence node {} conflicts with its content address",
             expected.id.as_str()
         )));
+    }
+    if needs_repair {
+        // Bounded GC can leave an unreachable node unsealed with surviving entries.
+        // Restore its proof only after verifying the exact content-addressed node.
+        conn.execute(
+            "INSERT INTO lineage_completed_sequence_nodes (lineage_id, node_id)
+             SELECT ?1, ?2 WHERE NOT EXISTS (
+                 SELECT 1 FROM lineage_completed_sequence_nodes
+                 WHERE lineage_id = ?1 AND node_id = ?2
+             )",
+            (lineage.as_str(), expected.id.as_str()),
+        )?;
     }
     if kind == SequenceKind::Transcript {
         #[cfg(not(test))]
@@ -928,6 +973,7 @@ pub(crate) fn insert_root(
     root: &SequenceRoot,
     stats: &mut OperationStats,
 ) -> Result<()> {
+    let _perf = smelt_perf::perf::begin("store:lineage:insert_sequence_root");
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO lineage_sequence_roots (
              lineage_id, root_id, root_kind, root_node_id, depth, item_count, byte_count
@@ -1141,19 +1187,59 @@ pub(crate) fn append_node(
     }
 }
 
-pub(crate) fn build_sequence_from_empty(
+pub(crate) fn build_sequence_from_empty<B: AsRef<[u8]>>(
     conn: &Connection,
     lineage: &LineageId,
     kind: SequenceKind,
-    items: &[Vec<u8>],
+    items: &[B],
     compression: ObjectCompression,
+    stats: &mut OperationStats,
+) -> Result<SequenceRoot> {
+    let mut payload_stats = OperationStats::default();
+    let payloads = items.iter().map(|bytes| {
+        put_payload(
+            conn,
+            lineage,
+            kind.into(),
+            bytes.as_ref(),
+            compression,
+            &mut payload_stats,
+        )
+    });
+    let result = build_sequence_from_payloads(conn, lineage, kind, payloads, stats);
+    merge_operation_stats(stats, payload_stats);
+    result
+}
+
+fn validate_sequence_payload(
+    conn: &Connection,
+    lineage: &LineageId,
+    kind: SequenceKind,
+    payload: &PayloadRef,
+) -> Result<()> {
+    if payload.kind != PayloadKind::from(kind)
+        || load_payload_ref(conn, lineage, &payload.id)? != *payload
+    {
+        return Err(StoreError::Integrity(
+            "sequence payload differs from its retained reference".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_sequence_from_payloads(
+    conn: &Connection,
+    lineage: &LineageId,
+    kind: SequenceKind,
+    payloads: impl IntoIterator<Item = Result<PayloadRef>>,
     stats: &mut OperationStats,
 ) -> Result<SequenceRoot> {
     let mut leaves = Vec::new();
     let mut entries = Vec::with_capacity(SEQUENCE_FANOUT);
     let mut leaf_bytes = 0_u64;
-    for bytes in items {
-        let payload = put_payload(conn, lineage, kind.into(), bytes, compression, stats)?;
+    for payload in payloads {
+        let payload = payload?;
+        validate_sequence_payload(conn, lineage, kind, &payload)?;
         let combined_bytes = leaf_bytes.checked_add(payload.byte_count).ok_or_else(|| {
             StoreError::Integrity("lineage sequence leaf byte extent overflow".into())
         })?;
@@ -1208,23 +1294,39 @@ pub(crate) fn append_sequence_in(
     items: &[Vec<u8>],
     compression: ObjectCompression,
 ) -> Result<(SequenceRoot, OperationStats)> {
+    let mut payload_stats = OperationStats::default();
+    let payloads = items.iter().map(|bytes| {
+        put_payload(
+            conn,
+            lineage,
+            root.kind.into(),
+            bytes,
+            compression,
+            &mut payload_stats,
+        )
+    });
+    let (root, mut stats) = append_sequence_payloads_in(conn, lineage, root, payloads)?;
+    merge_operation_stats(&mut stats, payload_stats);
+    Ok((root, stats))
+}
+
+pub(crate) fn append_sequence_payloads_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    root: &SequenceRoot,
+    payloads: impl IntoIterator<Item = Result<PayloadRef>>,
+) -> Result<(SequenceRoot, OperationStats)> {
     let mut stats = OperationStats::default();
     let mut current = load_matching_root(conn, lineage, root)?;
-    if current.node_id.is_none() && !items.is_empty() {
-        current =
-            build_sequence_from_empty(conn, lineage, current.kind, items, compression, &mut stats)?;
+    let mut payloads = payloads.into_iter().peekable();
+    if current.node_id.is_none() && payloads.peek().is_some() {
+        current = build_sequence_from_payloads(conn, lineage, current.kind, payloads, &mut stats)?;
         insert_root(conn, lineage, &current, &mut stats)?;
         return Ok((current, stats));
     }
-    for bytes in items {
-        let payload = put_payload(
-            conn,
-            lineage,
-            current.kind.into(),
-            bytes,
-            compression,
-            &mut stats,
-        )?;
+    for payload in payloads {
+        let payload = payload?;
+        validate_sequence_payload(conn, lineage, current.kind, &payload)?;
         let next_node = match current.node_id.as_ref() {
             None => create_node(
                 conn,
@@ -1292,7 +1394,7 @@ pub(crate) fn collect_range(
     expected_level: u32,
     start: u64,
     end: u64,
-    output: &mut Vec<Vec<u8>>,
+    output: &mut Vec<PayloadRef>,
     stats: &mut OperationStats,
 ) -> Result<()> {
     if start >= end {
@@ -1313,13 +1415,13 @@ pub(crate) fn collect_range(
                 let EntryTarget::Item(payload_id) = &entry.target else {
                     return Err(StoreError::Integrity("leaf entry is not a payload".into()));
                 };
-                output.push(hydrate_payload(
-                    conn,
-                    lineage,
-                    payload_id,
-                    expected_kind.into(),
-                    stats,
-                )?);
+                let payload = load_payload_ref(conn, lineage, payload_id)?;
+                if payload.kind != expected_kind.into() || payload.byte_count != entry.byte_count {
+                    return Err(StoreError::Integrity(
+                        "sequence item does not match payload extent or kind".into(),
+                    ));
+                }
+                output.push(payload);
             } else {
                 let EntryTarget::Child(child_id) = &entry.target else {
                     return Err(StoreError::Integrity(
@@ -1354,6 +1456,25 @@ pub(crate) fn sequence_range_from_root(
     start: u64,
     end: u64,
 ) -> Result<(Vec<Vec<u8>>, OperationStats)> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
+    let (refs, mut stats) = sequence_payload_refs_from_root(conn, lineage, root, start, end)?;
+    let output = refs
+        .iter()
+        .map(|payload| hydrate_payload_ref(conn, payload, root.kind.into(), &mut stats))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((output, stats))
+}
+
+pub(crate) fn sequence_payload_refs_from_root(
+    conn: &Connection,
+    lineage: &LineageId,
+    root: &SequenceRoot,
+    start: u64,
+    end: u64,
+) -> Result<(Vec<PayloadRef>, OperationStats)> {
     if start > end || end > root.item_count {
         return Err(StoreError::Integrity(format!(
             "sequence range {start}..{end} exceeds length {}",

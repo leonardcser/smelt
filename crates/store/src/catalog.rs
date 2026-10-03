@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusqlite::types::Value;
@@ -15,7 +16,7 @@ use crate::filesystem::{
 use crate::lineage::BranchId;
 use crate::{Result, StoreError};
 
-pub const CATALOG_SCHEMA_VERSION: i32 = 1;
+pub const CATALOG_SCHEMA_VERSION: i32 = 2;
 pub const MAX_CATALOG_PAGE_SIZE: u32 = 10_000;
 
 const CATALOG_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -39,7 +40,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     lineage_id TEXT,
     title TEXT,
     slug TEXT,
-    first_user_message TEXT,
     cwd TEXT,
     mode TEXT,
     reasoning_effort TEXT,
@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     error_kind TEXT,
     error_summary TEXT,
     last_seen_scan INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_messages (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    source_id TEXT,
+    body TEXT
 );
 
 CREATE INDEX IF NOT EXISTS sessions_updated_idx ON sessions(updated_at DESC, id);
@@ -213,7 +219,9 @@ pub struct CatalogSession {
     pub lineage_id: Option<String>,
     pub title: Option<String>,
     pub slug: Option<String>,
-    pub first_user_message: Option<String>,
+    pub first_user_message: Option<Arc<str>>,
+    /// Verified immutable message sequence ID. Unknown sources must supply the body.
+    pub first_user_message_id: Option<String>,
     pub cwd: Option<String>,
     pub mode: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -252,7 +260,8 @@ impl CatalogSession {
             lineage_id: lineage_id.or_else(|| receipt.lineage_id.clone()),
             title: metadata.title.clone(),
             slug: metadata.slug.clone(),
-            first_user_message: metadata.first_user_message.clone(),
+            first_user_message: metadata.first_user_message.as_deref().map(Arc::from),
+            first_user_message_id: None,
             cwd: metadata.cwd.clone(),
             mode: metadata.mode.clone(),
             reasoning_effort: metadata.reasoning_effort.clone(),
@@ -283,6 +292,7 @@ impl CatalogSession {
             title: None,
             slug: None,
             first_user_message: None,
+            first_user_message_id: None,
             cwd: None,
             mode: None,
             reasoning_effort: None,
@@ -376,7 +386,7 @@ impl Catalog {
     fn open_recovering(path: &Path) -> Result<(Self, bool)> {
         match Self::open(path) {
             Ok(catalog) => return Ok((catalog, false)),
-            Err(error) if !error.is_recoverable_catalog_corruption() => return Err(error),
+            Err(error) if !error.is_recoverable_derived_corruption() => return Err(error),
             Err(_) => {}
         }
 
@@ -387,7 +397,7 @@ impl Catalog {
         )?;
         let (conn, rebuilt) = match open_catalog_connection(path) {
             Ok(conn) => (conn, false),
-            Err(error) if error.is_recoverable_catalog_corruption() => {
+            Err(error) if error.is_recoverable_derived_corruption() => {
                 rebuild_catalog(path)?;
                 (open_catalog_connection(path)?, true)
             }
@@ -454,18 +464,17 @@ impl Catalog {
         };
         let sql = format!(
             "INSERT INTO sessions (
-                id, lineage_id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
+                id, lineage_id, title, slug, cwd, mode, reasoning_effort, model,
                 fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
                 updated_at, source_revision, status, error_kind, error_summary, last_seen_scan
              ) VALUES (
-                :id, :lineage_id, :title, :slug, :first_user_message, :cwd, :mode, :reasoning_effort, :model,
+                :id, :lineage_id, :title, :slug, :cwd, :mode, :reasoning_effort, :model,
                 :fast_mode, :parent_id, :context_tokens, :history_len, :text_bytes, :created_at,
                 :updated_at, :source_revision, 'available', NULL, NULL, :last_seen_scan
              ) ON CONFLICT(id) DO UPDATE SET
                 lineage_id = COALESCE(excluded.lineage_id, sessions.lineage_id),
                 title = excluded.title,
                 slug = excluded.slug,
-                first_user_message = excluded.first_user_message,
                 cwd = excluded.cwd,
                 mode = excluded.mode,
                 reasoning_effort = excluded.reasoning_effort,
@@ -483,14 +492,16 @@ impl Catalog {
                 error_summary = NULL,
                 last_seen_scan = MAX(sessions.last_seen_scan, excluded.last_seen_scan){revision_guard}"
         );
-        let changed = self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             &sql,
             named_params! {
                 ":id": session.id,
                 ":lineage_id": session.lineage_id,
                 ":title": session.title,
                 ":slug": session.slug,
-                ":first_user_message": session.first_user_message,
                 ":cwd": session.cwd,
                 ":mode": session.mode,
                 ":reasoning_effort": session.reasoning_effort,
@@ -506,6 +517,36 @@ impl Catalog {
                 ":last_seen_scan": last_seen_scan,
             },
         )?;
+        if changed != 0 {
+            let stored_id = tx
+                .query_row(
+                    "SELECT source_id FROM session_messages WHERE session_id = ?1",
+                    [&session.id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            // Immutable source equality avoids even binding or comparing retained body bytes.
+            if replace_ahead_revision
+                || session.first_user_message_id.is_none()
+                || stored_id != session.first_user_message_id
+            {
+                tx.execute(
+                    "INSERT INTO session_messages (session_id, source_id, body)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(session_id) DO UPDATE SET source_id = excluded.source_id,
+                         body = excluded.body
+                     WHERE session_messages.source_id IS NOT excluded.source_id
+                         OR session_messages.body IS NOT excluded.body",
+                    params![
+                        session.id,
+                        session.first_user_message_id,
+                        session.first_user_message.as_deref()
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(changed != 0)
     }
 
@@ -675,11 +716,11 @@ impl CatalogReader {
         conn.busy_timeout(CATALOG_READ_BUSY_TIMEOUT)?;
         let schema_tables = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_schema
-             WHERE type = 'table' AND name IN ('catalog_meta', 'sessions')",
+             WHERE type = 'table' AND name IN ('catalog_meta', 'sessions', 'session_messages')",
             [],
             |row| row.get::<_, i64>(0),
         )?;
-        if schema_tables != 2 {
+        if schema_tables != 3 {
             return Ok(None);
         }
         validate_schema(&conn)?;
@@ -846,6 +887,7 @@ fn open_catalog_connection(path: &Path) -> Result<Connection> {
     conn.busy_timeout(CATALOG_WRITE_BUSY_TIMEOUT)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", true)?;
     // Avoid a deferred read-to-write upgrade, which SQLite cannot safely wait on.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(CATALOG_SCHEMA)?;
@@ -855,6 +897,30 @@ fn open_catalog_connection(path: &Path) -> Result<Connection> {
          VALUES (1, ?1, 1, 0, NULL)",
         [CATALOG_SCHEMA_VERSION],
     )?;
+    let version: i32 = tx.query_row(
+        "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if version == 1 {
+        let has_inline_message: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('sessions')
+             WHERE name = 'first_user_message')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_inline_message {
+            return Err(StoreError::Integrity(
+                "legacy catalog has no inline message column".into(),
+            ));
+        }
+        tx.execute_batch(
+            "INSERT INTO session_messages (session_id, source_id, body)
+             SELECT id, NULL, first_user_message FROM sessions;
+             ALTER TABLE sessions DROP COLUMN first_user_message;
+             UPDATE catalog_meta SET schema_version = 2 WHERE singleton = 1;",
+        )?;
+    }
     validate_schema(&tx)?;
     tx.commit()?;
     Ok(conn)
@@ -917,10 +983,12 @@ fn catalog_metadata(conn: &Connection) -> Result<CatalogMetadata> {
 
 fn query_session(conn: &Connection, id: &str) -> Result<Option<CatalogSession>> {
     let mut statement = conn.prepare(
-        "SELECT id, lineage_id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
+        "SELECT id, lineage_id, title, slug, session_messages.body, cwd, mode, reasoning_effort, model,
                 fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
-                updated_at, source_revision, status, error_kind, error_summary, last_seen_scan
-         FROM sessions WHERE id = ?1",
+                updated_at, source_revision, status, error_kind, error_summary, last_seen_scan,
+                session_messages.source_id
+         FROM sessions LEFT JOIN session_messages ON session_messages.session_id = sessions.id
+         WHERE id = ?1",
     )?;
     let mut rows = statement.query([id])?;
     rows.next()?.map(catalog_session_from_row).transpose()
@@ -956,10 +1024,11 @@ fn query_page(conn: &Connection, query: &CatalogQuery) -> Result<CatalogPage> {
         )));
     }
     let mut sql = String::from(
-        "SELECT id, lineage_id, title, slug, first_user_message, cwd, mode, reasoning_effort, model,
+        "SELECT id, lineage_id, title, slug, session_messages.body, cwd, mode, reasoning_effort, model,
                 fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
-                updated_at, source_revision, status, error_kind, error_summary, last_seen_scan
-         FROM sessions",
+                updated_at, source_revision, status, error_kind, error_summary, last_seen_scan,
+                session_messages.source_id
+         FROM sessions LEFT JOIN session_messages ON session_messages.session_id = sessions.id",
     );
     let mut clauses = Vec::new();
     let mut values = Vec::<Value>::new();
@@ -1024,7 +1093,8 @@ fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> Result<CatalogSession> {
         lineage_id: row.get(1)?,
         title: row.get(2)?,
         slug: row.get(3)?,
-        first_user_message: row.get(4)?,
+        first_user_message: row.get::<_, Option<String>>(4)?.map(Arc::from),
+        first_user_message_id: row.get(21)?,
         cwd: row.get(5)?,
         mode: row.get(6)?,
         reasoning_effort: row.get(7)?,
@@ -1095,7 +1165,8 @@ mod tests {
             lineage_id: None,
             title: Some(format!("title-{id}")),
             slug: None,
-            first_user_message: Some(format!("message-{id}")),
+            first_user_message: Some(format!("message-{id}").into()),
+            first_user_message_id: None,
             cwd: Some(if id.starts_with('a') { "/a" } else { "/b" }.into()),
             mode: Some("agent".into()),
             reasoning_effort: Some("medium".into()),
@@ -1112,6 +1183,261 @@ mod tests {
             error_kind: None,
             error_summary: None,
             last_seen_scan: 0,
+        }
+    }
+
+    #[test]
+    fn catalog_page_snapshot_clones_share_large_message_bytes() {
+        for bytes in [32_768, 1_048_576] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("catalog.db");
+            let mut catalog = Catalog::open(&path).unwrap();
+            let mut session = row("large", 1, 1);
+            session.first_user_message = Some("m".repeat(bytes).into());
+            catalog.upsert_available(&session).unwrap();
+            let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+            let page = reader.page(&CatalogQuery::default()).unwrap();
+            let cloned = page.sessions[0].clone();
+            assert_eq!(cloned.first_user_message.as_deref().unwrap().len(), bytes);
+            assert_eq!(
+                cloned.first_user_message.as_deref().unwrap().as_ptr(),
+                page.sessions[0]
+                    .first_user_message
+                    .as_deref()
+                    .unwrap()
+                    .as_ptr(),
+                "catalog overlay/query snapshots must share immutable message bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_catalog_title_publication_does_not_rewrite_unchanged_message_pages() {
+        for bytes in [128, 32_768, 1_048_576] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("catalog.db");
+            let mut catalog = Catalog::open(&path).unwrap();
+            catalog
+                .conn
+                .pragma_update(None, "wal_autocheckpoint", 0)
+                .unwrap();
+            let mut session = row("large", 1, 1);
+            session.first_user_message = Some("m".repeat(bytes).into());
+            catalog.upsert_available(&session).unwrap();
+            catalog
+                .conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            for revision in 2..12 {
+                session.source_revision = revision;
+                session.updated_at = revision as i64;
+                session.title = Some(format!("title-{revision}"));
+                assert!(catalog.upsert_available(&session).unwrap());
+            }
+            let wal_bytes = std::fs::metadata(sqlite_companion_path(&path, "-wal"))
+                .unwrap()
+                .len();
+            eprintln!("CATALOG_TITLE_GROWTH message_bytes={bytes} saves=10 wal_bytes={wal_bytes}");
+            assert!(
+                wal_bytes < 262_144,
+                "unchanged message inflated catalog title WAL to {wal_bytes} bytes"
+            );
+            let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+            let saved = reader.session("large").unwrap().unwrap();
+            assert_eq!(saved.title.as_deref(), Some("title-11"));
+            assert!(saved.first_user_message.as_deref() == session.first_user_message.as_deref());
+        }
+    }
+
+    fn legacy_catalog(path: &Path) -> Connection {
+        let legacy = Connection::open(path).unwrap();
+        legacy.execute_batch(
+            "CREATE TABLE catalog_meta (singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL,
+                next_scan_id INTEGER NOT NULL, completed_scan_id INTEGER NOT NULL, reconciled_at INTEGER);
+             INSERT INTO catalog_meta VALUES (1, 1, 7, 6, 123);
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, lineage_id TEXT, title TEXT, slug TEXT,
+                first_user_message TEXT, cwd TEXT, mode TEXT, reasoning_effort TEXT, model TEXT,
+                fast_mode INTEGER, parent_id TEXT, context_tokens INTEGER, history_len INTEGER,
+                text_bytes INTEGER, created_at INTEGER, updated_at INTEGER, source_revision INTEGER,
+                status TEXT NOT NULL, error_kind TEXT, error_summary TEXT, last_seen_scan INTEGER NOT NULL);",
+        ).unwrap();
+        legacy
+    }
+
+    #[test]
+    fn catalog_v1_message_migration_rolls_back_on_message_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.db");
+        let legacy = legacy_catalog(&path);
+        legacy.execute_batch(
+            "INSERT INTO sessions (id, first_user_message, source_revision, status, last_seen_scan)
+             VALUES ('large', 'synthetic α', 4, 'available', 6);
+             CREATE TABLE session_messages (session_id TEXT PRIMARY KEY, source_id TEXT, body TEXT);
+             CREATE TRIGGER reject_migration BEFORE INSERT ON session_messages
+             BEGIN SELECT RAISE(ABORT, 'synthetic migration failure'); END;",
+        ).unwrap();
+        drop(legacy);
+        assert!(Catalog::open(&path).is_err());
+        let legacy = Connection::open(&path).unwrap();
+        let stored: (i32, String, i64) = legacy.query_row(
+            "SELECT schema_version, first_user_message, last_seen_scan FROM catalog_meta, sessions",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(stored, (1, "synthetic α".into(), 6));
+        assert_eq!(
+            legacy
+                .query_row("SELECT count(*) FROM session_messages", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        legacy
+            .execute_batch("DROP TRIGGER reject_migration")
+            .unwrap();
+        drop(legacy);
+        let catalog = Catalog::open(&path).unwrap();
+        assert_eq!(
+            catalog.page(&CatalogQuery::default()).unwrap().sessions[0]
+                .first_user_message
+                .as_deref(),
+            Some("synthetic α")
+        );
+    }
+
+    #[test]
+    fn catalog_v1_message_migration_preserves_rows_and_scan_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.db");
+        let legacy = legacy_catalog(&path);
+        let body = "synthetic α\n".repeat(32_768);
+        legacy.execute("INSERT INTO sessions (id, title, first_user_message, created_at, updated_at,
+            source_revision, status, last_seen_scan) VALUES ('large', 'old-title', ?1, 1, 2, 4, 'available', 6)", [&body]).unwrap();
+        drop(legacy);
+        assert!(CatalogReader::open_existing(&path).unwrap().is_none());
+        let mut catalog = Catalog::open(&path).unwrap();
+        let metadata = catalog.metadata().unwrap();
+        assert_eq!(metadata.next_scan_id, 7);
+        assert_eq!(metadata.completed_scan_id, 6);
+        assert_eq!(metadata.reconciled_at, Some(123));
+        let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+        let session = reader.session("large").unwrap().unwrap();
+        assert!(session.first_user_message.as_deref() == Some(body.as_str()));
+        assert_eq!(session.first_user_message_id, None);
+        assert_eq!(session.title.as_deref(), Some("old-title"));
+        assert_eq!(session.source_revision, 4);
+        assert_eq!(session.last_seen_scan, 6);
+        drop(reader);
+        assert!(catalog.remove("large").unwrap());
+        assert_eq!(
+            catalog
+                .conn
+                .query_row("SELECT count(*) FROM session_messages", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn catalog_message_and_scalar_publication_roll_back_together() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.db");
+        let mut catalog = Catalog::open(&path).unwrap();
+        let mut original = row("large", 1, 1);
+        original.first_user_message_id = Some("a".repeat(64));
+        catalog.upsert_available(&original).unwrap();
+        catalog
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_message_update BEFORE UPDATE ON session_messages
+            BEGIN SELECT RAISE(ABORT, 'synthetic message failure'); END;",
+            )
+            .unwrap();
+        let mut changed = original.clone();
+        changed.title = Some("changed".into());
+        changed.source_revision = 2;
+        changed.first_user_message_id = Some("b".repeat(64));
+        changed.first_user_message = Some("new-body".into());
+        assert!(catalog.upsert_available(&changed).is_err());
+        let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+        let saved = reader.session("large").unwrap().unwrap();
+        assert_eq!(saved.title, original.title);
+        assert_eq!(saved.source_revision, original.source_revision);
+        assert_eq!(saved.first_user_message_id, original.first_user_message_id);
+        assert!(saved.first_user_message == original.first_user_message);
+    }
+
+    #[test]
+    fn catalog_stale_publication_cannot_replace_or_remove_message_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.db");
+        let mut catalog = Catalog::open(&path).unwrap();
+        let mut original = row("large", 2, 2);
+        original.first_user_message_id = Some("a".repeat(64));
+        catalog.upsert_available(&original).unwrap();
+        let mut stale = original.clone();
+        stale.source_revision = 1;
+        stale.first_user_message_id = None;
+        stale.first_user_message = None;
+        assert!(!catalog.upsert_available(&stale).unwrap());
+        let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+        let saved = reader.session("large").unwrap().unwrap();
+        assert!(saved.first_user_message == original.first_user_message);
+        assert_eq!(saved.first_user_message_id, original.first_user_message_id);
+    }
+
+    #[test]
+    fn native_catalog_source_equality_skips_body_writes_and_reconciliation_repairs_them() {
+        for bytes in [32_768, 1_048_576] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("catalog.db");
+            let mut catalog = Catalog::open(&path).unwrap();
+            let mut session = row("large", 1, 1);
+            session.first_user_message = Some("m".repeat(bytes).into());
+            session.first_user_message_id = Some("a".repeat(64));
+            catalog.upsert_available(&session).unwrap();
+            use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+            catalog
+                .conn
+                .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                    AuthAction::Read {
+                        table_name: "session_messages",
+                        column_name: "body",
+                    }
+                    | AuthAction::Update {
+                        table_name: "session_messages",
+                        column_name: "body",
+                    } => Authorization::Deny,
+                    _ => Authorization::Allow,
+                }))
+                .unwrap();
+            session.title = Some("new-title".into());
+            session.source_revision = 2;
+            assert!(catalog.upsert_available(&session).unwrap());
+            let source_id = session.first_user_message_id.take();
+            assert!(catalog.upsert_available(&session).is_err());
+            session.first_user_message_id = source_id;
+            catalog
+                .conn
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .unwrap();
+            catalog
+                .conn
+                .execute_batch("UPDATE session_messages SET body = 'synthetic corrupt cache'")
+                .unwrap();
+            let scan = catalog.allocate_scan().unwrap();
+            catalog
+                .upsert_available_for_reconciliation(&session, scan)
+                .unwrap();
+            catalog.complete_scan(scan, 3).unwrap();
+            let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
+            let repaired = reader.session("large").unwrap().unwrap();
+            assert_eq!(repaired.first_user_message, session.first_user_message);
+            assert_eq!(
+                repaired.first_user_message_id,
+                session.first_user_message_id
+            );
+            assert_eq!(repaired.title, session.title);
         }
     }
 
@@ -1232,6 +1558,26 @@ mod tests {
     }
 
     #[test]
+    fn catalog_metadata_version_cannot_misclassify_current_layout_as_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.db");
+        let mut catalog = Catalog::open(&path).unwrap();
+        catalog.upsert_available(&row("synthetic", 1, 1)).unwrap();
+        catalog
+            .conn
+            .execute("UPDATE catalog_meta SET schema_version = 1", [])
+            .unwrap();
+        drop(catalog);
+        let catalog = CatalogReconciliation::open(&path).unwrap();
+        assert!(catalog.rebuilt());
+        assert!(catalog
+            .page(&CatalogQuery::default())
+            .unwrap()
+            .sessions
+            .is_empty());
+    }
+
+    #[test]
     fn unsupported_projection_version_requires_a_rebuild() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("catalog.db");
@@ -1296,7 +1642,7 @@ mod tests {
             std::env::var_os(CATALOG_CRASH_PATH).expect("catalog crash database path"),
         );
         let mut catalog = Catalog::open(path).unwrap();
-        if role == "during-upsert" {
+        if matches!(role.as_str(), "during-upsert" | "during-message") {
             catalog
                 .conn
                 .create_scalar_function(
@@ -1306,12 +1652,17 @@ mod tests {
                     |_| -> rusqlite::Result<i64> { std::process::abort() },
                 )
                 .unwrap();
+            let table = if role == "during-message" {
+                "session_messages"
+            } else {
+                "sessions"
+            };
             catalog
                 .conn
-                .execute_batch(
-                    "CREATE TEMP TRIGGER crash_catalog AFTER INSERT ON sessions
-                     BEGIN SELECT smelt_test_crash(); END;",
-                )
+                .execute_batch(&format!(
+                    "CREATE TEMP TRIGGER crash_catalog AFTER INSERT ON {table}
+                     BEGIN SELECT smelt_test_crash(); END;"
+                ))
                 .unwrap();
         } else if role != "after-upsert" {
             panic!("unknown catalog crash role {role}");
@@ -1322,7 +1673,7 @@ mod tests {
 
     #[test]
     fn subprocess_crashes_leave_catalog_repair_absent_or_complete() {
-        for role in ["during-upsert", "after-upsert"] {
+        for role in ["during-upsert", "during-message", "after-upsert"] {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("catalog.db");
             drop(Catalog::open(&path).unwrap());
@@ -1744,7 +2095,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(!error.is_recoverable_catalog_corruption());
+        assert!(!error.is_recoverable_derived_corruption());
         assert!(path.is_dir());
     }
 

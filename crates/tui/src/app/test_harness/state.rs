@@ -50,9 +50,38 @@ impl TestApp {
         let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
         let turn = self
             .app
-            .begin_agent_turn(text, protocol::Content::text(text), sent_at_ms)
-            .expect("test app has a usable model");
-        self.app.conversation.set_active(Some(turn));
+            .begin_agent_turn(text, protocol::Content::text(text), sent_at_ms);
+        self.app.conversation.set_active(turn);
+        self.wait_for_turn_persistence();
+        assert!(self.agent_running(), "test app has a usable model");
+    }
+
+    /// Settle explicit canonical fixture setup without advancing the virtual clock.
+    /// Key dispatch and rendering never call this wait implicitly.
+    pub fn wait_for_turn_persistence(&mut self) {
+        self.wait_for_turn_persistence_until(
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        );
+    }
+
+    pub(crate) fn wait_for_turn_persistence_until(&mut self, deadline: std::time::Instant) {
+        loop {
+            self.app.drain_persist_reports();
+            if let Some(event) = self.app.platform.try_recv_app_event() {
+                self.app.handle_app_event(event);
+            }
+            self.app.pump_lua();
+            if !self.app.conversation.canonical_operations_are_pending()
+                && !self.app.turn_submission_is_pending()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "turn persistence timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// Complete the active synthetic turn through the normal engine-event path.

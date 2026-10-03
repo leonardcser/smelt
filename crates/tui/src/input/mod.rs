@@ -429,6 +429,33 @@ impl PromptState {
         self.from_paste = false;
     }
 
+    /// Restore a removed range into an unchanged surviving prompt.
+    pub(crate) fn restore_removed_range(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        start: usize,
+        removed: String,
+        ids: Vec<AttachmentId>,
+    ) {
+        self.save_undo_force(ctx);
+        let start = smelt_buffer::text::snap(ctx.buf.source(), start);
+        let before = smelt_buffer::text::slice(ctx.buf.source(), 0..start);
+        let marker_index = before.matches(ATTACHMENT_MARKER).count();
+        let source = format!(
+            "{before}{removed}{}",
+            smelt_buffer::text::slice(ctx.buf.source(), start..ctx.buf.source().len())
+        );
+        let mut restored_ids = ctx.buf.attachment_ids.clone();
+        restored_ids.splice(marker_index..marker_index, ids);
+        let cpos = ctx.win.cpos();
+        let cpos = if cpos >= start {
+            cpos + removed.len()
+        } else {
+            cpos
+        };
+        self.install_source(ctx, source, cpos, restored_ids);
+    }
+
     /// Toggle stash. Attachments are cloned out of the store so the stash survives store clears.
     fn toggle_stash(&mut self, ctx: &mut PromptCtx<'_>) {
         if let Some(snap) = self.stash.take() {

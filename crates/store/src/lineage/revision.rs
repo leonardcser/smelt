@@ -13,7 +13,6 @@ pub(crate) struct RevisionRecord {
     pub(super) created_at: u64,
 }
 
-#[cfg(test)]
 impl RevisionRecord {
     pub(crate) fn id(&self) -> &RevisionId {
         &self.id
@@ -23,6 +22,7 @@ impl RevisionRecord {
         &self.history_root
     }
 
+    #[cfg(test)]
     pub(crate) fn transcript_root(&self) -> &SequenceRoot {
         &self.transcript_root
     }
@@ -109,6 +109,20 @@ pub(crate) fn insert_revision(
     lineage: &LineageId,
     revision: &RevisionRecord,
 ) -> Result<bool> {
+    // COMPAT(history-semantic-v3): legacy revision publication precedes index migration.
+    if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+        let parent = revision
+            .parent_id
+            .as_ref()
+            .map(|id| load_revision(conn, lineage, id))
+            .transpose()?;
+        ensure_history_index(
+            conn,
+            lineage,
+            &revision.history_root,
+            parent.as_ref().map(|parent| &parent.history_root),
+        )?;
+    }
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO lineage_revisions (
              lineage_id, revision_id, parent_revision_id, created_by_session_id,
@@ -969,7 +983,6 @@ pub(crate) fn commit_revision(
     Ok(result)
 }
 
-#[cfg(test)]
 pub(crate) fn merge_operation_stats(left: &mut OperationStats, right: OperationStats) {
     left.nodes_read += right.nodes_read;
     left.nodes_written += right.nodes_written;

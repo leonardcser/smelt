@@ -11,11 +11,55 @@ pub(crate) struct LineageSessionSnapshot {
     pub(crate) transcript_root: SequenceRoot,
 }
 
-pub(crate) fn revision_state_bytes(
-    metadata: &SessionMetadata,
-    side_tables: SideTableSuffixes,
-) -> Result<Vec<u8>> {
-    let mut metadata = metadata.clone();
+#[derive(Debug)]
+pub(crate) enum StoredRevisionState {
+    Shared(SharedRevisionState),
+    Legacy(CanonicalRevisionState),
+}
+
+impl StoredRevisionState {
+    pub(crate) fn metadata(&self) -> &SessionMetadata {
+        match self {
+            Self::Shared(state) => &state.metadata,
+            Self::Legacy(state) => &state.metadata,
+        }
+    }
+
+    pub(crate) fn catalog_message_id(&self) -> Option<&str> {
+        match self {
+            Self::Shared(state) => state.first_user_message_root.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn catalog_message(
+        &self,
+        conn: &Connection,
+        lineage: &LineageId,
+        stats: &mut OperationStats,
+    ) -> Result<Option<std::sync::Arc<str>>> {
+        match self {
+            Self::Shared(state) => {
+                Ok(read_first_user_message(conn, lineage, state, stats)?.map(std::sync::Arc::from))
+            }
+            _ => Ok(self
+                .metadata()
+                .first_user_message
+                .as_deref()
+                .map(std::sync::Arc::from)),
+        }
+    }
+}
+
+pub(crate) struct PreparedRevisionState {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) metadata: SessionMetadata,
+    pub(crate) archives_unchanged: bool,
+}
+
+pub(crate) fn normalize_revision_metadata(
+    mut metadata: SessionMetadata,
+) -> Result<SessionMetadata> {
     metadata.cwd = None;
     metadata.mode = None;
     metadata.reasoning_effort = None;
@@ -25,25 +69,269 @@ pub(crate) fn revision_state_bytes(
     if let Some(serde_json::Value::Object(accounting)) = metadata.accounting_json.as_mut() {
         accounting.remove("session_usage");
     }
-    Ok(serde_json::to_vec(&CanonicalRevisionState {
-        format_version: LINEAGE_REVISION_STATE_VERSION,
-        metadata,
-        side_tables,
-    })?)
+    Ok(metadata)
 }
 
-pub(crate) fn load_revision_state(
+pub(crate) fn prepare_revision_state(
+    conn: &Connection,
+    lineage: &LineageId,
+    metadata: &SessionMetadata,
+    side_tables: &SideTableSuffixes,
+    previous: Option<&StoredRevisionState>,
+    compression: ObjectCompression,
+) -> Result<PreparedRevisionState> {
+    let metadata = normalize_revision_metadata(metadata.clone())?;
+    if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+        let projected;
+        let previous = match previous {
+            Some(StoredRevisionState::Shared(state)) => Some(state),
+            Some(StoredRevisionState::Legacy(state)) => {
+                projected = shared_revision_state(
+                    conn,
+                    lineage,
+                    state.metadata.clone(),
+                    &state.side_tables,
+                    None,
+                    compression,
+                )?;
+                Some(&projected)
+            }
+            None => None,
+        };
+        let state = shared_revision_state(
+            conn,
+            lineage,
+            metadata,
+            side_tables,
+            previous.map(|state| &state.archives),
+            compression,
+        )?;
+        return Ok(PreparedRevisionState {
+            archives_unchanged: previous.is_some_and(|previous| {
+                previous.archives == state.archives
+                    && previous.first_user_message_root == state.first_user_message_root
+            }),
+            bytes: serde_json::to_vec(&state)?,
+            metadata: state.metadata,
+        });
+    }
+    // COMPAT(revision-state-v1): legacy migration fixtures retain their format.
+    let previous = match previous {
+        Some(StoredRevisionState::Legacy(state)) => Some(state),
+        Some(StoredRevisionState::Shared(_)) => {
+            return Err(StoreError::Integrity(
+                "shared revision state requires the current schema".into(),
+            ))
+        }
+        None => None,
+    };
+    let state = CanonicalRevisionState {
+        format_version: LINEAGE_REVISION_STATE_VERSION,
+        metadata,
+        side_tables: merge_side_tables(
+            previous.map_or(&SideTableSuffixes::default(), |state| &state.side_tables),
+            side_tables,
+        ),
+    };
+    let archives_unchanged = previous.is_some_and(|previous| {
+        previous.side_tables == state.side_tables
+            && previous.metadata.first_user_message == state.metadata.first_user_message
+            && previous.metadata.checkpoint_json == state.metadata.checkpoint_json
+            && previous.metadata.checkpoint_events_json == state.metadata.checkpoint_events_json
+    });
+    let bytes = serde_json::to_vec(&state)?;
+    let mut metadata = state.metadata;
+    metadata.checkpoint_json = None;
+    metadata.checkpoint_events_json = None;
+    Ok(PreparedRevisionState {
+        archives_unchanged,
+        bytes,
+        metadata,
+    })
+}
+
+pub(crate) fn load_revision_envelope(
     conn: &Connection,
     lineage: &LineageId,
     revision: &RevisionRecord,
-) -> Result<CanonicalRevisionState> {
-    let bytes = hydrate_payload(
+    stats: &mut OperationStats,
+) -> Result<StoredRevisionState> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
+    let projected = revision_projection(conn, lineage, &revision.state_payload_id)?;
+    let payload = projected.as_ref().unwrap_or(&revision.state_payload_id);
+    let state = load_revision_payload(conn, lineage, payload, stats)?;
+    if projected.is_some() && !matches!(state, StoredRevisionState::Shared(_)) {
+        return Err(StoreError::Integrity(
+            "revision projection is not a shared envelope".into(),
+        ));
+    }
+    Ok(state)
+}
+
+fn revision_projection(
+    conn: &Connection,
+    lineage: &LineageId,
+    original: &PayloadId,
+) -> Result<Option<PayloadId>> {
+    if crate::schema::user_version(conn)? == 3 {
+        return Ok(None);
+    }
+    let row = conn
+        .query_row(
+            "SELECT projected_payload_id, original_format_version, projection_id
+         FROM lineage_revision_state_projections
+         WHERE lineage_id = ?1 AND original_payload_id = ?2",
+            (lineage.as_str(), original.as_str()),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((id, format, proof)) = row else {
+        return Ok(None);
+    };
+    let projected = PayloadId::from_db(id)?;
+    if format != LINEAGE_REVISION_STATE_VERSION
+        || proof != revision_projection_id(lineage, original, &projected, format)
+    {
+        return Err(StoreError::Integrity(
+            "revision projection has an invalid content address".into(),
+        ));
+    }
+    Ok(Some(projected))
+}
+
+fn revision_projection_id(
+    lineage: &LineageId,
+    original: &PayloadId,
+    projected: &PayloadId,
+    original_format: u32,
+) -> String {
+    let mut encoder = CanonicalEncoder::new(b"smelt-lineage-revision-projection-v1\0");
+    encoder.str(lineage.as_str());
+    encoder.str(original.as_str());
+    encoder.str(projected.as_str());
+    encoder.u64(u64::from(original_format));
+    encoder.u64(u64::from(SHARED_REVISION_STATE_VERSION));
+    encoder.hash()
+}
+
+pub(crate) fn load_revision_for_save(
+    conn: &Connection,
+    lineage: &LineageId,
+    revision: &RevisionRecord,
+    compression: ObjectCompression,
+) -> Result<StoredRevisionState> {
+    let previous = load_revision_envelope(conn, lineage, revision, &mut OperationStats::default())?;
+    if crate::schema::user_version(conn)? == 3 || matches!(previous, StoredRevisionState::Shared(_))
+    {
+        return Ok(previous);
+    }
+    if conn.is_autocommit() {
+        return Err(StoreError::Integrity(
+            "revision projection requires a write transaction".into(),
+        ));
+    }
+    let (format, projected) = match &previous {
+        StoredRevisionState::Legacy(state) => (
+            LINEAGE_REVISION_STATE_VERSION,
+            shared_revision_state(
+                conn,
+                lineage,
+                state.metadata.clone(),
+                &state.side_tables,
+                None,
+                compression,
+            )?,
+        ),
+        StoredRevisionState::Shared(_) => unreachable!(),
+    };
+    let bytes = serde_json::to_vec(&projected)?;
+    let payload = put_payload(
         conn,
         lineage,
-        &revision.state_payload_id,
         PayloadKind::RevisionState,
+        &bytes,
+        compression,
         &mut OperationStats::default(),
     )?;
+    verify_revision_projection(conn, lineage, &previous, &payload.id, &projected)?;
+    conn.execute(
+        "INSERT INTO lineage_revision_state_projections
+         (lineage_id, original_payload_id, projected_payload_id, original_format_version, projection_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (lineage.as_str(), revision.state_payload_id.as_str(), payload.id.as_str(), format,
+         revision_projection_id(lineage, &revision.state_payload_id, &payload.id, format)),
+    )?;
+    Ok(StoredRevisionState::Shared(projected))
+}
+
+pub(crate) fn verify_revision_projections(conn: &Connection, lineage: &LineageId) -> Result<()> {
+    if crate::schema::user_version(conn)? == 3 {
+        return Ok(());
+    }
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
+    let originals = conn
+        .prepare(
+            "SELECT original_payload_id, original_format_version
+         FROM lineage_revision_state_projections WHERE lineage_id = ?1",
+        )?
+        .query_map([lineage.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, format) in originals {
+        let original = PayloadId::from_db(id)?;
+        let projected = revision_projection(conn, lineage, &original)?.ok_or_else(|| {
+            StoreError::Integrity("revision projection disappeared from read snapshot".into())
+        })?;
+        let original =
+            load_revision_payload(conn, lineage, &original, &mut OperationStats::default())?;
+        let original_format = match &original {
+            StoredRevisionState::Legacy(state) => state.format_version,
+            StoredRevisionState::Shared(state) => state.format_version,
+        };
+        if format != original_format {
+            return Err(StoreError::Integrity(
+                "revision projection records a different original format".into(),
+            ));
+        }
+        let StoredRevisionState::Shared(state) =
+            load_revision_payload(conn, lineage, &projected, &mut OperationStats::default())?
+        else {
+            return Err(StoreError::Integrity(
+                "revision projection is not a shared envelope".into(),
+            ));
+        };
+        verify_revision_projection(conn, lineage, &original, &projected, &state)?;
+    }
+    Ok(())
+}
+
+fn load_revision_payload(
+    conn: &Connection,
+    lineage: &LineageId,
+    payload: &PayloadId,
+    stats: &mut OperationStats,
+) -> Result<StoredRevisionState> {
+    let bytes = hydrate_payload(conn, lineage, payload, PayloadKind::RevisionState, stats)?;
+    let format: RevisionStateFormat = serde_json::from_slice(&bytes)?;
+    if format.format_version == SHARED_REVISION_STATE_VERSION {
+        let state = serde_json::from_slice(&bytes)?;
+        validate_shared_revision_archives(conn, lineage, payload, &state)?;
+        return Ok(StoredRevisionState::Shared(state));
+    }
+    // COMPAT(revision-state-v1): retained historical states remain byte-exact.
     let state: CanonicalRevisionState = serde_json::from_slice(&bytes)?;
     if state.format_version != LINEAGE_REVISION_STATE_VERSION {
         return Err(StoreError::Integrity(format!(
@@ -51,7 +339,29 @@ pub(crate) fn load_revision_state(
             state.format_version
         )));
     }
-    Ok(state)
+    Ok(StoredRevisionState::Legacy(state))
+}
+
+pub(crate) fn load_revision_state(
+    conn: &Connection,
+    lineage: &LineageId,
+    revision: &RevisionRecord,
+) -> Result<CanonicalRevisionState> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
+    match load_revision_payload(
+        conn,
+        lineage,
+        &revision.state_payload_id,
+        &mut OperationStats::default(),
+    )? {
+        StoredRevisionState::Shared(state) => {
+            hydrate_shared_revision_state(conn, lineage, &revision.state_payload_id, state)
+        }
+        StoredRevisionState::Legacy(state) => Ok(state),
+    }
 }
 
 pub(crate) fn branch_metadata_from_session(
@@ -109,12 +419,23 @@ pub(crate) fn merge_accounting_json(
     }
 }
 
-pub(crate) fn load_branch_snapshot(
+pub(crate) struct LineageBranchRecord {
+    pub(crate) identity: SessionIdentity,
+    pub(crate) metadata: BranchMetadata,
+    pub(crate) head: StoreHead,
+    pub(crate) revision: RevisionRecord,
+}
+
+pub(crate) fn load_branch_record(
     conn: &Connection,
     lineage: &LineageId,
     branch: &BranchId,
     include_deleted: bool,
-) -> Result<LineageSessionSnapshot> {
+) -> Result<LineageBranchRecord> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
     let deleted_filter = if include_deleted {
         ""
     } else {
@@ -123,7 +444,8 @@ pub(crate) fn load_branch_snapshot(
     let sql = format!(
         "SELECT parent_session_id, created_at, head_sequence, head_revision_id,
                 cwd, mode, reasoning_effort, model, fast_mode,
-                session_cost_usd, accounting_json
+                session_cost_usd, accounting_json,
+                input_tokens, cached_input_tokens, output_tokens, reasoning_tokens
          FROM lineage_branches
          WHERE lineage_id = ?1 AND session_id = ?2{deleted_filter}"
     );
@@ -141,29 +463,37 @@ pub(crate) fn load_branch_snapshot(
                 row.get::<_, Option<bool>>(8)?,
                 row.get::<_, f64>(9)?,
                 row.get::<_, String>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, i64>(13)?,
+                row.get::<_, i64>(14)?,
             ))
         })
         .optional()?
         .ok_or_else(|| StoreError::Integrity(format!("branch {} is not live", branch.as_str())))?;
     let revision_id = RevisionId::from_db(row.3)?;
     let revision = load_revision(conn, lineage, &revision_id)?;
-    let state = load_revision_state(conn, lineage, &revision)?;
-    let mut metadata = state.metadata;
-    metadata.cwd = row.4;
-    metadata.mode = row.5;
-    metadata.reasoning_effort = row.6;
-    metadata.model = row.7;
-    metadata.fast_mode = row.8;
-    metadata.session_cost_usd = SessionCostUsd::new(row.9)?;
-    let branch_accounting = serde_json::from_str::<Option<serde_json::Value>>(&row.10)?;
-    metadata.accounting_json = merge_accounting_json(metadata.accounting_json, branch_accounting);
+    let metadata = BranchMetadata {
+        parent_session_id: row.0.clone(),
+        cwd: row.4,
+        mode: row.5,
+        reasoning_effort: row.6,
+        model: row.7,
+        fast_mode: row.8,
+        session_cost_usd: SessionCostUsd::new(row.9)?.get(),
+        accounting_json: row.10,
+        input_tokens: nonnegative_u64(row.11, "branch input tokens")?,
+        cached_input_tokens: nonnegative_u64(row.12, "branch cached input tokens")?,
+        output_tokens: nonnegative_u64(row.13, "branch output tokens")?,
+        reasoning_tokens: nonnegative_u64(row.14, "branch reasoning tokens")?,
+    };
     let created_at = row.1;
     if created_at < 0 {
         return Err(StoreError::Integrity(
             "lineage branch has negative creation time".into(),
         ));
     }
-    Ok(LineageSessionSnapshot {
+    Ok(LineageBranchRecord {
         identity: SessionIdentity {
             id: branch.as_str().to_owned(),
             created_at,
@@ -180,7 +510,107 @@ pub(crate) fn load_branch_snapshot(
                 revision.transcript_root.item_count,
             ),
         },
+        revision,
+    })
+}
+
+pub(crate) fn metadata_for_branch(
+    mut metadata: SessionMetadata,
+    branch: &BranchMetadata,
+) -> Result<SessionMetadata> {
+    metadata.cwd = branch.cwd.clone();
+    metadata.mode = branch.mode.clone();
+    metadata.reasoning_effort = branch.reasoning_effort.clone();
+    metadata.model = branch.model.clone();
+    metadata.fast_mode = branch.fast_mode;
+    metadata.session_cost_usd = SessionCostUsd::new(branch.session_cost_usd)?;
+    let accounting = serde_json::from_str(&branch.accounting_json)?;
+    metadata.accounting_json = merge_accounting_json(metadata.accounting_json, accounting);
+    Ok(metadata)
+}
+
+pub(crate) fn effective_revision_metadata(
+    state: &StoredRevisionState,
+    branch: &BranchMetadata,
+) -> Result<SessionMetadata> {
+    let mut metadata = state.metadata().clone();
+    metadata.checkpoint_json = None;
+    metadata.checkpoint_events_json = None;
+    metadata_for_branch(metadata, branch)
+}
+
+pub(crate) fn revision_metadata_matches(
+    prior: &StoredRevisionState,
+    prior_branch: &BranchMetadata,
+    mut metadata: SessionMetadata,
+    branch: &BranchMetadata,
+) -> Result<bool> {
+    let mut previous = effective_revision_metadata(prior, prior_branch)?;
+    // Message equality is established independently by archive roots or legacy values.
+    previous.first_user_message = None;
+    metadata.first_user_message = None;
+    Ok(previous == metadata_for_branch(metadata, branch)?)
+}
+
+pub(crate) fn load_branch_snapshot(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    include_deleted: bool,
+) -> Result<LineageSessionSnapshot> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
+    let record = load_branch_record(conn, lineage, branch, include_deleted)?;
+    let state = load_revision_state(conn, lineage, &record.revision)?;
+    let metadata = metadata_for_branch(state.metadata, &record.metadata)?;
+    Ok(LineageSessionSnapshot {
+        identity: record.identity,
+        metadata,
+        head: record.head,
         side_tables: state.side_tables,
+        revision_id: record.revision.id,
+        history_root: record.revision.history_root,
+        transcript_root: record.revision.transcript_root,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LineageSessionHead {
+    pub(crate) head: StoreHead,
+    pub(crate) revision_id: RevisionId,
+    pub(crate) history_root: SequenceRoot,
+    pub(crate) transcript_root: SequenceRoot,
+}
+
+pub(crate) fn lineage_session_head(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+) -> Result<LineageSessionHead> {
+    let (sequence, revision_id) = conn
+        .query_row(
+            "SELECT head_sequence, head_revision_id FROM lineage_branches
+             WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
+            (lineage.as_str(), branch.as_str()),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::Integrity(format!("branch {} is not live", branch.as_str())))?;
+    let revision_id = RevisionId::from_db(revision_id)?;
+    let revision = load_revision(conn, lineage, &revision_id)?;
+    Ok(LineageSessionHead {
+        head: StoreHead {
+            revision: crate::session_commit::Revision::new(nonnegative_u64(
+                sequence,
+                "branch head sequence",
+            )?),
+            history_len: crate::session_commit::HistoryLen::new(revision.history_root.item_count),
+            transcript_record_count: crate::session_commit::TranscriptRecordCount::new(
+                revision.transcript_root.item_count,
+            ),
+        },
         revision_id,
         history_root: revision.history_root,
         transcript_root: revision.transcript_root,
@@ -230,7 +660,7 @@ pub(crate) fn lineage_history_range(
     start: u64,
     end: u64,
 ) -> Result<Vec<protocol::HistoryItem>> {
-    let snapshot = lineage_session_snapshot(conn, lineage, branch)?;
+    let snapshot = lineage_session_head(conn, lineage, branch)?;
     let bytes = sequence_range(conn, lineage, &snapshot.history_root, start, end)?.0;
     deserialize_history_items(conn, bytes)
 }
@@ -246,7 +676,7 @@ pub(crate) fn lineage_history_tail(
     if end == 0 || max_items == 0 || max_bytes == Some(0) {
         return Ok(Vec::new());
     }
-    let snapshot = lineage_session_snapshot(conn, lineage, branch)?;
+    let snapshot = lineage_session_head(conn, lineage, branch)?;
     let end = u64::try_from(end)
         .unwrap_or(u64::MAX)
         .min(snapshot.history_root.item_count);
@@ -332,7 +762,7 @@ pub(crate) fn lineage_transcript_root_identity(
     lineage: &LineageId,
     branch: &BranchId,
 ) -> Result<(String, u64)> {
-    let snapshot = lineage_session_snapshot(conn, lineage, branch)?;
+    let snapshot = lineage_session_head(conn, lineage, branch)?;
     Ok((
         snapshot.transcript_root.id.as_str().to_owned(),
         snapshot.transcript_root.item_count,
@@ -356,7 +786,7 @@ pub(crate) fn lineage_transcript_search_leaves_with_cancellation(
     if cancelled() {
         return Err(StoreError::Cancelled);
     }
-    let snapshot = lineage_session_snapshot(conn, lineage, branch)?;
+    let snapshot = lineage_session_head(conn, lineage, branch)?;
     let root = load_matching_root(conn, lineage, &snapshot.transcript_root)?;
     let mut leaves = Vec::new();
     if let Some(node_id) = &root.node_id {
@@ -487,7 +917,7 @@ pub(crate) fn lineage_transcript_object_backed_range(
     start: u64,
     end: u64,
 ) -> Result<Vec<StoredTranscriptBlock>> {
-    let snapshot = lineage_session_snapshot(conn, lineage, branch)?;
+    let snapshot = lineage_session_head(conn, lineage, branch)?;
     deserialize_sequence_range(conn, lineage, &snapshot.transcript_root, start, end)
 }
 

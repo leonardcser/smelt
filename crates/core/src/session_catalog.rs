@@ -7,9 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use smelt_store::CatalogAvailability;
 use smelt_store::{
-    Catalog, CatalogAvailability, CatalogCursor, CatalogMarkerLock, CatalogQuery, CatalogReader,
-    CatalogReconciliation, CatalogSession,
+    Catalog, CatalogCursor, CatalogMarkerLock, CatalogQuery, CatalogReader, CatalogReconciliation,
+    CatalogSession,
 };
 
 const MAX_PENDING_SESSIONS: usize = 1_024;
@@ -109,7 +111,23 @@ impl RepairRequest {
 #[derive(Clone, Debug)]
 enum PendingAction {
     Repair(RepairRequest),
+    Publish {
+        session: Arc<CatalogSession>,
+        pending_token: Option<Vec<u8>>,
+    },
     Remove,
+}
+
+impl PendingAction {
+    fn location(&self) -> Option<(u64, Option<&str>)> {
+        match self {
+            Self::Repair(repair) => Some((repair.minimum_revision, repair.lineage_id.as_deref())),
+            Self::Publish { session, .. } => {
+                Some((session.source_revision, session.lineage_id.as_deref()))
+            }
+            Self::Remove => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -145,7 +163,7 @@ impl PendingWork {
 
 #[derive(Default)]
 struct Overlays {
-    active: HashMap<String, CatalogSession>,
+    active: HashMap<String, Arc<CatalogSession>>,
     deleted: HashSet<String>,
 }
 
@@ -284,6 +302,18 @@ impl SessionCatalog {
         publish_commit_to(&self.owner.handle, command, receipt);
     }
 
+    pub(crate) fn publish_native(&self, session: CatalogSession, pending_token: Option<Vec<u8>>) {
+        let id = session.id.clone();
+        let session = self.owner.handle.publish_overlay(session);
+        self.owner.handle.request_action(
+            id,
+            PendingAction::Publish {
+                session,
+                pending_token,
+            },
+        );
+    }
+
     pub(crate) fn publish_snapshot(&self, session: CatalogSession) {
         publish_snapshot_to(&self.owner.handle, session);
     }
@@ -321,7 +351,7 @@ impl SessionCatalog {
                 return Ok(None);
             }
             if let Some(session) = overlays.active.get(id) {
-                return Ok(Some(session.clone()));
+                return Ok(Some(session.as_ref().clone()));
             }
         }
         match CatalogReader::open_existing(&self.owner.handle.catalog_path) {
@@ -457,9 +487,24 @@ impl ServiceHandle {
                     (PendingAction::Repair(current), PendingAction::Repair(repair)) => {
                         current.merge(repair)
                     }
-                    (current, replacement) => {
-                        *current = replacement;
-                        false
+                    (current, mut replacement) => {
+                        let previous = current.location();
+                        let incoming = replacement.location();
+                        let conflict = matches!((previous, incoming),
+                            (Some((_, Some(left))), Some((_, Some(right)))) if left != right);
+                        let stale = matches!((previous, incoming),
+                            (Some((left, _)), Some((right, _))) if left > right);
+                        if !conflict && !stale {
+                            if let PendingAction::Repair(repair) = &mut replacement {
+                                if repair.lineage_id.is_none() {
+                                    repair.lineage_id = previous
+                                        .and_then(|(_, lineage)| lineage)
+                                        .map(str::to_owned);
+                                }
+                            }
+                            *current = replacement;
+                        }
+                        conflict
                     }
                 };
                 smelt_perf::perf::record_value("session:catalog:coalesced", 1);
@@ -501,7 +546,8 @@ impl ServiceHandle {
         }
     }
 
-    fn publish_overlay(&self, session: CatalogSession) {
+    fn publish_overlay(&self, session: CatalogSession) -> Arc<CatalogSession> {
+        let session = Arc::new(session);
         let mut overlays = self
             .overlays
             .lock()
@@ -511,8 +557,29 @@ impl ServiceHandle {
         {
             overlays.active.clear();
         }
+        if overlays.active.get(&session.id).is_some_and(|current| {
+            current.lineage_id == session.lineage_id
+                && current.source_revision > session.source_revision
+        }) {
+            return session;
+        }
         overlays.deleted.remove(&session.id);
-        overlays.active.insert(session.id.clone(), session);
+        overlays.active.insert(session.id.clone(), session.clone());
+        session
+    }
+
+    fn clear_published_overlay(&self, session: &Arc<CatalogSession>) {
+        let mut overlays = self
+            .overlays
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if overlays
+            .active
+            .get(&session.id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            overlays.active.remove(&session.id);
+        }
     }
 
     fn begin_delete(&self, id: &str) {
@@ -534,22 +601,16 @@ impl ServiceHandle {
             .remove(id);
     }
 
-    fn clear_repaired_overlay(&self, id: &str, revision: u64) {
-        let mut overlays = self
-            .overlays
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if overlays
-            .active
-            .get(id)
-            .is_some_and(|row| row.source_revision <= revision)
-        {
-            overlays.active.remove(id);
+    fn clear_repaired_overlay(&self, observed: &Arc<CatalogSession>, revision: u64) {
+        if observed.source_revision <= revision {
+            self.clear_published_overlay(observed);
         }
     }
 
-    fn clear_missing(&self, id: &str, revision: u64) {
-        self.clear_repaired_overlay(id, revision);
+    fn clear_missing(&self, id: &str, revision: u64, observed: Option<&Arc<CatalogSession>>) {
+        if let Some(observed) = observed {
+            self.clear_repaired_overlay(observed, revision);
+        }
         self.overlays
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -759,7 +820,7 @@ fn read_page_from(service: &ServiceHandle, query: &CatalogQuery) -> ReadPage {
         .collect::<HashMap<_, _>>();
     for (id, session) in active {
         if row_matches_query(&session, query) {
-            by_id.insert(id, session);
+            by_id.insert(id, session.as_ref().clone());
         } else {
             by_id.remove(&id);
         }
@@ -851,7 +912,7 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
                         let mut recovery_error = None;
                         for id in pending_ids {
                             if let Err(error) =
-                                repair_session(&handle, &id, &RepairRequest::unresolved(0))
+                                repair_session(&handle, &id, &RepairRequest::unresolved(0), None)
                             {
                                 recovery_error = Some(error);
                                 break;
@@ -880,7 +941,11 @@ fn catalog_worker(handle: ServiceHandle, wakes: mpsc::Receiver<()>) {
             let mut needs_reconciliation = false;
             for (id, action) in std::mem::take(&mut batch.actions) {
                 let result = match action {
-                    PendingAction::Repair(repair) => repair_session(&handle, &id, &repair),
+                    PendingAction::Repair(repair) => repair_session(&handle, &id, &repair, None),
+                    PendingAction::Publish {
+                        session,
+                        pending_token,
+                    } => publish_session(&handle, &session, pending_token.as_deref()),
                     PendingAction::Remove => remove_session(&handle, &id).map(|()| false),
                 };
                 match result {
@@ -919,10 +984,46 @@ fn complete_barriers(barriers: Vec<mpsc::Sender<()>>) {
     }
 }
 
+fn publish_session(
+    handle: &ServiceHandle,
+    session: &Arc<CatalogSession>,
+    pending_token: Option<&[u8]>,
+) -> Result<bool, String> {
+    // An absent marker cannot prove that the captured snapshot is still current.
+    let token_matches = pending_token.is_some() && {
+        let _lock = CatalogMarkerLock::acquire(&handle.sessions_root, &session.id)
+            .map_err(|error| format!("lock native catalog publication: {error}"))?;
+        smelt_store::catalog_session_pending_token(&handle.sessions_root, &session.id)
+            .map_err(|error| format!("read native catalog publication token: {error}"))?
+            .as_deref()
+            == pending_token
+    };
+    if !token_matches {
+        return repair_session(
+            handle,
+            &session.id,
+            &RepairRequest::located(session.source_revision, session.lineage_id.clone()),
+            Some(session),
+        );
+    }
+    let mut catalog = Catalog::open(&handle.catalog_path)
+        .map_err(|error| format!("open native catalog publication: {error}"))?;
+    catalog
+        .upsert_available(session)
+        .map_err(|error| format!("publish native catalog row: {error}"))?;
+    handle.clear_published_overlay(session);
+    if let Some(token) = pending_token {
+        smelt_store::clear_catalog_session_pending(&handle.sessions_root, &session.id, token)
+            .map_err(|error| format!("clear native catalog publication token: {error}"))?;
+    }
+    Ok(false)
+}
+
 fn repair_session(
     handle: &ServiceHandle,
     id: &str,
     repair: &RepairRequest,
+    cached: Option<&CatalogSession>,
 ) -> Result<bool, String> {
     let _duration = smelt_perf::perf::begin_value_ms("session:catalog:repair_duration_ms");
     let _perf = smelt_perf::perf::begin("session:catalog:repair");
@@ -932,13 +1033,21 @@ fn repair_session(
         minimum_revision,
     );
     let lineage_id = repair.lineage_id.as_deref();
+    let observed = handle
+        .overlays
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .active
+        .get(id)
+        .cloned();
+    let cached = observed.as_deref().or(cached);
     let (pending_token, mut repaired) = {
         let _lock = CatalogMarkerLock::acquire(&handle.sessions_root, id)
             .map_err(|error| format!("lock session catalog repair: {error}"))?;
         let pending_token =
             smelt_store::catalog_session_pending_token(&handle.sessions_root, id)
                 .map_err(|error| format!("read pending catalog repair for {id}: {error}"))?;
-        let repaired = load_repair_session(&handle.sessions_root, id, lineage_id);
+        let repaired = load_repair_session(&handle.sessions_root, id, lineage_id, cached);
         (pending_token, repaired)
     };
     // Clearing compares the captured token, so slow catalog I/O can run outside the marker lock.
@@ -949,7 +1058,7 @@ fn repair_session(
             .is_some_and(|session| session.source_revision < minimum_revision)
     }) {
         smelt_perf::perf::record_value("session:catalog:post_publication_retry", 1);
-        repaired = load_repair_session(&handle.sessions_root, id, lineage_id);
+        repaired = load_repair_session(&handle.sessions_root, id, lineage_id, cached);
     }
 
     let mut catalog = Catalog::open(&handle.catalog_path)
@@ -964,7 +1073,9 @@ fn repair_session(
             catalog
                 .upsert_available(&session)
                 .map_err(|error| format!("repair session catalog row {id}: {error}"))?;
-            handle.clear_repaired_overlay(id, revision);
+            if let Some(observed) = &observed {
+                handle.clear_repaired_overlay(observed, revision);
+            }
             let revision_lagged = revision < minimum_revision;
             (revision_lagged, !revision_lagged)
         }
@@ -972,7 +1083,7 @@ fn repair_session(
             catalog
                 .remove(id)
                 .map_err(|error| format!("remove missing session {id} from catalog: {error}"))?;
-            handle.clear_missing(id, minimum_revision);
+            handle.clear_missing(id, minimum_revision, observed.as_ref());
             let expected_commit_missing = minimum_revision > 0;
             (expected_commit_missing, !expected_commit_missing)
         }
@@ -982,7 +1093,9 @@ fn repair_session(
                 .map_err(|catalog_error| {
                     format!("record unavailable session {id}: {catalog_error}")
                 })?;
-            handle.clear_repaired_overlay(id, minimum_revision);
+            if let Some(observed) = &observed {
+                handle.clear_repaired_overlay(observed, minimum_revision);
+            }
             (false, false)
         }
     };
@@ -1039,12 +1152,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
             .overlays
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let active = overlays
-            .active
-            .iter()
-            .map(|(id, session)| (id.clone(), session.source_revision))
-            .collect::<Vec<_>>();
-        (active, overlays.deleted.clone())
+        (overlays.active.clone(), overlays.deleted.clone())
     };
     let mut seen_tombstones = HashSet::with_capacity(tombstones.len());
     let mut candidates = 0_u64;
@@ -1066,7 +1174,7 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
                 smelt_store::catalog_session_pending_token(&handle.sessions_root, &id)
                     .map_err(|error| format!("read pending catalog repair for {id}: {error}"))?;
             let repaired =
-                load_repair_session(&handle.sessions_root, &id, Some(&location.lineage_id));
+                load_repair_session(&handle.sessions_root, &id, Some(&location.lineage_id), None);
             (pending_token, repaired)
         };
         match repaired {
@@ -1076,7 +1184,9 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
                 catalog
                     .upsert_available_for_reconciliation(&session, scan_id)
                     .map_err(|error| format!("reconcile lineage session {id}: {error}"))?;
-                handle.clear_repaired_overlay(&id, revision);
+                if let Some(observed) = active_overlays.get(&id) {
+                    handle.clear_repaired_overlay(observed, revision);
+                }
                 if let Some(token) = pending_token {
                     completed_pending.push((id.clone(), token));
                 }
@@ -1106,8 +1216,8 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
         .map_err(|error| format!("complete session catalog scan {scan_id}: {error}"))?;
     smelt_perf::perf::record_value("session:catalog:reconcile_removed", deleted as u64);
 
-    for (id, revision) in active_overlays {
-        handle.clear_repaired_overlay(&id, revision);
+    for observed in active_overlays.values() {
+        handle.clear_published_overlay(observed);
     }
     {
         let mut overlays = handle
@@ -1148,6 +1258,7 @@ fn load_repair_session(
     root: &Path,
     id: &str,
     lineage_id: Option<&str>,
+    cached: Option<&CatalogSession>,
 ) -> Result<Option<CatalogSession>, CatalogRepairError> {
     let reader = match lineage_id {
         Some(lineage_id) => {
@@ -1162,43 +1273,25 @@ fn load_repair_session(
     let Some(reader) = reader else {
         return Ok(None);
     };
-    let state = reader.snapshot().map_err(|error| CatalogRepairError {
-        kind: "corrupt".into(),
-        summary: format!("read lineage session {id} for catalog repair: {error}"),
-    })?;
-    if state.identity.id != id {
+    let session = cached
+        .map_or_else(
+            || reader.catalog_session(),
+            |cached| reader.catalog_session_with_cache(cached),
+        )
+        .map_err(|error| CatalogRepairError {
+            kind: "corrupt".into(),
+            summary: format!("read lineage session {id} for catalog repair: {error}"),
+        })?;
+    if session.id != id {
         return Err(CatalogRepairError {
             kind: "corrupt".into(),
             summary: format!(
                 "persisted lineage branch id {} does not match requested session {id}",
-                state.identity.id
+                session.id
             ),
         });
     }
-    let metadata = state.metadata;
-    Ok(Some(CatalogSession {
-        id: state.identity.id,
-        lineage_id: Some(state.lineage_id),
-        title: metadata.title,
-        slug: metadata.slug,
-        first_user_message: metadata.first_user_message,
-        cwd: metadata.cwd,
-        mode: metadata.mode,
-        reasoning_effort: metadata.reasoning_effort,
-        model: metadata.model,
-        fast_mode: metadata.fast_mode,
-        parent_id: state.identity.parent_id,
-        context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
-        history_len: Some(state.head.history_len.get()),
-        text_bytes: Some(state.history_text_bytes),
-        created_at: state.identity.created_at,
-        updated_at: metadata.updated_at,
-        source_revision: state.head.revision.get(),
-        availability: CatalogAvailability::Available,
-        error_kind: None,
-        error_summary: None,
-        last_seen_scan: 0,
-    }))
+    Ok(Some(session))
 }
 
 #[derive(Default)]
@@ -1235,11 +1328,12 @@ mod tests {
         let mut session = crate::session::Session::new(1, PathBuf::from("/workspace"));
         session.id = SESSION_ID.into();
         session.title = Some(title.into());
+        session.created_at_ms = 1_700_000_000_000;
         session.updated_at_ms = 1_700_000_000_000;
         session
     }
 
-    fn test_worker(root: &Path) -> (ServiceHandle, thread::JoinHandle<()>) {
+    fn test_handle(root: &Path) -> (ServiceHandle, mpsc::Receiver<()>) {
         let (wake, wakes) = mpsc::sync_channel(1);
         let layout = smelt_store::SessionStoreLayout::from_state_root(root);
         let handle = ServiceHandle {
@@ -1250,6 +1344,11 @@ mod tests {
             status: Arc::new(Mutex::new(ServiceStatus::default())),
             wake,
         };
+        (handle, wakes)
+    }
+
+    fn test_worker(root: &Path) -> (ServiceHandle, thread::JoinHandle<()>) {
+        let (handle, wakes) = test_handle(root);
         let worker_handle = handle.clone();
         let worker = thread::spawn(move || catalog_worker(worker_handle, wakes));
         (handle, worker)
@@ -1392,7 +1491,7 @@ mod tests {
         let command = crate::session::initial_store_commit_from_session(&session).unwrap();
         let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, SESSION_ID).unwrap();
         writer.commit_session(&command).unwrap();
-        let repaired = load_repair_session(&sessions_root, SESSION_ID, None)
+        let repaired = load_repair_session(&sessions_root, SESSION_ID, None, None)
             .unwrap()
             .unwrap();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
@@ -1439,7 +1538,7 @@ mod tests {
         let command = crate::session::initial_store_commit_from_session(&session).unwrap();
         let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, SESSION_ID).unwrap();
         writer.commit_session(&command).unwrap();
-        let repaired = load_repair_session(&sessions_root, SESSION_ID, None)
+        let repaired = load_repair_session(&sessions_root, SESSION_ID, None, None)
             .unwrap()
             .unwrap();
         let mut catalog = Catalog::open(&catalog_path).unwrap();
@@ -1509,6 +1608,7 @@ mod tests {
             title: Some("stale".into()),
             slug: None,
             first_user_message: None,
+            first_user_message_id: None,
             cwd: Some("/workspace".into()),
             mode: None,
             reasoning_effort: None,
@@ -1526,6 +1626,204 @@ mod tests {
             error_summary: None,
             last_seen_scan: 0,
         }
+    }
+
+    #[test]
+    fn native_catalog_pending_token_mismatch_repairs_current_scalars_with_shared_message() {
+        let root = tempfile::tempdir().unwrap();
+        let (handle, _wakes) = test_handle(root.path());
+        let mut session = canonical_session("first");
+        session.first_user_message = Some("m".repeat(1_048_576).into());
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(&handle.sessions_root, SESSION_ID).unwrap();
+        let empty_history = || smelt_store::HistorySuffix {
+            start: smelt_store::HistoryIndex::ZERO,
+            final_len: smelt_store::HistoryLen::ZERO,
+            items: Vec::new(),
+        };
+        let prepared = session
+            .prepare_archive_save(smelt_store::StoreHead::default(), empty_history(), None)
+            .unwrap();
+        let first = writer.commit_compact_session(prepared.command()).unwrap();
+        let row = writer
+            .catalog_session_for_result(&first, session.first_user_message.clone())
+            .unwrap();
+        let token = smelt_store::catalog_session_pending_token(&handle.sessions_root, SESSION_ID)
+            .unwrap()
+            .unwrap();
+        let old = handle.publish_overlay(row);
+        assert!(session.acknowledge_archive_save(&prepared, &first));
+        session.title = Some("latest".into());
+        session.updated_at_ms += 1;
+        let prepared = session
+            .prepare_archive_save(first.receipt.current, empty_history(), None)
+            .unwrap();
+        let latest = writer.commit_compact_session(prepared.command()).unwrap();
+        let repaired = load_repair_session(
+            &handle.sessions_root,
+            SESSION_ID,
+            Some(writer.lineage_id()),
+            Some(&old),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(repaired.title.as_deref(), Some("latest"));
+        assert!(Arc::ptr_eq(
+            repaired.first_user_message.as_ref().unwrap(),
+            old.first_user_message.as_ref().unwrap()
+        ));
+        assert!(!publish_session(&handle, &old, Some(&token)).unwrap());
+        let reader = CatalogReader::open_existing(&handle.catalog_path)
+            .unwrap()
+            .unwrap();
+        let current = reader.session(SESSION_ID).unwrap().unwrap();
+        assert_eq!(current.title.as_deref(), Some("latest"));
+        assert_eq!(
+            current.source_revision,
+            latest.receipt.current.revision.get()
+        );
+        assert_eq!(current.first_user_message, session.first_user_message);
+        assert!(
+            smelt_store::pending_catalog_session_ids(&handle.sessions_root)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn native_catalog_tokenless_packet_cannot_restore_a_settled_deleted_session() {
+        let root = tempfile::tempdir().unwrap();
+        let (handle, _wakes) = test_handle(root.path());
+        let session = canonical_session("first");
+        let command = crate::session::initial_store_commit_from_session(&session).unwrap();
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(&handle.sessions_root, SESSION_ID).unwrap();
+        let result = writer.commit_session_with_result(&command).unwrap();
+        let first =
+            handle.publish_overlay(writer.catalog_session_for_result(&result, None).unwrap());
+        let token = smelt_store::catalog_session_pending_token(&handle.sessions_root, SESSION_ID)
+            .unwrap()
+            .unwrap();
+        assert!(!publish_session(&handle, &first, Some(&token)).unwrap());
+        assert!(
+            smelt_store::catalog_session_pending_token(&handle.sessions_root, SESSION_ID)
+                .unwrap()
+                .is_none()
+        );
+        let delayed = Arc::new(writer.catalog_session_for_result(&result, None).unwrap());
+        writer.delete_branch(session.updated_at_ms + 1).unwrap();
+        remove_session(&handle, SESSION_ID).unwrap();
+        assert!(
+            smelt_store::catalog_session_pending_token(&handle.sessions_root, SESSION_ID)
+                .unwrap()
+                .is_none()
+        );
+        publish_session(&handle, &delayed, None).unwrap();
+        let reader = CatalogReader::open_existing(&handle.catalog_path)
+            .unwrap()
+            .unwrap();
+        assert!(
+            reader.session(SESSION_ID).unwrap().is_none(),
+            "a delayed tokenless packet resurrected a deleted catalog row"
+        );
+    }
+
+    #[test]
+    fn native_catalog_publication_preserves_newer_same_revision_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let (handle, _wakes) = test_handle(root.path());
+        let session = canonical_session("first");
+        let command = crate::session::initial_store_commit_from_session(&session).unwrap();
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(&handle.sessions_root, SESSION_ID).unwrap();
+        let result = writer.commit_session_with_result(&command).unwrap();
+        let old = handle.publish_overlay(writer.catalog_session_for_result(&result, None).unwrap());
+        let token = smelt_store::catalog_session_pending_token(&handle.sessions_root, SESSION_ID)
+            .unwrap()
+            .unwrap();
+        let mut current = old.as_ref().clone();
+        current.model = Some("new-model".into());
+        let newer = handle.publish_overlay(current);
+        assert!(!publish_session(&handle, &old, Some(&token)).unwrap());
+        assert!(Arc::ptr_eq(
+            &handle.overlays.lock().unwrap().active[SESSION_ID],
+            &newer
+        ));
+        handle.clear_repaired_overlay(&old, old.source_revision);
+        assert!(Arc::ptr_eq(
+            &handle.overlays.lock().unwrap().active[SESSION_ID],
+            &newer
+        ));
+        handle.clear_published_overlay(&old);
+        assert!(Arc::ptr_eq(
+            &handle.overlays.lock().unwrap().active[SESSION_ID],
+            &newer
+        ));
+        handle.clear_published_overlay(&newer);
+        assert!(handle.overlays.lock().unwrap().active.is_empty());
+    }
+
+    #[test]
+    fn native_catalog_pending_actions_preserve_revision_location_and_latest_packet() {
+        let root = tempfile::tempdir().unwrap();
+        let (handle, _wakes) = test_handle(root.path());
+        let mut row = stale_catalog_row();
+        row.source_revision = 5;
+        row.lineage_id = Some("lineage".into());
+        let old = handle.publish_overlay(row.clone());
+        handle.request_action(
+            SESSION_ID.into(),
+            PendingAction::Publish {
+                session: old,
+                pending_token: Some(vec![1]),
+            },
+        );
+        handle.request_action(
+            SESSION_ID.into(),
+            PendingAction::Repair(RepairRequest::unresolved(4)),
+        );
+        assert!(matches!(
+            handle.pending.lock().unwrap().actions.get(SESSION_ID),
+            Some(PendingAction::Publish { .. })
+        ));
+        row.model = Some("new-model".into());
+        let newer = handle.publish_overlay(row.clone());
+        handle.request_action(
+            SESSION_ID.into(),
+            PendingAction::Publish {
+                session: newer.clone(),
+                pending_token: Some(vec![2]),
+            },
+        );
+        assert!(
+            matches!(handle.pending.lock().unwrap().actions.get(SESSION_ID), Some(PendingAction::Publish { session, pending_token }) if Arc::ptr_eq(session, &newer) && pending_token.as_deref() == Some(&[2][..]))
+        );
+        let mut stale = row;
+        stale.source_revision = 4;
+        handle.publish_overlay(stale);
+        assert!(Arc::ptr_eq(
+            &handle.overlays.lock().unwrap().active[SESSION_ID],
+            &newer
+        ));
+        handle.request_action(
+            SESSION_ID.into(),
+            PendingAction::Repair(RepairRequest::unresolved(6)),
+        );
+        assert!(
+            matches!(handle.pending.lock().unwrap().actions.get(SESSION_ID), Some(PendingAction::Repair(RepairRequest { minimum_revision: 6, lineage_id: Some(lineage) })) if lineage == "lineage")
+        );
+        let mut foreign = newer.as_ref().clone();
+        foreign.lineage_id = Some("foreign-lineage".into());
+        handle.request_action(
+            SESSION_ID.into(),
+            PendingAction::Publish {
+                session: Arc::new(foreign),
+                pending_token: None,
+            },
+        );
+        let pending = handle.pending.lock().unwrap();
+        assert!(pending.reconcile_all);
+        assert!(pending.actions.is_empty());
     }
 
     #[test]
@@ -1589,7 +1887,7 @@ mod tests {
         overlay.source_revision = 5;
         handle.publish_overlay(overlay);
 
-        assert!(repair_session(&handle, SESSION_ID, &RepairRequest::unresolved(5)).unwrap());
+        assert!(repair_session(&handle, SESSION_ID, &RepairRequest::unresolved(5), None).unwrap());
         assert!(!handle
             .overlays
             .lock()
@@ -1600,7 +1898,7 @@ mod tests {
         let mut newer_overlay = stale_catalog_row();
         newer_overlay.source_revision = 6;
         handle.publish_overlay(newer_overlay);
-        assert!(repair_session(&handle, SESSION_ID, &RepairRequest::unresolved(5)).unwrap());
+        assert!(repair_session(&handle, SESSION_ID, &RepairRequest::unresolved(5), None).unwrap());
         assert_eq!(
             handle.overlays.lock().unwrap().active[SESSION_ID].source_revision,
             6

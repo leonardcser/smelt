@@ -34,7 +34,7 @@ pub(super) struct SessionForkRequest {
     pub(super) source_id: String,
     pub(super) forked: smelt_core::session::Session,
     pub(super) expected_source: Option<smelt_store::StoreHead>,
-    pub(super) preserved_intent: Option<crate::app::session_document::PreparedSessionBatch>,
+    pub(super) preserved_projection: Option<crate::app::session_document::ProjectedSessionSave>,
 }
 
 struct SessionLoadRequest {
@@ -159,7 +159,7 @@ impl Drop for SessionLoadRuntime {
 
 fn create_session_fork(
     sessions: &smelt_core::session::SessionStorage,
-    request: SessionForkRequest,
+    mut request: SessionForkRequest,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     if cancelled() {
@@ -174,31 +174,39 @@ fn create_session_fork(
         cancelled,
     )
     .map_err(|error| format!("failed to fork session store: {error}"))?;
-    let published = if let Some(intent) = request.preserved_intent {
-        let outcome = intent
-            .to_store_commit(request.forked.id.clone(), imported.current)
-            .map_err(|error| error.to_string())
-            .and_then(|command| {
-                destination
-                    .commit_session(&command)
-                    .map_err(|error| format!("{error:?}"))
-            });
-        match outcome {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                let cleanup = destination.delete_branch(smelt_core::session::now_ms());
-                return Err(match cleanup {
-                    Ok(()) => format!("failed to preserve unsaved fork state: {error}"),
-                    Err(cleanup) => format!("failed to preserve unsaved fork state: {error}; failed to remove incomplete fork: {cleanup}"),
-                });
-            }
+    let outcome = (|| {
+        if !request.forked.bind_fork_archives(&imported) {
+            return Err("copied fork archives do not match the captured source".to_string());
         }
-    } else {
-        imported
-    };
-    sessions
-        .publish_session_catalog_snapshot(&request.forked, &published)
-        .map_err(|error| format!("failed to publish fork session: {error}"))?;
+        let expected = imported.session.receipt.current;
+        let frame = if let Some(projection) = request.preserved_projection {
+            projection.prepare_archives(&request.forked, expected)
+        } else {
+            request.forked.prepare_archive_save(
+                expected,
+                smelt_store::HistorySuffix {
+                    start: smelt_store::HistoryIndex::new(expected.history_len.get()),
+                    final_len: expected.history_len,
+                    items: Vec::new(),
+                },
+                None,
+            )
+        }
+        .map_err(|error| format!("{error:?}"))?;
+        let result = destination
+            .commit_compact_session(frame.command())
+            .map_err(|error| format!("{error:?}"))?;
+        sessions
+            .publish_archive_save_catalog(&destination, &frame, &result)
+            .map_err(|error| format!("failed to publish fork session: {error}"))
+    })();
+    if let Err(error) = outcome {
+        let cleanup = destination.delete_branch(smelt_core::session::now_ms());
+        return Err(match cleanup {
+            Ok(()) => format!("failed to preserve fork state: {error}"),
+            Err(cleanup) => format!("failed to preserve fork state: {error}; failed to remove incomplete fork: {cleanup}"),
+        });
+    }
     destination
         .release()
         .map_err(|error| format!("failed to release fork writer: {error}"))

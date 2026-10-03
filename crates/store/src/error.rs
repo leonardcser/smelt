@@ -23,6 +23,9 @@ pub enum StoreError {
         owner: Option<String>,
     },
     OwnershipLost,
+    JournalRecovery {
+        failure: Box<crate::SessionCommitFailure>,
+    },
     Cancelled,
     MissingObject {
         reference: String,
@@ -39,7 +42,7 @@ pub enum StoreError {
 }
 
 impl StoreError {
-    pub fn is_recoverable_catalog_corruption(&self) -> bool {
+    pub fn is_recoverable_derived_corruption(&self) -> bool {
         matches!(self, Self::UnsupportedSchema { .. } | Self::Integrity(_))
             || matches!(
                 self,
@@ -56,7 +59,7 @@ impl StoreError {
         matches!(
             self,
             Self::Sqlite(_) | Self::TransactionCleanup { .. } | Self::OperationCleanup { .. }
-        )
+        ) || matches!(self, Self::JournalRecovery { failure } if failure.invalidates_connection())
     }
 }
 
@@ -96,6 +99,9 @@ impl fmt::Display for StoreError {
                 None => f.write_str("session is owned by another writer"),
             },
             StoreError::OwnershipLost => f.write_str("session writer ownership was lost"),
+            StoreError::JournalRecovery { failure } => {
+                write!(f, "session journal recovery failed: {failure:?}")
+            }
             StoreError::Cancelled => f.write_str("operation cancelled"),
             StoreError::MissingObject { reference } => {
                 write!(f, "session object is missing: {reference}")
@@ -135,4 +141,74 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 pub(crate) fn to_sql_error(err: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derived_recovery_rejects_operational_failures() {
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_LOCKED,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_READONLY,
+            rusqlite::ffi::SQLITE_PERM,
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_AUTH,
+            rusqlite::ffi::SQLITE_ERROR,
+        ] {
+            let error = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(!error.is_recoverable_derived_corruption(), "{error:?}");
+        }
+        assert!(
+            !StoreError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .is_recoverable_derived_corruption()
+        );
+        for code in [rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_NOTADB] {
+            let error = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(error.is_recoverable_derived_corruption(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn journal_recovery_failure_preserves_structure_and_connection_disposition() {
+        for failure in [
+            crate::SessionCommitFailure::Busy {
+                operation: "journal commit".into(),
+                attempts: 3,
+                waited_ms: 10,
+            },
+            crate::SessionCommitFailure::Sqlite {
+                message: "fixture failure".into(),
+            },
+            crate::SessionCommitFailure::Integrity {
+                message: "fixture corruption".into(),
+            },
+        ] {
+            let error = StoreError::JournalRecovery {
+                failure: Box::new(failure.clone()),
+            };
+            assert_eq!(
+                error.invalidates_connection(),
+                failure.invalidates_connection()
+            );
+            assert!(!error.is_recoverable_derived_corruption());
+            assert!(error
+                .to_string()
+                .starts_with("session journal recovery failed:"));
+            assert_eq!(
+                crate::session_command::commit_failure_from_store_error(error),
+                failure
+            );
+        }
+    }
 }

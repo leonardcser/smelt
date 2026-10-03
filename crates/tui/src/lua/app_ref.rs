@@ -28,7 +28,7 @@ pub(crate) struct SessionInfoSnapshot {
     pub(crate) ephemeral: bool,
     pub(crate) title: Option<String>,
     pub(crate) slug: Option<String>,
-    pub(crate) first_user_message: Option<String>,
+    pub(crate) first_user_message: Option<std::sync::Arc<str>>,
     pub(crate) parent_id: Option<String>,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,

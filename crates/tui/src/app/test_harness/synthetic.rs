@@ -72,11 +72,10 @@ impl TestApp {
     ) -> bool {
         self.ensure_writer_ready();
         let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
-        let Some(turn) = self.app.begin_custom_command_turn(command, sent_at_ms) else {
-            return false;
-        };
-        self.app.conversation.set_active(Some(turn));
-        true
+        let turn = self.app.begin_custom_command_turn(command, sent_at_ms);
+        self.app.conversation.set_active(turn);
+        self.wait_for_turn_persistence();
+        self.agent_running()
     }
 
     pub(crate) fn start_command_request_turn(
@@ -87,17 +86,16 @@ impl TestApp {
         start: crate::app::CommandTurnStart,
     ) -> bool {
         self.ensure_writer_ready();
-        let Some(turn) = self.app.begin_command_request_turn(
+        let turn = self.app.begin_command_request_turn(
             display,
             evaluated,
             overrides,
             start,
             engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
-        ) else {
-            return false;
-        };
-        self.app.conversation.set_active(Some(turn));
-        true
+        );
+        self.app.conversation.set_active(turn);
+        self.wait_for_turn_persistence();
+        self.agent_running()
     }
 
     pub(crate) fn open_picker(
@@ -622,7 +620,7 @@ impl TestApp {
             metadata: smelt_store::SessionMetadata {
                 title: meta.title.clone(),
                 slug: meta.slug.clone(),
-                first_user_message: meta.first_user_message.clone(),
+                first_user_message: meta.first_user_message.as_deref().map(str::to_owned),
                 cwd: meta.cwd.clone(),
                 mode: meta.mode.clone(),
                 reasoning_effort: meta

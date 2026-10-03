@@ -7,15 +7,11 @@ use crate::app::transcript_scroll_trace::{
     TranscriptVisibleContentAnchor,
 };
 use crate::app::TuiApp;
-use crate::content::prompt_parser::{
-    build_prompt_display_lines, prompt_display_uses_cursor_padding,
-};
 use crate::content::transcript_buf::TranscriptRowAnchor;
 use crate::smelt_edit::{
     add_signed_row, Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition,
     DocRange, DocumentCommand, RowIndex, TextRange, Theme, VerticalScroll,
 };
-use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
 use smelt_core::content::highlight::InlineOptions;
 
@@ -11146,33 +11142,6 @@ impl TuiApp {
             .filter(|r| r.line >= first && r.line < last)
             .map(|r| (r.line, r.col_start, r.col_end))
             .collect()
-    }
-
-    /// Wrap the prompt input against `width` and return the resulting row count.
-    /// The Lua layout composer reads this as `state.prompt_input_rows` and
-    /// gives the prompt window that many rows in the splits tree.
-    pub(crate) fn measure_prompt_input_rows(
-        &self,
-        edit_buf: &crate::smelt_edit::Buffer,
-        width: usize,
-        placeholder: Option<&str>,
-    ) -> u16 {
-        let usable = width.saturating_sub(2).min(u16::MAX as usize) as u16;
-        let attachment_store = self.prompt.attachment_store();
-        let store = attachment_store.lock().unwrap();
-        let lines = build_prompt_display_lines(
-            edit_buf.source(),
-            &edit_buf.attachment_ids,
-            &store,
-            placeholder,
-        );
-        let cursor_padding = prompt_display_uses_cursor_padding(edit_buf.source(), placeholder);
-        let layout = if cursor_padding {
-            WrappedLayout::from_lines_with_cursor_padding(&lines, usable, true)
-        } else {
-            WrappedLayout::from_lines(&lines, usable, true)
-        };
-        layout.visual_count().max(1) as u16
     }
 }
 

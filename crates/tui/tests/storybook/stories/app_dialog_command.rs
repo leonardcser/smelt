@@ -475,7 +475,7 @@ app_story!(resume_dialog, |ctx| {
             id: id.to_string(),
             title: Some(title.to_string()),
             slug: None,
-            first_user_message: Some(title.to_string()),
+            first_user_message: Some(title.into()),
             created_at_ms: ts,
             updated_at_ms: ts,
             mode: None,
@@ -488,7 +488,7 @@ app_story!(resume_dialog, |ctx| {
             display_context_tokens: None,
             history_len: None,
             checkpoint: None,
-            checkpoint_events: Vec::new(),
+            checkpoint_events: Default::default(),
             text_bytes: Some(bytes),
         };
         ctx.write_session_meta(&meta);

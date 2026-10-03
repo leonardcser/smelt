@@ -72,8 +72,9 @@ local function open()
   end)
 end
 
-for _, mode in ipairs({ "normal", "insert", "visual" }) do
-  smelt.keymap.set(mode, "c-r", open)
-end
+smelt.keymap.set("", "c-r", function()
+  if smelt.vim.mode() == "normal" then return false end
+  open()
+end)
 
 smelt.cmd.register("history", open, { desc = "search prompt history" })

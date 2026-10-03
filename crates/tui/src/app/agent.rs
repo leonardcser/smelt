@@ -424,6 +424,7 @@ pub(super) struct PendingTurnDispatch {
     dispatch: PreparedTurnDispatch,
     submit_state: PendingTurnSubmitState,
     cancellation: Option<PendingTurnCancellation>,
+    restore_prompt: Option<super::prompt_runtime::PendingPromptRecovery>,
 }
 
 pub(super) enum PendingTurnCancellation {
@@ -539,6 +540,7 @@ impl TuiApp {
     }
 
     fn prepare_user_visible_turn(&mut self) {
+        let _perf = smelt_perf::perf::begin("agent:prepare_visible_turn");
         self.dismiss_notification_for_turn_start();
         self.clear_prompt_prediction();
         self.platform.set_sleep_inhibited(true);
@@ -761,16 +763,6 @@ impl TuiApp {
             created_at_ms: session::now_ms(),
         };
         match self.submit_canonical_turn(new_turn) {
-            Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::Durable(acknowledgement)) => {
-                self.finish_prepared_turn_dispatch(
-                    dispatch,
-                    acknowledgement.receipt.turn_id.get(),
-                    acknowledgement.receipt.session.current.revision.get(),
-                    acknowledgement.persistence.generation.get(),
-                    Some(std::time::Instant::now()),
-                    acknowledgement.receipt.session.lineage_id.clone(),
-                )
-            }
             Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPersistence {
                 command_id,
                 generation,
@@ -812,7 +804,18 @@ impl TuiApp {
             dispatch,
             submit_state,
             cancellation: None,
+            restore_prompt: None,
         });
+    }
+
+    pub(super) fn preserve_pending_prompt_submission(
+        &mut self,
+        mut recovery: super::prompt_runtime::PendingPromptRecovery,
+    ) {
+        recovery.record_applied_edit(crate::input::prompt_ctx_ref(&self.ui).buf);
+        if let Some(pending) = self.pending_turn_dispatch.as_mut() {
+            pending.restore_prompt = Some(recovery);
+        }
     }
 
     fn fail_prepared_turn_dispatch(
@@ -976,9 +979,6 @@ impl TuiApp {
         outcome: crate::app::conversation::CanonicalTurnSubmitOutcome,
     ) -> bool {
         match outcome {
-            crate::app::conversation::CanonicalTurnSubmitOutcome::Durable(acknowledgement) => {
-                self.resume_turn_submission_after_persistence(*acknowledgement)
-            }
             crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPersistence {
                 command_id,
                 generation,
@@ -1102,6 +1102,12 @@ impl TuiApp {
         self.conversation
             .abandon_canonical_operation(pending.command_id);
         self.fail_prepared_turn_dispatch(pending.dispatch, cause);
+        if cause.definitely_not_committed() && pending.cancellation.is_none() {
+            if let Some(recovery) = pending.restore_prompt {
+                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                self.prompt.restore_failed_submission(&mut pctx, recovery);
+            }
+        }
         true
     }
 
@@ -1451,16 +1457,12 @@ impl TuiApp {
             self.save_session();
             return TerminalCommitStatus::Durable;
         }
-        match self.commit_canonical_turn_transition(
+        match self.enqueue_canonical_turn_transition(
             smelt_store::TurnId::new(turn_id),
             state,
             reason,
         ) {
-            Ok(crate::persist::TurnTransitionOutcome::Durable(_)) => {
-                self.conversation.mark_terminal(turn_id);
-                TerminalCommitStatus::Durable
-            }
-            Ok(crate::persist::TurnTransitionOutcome::Pending { .. }) => {
+            Ok(()) => {
                 self.request_urgent_render();
                 TerminalCommitStatus::Deferred
             }
@@ -1678,7 +1680,7 @@ impl TuiApp {
             match end {
                 TurnEnd::Complete => {
                     let start_queued = !self.prompt.queue_is_empty() && !self.busy_stack.is_busy();
-                    let meta = if start_queued {
+                    let meta = if start_queued && !turn.is_some_and(|(_, canonical)| canonical) {
                         self.working
                             .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
                     } else {
@@ -2883,12 +2885,7 @@ mod tests {
             .notify_turn_error_sticky("rate limit exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("try again", Content::text("try again"), 0)
-            .expect("test app has a usable model");
-        app.app.conversation.set_active(Some(turn));
+        app.start_submitted_turn("try again");
 
         assert!(app.app.notification_win().is_none());
     }
@@ -2901,12 +2898,7 @@ mod tests {
             "missing credentials".to_string(),
         );
 
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("try again", Content::text("try again"), 0)
-            .expect("test app has a usable model");
-        app.app.conversation.set_active(Some(turn));
+        app.start_submitted_turn("try again");
 
         assert!(app.app.notification_win().is_none());
     }
@@ -2918,12 +2910,7 @@ mod tests {
         app.app
             .notify_session_error_sticky("session failure".to_string());
 
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("try again", Content::text("try again"), 0)
-            .expect("test app has a usable model");
-        app.app.conversation.set_active(Some(turn));
+        app.start_submitted_turn("try again");
 
         assert!(app.app.overlays.notification().is_some_and(|notification| {
             matches!(
@@ -2940,12 +2927,7 @@ mod tests {
         app.app
             .notify_application_error_sticky("application failure".to_string());
 
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("try again", Content::text("try again"), 0)
-            .expect("test app has a usable model");
-        app.app.conversation.set_active(Some(turn));
+        app.start_submitted_turn("try again");
 
         assert!(app.app.overlays.notification().is_some_and(|notification| {
             matches!(
@@ -2958,29 +2940,23 @@ mod tests {
     #[test]
     fn starting_command_continuation_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.ensure_writer_ready();
-        let previous = app
-            .app
-            .begin_agent_turn("previous", Content::text("previous"), 0)
-            .expect("previous turn starts");
-        app.app.conversation.set_active(Some(previous));
+        app.start_submitted_turn("previous");
         app.app.discard_turn(crate::app::TurnEnd::Complete);
+        app.wait_for_turn_persistence();
         app.app
             .notify_turn_error_sticky("quota exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
         app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_command_request_turn(
-                "continue".into(),
-                String::new(),
-                smelt_core::custom_commands::CommandOverrides::default(),
-                crate::app::CommandTurnStart::ContinueFromLast,
-                0,
-            )
-            .expect("test app has a usable model");
-        app.app.conversation.set_active(Some(turn));
+        let turn = app.app.begin_command_request_turn(
+            "continue".into(),
+            String::new(),
+            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandTurnStart::ContinueFromLast,
+            0,
+        );
+        assert!(turn.is_none());
+        app.wait_for_turn_persistence();
 
         assert!(app.app.notification_win().is_none());
     }
@@ -2989,12 +2965,7 @@ mod tests {
     fn user_turn_commits_request_before_dispatch_without_duplicate_history() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("first request", Content::text("first request"), 0)
-            .expect("test app has a usable model");
-        app.app.conversation.set_active(Some(turn));
+        app.start_submitted_turn("first request");
 
         assert!(matches!(
             app.app.conversation.session().history.last(),
@@ -3033,13 +3004,8 @@ mod tests {
     #[test]
     fn terminal_turn_commits_final_history_and_completed_state_together() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("finish me", Content::text("finish me"), 0)
-            .expect("turn starts");
-        let turn_id = turn.turn_id;
-        app.app.conversation.set_active(Some(turn));
+        app.start_submitted_turn("finish me");
+        let turn_id = app.current_turn_id().unwrap();
         app.app
             .session_append_history(HistoryItem::assistant(protocol::AssistantStep::terminal(
                 Some(Content::text("finished")),
@@ -3048,6 +3014,7 @@ mod tests {
             )));
 
         app.app.discard_turn(crate::app::TurnEnd::Complete);
+        app.wait_for_turn_persistence();
 
         let reader = lineage_reader(&app);
         let stored = lineage_turn(&reader, turn_id);
@@ -3182,6 +3149,7 @@ mod tests {
                     ),
                     "{flush:?}"
                 );
+                app.wait_for_turn_persistence();
                 assert!(app.agent_running());
                 assert!(app.app.prompt.queue_is_empty());
                 assert_eq!(
@@ -3693,7 +3661,7 @@ mod tests {
         if let Some(turn) = turn {
             app.app.conversation.set_active(Some(turn));
         }
-        app.wait_for_session_lifecycle();
+        app.wait_for_turn_persistence();
         assert!(app.agent_running());
         assert!(
             elapsed < std::time::Duration::from_secs(1),
@@ -3784,13 +3752,8 @@ mod tests {
     #[test]
     fn terminal_transition_failure_keeps_queued_turn_from_starting() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("first", Content::text("first"), 0)
-            .expect("turn starts");
-        let turn_id = turn.turn_id;
-        app.app.conversation.set_active(Some(turn));
+        app.start_submitted_turn("first");
+        let turn_id = app.current_turn_id().unwrap();
         let _ = app.app.flush_persist();
         app.push_queued_message("must remain queued".into());
         app.clear_actions();
@@ -3799,6 +3762,7 @@ mod tests {
             .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
 
         app.app.discard_turn(crate::app::TurnEnd::Complete);
+        let _ = app.app.flush_persist();
 
         assert!(!app.agent_running());
         assert_eq!(app.state().queued_inputs, vec!["must remain queued"]);
@@ -3824,6 +3788,8 @@ mod tests {
         smelt_perf::perf::set_enabled(true);
         smelt_perf::perf::clear();
         app.press(crossterm::event::KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
 
@@ -3920,6 +3886,7 @@ mod tests {
         );
 
         app.press(crossterm::event::KeyCode::Enter);
+        app.app.flush_persist();
 
         assert_eq!(app.state().prompt_text, "retry this exact input");
         assert!(!app.state().agent_running);
@@ -3942,6 +3909,8 @@ mod tests {
         assert!(app.app.retry_blocked_persistence());
         app.clear_actions();
         app.press(crossterm::event::KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.agent_running());
         let _ = app.app.flush_persist();
         let reader = lineage_reader(&app);
@@ -3979,6 +3948,7 @@ mod tests {
             .unwrap_or_default();
 
         app.press(crossterm::event::KeyCode::Enter);
+        app.app.flush_persist();
         assert_eq!(
             app.app.core.signals.get::<u64>("history_epoch"),
             Some(history_epoch.wrapping_add(1)),
@@ -4017,6 +3987,8 @@ mod tests {
         // before identifying the retry's title request from newly emitted actions.
         let _ = app.drain_engine_sends();
         app.press(crossterm::event::KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.agent_running(), "the preserved prompt should resubmit");
         let retry_title_request = title_request_from_actions(&app);
         complete_active_turn_with_assistant(&mut app, "retry completed");
@@ -4033,6 +4005,8 @@ mod tests {
         app.clear_actions();
         app.type_text("follow up after recovery");
         app.press(crossterm::event::KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.agent_running(), "a subsequent turn should start");
         let follow_up_title_request = title_request_from_actions(&app);
         complete_active_turn_with_assistant(&mut app, "follow-up completed");
@@ -4134,6 +4108,7 @@ mod tests {
                 0,
             )
             .is_none());
+        app.app.flush_persist();
 
         assert_eq!(app.app.session_history_len(), baseline_history_len + 1);
         assert!(app
@@ -4158,17 +4133,16 @@ mod tests {
 
         assert!(app.app.retry_blocked_persistence());
         app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_command_request_turn(
-                "/retry".into(),
-                "retry command".into(),
-                smelt_core::custom_commands::CommandOverrides::default(),
-                crate::app::CommandTurnStart::Fresh,
-                0,
-            )
-            .expect("command retry starts");
-        app.app.conversation.set_active(Some(turn));
+        let turn = app.app.begin_command_request_turn(
+            "/retry".into(),
+            "retry command".into(),
+            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandTurnStart::Fresh,
+            0,
+        );
+        app.app.conversation.set_active(turn);
+        app.wait_for_turn_persistence();
+        assert!(app.agent_running(), "command retry starts");
         let reader = lineage_reader(&app);
         let history = lineage_history(&reader);
         assert_eq!(history.len(), baseline_history_len + 2);
@@ -4199,6 +4173,7 @@ mod tests {
         );
 
         assert!(app.app.begin_process_status_turn(note.clone()).is_none());
+        app.app.flush_persist();
 
         assert_eq!(app.app.session_history_len(), baseline_history_len + 1);
         assert!(app
@@ -4221,11 +4196,10 @@ mod tests {
             .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
 
         assert!(app.app.retry_blocked_persistence());
-        let turn = app
-            .app
-            .begin_process_status_turn(note)
-            .expect("note retry starts");
-        app.app.conversation.set_active(Some(turn));
+        let turn = app.app.begin_process_status_turn(note);
+        app.app.conversation.set_active(turn);
+        app.wait_for_turn_persistence();
+        assert!(app.agent_running(), "note retry starts");
         let reader = lineage_reader(&app);
         let history = lineage_history(&reader);
         assert_eq!(history.len(), baseline_history_len + 2);
@@ -4284,7 +4258,7 @@ mod tests {
             .app
             .begin_agent_turn("rejected", Content::text("rejected"), 0)
             .is_none());
-        let _ = app.app.flush_persist();
+        app.wait_for_turn_persistence();
 
         let reader = lineage_reader(&app);
         let turns = reader.turns().expect("read turns");
@@ -4317,6 +4291,7 @@ mod tests {
             app.app.conversation.inject_publish_failure();
 
             app.press(crossterm::event::KeyCode::Enter);
+            app.app.flush_persist();
 
             assert!(!app.state().agent_running);
             assert!(app.app.turn_submission_is_pending());
@@ -4334,7 +4309,7 @@ mod tests {
             app.clear_actions();
 
             assert!(app.app.retry_blocked_persistence());
-            let _ = app.app.flush_persist();
+            app.wait_for_turn_persistence();
 
             assert!(app.state().agent_running);
             assert!(!app.app.turn_submission_is_pending());
@@ -4381,13 +4356,8 @@ mod tests {
             let mut app = crate::app::test_harness::TestApp::builder()
                 .with_runtime_home(runtime.path())
                 .build();
-            app.ensure_writer_ready();
-            let turn = app
-                .app
-                .begin_agent_turn("before restart", Content::text("before restart"), 0)
-                .expect("turn starts");
-            turn_id = turn.turn_id;
-            app.app.conversation.set_active(Some(turn));
+            app.start_submitted_turn("before restart");
+            turn_id = app.current_turn_id().expect("turn starts");
             let _ = app.app.flush_persist();
             session_id = app.app.conversation.session().id.clone();
             let reader = lineage_reader(&app);
@@ -4401,7 +4371,28 @@ mod tests {
             .with_runtime_home(runtime.path())
             .build();
         resumed.clear_actions();
-        resumed.load_session_by_id(&session_id);
+        let prepared = crate::app::session_load::prepare_session_load(
+            &resumed.app.core.sessions,
+            &session_id,
+            80,
+            24,
+            &|| false,
+        )
+        .unwrap();
+        assert!(resumed.app.install_prepared_session_load(prepared));
+        assert!(resumed.app.conversation.writer_is_opening());
+        let title = resumed.app.conversation.session().title.clone();
+        resumed
+            .eval_lua::<()>("smelt.session.title.set('blocked while opening')")
+            .unwrap();
+        assert_eq!(resumed.app.conversation.session().title, title);
+        assert!(resumed
+            .overlays_probe()
+            .notification()
+            .unwrap()
+            .summary
+            .contains("still opening"));
+        resumed.wait_for_session_lifecycle();
 
         assert_eq!(
             resumed.app.conversation.session().id,
@@ -4429,9 +4420,18 @@ mod tests {
             lineage_turn(&reader, turn_id).state,
             smelt_store::TurnState::Interrupted
         );
+        let snapshot = reader.snapshot().unwrap();
+        assert_eq!(resumed.app.conversation.acknowledged_head(), snapshot.head);
+        let base = resumed
+            .app
+            .conversation
+            .session()
+            .archive_base()
+            .expect("resume binds verified archives");
+        assert_eq!(base.revision_id, snapshot.revision_id);
         assert_eq!(
-            resumed.app.conversation.acknowledged_head(),
-            reader.snapshot().unwrap().head
+            base.branch_sequence, snapshot.head.revision,
+            "startup must advance the verified archive base as well as the document head"
         );
     }
 
@@ -4444,14 +4444,9 @@ mod tests {
 
         smelt_perf::perf::set_enabled(true);
         smelt_perf::perf::clear();
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("new request", Content::text("new request"), 0)
-            .expect("test app has a usable model");
+        app.start_submitted_turn("new request");
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
-        app.app.conversation.set_active(Some(turn));
 
         assert_no_full_request_start_reads(&snapshot);
         assert_perf_value_at_most(&snapshot, "store:history:dirty_suffix_rows", 1);
@@ -4527,23 +4522,9 @@ mod tests {
         app.app.set_context_note("goal".into(), None);
         smelt_perf::perf::set_enabled(true);
         smelt_perf::perf::clear();
-        app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_agent_turn("new request", Content::text("new request"), 0)
-            .unwrap_or_else(|| {
-                panic!(
-                    "request did not start: read_only={}, notification={:?}",
-                    app.app.conversation.is_read_only(),
-                    app.app
-                        .overlays
-                        .notification()
-                        .map(|notification| notification.summary.as_str())
-                )
-            });
+        app.start_submitted_turn("new request");
         let snapshot = smelt_perf::perf::snapshot();
         smelt_perf::perf::set_enabled(false);
-        app.app.conversation.set_active(Some(turn));
 
         assert_no_full_request_start_reads(&snapshot);
         assert_perf_value_at_most(&snapshot, "store:history:dirty_suffix_rows", 2);
@@ -4566,17 +4547,16 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
         app.ensure_writer_ready();
-        let turn = app
-            .app
-            .begin_command_request_turn(
-                "/fix".into(),
-                "fix it".into(),
-                smelt_core::custom_commands::CommandOverrides::default(),
-                crate::app::CommandTurnStart::Fresh,
-                0,
-            )
-            .expect("test app has a usable model");
-        app.app.conversation.set_active(Some(turn));
+        let turn = app.app.begin_command_request_turn(
+            "/fix".into(),
+            "fix it".into(),
+            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandTurnStart::Fresh,
+            0,
+        );
+        app.app.conversation.set_active(turn);
+        app.wait_for_turn_persistence();
+        assert!(app.agent_running(), "test app has a usable model");
 
         assert_eq!(
             app.app.conversation.session().first_user_message.as_deref(),
@@ -4676,7 +4656,7 @@ mod tests {
                 output: String::new(),
             });
 
-        app.wait_for_session_lifecycle();
+        app.wait_for_turn_persistence();
         assert!(app.app.agent_is_running());
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
@@ -4697,7 +4677,7 @@ mod tests {
                 output: String::new(),
             });
 
-        app.wait_for_session_lifecycle();
+        app.wait_for_turn_persistence();
         assert!(app.app.agent_is_running());
         assert_eq!(
             process_status_blocks(&app),
@@ -4796,7 +4776,7 @@ mod tests {
             "test app has a usable model"
         );
 
-        app.wait_for_session_lifecycle();
+        app.wait_for_turn_persistence();
         assert!(app.app.agent_is_running());
         assert_eq!(process_status_blocks(&app), vec![text]);
         assert!(user_blocks(&app).is_empty());
@@ -4813,7 +4793,7 @@ mod tests {
                 termination: protocol::JobTermination::Exited,
                 output: String::new(),
             });
-        app.wait_for_session_lifecycle();
+        app.wait_for_turn_persistence();
         let turn_id = app
             .app
             .active_agent_turn_id()

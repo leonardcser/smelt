@@ -16,6 +16,8 @@ fn goal_auto_off_applies_while_agent_is_running() {
     let mut app = TestApp::builder().build();
     app.type_text("/goal finish the current work");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
     let turn_id = app.current_turn_id().expect("goal starts a turn");
     app.clear_actions();
 
@@ -65,6 +67,8 @@ fn goal_controls_apply_while_agent_is_running_without_changing_queued_messages()
             let mut app = TestApp::builder().build();
             app.type_text("/goal finish the current work");
             app.press(KeyCode::Enter);
+            app.wait_for_turn_persistence();
+            app.feed_one(SourceEvent::Tick(0));
             if matches!(arg, "resume" | "auto on") {
                 assert!(app.run_lua(r#"require("smelt.goal").pause()"#));
             }
@@ -105,6 +109,8 @@ fn goal_creation_while_running_waits_until_its_queued_request_is_consumed() {
             let mut app = TestApp::builder().build();
             app.type_text("initial request");
             app.press(KeyCode::Enter);
+            app.wait_for_turn_persistence();
+            app.feed_one(SourceEvent::Tick(0));
             let turn_id = app.current_turn_id().expect("initial turn");
             app.clear_actions();
 
@@ -135,6 +141,7 @@ fn goal_creation_while_running_waits_until_its_queued_request_is_consumed() {
             } else {
                 assert_only_history_updates(&app);
                 app.discard_turn(crate::app::TurnEnd::Complete);
+                app.wait_for_turn_persistence();
                 assert_ne!(app.current_turn_id(), Some(turn_id));
                 assert!(app.drain_engine_sends().iter().any(|cmd| matches!(
                     cmd,
@@ -494,10 +501,12 @@ fn lua_submit_command_continuation_carries_last_turn_elapsed_without_using_queue
 
     app.type_text("initial request");
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
     let _ = app.drain_engine_sends();
     app.feed_one(SourceEvent::Tick(750));
     app.discard_turn(crate::app::TurnEnd::Complete);
+    app.wait_for_turn_persistence();
     let token = app
         .conversation_probe()
         .pending_continuation_token()
@@ -513,6 +522,7 @@ fn lua_submit_command_continuation_carries_last_turn_elapsed_without_using_queue
         token
     )));
 
+    app.wait_for_turn_persistence();
     assert!(app.prompt_probe().queue_is_empty());
     assert_eq!(
         app.working_probe().elapsed(),

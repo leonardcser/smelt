@@ -39,7 +39,10 @@ fn session_entries_to_lua(
                 let meta = *meta;
                 row.set("available", true)?;
                 row.set("title", meta.title.unwrap_or_default())?;
-                row.set("subtitle", meta.first_user_message.unwrap_or_default())?;
+                row.set(
+                    "subtitle",
+                    meta.first_user_message.as_deref().unwrap_or_default(),
+                )?;
                 row.set("cwd", meta.cwd.unwrap_or_default())?;
                 row.set("parent_id", meta.parent_id.unwrap_or_default())?;
                 row.set("updated_at_ms", meta.updated_at_ms)?;
@@ -585,7 +588,7 @@ pub(super) fn register(
                 out.set("ephemeral", info.ephemeral)?;
                 out.set("title", info.title)?;
                 out.set("slug", info.slug)?;
-                out.set("first_user_message", info.first_user_message)?;
+                out.set("first_user_message", info.first_user_message.as_deref())?;
                 out.set("parent_id", info.parent_id)?;
                 out.set("created_at_ms", info.created_at_ms)?;
                 out.set("updated_at_ms", info.updated_at_ms)?;

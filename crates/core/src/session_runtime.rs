@@ -3,8 +3,6 @@ use protocol::{history_item_message_count, HistoryItem};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-const HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS: usize = 256;
-
 struct LiveStoreReader(smelt_store::LineageSessionReader);
 
 impl LiveStoreReader {
@@ -45,78 +43,24 @@ impl LiveStoreReader {
         end: usize,
         name: &str,
     ) -> smelt_store::Result<Option<usize>> {
-        let mut cursor = end;
-        while cursor > 0 {
-            let start = cursor.saturating_sub(HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS);
-            let items = self.read_history_items_range(start..cursor)?;
-            if let Some(index) = items.iter().rposition(|item| {
-                item.as_note().and_then(protocol::HistoryNote::context_name) == Some(name)
-            }) {
-                return Ok(Some(start + index));
-            }
-            cursor = start;
-        }
-        Ok(None)
+        let _perf = smelt_perf::perf::begin("session:history_semantic:context_note");
+        Ok(self
+            .0
+            .history_last_context_note_index_before(end as u64, name)?
+            .map(|index| index as usize))
     }
 
     fn history_any_transcript_visible_before(&self, end: usize) -> smelt_store::Result<bool> {
-        let state = self.0.snapshot()?;
-        let history_len = state.head.history_len.as_usize().unwrap_or(usize::MAX);
-        if end >= history_len {
-            return Ok(state.transcript_len > 0);
-        }
-        let mut start = 0;
-        while start < end {
-            let next = start
-                .saturating_add(HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS)
-                .min(end);
-            if self
-                .read_history_items_range(start..next)?
-                .iter()
-                .any(HistoryItem::is_transcript_visible)
-            {
-                return Ok(true);
-            }
-            start = next;
-        }
-        Ok(false)
+        self.0.history_any_transcript_visible_before(end as u64)
     }
 
     fn history_mode_before(&self, end: usize) -> smelt_store::Result<Option<String>> {
-        let mut cursor = end;
-        while cursor > 0 {
-            let start = cursor.saturating_sub(HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS);
-            if let Some(mode) = self
-                .read_history_items_range(start..cursor)?
-                .iter()
-                .rev()
-                .filter_map(HistoryItem::as_note)
-                .find_map(protocol::HistoryNote::mode)
-            {
-                return Ok(Some(mode.to_owned()));
-            }
-            cursor = start;
-        }
-        Ok(None)
+        self.0.history_mode_before(end as u64)
     }
 
     fn history_base_mode_range(&self, range: Range<usize>) -> smelt_store::Result<Option<String>> {
-        let mut start = range.start;
-        while start < range.end {
-            let next = start
-                .saturating_add(HISTORY_SEMANTIC_SCAN_CHUNK_ITEMS)
-                .min(range.end);
-            if let Some(mode) = self
-                .read_history_items_range(start..next)?
-                .iter()
-                .filter_map(HistoryItem::as_note)
-                .find_map(protocol::HistoryNote::base_mode)
-            {
-                return Ok(Some(mode.to_owned()));
-            }
-            start = next;
-        }
-        Ok(None)
+        self.0
+            .history_base_mode_range(range.start as u64..range.end as u64)
     }
 }
 
@@ -227,12 +171,6 @@ impl LiveSession {
         self.header.revision = revision;
         self.header.meta.history_len = Some(saved_history_len);
         self.header.meta.checkpoint = checkpoint.cloned();
-    }
-
-    pub fn replace_header(&mut self, header: SessionHeader) {
-        self.header = header;
-        self.live_start = self.header.history_len;
-        self.live_history.clear();
     }
 
     pub fn history_range(&self, range: Range<usize>) -> Result<Vec<HistoryItem>, String> {
@@ -713,7 +651,7 @@ mod tests {
                 display_context_tokens: None,
                 history_len: Some(2),
                 checkpoint: None,
-                checkpoint_events: Vec::new(),
+                checkpoint_events: Default::default(),
                 text_bytes: None,
             },
             history_len: 2,
@@ -782,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn store_backed_live_session_scans_mode_and_visibility_bounded() {
+    fn store_backed_live_session_uses_indexed_mode_and_visibility() {
         let dir = tempfile::tempdir().expect("tempdir");
         let history = vec![
             HistoryItem::user(protocol::Content::text("hello")),
@@ -810,7 +748,7 @@ mod tests {
                 display_context_tokens: None,
                 history_len: Some(3),
                 checkpoint: None,
-                checkpoint_events: Vec::new(),
+                checkpoint_events: Default::default(),
                 text_bytes: None,
             },
             history_len: 3,
@@ -823,6 +761,9 @@ mod tests {
         );
 
         assert!(live.any_transcript_visible_before(2).unwrap());
+        assert!(live.any_transcript_visible_before(3).unwrap());
+        assert!(live.any_transcript_visible_before(usize::MAX).unwrap());
+        assert!(!live.any_transcript_visible_before(0).unwrap());
         assert_eq!(live.effective_mode_at(3, "normal").unwrap(), "plan");
         assert_eq!(live.effective_mode_at(0, "normal").unwrap(), "normal");
     }
@@ -855,7 +796,7 @@ mod tests {
                 display_context_tokens: None,
                 history_len: Some(history.len()),
                 checkpoint: None,
-                checkpoint_events: Vec::new(),
+                checkpoint_events: Default::default(),
                 text_bytes: None,
             },
             history_len: history.len(),

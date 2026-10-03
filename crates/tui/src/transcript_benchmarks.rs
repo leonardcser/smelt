@@ -743,9 +743,12 @@ enum BurstBenchPosition {
 }
 
 fn save_bench_fixture(app: &mut TestApp, label: &str) -> smelt_store::SaveReceipt {
+    app.ensure_writer_ready();
     app.app.save_session();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
+        app.render_silent();
+        app.app.save_deferred_session_batch_if_ready();
         let outcome = app.app.flush_persist();
         match outcome {
             crate::persist::PersistenceFlushOutcome::Durable {
@@ -1588,7 +1591,7 @@ fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: 
     let mut session = smelt_core::session::Session::new(4242, std::path::PathBuf::from(cwd));
     session.id = id.clone();
     session.title = Some(format!("resume bench {id}"));
-    session.first_user_message = Some(format!("open resume dialog for {id}"));
+    session.first_user_message = Some(format!("open resume dialog for {id}").into());
     session.created_at_ms = updated_at_ms;
     session.updated_at_ms = updated_at_ms;
     let mut bytes = 0usize;
@@ -4404,9 +4407,45 @@ fn saved_hot_path_app(
         });
     }
 
-    app.app.load_session(session);
-    app.app.restore_screen();
-    let receipt = save_bench_fixture(&mut app, "hot path");
+    let session_id = session.id.clone();
+    // Seed durable history and records before opening the bounded UI projection.
+    let receipt = {
+        let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
+        let records = transcript
+            .history
+            .block_records_with_ids()
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                    index,
+                    record.block_id.get(),
+                    &record.record,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("project hot path fixture records");
+        let mut command = smelt_core::session::initial_store_commit_from_session(&session)
+            .expect("prepare hot path fixture");
+        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+            start: smelt_store::TranscriptRecordIndex::ZERO,
+            records,
+        });
+        let mut writer =
+            smelt_store::SessionWriter::open(app.app.core.sessions.sessions_dir(), &session_id)
+                .expect("open hot path fixture writer");
+        let receipt = writer
+            .commit_session(&command)
+            .expect("seed hot path fixture");
+        writer.release().expect("release hot path fixture writer");
+        app.app
+            .core
+            .sessions
+            .publish_session_catalog_commit(&command, &receipt);
+        receipt
+    };
+    drop(session);
+    assert!(app.resume_session(&session_id), "resume hot path fixture");
     wait_for_bench_catalog(&app, "hot path", &receipt);
     app
 }
@@ -4433,6 +4472,17 @@ fn copied_hot_path_fixture_app(fixture: &std::path::Path) -> TestApp {
     assert!(
         !app.app.conversation.is_read_only(),
         "copied hot-path fixture opened read-only"
+    );
+    // Fixture providers need not exist in the isolated harness configuration.
+    app.apply_model("test/test-model", false);
+    assert_eq!(
+        app.app
+            .core
+            .config
+            .active_model()
+            .map(|model| model.key.as_str()),
+        Some("test/test-model"),
+        "fixture must use the isolated harness provider"
     );
     app
 }
@@ -4959,6 +5009,9 @@ fn run_submit_hot_paths(
 
     let (submit, submit_snapshot) = capture_hot_path_sample("submit_enter", history_len, || {
         app.press(KeyCode::Enter);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.wait_for_turn_persistence_until(deadline);
+        app.feed_one(SourceEvent::Tick(0));
     });
     let started = app.actions().iter().find_map(|action| match action {
         Action::EngineSend(command) => match command.as_ref() {
@@ -4975,14 +5028,25 @@ fn run_submit_hot_paths(
             .notification()
             .map(|notification| notification.summary.as_str());
         panic!(
-            "submit_enter did not dispatch StartTurn; notification={notification:?}; actions={:?}",
-            app.actions()
+            "submit_enter did not dispatch StartTurn; notification={notification:?}; action_count={}",
+            app.actions().len()
         );
     };
     assert!(matches!(
         &started.history,
         protocol::ModelHistorySource::Store { .. }
     ));
+    assert_eq!(
+        app.actions()
+            .iter()
+            .filter(|action| {
+                matches!(action, Action::EngineSend(command)
+                    if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_)))
+            })
+            .count(),
+        1,
+        "submit_enter must dispatch exactly one turn"
+    );
     // Enter may append the current session context, a named-context tombstone,
     // and the submitted user item, but it must never rewrite persisted history.
     let max_dirty_history_rows = if fixture.is_some() { 3 } else { 2 };
@@ -5289,6 +5353,1065 @@ fn transcript_layout_hot_path_benchmark_suite() {
             stats.p95,
             stats.p99,
             stats.max,
+        );
+    }
+}
+
+/// Measures small reads against an explicitly supplied local lineage without
+/// claiming its writer or changing canonical data. Payloads are never printed.
+#[test]
+#[ignore = "requires explicit local lineage; read-only performance investigation"]
+fn large_session_read_only_benchmark() {
+    let root = std::env::var("SMELT_SESSION_BENCH_ROOT").expect("sessions root");
+    let lineage = std::env::var("SMELT_SESSION_BENCH_LINEAGE").expect("lineage ID");
+    let session = std::env::var("SMELT_SESSION_BENCH_ID").expect("session ID");
+    let reader =
+        smelt_store::LineageSessionReader::open_existing_in_lineage(root, lineage, session)
+            .expect("open local session read-only");
+    let state = reader.snapshot().expect("read session state");
+    let end = state.head.history_len.get();
+    let records = state.head.transcript_record_count.get();
+    assert!(end > 0 && records > 0);
+    drop(state);
+
+    smelt_perf::alloc::enable();
+    for operation in ["snapshot", "one_history_item", "one_transcript_record"] {
+        let mut times = Vec::new();
+        let mut allocated = Vec::new();
+        for _ in 0..20 {
+            let (sample, snapshot) =
+                capture_hot_path_sample(operation, end as usize, || match operation {
+                    "snapshot" => {
+                        std::hint::black_box(reader.snapshot().unwrap());
+                    }
+                    "one_history_item" => {
+                        let rows = reader.history_range(end - 1, end).unwrap();
+                        assert_eq!(rows.len(), 1);
+                        std::hint::black_box(rows);
+                    }
+                    "one_transcript_record" => {
+                        let rows = reader.transcript_range(records - 1, records).unwrap();
+                        assert_eq!(rows.len(), 1);
+                        std::hint::black_box(rows);
+                    }
+                    _ => unreachable!(),
+                });
+            times.push(sample.ms);
+            allocated.push(sample.thread_bytes_allocated);
+            if times.len() == 1 {
+                print_hot_path_perf(operation, &snapshot);
+            }
+        }
+        let stats = TailStats::from(&times);
+        eprintln!(
+            "LARGE_SESSION_READ operation={operation} history_len={end} median_ms={:.3} p95_ms={:.3} mean_alloc_bytes={}",
+            stats.p50, stats.p95, allocated.iter().sum::<u64>() / allocated.len() as u64,
+        );
+    }
+}
+
+fn saved_archive_bench_app(checkpoint_count: usize) -> (TestApp, usize) {
+    use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent, Session};
+
+    let mut app = TestApp::builder().build();
+    let history_len = 1024;
+    let mut session = Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.history = (0..history_len)
+        .map(|idx| hot_path_history_item(idx, 0))
+        .collect();
+    let mut random = 42_u64;
+    for index in 0..checkpoint_count {
+        let words = [
+            "session",
+            "history",
+            "checkpoint",
+            "storage",
+            "request",
+            "transcript",
+            "context",
+            "summary",
+            "provider",
+            "revision",
+            "message",
+            "worker",
+            "index",
+            "turn",
+            "metadata",
+            "object",
+        ];
+        let mut summary = String::new();
+        while summary.len() < 32 * 1024 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            summary.push_str(words[(random >> 32) as usize % words.len()]);
+            summary.push(' ');
+        }
+        session.checkpoint_events.push(ContextCheckpointEvent {
+            kind: "auto".into(),
+            summary: summary.into(),
+            first_live_index: (index + 1) * 4,
+            completed_at_history_len: (index + 1) * 4,
+            created_at_ms: index as u64,
+        });
+    }
+    // Keep the provider-visible tail identical in every fixture.
+    session.checkpoint = Some(ContextCheckpoint {
+        summary: "bounded active model context".into(),
+        first_live_index: history_len - 4,
+        ..Default::default()
+    });
+    let archive_bytes: usize = session
+        .checkpoint_events
+        .iter()
+        .map(|event| event.summary.len())
+        .sum();
+    app.app.load_session(session);
+    app.app.restore_screen();
+    let receipt = save_bench_fixture(&mut app, "large-session turn start");
+    wait_for_bench_catalog(&app, "large-session turn start", &receipt);
+    app.app.handle_resize(100, 32);
+    app.render_silent();
+    (app, archive_bytes)
+}
+
+/// Measures public SDK root copying with an unchanged archive. Cold fixture
+/// construction and historical verification stay outside the sample.
+#[test]
+#[ignore = "fork root-copy allocation acceptance; run optimized and process-isolated"]
+fn public_fork_root_copy_hot_work_is_bounded() {
+    let mut samples = Vec::new();
+    for checkpoints in [0, 32, 128] {
+        let (app, archive_bytes) = saved_archive_bench_app(checkpoints);
+        let address = app.app.conversation.transcript().store_address().unwrap();
+        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+            &address.sessions_root,
+            &address.lineage_id,
+            &address.session_id,
+        )
+        .unwrap();
+        let original = reader.snapshot().unwrap();
+        let target = app
+            .app
+            .conversation
+            .session()
+            .fork_target(app.app.core.env.pid());
+        // Keep the source lease active, but exclude unrelated idle collection
+        // from the process-wide allocation sample of this direct SDK operation.
+        let release = app.app.conversation.pause_persistence();
+        let mut fork = None;
+        let (sample, perf) = capture_hot_path_sample("public_fork_root_copy", checkpoints, || {
+            fork = Some(
+                smelt_store::OwnedLineageWriter::fork_from(
+                    &address.sessions_root,
+                    &address.session_id,
+                    &target.id,
+                    target.created_at_ms,
+                    Some(original.head),
+                    &|| false,
+                )
+                .unwrap(),
+            );
+        });
+        assert_hot_path_at_most(
+            &perf,
+            sample.operation,
+            "persist:reclamation:rows_examined",
+            0,
+        );
+        release.send(()).expect("resume source persistence actor");
+        let (destination, result) = fork.unwrap();
+        assert_eq!(result.source_session_id, address.session_id);
+        assert_eq!(result.source_head, original.head);
+        assert_eq!(result.session.revision_id, original.revision_id);
+        let receipt = result.session.receipt;
+        assert_eq!(receipt.current.revision, smelt_store::Revision::new(1));
+        assert_eq!(receipt.current.history_len, original.head.history_len);
+        assert_eq!(
+            receipt.current.transcript_record_count,
+            original.head.transcript_record_count
+        );
+        let copied = destination.snapshot().unwrap();
+        assert_eq!(copied.revision_id, original.revision_id);
+        assert_eq!(copied.history_root_id, original.history_root_id);
+        assert_eq!(copied.transcript_root_id, original.transcript_root_id);
+        assert_eq!(copied.side_tables, original.side_tables);
+        assert_eq!(
+            copied.metadata.first_user_message,
+            original.metadata.first_user_message
+        );
+        assert_eq!(
+            copied.metadata.checkpoint_events_json,
+            original.metadata.checkpoint_events_json
+        );
+        assert_eq!(reader.snapshot().unwrap(), original);
+        assert_hot_path_at_most(&perf, sample.operation, "store:object:bytes_hydrated", 0);
+        eprintln!(
+            "PUBLIC_FORK_HOT_WORK checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}",
+            sample.thread_bytes_allocated, sample.process_bytes_allocated,
+        );
+        samples.push((checkpoints, sample.process_bytes_allocated));
+        destination.release().unwrap();
+    }
+    let baseline = samples[0].1;
+    for (checkpoints, allocated) in samples {
+        assert!(allocated <= baseline + 256 * 1024,
+            "{checkpoints} retained checkpoints inflate public fork root copying to {allocated} allocated bytes, baseline {baseline}");
+    }
+}
+
+/// Measures actual command capture with many short retained records, independently
+/// of archive body size. Cold resume, settlement and exact reads are outside the sample.
+#[test]
+#[ignore = "fork record-count allocation acceptance; run optimized and process-isolated"]
+fn retained_record_count_clean_fork_request_allocation_is_bounded() {
+    use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent, Session};
+
+    smelt_perf::alloc::enable();
+    let mut samples = Vec::new();
+    for checkpoints in [0, 4096, 16_384] {
+        let mut app = TestApp::builder().build();
+        let storage =
+            smelt_core::session::SessionStorage::new(app.session_storage_root().to_path_buf());
+        let mut session = Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        let texts = [
+            "synthetic user",
+            "synthetic assistant",
+            "synthetic current user",
+            "synthetic current assistant",
+        ];
+        session.history = texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                if index % 2 == 0 {
+                    protocol::HistoryItem::user(protocol::Content::text(*text))
+                } else {
+                    protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                        Some(protocol::Content::text(*text)),
+                        None,
+                        Vec::new(),
+                    ))
+                }
+            })
+            .collect();
+        session.first_user_message = Some(texts[0].into());
+        session.checkpoint_events = (0..checkpoints)
+            .map(|index| ContextCheckpointEvent {
+                kind: "auto".into(),
+                summary: "short synthetic retained summary".into(),
+                first_live_index: 2,
+                completed_at_history_len: 2,
+                created_at_ms: index as u64,
+            })
+            .collect::<Vec<_>>()
+            .into();
+        session.checkpoint = Some(ContextCheckpoint {
+            summary: "bounded current context".into(),
+            first_live_index: 2,
+            ..Default::default()
+        });
+        let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
+        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
+            start: smelt_store::TranscriptRecordIndex::ZERO,
+            records: texts
+                .into_iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let block = if index % 2 == 0 {
+                        smelt_core::Block::User {
+                            text: text.into(),
+                            image_labels: Vec::new(),
+                            command: false,
+                            sent_at_ms: None,
+                        }
+                    } else {
+                        smelt_core::Block::Text {
+                            content: text.to_string().into(),
+                        }
+                    };
+                    let record = smelt_core::TranscriptBlockRecord {
+                        content_hash: block.content_hash(),
+                        block,
+                        origin: Some(smelt_core::BlockOrigin::History(index)),
+                        tool_state: None,
+                        tool_render_revision: 0,
+                    };
+                    smelt_core::transcript_model::transcript_block_row(index, &record).unwrap()
+                })
+                .collect(),
+        });
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(storage.sessions_dir(), &session.id).unwrap();
+        let receipt = writer.commit_session(&command).unwrap();
+        app.publish_session_catalog_commit(&command, &receipt);
+        writer.release().unwrap();
+        app.reconcile_session_catalog().unwrap();
+        assert!(app.resume_session(&session.id));
+        assert_eq!(app.session_snapshot().id, session.id);
+        app.render_silent();
+        let reader =
+            smelt_store::LineageSessionReader::open_existing(storage.sessions_dir(), &session.id)
+                .unwrap();
+        let original = reader.snapshot().unwrap();
+        let history = reader
+            .history_range(0, original.head.history_len.get())
+            .unwrap();
+        let transcript = reader
+            .transcript_range(0, original.head.transcript_record_count.get())
+            .unwrap();
+
+        let (sample, _) = capture_hot_path_sample("fork_record_count", checkpoints, || {
+            assert!(app.run_lua(r#"smelt.cmd.run("fork")"#));
+        });
+        app.wait_for_session_lifecycle();
+        let target_id = app.session_snapshot().id;
+        assert_ne!(target_id, session.id);
+        let fork =
+            smelt_store::LineageSessionReader::open_existing(storage.sessions_dir(), target_id)
+                .unwrap();
+        let saved = fork.snapshot().unwrap();
+        assert_eq!(
+            saved.identity.parent_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(saved.history_root_id, original.history_root_id);
+        assert_eq!(saved.transcript_root_id, original.transcript_root_id);
+        assert_eq!(
+            saved.metadata.checkpoint_events_json,
+            original.metadata.checkpoint_events_json
+        );
+        assert_eq!(
+            saved.metadata.checkpoint_json,
+            original.metadata.checkpoint_json
+        );
+        assert_eq!(saved.side_tables, original.side_tables);
+        assert_eq!(
+            fork.history_range(0, saved.head.history_len.get()).unwrap(),
+            history
+        );
+        assert_eq!(
+            fork.transcript_range(0, saved.head.transcript_record_count.get())
+                .unwrap(),
+            transcript
+        );
+        assert_eq!(reader.snapshot().unwrap(), original);
+        eprintln!("FORK_RECORD_COUNT records={checkpoints} ui_thread_alloc_bytes={} exact_content=true source_unchanged=true", sample.thread_bytes_allocated);
+        samples.push((checkpoints, sample.thread_bytes_allocated));
+    }
+    let baseline = samples[0].1;
+    for (checkpoints, allocated) in samples {
+        assert!(allocated <= baseline + 256 * 1024,
+            "{checkpoints} retained records inflate fork capture to {allocated} UI-thread bytes, baseline {baseline}");
+    }
+}
+
+/// Measures the clean fork command after resume. Worker persistence and cold
+/// historical verification stay outside the UI-thread allocation sample.
+#[test]
+#[ignore = "clean fork request allocation acceptance; run optimized and process-isolated"]
+fn unchanged_archive_clean_fork_request_allocation_is_bounded() {
+    smelt_perf::alloc::enable();
+    let mut samples = Vec::new();
+    for checkpoints in [0, 32, 128] {
+        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
+        let address = app.app.conversation.transcript().store_address().unwrap();
+        let root = address.sessions_root.clone();
+        let source_id = address.session_id.clone();
+        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+            &root,
+            &address.lineage_id,
+            &source_id,
+        )
+        .unwrap();
+        let original = reader.snapshot().unwrap();
+        let history = reader
+            .history_range(0, original.head.history_len.get())
+            .unwrap();
+        let records = reader
+            .transcript_range(0, original.head.transcript_record_count.get())
+            .unwrap();
+        assert!(app.resume_session(&source_id));
+        assert!(!app.session_is_read_only());
+        assert!(!app.session_document_has_unflushed_work());
+
+        let (sample, perf) = capture_hot_path_sample("clean_fork_request", checkpoints, || {
+            assert!(app.run_lua(r#"smelt.cmd.run("fork")"#));
+        });
+        eprintln!(
+            "CLEAN_FORK_UI checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}",
+            sample.thread_bytes_allocated, sample.process_bytes_allocated,
+        );
+        print_hot_path_perf(sample.operation, &perf);
+        app.wait_for_session_lifecycle();
+        let fork_id = app.app.conversation.session().id.clone();
+        assert_ne!(fork_id, source_id);
+        assert!(!app.session_is_read_only());
+        assert!(!app.session_document_has_unflushed_work());
+        let fork = smelt_store::LineageSessionReader::open_existing(&root, &fork_id).unwrap();
+        let saved = fork.snapshot().unwrap();
+        assert_eq!(
+            saved.identity.parent_id.as_deref(),
+            Some(source_id.as_str())
+        );
+        assert_eq!(saved.head.revision, smelt_store::Revision::new(2));
+        assert_eq!(saved.history_root_id, original.history_root_id);
+        assert_eq!(saved.transcript_root_id, original.transcript_root_id);
+        assert_eq!(saved.head.history_len, original.head.history_len);
+        assert_eq!(
+            saved.head.transcript_record_count,
+            original.head.transcript_record_count
+        );
+        assert_eq!(
+            saved.metadata.checkpoint_events_json,
+            original.metadata.checkpoint_events_json
+        );
+        assert_eq!(
+            saved.metadata.checkpoint_json,
+            original.metadata.checkpoint_json
+        );
+        assert_eq!(
+            saved.metadata.first_user_message,
+            original.metadata.first_user_message
+        );
+        assert_eq!(saved.metadata.title, original.metadata.title);
+        assert_eq!(saved.metadata.slug, original.metadata.slug);
+        assert_eq!(saved.side_tables, original.side_tables);
+        assert_eq!(
+            fork.history_range(0, saved.head.history_len.get()).unwrap(),
+            history
+        );
+        assert_eq!(
+            fork.transcript_range(0, saved.head.transcript_record_count.get())
+                .unwrap(),
+            records
+        );
+        assert_eq!(reader.snapshot().unwrap(), original);
+        samples.push((checkpoints, sample.thread_bytes_allocated));
+    }
+    let baseline = samples[0].1;
+    for (checkpoints, allocated) in samples {
+        assert!(
+            allocated <= baseline + 256 * 1024,
+            "{checkpoints} retained checkpoints inflate clean fork initiation to {allocated} UI-thread allocated bytes, baseline {baseline}"
+        );
+    }
+}
+
+/// Measures the actual Lua request for a fork that preserves pending edits. Worker
+/// persistence and cold verification are outside the UI-thread allocation sample.
+#[test]
+#[ignore = "preserved fork request allocation acceptance; run optimized and process-isolated"]
+fn unchanged_archive_preserved_fork_request_allocation_is_bounded() {
+    smelt_perf::alloc::enable();
+    let mut samples = Vec::new();
+    for checkpoints in [0, 32, 128] {
+        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
+        let address = app.app.conversation.transcript().store_address().unwrap();
+        let root = address.sessions_root.clone();
+        let source_id = address.session_id.clone();
+        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+            &root,
+            &address.lineage_id,
+            &source_id,
+        )
+        .unwrap();
+        let original = reader.snapshot().unwrap();
+        let history = reader
+            .history_range(0, original.head.history_len.get())
+            .unwrap();
+        let records = reader
+            .transcript_range(0, original.head.transcript_record_count.get())
+            .unwrap();
+        let pending = hot_path_user("preserved fork pending suffix");
+        app.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+        app.session_append_history(pending.clone());
+        app.save_session_and_flush();
+        assert!(app.session_is_read_only());
+        assert!(app.session_document_has_unflushed_work());
+        assert_eq!(reader.snapshot().unwrap(), original);
+
+        let (sample, _) = capture_hot_path_sample("preserved_fork_request", checkpoints, || {
+            assert!(app.run_lua("smelt.session.fork()"));
+        });
+        app.wait_for_session_lifecycle();
+        let fork_id = app.session_snapshot().id.clone();
+        assert_ne!(fork_id, source_id);
+        assert!(!app.session_is_read_only());
+        assert!(!app.session_document_has_unflushed_work());
+        let fork = smelt_store::LineageSessionReader::open_existing(&root, &fork_id).unwrap();
+        let saved = fork.snapshot().unwrap();
+        assert_eq!(
+            saved.identity.parent_id.as_deref(),
+            Some(source_id.as_str())
+        );
+        assert_eq!(
+            saved.metadata.checkpoint_events_json,
+            original.metadata.checkpoint_events_json
+        );
+        assert_eq!(
+            saved.metadata.checkpoint_json,
+            original.metadata.checkpoint_json
+        );
+        assert_eq!(
+            saved.metadata.first_user_message,
+            original.metadata.first_user_message
+        );
+        assert_eq!(
+            saved.head.history_len.get(),
+            original.head.history_len.get() + 1
+        );
+        assert_eq!(
+            fork.history_range(0, original.head.history_len.get())
+                .unwrap(),
+            history
+        );
+        assert_eq!(
+            fork.history_range(
+                original.head.history_len.get(),
+                saved.head.history_len.get()
+            )
+            .unwrap(),
+            vec![pending]
+        );
+        assert_eq!(
+            fork.transcript_range(0, saved.head.transcript_record_count.get())
+                .unwrap(),
+            records
+        );
+        assert_eq!(reader.snapshot().unwrap(), original);
+        eprintln!(
+            "PRESERVED_FORK_UI checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}",
+            sample.thread_bytes_allocated, sample.process_bytes_allocated,
+        );
+        samples.push((checkpoints, sample.thread_bytes_allocated));
+    }
+    let baseline = samples[0].1;
+    for (checkpoints, allocated) in samples {
+        assert!(allocated <= baseline + 256 * 1024,
+            "{checkpoints} retained checkpoints inflate the preserved fork UI request to {allocated} allocated bytes, baseline {baseline}");
+    }
+}
+
+/// Measures actual Lua title changes through canonical settlement with an unchanged
+/// archive. Cold fixture construction and historical verification stay outside the sample.
+#[test]
+#[ignore = "compact owner acceptance; run optimized and process-isolated"]
+fn unchanged_archive_title_save_hot_work_is_bounded() {
+    let mut samples = Vec::new();
+    for checkpoints in [0, 32, 128] {
+        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
+        let address = app
+            .app
+            .conversation
+            .transcript()
+            .store_address()
+            .expect("archive fixture address");
+        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+            &address.sessions_root,
+            &address.lineage_id,
+            &address.session_id,
+        )
+        .expect("open title hot-work fixture reader");
+        let original = reader.snapshot().expect("original archived state");
+        let mut receipt = None;
+        let (sample, perf) = capture_hot_path_sample("archive_title_hot_work", checkpoints, || {
+            assert!(app.run_lua("smelt.session.title.set('bounded archive title')"));
+            receipt = Some(save_bench_fixture(&mut app, "archive title hot work"));
+        });
+        let receipt = receipt.expect("durable title receipt");
+        wait_for_bench_catalog(&app, "archive title hot work", &receipt);
+        assert_eq!(receipt.session_id, original.identity.id);
+        assert!(receipt.current.revision > original.head.revision);
+        assert_eq!(receipt.current.history_len, original.head.history_len);
+        assert_eq!(
+            receipt.current.transcript_record_count,
+            original.head.transcript_record_count
+        );
+        let saved = reader.snapshot().expect("saved archived state");
+        assert_eq!(saved.head, receipt.current);
+        assert_eq!(
+            saved.metadata.title.as_deref(),
+            Some("bounded archive title")
+        );
+        assert_eq!(
+            saved.metadata.checkpoint_events_json,
+            original.metadata.checkpoint_events_json
+        );
+        let preparation = perf
+            .allocs
+            .iter()
+            .find(|row| row.label == "session:prepare_save_batch")
+            .expect("actual title-save preparation must be instrumented");
+        assert!(preparation.count > 0);
+        eprintln!(
+            "ARCHIVE_TITLE_HOT_WORK checkpoints={checkpoints} archive_bytes={archive_bytes} preparation_samples={} preparation_bytes_max={} preparation_bytes_total={} ui_alloc_bytes={} process_alloc_bytes={}",
+            preparation.count, preparation.bytes_max, preparation.bytes_total,
+            sample.thread_bytes_allocated, sample.process_bytes_allocated,
+        );
+        samples.push((
+            checkpoints,
+            preparation.bytes_max,
+            sample.process_bytes_allocated,
+        ));
+    }
+    let (_, baseline_preparation, baseline_process) = samples[0];
+    for (checkpoints, preparation, process) in samples {
+        assert!(
+            preparation <= baseline_preparation + 256 * 1024,
+            "{checkpoints} unchanged checkpoints inflate title preparation to {preparation} bytes, zero-archive baseline {baseline_preparation}",
+        );
+        assert!(
+            process <= baseline_process + 1024 * 1024,
+            "{checkpoints} unchanged checkpoints inflate title persistence to {process} process allocation bytes, zero-archive baseline {baseline_process}",
+        );
+    }
+}
+
+/// Exercises real title changes with fixed history, checkpoint archive and
+/// provider context. Retaining titles must not retain another archive per save.
+#[test]
+#[ignore = "storage scaling acceptance; run optimized and process-isolated"]
+fn unchanged_archive_repeated_title_save_storage_growth() {
+    const SAVES: u64 = 20;
+    // Allows command receipts, index paths and small unique metadata, but not
+    // another compressed archive on every revision.
+    const MAX_PHYSICAL_BYTES_PER_SAVE: u64 = 64 * 1024;
+    let mut samples = Vec::new();
+    for checkpoints in [0, 32, 128] {
+        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
+        let address = app
+            .app
+            .conversation
+            .transcript()
+            .store_address()
+            .expect("archive fixture store address");
+        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+            &address.sessions_root,
+            &address.lineage_id,
+            &address.session_id,
+        )
+        .expect("open archive fixture reader");
+        let before = reader.storage_stats().expect("initial storage accounting");
+        let initial = reader.snapshot().expect("initial archived snapshot");
+        let mut head = initial.head;
+        for save in 0..SAVES {
+            let title = format!("archive growth title {save:02}");
+            assert!(app.run_lua(&format!("smelt.session.title.set({title:?})")));
+            let receipt = save_bench_fixture(&mut app, "archive growth title");
+            wait_for_bench_catalog(&app, "archive growth title", &receipt);
+            assert_eq!(receipt.session_id, initial.identity.id);
+            assert!(receipt.current.revision > head.revision);
+            assert_eq!(receipt.current.history_len, head.history_len);
+            assert_eq!(
+                receipt.current.transcript_record_count,
+                head.transcript_record_count
+            );
+            let snapshot = reader.snapshot().expect("saved archived snapshot");
+            assert_eq!(snapshot.head, receipt.current);
+            assert_eq!(snapshot.metadata.title.as_deref(), Some(title.as_str()));
+            assert_eq!(
+                snapshot.metadata.checkpoint_events_json, initial.metadata.checkpoint_events_json,
+                "title saves must retain the exact checkpoint archive"
+            );
+            head = receipt.current;
+        }
+        let after = reader.storage_stats().expect("final storage accounting");
+        let physical_growth = after.object_stored_bytes - before.object_stored_bytes;
+        eprintln!(
+            "ARCHIVE_STORAGE_GROWTH checkpoints={checkpoints} archive_bytes={archive_bytes} saves={SAVES} revisions={} object_rows_added={} logical_bytes_added={} physical_bytes_added={physical_growth} physical_bytes_per_save={} database_bytes={} wal_bytes={}",
+            head.revision.get() - initial.head.revision.get(),
+            after.object_rows - before.object_rows,
+            after.object_raw_bytes - before.object_raw_bytes,
+            physical_growth / SAVES,
+            after.database_bytes,
+            after.wal_bytes,
+        );
+        samples.push((checkpoints, physical_growth));
+    }
+    for (checkpoints, physical_growth) in samples {
+        assert!(
+            physical_growth <= SAVES * MAX_PHYSICAL_BYTES_PER_SAVE,
+            "{checkpoints} unchanged checkpoints repeated across title saves: \
+             {physical_growth} new physical object bytes, budget {}",
+            SAVES * MAX_PHYSICAL_BYTES_PER_SAVE
+        );
+    }
+}
+
+/// A retained initial paste must not be stored again when only the title changes.
+#[test]
+#[ignore = "storage scaling acceptance; run optimized and process-isolated"]
+fn large_initial_message_repeated_title_save_storage_growth() {
+    const SAVES: u64 = 10;
+    const MAX_PHYSICAL_BYTES_PER_SAVE: u64 = 64 * 1024;
+    let mut samples = Vec::new();
+    for message_bytes in [128, 256 * 1024, 1024 * 1024] {
+        let mut random = 42_u64;
+        let alphabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut message = String::with_capacity(message_bytes);
+        for index in 0..message_bytes {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            message.push(if index % 80 == 79 {
+                '\n'
+            } else {
+                alphabet[random as usize % alphabet.len()] as char
+            });
+        }
+        let mut app = TestApp::builder().build();
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
+            message.clone(),
+        )));
+        app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(SourceEvent::Tick(0));
+        assert_eq!(
+            app.app.conversation.session().first_user_message.as_deref(),
+            Some(message.as_str()),
+            "terminal paste submission must retain the complete initial message"
+        );
+        app.app.discard_turn(crate::app::TurnEnd::Complete);
+        app.wait_for_turn_persistence();
+        let receipt = save_bench_fixture(&mut app, "initial message growth");
+        wait_for_bench_catalog(&app, "initial message growth", &receipt);
+        let address = app
+            .app
+            .conversation
+            .transcript()
+            .store_address()
+            .expect("initial message fixture store address");
+        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+            &address.sessions_root,
+            &address.lineage_id,
+            &address.session_id,
+        )
+        .expect("open initial message fixture reader");
+        let initial = reader.snapshot().expect("initial message snapshot");
+        assert_eq!(
+            initial.metadata.first_user_message.as_deref(),
+            Some(message.as_str())
+        );
+        let before = reader.storage_stats().expect("initial storage accounting");
+        let mut head = initial.head;
+        let mut process_alloc_bytes = 0;
+        let mut ui_alloc_bytes = 0;
+        for save in 0..SAVES {
+            let title = format!("initial message title {save:02}");
+            let mut saved_receipt = None;
+            let (sample, _) = capture_hot_path_sample("initial_message_title", 1, || {
+                assert!(app.run_lua(&format!("smelt.session.title.set({title:?})")));
+                saved_receipt = Some(save_bench_fixture(&mut app, "initial message title"));
+            });
+            process_alloc_bytes += sample.process_bytes_allocated;
+            ui_alloc_bytes += sample.thread_bytes_allocated;
+            let receipt = saved_receipt.expect("title save receipt");
+            wait_for_bench_catalog(&app, "initial message title", &receipt);
+            assert_eq!(receipt.session_id, initial.identity.id);
+            assert!(receipt.current.revision > head.revision);
+            assert_eq!(receipt.current.history_len, initial.head.history_len);
+            assert_eq!(
+                receipt.current.transcript_record_count,
+                initial.head.transcript_record_count
+            );
+            let snapshot = reader.snapshot().expect("saved initial message snapshot");
+            assert_eq!(snapshot.head, receipt.current);
+            assert_eq!(snapshot.metadata.title.as_deref(), Some(title.as_str()));
+            assert_eq!(
+                snapshot.metadata.first_user_message.as_deref(),
+                Some(message.as_str())
+            );
+            let (_, metadata) = snapshot
+                .side_tables
+                .metadata_snapshots
+                .last()
+                .expect("title metadata snapshot");
+            assert_eq!(metadata["title"].as_str(), Some(title.as_str()));
+            assert_eq!(
+                metadata["first_user_message"].as_str(),
+                Some(message.as_str())
+            );
+            head = receipt.current;
+        }
+        let after = reader.storage_stats().expect("final storage accounting");
+        let physical_growth = after.object_stored_bytes - before.object_stored_bytes;
+        eprintln!(
+            "INITIAL_MESSAGE_STORAGE_GROWTH message_bytes={message_bytes} saves={SAVES} revisions={} object_rows_added={} logical_bytes_added={} physical_bytes_added={physical_growth} physical_bytes_per_save={} ui_alloc_bytes={ui_alloc_bytes} process_alloc_bytes={process_alloc_bytes} database_bytes={} wal_bytes={}",
+            head.revision.get() - initial.head.revision.get(),
+            after.object_rows - before.object_rows,
+            after.object_raw_bytes - before.object_raw_bytes,
+            physical_growth / SAVES,
+            after.database_bytes,
+            after.wal_bytes,
+        );
+        samples.push((message_bytes, physical_growth));
+    }
+    for (message_bytes, physical_growth) in samples {
+        assert!(
+            physical_growth <= SAVES * MAX_PHYSICAL_BYTES_PER_SAVE,
+            "{message_bytes} initial message bytes repeated across title saves: \
+             {physical_growth} new physical object bytes, budget {}",
+            SAVES * MAX_PHYSICAL_BYTES_PER_SAVE
+        );
+    }
+}
+
+/// Exercises real Enter/continuation/queued-handoff dispatch with a bounded
+/// model context and an increasing archive of compaction summaries.
+#[test]
+#[ignore = "timed large-session investigation; run optimized and single-threaded"]
+fn large_session_turn_start_benchmark() {
+    for checkpoint_count in [0, 16, 64, 128] {
+        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoint_count);
+        let history_len = app.app.session_history_len();
+        for operation in ["submit_enter", "continue_enter", "queued_handoff"] {
+            match operation {
+                "submit_enter" => app.type_text("benchmark next request"),
+                "continue_enter" => {
+                    app.app.discard_turn(crate::app::TurnEnd::Complete);
+                    app.wait_for_turn_persistence();
+                }
+                "queued_handoff" => {
+                    app.type_text("benchmark queued request");
+                    app.press(KeyCode::Enter);
+                    assert_eq!(app.state().queued_inputs.len(), 1);
+                }
+                _ => unreachable!(),
+            }
+            app.clear_actions();
+            let mut ui_return_ms = 0.0;
+            let (sample, snapshot) = capture_hot_path_sample(operation, history_len, || {
+                let started = std::time::Instant::now();
+                if operation == "queued_handoff" {
+                    let turn_id = app.app.conversation.active().expect("active turn").turn_id;
+                    app.feed_one(SourceEvent::Engine {
+                        event: Box::new(protocol::EngineEvent::TurnComplete {
+                            turn_id,
+                            history: None,
+                            meta: None,
+                        }),
+                    });
+                } else {
+                    app.press(KeyCode::Enter);
+                }
+                ui_return_ms = started.elapsed().as_secs_f64() * 1000.0;
+                app.wait_for_turn_persistence();
+                app.feed_one(SourceEvent::Tick(0));
+            });
+            let dispatched = app
+                .actions()
+                .iter()
+                .filter(|action| {
+                    matches!(action, Action::EngineSend(command)
+                        if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_)))
+                })
+                .count();
+            assert_eq!(dispatched, 1, "{operation} must dispatch exactly one turn");
+            eprintln!(
+                "LARGE_SESSION_TURN_START operation={operation} checkpoints={checkpoint_count} archive_bytes={archive_bytes} ui_return_ms={ui_return_ms:.3} durable_dispatch_ms={:.3} ui_alloc_bytes={} process_alloc_bytes={}",
+                sample.ms, sample.thread_bytes_allocated, sample.process_bytes_allocated,
+            );
+            print_hot_path_perf(operation, &snapshot);
+            let (render, _) = capture_hot_path_sample("first_frame", history_len, || {
+                app.render_unsettled_silent();
+            });
+            eprintln!(
+                "LARGE_SESSION_TURN_FRAME operation={operation} checkpoints={checkpoint_count} ms={:.3} ui_alloc_bytes={}",
+                render.ms, render.thread_bytes_allocated,
+            );
+            app.app.flush_persist();
+        }
+        measure_archive_interaction_edges(&mut app, checkpoint_count, archive_bytes);
+    }
+}
+
+fn measure_archive_interaction_edges(app: &mut TestApp, checkpoints: usize, archive_bytes: usize) {
+    app.app.discard_turn(crate::app::TurnEnd::Complete);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    app.wait_for_turn_persistence_until(deadline);
+    save_bench_fixture(app, "archive interaction edges");
+    let history_len = app.app.session_history_len();
+    let release = app.app.conversation.pause_persistence();
+    for operation in [
+        "typing_32_busy_actor",
+        "cursor_32_busy_actor",
+        "paste_64k_busy_actor",
+        "title_busy_actor",
+        "idle_100_busy_actor",
+    ] {
+        let (sample, snapshot) =
+            capture_hot_path_sample(operation, history_len, || match operation {
+                "typing_32_busy_actor" => {
+                    for _ in 0..32 {
+                        app.press(KeyCode::Char('a'));
+                        app.render_unsettled_silent();
+                    }
+                }
+                "cursor_32_busy_actor" => {
+                    for _ in 0..32 {
+                        app.press(KeyCode::Left);
+                        app.render_unsettled_silent();
+                    }
+                }
+                "paste_64k_busy_actor" => {
+                    app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
+                        "paste m\n".repeat(8192),
+                    )));
+                    app.render_unsettled_silent();
+                }
+                "title_busy_actor" => {
+                    assert!(app.run_lua(r#"smelt.session.title.set("archive edge benchmark")"#));
+                    app.render_unsettled_silent();
+                }
+                "idle_100_busy_actor" => {
+                    for _ in 0..100 {
+                        app.render_unsettled_silent();
+                    }
+                }
+                _ => unreachable!(),
+            });
+        eprintln!("ARCHIVE_INTERACTION_EDGE operation={operation} checkpoints={checkpoints} archive_bytes={archive_bytes} ms={:.3} ui_alloc_bytes={}", sample.ms, sample.thread_bytes_allocated);
+        print_hot_path_perf(operation, &snapshot);
+    }
+    release.send(()).expect("resume edge fixture persistence");
+    assert!(app.run_lua(r#"smelt.prompt.set_text("")"#));
+    save_bench_fixture(app, "archive edge title");
+
+    let session_id = app.app.conversation.session().id.clone();
+    for operation in ["resume_request_frame", "fork_request_frame"] {
+        let ready_start = std::time::Instant::now();
+        let (request, snapshot) = capture_hot_path_sample(operation, history_len, || {
+            if operation == "resume_request_frame" {
+                assert!(app.run_lua(&format!("smelt.session.load({session_id:?})")));
+            } else {
+                assert!(app.run_lua(r#"smelt.cmd.run("fork")"#));
+            }
+            app.render_unsettled_silent();
+        });
+        app.wait_for_session_lifecycle();
+        app.render_to_frame();
+        eprintln!("ARCHIVE_INTERACTION_EDGE operation={operation} checkpoints={checkpoints} archive_bytes={archive_bytes} ms={:.3} ready_ms={:.3} ui_alloc_bytes={}", request.ms, ready_start.elapsed().as_secs_f64() * 1000.0, request.thread_bytes_allocated);
+        print_hot_path_perf(operation, &snapshot);
+        if operation == "resume_request_frame" {
+            assert_eq!(app.app.conversation.session().id, session_id);
+        } else {
+            assert_ne!(
+                app.app.conversation.session().id,
+                session_id,
+                "fork must switch branches"
+            );
+        }
+    }
+}
+
+/// Measures completion-to-visible-feedback for canonical turns, including a
+/// controlled slow persistence actor in a small session or an isolated fixture.
+#[test]
+#[ignore = "timed canonical completion investigation; run optimized and single-threaded"]
+fn canonical_turn_completion_benchmark() {
+    let fixture =
+        std::env::var_os("SMELT_TRANSCRIPT_HOT_PATH_FIXTURE").map(std::path::PathBuf::from);
+    let delays: &[u64] = if fixture.is_some() {
+        &[0]
+    } else {
+        &[0, 2000, 6000]
+    };
+    for &delay_ms in delays {
+        let mut app = fixture.as_deref().map_or_else(
+            || saved_hot_path_app("canonical-completion", 8, None),
+            copied_hot_path_fixture_app,
+        );
+        assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
+        app.app.handle_resize(100, 32);
+        app.type_text("completion investigation request");
+        app.press(KeyCode::Enter);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.wait_for_turn_persistence_until(deadline);
+        let active = app
+            .app
+            .conversation
+            .active()
+            .expect("canonical turn is active");
+        assert!(active.canonical);
+        let turn_id = active.turn_id;
+        while !matches!(
+            app.flush_persist(),
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "turn setup did not become durable"
+            );
+        }
+        let before = app.render_to_frame();
+        let spinner_frames: String = app
+            .lua_probe()
+            .lua
+            .load("return table.concat(smelt.spinner.SPINNER_FRAMES)")
+            .eval()
+            .unwrap();
+        assert!(app.working_state().animating);
+        assert!(
+            spinner_frames
+                .chars()
+                .any(|glyph| before.text().contains(glyph)),
+            "active prompt must show its spinner"
+        );
+
+        let release = (delay_ms > 0).then(|| {
+            let resume = app.app.conversation.pause_persistence();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                resume.send(()).expect("resume persistence actor");
+            })
+        });
+        let history_len = app.app.session_history_len();
+        let feedback_start = std::time::Instant::now();
+        let (completion, snapshot) =
+            capture_hot_path_sample("canonical_turn_complete", history_len, || {
+                app.feed_one(SourceEvent::engine(protocol::EngineEvent::TurnComplete {
+                    turn_id,
+                    history: None,
+                    meta: None,
+                }));
+            });
+        let (render, render_snapshot) =
+            capture_hot_path_sample("completion_first_render", history_len, || {
+                let after = app.render_to_frame();
+                if fixture.is_none() {
+                    assert!(
+                        !spinner_frames
+                            .chars()
+                            .any(|glyph| after.text().contains(glyph)),
+                        "completed prompt must remove its spinner"
+                    );
+                }
+            });
+        let feedback_ms = feedback_start.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            !app.working_state().animating,
+            "completed prompt must stop animating"
+        );
+        assert!(!app.agent_running());
+        let durable_start = std::time::Instant::now();
+        if let Some(release) = release {
+            release.join().expect("persistence release thread");
+        }
+        let deadline = durable_start + std::time::Duration::from_secs(60);
+        while !matches!(
+            app.flush_persist(),
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "completion did not become durable"
+            );
+        }
+        print_hot_path_perf(completion.operation, &snapshot);
+        print_hot_path_perf(render.operation, &render_snapshot);
+        print_hot_path_perf("completion_after_feedback", &smelt_perf::perf::snapshot());
+        eprintln!(
+            "CANONICAL_TURN_COMPLETION fixture={} history_len={history_len} actor_delay_ms={delay_ms} event_ms={:.3} first_render_ms={:.3} feedback_ms={feedback_ms:.3} remaining_durable_ms={:.3}",
+            fixture.is_some(), completion.ms, render.ms, durable_start.elapsed().as_secs_f64() * 1000.0,
         );
     }
 }

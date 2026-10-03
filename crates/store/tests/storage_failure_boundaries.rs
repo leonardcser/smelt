@@ -28,17 +28,17 @@ fn storage_subprocess_probe() {
             wait_for(&go);
             match smelt_store::OwnedLineageWriter::open_existing(&root, SESSION_ID) {
                 Ok(_writer) => {
-                    std::fs::write(required_path(PROBE_RESULT), "owned")
-                        .expect("write claim result");
+                    publish(&required_path(PROBE_RESULT), b"owned");
                     wait_for(&required_path(PROBE_RELEASE));
                 }
                 Err(smelt_store::StoreError::OwnershipConflict { .. }) => {
-                    std::fs::write(required_path(PROBE_RESULT), "conflict")
-                        .expect("write claim result");
+                    publish(&required_path(PROBE_RESULT), b"conflict");
                 }
                 Err(err) => {
-                    std::fs::write(required_path(PROBE_RESULT), format!("error:{err}"))
-                        .expect("write claim result");
+                    publish(
+                        &required_path(PROBE_RESULT),
+                        format!("error:{err}").as_bytes(),
+                    );
                 }
             }
         }
@@ -160,12 +160,12 @@ fn simultaneous_process_claims_have_one_lifetime_owner() {
     wait_for(&second_result);
 
     let mut results = [read(&first_result), read(&second_result)];
-    results.sort();
-    assert_eq!(results, ["conflict", "owned"]);
-
     touch(&release);
     assert_success(first.wait().expect("wait for first claim"));
     assert_success(second.wait().expect("wait for second claim"));
+
+    results.sort();
+    assert_eq!(results, ["conflict", "owned"]);
 }
 
 #[test]
@@ -386,8 +386,16 @@ fn wait_for(path: &Path) {
     }
 }
 
+fn publish(path: &Path, bytes: &[u8]) {
+    let staging = path.with_added_extension("staging");
+    std::fs::write(&staging, bytes)
+        .unwrap_or_else(|err| panic!("write {}: {err}", staging.display()));
+    std::fs::rename(&staging, path)
+        .unwrap_or_else(|err| panic!("publish {}: {err}", path.display()));
+}
+
 fn touch(path: &Path) {
-    std::fs::write(path, b"ready").unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
+    publish(path, b"ready");
 }
 
 fn read(path: &Path) -> String {

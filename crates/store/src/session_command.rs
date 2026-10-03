@@ -4,8 +4,9 @@ use std::io::Write;
 use crate::error::{Result, StoreError};
 use crate::meta::{self, SessionMetadata};
 use crate::session_commit::{
-    HistoryIndex, HistoryIndexBound, HistoryLen, NewTurn, SessionCommit, SessionCommitFailure,
-    SubmitTurn, TurnId, TurnKind, TurnState, TurnTransition,
+    HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix, NewTurn, SessionCommit,
+    SessionCommitFailure, StoreHead, SubmitTurn, TranscriptRecordSuffix, TurnId, TurnKind,
+    TurnState, TurnTransition,
 };
 
 const MAX_TERMINAL_REASON_BYTES: usize = 1024;
@@ -80,23 +81,33 @@ pub(crate) fn validate_new_turn(
 pub(crate) fn validate_turn_transition(
     command: &TurnTransition,
 ) -> std::result::Result<(), SessionCommitFailure> {
-    validate_turn_id(command.turn_id)?;
-    validate_coordinate(command.at_ms, "turn transition timestamp")?;
-    if command.state == TurnState::Ready {
+    validate_turn_transition_fields(
+        command.turn_id,
+        command.state,
+        command.at_ms,
+        command.terminal_reason.as_deref(),
+    )
+}
+
+pub(crate) fn validate_turn_transition_fields(
+    turn_id: TurnId,
+    state: TurnState,
+    at_ms: u64,
+    terminal_reason: Option<&str>,
+) -> std::result::Result<(), SessionCommitFailure> {
+    validate_turn_id(turn_id)?;
+    validate_coordinate(at_ms, "turn transition timestamp")?;
+    if state == TurnState::Ready {
         return Err(SessionCommitFailure::InvalidTurn {
             message: "a transition cannot target ready".into(),
         });
     }
-    if command.state == TurnState::Running && command.terminal_reason.is_some() {
+    if state == TurnState::Running && terminal_reason.is_some() {
         return Err(SessionCommitFailure::InvalidTurn {
             message: "a running transition cannot have a terminal reason".into(),
         });
     }
-    if command
-        .terminal_reason
-        .as_ref()
-        .is_some_and(|reason| reason.len() > MAX_TERMINAL_REASON_BYTES)
-    {
+    if terminal_reason.is_some_and(|reason| reason.len() > MAX_TERMINAL_REASON_BYTES) {
         return Err(SessionCommitFailure::InvalidTurn {
             message: format!("terminal reason exceeds {MAX_TERMINAL_REASON_BYTES} UTF-8 bytes"),
         });
@@ -106,6 +117,7 @@ pub(crate) fn validate_turn_transition(
 
 pub(crate) fn commit_failure_from_store_error(error: StoreError) -> SessionCommitFailure {
     match error {
+        StoreError::JournalRecovery { failure } => *failure,
         StoreError::OwnershipLost | StoreError::OwnershipConflict { .. } => {
             SessionCommitFailure::OwnershipLost
         }
@@ -195,49 +207,63 @@ fn prepare_session_commit(
     meta::validate_session_checkpoint(&command.metadata, command.history.final_len.get())
         .map_err(commit_failure_from_store_error)?;
 
-    let start =
-        command
-            .history
-            .start
-            .as_usize()
-            .ok_or_else(|| SessionCommitFailure::Integrity {
-                message: format!(
-                    "history index {} does not fit usize",
-                    command.history.start.get()
-                ),
-            })?;
+    validate_history_suffix(command.expected, &command.history)?;
+    let side_tables = prepare_side_tables(command)?;
+    validate_transcript_suffix(
+        command.expected,
+        command.history.final_len,
+        command.transcript_records.as_ref(),
+    )?;
+    Ok(side_tables)
+}
+
+pub(crate) fn validate_history_suffix(
+    expected: StoreHead,
+    history: &HistorySuffix,
+) -> std::result::Result<(), SessionCommitFailure> {
+    let start = history
+        .start
+        .as_usize()
+        .ok_or_else(|| SessionCommitFailure::Integrity {
+            message: format!("history index {} does not fit usize", history.start.get()),
+        })?;
     let final_len =
-        command
-            .history
+        history
             .final_len
             .as_usize()
             .ok_or_else(|| SessionCommitFailure::Integrity {
                 message: format!(
                     "history length {} does not fit usize",
-                    command.history.final_len.get()
+                    history.final_len.get()
                 ),
             })?;
-    if command.history.start.get() > command.expected.history_len.get() {
+    if history.start.get() > expected.history_len.get() {
         return Err(SessionCommitFailure::InvalidHistorySuffixStart {
-            start: command.history.start,
-            current_len: command.expected.history_len,
+            start: history.start,
+            current_len: expected.history_len,
         });
     }
-    if start.checked_add(command.history.items.len()) != Some(final_len) {
+    if start.checked_add(history.items.len()) != Some(final_len) {
         return Err(SessionCommitFailure::InvalidHistorySuffix {
-            start: command.history.start,
-            final_len: command.history.final_len,
-            item_count: u64::try_from(command.history.items.len()).unwrap_or(u64::MAX),
+            start: history.start,
+            final_len: history.final_len,
+            item_count: u64::try_from(history.items.len()).unwrap_or(u64::MAX),
         });
     }
+    Ok(())
+}
 
-    let side_tables = prepare_side_tables(command)?;
-    if let Some(suffix) = &command.transcript_records {
+pub(crate) fn validate_transcript_suffix(
+    expected: StoreHead,
+    history_len: HistoryLen,
+    suffix: Option<&TranscriptRecordSuffix>,
+) -> std::result::Result<(), SessionCommitFailure> {
+    if let Some(suffix) = suffix {
         validate_coordinate(suffix.start.get(), "record start")?;
-        if suffix.start.get() > command.expected.transcript_record_count.get() {
+        if suffix.start.get() > expected.transcript_record_count.get() {
             return Err(SessionCommitFailure::InvalidTranscriptRecordSuffix {
                 start: suffix.start,
-                current_len: command.expected.transcript_record_count,
+                current_len: expected.transcript_record_count,
             });
         }
         let final_len = suffix
@@ -256,11 +282,11 @@ fn prepare_session_commit(
             validate_coordinate(record.block_idx, "record block index")?;
             if let Some(history_idx) = record.history_idx {
                 validate_coordinate(history_idx, "record history index")?;
-                if history_idx >= command.history.final_len.get() {
+                if history_idx >= history_len.get() {
                     return Err(SessionCommitFailure::Integrity {
                         message: format!(
                             "transcript record history link {history_idx} is outside final history length {}",
-                            command.history.final_len.get()
+                            history_len.get()
                         ),
                     });
                 }
@@ -281,7 +307,7 @@ fn prepare_session_commit(
             }
         }
     }
-    Ok(side_tables)
+    Ok(())
 }
 
 fn prepare_side_tables(
@@ -380,7 +406,10 @@ fn validate_metadata_coordinates(
     Ok(())
 }
 
-fn validate_coordinate(value: u64, field: &str) -> std::result::Result<(), SessionCommitFailure> {
+pub(crate) fn validate_coordinate(
+    value: u64,
+    field: &str,
+) -> std::result::Result<(), SessionCommitFailure> {
     i64::try_from(value).map_err(|_| SessionCommitFailure::Integrity {
         message: format!("{field} exceeds SQLite integer range"),
     })?;
@@ -600,37 +629,35 @@ impl CanonicalEncoder {
     }
 }
 
-fn write_canonical_json(value: &serde_json::Value, out: &mut Vec<u8>) -> Result<()> {
+pub(crate) fn write_canonical_json(value: &serde_json::Value, out: &mut impl Write) -> Result<()> {
     match value {
-        serde_json::Value::Null => out.extend_from_slice(b"null"),
-        serde_json::Value::Bool(value) => {
-            out.extend_from_slice(if *value { b"true" } else { b"false" })
-        }
+        serde_json::Value::Null => out.write_all(b"null")?,
+        serde_json::Value::Bool(value) => out.write_all(if *value { b"true" } else { b"false" })?,
         serde_json::Value::Number(value) => write!(out, "{value}")?,
         serde_json::Value::String(value) => serde_json::to_writer(out, value)?,
         serde_json::Value::Array(values) => {
-            out.push(b'[');
+            out.write_all(b"[")?;
             for (index, value) in values.iter().enumerate() {
                 if index != 0 {
-                    out.push(b',');
+                    out.write_all(b",")?;
                 }
                 write_canonical_json(value, out)?;
             }
-            out.push(b']');
+            out.write_all(b"]")?;
         }
         serde_json::Value::Object(values) => {
-            out.push(b'{');
+            out.write_all(b"{")?;
             let mut entries = values.iter().collect::<Vec<_>>();
             entries.sort_unstable_by_key(|(key, _)| *key);
             for (index, (key, value)) in entries.into_iter().enumerate() {
                 if index != 0 {
-                    out.push(b',');
+                    out.write_all(b",")?;
                 }
                 serde_json::to_writer(&mut *out, key)?;
-                out.push(b':');
+                out.write_all(b":")?;
                 write_canonical_json(value, out)?;
             }
-            out.push(b'}');
+            out.write_all(b"}")?;
         }
     }
     Ok(())

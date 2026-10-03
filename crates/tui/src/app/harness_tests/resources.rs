@@ -824,6 +824,8 @@ fn restored_static_credentials_recover_without_model_reselection() {
     environment_guard.set_var(KEY_ENV, "restored-secret");
     app.type_text("dispatch after credential restore");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
     environment_guard.remove_var(KEY_ENV);
 
     assert!(app.state().agent_running);
@@ -922,6 +924,8 @@ fn skill_backed_commands_submit_skill_body_and_focus() {
     app.install_skill_loader_for_harness(loader);
     app.type_text("/reflect focus area");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
     let payload = app
         .actions()
         .iter()
@@ -997,6 +1001,8 @@ async fn custom_command_shell_output_is_marked_as_smelt_context() {
         }
     }
 
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
     let payload = app
         .actions()
         .iter()

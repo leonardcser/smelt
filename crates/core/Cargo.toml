@@ -15,7 +15,7 @@ smelt-ansi = { workspace = true }
 smelt-lua-doc-derive = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "process", "net"] }
 tokio-util = { workspace = true, features = ["rt"] }
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process"] }

@@ -177,6 +177,8 @@ fn fast_slash_command_enables_the_next_turn_payload() {
     app.press(KeyCode::Enter);
     app.type_text("verify fast request");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
 
     let fast_mode = app
         .actions()
@@ -288,6 +290,8 @@ fn unknown_slash_prompt_submits_as_user_message() {
 
     app.type_text("/not-a-command please answer normally");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
 
     assert!(app.agent_running());
     assert!(
@@ -325,6 +329,8 @@ fn enter_renders_user_message_and_dispatches_only_after_durable_turn() {
         app.render_to_frame().text().contains("durable echo"),
         "submitted text should be visible in the transcript after Enter"
     );
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
     let payload = app.actions().iter().find_map(|action| match action {
         Action::EngineSend(cmd) => match cmd.as_ref() {
             protocol::UiCommand::StartTurn(payload) => Some(payload),
@@ -385,6 +391,7 @@ fn queued_turn_preserves_work_elapsed() {
         history: None,
         meta: None,
     }));
+    app.wait_for_turn_persistence();
     let after = app.working_probe().elapsed().expect("queued turn elapsed");
 
     let saved_elapsed_ms = app
@@ -395,7 +402,10 @@ fn queued_turn_preserves_work_elapsed() {
         .map(|(_, meta)| meta.elapsed_ms)
         .expect("completed turn meta");
 
-    assert!(app.agent_running(), "queued turn should start immediately");
+    assert!(
+        app.agent_running(),
+        "queued turn should start after its receipt"
+    );
     assert_eq!(app.queued_message_count(), 0);
     assert_eq!(app.state().prompt_text, "");
     assert!(
@@ -461,6 +471,8 @@ fn queued_timestamp_survives_waiting_and_promotion() {
                 app.press(KeyCode::Enter);
             }
         }
+        app.wait_for_turn_persistence();
+        app.feed_one(SourceEvent::Tick(0));
         let input = app
             .actions()
             .iter()
@@ -512,6 +524,8 @@ fn command_timestamp_survives_queueing_and_coroutine_yields() {
             app.feed_one(SourceEvent::Tick(60_000));
             assert!(app.finish_turn());
         }
+        app.wait_for_turn_persistence();
+        app.feed_one(SourceEvent::Tick(0));
         let input = app
             .actions()
             .iter()
@@ -1540,6 +1554,31 @@ fn prompt_window_wraps_parser_output() {
     )));
     app.render_silent();
     app.assert_ui_invariants();
+}
+
+#[test]
+fn large_wrapped_paste_preserves_cursor_projection() {
+    for (input, last_grapheme_bytes) in [
+        ("x".repeat(65_535), 1),
+        ("x".repeat(65_536), 1),
+        ("x".repeat(65_537), 1),
+        ("paste me".repeat(8192), 1),
+        ("界".repeat(32_768), 3),
+    ] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.set_terminal_size(100, 32);
+        app.render_silent();
+        let len = input.len();
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(input)));
+        app.render_silent();
+        assert_eq!(app.prompt_cpos(), len);
+        app.press(KeyCode::Left);
+        app.render_silent();
+        assert_eq!(app.prompt_cpos(), len - last_grapheme_bytes);
+        app.press(KeyCode::Right);
+        app.render_silent();
+        assert_eq!(app.prompt_cpos(), len);
+    }
 }
 
 #[test]

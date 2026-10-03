@@ -637,8 +637,10 @@ smelt.provider.register("local", {{
         }
         assert!(
             Instant::now() < deadline,
-            "message recovery failed ({recovery:?}, vim={vim}, requests: {}, rewind_sent={rewind_sent}, resubmitted={resubmitted}, output_started={}, turn_ended={}): {}",
+            "message recovery failed ({recovery:?}, vim={vim}, requests: {}, rewind_sent={rewind_sent}, resubmitted={resubmitted}, last_has_edited={}, last_has_queued={}, output_started={}, turn_ended={}): {}",
             bodies.len(),
+            bodies.last().is_some_and(|body| body["messages"].to_string().contains("first request edited")),
+            bodies.last().is_some_and(|body| body["messages"].to_string().contains("queued follow-up")),
             home.path().join("output-started").exists(),
             home.path().join("turn-ended").exists(),
             String::from_utf8_lossy(&captured[captured.len().saturating_sub(5000)..])
@@ -1198,16 +1200,15 @@ fn inspect_startup_explicitly_reconciles_the_session_catalog() {
         .env("XDG_DATA_HOME", root.path().join("data"))
         .env("TERM", "xterm-256color")
         .env("NO_COLOR", "1");
+    let reader = smelt_store::CatalogReader::open_existing(&catalog_path)
+        .expect("open inspector catalog")
+        .expect("inspector catalog exists");
     let (mut master, mut process) = spawn_in_pty(command);
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut captured = Vec::new();
     loop {
         drain_pty(&mut master, &mut captured);
-        let metadata = smelt_store::CatalogReader::open_existing(&catalog_path)
-            .expect("open inspector catalog")
-            .expect("inspector catalog exists")
-            .metadata()
-            .expect("read inspector catalog metadata");
+        let metadata = reader.metadata().expect("read inspector catalog metadata");
         if metadata.completed_scan_id != scan_id {
             assert_eq!(metadata.completed_scan_id, scan_id + 1);
             assert_eq!(metadata.next_scan_id, scan_id + 2);

@@ -93,6 +93,15 @@ impl InputQueues {
         true
     }
 
+    pub(crate) fn try_push_replacement(&mut self, queued: QueuedInput) -> bool {
+        if self.len() >= MAX_QUEUED_MESSAGES {
+            return false;
+        }
+        self.demote_requests_to_turn_front();
+        self.turn.push_front(queued);
+        true
+    }
+
     pub(crate) fn try_push_request(&mut self, queued: QueuedInput) -> bool {
         if self.len() >= MAX_QUEUED_MESSAGES || !queued.can_queue_for_request() {
             return false;
@@ -388,5 +397,41 @@ impl QueuedInput {
             ids: Vec::new(),
             image_indices: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_precedes_both_queue_stages_without_reordering_followups() {
+        let mut queues = InputQueues::default();
+        for text in ["steering one", "steering two"] {
+            assert!(queues.try_push_request(QueuedInput::request(text, Content::text(text), 0)));
+        }
+        assert!(queues.try_push_turn(QueuedInput::command("followup", 0)));
+        assert!(queues.try_push_replacement(QueuedInput::command("replacement", 0)));
+        assert_eq!(queues.request_len(), 0);
+        for expected in ["/replacement", "steering one", "steering two", "/followup"] {
+            let (stage, queued) = queues.pop_next_for_turn_with_stage().unwrap();
+            assert_eq!(stage, QueueStage::Turn);
+            assert_eq!(queued.display(), expected);
+        }
+        assert!(queues.is_empty());
+    }
+
+    #[test]
+    fn full_queue_rejects_replacement_without_demoting_or_reordering() {
+        let mut queues = InputQueues::default();
+        assert!(queues.try_push_request(QueuedInput::command("steering", 0)));
+        for index in 1..MAX_QUEUED_MESSAGES {
+            assert!(queues.try_push_turn(QueuedInput::command(format!("followup-{index}"), 0)));
+        }
+        let before = queues.display_texts();
+        let stages = queues.display_kinds();
+        assert!(!queues.try_push_replacement(QueuedInput::command("replacement", 0)));
+        assert_eq!(queues.display_texts(), before);
+        assert_eq!(queues.display_kinds(), stages);
     }
 }

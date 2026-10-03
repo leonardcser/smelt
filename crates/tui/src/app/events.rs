@@ -276,6 +276,13 @@ impl TuiApp {
                                         .replay
                                         .as_ref()
                                         .map(crate::input::PromptReplay::image_placement);
+                                    let replay = submission.replay.take().unwrap_or_else(|| {
+                                        crate::input::PromptReplay {
+                                            source: submission.display.clone(),
+                                            ids: Vec::new(),
+                                            image_indices: Vec::new(),
+                                        }
+                                    });
                                     match self.begin_agent_turn_with_placement(
                                         &submission.display,
                                         submission.content,
@@ -290,9 +297,16 @@ impl TuiApp {
                                             true
                                         }
                                         None if self.turn_submission_is_pending() => {
+                                            let recovery = self.prompt.prepare_submission_recovery(
+                                                crate::input::prompt_ctx_ref(&self.ui),
+                                                edit.as_ref().expect("submit edit"),
+                                                replay,
+                                                self.core.config.settings.redact_secrets,
+                                            );
                                             self.commit_prompt_submission(
                                                 edit.take().expect("submit edit"),
                                             );
+                                            self.preserve_pending_prompt_submission(recovery);
                                             true
                                         }
                                         None => false,
@@ -2242,6 +2256,8 @@ mod tests {
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
         app.app.start_next_queued_input_if_idle();
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.actions().iter().any(|action| matches!(
             action,
@@ -2489,6 +2505,8 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
@@ -2523,6 +2541,7 @@ mod tests {
                 retry_at_ms: None,
             },
         ));
+        app.wait_for_turn_persistence();
         assert_eq!(
             app.app.prompt_work_state(),
             crate::app::PromptWorkState::Paused
@@ -2542,9 +2561,12 @@ mod tests {
                 if payload.input.provider_content().image_count() == 1)
         )));
 
+        app.wait_for_turn_persistence();
         assert!(app.finish_turn());
-        let _ = app.app.flush_persist();
+        app.wait_for_turn_persistence();
         app.app.start_next_queued_input_if_idle();
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
@@ -2674,6 +2696,8 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.agent_running());
         assert!(app.state().queued_inputs.is_empty());
@@ -2696,6 +2720,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("baseline");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
         assert!(!app.app.conversation.canonical_operations_are_pending());
@@ -2733,6 +2758,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("baseline");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
 
@@ -2870,7 +2896,7 @@ mod tests {
                     if matches!(command.as_ref(), protocol::UiCommand::Steer { .. } | protocol::UiCommand::Cancel)
             )));
             release.send(()).unwrap();
-            app.app.flush_persist();
+            app.wait_for_turn_persistence();
             assert!(app.agent_running());
             assert!(app.state().queued_inputs.is_empty());
         }
@@ -2982,7 +3008,7 @@ mod tests {
             app.press_mod(KeyCode::Enter, modifiers);
             assert_eq!(queue_stages(&app), vec!["turn"]);
             release.send(()).unwrap();
-            app.app.flush_persist();
+            app.wait_for_turn_persistence();
             assert!(app.agent_running(), "command stayed paused: {busy}");
             assert!(app.state().queued_inputs.is_empty());
         }
@@ -2993,6 +3019,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("baseline");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
         let baseline_turn_id = app
@@ -3046,6 +3073,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("baseline");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
 
@@ -3083,6 +3111,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("first turn");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         assert!(app.agent_running());
         let _ = app.app.flush_persist();
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
@@ -3128,6 +3157,7 @@ mod tests {
             "queued request timeout made the session read-only: {}",
             app.app.conversation.read_only_reason()
         );
+        app.wait_for_turn_persistence();
         assert!(app.agent_running(), "queued request did not start");
         assert!(app.state().queued_inputs.is_empty());
         assert!(app.session_snapshot().history.iter().any(|item| {
@@ -3236,6 +3266,8 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.actions().iter().any(|action| matches!(
             action,
@@ -3386,6 +3418,8 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.agent_running());
         assert_eq!(app.state().queued_inputs, vec!["run second".to_string()]);
@@ -3401,6 +3435,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("before");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         let first_turn_id = app.current_turn_id().expect("first turn starts");
         app.push_assistant_text("done");
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
@@ -3422,7 +3457,10 @@ mod tests {
             .count();
         app.clear_actions();
 
+        app.wait_for_turn_persistence();
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.agent_running());
         let history = app.app.conversation.transcript().history();

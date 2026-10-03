@@ -56,6 +56,9 @@ pub enum SessionStoreError {
     Corrupt {
         context: String,
     },
+    JournalRecovery {
+        failure: Box<smelt_store::SessionCommitFailure>,
+    },
     Sqlite {
         operation: &'static str,
         path: String,
@@ -80,6 +83,7 @@ impl SessionStoreError {
             Self::MissingObject { .. } => "missing_object",
             Self::ObjectTooLarge { .. } => "object_too_large",
             Self::Corrupt { .. } => "corrupt",
+            Self::JournalRecovery { .. } => "journal_recovery",
             Self::Sqlite { .. } => "sqlite",
         }
     }
@@ -136,6 +140,7 @@ impl fmt::Display for SessionStoreError {
                 "session attachment or object is too large: {size} bytes exceeds {max}"
             ),
             Self::Corrupt { context } => write!(f, "corrupt session: {context}"),
+            Self::JournalRecovery { failure } => write!(f, "session journal recovery failed: {failure:?}"),
             Self::Sqlite {
                 operation,
                 path,
@@ -211,6 +216,9 @@ pub fn store_error(
         smelt_store::StoreError::OwnershipLost => SessionStoreError::ReadOnlyOwnerConflict {
             owner: "writer ownership was lost".into(),
         },
+        smelt_store::StoreError::JournalRecovery { failure } => {
+            SessionStoreError::JournalRecovery { failure }
+        }
         smelt_store::StoreError::Cancelled => SessionStoreError::Corrupt {
             context: format!("{operation} {}: operation cancelled", path.display()),
         },
@@ -307,4 +315,35 @@ fn reader_for_export(id_or_prefix: &str) -> SessionStoreResult<smelt_store::Line
             error,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn journal_recovery_error_retains_structured_command_failure() {
+        let failure = smelt_store::SessionCommitFailure::Busy {
+            operation: "journal commit".into(),
+            attempts: 3,
+            waited_ms: 10,
+        };
+        let error = store_error(
+            "open writer",
+            Path::new("synthetic"),
+            smelt_store::StoreError::JournalRecovery {
+                failure: Box::new(failure.clone()),
+            },
+        );
+        assert_eq!(error.code(), "journal_recovery");
+        assert!(error
+            .to_string()
+            .starts_with("session journal recovery failed:"));
+        assert_eq!(
+            error,
+            SessionStoreError::JournalRecovery {
+                failure: Box::new(failure)
+            }
+        );
+    }
 }

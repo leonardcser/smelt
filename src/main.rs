@@ -568,7 +568,11 @@ fn write_backup_manifest(
 }
 
 fn resolve_session_target(reference: &str) -> Result<(String, PathBuf), String> {
-    let id = smelt_core::session::resolve_prefix(reference).map_err(|err| err.to_string())?;
+    // Canonical readers/writers check exact IDs. Derived catalog publication is
+    // not required to diagnose, back up or reclaim canonical storage.
+    let id = smelt_core::session_id::SessionId::parse(reference)
+        .or_else(|_| smelt_core::session::resolve_prefix(reference))
+        .map_err(|err| err.to_string())?;
     Ok((id.into_string(), smelt_core::session::sessions_dir()))
 }
 
@@ -896,10 +900,28 @@ fn run_session_command(args: SessionArgs) {
         }
         SessionCommand::Gc(args) => with_lineage_writer(&args.session, |writer| {
             const RECLAMATION_ROWS_PER_TRANSACTION: usize = 256;
+            let mut sharing_cursor = smelt_store::ObjectSharingCursor::default();
+            let mut objects_shared = 0usize;
+            let mut sharing_pages_saved = 0u64;
+            loop {
+                let step = writer
+                    .share_objects(&mut sharing_cursor)
+                    .map_err(|err| format!("failed to share lineage objects: {err}"))?;
+                objects_shared += step.objects_shared;
+                sharing_pages_saved += step.pages_saved;
+                if step.complete {
+                    break;
+                }
+                if step.objects_scanned == 0 {
+                    return Err("object sharing made no bounded progress".into());
+                }
+            }
             let mut branch_heads_cleared = 0usize;
             let mut canonical_rows_deleted = 0usize;
             let mut objects_deleted = 0usize;
-            let mut search_segments_deleted = 0usize;
+            let search_segments_deleted = writer
+                .prune_search_projection()
+                .map_err(|err| format!("failed to prune derived search data: {err}"))?;
             let mut transactions = 0usize;
             loop {
                 let step = writer
@@ -911,18 +933,18 @@ fn run_session_command(args: SessionArgs) {
                 canonical_rows_deleted =
                     canonical_rows_deleted.saturating_add(step.canonical_rows_deleted);
                 objects_deleted = objects_deleted.saturating_add(step.objects_deleted);
-                search_segments_deleted =
-                    search_segments_deleted.saturating_add(step.search_segments_deleted);
                 if step.complete {
                     break;
                 }
-                if step.work_rows() == 0 {
+                if !step.made_progress() {
                     return Err("lineage reclamation made no bounded progress".into());
                 }
             }
             let vacuum = writer
                 .vacuum()
                 .map_err(|err| format!("failed to vacuum reclaimed lineage pages: {err}"))?;
+            println!("shared_objects: {objects_shared}");
+            println!("sharing_pages_saved: {sharing_pages_saved}");
             println!("cleared_branch_heads: {branch_heads_cleared}");
             println!("deleted_canonical_rows: {canonical_rows_deleted}");
             println!("deleted_objects: {objects_deleted}");
@@ -930,6 +952,7 @@ fn run_session_command(args: SessionArgs) {
             println!("free_pages_before: {}", vacuum.free_pages_before);
             println!("free_pages_after: {}", vacuum.free_pages_after);
             println!("pages_reclaimed: {}", vacuum.pages_reclaimed);
+            println!("wal_truncated: {}", vacuum.wal_truncated);
             println!("transactions: {transactions}");
             Ok(())
         }),

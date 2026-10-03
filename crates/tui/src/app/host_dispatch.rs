@@ -784,6 +784,7 @@ mod tests {
                 history: None,
                 meta: None,
             });
+            app.wait_for_turn_persistence();
             let commands = app.drain_engine_sends();
             if cancel {
                 assert!(!app.agent_running());
@@ -905,6 +906,7 @@ mod tests {
                         history: None,
                         meta: None,
                     });
+                    app.wait_for_turn_persistence();
                     assert!(app
                         .drain_engine_sends()
                         .iter()

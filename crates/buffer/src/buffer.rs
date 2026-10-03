@@ -926,6 +926,12 @@ impl Buffer {
         &self.source
     }
 
+    /// Mutation counter for editable source and paired attachment ids.
+    /// Rendering and decoration changes do not advance this counter.
+    pub fn source_tick(&self) -> u64 {
+        self.source_tick
+    }
+
     /// Mutable access to source + attachment ids as a single
     /// invariant-preserving wrapper. Use this instead of raw `&mut String`
     /// for any mutation that might add/remove attachment markers - the
@@ -2170,6 +2176,40 @@ mod tests {
             ]
         );
         assert_eq!(buf.get_line(0), Some("y@20"));
+    }
+
+    #[test]
+    fn source_tick_tracks_text_and_attachments_but_not_rendering() {
+        let mut buf = make_buf().attach(StubParser::new());
+        let empty_tick = buf.source_tick();
+        buf.set_source("abc".into());
+        let text_tick = buf.source_tick();
+        assert_ne!(text_tick, empty_tick);
+        buf.set_source("abc".into());
+        assert_eq!(buf.source_tick(), text_tick);
+        assert!(buf.ensure_rendered_at(10));
+        assert!(buf.ensure_rendered_at(20));
+        let ns = buf.create_namespace("decoration");
+        buf.set_extmark(
+            ns,
+            0,
+            0,
+            ExtmarkOpts::highlight(1, SpanStyle::new().bold(), SpanMeta::default()),
+        );
+        assert_eq!(buf.source_tick(), text_tick);
+        buf.text_mut().insert_marker(1, 7);
+        let attachment_tick = buf.source_tick();
+        assert_ne!(attachment_tick, text_tick);
+        assert_eq!(buf.attachment_ids, vec![7]);
+        buf.text_mut()
+            .replace_range(1..1 + ATTACHMENT_MARKER.len_utf8(), "");
+        assert_ne!(buf.source_tick(), attachment_tick);
+        assert!(buf.attachment_ids.is_empty());
+        assert_eq!(buf.source(), "abc");
+        let edit_tick = buf.source_tick();
+        let (mut source, _) = buf.edit_refs();
+        source.insert_str(0, "界");
+        assert_ne!(buf.source_tick(), edit_tick);
     }
 
     #[test]

@@ -1422,9 +1422,19 @@ impl TuiApp {
         queued: QueuedInput,
         target: QueueStage,
     ) -> bool {
-        let accepted = match target {
-            QueueStage::Turn => self.prompt.try_queue_turn(queued),
-            QueueStage::Request => self.queue_input_for_request(queued),
+        let replacing_cancelled_turn = self.conversation.canonical_operations_are_pending()
+            && self
+                .conversation
+                .turn_pause()
+                .is_some_and(|pause| pause.kind == Some(protocol::EngineAskErrorKind::Cancelled));
+        let accepted = if replacing_cancelled_turn {
+            // The replacement must precede preserved follow-ups while its receipt is pending.
+            self.prompt.try_queue_replacement(queued)
+        } else {
+            match target {
+                QueueStage::Turn => self.prompt.try_queue_turn(queued),
+                QueueStage::Request => self.queue_input_for_request(queued),
+            }
         };
         if accepted {
             self.clear_cancelled_pause();
@@ -1776,10 +1786,19 @@ impl TuiApp {
             return false;
         };
         let was_animating = self.working.is_animating();
+        if !was_animating
+            && self.working.last_outcome() == Some(smelt_core::working::TurnOutcome::Done)
+        {
+            self.working
+                .continue_from_last(smelt_core::working::TurnPhase::Working);
+        }
         if let Err(queued) = self.start_queued_input(queued) {
             self.prompt.queue_front(stage, queued);
         }
-        if was_animating && !self.conversation.is_active() {
+        if self.working.is_animating()
+            && !self.conversation.is_active()
+            && !self.turn_submission_is_pending()
+        {
             self.working.finish(smelt_core::working::TurnOutcome::Done);
         }
         true
@@ -2817,6 +2836,7 @@ impl TuiApp {
 
     pub(crate) fn drain_persist_reports(&mut self) {
         let Some(report) = self.conversation.drain_persistence_report() else {
+            self.drive_canonical_operations();
             return;
         };
         if let Some(Err(cause)) = report.startup {
@@ -2897,15 +2917,6 @@ impl TuiApp {
                 match event {
                     crate::app::conversation::CanonicalOperationEvent::Submit(outcome) => {
                         self.handle_canonical_submit_outcome(outcome);
-                    }
-                    crate::app::conversation::CanonicalOperationEvent::TransitionDurable(
-                        acknowledgement,
-                    ) => {
-                        if acknowledgement.receipt.state.is_terminal() {
-                            self.conversation
-                                .mark_terminal(acknowledgement.receipt.turn_id.get());
-                            self.start_next_queued_input_if_idle();
-                        }
                     }
                     crate::app::conversation::CanonicalOperationEvent::Failed {
                         command_id,

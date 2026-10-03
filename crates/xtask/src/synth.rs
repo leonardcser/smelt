@@ -72,7 +72,7 @@ fn generate(turns: usize, words: usize, title: Option<String>) -> Result<(), Box
     let stamp = session.id.clone();
     session.title =
         Some(title.unwrap_or_else(|| format!("synth fixture · {turns} turns × {words} words")));
-    session.first_user_message = Some("synth turn 1 - describe topic 1".to_string());
+    session.first_user_message = Some("synth turn 1 - describe topic 1".into());
     session.slug = Some("synth".into());
     session.model = Some("synth/local".into());
 

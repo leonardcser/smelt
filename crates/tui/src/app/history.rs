@@ -147,7 +147,7 @@ fn live_session_for_test_with_address(
             display_context_tokens: None,
             history_len: Some(history_len),
             checkpoint,
-            checkpoint_events: Vec::new(),
+            checkpoint_events: Default::default(),
             text_bytes: None,
         },
         history_len,
@@ -197,13 +197,13 @@ fn checkpoint_transcript_markers(
     session
         .checkpoint_events
         .iter()
-        .map(|event| (event.completed_at_history_len, event.summary.as_str()))
+        .map(|event| (event.completed_at_history_len, event.summary.as_ref()))
         .chain(
             session
                 .checkpoint
                 .iter()
                 .filter(|_| session.checkpoint_events.is_empty())
-                .map(|checkpoint| (checkpoint.first_live_index, checkpoint.summary.as_str())),
+                .map(|checkpoint| (checkpoint.first_live_index, checkpoint.summary.as_ref())),
         )
 }
 
@@ -1459,10 +1459,6 @@ impl TuiApp {
         }
 
         let preserve_unsaved = source_is_read_only && self.session_document_has_unflushed_work();
-        if !preserve_unsaved {
-            self.conversation.refresh_live_session_header();
-        }
-
         let acknowledged_head = self.conversation.acknowledged_head();
         let prepared_fork = if preserve_unsaved {
             let mut forked = self
@@ -1491,7 +1487,7 @@ impl TuiApp {
             None
         };
         let original_id = self.conversation.session().id.clone();
-        let (forked, preserved_intent) = prepared_fork.map_or_else(
+        let (forked, preserved_projection) = prepared_fork.map_or_else(
             || {
                 (
                     self.conversation
@@ -1506,7 +1502,7 @@ impl TuiApp {
             source_id: original_id,
             forked,
             expected_source: preserve_unsaved.then_some(acknowledged_head),
-            preserved_intent,
+            preserved_projection,
         });
     }
 
@@ -2102,21 +2098,6 @@ impl TuiApp {
         )
     }
 
-    pub(crate) fn commit_canonical_turn_transition(
-        &mut self,
-        turn_id: smelt_store::TurnId,
-        state: smelt_store::TurnState,
-        terminal_reason: Option<String>,
-    ) -> Result<crate::persist::TurnTransitionOutcome, crate::persist::PersistenceCause> {
-        let metadata = self.runtime_session_metadata();
-        self.conversation.commit_canonical_turn_transition(
-            metadata,
-            turn_id,
-            state,
-            terminal_reason,
-        )
-    }
-
     fn runtime_session_metadata(&self) -> crate::app::session_document::RuntimeSessionMetadata {
         crate::app::session_document::RuntimeSessionMetadata {
             updated_at_ms: session::now_ms(),
@@ -2569,6 +2550,7 @@ impl TuiApp {
         block: Option<Block>,
         first_user_message: Option<String>,
     ) -> protocol::ModelHistorySource {
+        let _perf = smelt_perf::perf::begin("agent:stage_request_history");
         let history = self.model_history_source();
         self.commit_request_history_item_to_document(item, block, first_user_message);
         self.sync_session_snapshot();
@@ -2775,10 +2757,26 @@ mod checkpoint_tests {
             })
             .collect();
 
+        let target_id = session.id.clone();
         app.load_session(session);
+        let close_deadline_notice = app.app.overlays.notification().is_some_and(|notice| {
+            notice.summary.contains("deadline") || notice.summary.contains("before session close")
+        });
+        assert_eq!(
+            app.app.conversation.session().id,
+            target_id,
+            "large fixture was not adopted, close_deadline_notice={close_deadline_notice}"
+        );
         app.app.restore_screen();
         app.app.save_session();
-        app.app.flush_persist();
+        let outcome = app.app.flush_persist();
+        assert!(
+            matches!(
+                outcome,
+                crate::persist::PersistenceFlushOutcome::Durable { .. }
+            ),
+            "large fixture initial publication did not become durable: {outcome:?}"
+        );
         app
     }
 
@@ -2801,8 +2799,17 @@ mod checkpoint_tests {
 
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         session.history = vec![user("loaded user"), assistant("loaded assistant")];
+        let target_id = session.id.clone();
 
         app.load_session(session);
+        let close_deadline_notice = app.app.overlays.notification().is_some_and(|notice| {
+            notice.summary.contains("deadline") || notice.summary.contains("before session close")
+        });
+        assert_eq!(
+            app.app.conversation.session().id,
+            target_id,
+            "session was not adopted, close_deadline_notice={close_deadline_notice}"
+        );
 
         let history = app.app.conversation.transcript().history();
         let visible_text = history
@@ -2818,6 +2825,52 @@ mod checkpoint_tests {
     }
 
     #[test]
+    fn full_session_load_close_deadline_preserves_source_and_allows_retry() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.ensure_writer_ready();
+        let source_id = app.app.conversation.session().id.clone();
+        let clock_before = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+        let release = app.app.conversation.pause_persistence();
+        app.app.show_user_message("stale visible block", Vec::new());
+        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        session.history = vec![user("loaded user"), assistant("loaded assistant")];
+        let target_id = session.id.clone();
+
+        app.app.load_session(session.clone());
+        let retained_id = app.app.conversation.session().id.clone();
+        let retained_text = app.render_to_frame().text();
+        let close_deadline_notice = app.app.overlays.notification().is_some_and(|notice| {
+            notice.summary.contains("deadline") || notice.summary.contains("before session close")
+        });
+        let unflushed = app.app.session_document_has_unflushed_work();
+        release.send(()).unwrap();
+        assert_eq!(retained_id, source_id);
+        assert!(retained_text.contains("stale visible block"));
+        assert!(!retained_text.contains("loaded user"));
+        assert!(close_deadline_notice);
+        assert!(unflushed);
+        assert_eq!(
+            engine::clock::unix_time_ms(app.app.core.clock.as_ref()),
+            clock_before
+        );
+        assert!(matches!(
+            app.flush_persist(),
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ));
+
+        app.load_session(session);
+        assert_eq!(app.app.conversation.session().id, target_id);
+        let loaded_text = app.render_to_frame().text();
+        assert!(loaded_text.contains("loaded user"));
+        assert!(loaded_text.contains("loaded assistant"));
+        assert!(!loaded_text.contains("stale visible block"));
+        assert_eq!(
+            engine::clock::unix_time_ms(app.app.core.clock.as_ref()),
+            clock_before
+        );
+    }
+
+    #[test]
     fn full_session_load_replaces_same_length_stored_history() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut initial = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
@@ -2828,8 +2881,15 @@ mod checkpoint_tests {
         app.app.restore_screen();
         app.app.save_session_and_flush();
 
-        initial.history = vec![user("replacement user"), assistant("replacement assistant")];
-        app.load_session(initial);
+        let mut replacement = app
+            .app
+            .core
+            .sessions
+            .load_full_result(&id)
+            .expect("load verified replacement owner")
+            .expect("stored session exists");
+        replacement.history = vec![user("replacement user"), assistant("replacement assistant")];
+        app.load_session(replacement);
         app.app.restore_screen();
         app.app.save_session_and_flush();
 
@@ -3478,6 +3538,7 @@ mod checkpoint_tests {
         let submitted = user("fresh user")
             .with_sent_at_ms(engine::clock::unix_time_ms(app.app.core.clock.as_ref()));
         app.press(crossterm::event::KeyCode::Enter);
+        app.wait_for_turn_persistence();
 
         let turn_id = app.current_turn_id().expect("fresh turn is active");
         let submitted_history_idx = app.app.session_history_len() - 1;
@@ -3935,7 +3996,7 @@ mod checkpoint_tests {
         ]);
         app.app.conversation.set_checkpoint(Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "old summary".to_string(),
+            summary: "old summary".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: None,
@@ -4111,7 +4172,7 @@ mod checkpoint_tests {
         ]);
         app.app.conversation.set_checkpoint(Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "old summary".to_string(),
+            summary: "old summary".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: None,
@@ -4274,7 +4335,7 @@ mod checkpoint_tests {
         ];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "summary text".to_string(),
+            summary: "summary text".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: None,
@@ -4301,7 +4362,7 @@ mod checkpoint_tests {
         ];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "summary".to_string(),
+            summary: "summary".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: None,
@@ -4332,7 +4393,7 @@ mod checkpoint_tests {
         ];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "summary".to_string(),
+            summary: "summary".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: None,
@@ -4385,7 +4446,7 @@ mod checkpoint_tests {
         session.context_tokens = Some(500);
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "summary".to_string(),
+            summary: "summary".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: Some(500),
@@ -4412,7 +4473,7 @@ mod checkpoint_tests {
         ];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "s".to_string(),
+            summary: "s".into(),
             first_live_index: 4, // keep user("2") and assistant("2a")
             created_at_ms: 0,
             tokens_before: None,
@@ -4440,7 +4501,7 @@ mod checkpoint_tests {
         ];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "the summary".to_string(),
+            summary: "the summary".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: None,
@@ -4492,7 +4553,7 @@ mod checkpoint_tests {
         ];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "the summary".to_string(),
+            summary: "the summary".into(),
             first_live_index: 2,
             created_at_ms: 0,
             tokens_before: None,
@@ -4534,7 +4595,7 @@ mod checkpoint_tests {
         session.history = vec![user("a"), assistant("b")];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "s".to_string(),
+            summary: "s".into(),
             first_live_index: 1,
             created_at_ms: 0,
             tokens_before: None,
@@ -4974,7 +5035,7 @@ mod checkpoint_tests {
         session.context_tokens_history_len = Some(4);
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "summary".to_string(),
+            summary: "summary".into(),
             first_live_index: 2,
             created_at_ms: 7,
             tokens_before: Some(100),
@@ -5014,7 +5075,7 @@ mod checkpoint_tests {
         session.context_tokens_history_len = None;
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "summary".to_string(),
+            summary: "summary".into(),
             first_live_index: 2,
             created_at_ms: 7,
             tokens_before: Some(100),
@@ -5048,7 +5109,7 @@ mod checkpoint_tests {
         ];
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
-            summary: "summary".to_string(),
+            summary: "summary".into(),
             first_live_index: 2,
             created_at_ms: 7,
             tokens_before: Some(100),

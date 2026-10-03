@@ -923,7 +923,7 @@ mod tests {
         let mut session = smelt_core::session::Session::new(1, PathBuf::from(cwd));
         session.id = id.to_string();
         session.title = Some(title.to_string());
-        session.first_user_message = Some(format!("message for {title}"));
+        session.first_user_message = Some(format!("message for {title}").into());
         session.created_at_ms = updated_at_ms.saturating_sub(1);
         session.updated_at_ms = updated_at_ms;
         session

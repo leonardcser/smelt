@@ -92,6 +92,28 @@ pub(crate) fn validate_session_checkpoint(
     let events = events.as_array().ok_or_else(|| {
         StoreError::Integrity("checkpoint_events_json must be an array".to_owned())
     })?;
+    validate_checkpoint_events(events, history_len)
+}
+
+pub(crate) fn validate_checkpoint_events(
+    events: &[serde_json::Value],
+    history_len: u64,
+) -> Result<()> {
+    validate_checkpoint_event_rows(events.iter(), history_len, true)
+}
+
+pub(crate) fn validate_checkpoint_event_fields<'a>(
+    events: impl Iterator<Item = &'a serde_json::Value>,
+    history_len: u64,
+) -> Result<()> {
+    validate_checkpoint_event_rows(events, history_len, false)
+}
+
+fn validate_checkpoint_event_rows<'a>(
+    events: impl Iterator<Item = &'a serde_json::Value>,
+    history_len: u64,
+    inline_summary: bool,
+) -> Result<()> {
     let mut previous_completion = None;
     for event in events {
         if event.get("kind").is_some_and(|kind| !kind.is_string()) {
@@ -99,9 +121,10 @@ pub(crate) fn validate_session_checkpoint(
                 "checkpoint event kind must be a string".to_owned(),
             ));
         }
-        if !event
-            .get("summary")
-            .is_some_and(serde_json::Value::is_string)
+        if inline_summary
+            && !event
+                .get("summary")
+                .is_some_and(serde_json::Value::is_string)
         {
             return Err(StoreError::Integrity(
                 "checkpoint event summary must be a string".to_owned(),

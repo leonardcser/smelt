@@ -4,7 +4,7 @@ use smelt_core::history::History;
 use super::queue::{InputQueues, QueueStage, QueuedInput, QueuedRow};
 use super::{PlaceholderOpts, PlaceholderState, PromptHeightState, PromptResizeDrag};
 use crate::input::{Action, PromptCtx, PromptCtxRef, PromptState, SubmitEdit};
-use crate::smelt_edit::{Clipboard, VimMode, WinId, Window};
+use crate::smelt_edit::{BufId, Buffer, Clipboard, VimMode, WinId, Window};
 
 /// Owns prompt editing sidecars, history, queues, placeholders, and height state.
 ///
@@ -18,6 +18,29 @@ pub(crate) struct PromptRuntime {
     last_published_text: String,
     height: PromptHeightState,
     placeholders: PlaceholderState,
+}
+
+pub(super) struct PendingPromptRecovery {
+    replay: crate::input::PromptReplay,
+    from_paste: bool,
+    removed: Option<RemovedPromptRange>,
+}
+
+struct RemovedPromptRange {
+    start: usize,
+    source: String,
+    ids: Vec<smelt_buffer::attachment::AttachmentId>,
+    buffer_id: BufId,
+    source_tick: u64,
+}
+
+impl PendingPromptRecovery {
+    pub(super) fn record_applied_edit(&mut self, buf: &Buffer) {
+        if let Some(removed) = self.removed.as_mut() {
+            removed.buffer_id = buf.id();
+            removed.source_tick = buf.source_tick();
+        }
+    }
 }
 
 /// Queue state held outside the prompt runtime only while turn cancellation runs.
@@ -87,6 +110,63 @@ impl PromptRuntime {
         ids: Vec<smelt_buffer::attachment::AttachmentId>,
     ) {
         self.input.prepend_attached(ctx, prefix, ids);
+    }
+
+    pub(super) fn prepare_submission_recovery(
+        &self,
+        ctx: PromptCtxRef<'_>,
+        edit: &SubmitEdit,
+        replay: crate::input::PromptReplay,
+        redact_secrets: bool,
+    ) -> PendingPromptRecovery {
+        let removed = match edit {
+            SubmitEdit::Clear => None,
+            SubmitEdit::DeleteRange { range } => {
+                let start = smelt_buffer::text::snap(ctx.buf.source(), range.start);
+                let source = smelt_buffer::text::slice(ctx.buf.source(), range.clone());
+                let marker_start = smelt_buffer::text::slice(ctx.buf.source(), 0..start)
+                    .matches(crate::input::ATTACHMENT_MARKER)
+                    .count();
+                let marker_count = source.matches(crate::input::ATTACHMENT_MARKER).count();
+                Some(RemovedPromptRange {
+                    start,
+                    source: if redact_secrets {
+                        engine::redact::redact_with_markers(source)
+                    } else {
+                        source.to_owned()
+                    },
+                    ids: ctx.buf.attachment_ids[marker_start..marker_start + marker_count].to_vec(),
+                    buffer_id: ctx.buf.id(),
+                    source_tick: ctx.buf.source_tick(),
+                })
+            }
+        };
+        PendingPromptRecovery {
+            replay,
+            from_paste: self.input.from_paste,
+            removed,
+        }
+    }
+
+    pub(super) fn restore_failed_submission(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        recovery: PendingPromptRecovery,
+    ) {
+        let from_paste = self.input.from_paste || recovery.from_paste;
+        if let Some(removed) = recovery.removed.filter(|removed| {
+            removed.buffer_id == ctx.buf.id() && removed.source_tick == ctx.buf.source_tick()
+        }) {
+            self.input
+                .restore_removed_range(ctx, removed.start, removed.source, removed.ids);
+        } else {
+            let mut replay = recovery.replay;
+            if !ctx.buf.source().is_empty() {
+                replay.source.push('\n');
+            }
+            self.input.prepend_attached(ctx, replay.source, replay.ids);
+        }
+        self.input.from_paste = from_paste;
     }
 
     pub(crate) fn replace_text(&mut self, ctx: &mut PromptCtx<'_>, text: String) {
@@ -174,6 +254,14 @@ impl PromptRuntime {
 
     pub(crate) fn try_queue_turn(&mut self, queued: QueuedInput) -> bool {
         let queued = self.queues.try_push_turn(queued);
+        if queued {
+            self.bump_queue_revision();
+        }
+        queued
+    }
+
+    pub(crate) fn try_queue_replacement(&mut self, queued: QueuedInput) -> bool {
+        let queued = self.queues.try_push_replacement(queued);
         if queued {
             self.bump_queue_revision();
         }

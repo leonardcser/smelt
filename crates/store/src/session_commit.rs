@@ -199,6 +199,19 @@ impl StartupRecoveryReceipt {
     }
 }
 
+/// The exact immutable session result retained by interruption recovery.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct StartupRecoveryResult {
+    pub session: SessionCommitResult,
+    pub interrupted_turns: Vec<TurnId>,
+}
+
+impl StartupRecoveryResult {
+    pub const fn head(&self) -> StoreHead {
+        self.session.receipt.current
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StoredTurn {
     pub turn_id: TurnId,
@@ -262,6 +275,22 @@ pub struct SaveReceipt {
     pub lineage_id: Option<String>,
     #[serde(default)]
     pub history_text_bytes: u64,
+}
+
+/// A save receipt that owns its exact immutable result until its session is reclaimed.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SessionCommitResult {
+    pub receipt: SaveReceipt,
+    pub revision_id: String,
+}
+
+/// A fork's exact copied revision and the source head captured in its transaction.
+/// The destination's immutable initial-revision ownership protects this result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionForkResult {
+    pub source_session_id: String,
+    pub source_head: StoreHead,
+    pub session: SessionCommitResult,
 }
 
 impl SaveReceipt {

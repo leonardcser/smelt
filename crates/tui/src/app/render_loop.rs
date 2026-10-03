@@ -908,6 +908,20 @@ impl TuiApp {
         self.ensure_main_layout()
     }
 
+    /// Measure the same retained prompt projection and wrapping used for paint.
+    fn measure_prompt_input_rows(&mut self, width: u16) -> u16 {
+        let placeholder_is_empty = self
+            .prompt
+            .placeholder_text(crate::app::PROMPT_WIN)
+            .is_none_or(str::is_empty);
+        let ctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        let usable = ctx.win.config.gutters.content_width(width);
+        ctx.buf.ensure_rendered_at(usable);
+        ctx.win.wrap_cursor_padding = !ctx.buf.source().is_empty() || placeholder_is_empty;
+        ctx.win.ensure_layout(ctx.buf, usable);
+        ctx.win.layout().visual_count().clamp(1, u16::MAX as usize) as u16
+    }
+
     fn ensure_main_layout(&mut self) -> (layout::Rect, u16) {
         if smelt_core::host::host_access_active() {
             self.lua.shared().request_layout_refresh();
@@ -915,9 +929,7 @@ impl TuiApp {
         }
         let applying_deferred_layout = self.lua.shared().take_layout_refresh();
         let (term_w, term_h) = self.ui.terminal_size();
-        let width = term_w as usize;
-        let ghost = self.prompt.placeholder_text(crate::app::PROMPT_WIN);
-        let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width, ghost);
+        let wrapped_rows = self.measure_prompt_input_rows(term_w);
         // Auto-height keeps the transcript usable; a deliberate manual resize
         // can claim more room for prompt review without taking the full screen.
         let input_rows = self.prompt.resolve_height(wrapped_rows, term_h);
@@ -1449,6 +1461,95 @@ fn prompt_block_cursor(theme: &crate::smelt_edit::Theme) -> crate::smelt_edit::C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_large_prompt_height_reuses_projection_and_wrapping_without_allocating() {
+        use crate::app::test_harness::{SourceEvent, TestApp};
+
+        for input in ["x".repeat(65_537), "界".repeat(32_768)] {
+            let mut app = TestApp::builder().with_vim(false).build();
+            app.set_terminal_size(100, 32);
+            app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(input)));
+            app.render_silent();
+            let expected = app.app.measure_prompt_input_rows(100);
+            assert!(expected > 600);
+            let enabled = smelt_perf::alloc::enabled();
+            smelt_perf::alloc::set_enabled(true);
+            let before = smelt_perf::alloc::thread_snapshot();
+            for _ in 0..10 {
+                assert_eq!(app.app.measure_prompt_input_rows(100), expected);
+            }
+            let after = smelt_perf::alloc::thread_snapshot();
+            smelt_perf::alloc::set_enabled(enabled);
+            assert_eq!(after, before, "unchanged height measurement allocated");
+        }
+    }
+
+    #[test]
+    fn prompt_height_and_paint_share_cursor_padding_and_gutter_width() {
+        use crate::app::test_harness::{SourceEvent, TestApp};
+
+        let mut app = TestApp::builder().with_vim(false).build();
+        let width = 80;
+        let usable = app
+            .app
+            .ui
+            .win(crate::app::PROMPT_WIN)
+            .unwrap()
+            .config
+            .gutters
+            .content_width(width);
+        let text = "x".repeat(usable as usize);
+        app.app
+            .set_placeholder(crate::app::PROMPT_WIN, text.clone());
+        assert_eq!(app.app.measure_prompt_input_rows(width), 1);
+        assert!(
+            !app.app
+                .ui
+                .win(crate::app::PROMPT_WIN)
+                .unwrap()
+                .wrap_cursor_padding
+        );
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(text)));
+        assert_eq!(app.app.measure_prompt_input_rows(width), 2);
+        assert!(
+            app.app
+                .ui
+                .win(crate::app::PROMPT_WIN)
+                .unwrap()
+                .wrap_cursor_padding
+        );
+        app.press(crossterm::event::KeyCode::Backspace);
+        assert_eq!(app.app.measure_prompt_input_rows(width), 1);
+        app.app
+            .ui
+            .win_mut(crate::app::PROMPT_WIN)
+            .unwrap()
+            .config
+            .gutters
+            .pad_left += 2;
+        assert_eq!(app.app.measure_prompt_input_rows(width), 2);
+        assert_eq!(
+            app.app
+                .ui
+                .win(crate::app::PROMPT_WIN)
+                .unwrap()
+                .layout()
+                .visual_count(),
+            2
+        );
+    }
+
+    #[test]
+    fn prompt_height_saturates_instead_of_wrapping_at_terminal_row_limit() {
+        use crate::app::test_harness::{SourceEvent, TestApp};
+
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
+            "\n".repeat(u16::MAX as usize),
+        )));
+        assert_eq!(app.app.measure_prompt_input_rows(80), u16::MAX);
+    }
 
     #[test]
     fn continuation_requests_wait_for_frame_interval() {

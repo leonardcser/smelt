@@ -145,12 +145,6 @@ pub struct SearchProjectionStatus {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SearchReclamationStep {
-    pub(crate) segments_deleted: usize,
-    pub(crate) complete: bool,
-}
-
 pub struct LineageSearchProjector {
     requested: Arc<AtomicU64>,
     completed: Arc<AtomicU64>,
@@ -642,18 +636,35 @@ fn project_current_branch(
         if cancelled() {
             return Ok(());
         }
-        match search_segment_row(&search, &source.id) {
-            Ok(Some(row))
-                if search_segment_matches_source(&row, source)
-                    && validate_search_segment_structure(&search, &row).is_ok() =>
-            {
-                continue;
+        let validation = search_segment_row(&search, &source.id).and_then(|row| {
+            if let Some(row) = row {
+                if !search_segment_matches_source(&row, source) {
+                    return Err(StoreError::Integrity(
+                        "derived search segment does not match its source".into(),
+                    ));
+                }
+                validate_search_segment_structure(&search, &row)?;
             }
-            Ok(None) => {}
-            Ok(Some(_)) | Err(_) => {
+            Ok(())
+        });
+        match validation {
+            Ok(()) => {}
+            Err(error) if error.is_recoverable_derived_corruption() => {
+                drop(search);
                 reset_search_database(search_path)?;
                 search = open_search_writer(search_path, lineage)?;
+                break;
             }
+            Err(error) => return Err(error),
+        }
+    }
+    // Validate before building so a reset also rebuilds earlier source segments.
+    for source in &sources {
+        if cancelled() {
+            return Ok(());
+        }
+        if search_segment_row(&search, &source.id)?.is_some() {
+            continue;
         }
         let records = match search_source_records(&canonical, lineage, source, &cancelled) {
             Err(StoreError::Cancelled) => return Ok(()),
@@ -796,141 +807,133 @@ fn prune_stale_search_manifests(
     Ok(())
 }
 
-pub(crate) fn reclaim_one_obsolete_search_segment(
+pub(crate) fn prune_search_projection(
     canonical: &Connection,
     search_path: &Path,
     lineage: &LineageId,
-) -> Result<SearchReclamationStep> {
+) -> Result<usize> {
     reject_symlink(search_path)?;
     if !search_path.exists() {
-        return Ok(SearchReclamationStep {
-            complete: true,
-            ..SearchReclamationStep::default()
-        });
+        return Ok(0);
     }
-
+    let _read = canonical
+        .is_autocommit()
+        .then(|| rusqlite::Transaction::new_unchecked(canonical, TransactionBehavior::Deferred))
+        .transpose()?;
     let (reachable, live_roots) = reachable_search_state(canonical, lineage)?;
-    let result = (|| -> Result<SearchReclamationStep> {
+    let mut deleted = 0;
+    let result = (|| -> Result<()> {
         let mut search = open_search_writer(search_path, lineage)?;
         prune_stale_search_manifests(&mut search, &live_roots)?;
-        let target = {
-            let mut segments = search.prepare(
-                "SELECT segment_id, source_node_id, source_item_count, source_byte_count,
-                    min_block_idx, max_block_idx, doc_count, first_doc_id, last_doc_id
-             FROM search_segments
-             WHERE complete = 1
-             ORDER BY segment_id",
-            )?;
-            let rows = segments.query_map([], decode_search_segment_row)?;
-            let mut target = None;
-            for row in rows {
-                let row = row?;
-                validate_search_segment_structure(&search, &row)?;
-                if !reachable.contains(&row.source_node_id) {
-                    target = Some(row);
-                    break;
+        let last: i64 = search.query_row(
+            "SELECT COALESCE(MAX(segment_id), 0) FROM search_segments",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut cursor = 0;
+        loop {
+            let target = search
+                .query_row(
+                    "SELECT segment_id, source_node_id, source_item_count, source_byte_count,
+                        min_block_idx, max_block_idx, doc_count, first_doc_id, last_doc_id
+                 FROM search_segments
+                 WHERE segment_id > ?1 AND segment_id <= ?2 AND complete = 1
+                 ORDER BY segment_id LIMIT 1",
+                    (cursor, last),
+                    decode_search_segment_row,
+                )
+                .optional()?;
+            let Some(target) = target else { break };
+            cursor = sql_i64(target.segment_id, "search segment ID")?;
+            validate_search_segment_structure(&search, &target)?;
+            if reachable.contains(&target.source_node_id) {
+                continue;
+            }
+            let source = search_segment_source(&search, &target)?;
+            for leaf in &source.leaves {
+                let retained: bool = canonical.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM lineage_sequence_nodes
+                     WHERE lineage_id = ?1 AND node_id = ?2)",
+                    params![lineage.as_str(), leaf.node_id],
+                    |row| row.get(0),
+                )?;
+                if !retained {
+                    // Contentless FTS deletion needs the exact original text. Canonical
+                    // collection may already have reclaimed this obsolete source.
+                    return Err(StoreError::Integrity(
+                        "derived search deletion source has been reclaimed".into(),
+                    ));
                 }
             }
-            target
-        };
-        let Some(target) = target else {
-            return Ok(SearchReclamationStep {
-                complete: true,
-                ..SearchReclamationStep::default()
-            });
-        };
-        let source_records = match search_segment_source(&search, &target)
-            .and_then(|source| search_source_records(canonical, lineage, &source, &never_cancelled))
-        {
-            Ok(records) => records,
-            Err(_) => {
-                drop(search);
-                reset_search_database(search_path)?;
-                return Ok(SearchReclamationStep {
-                    complete: true,
-                    ..SearchReclamationStep::default()
-                });
-            }
-        };
+            let source_records =
+                search_source_records(canonical, lineage, &source, &never_cancelled)?;
 
-        let source_documents = search_document_inputs(&source_records)?;
-        let tx = search.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        {
-            let mut docs = tx.prepare(
-                "SELECT doc_id, first_record_ordinal, last_record_ordinal,
+            let source_documents = search_document_inputs(&source_records)?;
+            let tx = search.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            {
+                let mut docs = tx.prepare(
+                    "SELECT doc_id, first_record_ordinal, last_record_ordinal,
                         min_block_idx, max_block_idx
                  FROM search_docs
                  WHERE segment_id = ?1
                  ORDER BY doc_id",
-            )?;
-            let rows = docs
-                .query_map(
-                    [sql_i64(target.segment_id, "search segment ID")?],
-                    decode_search_doc,
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            if rows.len() != source_documents.len() {
-                return Err(StoreError::Integrity(
-                    "derived search document count does not match its source".into(),
-                ));
-            }
-            let mut delete_fts = tx.prepare(
-                "INSERT INTO search_fts(search_fts, rowid, text)
-                 VALUES ('delete', ?1, ?2)",
-            )?;
-            for (doc, source) in rows.into_iter().zip(source_documents) {
-                validate_search_doc(
-                    &doc,
-                    source.first_record_ordinal,
-                    source.last_record_ordinal,
-                    source.min_block_idx,
-                    source.max_block_idx,
-                    &target,
                 )?;
-                delete_fts.execute(params![
-                    sql_i64(doc.doc_id, "search document ID")?,
-                    source.text
-                ])?;
-            }
-        }
-        let deleted_segments = tx.execute(
-            "DELETE FROM search_segments WHERE segment_id = ?1",
-            [sql_i64(target.segment_id, "search segment ID")?],
-        )?;
-        if deleted_segments != 1 {
-            return Err(StoreError::Integrity(
-                "derived search reclamation did not delete its target segment".into(),
-            ));
-        }
-        tx.commit()?;
-        search.execute_batch("PRAGMA incremental_vacuum(256);")?;
-
-        let complete = {
-            let mut segments = search.prepare("SELECT source_node_id FROM search_segments")?;
-            let rows = segments.query_map([], |row| row.get::<_, String>(0))?;
-            let mut complete = true;
-            for source_id in rows {
-                if !reachable.contains(&source_id?) {
-                    complete = false;
-                    break;
+                let rows = docs
+                    .query_map(
+                        [sql_i64(target.segment_id, "search segment ID")?],
+                        decode_search_doc,
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                if rows.len() != source_documents.len() {
+                    return Err(StoreError::Integrity(
+                        "derived search document count does not match its source".into(),
+                    ));
+                }
+                let mut delete_fts = tx.prepare(
+                    "INSERT INTO search_fts(search_fts, rowid, text)
+                 VALUES ('delete', ?1, ?2)",
+                )?;
+                for (doc, source) in rows.into_iter().zip(source_documents) {
+                    validate_search_doc(
+                        &doc,
+                        source.first_record_ordinal,
+                        source.last_record_ordinal,
+                        source.min_block_idx,
+                        source.max_block_idx,
+                        &target,
+                    )?;
+                    delete_fts.execute(params![
+                        sql_i64(doc.doc_id, "search document ID")?,
+                        source.text
+                    ])?;
                 }
             }
-            complete
-        };
-        Ok(SearchReclamationStep {
-            segments_deleted: 1,
-            complete,
-        })
+            let deleted_segments = tx.execute(
+                "DELETE FROM search_segments WHERE segment_id = ?1",
+                [sql_i64(target.segment_id, "search segment ID")?],
+            )?;
+            if deleted_segments != 1 {
+                return Err(StoreError::Integrity(
+                    "derived search reclamation did not delete its target segment".into(),
+                ));
+            }
+            tx.commit()?;
+            deleted += deleted_segments;
+        }
+        if deleted > 0 {
+            let mut vacuum = search.prepare("PRAGMA incremental_vacuum(256)")?;
+            let mut rows = vacuum.query([])?;
+            while rows.next()?.is_some() {}
+        }
+        Ok(())
     })();
     match result {
-        Ok(step) => Ok(step),
-        Err(_) => {
+        Ok(()) => Ok(deleted),
+        Err(error) if error.is_recoverable_derived_corruption() => {
             reset_search_database(search_path)?;
-            Ok(SearchReclamationStep {
-                complete: true,
-                ..SearchReclamationStep::default()
-            })
+            Ok(deleted)
         }
+        Err(error) => Err(error),
     }
 }
 
@@ -1006,6 +1009,27 @@ fn validate_search_meta(conn: &Connection, lineage: &LineageId) -> Result<()> {
             expected: SEARCH_FORMAT_VERSION,
         });
     }
+    for table in [
+        "search_meta",
+        "search_segments",
+        "search_root_manifests",
+        "search_root_sources",
+        "search_source_leaves",
+        "search_docs",
+        "search_fts",
+        "search_short_postings",
+    ] {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !present {
+            return Err(StoreError::Integrity(format!(
+                "derived search table {table} is missing"
+            )));
+        }
+    }
     let row = conn
         .query_row(
             "SELECT format_version, lineage_id, segment_bytes, segment_leaves,
@@ -1039,19 +1063,6 @@ fn validate_search_meta(conn: &Connection, lineage: &LineageId) -> Result<()> {
     {
         return Err(StoreError::Integrity(
             "derived search metadata does not match this format".into(),
-        ));
-    }
-    let source_leaves_table: bool = conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM sqlite_schema
-             WHERE type = 'table' AND name = 'search_source_leaves'
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    if !source_leaves_table {
-        return Err(StoreError::Integrity(
-            "derived search source-leaf mapping is missing".into(),
         ));
     }
     Ok(())
@@ -1099,7 +1110,8 @@ fn open_search_writer(path: &Path, lineage: &LineageId) -> Result<Connection> {
                 Ok(conn)
             }) {
             Ok(conn) => return Ok(conn),
-            Err(_) => reset_search_database(path)?,
+            Err(error) if error.is_recoverable_derived_corruption() => reset_search_database(path)?,
+            Err(error) => return Err(error),
         }
     }
     let conn = Connection::open(path)?;

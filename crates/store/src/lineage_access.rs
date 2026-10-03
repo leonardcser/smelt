@@ -2,9 +2,10 @@ use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::catalog::{Catalog, CatalogAvailability, CatalogSession};
 use crate::compression::ObjectCompression;
@@ -48,16 +49,24 @@ pub struct LineageReclamation {
     pub branch_heads_cleared: usize,
     pub canonical_rows_deleted: usize,
     pub objects_deleted: usize,
-    pub search_segments_deleted: usize,
+    /// Seed rows, frontier nodes and sweep candidates examined in this step.
+    pub rows_examined: usize,
+    /// An exhausted bounded scan advanced the pass, without requiring a deletion.
+    pub phase_advanced: bool,
     pub complete: bool,
 }
 
 impl LineageReclamation {
     pub fn work_rows(self) -> usize {
-        self.branch_heads_cleared
-            .saturating_add(self.canonical_rows_deleted)
-            .saturating_add(self.objects_deleted)
-            .saturating_add(self.search_segments_deleted)
+        self.rows_examined.max(
+            self.branch_heads_cleared
+                .saturating_add(self.canonical_rows_deleted)
+                .saturating_add(self.objects_deleted),
+        )
+    }
+
+    pub fn made_progress(self) -> bool {
+        self.work_rows() > 0 || self.phase_advanced
     }
 }
 
@@ -66,6 +75,8 @@ pub struct LineageVacuum {
     pub free_pages_before: u64,
     pub free_pages_after: u64,
     pub pages_reclaimed: u64,
+    /// Active read snapshots can defer truncation without blocking maintenance.
+    pub wal_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -128,7 +139,7 @@ pub struct OwnedLineageWriter {
     lineage: LineageId,
     branch: BranchId,
     conn: Connection,
-    startup_recovery: Option<crate::session_commit::StartupRecoveryReceipt>,
+    startup_recovery: Option<crate::session_commit::StartupRecoveryResult>,
     connection_invalidated: bool,
     catalog: RefCell<Option<Catalog>>,
     // Writers share the database, but cleanup must wait for every writer to close.
@@ -149,13 +160,29 @@ impl std::fmt::Debug for OwnedLineageWriter {
     }
 }
 
+fn record_submit_turn_commit(history_rows: usize, transcript_record_rows: usize) {
+    smelt_perf::perf::record_value(
+        "persist:submit_turn:committed_at_us",
+        smelt_perf::perf::timestamp_us(),
+    );
+    smelt_perf::perf::record_value("persist:submit_turn:history_rows", history_rows as u64);
+    smelt_perf::perf::record_value(
+        "persist:submit_turn:transcript_record_rows",
+        transcript_record_rows as u64,
+    );
+    smelt_perf::perf::record_value(
+        "persist:submit_turn:index_rows",
+        transcript_record_rows as u64,
+    );
+}
+
 impl OwnedLineageWriter {
     pub fn open(root: impl AsRef<Path>, session_id: impl Into<String>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), session_id.into(), true)
+        Self::acquire(root.as_ref(), session_id.into(), true)?.finish_startup()
     }
 
     pub fn open_existing(root: impl AsRef<Path>, session_id: impl Into<String>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), session_id.into(), false)
+        Self::acquire(root.as_ref(), session_id.into(), false)?.finish_startup()
     }
 
     pub fn open_existing_in_lineage(
@@ -163,11 +190,19 @@ impl OwnedLineageWriter {
         lineage_id: impl Into<String>,
         session_id: impl Into<String>,
     ) -> Result<Self> {
-        let root = root.as_ref();
-        let branch = BranchId::new(session_id.into())?;
+        Self::acquire_existing_in_lineage(root.as_ref(), lineage_id.into(), session_id.into())?
+            .finish_startup()
+    }
+
+    pub(crate) fn acquire_existing_in_lineage(
+        root: &Path,
+        lineage_id: String,
+        session_id: String,
+    ) -> Result<Self> {
+        let branch = BranchId::new(session_id)?;
         validate_storage_root(root)?;
         let branch_lease = LineageLease::acquire_branch(root, &branch)?;
-        let lineage = LineageId::from_hex(lineage_id.into())?;
+        let lineage = LineageId::from_hex(lineage_id)?;
         let lease = LineageLease::acquire_shared(root, &lineage)?;
         let path = lineage_database_path(root, &lineage);
         reject_symlink(&path)?;
@@ -194,10 +229,18 @@ impl OwnedLineageWriter {
                 lineage.as_str()
             )));
         }
-        Self::finish_open(root, lineage, branch, conn, lease, branch_lease)
+        Ok(Self::from_acquired(
+            root,
+            lineage,
+            branch,
+            conn,
+            lease,
+            branch_lease,
+        ))
     }
 
-    fn open_inner(root: &Path, session_id: String, create: bool) -> Result<Self> {
+    /// Acquires storage and leases without exposing a ready public writer.
+    pub(crate) fn acquire(root: &Path, session_id: String, create: bool) -> Result<Self> {
         let branch = BranchId::new(session_id)?;
         validate_storage_root(root)?;
         let branch_lease = LineageLease::acquire_branch(root, &branch)?;
@@ -219,41 +262,51 @@ impl OwnedLineageWriter {
             lineage::create_lineage(&conn, &lineage, unix_timestamp_seconds()?)?;
         }
         crate::schema::initialize_lineage_schema(&mut conn)?;
-        Self::finish_open(root, lineage, branch, conn, lease, branch_lease)
+        Ok(Self::from_acquired(
+            root,
+            lineage,
+            branch,
+            conn,
+            lease,
+            branch_lease,
+        ))
     }
 
-    fn finish_open(
+    fn from_acquired(
         root: &Path,
         lineage: LineageId,
         branch: BranchId,
-        mut conn: Connection,
+        conn: Connection,
         lease: LineageLease,
         branch_lease: LineageLease,
-    ) -> Result<Self> {
-        let startup_recovery = if lineage::lineage_has_nonterminal_turns(&conn, &lineage, &branch)?
-        {
-            let _catalog_pending =
-                crate::catalog::mark_catalog_session_pending(root, branch.as_str())?;
-            lineage::recover_lineage_nonterminal_turns(
-                &mut conn,
-                &lineage,
-                &branch,
-                unix_timestamp_millis()?,
-            )?
-        } else {
-            None
-        };
-        Ok(Self {
+    ) -> Self {
+        Self {
             sessions_root: root.to_path_buf(),
             lineage,
             branch,
             conn,
-            startup_recovery,
+            startup_recovery: None,
             connection_invalidated: false,
             catalog: RefCell::new(None),
             lineage_lease: lease,
             branch_lease,
-        })
+        }
+    }
+
+    pub(crate) fn finish_startup(mut self) -> Result<Self> {
+        if lineage::lineage_has_nonterminal_turns(&self.conn, &self.lineage, &self.branch)? {
+            let _catalog_pending = crate::catalog::mark_catalog_session_pending(
+                &self.sessions_root,
+                self.branch.as_str(),
+            )?;
+            self.startup_recovery = lineage::recover_lineage_nonterminal_turns(
+                &mut self.conn,
+                &self.lineage,
+                &self.branch,
+                unix_timestamp_millis()?,
+            )?;
+        }
+        Ok(self)
     }
 
     pub fn lineage_id(&self) -> &str {
@@ -262,6 +315,10 @@ impl OwnedLineageWriter {
 
     pub fn session_id(&self) -> &str {
         self.branch.as_str()
+    }
+
+    pub fn sessions_root(&self) -> &Path {
+        &self.sessions_root
     }
 
     pub fn commit_session(
@@ -287,6 +344,81 @@ impl OwnedLineageWriter {
         Ok(receipt)
     }
 
+    /// Reads a matching legacy receipt without writing or promising a retained archive result.
+    pub fn recover_session_commit(
+        &self,
+        command: &SessionCommit,
+    ) -> std::result::Result<Option<SaveReceipt>, SessionCommitFailure> {
+        lineage::recover_lineage_session_commit(&self.conn, &self.lineage, &self.branch, command)
+    }
+
+    /// Reads the exact retained native result without publishing or advancing the branch.
+    pub fn recover_compact_session(
+        &self,
+        command: &crate::CompactSessionCommit,
+    ) -> std::result::Result<Option<crate::SessionCommitResult>, SessionCommitFailure> {
+        lineage::recover_compact_session(&self.conn, &self.lineage, &self.branch, command)
+    }
+
+    /// Saves atomically and retains the exact result for replay after rewind and reclamation.
+    /// A legacy receipt whose result has already been reclaimed cannot be upgraded.
+    pub fn commit_session_with_result(
+        &mut self,
+        command: &SessionCommit,
+    ) -> std::result::Result<crate::SessionCommitResult, SessionCommitFailure> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
+        let mut transaction =
+            crate::write_transaction::begin_write(&mut self.conn, "commit session with result")
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
+        let compression = ObjectCompression::default();
+        let (fingerprint, receipt) = lineage::apply_lineage_session_commit_with_fingerprint(
+            &mut transaction,
+            &self.lineage,
+            &self.branch,
+            command,
+            compression,
+        )?;
+        let result = lineage::retain_session_receipt_result(
+            &transaction,
+            &self.lineage,
+            &self.branch,
+            &fingerprint,
+            receipt,
+            compression,
+        )
+        .map_err(crate::session_command::commit_failure_from_store_error)?;
+        transaction.commit().map_err(|error| {
+            crate::session_command::commit_failure_from_store_error(error.into())
+        })?;
+        Ok(result)
+    }
+
+    /// Applies exact-base archive edits and atomically retains the exact result for replay.
+    pub fn commit_compact_session(
+        &mut self,
+        command: &crate::CompactSessionCommit,
+    ) -> std::result::Result<crate::SessionCommitResult, SessionCommitFailure> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
+        let mut transaction =
+            crate::write_transaction::begin_write(&mut self.conn, "commit compact session")
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
+        let result = lineage::apply_compact_session_commit(
+            &mut transaction,
+            &self.lineage,
+            &self.branch,
+            command,
+            ObjectCompression::default(),
+        )?;
+        transaction.commit().map_err(|error| {
+            crate::session_command::commit_failure_from_store_error(error.into())
+        })?;
+        Ok(result)
+    }
+
     pub fn submit_turn(
         &mut self,
         command: &crate::session_commit::SubmitTurn,
@@ -306,27 +438,13 @@ impl OwnedLineageWriter {
         );
         drop(transaction_duration);
         if result.is_ok() {
-            smelt_perf::perf::record_value(
-                "persist:submit_turn:committed_at_us",
-                smelt_perf::perf::timestamp_us(),
-            );
-            smelt_perf::perf::record_value(
-                "persist:submit_turn:history_rows",
-                command.session.history.items.len() as u64,
-            );
-            let transcript_record_rows = command
-                .session
-                .transcript_records
-                .as_ref()
-                .map_or(0, |suffix| suffix.records.len())
-                as u64;
-            smelt_perf::perf::record_value(
-                "persist:submit_turn:transcript_record_rows",
-                transcript_record_rows,
-            );
-            smelt_perf::perf::record_value(
-                "persist:submit_turn:index_rows",
-                transcript_record_rows,
+            record_submit_turn_commit(
+                command.session.history.items.len(),
+                command
+                    .session
+                    .transcript_records
+                    .as_ref()
+                    .map_or(0, |suffix| suffix.records.len()),
             );
         }
         result
@@ -367,12 +485,94 @@ impl OwnedLineageWriter {
         lineage::recover_lineage_turn_transition(&self.conn, &self.lineage, &self.branch, command)
     }
 
+    /// Submits a turn and atomically retains its exact compact session result.
+    pub fn submit_compact_turn(
+        &mut self,
+        command: &crate::CompactSubmitTurn,
+    ) -> std::result::Result<crate::CompactSubmitTurnResult, SessionCommitFailure> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
+        let transaction_duration =
+            smelt_perf::perf::begin_value_ms("persist:submit_turn:transaction_ms");
+        smelt_perf::perf::record_value("persist:submit_turn:transactions", 1);
+        let result = lineage::apply_compact_submit_turn(
+            &mut self.conn,
+            &self.lineage,
+            &self.branch,
+            command,
+            ObjectCompression::default(),
+        );
+        drop(transaction_duration);
+        if result.is_ok() {
+            record_submit_turn_commit(
+                command.session.history.items.len(),
+                command
+                    .session
+                    .transcript_records
+                    .as_ref()
+                    .map_or(0, |suffix| suffix.records.len()),
+            );
+        }
+        result
+    }
+
+    pub fn recover_compact_submit_turn(
+        &self,
+        command: &crate::CompactSubmitTurn,
+    ) -> std::result::Result<Option<crate::CompactSubmitTurnResult>, SessionCommitFailure> {
+        lineage::recover_compact_submit_turn(&self.conn, &self.lineage, &self.branch, command)
+    }
+
+    /// Transitions a turn and atomically retains its exact compact session result.
+    pub fn transition_compact_turn(
+        &mut self,
+        command: &crate::CompactTurnTransition,
+    ) -> std::result::Result<crate::CompactTurnTransitionResult, SessionCommitFailure> {
+        let _catalog_pending =
+            crate::catalog::mark_catalog_session_pending(&self.sessions_root, self.branch.as_str())
+                .map_err(crate::session_command::commit_failure_from_store_error)?;
+        lineage::apply_compact_turn_transition(
+            &mut self.conn,
+            &self.lineage,
+            &self.branch,
+            command,
+            ObjectCompression::default(),
+        )
+    }
+
+    pub fn recover_compact_turn_transition(
+        &self,
+        command: &crate::CompactTurnTransition,
+    ) -> std::result::Result<Option<crate::CompactTurnTransitionResult>, SessionCommitFailure> {
+        lineage::recover_compact_turn_transition(&self.conn, &self.lineage, &self.branch, command)
+    }
+
     pub fn store_head(&self) -> Result<StoreHead> {
         if branch_exists(&self.conn, &self.lineage, &self.branch)? {
-            Ok(lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?.head)
+            Ok(lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?.head)
         } else {
             Ok(StoreHead::default())
         }
+    }
+
+    /// Projects current catalog scalars while sharing the message represented by an
+    /// unchanged, verified publication. The result must still name the current revision.
+    pub fn catalog_session_for_result(
+        &self,
+        result: &crate::SessionCommitResult,
+        first_user_message: Option<Arc<str>>,
+    ) -> Result<CatalogSession> {
+        load_catalog_session(
+            &self.conn,
+            &self.lineage,
+            &self.branch,
+            &mut lineage::OperationStats::default(),
+            CatalogMessageSource::Published {
+                result,
+                first_user_message,
+            },
+        )
     }
 
     pub fn last_session_commit(&self) -> Result<Option<(String, SaveReceipt)>> {
@@ -381,11 +581,11 @@ impl OwnedLineageWriter {
 
     pub fn take_startup_recovery(
         &mut self,
-    ) -> Option<crate::session_commit::StartupRecoveryReceipt> {
+    ) -> Option<crate::session_commit::StartupRecoveryResult> {
         self.startup_recovery.take()
     }
 
-    pub fn startup_recovery(&self) -> Option<&crate::session_commit::StartupRecoveryReceipt> {
+    pub fn startup_recovery(&self) -> Option<&crate::session_commit::StartupRecoveryResult> {
         self.startup_recovery.as_ref()
     }
 
@@ -405,34 +605,13 @@ impl OwnedLineageWriter {
     }
 
     fn refresh_catalog_branch(&self, branch: &BranchId) -> Result<()> {
-        let snapshot = public_snapshot(
+        let session = load_catalog_session(
+            &self.conn,
             &self.lineage,
-            lineage::lineage_session_snapshot(&self.conn, &self.lineage, branch)?,
+            branch,
+            &mut lineage::OperationStats::default(),
+            CatalogMessageSource::Stored,
         )?;
-        let metadata = &snapshot.metadata;
-        let session = CatalogSession {
-            id: branch.as_str().to_string(),
-            lineage_id: Some(self.lineage.as_str().to_string()),
-            title: metadata.title.clone(),
-            slug: metadata.slug.clone(),
-            first_user_message: metadata.first_user_message.clone(),
-            cwd: metadata.cwd.clone(),
-            mode: metadata.mode.clone(),
-            reasoning_effort: metadata.reasoning_effort.clone(),
-            model: metadata.model.clone(),
-            fast_mode: metadata.fast_mode,
-            parent_id: snapshot.identity.parent_id.clone(),
-            context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
-            history_len: Some(snapshot.head.history_len.get()),
-            text_bytes: Some(snapshot.history_text_bytes),
-            created_at: snapshot.identity.created_at,
-            updated_at: metadata.updated_at,
-            source_revision: snapshot.head.revision.get(),
-            availability: CatalogAvailability::Available,
-            error_kind: None,
-            error_summary: None,
-            last_seen_scan: 0,
-        };
         self.upsert_catalog_session(&session)?;
         Ok(())
     }
@@ -477,6 +656,7 @@ impl OwnedLineageWriter {
     }
 
     /// Creates and owns a destination without taking ownership of its source.
+    /// Captures the exact source head and copied immutable revision in one transaction.
     /// An expected source head fences unsaved suffixes against concurrent edits.
     pub fn fork_from(
         root: impl AsRef<Path>,
@@ -485,7 +665,7 @@ impl OwnedLineageWriter {
         created_at: u64,
         expected_source: Option<StoreHead>,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<(Self, SaveReceipt)> {
+    ) -> Result<(Self, crate::SessionForkResult)> {
         let root = root.as_ref();
         validate_storage_root(root)?;
         let source = BranchId::new(source_session_id.into())?;
@@ -521,7 +701,7 @@ impl OwnedLineageWriter {
             std::time::Instant::now() + crate::write_transaction::WRITE_DEADLINE,
             cancelled,
         )?;
-        let snapshot = lineage::lineage_session_snapshot(&tx, &lineage, &source)?;
+        let snapshot = lineage::lineage_session_head(&tx, &lineage, &source)?;
         if let Some(expected) = expected_source {
             if snapshot.head != expected {
                 return Err(StoreError::Integrity(format!(
@@ -549,9 +729,18 @@ impl OwnedLineageWriter {
             lineage_id: Some(lineage.as_str().to_owned()),
             history_text_bytes: snapshot.history_root.byte_count(),
         };
+        let result = crate::SessionForkResult {
+            source_session_id: source.as_str().to_owned(),
+            source_head: snapshot.head,
+            session: crate::SessionCommitResult {
+                receipt,
+                revision_id: snapshot.revision_id.as_str().to_owned(),
+            },
+        };
         tx.commit()?;
-        let writer = Self::finish_open(root, lineage, target, conn, lease, target_lease)?;
-        Ok((writer, receipt))
+        let writer = Self::from_acquired(root, lineage, target, conn, lease, target_lease)
+            .finish_startup()?;
+        Ok((writer, result))
     }
 
     pub fn fork_current(
@@ -559,7 +748,7 @@ impl OwnedLineageWriter {
         target_session_id: impl Into<String>,
         created_at: u64,
     ) -> Result<SaveReceipt> {
-        let (destination, receipt) = Self::fork_from(
+        let (destination, result) = Self::fork_from(
             &self.sessions_root,
             self.session_id(),
             target_session_id,
@@ -568,7 +757,7 @@ impl OwnedLineageWriter {
             &|| false,
         )?;
         destination.release()?;
-        Ok(receipt)
+        Ok(result.session.receipt)
     }
 
     pub fn rewind_to_sequence(&mut self, sequence: u64, updated_at: u64) -> Result<SaveReceipt> {
@@ -686,47 +875,85 @@ impl OwnedLineageWriter {
         Ok(())
     }
 
+    /// Advance canonical reclamation within the supplied row budget. Derived
+    /// search-cache pruning and physical file compaction are separate cold operations.
     pub fn reclaim_step(&mut self, max_rows: usize) -> Result<LineageReclamation> {
-        if max_rows == 0 {
-            return Err(StoreError::Integrity(
-                "lineage reclamation row budget must be positive".into(),
-            ));
-        }
-        let search = crate::lineage_search::reclaim_one_obsolete_search_segment(
-            &self.conn,
-            &self.search_database_path(),
-            &self.lineage,
-        )?;
-        debug_assert!(search.segments_deleted <= 1);
-        if search.segments_deleted > 0 || !search.complete {
-            return Ok(LineageReclamation {
-                search_segments_deleted: search.segments_deleted,
-                complete: false,
-                ..LineageReclamation::default()
-            });
-        }
-
         let step = lineage::reclaim_step(&mut self.conn, &self.lineage, max_rows)?;
         debug_assert!(step.work_rows() <= max_rows);
         Ok(LineageReclamation {
             branch_heads_cleared: step.branch_heads_cleared,
             canonical_rows_deleted: step.canonical_rows_deleted,
             objects_deleted: step.objects_deleted,
-            search_segments_deleted: search.segments_deleted,
+            rows_examined: step.rows_examined,
+            phase_advanced: step.phase_advanced,
             complete: step.complete,
         })
     }
 
+    /// Cold pruning of obsolete derived search segments. This scans live search
+    /// sources once and removes each obsolete segment transactionally. Run before
+    /// canonical reclamation while its source text is still available. Never call
+    /// it from key handling, rendering or automatic canonical idle maintenance.
+    pub fn prune_search_projection(&self) -> Result<usize> {
+        crate::lineage_search::prune_search_projection(
+            &self.conn,
+            &self.search_database_path(),
+            &self.lineage,
+        )
+    }
+
+    /// Losslessly share one aggregate-cost cohort, scanning at most 256 large
+    /// object headers and processing at most 128 MiB, enough for two maximum-sized
+    /// logical objects. Keep the cursor until the pass reports complete.
+    /// A rejected cohort rolls back all allocations and still advances the pass.
+    /// This is cold maintenance, never part of key handling or rendering.
+    pub fn share_objects(
+        &mut self,
+        cursor: &mut crate::ObjectSharingCursor,
+    ) -> Result<crate::ObjectSharingStep> {
+        lineage::share_objects(&mut self.conn, &self.lineage, cursor)
+    }
+
+    /// Cold compaction of the pages free at entry. Each incremental statement is
+    /// drained and limited to 256 pages. Concurrent readers may defer WAL
+    /// truncation; the result reports that explicitly rather than waiting on them.
     pub fn vacuum(&mut self) -> Result<LineageVacuum> {
         let free_pages_before = self
             .conn
             .pragma_query_value(None, "freelist_count", |row| row.get::<_, i64>(0))?;
         let free_pages_before = nonnegative_u64(free_pages_before, "free pages before vacuum")?;
-        self.conn.execute_batch(
-            "PRAGMA wal_checkpoint(PASSIVE);
-             PRAGMA incremental_vacuum(256);
-             PRAGMA optimize;",
-        )?;
+        self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)")?;
+        let auto_vacuum: i64 = self
+            .conn
+            .pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+        if auto_vacuum == 2 {
+            // Bound the entire cold pass to its original free pages, even if
+            // another branch writer frees additional pages between statements.
+            let mut remaining = free_pages_before;
+            while remaining > 0 {
+                let mut statement = self.conn.prepare(&format!(
+                    "PRAGMA incremental_vacuum({})",
+                    remaining.min(256),
+                ))?;
+                let mut rows = statement.query([])?;
+                let mut reclaimed = 0u64;
+                while rows.next()?.is_some() {
+                    reclaimed += 1;
+                }
+                if reclaimed == 0 {
+                    break;
+                }
+                remaining = remaining.saturating_sub(reclaimed);
+            }
+        } else if free_pages_before > 0 {
+            // Older databases without incremental auto-vacuum still support
+            // explicit cold compaction without changing their logical schema.
+            self.conn.execute_batch("VACUUM")?;
+        }
+        self.conn.execute_batch("PRAGMA optimize")?;
+        let checkpoint_busy: i64 =
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
         let free_pages_after = self
             .conn
             .pragma_query_value(None, "freelist_count", |row| row.get::<_, i64>(0))?;
@@ -735,6 +962,7 @@ impl OwnedLineageWriter {
             free_pages_before,
             free_pages_after,
             pages_reclaimed: free_pages_before.saturating_sub(free_pages_after),
+            wal_truncated: checkpoint_busy == 0,
         })
     }
 
@@ -1047,11 +1275,37 @@ impl LineageSessionReader {
             .lineage_search_path(self.lineage.as_str())
     }
 
+    /// Projects catalog metadata without materializing retained archive values.
+    pub fn catalog_session(&self) -> Result<CatalogSession> {
+        load_catalog_session(
+            &self.conn,
+            &self.lineage,
+            &self.branch,
+            &mut lineage::OperationStats::default(),
+            CatalogMessageSource::Stored,
+        )
+    }
+
+    /// Reuses a prior verified catalog message only when its immutable source matches.
+    pub fn catalog_session_with_cache(&self, cached: &CatalogSession) -> Result<CatalogSession> {
+        load_catalog_session(
+            &self.conn,
+            &self.lineage,
+            &self.branch,
+            &mut lineage::OperationStats::default(),
+            CatalogMessageSource::Cached(cached),
+        )
+    }
+
     pub fn snapshot(&self) -> Result<LineageSessionState> {
         public_snapshot(
             &self.lineage,
             lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?,
         )
+    }
+
+    pub fn store_head(&self) -> Result<StoreHead> {
+        Ok(lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?.head)
     }
 
     pub fn history_range(&self, start: u64, end: u64) -> Result<Vec<protocol::HistoryItem>> {
@@ -1078,6 +1332,53 @@ impl LineageSessionReader {
         lineage::lineage_transcript_range(&self.conn, &self.lineage, &self.branch, start, end)
     }
 
+    /// Latest context update or tombstone strictly before `end` on this head.
+    pub fn history_last_context_note_index_before(
+        &self,
+        end: u64,
+        name: &str,
+    ) -> Result<Option<u64>> {
+        Ok(self
+            .history_semantic_query(lineage::HistorySemantic::Context(name), 0..end, true)?
+            .map(|(index, _)| index))
+    }
+
+    pub fn history_mode_before(&self, end: u64) -> Result<Option<String>> {
+        Ok(self
+            .history_semantic_query(lineage::HistorySemantic::Mode, 0..end, true)?
+            .map(|(_, mode)| mode))
+    }
+
+    pub fn history_base_mode_range(&self, range: std::ops::Range<u64>) -> Result<Option<String>> {
+        Ok(self
+            .history_semantic_query(lineage::HistorySemantic::BaseMode, range, false)?
+            .map(|(_, mode)| mode))
+    }
+
+    pub fn history_any_transcript_visible_before(&self, end: u64) -> Result<bool> {
+        Ok(self
+            .history_semantic_query(lineage::HistorySemantic::Visible, 0..end, false)?
+            .is_some())
+    }
+
+    fn history_semantic_query(
+        &self,
+        semantic: lineage::HistorySemantic<'_>,
+        range: std::ops::Range<u64>,
+        last: bool,
+    ) -> Result<Option<(u64, String)>> {
+        let head = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
+        Ok(lineage::history_semantic_range(
+            &self.conn,
+            &self.lineage,
+            &head.history_root,
+            semantic,
+            range,
+            last,
+        )?
+        .0)
+    }
+
     pub fn transcript_object_backed_range(
         &self,
         start: u64,
@@ -1096,7 +1397,7 @@ impl LineageSessionReader {
         &self,
         range: crate::TranscriptRecordRange,
     ) -> Result<crate::TranscriptExtentProfile> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_extent_profile(
             &self.conn,
             &self.lineage,
@@ -1111,7 +1412,7 @@ impl LineageSessionReader {
         width: u16,
     ) -> Result<u64> {
         let _perf = smelt_perf::perf::begin("store:extent:reader_estimated_rows");
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_estimated_rows(
             &self.conn,
             &self.lineage,
@@ -1122,7 +1423,7 @@ impl LineageSessionReader {
     }
 
     pub fn transcript_total_estimated_rows(&self, width: u16) -> Result<u64> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_total_estimated_rows(
             &self.conn,
             &self.lineage,
@@ -1136,7 +1437,7 @@ impl LineageSessionReader {
         width: u16,
         row: u64,
     ) -> Result<Option<crate::TranscriptRowLocation>> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_row_location(
             &self.conn,
             &self.lineage,
@@ -1151,7 +1452,7 @@ impl LineageSessionReader {
         kind: &str,
         before_or_at: usize,
     ) -> Result<Option<crate::TranscriptNavigationRecord>> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_record_before_kind(
             &self.conn,
             &self.lineage,
@@ -1166,7 +1467,7 @@ impl LineageSessionReader {
         kind: &str,
         after_or_at: usize,
     ) -> Result<Option<crate::TranscriptNavigationRecord>> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_record_after_kind(
             &self.conn,
             &self.lineage,
@@ -1181,7 +1482,7 @@ impl LineageSessionReader {
         role: &str,
         before_or_at: usize,
     ) -> Result<Option<crate::TranscriptNavigationRecord>> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_record_before_role(
             &self.conn,
             &self.lineage,
@@ -1196,7 +1497,7 @@ impl LineageSessionReader {
         role: &str,
         after_or_at: usize,
     ) -> Result<Option<crate::TranscriptNavigationRecord>> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_record_after_role(
             &self.conn,
             &self.lineage,
@@ -1207,7 +1508,7 @@ impl LineageSessionReader {
     }
 
     pub fn transcript_record_index_for_block_idx(&self, block_idx: u64) -> Result<Option<usize>> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_record_index_for_block_idx(
             &self.conn,
             &self.lineage,
@@ -1220,7 +1521,7 @@ impl LineageSessionReader {
         &self,
         history_idx: u64,
     ) -> Result<Option<usize>> {
-        let snapshot = lineage::lineage_session_snapshot(&self.conn, &self.lineage, &self.branch)?;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
         lineage::lineage_transcript_record_index_for_history_idx(
             &self.conn,
             &self.lineage,
@@ -1489,6 +1790,86 @@ pub fn verify_lineage_backup(
     lineage_doctor_report(&conn, path, &lineage, None)
 }
 
+enum CatalogMessageSource<'a> {
+    Stored,
+    Cached(&'a CatalogSession),
+    Published {
+        result: &'a crate::SessionCommitResult,
+        first_user_message: Option<Arc<str>>,
+    },
+}
+
+fn load_catalog_session(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    stats: &mut lineage::OperationStats,
+    message: CatalogMessageSource<'_>,
+) -> Result<CatalogSession> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
+    let record = lineage::load_branch_record(conn, lineage, branch, false)?;
+    let state = lineage::load_revision_envelope(conn, lineage, &record.revision, stats)?;
+    let first_user_message_id = state.catalog_message_id().map(str::to_owned);
+    let first_user_message = match message {
+        CatalogMessageSource::Published {
+            result,
+            first_user_message,
+        } => {
+            if result.receipt.session_id != branch.as_str()
+                || result.receipt.lineage_id.as_deref() != Some(lineage.as_str())
+                || result.receipt.current != record.head
+                || result.revision_id != record.revision.id().as_str()
+                || !matches!(state, lineage::StoredRevisionState::Shared(_))
+                || first_user_message.is_some() != first_user_message_id.is_some()
+            {
+                return Err(StoreError::Integrity(
+                    "catalog publication has no matching current revision".into(),
+                ));
+            }
+            first_user_message
+        }
+        CatalogMessageSource::Cached(cached)
+            if cached.id == branch.as_str()
+                && cached.lineage_id.as_deref() == Some(lineage.as_str())
+                && first_user_message_id.is_some()
+                && cached.first_user_message.is_some()
+                && cached.first_user_message_id == first_user_message_id =>
+        {
+            cached.first_user_message.clone()
+        }
+        _ => state.catalog_message(conn, lineage, stats)?,
+    };
+    let metadata = state.metadata();
+    crate::SessionCostUsd::new(record.metadata.session_cost_usd)?;
+    Ok(CatalogSession {
+        id: record.identity.id,
+        lineage_id: Some(lineage.as_str().to_owned()),
+        title: metadata.title.clone(),
+        slug: metadata.slug.clone(),
+        first_user_message,
+        first_user_message_id,
+        cwd: record.metadata.cwd,
+        mode: record.metadata.mode,
+        reasoning_effort: record.metadata.reasoning_effort,
+        model: record.metadata.model,
+        fast_mode: record.metadata.fast_mode,
+        parent_id: record.identity.parent_id,
+        context_tokens: metadata.display_context_tokens.or(metadata.context_tokens),
+        history_len: Some(record.head.history_len.get()),
+        text_bytes: Some(record.revision.history_root().byte_count()),
+        created_at: record.identity.created_at,
+        updated_at: metadata.updated_at,
+        source_revision: record.head.revision.get(),
+        availability: CatalogAvailability::Available,
+        error_kind: None,
+        error_summary: None,
+        last_seen_scan: 0,
+    })
+}
+
 fn public_snapshot(
     lineage: &LineageId,
     snapshot: LineageSessionSnapshot,
@@ -1561,6 +1942,1278 @@ mod tests {
         }
     }
 
+    fn retaining_title_commit(
+        initial: &SessionCommit,
+        result: &crate::SessionCommitResult,
+        title: &str,
+    ) -> crate::CompactSessionCommit {
+        crate::CompactSessionCommit {
+            session_id: initial.session_id.clone(),
+            expected: result.receipt.current,
+            identity: initial.identity.clone(),
+            scalars: crate::SessionScalars {
+                title: Some(title.into()),
+                slug: None,
+                cwd: initial.metadata.cwd.clone(),
+                mode: initial.metadata.mode.clone(),
+                reasoning_effort: None,
+                model: initial.metadata.model.clone(),
+                fast_mode: initial.metadata.fast_mode,
+                accounting: crate::ValueEdit::Retain,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: initial.metadata.session_cost_usd,
+                updated_at: 2,
+            },
+            archive_base: Some(crate::SessionArchiveBase {
+                lineage_id: result.receipt.lineage_id.clone().unwrap(),
+                revision_id: result.revision_id.clone(),
+                branch_sequence: result.receipt.current.revision,
+            }),
+            archives: crate::CompactSessionArchives::default(),
+            history: HistorySuffix {
+                start: HistoryIndex::new(result.receipt.current.history_len.get()),
+                final_len: result.receipt.current.history_len,
+                items: Vec::new(),
+            },
+            transcript_records: None,
+        }
+    }
+
+    #[test]
+    fn native_batch_recovery_is_read_only_and_does_not_hydrate_retained_archives() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        for (events, message_bytes) in [(0, 128), (32, 32_768), (128, 1_048_576)] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = crate::SessionWriter::open(root.path(), &id).unwrap();
+            let mut initial = initial_commit(&id);
+            initial.metadata.first_user_message = Some("m".repeat(message_bytes));
+            initial.metadata.checkpoint_events_json = Some(serde_json::Value::Array(
+                (0..events)
+                    .map(|index| {
+                        serde_json::json!({
+                            "kind": "auto", "summary": "archive ".repeat(4096),
+                            "first_live_index": 0, "completed_at_history_len": 1,
+                            "created_at_ms": index,
+                        })
+                    })
+                    .collect(),
+            ));
+            let first = writer
+                .lineage_writer_mut()
+                .commit_session_with_result(&initial)
+                .unwrap();
+            let command = retaining_title_commit(&initial, &first, "recover-title");
+            let batch = crate::SessionEventBatch::compact_save(
+                2,
+                command,
+                crate::SessionBatchBarrier::None,
+            );
+            assert!(writer.recover_batch(&batch).unwrap().is_none());
+            let saved = writer.commit_batch(&batch).unwrap();
+            let mut later =
+                retaining_title_commit(&initial, saved.exact_session().unwrap(), "later-title");
+            later.scalars.updated_at = 3;
+            writer
+                .commit_batch(&crate::SessionEventBatch::compact_save(
+                    3,
+                    later,
+                    crate::SessionBatchBarrier::None,
+                ))
+                .unwrap();
+            let head = writer.store_head().unwrap();
+            assert!(head.revision > saved.session().current.revision);
+            let marker = crate::catalog_session_pending_token(root.path(), &id).unwrap();
+            let changes = writer.lineage_writer_mut().conn.total_changes();
+            writer
+                .lineage_writer_mut()
+                .conn
+                .pragma_update(None, "query_only", true)
+                .unwrap();
+            writer
+                .lineage_writer_mut()
+                .conn
+                .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                    AuthAction::Read {
+                        table_name: "lineage_sequence_entries",
+                        ..
+                    } => Authorization::Deny,
+                    _ => Authorization::Allow,
+                }))
+                .unwrap();
+            let steps = Arc::new(AtomicU64::new(0));
+            let counter = steps.clone();
+            writer
+                .lineage_writer_mut()
+                .conn
+                .progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .unwrap();
+            assert_eq!(writer.recover_batch(&batch).unwrap(), Some(saved));
+            let measured = steps.load(Ordering::Relaxed);
+            writer
+                .lineage_writer_mut()
+                .conn
+                .progress_handler(0, None::<fn() -> bool>)
+                .unwrap();
+            eprintln!("NATIVE_BATCH_RECOVERY events={events} message_bytes={message_bytes} vm_steps={measured}");
+            assert!(
+                measured < 8192,
+                "retained archives inflated recovery to {measured} VM steps"
+            );
+            assert!(
+                writer.lineage_writer_mut().snapshot().is_err(),
+                "cold hydration must fail under the same entry-read guard"
+            );
+            writer
+                .lineage_writer_mut()
+                .conn
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .unwrap();
+            assert_eq!(writer.store_head().unwrap(), head);
+            assert_eq!(writer.lineage_writer_mut().conn.total_changes(), changes);
+            assert_eq!(
+                crate::catalog_session_pending_token(root.path(), &id).unwrap(),
+                marker
+            );
+        }
+    }
+
+    #[test]
+    fn public_reclamation_step_work_is_bounded_on_retained_history() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        for (history_len, searchable) in [(16, false), (4096, false), (16, true), (4096, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            let mut command = initial_commit(&id);
+            command.history.final_len = HistoryLen::new(history_len);
+            command.history.items = (0..history_len)
+                .map(|index| {
+                    let text = format!("retained history {index}");
+                    if searchable {
+                        protocol::HistoryItem::user(protocol::Content::text(text))
+                    } else {
+                        protocol::HistoryItem::system(text)
+                    }
+                })
+                .collect();
+            let receipt = writer.commit_session(&command).unwrap();
+            let snapshot = writer.snapshot().unwrap();
+            let vm_steps = Arc::new(AtomicU64::new(0));
+            let counter = vm_steps.clone();
+            writer
+                .conn
+                .progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .unwrap();
+            let mut peak = 0;
+            let mut calls = 0;
+            let (complete, measured) = loop {
+                vm_steps.store(0, Ordering::Relaxed);
+                let step = writer.reclaim_step(1).unwrap();
+                let measured = vm_steps.load(Ordering::Relaxed);
+                peak = peak.max(measured);
+                calls += 1;
+                assert!(step.work_rows() <= 1);
+                assert!(step.complete || step.made_progress());
+                assert!(calls < history_len * 64 + 1024, "public GC did not settle");
+                if step.complete || measured >= 16_384 {
+                    break (step.complete, measured);
+                }
+            };
+            writer
+                .conn
+                .progress_handler(0, None::<fn() -> bool>)
+                .unwrap();
+            assert_eq!(writer.snapshot().unwrap(), snapshot);
+            assert_eq!(writer.commit_session(&command).unwrap(), receipt);
+            println!("public GC all-phase one-row steps: history_len={history_len} searchable={searchable} calls={calls} peak_vm_steps={peak} complete={complete}");
+            assert!(measured < 16_384,
+                "one-row public GC traversed retained history: history_len={history_len} calls={calls} vm_steps={measured}");
+            assert!(complete);
+        }
+    }
+
+    #[test]
+    fn public_reclamation_step_work_is_bounded_with_ready_search_projection() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        for record_count in [16, 4096] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            let mut command = initial_commit(&id);
+            command.transcript_records = Some(crate::TranscriptRecordSuffix {
+                start: crate::TranscriptRecordIndex::ZERO,
+                records: (0..record_count)
+                    .map(|index| {
+                        transcript_record(index, format!("retained projected transcript {index}"))
+                    })
+                    .collect(),
+            });
+            let receipt = writer.commit_session(&command).unwrap();
+            let snapshot = writer.snapshot().unwrap();
+            let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+            let projector = writer.spawn_search_projector().unwrap();
+            projector.request();
+            let status = wait_for_search_projection(&reader);
+            assert_eq!(status.ready_segments, status.total_segments);
+            assert!(status.ready_segments > 0);
+            drop(projector);
+            let expected_candidates = reader
+                .search_transcript_candidate_page(
+                    "retained projected transcript",
+                    None,
+                    crate::TranscriptSearchDirection::Forward,
+                    3,
+                )
+                .unwrap();
+            assert_eq!(expected_candidates.len(), 3);
+
+            let vm_steps = Arc::new(AtomicU64::new(0));
+            let counter = vm_steps.clone();
+            writer
+                .conn
+                .progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .unwrap();
+            let mut calls = 0;
+            let mut peak = 0;
+            let (complete, measured) = loop {
+                vm_steps.store(0, Ordering::Relaxed);
+                let step = writer.reclaim_step(1).unwrap();
+                let measured = vm_steps.load(Ordering::Relaxed);
+                peak = peak.max(measured);
+                calls += 1;
+                assert!(step.work_rows() <= 1);
+                assert!(step.complete || step.made_progress());
+                assert!(
+                    calls < record_count * 64 + 1024,
+                    "projected public GC did not settle"
+                );
+                if step.complete || measured >= 16_384 {
+                    break (step.complete, measured);
+                }
+            };
+            writer
+                .conn
+                .progress_handler(0, None::<fn() -> bool>)
+                .unwrap();
+            assert_eq!(writer.snapshot().unwrap(), snapshot);
+            assert_eq!(writer.commit_session(&command).unwrap(), receipt);
+            assert_eq!(
+                reader.search_projection_status().unwrap().state,
+                crate::SearchProjectionState::Current
+            );
+            assert_eq!(
+                reader
+                    .search_transcript_candidate_page(
+                        "retained projected transcript",
+                        None,
+                        crate::TranscriptSearchDirection::Forward,
+                        3,
+                    )
+                    .unwrap(),
+                expected_candidates
+            );
+            println!("projected public GC: records={record_count} calls={calls} peak_vm_steps={peak} complete={complete}");
+            assert!(measured < 16_384,
+                "one-row public GC traversed ready search sources: records={record_count} calls={calls} vm_steps={measured}");
+            assert!(complete);
+        }
+    }
+
+    #[test]
+    fn public_reclamation_marking_matches_retained_graph_with_bounded_steps() {
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        for history_len in [16, 4096] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            let mut command = initial_commit(&id);
+            command.history.final_len = HistoryLen::new(history_len);
+            command.history.items = (0..history_len)
+                .map(|index| protocol::HistoryItem::system(format!("retained history {index}")))
+                .collect();
+            let receipt = writer.commit_session(&command).unwrap();
+            let snapshot = writer.snapshot().unwrap();
+            let expected = lineage::inspect_reachability(&writer.conn, &writer.lineage).unwrap();
+            let vm_steps = Arc::new(AtomicU64::new(0));
+            let mut peak = 0;
+            let mut complete = false;
+            for _ in 0..history_len * 64 + 1024 {
+                let counter = vm_steps.clone();
+                vm_steps.store(0, Ordering::Relaxed);
+                writer
+                    .conn
+                    .progress_handler(
+                        1,
+                        Some(move || {
+                            counter.fetch_add(1, Ordering::Relaxed);
+                            false
+                        }),
+                    )
+                    .unwrap();
+                let step = writer.reclaim_step(1).unwrap();
+                writer
+                    .conn
+                    .progress_handler(0, None::<fn() -> bool>)
+                    .unwrap();
+                let measured = vm_steps.load(Ordering::Relaxed);
+                peak = peak.max(measured);
+                assert!(
+                    measured < 16_384,
+                    "marking traversed retained history: {measured}"
+                );
+                assert!(step.work_rows() <= 1);
+                assert!(step.made_progress());
+                assert_eq!(
+                    step.canonical_rows_deleted + step.objects_deleted + step.branch_heads_cleared,
+                    0
+                );
+                let phase: i64 = writer
+                    .conn
+                    .query_row(
+                        "SELECT phase FROM smelt_gc_pass WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                if phase == 9 {
+                    complete = true;
+                    break;
+                }
+            }
+            assert!(complete, "marking did not settle");
+            for (view, column, expected) in [
+                (
+                    "smelt_reachable_revisions",
+                    "revision_id",
+                    expected.reachable_revisions,
+                ),
+                ("smelt_reachable_roots", "root_id", expected.reachable_roots),
+                ("smelt_reachable_nodes", "node_id", expected.reachable_nodes),
+                (
+                    "smelt_reachable_payloads",
+                    "payload_id",
+                    expected.reachable_payloads,
+                ),
+            ] {
+                let actual = writer
+                    .conn
+                    .prepare(&format!("SELECT {column} FROM {view}"))
+                    .unwrap()
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<BTreeSet<_>>>()
+                    .unwrap();
+                assert_eq!(actual, expected, "marking differs for {view}");
+            }
+            assert_eq!(writer.snapshot().unwrap(), snapshot);
+            assert_eq!(writer.commit_session(&command).unwrap(), receipt);
+            println!("public GC marking: history_len={history_len} peak_vm_steps={peak}");
+        }
+    }
+
+    #[test]
+    fn public_reclamation_reopens_and_resumes_with_changing_budgets() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('1');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.history.final_len = HistoryLen::new(128);
+        command.history.items = (0..128)
+            .map(|index| {
+                protocol::HistoryItem::user(protocol::Content::text(format!(
+                    "retained history {index}"
+                )))
+            })
+            .collect();
+        let receipt = writer.commit_session(&command).unwrap();
+        let snapshot = writer.snapshot().unwrap();
+        for _ in 0..13 {
+            let step = writer.reclaim_step(1).unwrap();
+            assert!(step.made_progress());
+            assert!(step.work_rows() <= 1);
+            assert!(!step.complete);
+        }
+        drop(writer);
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        assert_eq!(
+            writer
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM temp.sqlite_schema WHERE name = 'smelt_gc_pass'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let mut complete = false;
+        for (index, budget) in [1, 7, 3, 16].into_iter().cycle().take(128 * 64).enumerate() {
+            let step = writer.reclaim_step(budget).unwrap();
+            assert!(step.work_rows() <= budget);
+            assert!(step.complete || step.made_progress());
+            if step.complete {
+                complete = true;
+                break;
+            }
+            if index % 97 == 0 {
+                assert_eq!(writer.snapshot().unwrap(), snapshot);
+            }
+        }
+        assert!(complete);
+        assert_eq!(writer.snapshot().unwrap(), snapshot);
+        assert_eq!(writer.commit_session(&command).unwrap(), receipt);
+    }
+
+    #[test]
+    fn public_reclamation_marking_restarts_after_own_foreign_rolled_back_and_schema_writes() {
+        for phase in [2, 8, 9, -1] {
+            for mutation in ["own", "foreign", "rollback", "vacuum"] {
+                let root = tempfile::tempdir().unwrap();
+                let id = session_id('1');
+                let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+                let initial = initial_commit(&id);
+                let result = writer.commit_session_with_result(&initial).unwrap();
+                let mut settled = false;
+                for _ in 0..1024 {
+                    let step = writer.reclaim_step(1).unwrap();
+                    let current: i64 = writer
+                        .conn
+                        .query_row(
+                            "SELECT phase FROM smelt_gc_pass WHERE singleton = 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    if (phase == -1 && step.complete) || current == phase {
+                        settled = true;
+                        break;
+                    }
+                }
+                assert!(settled, "phase not reached: {phase}");
+                let epoch: i64 = writer
+                    .conn
+                    .query_row(
+                        "SELECT epoch FROM smelt_gc_pass WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                match mutation {
+                    "own" => {
+                        writer
+                            .commit_compact_session(&retaining_title_commit(
+                                &initial, &result, "new head",
+                            ))
+                            .unwrap();
+                    }
+                    "foreign" => {
+                        let other = Connection::open(writer.conn.path().unwrap()).unwrap();
+                        other
+                            .execute("UPDATE store_meta SET updated_at = updated_at + 1", [])
+                            .unwrap();
+                    }
+                    "rollback" => {
+                        let tx = writer.conn.transaction().unwrap();
+                        tx.execute("UPDATE store_meta SET updated_at = updated_at + 1", [])
+                            .unwrap();
+                        tx.rollback().unwrap();
+                    }
+                    "vacuum" => {
+                        writer.conn.execute_batch("VACUUM").unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let snapshot = writer.snapshot().unwrap();
+                let step = writer.reclaim_step(1).unwrap();
+                assert!(step.made_progress());
+                assert!(!step.complete);
+                assert!(step.work_rows() <= 1);
+                assert_eq!(
+                    step.canonical_rows_deleted + step.objects_deleted + step.branch_heads_cleared,
+                    0
+                );
+                let restarted: i64 = writer
+                    .conn
+                    .query_row(
+                        "SELECT epoch FROM smelt_gc_pass WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    restarted,
+                    epoch + 1,
+                    "stale pass survived {mutation} at phase {phase}"
+                );
+                assert_eq!(writer.snapshot().unwrap(), snapshot);
+                let mut complete = false;
+                for _ in 0..1024 {
+                    if writer.reclaim_step(7).unwrap().complete {
+                        complete = true;
+                        break;
+                    }
+                }
+                assert!(complete);
+                assert_eq!(writer.snapshot().unwrap(), snapshot);
+                assert_eq!(writer.commit_session(&initial).unwrap(), result.receipt);
+            }
+        }
+    }
+
+    #[test]
+    fn native_batch_recovery_rejects_missing_or_corrupt_exact_result_ownership() {
+        for kind in ["save", "submit", "transition"] {
+            for missing in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let id = session_id('1');
+                let mut writer = crate::SessionWriter::open(root.path(), &id).unwrap();
+                let initial = initial_commit(&id);
+                let first = writer
+                    .lineage_writer_mut()
+                    .commit_session_with_result(&initial)
+                    .unwrap();
+                let mut session = retaining_title_commit(&initial, &first, "native-result");
+                let batch = if kind == "save" {
+                    crate::SessionEventBatch::compact_save(
+                        2,
+                        session,
+                        crate::SessionBatchBarrier::None,
+                    )
+                } else {
+                    let submitted_batch = crate::SessionEventBatch::compact_submit_turn(
+                        2,
+                        crate::CompactSubmitTurn {
+                            session: session.clone(),
+                            turn: crate::NewTurn {
+                                kind: crate::TurnKind::Command,
+                                submitted_history_idx: HistoryIndex::ZERO,
+                                continuation_of: None,
+                                created_at_ms: 2,
+                            },
+                        },
+                    );
+                    if kind == "submit" {
+                        submitted_batch
+                    } else {
+                        let submitted = writer.commit_batch(&submitted_batch).unwrap();
+                        let crate::SessionEventReceipt::CompactSubmitTurn(result) = submitted
+                        else {
+                            panic!("native submit result")
+                        };
+                        session =
+                            retaining_title_commit(&initial, &result.session, "native-result");
+                        crate::SessionEventBatch::compact_turn_transition(
+                            3,
+                            crate::CompactTurnTransition {
+                                session,
+                                turn_id: result.turn_id,
+                                state: crate::TurnState::Running,
+                                at_ms: 3,
+                                terminal_reason: None,
+                            },
+                        )
+                    }
+                };
+                let saved = writer.commit_batch(&batch).unwrap();
+                assert_eq!(writer.recover_batch(&batch).unwrap(), Some(saved));
+                let fingerprint = match &batch.command {
+                    crate::SessionEventCommand::CompactSave { session } => {
+                        crate::compact_session_commit_fingerprint(session).unwrap()
+                    }
+                    crate::SessionEventCommand::CompactSubmitTurn { command } => {
+                        crate::compact_submit_turn_fingerprint(command).unwrap()
+                    }
+                    crate::SessionEventCommand::CompactTurnTransition { command } => {
+                        crate::compact_turn_transition_fingerprint(command).unwrap()
+                    }
+                    _ => unreachable!(),
+                };
+                let head = writer.store_head().unwrap();
+                let conn = &writer.lineage_writer_mut().conn;
+                if missing {
+                    conn.execute_batch("DROP TRIGGER lineage_session_receipt_result_delete")
+                        .unwrap();
+                    conn.execute(
+                        "DELETE FROM lineage_session_receipt_results WHERE fingerprint = ?1",
+                        [&fingerprint],
+                    )
+                    .unwrap();
+                } else {
+                    conn.execute_batch("DROP TRIGGER lineage_session_receipt_result_update")
+                        .unwrap();
+                    conn.execute("UPDATE lineage_session_receipt_results SET result_id = ?1 WHERE fingerprint = ?2", (&"0".repeat(64), &fingerprint)).unwrap();
+                }
+                conn.pragma_update(None, "query_only", true).unwrap();
+                assert!(writer.last_session_commit().unwrap().is_some());
+                assert!(matches!(writer.recover_batch(&batch), Err(SessionCommitFailure::Integrity { .. })), "{kind} recovery must not guess an exact result from an ordinary receipt or current head");
+                assert_eq!(writer.store_head().unwrap(), head);
+            }
+        }
+    }
+
+    #[test]
+    fn native_catalog_projection_reuses_verified_messages_with_bounded_reads() {
+        for (checkpoints, message_bytes) in [(0, 128), (32, 32_768), (128, 1_048_576)] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            let mut initial = initial_commit(&id);
+            let message: Arc<str> = "m".repeat(message_bytes).into();
+            initial.metadata.first_user_message = Some(message.to_string());
+            initial.metadata.checkpoint_events_json = Some(serde_json::Value::Array(
+                (0..checkpoints)
+                    .map(|index| {
+                        serde_json::json!({
+                            "kind": "auto",
+                            "summary": format!("{index} {}", "archive ".repeat(4096)),
+                            "first_live_index": 0,
+                            "completed_at_history_len": 1,
+                            "created_at_ms": index,
+                        })
+                    })
+                    .collect(),
+            ));
+            let first = writer.commit_session_with_result(&initial).unwrap();
+            let projected = writer
+                .catalog_session_for_result(&first, Some(message.clone()))
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                projected.first_user_message.as_ref().unwrap(),
+                &message
+            ));
+            let reader = LineageSessionReader::open_existing_in_lineage(
+                root.path(),
+                writer.lineage_id(),
+                &id,
+            )
+            .unwrap();
+            let mut command = retaining_title_commit(&initial, &first, "native-title");
+            let title = writer.commit_compact_session(&command).unwrap();
+            for source in [
+                CatalogMessageSource::Published {
+                    result: &title,
+                    first_user_message: Some(message.clone()),
+                },
+                CatalogMessageSource::Cached(&projected),
+            ] {
+                let mut stats = lineage::OperationStats::default();
+                let current = load_catalog_session(
+                    &reader.conn,
+                    &reader.lineage,
+                    &reader.branch,
+                    &mut stats,
+                    source,
+                )
+                .unwrap();
+                assert!(Arc::ptr_eq(
+                    current.first_user_message.as_ref().unwrap(),
+                    &message
+                ));
+                assert_eq!(current.title.as_deref(), Some("native-title"));
+                assert_eq!(stats.payloads_read, 1);
+                assert_eq!(stats.nodes_read, 0);
+                assert_eq!(stats.payloads_written, 0);
+                eprintln!("NATIVE_CATALOG_READS checkpoints={checkpoints} message_bytes={message_bytes} payloads={} nodes={}", stats.payloads_read, stats.nodes_read);
+            }
+            assert!(writer
+                .catalog_session_for_result(&first, Some(message.clone()))
+                .is_err());
+            assert!(writer.catalog_session_for_result(&title, None).is_err());
+            let mut foreign = title.clone();
+            foreign.receipt.lineage_id = Some("a".repeat(32));
+            assert!(writer
+                .catalog_session_for_result(&foreign, Some(message.clone()))
+                .is_err());
+
+            command.expected = title.receipt.current;
+            let runtime = writer.commit_compact_session(&command).unwrap();
+            assert_eq!(runtime.receipt.current, title.receipt.current);
+            assert_eq!(runtime.revision_id, title.revision_id);
+            let mut branch_metadata =
+                lineage::load_branch_record(&writer.conn, &writer.lineage, &writer.branch, false)
+                    .unwrap()
+                    .metadata;
+            branch_metadata.mode = Some("plan".into());
+            branch_metadata.model = Some("new-model".into());
+            lineage::update_branch_metadata(
+                &writer.conn,
+                &writer.lineage,
+                &writer.branch,
+                &branch_metadata,
+            )
+            .unwrap();
+            assert_eq!(writer.commit_compact_session(&command).unwrap(), runtime);
+            let current = writer
+                .catalog_session_for_result(&runtime, Some(message.clone()))
+                .unwrap();
+            assert_eq!(current.mode.as_deref(), Some("plan"));
+            assert_eq!(current.model.as_deref(), Some("new-model"));
+
+            let mut wrong_session = projected.clone();
+            wrong_session.id = session_id('2');
+            let mut wrong_lineage = projected.clone();
+            wrong_lineage.lineage_id = Some("a".repeat(32));
+            let mut missing_body = projected.clone();
+            missing_body.first_user_message = None;
+            for cached in [wrong_session, wrong_lineage, missing_body] {
+                let mut stats = lineage::OperationStats::default();
+                let current = load_catalog_session(
+                    &reader.conn,
+                    &reader.lineage,
+                    &reader.branch,
+                    &mut stats,
+                    CatalogMessageSource::Cached(&cached),
+                )
+                .unwrap();
+                assert_eq!(
+                    current.first_user_message.as_deref(),
+                    Some(message.as_ref())
+                );
+                assert!(!Arc::ptr_eq(
+                    current.first_user_message.as_ref().unwrap(),
+                    &message
+                ));
+                assert_eq!(stats.payloads_read, 2);
+                assert_eq!(stats.nodes_read, 1);
+            }
+            command.archives.first_user_message = crate::ValueEdit::Replace {
+                value: Some("replacement α".into()),
+            };
+            command.scalars.updated_at = 3;
+            writer.commit_compact_session(&command).unwrap();
+            let changed = reader.catalog_session_with_cache(&projected).unwrap();
+            assert_eq!(changed.first_user_message.as_deref(), Some("replacement α"));
+            assert_ne!(
+                changed.first_user_message_id,
+                projected.first_user_message_id
+            );
+        }
+    }
+
+    fn install_legacy_fixture(writer: &mut OwnedLineageWriter) {
+        let source = crate::schema::tests::v3_connection();
+        lineage::create_lineage(&source, &writer.lineage, 1).unwrap();
+        rusqlite::backup::Backup::new(&source, &mut writer.conn)
+            .unwrap()
+            .run_to_completion(128, std::time::Duration::ZERO, None)
+            .unwrap();
+        crate::schema::validate_lineage_schema(&writer.conn).unwrap();
+    }
+
+    #[test]
+    fn catalog_projection_preserves_metadata_without_hydrating_compact_archives() {
+        for (version, checkpoints) in [(3, 0), (3, 32), (3, 128), (4, 0), (4, 32), (4, 128)] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            if version == 3 {
+                install_legacy_fixture(&mut writer);
+            }
+            let mut initial = initial_commit(&id);
+            initial.metadata.first_user_message = Some("catalog first α".into());
+            initial.metadata.slug = Some("catalog-title".into());
+            initial.metadata.context_tokens = Some(5);
+            initial.metadata.display_context_tokens = Some(7);
+            initial.metadata.checkpoint_events_json = Some(serde_json::Value::Array(
+                (0..checkpoints).map(|index| serde_json::json!({
+                    "kind": "auto", "summary": format!("{index} {}", "archive ".repeat(4096)),
+                    "first_live_index": 0, "completed_at_history_len": 1,
+                    "created_at_ms": index,
+                })).collect(),
+            ));
+            initial.side_tables.metadata_snapshots.push((
+                HistoryIndex::ZERO,
+                serde_json::json!({
+                    "retained": "metadata α".repeat(4096),
+                }),
+            ));
+            let receipt = writer.commit_session(&initial).unwrap();
+            let mut expected =
+                CatalogSession::from_commit(&initial, &receipt, receipt.lineage_id.clone());
+            let saved =
+                lineage::load_branch_record(&writer.conn, &writer.lineage, &writer.branch, false)
+                    .unwrap();
+            let envelope = lineage::load_revision_envelope(
+                &writer.conn,
+                &writer.lineage,
+                &saved.revision,
+                &mut lineage::OperationStats::default(),
+            )
+            .unwrap();
+            expected.first_user_message_id = envelope.catalog_message_id().map(str::to_owned);
+            let reader = LineageSessionReader::open_existing_in_lineage(
+                root.path(),
+                writer.lineage_id(),
+                &id,
+            )
+            .unwrap();
+            let mut stats = lineage::OperationStats::default();
+            let actual = load_catalog_session(
+                &reader.conn,
+                &reader.lineage,
+                &reader.branch,
+                &mut stats,
+                CatalogMessageSource::Stored,
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(reader.catalog_session().unwrap(), expected);
+            assert_eq!(
+                stats.payloads_read,
+                if version == crate::schema::LINEAGE_SCHEMA_VERSION {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert_eq!(
+                stats.nodes_read,
+                if version == crate::schema::LINEAGE_SCHEMA_VERSION {
+                    1
+                } else {
+                    0
+                }
+            );
+            assert_eq!(stats.payloads_written, 0);
+            let record =
+                lineage::load_branch_record(&writer.conn, &writer.lineage, &writer.branch, false)
+                    .unwrap();
+            let (state_id, state_bytes) = writer.conn.query_row(
+                "SELECT revision.state_payload_id, object.raw_size FROM lineage_revisions revision
+                 JOIN lineage_payload_object_refs payload ON payload.lineage_id = revision.lineage_id
+                   AND payload.payload_id = revision.state_payload_id
+                 JOIN objects object ON object.hash = payload.object_hash
+                 WHERE revision.lineage_id = ?1 AND revision.revision_id = ?2",
+                (writer.lineage_id(), record.revision.id().as_str()),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            ).unwrap();
+            if version == crate::schema::LINEAGE_SCHEMA_VERSION {
+                let (hash, bytes) = writer.conn.query_row(
+                    "SELECT object.hash, object.bytes FROM lineage_revision_state_roots archive
+                     JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+                       AND root.root_id = archive.root_id AND root.item_count = 1 AND root.depth = 1
+                     JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+                       AND entry.node_id = root.root_node_id AND entry.entry_index = 0
+                     JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+                       AND payload.payload_id = entry.payload_id
+                     JOIN objects object ON object.hash = payload.object_hash
+                     WHERE archive.lineage_id = ?1 AND archive.state_payload_id = ?2
+                       AND archive.role = 'first_user_message'",
+                    (writer.lineage_id(), state_id.as_str()),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                ).unwrap();
+                writer
+                    .conn
+                    .execute(
+                        "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
+                        [&hash],
+                    )
+                    .unwrap();
+                assert!(
+                    reader.snapshot().is_err(),
+                    "active message bytes must be hash-verified"
+                );
+                assert!(reader.catalog_session().is_err());
+                assert!(writer.refresh_catalog().is_err());
+                assert_eq!(reader.store_head().unwrap(), receipt.current);
+                writer
+                    .conn
+                    .execute(
+                        "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
+                        (&bytes, &hash),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    reader.snapshot().unwrap().metadata.first_user_message,
+                    initial.metadata.first_user_message
+                );
+                assert_eq!(reader.catalog_session().unwrap(), expected);
+            }
+            if version == crate::schema::LINEAGE_SCHEMA_VERSION {
+                assert!(state_bytes < 2048);
+                assert_eq!(writer.conn.execute(
+                    "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = (
+                         SELECT payload.object_hash FROM lineage_revision_state_roots archive
+                         JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+                           AND root.root_id = archive.root_id AND root.item_count = 2 AND root.depth = 1
+                         JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+                           AND entry.node_id = root.root_node_id AND entry.entry_index = ?3
+                         JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+                           AND payload.payload_id = entry.payload_id
+                         WHERE archive.lineage_id = ?1 AND archive.state_payload_id = ?2
+                           AND archive.role = 'metadata_snapshots'
+                     )",
+                    (writer.lineage_id(), state_id.as_str(), 0),
+                ).unwrap(), 1);
+                assert!(reader.snapshot().is_err());
+                assert_eq!(reader.catalog_session().unwrap(), expected);
+                writer.refresh_catalog().unwrap();
+                let catalog = crate::CatalogReader::open_existing(
+                    crate::SessionStoreLayout::from_sessions_root(root.path()).catalog_path(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(catalog.session(&id).unwrap().unwrap(), expected);
+            }
+            writer
+                .conn
+                .execute(
+                    "UPDATE objects SET bytes = zeroblob(stored_size)
+                 WHERE hash = (SELECT object_hash FROM lineage_payload_object_refs
+                               WHERE lineage_id = ?1 AND payload_id = ?2)",
+                    (writer.lineage_id(), state_id.as_str()),
+                )
+                .unwrap();
+            assert!(
+                reader.catalog_session().is_err(),
+                "catalog envelopes must be hash-verified"
+            );
+            assert!(writer.refresh_catalog().is_err());
+        }
+    }
+
+    #[test]
+    fn vacuum_recovers_free_pages_and_reports_snapshot_blocked_wal_truncation() {
+        for incremental in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            writer.commit_session(&initial_commit(&id)).unwrap();
+            let snapshot = writer.snapshot().unwrap();
+            if !incremental {
+                writer
+                    .conn
+                    .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM")
+                    .unwrap();
+            }
+            for index in 0..8 {
+                crate::object::put_object(
+                    &writer.conn,
+                    &vec![index; 512 * 1024],
+                    ObjectCompression::none(),
+                )
+                .unwrap();
+            }
+            writer
+                .conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            let before_bytes = fs::metadata(writer.database_path()).unwrap().len();
+            let reader = Connection::open(writer.database_path()).unwrap();
+            reader.execute_batch("BEGIN").unwrap();
+            let pinned_bytes: i64 = reader
+                .query_row("SELECT SUM(stored_size) FROM objects", [], |row| row.get(0))
+                .unwrap();
+            writer
+                .conn
+                .execute("DELETE FROM objects WHERE raw_size >= 131072", [])
+                .unwrap();
+            let vacuum = writer.vacuum().unwrap();
+            assert!(vacuum.free_pages_before > 256);
+            assert_eq!(vacuum.free_pages_after, 0);
+            assert_eq!(vacuum.pages_reclaimed, vacuum.free_pages_before);
+            assert!(!vacuum.wal_truncated);
+            assert_eq!(
+                reader
+                    .query_row("SELECT SUM(stored_size) FROM objects", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                pinned_bytes
+            );
+            assert_eq!(writer.snapshot().unwrap(), snapshot);
+            reader.execute_batch("COMMIT").unwrap();
+            let settled = writer.vacuum().unwrap();
+            assert!(settled.wal_truncated);
+            assert_eq!(settled.free_pages_after, 0);
+            let stats =
+                lineage_storage_stats(&writer.conn, &writer.database_path(), Some(&writer.branch))
+                    .unwrap();
+            assert!(stats.database_bytes < before_bytes / 2);
+            assert_eq!(stats.wal_bytes, 0);
+            assert_eq!(writer.snapshot().unwrap(), snapshot);
+        }
+    }
+
+    #[test]
+    fn explicit_object_sharing_preserves_session_receipts_forks_and_backups() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('1');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        install_legacy_fixture(&mut writer);
+        let mut initial = initial_commit(&id);
+        let mut state = 0x123456789abcdef0_u64;
+        let summary = (0..512 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from(b'!' + (state % 90) as u8)
+            })
+            .collect::<String>();
+        initial.metadata.checkpoint_events_json = Some(serde_json::json!([{
+            "kind": "auto", "summary": summary, "first_live_index": 0,
+            "completed_at_history_len": 0, "created_at_ms": 1,
+        }]));
+        let first = writer.commit_session(&initial).unwrap();
+        let mut current = first.current;
+        for index in 0..3 {
+            let mut command = initial.clone();
+            command.expected = current;
+            command.metadata.updated_at = index + 2;
+            command.metadata.title = Some(format!("title-{index}"));
+            command.history.start = HistoryIndex::new(1);
+            command.history.items.clear();
+            current = writer.commit_session(&command).unwrap().current;
+        }
+        crate::schema::initialize_lineage_schema(&mut writer.conn).unwrap();
+        let before = writer.snapshot().unwrap();
+        let before_stats =
+            lineage_storage_stats(&writer.conn, &writer.database_path(), Some(&writer.branch))
+                .unwrap();
+        let hashes = writer
+            .conn
+            .prepare("SELECT hash FROM objects WHERE raw_size >= 131072 ORDER BY hash")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(hashes.len(), 4);
+        let mut cursor = crate::ObjectSharingCursor::default();
+        let step = writer.share_objects(&mut cursor).unwrap();
+        assert!(step.complete);
+        assert_eq!(step.objects_scanned, hashes.len());
+        assert_eq!(step.objects_shared, hashes.len());
+        assert!(step.pages_saved > 0);
+        assert_eq!(writer.store_head().unwrap(), current);
+        assert_eq!(
+            writer.share_objects(&mut cursor).unwrap().objects_scanned,
+            0
+        );
+        let repeat = writer
+            .share_objects(&mut crate::ObjectSharingCursor::default())
+            .unwrap();
+        assert!(repeat.complete);
+        assert_eq!(repeat.objects_scanned, hashes.len());
+        assert_eq!(repeat.objects_shared, 0);
+        let after_stats =
+            lineage_storage_stats(&writer.conn, &writer.database_path(), Some(&writer.branch))
+                .unwrap();
+        assert!(
+            after_stats.object_stored_bytes < before_stats.object_stored_bytes / 2,
+            "shared compressed archives must reclaim repeated physical payload bytes"
+        );
+        let after = writer.snapshot().unwrap();
+        assert_eq!(after.metadata, before.metadata);
+        assert_eq!(after.history_root_id, before.history_root_id);
+        assert_eq!(after.transcript_root_id, before.transcript_root_id);
+        assert_eq!(after.revision_id, before.revision_id);
+        assert_eq!(writer.commit_session(&initial).unwrap(), first);
+        assert_eq!(writer.store_head().unwrap(), current);
+        for hash in hashes {
+            let object = crate::object::object(&writer.conn, &hash).unwrap().unwrap();
+            assert_eq!(crate::object::sha256_hex(&object.bytes), hash);
+        }
+        let fork_id = session_id('2');
+        writer.fork_current(&fork_id, 10).unwrap();
+        let reader = LineageSessionReader::open_existing(root.path(), &fork_id).unwrap();
+        assert_eq!(
+            reader.snapshot().unwrap().metadata.checkpoint_events_json,
+            before.metadata.checkpoint_events_json
+        );
+        assert_eq!(reader.history_range(0, 1).unwrap(), initial.history.items);
+        assert!(reader.doctor_report().unwrap().healthy);
+        let backup = root.path().join("isolated-sharing-backup.db");
+        reader.backup_to(&backup).unwrap();
+        assert!(
+            verify_lineage_backup(&backup, writer.lineage_id())
+                .unwrap()
+                .healthy
+        );
+    }
+
+    #[test]
+    fn hot_reads_do_not_hydrate_revision_state() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('1');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.metadata.checkpoint_events_json = Some(serde_json::json!([{
+            "kind": "auto",
+            "summary": "archived summary ".repeat(65_536),
+            "first_live_index": 0,
+            "completed_at_history_len": 0,
+            "created_at_ms": 1,
+        }]));
+        let record = transcript_record(0, "visible transcript".into());
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: vec![record.clone()],
+        });
+        let receipt = writer.commit_session(&command).unwrap();
+        writer
+            .conn
+            .execute(
+                "UPDATE objects SET codec = 'none', raw_size = 1, stored_size = 1, bytes = x'00'
+             WHERE hash = (
+                 SELECT payload.object_hash FROM lineage_branches branch
+                 JOIN lineage_revisions revision
+                   ON revision.lineage_id = branch.lineage_id
+                  AND revision.revision_id = branch.head_revision_id
+                 JOIN lineage_payload_object_refs payload
+                   ON payload.lineage_id = revision.lineage_id
+                  AND payload.payload_id = revision.state_payload_id
+                 WHERE branch.session_id = ?1
+             )",
+                [&id],
+            )
+            .unwrap();
+        assert!(
+            writer.snapshot().is_err(),
+            "cold state read must detect corruption"
+        );
+        assert_eq!(writer.store_head().unwrap(), receipt.current);
+        let reader =
+            LineageSessionReader::open_existing_in_lineage(root.path(), writer.lineage_id(), &id)
+                .unwrap();
+        assert_eq!(reader.store_head().unwrap(), receipt.current);
+        assert_eq!(
+            reader
+                .history_last_context_note_index_before(u64::MAX, "missing")
+                .unwrap(),
+            None
+        );
+        assert_eq!(reader.history_mode_before(u64::MAX).unwrap(), None);
+        assert_eq!(reader.history_base_mode_range(0..u64::MAX).unwrap(), None);
+        assert!(
+            !reader
+                .history_any_transcript_visible_before(u64::MAX)
+                .unwrap(),
+            "transcript records must not substitute for history visibility"
+        );
+        assert_eq!(reader.history_range(0, 1).unwrap(), command.history.items);
+        assert_eq!(
+            reader.history_tail(1, 1, None).unwrap(),
+            command.history.items
+        );
+        assert_eq!(reader.transcript_range(0, 1).unwrap(), vec![record.clone()]);
+        assert_eq!(
+            reader.transcript_object_backed_range(0, 1).unwrap(),
+            vec![record.clone()]
+        );
+        assert_eq!(
+            reader.transcript_extent_profile((0..1).into()).unwrap(),
+            crate::history::transcript_extent_profile(&[record]),
+        );
+        assert!(reader.transcript_total_estimated_rows(80).unwrap() > 0);
+        assert_eq!(
+            reader.transcript_record_index_for_block_idx(0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            reader.transcript_record_index_for_history_idx(0).unwrap(),
+            Some(0)
+        );
+        assert!(reader
+            .transcript_record_before_kind("assistant", 1)
+            .unwrap()
+            .is_some());
+        assert!(reader
+            .transcript_record_after_kind("assistant", 0)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn indexed_semantics_do_not_hydrate_history_or_revision_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('1');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.history.items = vec![
+            protocol::HistoryItem::note(protocol::HistoryNote::named_context("shared", "value")),
+            protocol::HistoryItem::note(protocol::HistoryNote::named_context("shared", "")),
+            protocol::HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                "normal", "plan", "mode",
+            )),
+            protocol::HistoryItem::user(protocol::Content::text("visible")),
+        ];
+        command.history.final_len = HistoryLen::new(4);
+        writer.commit_session(&command).unwrap();
+        writer
+            .conn
+            .execute(
+                "UPDATE objects SET codec = 'none', raw_size = 0, stored_size = 0, bytes = x''",
+                [],
+            )
+            .unwrap();
+        let reader =
+            LineageSessionReader::open_existing_in_lineage(root.path(), writer.lineage_id(), &id)
+                .unwrap();
+        assert!(reader.snapshot().is_err());
+        assert!(reader.history_range(0, 4).is_err());
+        assert_eq!(
+            reader
+                .history_last_context_note_index_before(0, "shared")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reader
+                .history_last_context_note_index_before(1, "shared")
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            reader
+                .history_last_context_note_index_before(u64::MAX, "shared")
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            reader
+                .history_last_context_note_index_before(u64::MAX, "missing")
+                .unwrap(),
+            None
+        );
+        assert_eq!(reader.history_mode_before(2).unwrap(), None);
+        assert_eq!(reader.history_mode_before(3).unwrap(), Some("plan".into()));
+        assert_eq!(reader.history_base_mode_range(0..2).unwrap(), None);
+        assert_eq!(
+            reader.history_base_mode_range(2..3).unwrap(),
+            Some("normal".into())
+        );
+        assert!(!reader.history_any_transcript_visible_before(2).unwrap());
+        assert!(reader.history_any_transcript_visible_before(3).unwrap());
+        assert_eq!(
+            reader.store_head().unwrap().transcript_record_count.get(),
+            0
+        );
+    }
+
     fn install_reconciled_catalog_hint(sessions_root: &Path, id: &str, lineage_id: &str) {
         let mut catalog = Catalog::open(
             crate::SessionStoreLayout::from_sessions_root(sessions_root).catalog_path(),
@@ -1575,6 +3228,7 @@ mod tests {
                     title: Some("catalog hint".into()),
                     slug: None,
                     first_user_message: None,
+                    first_user_message_id: None,
                     cwd: Some("/workspace".into()),
                     mode: Some("agent".into()),
                     reasoning_effort: None,
@@ -1960,6 +3614,144 @@ mod tests {
     }
 
     #[test]
+    fn public_fork_copies_verified_roots_without_hydrating_retained_bodies() {
+        for events in [0, 32, 128] {
+            let root = tempfile::tempdir().unwrap();
+            let source_id = session_id('a');
+            let target_id = session_id('b');
+            let mut source = OwnedLineageWriter::open(root.path(), &source_id).unwrap();
+            let mut command = initial_commit(&source_id);
+            command.metadata.first_user_message = Some("synthetic retained message α".repeat(1024));
+            command.metadata.checkpoint_events_json = Some(serde_json::Value::Array(
+                (0..events)
+                    .map(|index| {
+                        serde_json::json!({
+                            "kind": "auto", "summary": "synthetic archive ".repeat(2048),
+                            "first_live_index": 0, "completed_at_history_len": 1,
+                            "created_at_ms": index,
+                        })
+                    })
+                    .collect(),
+            ));
+            let initial = source.commit_session(&command).unwrap();
+            let immutable_revision = source.snapshot().unwrap().revision_id;
+            command.expected = initial.current;
+            let submitted = source
+                .submit_turn(&SubmitTurn {
+                    session: command,
+                    turn: NewTurn {
+                        kind: TurnKind::Command,
+                        submitted_history_idx: HistoryIndex::ZERO,
+                        continuation_of: None,
+                        created_at_ms: 2,
+                    },
+                })
+                .unwrap();
+            assert_eq!(submitted.session.current, initial.current);
+            source.release().unwrap();
+            let mut source = OwnedLineageWriter::open_existing(root.path(), &source_id).unwrap();
+            let recovery = source.take_startup_recovery().unwrap();
+            assert_eq!(recovery.interrupted_turns, vec![submitted.turn_id]);
+            let saved = recovery.session.receipt;
+            let original = source.snapshot().unwrap();
+            assert!(saved.current.revision > initial.current.revision);
+            assert_eq!(original.revision_id, immutable_revision);
+            let head = lineage::lineage_session_head(&source.conn, &source.lineage, &source.branch)
+                .unwrap();
+            assert_eq!(head.head, saved.current);
+            assert_eq!(head.revision_id.as_str(), immutable_revision);
+            let (hash, bytes) = source
+                .conn
+                .query_row(
+                    "SELECT object.hash, object.bytes FROM lineage_revision_state_roots archive
+                 JOIN lineage_revisions revision ON revision.lineage_id = archive.lineage_id
+                   AND revision.state_payload_id = archive.state_payload_id
+                 JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+                   AND root.root_id = archive.root_id AND root.item_count = 1 AND root.depth = 1
+                 JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+                   AND entry.node_id = root.root_node_id AND entry.entry_index = 0
+                 JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+                   AND payload.payload_id = entry.payload_id
+                 JOIN objects object ON object.hash = payload.object_hash
+                 WHERE revision.lineage_id = ?1 AND revision.revision_id = ?2
+                   AND archive.role = 'first_user_message'",
+                    (source.lineage_id(), &original.revision_id),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                source
+                    .conn
+                    .execute(
+                        "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
+                        [&hash],
+                    )
+                    .unwrap(),
+                1
+            );
+            assert!(
+                source.snapshot().is_err(),
+                "cold source validation detects body corruption"
+            );
+            assert_eq!(source.store_head().unwrap(), saved.current);
+
+            let (destination, result) = OwnedLineageWriter::fork_from(
+                root.path(),
+                &source_id,
+                &target_id,
+                2,
+                Some(saved.current),
+                &|| false,
+            )
+            .expect("root-copy fork must not hydrate unchanged message or checkpoint bodies");
+            assert_eq!(result.source_session_id, source_id);
+            assert_eq!(result.source_head, saved.current);
+            assert_eq!(result.session.revision_id, immutable_revision);
+            let receipt = result.session.receipt;
+            assert_eq!(receipt.previous, StoreHead::default());
+            assert_eq!(receipt.current.revision, crate::Revision::new(1));
+            assert_eq!(receipt.current.history_len, saved.current.history_len);
+            assert_eq!(
+                receipt.current.transcript_record_count,
+                saved.current.transcript_record_count
+            );
+            assert_eq!(receipt.history_text_bytes, saved.history_text_bytes);
+            assert_eq!(source.store_head().unwrap(), saved.current);
+            assert!(
+                destination.snapshot().is_err(),
+                "fork does not bypass cold validation"
+            );
+            source
+                .conn
+                .execute(
+                    "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
+                    (&bytes, &hash),
+                )
+                .unwrap();
+            let copied = destination.snapshot().unwrap();
+            assert_eq!(copied.revision_id, original.revision_id);
+            assert_eq!(copied.history_root_id, original.history_root_id);
+            assert_eq!(copied.transcript_root_id, original.transcript_root_id);
+            assert_eq!(copied.side_tables, original.side_tables);
+            assert_eq!(
+                copied.metadata.first_user_message,
+                original.metadata.first_user_message
+            );
+            assert_eq!(
+                copied.metadata.checkpoint_events_json,
+                original.metadata.checkpoint_events_json
+            );
+            assert_eq!(
+                copied.identity.parent_id.as_deref(),
+                Some(source_id.as_str())
+            );
+            assert_eq!(source.snapshot().unwrap(), original);
+            destination.release().unwrap();
+            source.release().unwrap();
+        }
+    }
+
+    #[test]
     fn fork_checks_the_source_head_before_creating_the_destination() {
         let root = tempfile::tempdir().unwrap();
         let source_id = session_id('a');
@@ -1989,7 +3781,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(destination.session_id(), target_id);
-        assert_eq!(destination.store_head().unwrap(), receipt.current);
+        assert_eq!(receipt.source_session_id, source_id);
+        assert_eq!(receipt.source_head, updated.current);
+        assert_eq!(
+            destination.store_head().unwrap(),
+            receipt.session.receipt.current
+        );
         assert_eq!(source.store_head().unwrap(), updated.current);
         assert!(matches!(
             OwnedLineageWriter::open_existing(root.path(), &target_id),
@@ -2103,6 +3900,21 @@ mod tests {
 
     #[test]
     fn lineage_writer_owns_one_database_and_common_fork_writes_only_metadata() {
+        let _ = common_fork_p95();
+    }
+
+    #[test]
+    #[ignore = "optimized wall-clock benchmark; run in isolation"]
+    fn common_fork_latency_benchmark() {
+        let p95 = common_fork_p95();
+        println!("COMMON_FORK_LATENCY forks=100 p95={p95:?}");
+        assert!(
+            p95 < std::time::Duration::from_millis(100),
+            "100-fork p95 exceeded the interaction ceiling: {p95:?}"
+        );
+    }
+
+    fn common_fork_p95() -> std::time::Duration {
         let root = tempfile::tempdir().unwrap();
         let source_id = session_id('a');
         let target_id = session_id('b');
@@ -2132,11 +3944,7 @@ mod tests {
             assert_eq!(fork.current.history_len, HistoryLen::new(1));
         }
         fork_durations.sort_unstable();
-        assert!(
-            fork_durations[94] < std::time::Duration::from_millis(100),
-            "100-fork p95 exceeded the interaction ceiling: {:?}",
-            fork_durations[94]
-        );
+        let p95 = fork_durations[94];
         assert_eq!(row_count(&writer.conn, "lineage_branches"), 101);
         let storage_growth =
             sqlite_storage_bytes(&writer.database_path()).saturating_sub(storage_before);
@@ -2168,6 +3976,7 @@ mod tests {
             target.history_range(0, 1).unwrap(),
             vec![protocol::HistoryItem::system("first")]
         );
+        p95
     }
 
     #[test]
@@ -2281,8 +4090,33 @@ mod tests {
         let mut record_profiles = row_count(&writer.conn, "lineage_transcript_record_profiles");
         let mut reclaimed_profile = false;
         let mut complete = false;
-        for _ in 0..512 {
+        let snapshot = writer.snapshot().unwrap();
+        let vm_steps = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut peak_vm_steps = 0;
+        let step_limit = row_count(&writer.conn, "lineage_sequence_entries")
+            .saturating_add(row_count(&writer.conn, "lineage_payload_object_refs"))
+            .saturating_mul(8)
+            .saturating_add(256);
+        for _ in 0..step_limit {
+            vm_steps.store(0, std::sync::atomic::Ordering::Relaxed);
+            let counter = vm_steps.clone();
+            writer
+                .conn
+                .progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .unwrap();
             let reclamation = writer.reclaim_step(1).unwrap();
+            writer
+                .conn
+                .progress_handler(0, None::<fn() -> bool>)
+                .unwrap();
+            peak_vm_steps = peak_vm_steps.max(vm_steps.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(reclamation.work_rows() <= 1);
             let remaining_nodes = row_count(&writer.conn, "lineage_transcript_extent_nodes");
             let remaining_records = row_count(&writer.conn, "lineage_transcript_record_profiles");
             assert!(node_profiles.saturating_sub(remaining_nodes) <= 1);
@@ -2297,6 +4131,12 @@ mod tests {
             }
         }
         assert!(complete);
+        assert_eq!(writer.snapshot().unwrap(), snapshot);
+        println!("public GC deleted suffix: peak_vm_steps={peak_vm_steps}");
+        assert!(
+            peak_vm_steps < 16_384,
+            "one-row deleted-suffix GC used {peak_vm_steps} VM steps"
+        );
         assert!(reclaimed_profile);
         assert!(node_profiles > 0 && node_profiles <= retained_node_profiles);
         assert!(record_profiles > 0 && record_profiles <= retained_record_profiles);
@@ -2847,6 +4687,437 @@ mod tests {
     }
 
     #[test]
+    fn cold_search_pruning_removes_multiple_obsolete_segments_and_is_idempotent() {
+        for corrupt_late_segment in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('1');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            let mut command = initial_commit(&id);
+            command.transcript_records = Some(crate::TranscriptRecordSuffix {
+                start: crate::TranscriptRecordIndex::ZERO,
+                records: (0..1024)
+                    .map(|index| transcript_record(index, format!("retained initial {index}")))
+                    .collect(),
+            });
+            let original = command.clone();
+            let receipt = writer.commit_session(&command).unwrap();
+            let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+            let projector = writer.spawn_search_projector().unwrap();
+            projector.request();
+            assert_eq!(wait_for_search_projection(&reader).ready_segments, 1);
+            assert_eq!(writer.prune_search_projection().unwrap(), 0);
+            for batch in 1..=2 {
+                command.expected = writer.store_head().unwrap();
+                command.metadata.updated_at = batch + 1;
+                command.history = HistorySuffix {
+                    start: HistoryIndex::new(1),
+                    final_len: HistoryLen::new(1),
+                    items: Vec::new(),
+                };
+                command.side_tables.start = HistoryIndex::new(1);
+                let start = batch as u64 * 1024;
+                command.transcript_records = Some(crate::TranscriptRecordSuffix {
+                    start: crate::TranscriptRecordIndex::new(start),
+                    records: (start..start + 1024)
+                        .map(|index| transcript_record(index, format!("obsolete suffix {index}")))
+                        .collect(),
+                });
+                writer.commit_session(&command).unwrap();
+                projector.request();
+                assert_eq!(
+                    wait_for_search_projection(&reader).ready_segments,
+                    batch as usize + 1
+                );
+            }
+            drop(projector);
+            if corrupt_late_segment {
+                let search = Connection::open(reader.search_database_path()).unwrap();
+                let damaged = search
+                    .execute(
+                        "UPDATE search_short_postings SET docs = x'80'
+             WHERE segment_id = (SELECT MAX(segment_id) FROM search_segments)",
+                        [],
+                    )
+                    .unwrap();
+                assert!(damaged > 0);
+                drop(search);
+                assert_eq!(
+                    reader.search_projection_status().unwrap().state,
+                    crate::SearchProjectionState::Corrupt
+                );
+                let projector = writer.spawn_search_projector().unwrap();
+                projector.request();
+                assert_eq!(wait_for_search_projection(&reader).ready_segments, 3);
+                drop(projector);
+            }
+            writer.rewind_to_sequence(1, 4).unwrap();
+            if corrupt_late_segment {
+                // The reset rebuilt the current root, not its historical manifests.
+                assert_eq!(
+                    reader.search_projection_status().unwrap().state,
+                    crate::SearchProjectionState::Partial
+                );
+                let projector = writer.spawn_search_projector().unwrap();
+                projector.request();
+                assert_eq!(wait_for_search_projection(&reader).ready_segments, 1);
+                drop(projector);
+            }
+            let snapshot = writer.snapshot().unwrap();
+            assert_eq!(writer.prune_search_projection().unwrap(), 2);
+            assert_eq!(writer.prune_search_projection().unwrap(), 0);
+            assert_eq!(writer.snapshot().unwrap(), snapshot);
+            assert_eq!(writer.commit_session(&original).unwrap(), receipt);
+            assert_eq!(
+                reader.search_projection_status().unwrap().state,
+                crate::SearchProjectionState::Current
+            );
+            assert!(reader
+                .search_transcript_candidate_page(
+                    "obsolete suffix",
+                    None,
+                    crate::TranscriptSearchDirection::Forward,
+                    10,
+                )
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                reader
+                    .search_transcript_candidate_page(
+                        "retained initial",
+                        None,
+                        crate::TranscriptSearchDirection::Forward,
+                        3,
+                    )
+                    .unwrap()
+                    .len(),
+                3
+            );
+            let search = Connection::open_with_flags(
+                reader.search_database_path(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap();
+            let (segments, obsolete_hits, manifests): (i64, i64, i64) = search
+                .query_row(
+                    "SELECT (SELECT count(*) FROM search_segments),
+                    (SELECT count(*) FROM search_fts WHERE search_fts MATCH 'obs'),
+                    (SELECT count(*) FROM search_root_manifests)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((segments, obsolete_hits, manifests), (1, 0, 1));
+        }
+    }
+
+    #[test]
+    fn cold_search_pruning_preserves_ready_cache_under_writer_contention() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('2');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: (0..1024)
+                .map(|index| transcript_record(index, format!("retained initial {index}")))
+                .collect(),
+        });
+        let original = command.clone();
+        let receipt = writer.commit_session(&command).unwrap();
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        let projector = writer.spawn_search_projector().unwrap();
+        projector.request();
+        assert_eq!(wait_for_search_projection(&reader).ready_segments, 1);
+        command.expected = receipt.current;
+        command.metadata.updated_at = 2;
+        command.history = HistorySuffix {
+            start: HistoryIndex::new(1),
+            final_len: HistoryLen::new(1),
+            items: Vec::new(),
+        };
+        command.side_tables.start = HistoryIndex::new(1);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::new(1024),
+            records: (1024..2048)
+                .map(|index| transcript_record(index, format!("obsolete suffix {index}")))
+                .collect(),
+        });
+        writer.commit_session(&command).unwrap();
+        projector.request();
+        assert_eq!(wait_for_search_projection(&reader).ready_segments, 2);
+        drop(projector);
+        writer.rewind_to_sequence(1, 3).unwrap();
+        let snapshot = writer.snapshot().unwrap();
+        let candidates = reader
+            .search_transcript_candidate_page(
+                "retained initial",
+                None,
+                crate::TranscriptSearchDirection::Forward,
+                3,
+            )
+            .unwrap();
+        let path = reader.search_database_path();
+        let search = Connection::open(&path).unwrap();
+        let segments = || {
+            search
+                .query_row("SELECT count(*) FROM search_segments", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(segments(), 2);
+        search.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for stale_manifests in [true, false] {
+            if !stale_manifests {
+                assert_eq!(
+                    search
+                        .execute(
+                            "DELETE FROM search_root_manifests WHERE item_count = 2048",
+                            [],
+                        )
+                        .unwrap(),
+                    1
+                );
+            }
+            search.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let result = writer.prune_search_projection();
+            assert_eq!(writer.snapshot().unwrap(), snapshot);
+            assert_eq!(writer.commit_session(&original).unwrap(), receipt);
+            assert!(
+                path.exists(),
+                "contended pruning removed a healthy derived search database: {result:?}"
+            );
+            assert!(
+                matches!(result,
+                    Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
+                        if error.code == rusqlite::ErrorCode::DatabaseBusy
+                ),
+                "contended pruning must report busy, not repair or succeed"
+            );
+            assert_eq!(segments(), 2);
+            assert_eq!(
+                reader.search_projection_status().unwrap().state,
+                crate::SearchProjectionState::Current
+            );
+            assert_eq!(
+                reader
+                    .search_transcript_candidate_page(
+                        "retained initial",
+                        None,
+                        crate::TranscriptSearchDirection::Forward,
+                        3,
+                    )
+                    .unwrap(),
+                candidates
+            );
+            search.execute_batch("ROLLBACK").unwrap();
+        }
+        assert_eq!(writer.prune_search_projection().unwrap(), 1);
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
+        assert_eq!(segments(), 1);
+        assert_eq!(
+            reader.search_projection_status().unwrap().state,
+            crate::SearchProjectionState::Current
+        );
+        assert_eq!(
+            reader
+                .search_transcript_candidate_page(
+                    "retained initial",
+                    None,
+                    crate::TranscriptSearchDirection::Forward,
+                    3,
+                )
+                .unwrap(),
+            candidates
+        );
+        assert_eq!(writer.snapshot().unwrap(), snapshot);
+        assert_eq!(writer.commit_session(&original).unwrap(), receipt);
+        assert!(reader.doctor_report().unwrap().healthy);
+    }
+
+    #[test]
+    fn cold_search_pruning_rebuilds_after_canonical_source_reclamation() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('2');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: (0..1024)
+                .map(|index| transcript_record(index, format!("retained needle {index}")))
+                .collect(),
+        });
+        let original = command.clone();
+        let receipt = writer.commit_session(&command).unwrap();
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        let projector = writer.spawn_search_projector().unwrap();
+        projector.request();
+        assert_eq!(wait_for_search_projection(&reader).ready_segments, 1);
+        command.expected = receipt.current;
+        command.metadata.updated_at = 2;
+        command.history = HistorySuffix {
+            start: HistoryIndex::new(1),
+            final_len: HistoryLen::new(1),
+            items: Vec::new(),
+        };
+        command.side_tables.start = HistoryIndex::new(1);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::new(1024),
+            records: vec![transcript_record(1024, "obsolete suffix".into())],
+        });
+        writer.commit_session(&command).unwrap();
+        projector.request();
+        assert_eq!(wait_for_search_projection(&reader).ready_segments, 2);
+        drop(projector);
+        writer.rewind_to_sequence(1, 3).unwrap();
+        let snapshot = writer.snapshot().unwrap();
+        let candidates = reader
+            .search_transcript_candidate_page(
+                "needle",
+                None,
+                crate::TranscriptSearchDirection::Forward,
+                3,
+            )
+            .unwrap();
+        let search_path = reader.search_database_path();
+        let source_nodes = {
+            let search = Connection::open(&search_path).unwrap();
+            let mut leaves = search
+                .prepare("SELECT node_id FROM search_source_leaves")
+                .unwrap();
+            let nodes = leaves
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            nodes
+        };
+        let mut complete = false;
+        for _ in 0..lineage::reclamation_step_limit(&writer.conn, &writer.lineage) {
+            let step = writer.reclaim_step(1).unwrap();
+            assert!(step.work_rows() <= 1);
+            if step.complete {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete);
+        assert!(
+            source_nodes.iter().any(|node| {
+                !writer
+                    .conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM lineage_sequence_nodes
+                 WHERE lineage_id = ?1 AND node_id = ?2)",
+                        (writer.lineage.as_str(), node),
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap()
+            }),
+            "fixture must actually reclaim an obsolete projected leaf"
+        );
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
+        assert!(!search_path.exists());
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
+        assert_eq!(
+            reader
+                .search_transcript_candidate_page(
+                    "needle",
+                    None,
+                    crate::TranscriptSearchDirection::Forward,
+                    3,
+                )
+                .unwrap(),
+            candidates
+        );
+        let projector = writer.spawn_search_projector().unwrap();
+        projector.request();
+        assert_eq!(wait_for_search_projection(&reader).ready_segments, 1);
+        drop(projector);
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
+        assert_eq!(writer.snapshot().unwrap(), snapshot);
+        assert_eq!(writer.commit_session(&original).unwrap(), receipt);
+        assert!(reader.doctor_report().unwrap().healthy);
+    }
+
+    #[test]
+    fn cold_search_open_and_projector_preserve_cache_under_exclusive_contention() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('2');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: (0..70)
+                .map(|index| transcript_record(index, format!("retained needle {index}")))
+                .collect(),
+        });
+        let receipt = writer.commit_session(&command).unwrap();
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        let projector = writer.spawn_search_projector().unwrap();
+        projector.request();
+        wait_for_search_projection(&reader);
+        drop(projector);
+        let snapshot = writer.snapshot().unwrap();
+        let candidates = reader
+            .search_transcript_candidate_page(
+                "needle",
+                None,
+                crate::TranscriptSearchDirection::Forward,
+                10,
+            )
+            .unwrap();
+        let path = reader.search_database_path();
+        let search = Connection::open(&path).unwrap();
+        search
+            .execute_batch("PRAGMA journal_mode = DELETE")
+            .unwrap();
+        let original_bytes = fs::read(&path).unwrap();
+        search.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(matches!(writer.prune_search_projection(),
+            Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+        let projector = writer.spawn_search_projector().unwrap();
+        projector.request();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !projector.is_idle() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(projector.latest_error().unwrap().contains("locked"));
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+        search.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            reader.search_projection_status().unwrap().state,
+            crate::SearchProjectionState::Current
+        );
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
+        projector.request();
+        wait_for_search_projection(&reader);
+        while !projector.is_idle() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(projector.latest_error(), None);
+        assert_eq!(
+            reader
+                .search_transcript_candidate_page(
+                    "needle",
+                    None,
+                    crate::TranscriptSearchDirection::Forward,
+                    10,
+                )
+                .unwrap(),
+            candidates
+        );
+        assert_eq!(writer.snapshot().unwrap(), snapshot);
+        assert_eq!(writer.commit_session(&command).unwrap(), receipt);
+        assert!(reader.doctor_report().unwrap().healthy);
+    }
+
+    #[test]
     fn missing_corrupt_and_incomplete_search_projection_falls_back_and_rebuilds() {
         let root = tempfile::tempdir().unwrap();
         let session_id = session_id('4');
@@ -2908,9 +5179,10 @@ mod tests {
                 .unwrap(),
             expected
         );
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
         loop {
             let reclamation = writer.reclaim_step(1).unwrap();
-            assert_eq!(reclamation.search_segments_deleted, 0);
+            assert!(reclamation.work_rows() <= 1);
             if reclamation.complete {
                 break;
             }
@@ -2939,6 +5211,7 @@ mod tests {
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
         assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
             crate::SearchProjectionState::Partial
@@ -2971,6 +5244,7 @@ mod tests {
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
         assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
             crate::SearchProjectionState::Partial
@@ -3007,6 +5281,7 @@ mod tests {
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
         assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
             crate::SearchProjectionState::Partial
@@ -3016,6 +5291,38 @@ mod tests {
         let rebuilt = wait_for_search_projection(&reader);
         assert_eq!(rebuilt.ready_segments, rebuilt.total_segments);
         drop(projector);
+
+        for table in [
+            "search_meta",
+            "search_root_manifests",
+            "search_source_leaves",
+        ] {
+            let search = Connection::open(&search_path).unwrap();
+            search
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .unwrap();
+            drop(search);
+            assert_eq!(writer.prune_search_projection().unwrap(), 0);
+            assert_eq!(
+                reader.search_projection_status().unwrap().state,
+                crate::SearchProjectionState::Partial
+            );
+            let projector = writer.spawn_search_projector().unwrap();
+            projector.request();
+            wait_for_search_projection(&reader);
+            drop(projector);
+            assert_eq!(
+                reader
+                    .search_transcript_candidate_page(
+                        "needle",
+                        None,
+                        crate::TranscriptSearchDirection::Forward,
+                        10,
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
 
         let search = Connection::open(&search_path).unwrap();
         search
@@ -3046,6 +5353,7 @@ mod tests {
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
         assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
             crate::SearchProjectionState::Missing
@@ -3228,17 +5536,25 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let mut search_segments_deleted = 0usize;
-        for _ in 0..10_000 {
+        assert_eq!(writer.prune_search_projection().unwrap(), 1);
+        assert_eq!(writer.prune_search_projection().unwrap(), 0);
+        let mut complete = false;
+        let mut calls = 0;
+        let step_limit = lineage::reclamation_step_limit(&writer.conn, &writer.lineage);
+        for _ in 0..step_limit {
             let step = writer.reclaim_step(1).unwrap();
+            calls += 1;
             assert!(step.work_rows() <= 1);
-            search_segments_deleted =
-                search_segments_deleted.saturating_add(step.search_segments_deleted);
+            assert!(step.complete || step.made_progress());
             if step.complete {
+                complete = true;
                 break;
             }
         }
-        assert_eq!(search_segments_deleted, 1);
+        eprintln!(
+            "search/fork reclamation: calls={calls} step_limit={step_limit} complete={complete}"
+        );
+        assert!(complete, "search/fork reclamation did not complete");
         assert_eq!(segment_count(), 1);
         let search = Connection::open_with_flags(
             &search_path,
@@ -3533,6 +5849,102 @@ mod tests {
     }
 
     #[test]
+    fn receipt_result_ownership_survives_rewind_gc_reopen_and_noop_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('c');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let first = writer.commit_session(&initial_commit(&id)).unwrap();
+        let mut changed = initial_commit(&id);
+        changed.expected = first.current;
+        changed.history.start = HistoryIndex::new(1);
+        changed.history.items.clear();
+        changed.metadata = metadata(2, "retained result");
+        changed.metadata.first_user_message = Some("synthetic retained message α\n".repeat(512));
+        changed.metadata.checkpoint_json = Some(serde_json::json!({
+            "kind": "auto", "summary": "synthetic retained summary 日本語\n".repeat(512),
+            "first_live_index": 0, "completed_at_history_len": 1, "created_at_ms": 2,
+        }));
+        changed.metadata.checkpoint_events_json = Some(serde_json::json!([changed
+            .metadata
+            .checkpoint_json
+            .clone()
+            .unwrap()]));
+        changed.side_tables.start = HistoryIndex::new(1);
+        changed.side_tables.metadata_snapshots.push((
+            HistoryIndex::new(1),
+            serde_json::json!({"title": changed.metadata.title,
+                "first_user_message": changed.metadata.first_user_message}),
+        ));
+        let second = writer.commit_session(&changed).unwrap();
+        let original = writer.snapshot().unwrap();
+        let mut noop = changed;
+        noop.expected = second.current;
+        let owned = writer.commit_session_with_result(&noop).unwrap();
+        assert_eq!(owned.revision_id, original.revision_id);
+        let receipt = owned.receipt;
+        assert_eq!(receipt.current, second.current);
+        let exact_receipt = serde_json::to_vec(&receipt).unwrap();
+        let rewind = writer.rewind_to_sequence(1, 3).unwrap();
+        assert!(rewind.current.revision > receipt.current.revision);
+        assert_ne!(writer.snapshot().unwrap().revision_id, original.revision_id);
+        let mut complete = false;
+        for _ in 0..1000 {
+            let step = writer.reclaim_step(1).unwrap();
+            assert!(step.work_rows() <= 1);
+            if step.complete {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "bounded fixture reclamation must finish");
+        let lineage_id = writer.lineage_id().to_owned();
+        writer.release().unwrap();
+        let mut writer =
+            OwnedLineageWriter::open_existing_in_lineage(root.path(), &lineage_id, &id).unwrap();
+        let replay = writer.commit_session_with_result(&noop).unwrap();
+        assert_eq!(replay.revision_id, original.revision_id);
+        let replay = replay.receipt;
+        assert_eq!(serde_json::to_vec(&replay).unwrap(), exact_receipt);
+        assert_eq!(writer.store_head().unwrap(), rewind.current);
+        let lineage = LineageId::from_hex(lineage_id).unwrap();
+        let branch = BranchId::new(id).unwrap();
+        let result = lineage::branch_revision_at_sequence(
+            &writer.conn,
+            &lineage,
+            &branch,
+            replay.current.revision.get(),
+        );
+        assert!(result.is_ok(),
+            "a result-owning receipt must retain its exact revision after rewind, GC and replay: {result:?}");
+        let result = lineage::load_revision(&writer.conn, &lineage, &result.unwrap()).unwrap();
+        assert_eq!(result.id().as_str(), original.revision_id);
+        let state = serde_json::to_value(
+            lineage::load_revision_state(&writer.conn, &lineage, &result).unwrap(),
+        )
+        .unwrap();
+        for (field, expected) in [
+            (
+                "first_user_message",
+                serde_json::to_value(original.metadata.first_user_message).unwrap(),
+            ),
+            (
+                "checkpoint_json",
+                serde_json::to_value(original.metadata.checkpoint_json).unwrap(),
+            ),
+            (
+                "checkpoint_events_json",
+                serde_json::to_value(original.metadata.checkpoint_events_json).unwrap(),
+            ),
+        ] {
+            assert_eq!(state["metadata"][field], expected);
+        }
+        assert_eq!(
+            state["side_tables"],
+            serde_json::to_value(original.side_tables).unwrap()
+        );
+    }
+
+    #[test]
     fn degraded_direct_search_yields_promptly_when_its_generation_is_cancelled() {
         let root = tempfile::tempdir().unwrap();
         let id = session_id('e');
@@ -3619,6 +6031,7 @@ mod tests {
             Some(running_receipt.clone())
         );
         assert_eq!(writer.transition_turn(&running).unwrap(), running_receipt);
+        let immutable_revision = writer.snapshot().unwrap().revision_id;
         writer.release().unwrap();
 
         let mut reopened = OwnedLineageWriter::open_existing(root.path(), &id).unwrap();
@@ -3626,9 +6039,14 @@ mod tests {
             .take_startup_recovery()
             .expect("running turn is interrupted before the writer becomes available");
         assert_eq!(recovery.interrupted_turns, vec![receipt.turn_id]);
-        assert_eq!(recovery.session.previous, running_receipt.session.current);
+        assert_eq!(recovery.session.revision_id, immutable_revision);
+        assert_eq!(reopened.snapshot().unwrap().revision_id, immutable_revision);
         assert_eq!(
-            recovery.session.current.revision.get(),
+            recovery.session.receipt.previous,
+            running_receipt.session.current
+        );
+        assert_eq!(
+            recovery.session.receipt.current.revision.get(),
             running_receipt.session.current.revision.get() + 1
         );
         assert_eq!(

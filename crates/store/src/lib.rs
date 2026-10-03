@@ -14,6 +14,7 @@ mod request_audit;
 mod schema;
 mod session_command;
 mod session_commit;
+mod session_compact;
 mod session_writer;
 mod snapshot;
 mod write_transaction;
@@ -122,6 +123,7 @@ pub use history::{
     TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice, TranscriptRowLocation,
     TranscriptSearchCandidate, TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
+pub use lineage::{ObjectSharingCursor, ObjectSharingStep};
 pub use lineage_access::{
     cleanup_abandoned_lineages, lineage_session_ids, lineage_session_locations,
     verify_lineage_backup, LineageReclamation, LineageSessionLocation, LineageSessionReader,
@@ -131,7 +133,7 @@ pub use lineage_search::{
     LineageSearchProjector, SearchProjectionState, SearchProjectionStatus, SEARCH_FORMAT_VERSION,
 };
 pub use meta::{SessionCostUsd, SessionIdentity, SessionMetadata};
-pub use object::{ObjectCodec, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
+pub use object::{ObjectCodec, ObjectLayout, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
 pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
     RequestAuditStats, RequestAuditSummary,
@@ -142,9 +144,18 @@ pub use session_command::{
 };
 pub use session_commit::{
     HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix, NewTurn, Revision, SaveReceipt,
-    SessionCommit, SessionCommitFailure, SideTableSuffixes, StartupRecoveryReceipt, StoreHead,
-    StoredTurn, SubmitTurn, SubmitTurnReceipt, TranscriptRecordCount, TranscriptRecordIndex,
-    TranscriptRecordSuffix, TurnId, TurnKind, TurnState, TurnTransition, TurnTransitionReceipt,
+    SessionCommit, SessionCommitFailure, SessionCommitResult, SessionForkResult, SideTableSuffixes,
+    StartupRecoveryReceipt, StartupRecoveryResult, StoreHead, StoredTurn, SubmitTurn,
+    SubmitTurnReceipt, TranscriptRecordCount, TranscriptRecordIndex, TranscriptRecordSuffix,
+    TurnId, TurnKind, TurnState, TurnTransition, TurnTransitionReceipt,
+};
+pub use session_compact::{
+    compact_session_commit_fingerprint, compact_submit_turn_fingerprint,
+    compact_turn_transition_fingerprint, ArchiveEdit, ArchiveRow, CheckpointEdit,
+    CheckpointEventsEdit, CheckpointRecord, CheckpointSummary, CompactSessionArchives,
+    CompactSessionCommit, CompactSubmitTurn, CompactSubmitTurnResult, CompactTurnTransition,
+    CompactTurnTransitionResult, MetadataArchiveRow, MetadataMessage, SessionAccounting,
+    SessionArchiveBase, SessionContextIdentity, SessionScalars, SessionTokenUsage, ValueEdit,
 };
 pub use session_writer::{
     SessionBatchBarrier, SessionEventBatch, SessionEventCommand, SessionEventReceipt,

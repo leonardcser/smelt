@@ -603,6 +603,7 @@ fn usage_dialog_opened_during_active_turn_stays_dismissible() {
         let mut app = TestApp::builder().build();
         app.type_text("start working");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         assert!(
             app.agent_running(),
             "submitting a prompt should start a turn"

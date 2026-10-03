@@ -173,6 +173,7 @@ fn paused_prompt_still_queues_messages_and_resumes_on_empty_enter() {
         kind: Some(protocol::EngineAskErrorKind::Network),
         retry_at_ms: None,
     }));
+    app.wait_for_turn_persistence();
 
     app.type_text("queued turn");
     app.press(KeyCode::Enter);
@@ -191,6 +192,7 @@ fn paused_prompt_still_queues_messages_and_resumes_on_empty_enter() {
     );
 
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
 }
 
@@ -257,8 +259,13 @@ fn non_quota_retry_metadata_does_not_publish_continuation_token() {
 }
 
 fn run_due_timers(app: &mut TestApp, ms: u64) -> Vec<protocol::UiCommand> {
+    app.app.drain_persist_reports();
+    app.pump_lua();
     app.feed_one(SourceEvent::Tick(ms));
     app.tick_timers();
+    if app.agent_running() || app.app.turn_submission_is_pending() {
+        app.wait_for_turn_persistence();
+    }
     app.drain_engine_sends()
 }
 
@@ -270,6 +277,7 @@ fn has_started_turn(cmds: &[protocol::UiCommand]) -> bool {
 fn start_canonical_turn(app: &mut TestApp) -> u64 {
     app.type_text("initial request");
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_persistence();
     let turn_id = app.current_turn_id().expect("canonical turn starts");
     let _ = app.drain_engine_sends();
     turn_id
@@ -319,6 +327,7 @@ fn goal_auto_continues_after_recoverable_quota_error() {
         kind: Some(protocol::EngineAskErrorKind::Quota),
         retry_at_ms: Some(0),
     }));
+    app.wait_for_turn_persistence();
 
     assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
 }
@@ -351,6 +360,7 @@ fn auto_continue_always_continues_without_goal() {
         history: None,
         meta: None,
     }));
+    app.wait_for_turn_persistence();
 
     assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
 }
@@ -391,6 +401,7 @@ fn quota_error(app: &mut TestApp, retry_at_ms: Option<u64>) {
         kind: Some(protocol::EngineAskErrorKind::Quota),
         retry_at_ms,
     }));
+    app.wait_for_turn_persistence();
 }
 
 fn complete_background_job(app: &mut TestApp) {
@@ -427,6 +438,55 @@ fn quota_pause_blocks_idle_dispatch_and_keeps_both_queue_stages_visible() {
 }
 
 #[test]
+fn rewind_command_resubmits_edited_prompt_before_preserved_queue() {
+    for steering in [false, true] {
+        let mut app = isolated_app();
+        assert!(app.run_lua(
+            r#"
+        smelt.settings.auto_continue = "off"
+        smelt.cmd.register("rewind-first", function()
+            smelt.session.rewind_to(smelt.session.turns()[1].history_idx)
+        end)
+    "#
+        ));
+        app.start_submitted_turn("first request");
+        if steering {
+            app.steer("queued steering");
+        }
+        app.type_text("queued follow-up");
+        app.press(KeyCode::Enter);
+        let release = app.app.conversation.pause_persistence();
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+            message: "quota exceeded".into(),
+            kind: Some(protocol::EngineAskErrorKind::Quota),
+            retry_at_ms: Some(123_000),
+        }));
+        app.type_text("/rewind-first");
+        app.press(KeyCode::Enter);
+        assert_eq!(app.state().prompt_text, "first request");
+        let preserved = if steering {
+            vec!["queued steering", "queued follow-up"]
+        } else {
+            vec!["queued follow-up"]
+        };
+        assert_eq!(app.state().queued_inputs, preserved);
+        assert!(!app.start_next_queued_input_if_idle());
+        app.drain_engine_sends();
+        app.type_text(" edited");
+        app.press(KeyCode::Enter);
+        release.send(()).unwrap();
+        app.wait_for_turn_persistence();
+        assert!(app
+            .drain_engine_sends()
+            .iter()
+            .any(|command| matches!(command,
+        protocol::UiCommand::StartTurn(payload)
+            if payload.input.provider_content().text_content() == "first request edited")));
+        assert_eq!(app.state().queued_inputs, preserved);
+    }
+}
+
+#[test]
 fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
     for to_start in [false, true] {
         for pending_persistence in [false, true] {
@@ -439,7 +499,14 @@ fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
             app.push_queued_message("queued follow-up".into());
             let queued = app.state().queued_inputs;
             let release = pending_persistence.then(|| app.app.conversation.pause_persistence());
-            quota_error(&mut app, Some(123_000));
+            app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+                message: "quota exceeded".into(),
+                kind: Some(protocol::EngineAskErrorKind::Quota),
+                retry_at_ms: Some(123_000),
+            }));
+            if !pending_persistence {
+                app.wait_for_turn_persistence();
+            }
             let retry_token = app.app.conversation.continuation_token().unwrap();
 
             app.rewind_to_history_index(if to_start { None } else { history_idx }, false);
@@ -462,7 +529,7 @@ fn rewind_keeps_existing_queue_paused_until_explicit_submission() {
                 assert!(!app.agent_running(), "submission must wait for persistence");
                 release.send(()).unwrap();
             }
-            app.app.flush_persist();
+            app.wait_for_turn_persistence();
             assert!(
                 app.agent_running(),
                 "explicit Enter must not leave the queue locked"
@@ -526,6 +593,7 @@ fn quota_resume_preserves_command_scope_across_reload_and_cancellation() {
             })
         "#
         ));
+        app.wait_for_turn_persistence();
         assert!(app.agent_running());
         app.push_queued_message("next turn".into());
         let _ = app.drain_engine_sends();
@@ -536,7 +604,8 @@ fn quota_resume_preserves_command_scope_across_reload_and_cancellation() {
         app.reload_lua();
         let commands = if manual {
             app.press(crossterm::event::KeyCode::Enter);
-            Vec::new()
+            app.wait_for_turn_persistence();
+            app.drain_engine_sends()
         } else {
             run_due_timers(&mut app, 1300)
         };
@@ -582,14 +651,13 @@ fn quota_resume_preserves_command_scope_across_reload_and_cancellation() {
             history: None,
             meta: None,
         }));
-        assert!(app
-            .actions()
-            .iter()
-            .any(|action| matches!(action, Action::EngineSend(cmd)
-            if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
+        app.wait_for_turn_persistence();
+        assert!(app.drain_engine_sends().iter().any(
+            |cmd| matches!(cmd, protocol::UiCommand::StartTurn(payload)
                 if payload.input.provider_content().text_content() == "next turn"
                     && payload.permission_overrides.is_none()
-                    && payload.model_target.config.temperature != Some(0.3)))));
+                    && payload.model_target.config.temperature != Some(0.3))
+        ));
     }
 }
 
@@ -610,11 +678,13 @@ fn quota_resume_uses_updated_global_settings_only_without_command_overrides() {
             }})
         "#
         )));
+        app.wait_for_turn_persistence();
         assert!(app.agent_running());
         quota_error(&mut app, Some(0));
         app.apply_model("test/alternate-model", true);
         assert!(app.run_lua(r#"smelt.reasoning.set("low")"#));
         app.press(crossterm::event::KeyCode::Enter);
+        app.wait_for_turn_persistence();
         let expected_model = if scoped {
             original.model_name.as_str()
         } else {
@@ -625,14 +695,12 @@ fn quota_resume_uses_updated_global_settings_only_without_command_overrides() {
         } else {
             protocol::ReasoningEffort::Low
         };
-        assert!(app
-            .actions()
-            .iter()
-            .any(|action| matches!(action, Action::EngineSend(command)
-            if matches!(command.as_ref(), protocol::UiCommand::StartTurn(payload)
+        assert!(app.drain_engine_sends().iter().any(
+            |command| matches!(command, protocol::UiCommand::StartTurn(payload)
                 if payload.input.provider_content().is_empty()
                     && payload.model_target.model == expected_model
-                    && payload.reasoning_effort == expected_effort))));
+                    && payload.reasoning_effort == expected_effort)
+        ));
     }
 }
 
@@ -650,6 +718,7 @@ fn cancelling_quota_pause_also_cancels_foreground_busy_work() {
     assert!(!has_started_turn(&run_due_timers(&mut app, 300_000)));
     assert_eq!(app.state().queued_inputs, vec!["keep queued"]);
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
 }
 
@@ -689,6 +758,7 @@ fn cancelling_from_quota_turn_end_does_not_finalize_the_turn_twice() {
     assert!(!has_started_turn(&run_due_timers(&mut app, 300_000)));
     assert_eq!(app.state().queued_inputs, vec!["keep queued"]);
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
 }
 
@@ -709,6 +779,7 @@ fn quota_recovery_keeps_original_deadline_when_a_retry_omits_metadata() {
             kind: Some(kind),
             retry_at_ms: None,
         }));
+        app.wait_for_turn_persistence();
         assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
         app.reload_lua();
         assert!(app.run_lua(r#"smelt.settings.auto_continue = "goal""#));
@@ -721,6 +792,38 @@ fn quota_recovery_keeps_original_deadline_when_a_retry_omits_metadata() {
 }
 
 #[test]
+fn quota_retry_preserves_deadline_while_terminal_receipt_is_pending() {
+    let mut app = isolated_app();
+    create_auto_goal(&mut app, "retain reset while finalizing");
+    start_canonical_turn(&mut app);
+    let reset = engine::clock::unix_time_ms(app.clock.as_ref()) + 150_000;
+    quota_error(&mut app, Some(reset));
+    assert!(has_started_turn(&run_due_timers(&mut app, 60_000)));
+
+    let release = app.app.conversation.pause_persistence();
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+        message: "provider limit".into(),
+        kind: Some(protocol::EngineAskErrorKind::Quota),
+        retry_at_ms: None,
+    }));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 90_999)));
+    assert!(!has_started_turn(&run_due_timers(&mut app, 1)));
+    assert!(app.run_lua(&format!(
+        r#"
+        assert(smelt.engine.has_active_turn())
+        local status = smelt.signal.get("auto_continue_status")
+        assert(status.next_attempt_at_ms == {})
+        assert(status.phase == "waiting_for_idle")
+        "#,
+        reset + 1000,
+    )));
+    release.send(()).unwrap();
+    app.wait_for_turn_persistence();
+    assert!(!has_started_turn(&run_due_timers(&mut app, 249)));
+    assert!(has_started_turn(&run_due_timers(&mut app, 1)));
+}
+
+#[test]
 fn quota_without_reset_requires_manual_resume_even_in_always_mode() {
     let mut app = isolated_app();
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
@@ -729,9 +832,10 @@ fn quota_without_reset_requires_manual_resume_even_in_always_mode() {
     quota_error(&mut app, None);
     assert!(!has_started_turn(&run_due_timers(&mut app, 60_000)));
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
-    assert!(app.actions().iter().any(|action| matches!(action, Action::EngineSend(cmd)
-        if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().is_empty()))));
+    assert!(app.drain_engine_sends().iter().any(|cmd| matches!(cmd,
+        protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().is_empty())));
     assert_eq!(app.state().queued_inputs.len(), 1);
 }
 
@@ -776,6 +880,7 @@ fn normal_auto_continue_waits_for_background_busy_token() {
         history: None,
         meta: None,
     }));
+    app.wait_for_turn_persistence();
     assert!(app.run_lua(r#"_G.quota_busy = smelt.work.busy("background work")"#));
     assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
     assert!(app.run_lua("_G.quota_busy:remove()"));
@@ -821,6 +926,7 @@ fn background_follow_up_invalidates_old_auto_continue_timer() {
         meta: None,
     }));
     complete_background_job(&mut app);
+    app.wait_for_turn_persistence();
     assert!(has_started_turn(&app.drain_engine_sends()));
     assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
     let turn_id = app.current_turn_id().unwrap();
@@ -829,6 +935,7 @@ fn background_follow_up_invalidates_old_auto_continue_timer() {
         history: None,
         meta: None,
     }));
+    app.wait_for_turn_persistence();
     assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
 }
 
@@ -896,6 +1003,7 @@ fn hybrid_quota_retry_backs_off_to_five_minutes_before_reset() {
                 kind: Some(kind),
                 retry_at_ms: Some(reset),
             }));
+            app.wait_for_turn_persistence();
             assert!(!has_started_turn(&run_due_timers(&mut app, delay - 1)));
             let cmds = run_due_timers(&mut app, 1);
             assert_eq!(
@@ -963,6 +1071,7 @@ fn cancelling_hybrid_quota_retry_clears_backoff_without_losing_queued_work() {
     assert_eq!(app.state().queued_inputs, vec!["keep queued"]);
     assert!(!app.start_next_queued_input_if_idle());
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
 }
 
@@ -978,6 +1087,7 @@ fn hybrid_quota_retry_resets_backoff_after_success_or_manual_resume() {
         if manual {
             quota_error(&mut app, Some(reset));
             app.press(crossterm::event::KeyCode::Enter);
+            app.wait_for_turn_persistence();
         } else {
             let turn_id = app.current_turn_id().unwrap();
             app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
@@ -1034,6 +1144,7 @@ fn nearby_quota_and_rate_limit_resets_preempt_the_first_periodic_retry() {
             kind: Some(kind),
             retry_at_ms: Some(now + 5_000),
         }));
+        app.wait_for_turn_persistence();
         assert!(!has_started_turn(&run_due_timers(&mut app, 5_999)));
         assert!(has_started_turn(&run_due_timers(&mut app, 1)));
         assert!(!has_started_turn(&run_due_timers(&mut app, 10_000)));
@@ -1055,6 +1166,7 @@ fn auto_continue_waits_for_modal_prompt_ownership() {
                 meta: None,
             }));
         }
+        app.wait_for_turn_persistence();
         assert!(app.run_lua("_G.modal_owner = smelt.prompt.acquire()"));
         assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
         assert!(app.run_lua("_G.modal_owner:remove()"));
@@ -1083,6 +1195,7 @@ fn double_escape_stops_quota_retry_but_empty_enter_can_still_resume() {
             "#
         ));
         app.press(crossterm::event::KeyCode::Enter);
+        app.wait_for_turn_persistence();
         assert!(app.agent_running());
         assert_eq!(app.state().queued_inputs, vec!["keep queued"]);
     }
@@ -1140,6 +1253,7 @@ fn quota_pause_status_redraws_on_deadline_and_cancellation() {
     "#
     ));
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
     let resumed = app.render_to_frame().text();
     assert!(!resumed.contains("quota exceeded"), "{resumed}");
@@ -1208,6 +1322,7 @@ fn goal_stop_controls_while_running_prevent_auto_continuation_after_turn_end() {
             let mut app = isolated_app();
             app.type_text("/goal finish the current work");
             app.press(KeyCode::Enter);
+            app.wait_for_turn_persistence();
             let turn_id = app.current_turn_id().expect("goal starts a turn");
             let _ = app.drain_engine_sends();
 
@@ -1241,6 +1356,7 @@ fn goal_resume_controls_while_running_continue_only_after_turn_end() {
         let mut app = isolated_app();
         app.type_text("/goal finish the current work");
         app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
         let turn_id = app.current_turn_id().expect("goal starts a turn");
         app.type_text("/goal pause");
         app.press(KeyCode::Enter);
@@ -1257,6 +1373,7 @@ fn goal_resume_controls_while_running_continue_only_after_turn_end() {
             history: None,
             meta: None,
         }));
+        app.wait_for_turn_persistence();
         assert!(
             has_started_turn(&run_due_timers(&mut app, 1300)),
             "{command}"
@@ -1339,6 +1456,7 @@ fn turn_complete_still_chains_queued_turn() {
         meta: None,
     }));
 
+    app.wait_for_turn_persistence();
     assert!(
         app.agent_running(),
         "queued turn should start on clean completion"

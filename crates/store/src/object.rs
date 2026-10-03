@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use smelt_perf::perf;
 
@@ -38,10 +38,19 @@ impl ObjectCodec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObjectLayout {
+    Blob,
+    DataSequence { lineage_id: String, root_id: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectMeta {
     pub hash: String,
+    pub layout: ObjectLayout,
+    /// Compression of the inline blob. Data-sequence chunks have their own codecs.
     pub codec: ObjectCodec,
     pub raw_size: u64,
+    /// Bytes in this object row. Shared chunks are counted once in storage stats.
     pub stored_size: u64,
 }
 
@@ -112,6 +121,10 @@ pub(crate) fn put_object(
 }
 
 pub(crate) fn object(conn: &Connection, hash: &str) -> Result<Option<StoredObject>> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
     let Some(meta) = object_meta(conn, hash)? else {
         return Ok(None);
     };
@@ -120,10 +133,7 @@ pub(crate) fn object(conn: &Connection, hash: &str) -> Result<Option<StoredObjec
 }
 
 pub(crate) fn object_bytes_by_hash(conn: &Connection, hash: &str) -> Result<Option<Vec<u8>>> {
-    let Some(meta) = object_meta(conn, hash)? else {
-        return Ok(None);
-    };
-    object_bytes(conn, &meta).map(Some)
+    object(conn, hash).map(|stored| stored.map(|stored| stored.bytes))
 }
 
 fn object_meta_from_parts(
@@ -134,6 +144,7 @@ fn object_meta_from_parts(
 ) -> Result<ObjectMeta> {
     Ok(ObjectMeta {
         hash,
+        layout: ObjectLayout::Blob,
         codec: ObjectCodec::from_str(&codec)?,
         raw_size: nonnegative_u64(raw_size, "raw_size")?,
         stored_size: nonnegative_u64(stored_size, "stored_size")?,
@@ -141,6 +152,10 @@ fn object_meta_from_parts(
 }
 
 pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<ObjectMeta>> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
     conn.query_row(
         "SELECT hash, codec, raw_size, stored_size, length(bytes)
          FROM objects
@@ -161,7 +176,7 @@ pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<Object
     )
     .optional()?
     .map(|(hash, codec, raw_size, stored_size, actual_stored_size)| {
-        let meta = object_meta_from_parts(hash, codec, raw_size, stored_size)?;
+        let mut meta = object_meta_from_parts(hash, codec, raw_size, stored_size)?;
         enforce_object_size(meta.raw_size)?;
         enforce_object_size(meta.stored_size)?;
         let actual_stored_size = nonnegative_u64(actual_stored_size, "length(bytes)")?;
@@ -172,18 +187,68 @@ pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<Object
                 meta.hash, meta.stored_size
             )));
         }
+        if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+            let root = conn
+                .query_row(
+                    "SELECT lineage_id, root_id FROM object_data_roots WHERE object_hash = ?1",
+                    [&meta.hash],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((lineage_id, root_id)) = root {
+                if meta.codec != ObjectCodec::None || meta.stored_size != 0 {
+                    return Err(StoreError::Integrity(
+                        "shared logical object has an inline payload".into(),
+                    ));
+                }
+                meta.layout = ObjectLayout::DataSequence {
+                    lineage_id,
+                    root_id,
+                };
+            }
+        }
         Ok(meta)
     })
     .transpose()
 }
 
 pub(crate) fn object_bytes(conn: &Connection, meta: &ObjectMeta) -> Result<Vec<u8>> {
-    let stored_bytes: Vec<u8> = conn.query_row(
-        "SELECT bytes FROM objects WHERE hash = ?1",
-        [&meta.hash],
-        |row| row.get(0),
-    )?;
-    decode_and_verify_object(meta, &stored_bytes)
+    // Maintenance may replace a physical layout after a caller reads metadata.
+    // Pin one SQLite snapshot and resolve that layout again before hydration.
+    if conn.is_autocommit() {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+        let current = object_meta(&tx, &meta.hash)?.ok_or_else(|| StoreError::MissingObject {
+            reference: format!("object {}", meta.hash),
+        })?;
+        if current.raw_size != meta.raw_size {
+            return Err(StoreError::Integrity(
+                "logical object size changed during hydration".into(),
+            ));
+        }
+        return object_bytes(&tx, &current);
+    }
+    match &meta.layout {
+        ObjectLayout::Blob => {
+            let stored_bytes: Vec<u8> = conn.query_row(
+                "SELECT bytes FROM objects WHERE hash = ?1",
+                [&meta.hash],
+                |row| row.get(0),
+            )?;
+            decode_and_verify_object(meta, &stored_bytes)
+        }
+        ObjectLayout::DataSequence {
+            lineage_id,
+            root_id,
+        } => {
+            let _perf = perf::begin("store:object:hydrate_bytes");
+            let bytes =
+                crate::lineage::hydrate_object_data(conn, lineage_id, root_id, meta.raw_size)?;
+            verify_object_hash(meta, &bytes)?;
+            perf::record_value("store:object:payloads_loaded", 1);
+            perf::record_value("store:object:bytes_hydrated", bytes.len() as u64);
+            Ok(bytes)
+        }
+    }
 }
 
 fn decode_and_verify_object(meta: &ObjectMeta, stored_bytes: &[u8]) -> Result<Vec<u8>> {
@@ -198,17 +263,22 @@ fn decode_and_verify_object(meta: &ObjectMeta, stored_bytes: &[u8]) -> Result<Ve
         )));
     }
     let bytes = decode_object(meta.codec, stored_bytes, meta.raw_size)?;
-    let decoded_hash = sha256_hex(&bytes);
+    verify_object_hash(meta, &bytes)?;
+    perf::record_value("store:object:payloads_loaded", 1);
+    perf::record_value("store:object:bytes_hydrated", bytes.len() as u64);
+    perf::record_value("store:object:bytes_read", stored_bytes.len() as u64);
+    Ok(bytes)
+}
+
+fn verify_object_hash(meta: &ObjectMeta, bytes: &[u8]) -> Result<()> {
+    let decoded_hash = sha256_hex(bytes);
     if decoded_hash != meta.hash {
         return Err(StoreError::Integrity(format!(
             "object hash mismatch: row has {}, decoded bytes hash to {decoded_hash}",
             meta.hash
         )));
     }
-    perf::record_value("store:object:payloads_loaded", 1);
-    perf::record_value("store:object:bytes_hydrated", bytes.len() as u64);
-    perf::record_value("store:object:bytes_read", stored_bytes.len() as u64);
-    Ok(bytes)
+    Ok(())
 }
 
 pub(crate) fn checked_i64(value: u64, field: &str) -> Result<i64> {

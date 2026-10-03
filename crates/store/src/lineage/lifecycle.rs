@@ -61,6 +61,33 @@ pub(crate) fn load_session_receipt(
     }))
 }
 
+pub(crate) fn recover_lineage_session_commit(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &SessionCommit,
+) -> std::result::Result<Option<SaveReceipt>, SessionCommitFailure> {
+    let fingerprint = crate::session_commit_fingerprint(command)?;
+    Ok(
+        load_session_receipt(conn, lineage, branch, &fingerprint, "save")
+            .map_err(store_failure)?
+            .map(|receipt| receipt.save),
+    )
+}
+
+pub(crate) fn recover_compact_session(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &crate::CompactSessionCommit,
+) -> std::result::Result<Option<SessionCommitResult>, SessionCommitFailure> {
+    let fingerprint = crate::compact_session_commit_fingerprint(command)?;
+    Ok(
+        recover_compact_receipt_in(conn, lineage, branch, &fingerprint, "save")?
+            .map(|(_, result)| result),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn insert_session_receipt(
     conn: &Connection,
@@ -119,6 +146,18 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
     command: &SessionCommit,
     compression: ObjectCompression,
 ) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+    apply_lineage_session_commit_with_fingerprint(conn, lineage, branch, command, compression)
+        .map(|(_, receipt)| receipt)
+}
+
+pub(crate) fn apply_lineage_session_commit_with_fingerprint<C: LineageSavepoint>(
+    conn: &mut C,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &SessionCommit,
+    compression: ObjectCompression,
+) -> std::result::Result<(String, SaveReceipt), SessionCommitFailure> {
+    let _perf = smelt_perf::perf::begin("store:lineage:apply_session_commit");
     crate::session_command::validate_session_commit(command)?;
     if command.session_id != branch.as_str() {
         return Err(SessionCommitFailure::SessionMismatch {
@@ -149,9 +188,9 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
         tx.commit()
             .map_err(StoreError::from)
             .map_err(store_failure)?;
-        return Ok(stored.save);
+        return Ok((command_fingerprint, stored.save));
     }
-    let existing = load_branch_snapshot(&tx, lineage, branch, false)
+    let existing = load_branch_record(&tx, lineage, branch, false)
         .optional_store()
         .map_err(store_failure)?;
 
@@ -206,54 +245,34 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
             }
             None => empty_transcript,
         };
-        let side_tables = merge_side_tables(&SideTableSuffixes::default(), &command.side_tables);
-        let history_text_bytes = history_root.byte_count();
-        let state_bytes =
-            revision_state_bytes(&command.metadata, side_tables).map_err(store_failure)?;
-        create_initial_branch_in(
+        let state = prepare_revision_state(
             &tx,
             lineage,
-            branch,
-            &branch_metadata,
-            history_root,
-            transcript_root,
-            &state_bytes,
-            branch_created_at,
-            created_at.max(branch_created_at),
+            &command.metadata,
+            &command.side_tables,
+            None,
+            compression,
         )
         .map_err(store_failure)?;
-        let receipt = SaveReceipt {
-            session_id: branch.as_str().to_owned(),
-            previous: StoreHead::default(),
-            current: StoreHead {
-                revision: crate::session_commit::Revision::new(1),
-                history_len: command.history.final_len,
-                transcript_record_count: crate::session_commit::TranscriptRecordCount::new(
-                    command.transcript_records.as_ref().map_or(0, |records| {
-                        records.start.get() + records.records.len() as u64
-                    }),
-                ),
-            },
-            lineage_id: Some(lineage.as_str().to_owned()),
-            history_text_bytes,
-        };
-        insert_session_receipt(
+        let receipt = publish_session_save_in(
             &tx,
             lineage,
             branch,
             &command_fingerprint,
-            "save",
-            &receipt,
-            None,
-            None,
-            None,
-            created_at,
-        )
-        .map_err(store_failure)?;
+            PreparedSessionSave {
+                expected: command.expected,
+                branch_metadata: &branch_metadata,
+                history_root,
+                transcript_root,
+                state,
+                created_at,
+                base: SessionSaveBase::Initial { branch_created_at },
+            },
+        )?;
         tx.commit()
             .map_err(StoreError::from)
             .map_err(store_failure)?;
-        return Ok(receipt);
+        return Ok((command_fingerprint, receipt));
     }
 
     let current = existing.expect("checked above");
@@ -264,21 +283,23 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
         });
     }
     if command.expected.revision == crate::session_commit::Revision::ZERO {
+        // Bootstrap equivalence is an explicit full comparison, not a normal commit read.
+        let snapshot = load_branch_snapshot(&tx, lineage, branch, false).map_err(store_failure)?;
         let history = sequence_range(
             &tx,
             lineage,
-            &current.history_root,
+            &current.revision.history_root,
             0,
-            current.history_root.item_count,
+            current.revision.history_root.item_count,
         )
         .and_then(|(bytes, _)| deserialize_history_items(&tx, bytes))
         .map_err(store_failure)?;
         let mut transcript = deserialize_sequence_range::<StoredTranscriptBlock>(
             &tx,
             lineage,
-            &current.transcript_root,
+            &current.revision.transcript_root,
             0,
-            current.transcript_root.item_count,
+            current.revision.transcript_root.item_count,
         )
         .map_err(store_failure)?;
         hydrate_transcript_records(&tx, &mut transcript).map_err(store_failure)?;
@@ -290,15 +311,15 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
         if current.head.revision == crate::session_commit::Revision::new(1)
             && history == command.history.items
             && transcript == expected_transcript
-            && current.metadata == command.metadata
-            && current.side_tables == expected_side
+            && snapshot.metadata == command.metadata
+            && snapshot.side_tables == expected_side
         {
             let receipt = SaveReceipt {
                 session_id: branch.as_str().to_owned(),
                 previous: StoreHead::default(),
                 current: current.head,
                 lineage_id: Some(lineage.as_str().to_owned()),
-                history_text_bytes: current.history_root.byte_count(),
+                history_text_bytes: current.revision.history_root.byte_count(),
             };
             insert_session_receipt(
                 &tx,
@@ -316,7 +337,7 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
             tx.commit()
                 .map_err(StoreError::from)
                 .map_err(store_failure)?;
-            return Ok(receipt);
+            return Ok((command_fingerprint, receipt));
         }
         return Err(SessionCommitFailure::StaleBase {
             expected: command.expected,
@@ -336,66 +357,26 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
             current: current.head,
         });
     }
-    let history_items =
-        serialize_history_items(&tx, &command.history.items, compression).map_err(store_failure)?;
-    let history_root = replace_sequence_suffix_in(
+    let (history_root, transcript_root) = prepare_session_sequences_in(
         &tx,
         lineage,
-        &prior.history_root,
-        command.history.start.get(),
-        &history_items,
+        (&prior.history_root, &prior.transcript_root),
+        &command.history,
+        command.transcript_records.as_ref(),
         compression,
     )
     .map_err(store_failure)?;
-    let transcript_root = match &command.transcript_records {
-        Some(records) => replace_sequence_suffix_in(
-            &tx,
-            lineage,
-            &prior.transcript_root,
-            records.start.get(),
-            &serialize_transcript_items(&tx, &records.records, compression)
-                .map_err(store_failure)?,
-            compression,
-        )
-        .map_err(store_failure)?,
-        None => prior.transcript_root.clone(),
-    };
-    let prior_state = load_revision_state(&tx, lineage, &prior).map_err(store_failure)?;
-    let side_tables = merge_side_tables(&prior_state.side_tables, &command.side_tables);
-    let current_was_expected = current.revision_id == expected_revision;
-    if current_was_expected
-        && history_root == prior.history_root
-        && transcript_root == prior.transcript_root
-        && command.metadata == current.metadata
-        && side_tables == current.side_tables
-    {
-        let receipt = SaveReceipt {
-            session_id: branch.as_str().to_owned(),
-            previous: command.expected,
-            current: command.expected,
-            lineage_id: Some(lineage.as_str().to_owned()),
-            history_text_bytes: prior.history_root.byte_count(),
-        };
-        insert_session_receipt(
-            &tx,
-            lineage,
-            branch,
-            &command_fingerprint,
-            "save",
-            &receipt,
-            None,
-            None,
-            None,
-            created_at,
-        )
-        .map_err(store_failure)?;
-        tx.commit()
-            .map_err(StoreError::from)
-            .map_err(store_failure)?;
-        return Ok(receipt);
-    }
-    let state_bytes =
-        revision_state_bytes(&command.metadata, side_tables).map_err(store_failure)?;
+    let prior_state =
+        load_revision_for_save(&tx, lineage, &prior, compression).map_err(store_failure)?;
+    let state = prepare_revision_state(
+        &tx,
+        lineage,
+        &command.metadata,
+        &command.side_tables,
+        Some(&prior_state),
+        compression,
+    )
+    .map_err(store_failure)?;
     let is_append = command.history.start.get() == prior.history_root.item_count
         && command
             .transcript_records
@@ -406,63 +387,411 @@ pub(crate) fn apply_lineage_session_commit<C: LineageSavepoint>(
     } else {
         LineageOperation::Split
     };
-    let (revision, _) = commit_revision_in(
-        &tx,
-        lineage,
-        branch,
-        &expected_revision,
-        &history_root,
-        &transcript_root,
-        &state_bytes,
-        operation,
-        created_at,
-    )
-    .map_err(|error| {
-        if !current_was_expected {
-            SessionCommitFailure::StaleBase {
-                expected: command.expected,
-                current: current.head,
-            }
-        } else {
-            store_failure(error)
-        }
-    })?;
-    if current_was_expected {
-        update_branch_metadata(&tx, lineage, branch, &branch_metadata).map_err(store_failure)?;
-    }
-    let receipt = SaveReceipt {
-        session_id: branch.as_str().to_owned(),
-        previous: command.expected,
-        current: StoreHead {
-            revision: command.expected.revision.checked_add(1).ok_or_else(|| {
-                SessionCommitFailure::Integrity {
-                    message: "lineage branch sequence overflow".into(),
-                }
-            })?,
-            history_len: crate::session_commit::HistoryLen::new(revision.history_root.item_count),
-            transcript_record_count: crate::session_commit::TranscriptRecordCount::new(
-                revision.transcript_root.item_count,
-            ),
-        },
-        lineage_id: Some(lineage.as_str().to_owned()),
-        history_text_bytes: revision.history_root.byte_count(),
-    };
-    insert_session_receipt(
+    let receipt = publish_session_save_in(
         &tx,
         lineage,
         branch,
         &command_fingerprint,
+        PreparedSessionSave {
+            expected: command.expected,
+            branch_metadata: &branch_metadata,
+            history_root,
+            transcript_root,
+            state,
+            created_at,
+            base: SessionSaveBase::Existing {
+                current: &current,
+                prior: &prior,
+                prior_state: &prior_state,
+                operation,
+            },
+        },
+    )?;
+    tx.commit()
+        .map_err(StoreError::from)
+        .map_err(store_failure)?;
+    Ok((command_fingerprint, receipt))
+}
+
+fn prepare_session_sequences_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    previous: (&SequenceRoot, &SequenceRoot),
+    history: &crate::HistorySuffix,
+    records: Option<&crate::TranscriptRecordSuffix>,
+    compression: ObjectCompression,
+) -> Result<(SequenceRoot, SequenceRoot)> {
+    let history_items = serialize_history_items(conn, &history.items, compression)?;
+    let history_root = replace_sequence_suffix_in(
+        conn,
+        lineage,
+        previous.0,
+        history.start.get(),
+        &history_items,
+        compression,
+    )?;
+    let transcript_root = match records {
+        Some(records) => replace_sequence_suffix_in(
+            conn,
+            lineage,
+            previous.1,
+            records.start.get(),
+            &serialize_transcript_items(conn, &records.records, compression)?,
+            compression,
+        )?,
+        None => previous.1.clone(),
+    };
+    Ok((history_root, transcript_root))
+}
+
+pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
+    conn: &mut C,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &crate::CompactSessionCommit,
+    compression: ObjectCompression,
+) -> std::result::Result<SessionCommitResult, SessionCommitFailure> {
+    let _perf = smelt_perf::perf::begin("store:lineage:apply_compact_session_commit");
+    let fingerprint = crate::compact_session_commit_fingerprint(command)?;
+    if command.session_id != branch.as_str() {
+        return Err(SessionCommitFailure::SessionMismatch {
+            expected: branch.as_str().to_owned(),
+            actual: Some(command.session_id.clone()),
+        });
+    }
+    let tx = conn
+        .lineage_savepoint()
+        .map_err(StoreError::from)
+        .map_err(store_failure)?;
+    let version = crate::schema::user_version(&tx).map_err(store_failure)?;
+    if version != crate::schema::LINEAGE_SCHEMA_VERSION {
+        return Err(SessionCommitFailure::UnsupportedSchema {
+            found: version,
+            expected: crate::schema::LINEAGE_SCHEMA_VERSION,
+        });
+    }
+    if let Some((_, result)) =
+        recover_compact_receipt_in(&tx, lineage, branch, &fingerprint, "save")?
+    {
+        tx.commit()
+            .map_err(StoreError::from)
+            .map_err(store_failure)?;
+        return Ok(result);
+    }
+    let current = load_branch_record(&tx, lineage, branch, false)
+        .optional_store()
+        .map_err(store_failure)?;
+    let current_head = current
+        .as_ref()
+        .map_or(StoreHead::default(), |current| current.head);
+    if command.expected != current_head {
+        return Err(SessionCommitFailure::StaleBase {
+            expected: command.expected,
+            current: current_head,
+        });
+    }
+    if let Some(current) = &current {
+        if command.identity != current.identity {
+            return Err(SessionCommitFailure::IdentityMismatch {
+                stored: current.identity.clone(),
+                attempted: command.identity.clone(),
+            });
+        }
+    }
+    let prior_state = current
+        .as_ref()
+        .map(|current| load_revision_for_save(&tx, lineage, &current.revision, compression))
+        .transpose()
+        .map_err(store_failure)?;
+    let projected_base;
+    let archive_base = match (&command.archive_base, &current) {
+        (None, None) => None,
+        (Some(base), Some(current)) => {
+            if base.lineage_id != lineage.as_str() {
+                return Err(SessionCommitFailure::InvalidCommand {
+                    message: "archive base belongs to another lineage".into(),
+                });
+            }
+            let associated =
+                branch_revision_at_sequence(&tx, lineage, branch, base.branch_sequence.get())
+                    .map_err(store_failure)?;
+            if base.branch_sequence > command.expected.revision
+                || associated.as_str() != base.revision_id
+            {
+                return Err(SessionCommitFailure::InvalidCommand {
+                    message: "archive base is not an exact revision owned by this branch".into(),
+                });
+            }
+            let state = if base.revision_id == current.revision.id.as_str() {
+                prior_state.as_ref().expect("existing revision state")
+            } else {
+                let revision = load_revision(
+                    &tx,
+                    lineage,
+                    &RevisionId::from_db(base.revision_id.clone()).map_err(store_failure)?,
+                )
+                .map_err(store_failure)?;
+                projected_base = load_revision_for_save(&tx, lineage, &revision, compression)
+                    .map_err(store_failure)?;
+                &projected_base
+            };
+            match state {
+                StoredRevisionState::Shared(state) => Some(state),
+                _ => {
+                    return Err(SessionCommitFailure::Integrity {
+                        message: "compact archive base has no verified shared state".into(),
+                    })
+                }
+            }
+        }
+        _ => {
+            return Err(SessionCommitFailure::InvalidCommand {
+                message:
+                    "existing compact saves require an exact archive base; initial saves have none"
+                        .into(),
+            })
+        }
+    };
+    let retained_accounting = match (&command.scalars.accounting, &prior_state, &current) {
+        (crate::ValueEdit::Retain, Some(state), Some(current)) => {
+            effective_revision_metadata(state, &current.metadata)
+                .map_err(store_failure)?
+                .accounting_json
+        }
+        _ => None,
+    };
+    let metadata = command
+        .scalars
+        .metadata(retained_accounting)
+        .map_err(store_failure)?;
+    let branch_metadata =
+        branch_metadata_from_session(&command.identity, &metadata).map_err(store_failure)?;
+    let state = prepare_compact_archives(
+        &tx,
+        lineage,
+        normalize_revision_metadata(metadata).map_err(store_failure)?,
+        &command.archives,
+        archive_base,
+        command.history.final_len.get(),
+        compression,
+    )
+    .map_err(store_failure)?;
+    let archives_unchanged = prior_state.as_ref().is_some_and(|prior| match prior {
+        StoredRevisionState::Shared(prior) => {
+            prior.archives == state.archives
+                && prior.first_user_message_root == state.first_user_message_root
+        }
+        _ => false,
+    });
+    let prepared = PreparedRevisionState {
+        bytes: serde_json::to_vec(&state)
+            .map_err(StoreError::from)
+            .map_err(store_failure)?,
+        metadata: state.metadata,
+        archives_unchanged,
+    };
+    let empty_history;
+    let empty_transcript;
+    let previous = match &current {
+        Some(current) => (
+            &current.revision.history_root,
+            &current.revision.transcript_root,
+        ),
+        None => {
+            empty_history =
+                empty_sequence(&tx, lineage, SequenceKind::History).map_err(store_failure)?;
+            empty_transcript =
+                empty_sequence(&tx, lineage, SequenceKind::Transcript).map_err(store_failure)?;
+            (&empty_history, &empty_transcript)
+        }
+    };
+    let (history_root, transcript_root) = prepare_session_sequences_in(
+        &tx,
+        lineage,
+        previous,
+        &command.history,
+        command.transcript_records.as_ref(),
+        compression,
+    )
+    .map_err(store_failure)?;
+    let base = match &current {
+        Some(current) => SessionSaveBase::Existing {
+            current,
+            prior: &current.revision,
+            prior_state: prior_state.as_ref().expect("existing revision state"),
+            operation: if command.history.start.get() == current.revision.history_root.item_count
+                && command.transcript_records.as_ref().is_none_or(|records| {
+                    records.start.get() == current.revision.transcript_root.item_count
+                }) {
+                LineageOperation::Append
+            } else {
+                LineageOperation::Split
+            },
+        },
+        None => SessionSaveBase::Initial {
+            branch_created_at: command.identity.created_at as u64,
+        },
+    };
+    let receipt = publish_session_save_in(
+        &tx,
+        lineage,
+        branch,
+        &fingerprint,
+        PreparedSessionSave {
+            expected: command.expected,
+            branch_metadata: &branch_metadata,
+            history_root,
+            transcript_root,
+            state: prepared,
+            created_at: command.scalars.updated_at as u64,
+            base,
+        },
+    )?;
+    let result =
+        retain_session_receipt_result(&tx, lineage, branch, &fingerprint, receipt, compression)
+            .map_err(store_failure)?;
+    tx.commit()
+        .map_err(StoreError::from)
+        .map_err(store_failure)?;
+    Ok(result)
+}
+
+enum SessionSaveBase<'a> {
+    Initial {
+        branch_created_at: u64,
+    },
+    Existing {
+        current: &'a LineageBranchRecord,
+        prior: &'a RevisionRecord,
+        prior_state: &'a StoredRevisionState,
+        operation: LineageOperation,
+    },
+}
+
+struct PreparedSessionSave<'a> {
+    expected: StoreHead,
+    branch_metadata: &'a BranchMetadata,
+    history_root: SequenceRoot,
+    transcript_root: SequenceRoot,
+    state: PreparedRevisionState,
+    created_at: u64,
+    base: SessionSaveBase<'a>,
+}
+
+fn publish_session_save_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    fingerprint: &str,
+    save: PreparedSessionSave<'_>,
+) -> std::result::Result<SaveReceipt, SessionCommitFailure> {
+    let (head, history_text_bytes) = match save.base {
+        SessionSaveBase::Initial { branch_created_at } => {
+            let head = StoreHead {
+                revision: crate::session_commit::Revision::new(1),
+                history_len: crate::session_commit::HistoryLen::new(save.history_root.item_count),
+                transcript_record_count: crate::session_commit::TranscriptRecordCount::new(
+                    save.transcript_root.item_count,
+                ),
+            };
+            let history_text_bytes = save.history_root.byte_count();
+            create_initial_branch_in(
+                conn,
+                lineage,
+                branch,
+                save.branch_metadata,
+                save.history_root,
+                save.transcript_root,
+                &save.state.bytes,
+                branch_created_at,
+                save.created_at.max(branch_created_at),
+            )
+            .map_err(store_failure)?;
+            (head, history_text_bytes)
+        }
+        SessionSaveBase::Existing {
+            current,
+            prior,
+            prior_state,
+            operation,
+        } => {
+            let current_was_expected = current.revision.id == prior.id;
+            if current_was_expected
+                && save.history_root == prior.history_root
+                && save.transcript_root == prior.transcript_root
+                && save.state.archives_unchanged
+                && revision_metadata_matches(
+                    prior_state,
+                    &current.metadata,
+                    save.state.metadata,
+                    save.branch_metadata,
+                )
+                .map_err(store_failure)?
+            {
+                (save.expected, prior.history_root.byte_count())
+            } else {
+                let (revision, _) = commit_revision_in(
+                    conn,
+                    lineage,
+                    branch,
+                    &prior.id,
+                    &save.history_root,
+                    &save.transcript_root,
+                    &save.state.bytes,
+                    operation,
+                    save.created_at,
+                )
+                .map_err(|error| {
+                    if !current_was_expected {
+                        SessionCommitFailure::StaleBase {
+                            expected: save.expected,
+                            current: current.head,
+                        }
+                    } else {
+                        store_failure(error)
+                    }
+                })?;
+                if current_was_expected {
+                    update_branch_metadata(conn, lineage, branch, save.branch_metadata)
+                        .map_err(store_failure)?;
+                }
+                let head = StoreHead {
+                    revision: save.expected.revision.checked_add(1).ok_or_else(|| {
+                        SessionCommitFailure::Integrity {
+                            message: "lineage branch sequence overflow".into(),
+                        }
+                    })?,
+                    history_len: crate::session_commit::HistoryLen::new(
+                        revision.history_root.item_count,
+                    ),
+                    transcript_record_count: crate::session_commit::TranscriptRecordCount::new(
+                        revision.transcript_root.item_count,
+                    ),
+                };
+                (head, revision.history_root.byte_count())
+            }
+        }
+    };
+    let receipt = SaveReceipt {
+        session_id: branch.as_str().to_owned(),
+        previous: save.expected,
+        current: head,
+        lineage_id: Some(lineage.as_str().to_owned()),
+        history_text_bytes,
+    };
+    insert_session_receipt(
+        conn,
+        lineage,
+        branch,
+        fingerprint,
         "save",
         &receipt,
         None,
         None,
         None,
-        created_at,
+        save.created_at,
     )
     .map_err(store_failure)?;
-    tx.commit()
-        .map_err(StoreError::from)
-        .map_err(store_failure)?;
     Ok(receipt)
 }
 
@@ -598,7 +927,29 @@ pub(crate) fn apply_lineage_submit_turn(
         crate::write_transaction::begin_write(conn, "commit turn").map_err(store_failure)?;
     let session =
         apply_lineage_session_commit(&mut tx, lineage, branch, &command.session, compression)?;
-    let turn_id = tx
+    let receipt =
+        publish_turn_submission_in(&tx, lineage, branch, &fingerprint, session, &command.turn)?;
+    {
+        let _perf = smelt_perf::perf::begin("store:lineage:transaction_commit");
+        tx.commit()
+            .map_err(StoreError::from)
+            .map_err(store_failure)?;
+    }
+    Ok(receipt)
+}
+
+fn publish_turn_submission_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    fingerprint: &str,
+    session: SaveReceipt,
+    turn: &crate::NewTurn,
+) -> std::result::Result<SubmitTurnReceipt, SessionCommitFailure> {
+    let id = branch_revision_at_sequence(conn, lineage, branch, session.current.revision.get())
+        .map_err(store_failure)?;
+    let revision = load_revision(conn, lineage, &id).map_err(store_failure)?;
+    let turn_id = conn
         .query_row(
             "UPDATE lineage_branches
              SET next_turn_id = next_turn_id + 1
@@ -615,19 +966,18 @@ pub(crate) fn apply_lineage_submit_turn(
         })?;
     let turn_id =
         TurnId::new(nonnegative_u64(turn_id, "allocated turn id").map_err(store_failure)?);
-    let snapshot = load_branch_snapshot(&tx, lineage, branch, false).map_err(store_failure)?;
     let (history_bytes, _) = sequence_item(
-        &tx,
+        conn,
         lineage,
-        &snapshot.history_root,
-        command.turn.submitted_history_idx.get(),
+        &revision.history_root,
+        turn.submitted_history_idx.get(),
     )
     .map_err(store_failure)?;
     let submitted_item: protocol::HistoryItem = serde_json::from_slice(&history_bytes)
         .map_err(StoreError::from)
         .map_err(store_failure)?;
     let history_hash = crate::history::item_hash(&submitted_item).map_err(store_failure)?;
-    let inserted = tx
+    let inserted = conn
         .execute(
             "INSERT INTO lineage_turns (
                  lineage_id, session_id, turn_id, submitted_history_idx,
@@ -639,25 +989,19 @@ pub(crate) fn apply_lineage_submit_turn(
                 lineage.as_str(),
                 branch.as_str(),
                 checked_i64(turn_id.get(), "turn id").map_err(store_failure)?,
-                checked_i64(
-                    command.turn.submitted_history_idx.get(),
-                    "submitted history index"
-                )
-                .map_err(store_failure)?,
-                history_hash,
-                snapshot.revision_id.as_str(),
-                checked_i64(snapshot.head.revision.get(), "submitted sequence")
+                checked_i64(turn.submitted_history_idx.get(), "submitted history index")
                     .map_err(store_failure)?,
-                command.turn.kind.as_str(),
-                command
-                    .turn
-                    .continuation_of
+                history_hash,
+                revision.id.as_str(),
+                checked_i64(session.current.revision.get(), "submitted sequence")
+                    .map_err(store_failure)?,
+                turn.kind.as_str(),
+                turn.continuation_of
                     .map(TurnId::get)
                     .map(|value| checked_i64(value, "continuation turn id"))
                     .transpose()
                     .map_err(store_failure)?,
-                checked_i64(command.turn.created_at_ms, "turn created_at_ms")
-                    .map_err(store_failure)?,
+                checked_i64(turn.created_at_ms, "turn created_at_ms").map_err(store_failure)?,
             ],
         )
         .map_err(StoreError::from)
@@ -668,24 +1012,18 @@ pub(crate) fn apply_lineage_submit_turn(
         });
     }
     insert_session_receipt(
-        &tx,
+        conn,
         lineage,
         branch,
-        &fingerprint,
+        fingerprint,
         "submit_turn",
         &session,
         Some(turn_id),
         Some(TurnState::Ready),
         None,
-        command.turn.created_at_ms,
+        turn.created_at_ms,
     )
     .map_err(store_failure)?;
-    {
-        let _perf = smelt_perf::perf::begin("store:lineage:transaction_commit");
-        tx.commit()
-            .map_err(StoreError::from)
-            .map_err(store_failure)?;
-    }
     Ok(SubmitTurnReceipt { session, turn_id })
 }
 
@@ -733,13 +1071,46 @@ pub(crate) fn apply_lineage_turn_transition(
     }
     let mut tx =
         crate::write_transaction::begin_write(conn, "commit turn").map_err(store_failure)?;
-    let current = stored_lineage_turn(&tx, lineage, branch, command.turn_id)
+    let transition = prepare_turn_transition_in(
+        &tx,
+        lineage,
+        branch,
+        command.turn_id,
+        command.state,
+        command.at_ms,
+        command.terminal_reason.as_deref(),
+    )?;
+    let session =
+        apply_lineage_session_commit(&mut tx, lineage, branch, &command.session, compression)?;
+    let receipt =
+        publish_turn_transition_in(&tx, lineage, branch, &fingerprint, session, transition)?;
+    tx.commit()
+        .map_err(StoreError::from)
+        .map_err(store_failure)?;
+    Ok(receipt)
+}
+
+struct PreparedTurnTransition<'a> {
+    current: StoredTurn,
+    state: TurnState,
+    at_ms: u64,
+    terminal_reason: Option<&'a str>,
+}
+
+fn prepare_turn_transition_in<'a>(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    turn_id: TurnId,
+    state: TurnState,
+    at_ms: u64,
+    terminal_reason: Option<&'a str>,
+) -> std::result::Result<PreparedTurnTransition<'a>, SessionCommitFailure> {
+    let current = stored_lineage_turn(conn, lineage, branch, turn_id)
         .map_err(store_failure)?
-        .ok_or(SessionCommitFailure::TurnNotFound {
-            turn_id: command.turn_id,
-        })?;
+        .ok_or(SessionCommitFailure::TurnNotFound { turn_id })?;
     let allowed = matches!(
-        (current.state, command.state),
+        (current.state, state),
         (TurnState::Ready, TurnState::Running)
             | (TurnState::Ready, TurnState::Failed)
             | (TurnState::Ready, TurnState::Cancelled)
@@ -751,48 +1122,66 @@ pub(crate) fn apply_lineage_turn_transition(
     );
     if !allowed {
         return Err(SessionCommitFailure::InvalidTurnTransition {
-            turn_id: command.turn_id,
+            turn_id,
             from: current.state,
-            to: command.state,
+            to: state,
         });
     }
     let minimum_time = current.started_at_ms.unwrap_or(current.created_at_ms);
-    if command.at_ms < minimum_time {
+    if at_ms < minimum_time {
         return Err(SessionCommitFailure::InvalidTurn {
-            message: format!(
-                "turn transition timestamp {} precedes {}",
-                command.at_ms, minimum_time
-            ),
+            message: format!("turn transition timestamp {at_ms} precedes {minimum_time}"),
         });
     }
-    let session =
-        apply_lineage_session_commit(&mut tx, lineage, branch, &command.session, compression)?;
-    let updated = if command.state == TurnState::Running {
-        tx.execute(
+    Ok(PreparedTurnTransition {
+        current,
+        state,
+        at_ms,
+        terminal_reason,
+    })
+}
+
+fn publish_turn_transition_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    fingerprint: &str,
+    session: SaveReceipt,
+    transition: PreparedTurnTransition<'_>,
+) -> std::result::Result<TurnTransitionReceipt, SessionCommitFailure> {
+    let PreparedTurnTransition {
+        current,
+        state,
+        at_ms,
+        terminal_reason,
+    } = transition;
+    let turn_id = current.turn_id;
+    let updated = if state == TurnState::Running {
+        conn.execute(
             "UPDATE lineage_turns
              SET turn_state = 'running', started_at_ms = ?1
              WHERE lineage_id = ?2 AND session_id = ?3 AND turn_id = ?4
                AND turn_state = 'ready'",
             rusqlite::params![
-                checked_i64(command.at_ms, "turn transition timestamp").map_err(store_failure)?,
+                checked_i64(at_ms, "turn transition timestamp").map_err(store_failure)?,
                 lineage.as_str(),
                 branch.as_str(),
-                checked_i64(command.turn_id.get(), "turn id").map_err(store_failure)?,
+                checked_i64(turn_id.get(), "turn id").map_err(store_failure)?,
             ],
         )
     } else {
-        tx.execute(
+        conn.execute(
             "UPDATE lineage_turns
              SET turn_state = ?1, finished_at_ms = ?2, terminal_reason = ?3
              WHERE lineage_id = ?4 AND session_id = ?5 AND turn_id = ?6
                AND turn_state IN ('ready', 'running')",
             rusqlite::params![
-                command.state.as_str(),
-                checked_i64(command.at_ms, "turn transition timestamp").map_err(store_failure)?,
-                command.terminal_reason,
+                state.as_str(),
+                checked_i64(at_ms, "turn transition timestamp").map_err(store_failure)?,
+                terminal_reason,
                 lineage.as_str(),
                 branch.as_str(),
-                checked_i64(command.turn_id.get(), "turn id").map_err(store_failure)?,
+                checked_i64(turn_id.get(), "turn id").map_err(store_failure)?,
             ],
         )
     }
@@ -800,23 +1189,23 @@ pub(crate) fn apply_lineage_turn_transition(
     .map_err(store_failure)?;
     if updated != 1 {
         return Err(SessionCommitFailure::Integrity {
-            message: format!("turn {} changed during transition", command.turn_id.get()),
+            message: format!("turn {} changed during transition", turn_id.get()),
         });
     }
     insert_session_receipt(
-        &tx,
+        conn,
         lineage,
         branch,
-        &fingerprint,
+        fingerprint,
         "turn_transition",
         &session,
-        Some(command.turn_id),
-        Some(command.state),
+        Some(turn_id),
+        Some(state),
         None,
-        command.at_ms,
+        at_ms,
     )
     .map_err(store_failure)?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO lineage_turn_transitions (
              lineage_id, session_id, fingerprint, turn_id, from_state, to_state,
              transitioned_at_ms, terminal_reason
@@ -825,22 +1214,211 @@ pub(crate) fn apply_lineage_turn_transition(
             lineage.as_str(),
             branch.as_str(),
             fingerprint,
-            checked_i64(command.turn_id.get(), "turn id").map_err(store_failure)?,
+            checked_i64(turn_id.get(), "turn id").map_err(store_failure)?,
             current.state.as_str(),
-            command.state.as_str(),
-            checked_i64(command.at_ms, "turn transition timestamp").map_err(store_failure)?,
-            command.terminal_reason,
+            state.as_str(),
+            checked_i64(at_ms, "turn transition timestamp").map_err(store_failure)?,
+            terminal_reason,
         ],
     )
     .map_err(StoreError::from)
     .map_err(store_failure)?;
+    Ok(TurnTransitionReceipt {
+        session,
+        turn_id,
+        state,
+    })
+}
+
+fn recover_compact_receipt_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    fingerprint: &str,
+    kind: &str,
+) -> std::result::Result<
+    Option<(PersistedLineageSessionReceipt, SessionCommitResult)>,
+    SessionCommitFailure,
+> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()
+        .map_err(StoreError::from)
+        .map_err(store_failure)?;
+    let Some(receipt) =
+        load_session_receipt(conn, lineage, branch, fingerprint, kind).map_err(store_failure)?
+    else {
+        return Ok(None);
+    };
+    let result = load_session_receipt_result(conn, lineage, branch, fingerprint)
+        .map_err(store_failure)?
+        .ok_or_else(|| SessionCommitFailure::Integrity {
+            message: "compact receipt has no retained exact result".into(),
+        })?;
+    Ok(Some((receipt, result)))
+}
+
+pub(crate) fn recover_compact_submit_turn(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &crate::CompactSubmitTurn,
+) -> std::result::Result<Option<crate::CompactSubmitTurnResult>, SessionCommitFailure> {
+    let fingerprint = crate::compact_submit_turn_fingerprint(command)?;
+    recover_compact_submit_turn_in(conn, lineage, branch, &fingerprint)
+}
+
+fn recover_compact_submit_turn_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    fingerprint: &str,
+) -> std::result::Result<Option<crate::CompactSubmitTurnResult>, SessionCommitFailure> {
+    recover_compact_receipt_in(conn, lineage, branch, fingerprint, "submit_turn")?
+        .map(|(receipt, session)| {
+            let turn_id = receipt
+                .turn_id
+                .ok_or_else(|| SessionCommitFailure::Integrity {
+                    message: "compact submission receipt has no turn ID".into(),
+                })?;
+            Ok(crate::CompactSubmitTurnResult { session, turn_id })
+        })
+        .transpose()
+}
+
+pub(crate) fn apply_compact_submit_turn(
+    conn: &mut Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &crate::CompactSubmitTurn,
+    compression: ObjectCompression,
+) -> std::result::Result<crate::CompactSubmitTurnResult, SessionCommitFailure> {
+    let fingerprint = crate::compact_submit_turn_fingerprint(command)?;
+    let mut tx = crate::write_transaction::begin_write(conn, "commit compact turn")
+        .map_err(store_failure)?;
+    if let Some(result) = recover_compact_submit_turn_in(&tx, lineage, branch, &fingerprint)? {
+        tx.commit()
+            .map_err(StoreError::from)
+            .map_err(store_failure)?;
+        return Ok(result);
+    }
+    let session =
+        apply_compact_session_commit(&mut tx, lineage, branch, &command.session, compression)?;
+    let receipt = publish_turn_submission_in(
+        &tx,
+        lineage,
+        branch,
+        &fingerprint,
+        session.receipt,
+        &command.turn,
+    )?;
+    let session = retain_session_receipt_result(
+        &tx,
+        lineage,
+        branch,
+        &fingerprint,
+        receipt.session,
+        compression,
+    )
+    .map_err(store_failure)?;
     tx.commit()
         .map_err(StoreError::from)
         .map_err(store_failure)?;
-    Ok(TurnTransitionReceipt {
+    Ok(crate::CompactSubmitTurnResult {
         session,
-        turn_id: command.turn_id,
-        state: command.state,
+        turn_id: receipt.turn_id,
+    })
+}
+
+pub(crate) fn recover_compact_turn_transition(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &crate::CompactTurnTransition,
+) -> std::result::Result<Option<crate::CompactTurnTransitionResult>, SessionCommitFailure> {
+    let fingerprint = crate::compact_turn_transition_fingerprint(command)?;
+    recover_compact_turn_transition_in(conn, lineage, branch, &fingerprint)
+}
+
+fn recover_compact_turn_transition_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    fingerprint: &str,
+) -> std::result::Result<Option<crate::CompactTurnTransitionResult>, SessionCommitFailure> {
+    recover_compact_receipt_in(conn, lineage, branch, fingerprint, "turn_transition")?
+        .map(|(receipt, session)| {
+            let turn_id = receipt
+                .turn_id
+                .ok_or_else(|| SessionCommitFailure::Integrity {
+                    message: "compact transition receipt has no turn ID".into(),
+                })?;
+            let state = receipt
+                .turn_state
+                .ok_or_else(|| SessionCommitFailure::Integrity {
+                    message: "compact transition receipt has no turn state".into(),
+                })?;
+            Ok(crate::CompactTurnTransitionResult {
+                session,
+                turn_id,
+                state,
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn apply_compact_turn_transition(
+    conn: &mut Connection,
+    lineage: &LineageId,
+    branch: &BranchId,
+    command: &crate::CompactTurnTransition,
+    compression: ObjectCompression,
+) -> std::result::Result<crate::CompactTurnTransitionResult, SessionCommitFailure> {
+    let fingerprint = crate::compact_turn_transition_fingerprint(command)?;
+    let mut tx = crate::write_transaction::begin_write(conn, "commit compact turn")
+        .map_err(store_failure)?;
+    if let Some(result) = recover_compact_turn_transition_in(&tx, lineage, branch, &fingerprint)? {
+        tx.commit()
+            .map_err(StoreError::from)
+            .map_err(store_failure)?;
+        return Ok(result);
+    }
+    let transition = prepare_turn_transition_in(
+        &tx,
+        lineage,
+        branch,
+        command.turn_id,
+        command.state,
+        command.at_ms,
+        command.terminal_reason.as_deref(),
+    )?;
+    let session =
+        apply_compact_session_commit(&mut tx, lineage, branch, &command.session, compression)?;
+    let receipt = publish_turn_transition_in(
+        &tx,
+        lineage,
+        branch,
+        &fingerprint,
+        session.receipt,
+        transition,
+    )?;
+    let session = retain_session_receipt_result(
+        &tx,
+        lineage,
+        branch,
+        &fingerprint,
+        receipt.session,
+        compression,
+    )
+    .map_err(store_failure)?;
+    tx.commit()
+        .map_err(StoreError::from)
+        .map_err(store_failure)?;
+    Ok(crate::CompactTurnTransitionResult {
+        session,
+        turn_id: receipt.turn_id,
+        state: receipt.state,
     })
 }
 
@@ -866,7 +1444,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
     lineage: &LineageId,
     branch: &BranchId,
     at_ms: u64,
-) -> Result<Option<StartupRecoveryReceipt>> {
+) -> Result<Option<StartupRecoveryResult>> {
     let tx = crate::write_transaction::begin_write(conn, "recover interrupted turns")?;
     let mut statement = tx.prepare(
         "SELECT turn_id, turn_state, created_at_ms, started_at_ms
@@ -889,7 +1467,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
         tx.commit()?;
         return Ok(None);
     }
-    let previous = load_branch_snapshot(&tx, lineage, branch, false)?;
+    let previous = load_branch_record(&tx, lineage, branch, false)?;
     let at_ms_sql = checked_i64(at_ms, "startup recovery timestamp")?;
     let updated = tx.execute(
         "UPDATE lineage_turns
@@ -920,7 +1498,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
             at_ms_sql,
             lineage.as_str(),
             branch.as_str(),
-            previous.revision_id.as_str(),
+            previous.revision.id.as_str(),
         ],
     )?;
     tx.execute(
@@ -931,7 +1509,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
             lineage.as_str(),
             branch.as_str(),
             checked_i64(next_sequence.get(), "recovery branch sequence")?,
-            previous.revision_id.as_str(),
+            previous.revision.id.as_str(),
         ),
     )?;
     let current = StoreHead {
@@ -943,7 +1521,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
         previous: previous.head,
         current,
         lineage_id: Some(lineage.as_str().to_owned()),
-        history_text_bytes: previous.history_root.byte_count(),
+        history_text_bytes: previous.revision.history_root.byte_count(),
     };
     let mut interrupted_turns = Vec::with_capacity(pending.len());
     for (turn_id, from_state, _, _) in pending {
@@ -974,6 +1552,14 @@ pub(crate) fn recover_lineage_nonterminal_turns(
             None,
             at_ms,
         )?;
+        retain_session_receipt_result(
+            &tx,
+            lineage,
+            branch,
+            &fingerprint,
+            save.clone(),
+            ObjectCompression::default(),
+        )?;
         tx.execute(
             "INSERT INTO lineage_turn_transitions (
                  lineage_id, session_id, fingerprint, turn_id, from_state, to_state,
@@ -990,8 +1576,11 @@ pub(crate) fn recover_lineage_nonterminal_turns(
         )?;
     }
     tx.commit()?;
-    Ok(Some(StartupRecoveryReceipt {
-        session: save,
+    Ok(Some(StartupRecoveryResult {
+        session: SessionCommitResult {
+            receipt: save,
+            revision_id: previous.revision.id.as_str().to_owned(),
+        },
         interrupted_turns,
     }))
 }

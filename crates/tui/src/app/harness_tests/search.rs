@@ -58,10 +58,16 @@ fn sparse_display_only_search_app() -> TestApp {
 
     let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(store_address, 80, 16)
         .expect("display-only transcript tail");
-    session.history.clear();
+    let resume = app
+        .core_probe()
+        .sessions
+        .load_store_resume_result(&session_id, 80, 16)
+        .expect("load verified sparse session owner")
+        .expect("sparse session exists");
+    assert_eq!(resume.head, receipt.current);
     app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
-            session,
+            resume.session,
             loaded,
             crate::app::history::store_backed_live_session_for_test(
                 session_id.clone(),
@@ -199,6 +205,7 @@ fn hydration_preserves_terminal_transition_before_following_submit() {
     app.focus_prompt();
     app.type_text("first ordered turn");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
     let _ = app.app.flush_persist();
     app.feed_one(crate::app::test_harness::SourceEvent::engine(
@@ -258,6 +265,7 @@ fn sparse_transcript_hydrates_interrupted_tool_turn_before_persisting() {
     app.focus_prompt();
     app.type_text("first turn");
     app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
     assert!(app.agent_running());
     let _ = app.app.flush_persist();
     app.feed_one(crate::app::test_harness::SourceEvent::engine(

@@ -43,6 +43,7 @@ struct DocumentChanges {
     current: PersistenceGeneration,
     durable: PersistenceGeneration,
     acknowledged_head: smelt_store::StoreHead,
+    published_head: smelt_store::StoreHead,
     history_dirty_from: Option<usize>,
 }
 
@@ -82,6 +83,7 @@ impl DocumentChanges {
     fn install_head(&mut self, head: smelt_store::StoreHead) {
         *self = Self {
             acknowledged_head: head,
+            published_head: head,
             ..Self::default()
         };
     }
@@ -89,6 +91,7 @@ impl DocumentChanges {
     fn mark_clean(&mut self, head: smelt_store::StoreHead) {
         self.durable = self.current;
         self.acknowledged_head = head;
+        self.published_head = head;
         self.history_dirty_from = None;
     }
 }
@@ -97,24 +100,6 @@ impl DocumentChanges {
 pub(crate) struct SessionRecordSaveProjection {
     pub(crate) bounds: Option<TranscriptRecordSaveBounds>,
     pub(crate) final_len: usize,
-}
-
-impl SessionRecordSaveProjection {
-    pub(crate) fn persisted_head(head: smelt_store::StoreHead) -> Self {
-        Self {
-            bounds: None,
-            final_len: head
-                .transcript_record_count
-                .as_usize()
-                .expect("persisted record count originated as usize"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PreparedTranscriptRecordSuffix {
-    pub(crate) start: smelt_store::TranscriptRecordIndex,
-    pub(crate) records: Vec<smelt_core::TranscriptBlockRecordWithId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,55 +123,46 @@ impl std::fmt::Display for SessionBatchPreparationError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
+pub(crate) struct ProjectedSessionSave {
+    pub(crate) record_projection: SessionRecordSaveProjection,
+    history: smelt_store::HistorySuffix,
+    records: Option<smelt_store::TranscriptRecordSuffix>,
+}
+
+impl ProjectedSessionSave {
+    pub(crate) fn prepare_archives(
+        self,
+        session: &Session,
+        expected: smelt_store::StoreHead,
+    ) -> Result<smelt_core::session::PreparedArchiveSave, smelt_store::StoreError> {
+        session.prepare_archive_save(expected, self.history, self.records)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct PreparedSessionBatch {
     pub(crate) generation: PersistenceGeneration,
     pub(crate) record_projection: SessionRecordSaveProjection,
-    pub(crate) identity: smelt_store::SessionIdentity,
-    pub(crate) metadata: smelt_store::SessionMetadata,
-    pub(crate) history: smelt_store::HistorySuffix,
-    pub(crate) side_tables: smelt_store::SideTableSuffixes,
-    pub(crate) records: Option<PreparedTranscriptRecordSuffix>,
+    pub(crate) frame: std::sync::Arc<smelt_core::session::PreparedArchiveSave>,
+}
+
+impl PartialEq for PreparedSessionBatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.record_projection == other.record_projection
+            && (std::sync::Arc::ptr_eq(&self.frame, &other.frame)
+                || self.frame.same_snapshot(&other.frame))
+    }
 }
 
 impl PreparedSessionBatch {
-    pub(crate) fn to_store_commit(
-        &self,
-        session_id: String,
-        expected: smelt_store::StoreHead,
-    ) -> Result<smelt_store::SessionCommit, smelt_store::StoreError> {
-        let transcript_records = self
-            .records
-            .as_ref()
-            .map(|records| {
-                let start = records.start.as_usize().ok_or_else(|| {
-                    smelt_store::StoreError::Integrity(
-                        "prepared record start exceeds platform limits".into(),
-                    )
-                })?;
-                let rows = records
-                    .records
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, record)| {
-                        transcript_record_row(start + offset, record, &self.history)
-                    })
-                    .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
-                Ok::<_, smelt_store::StoreError>(smelt_store::TranscriptRecordSuffix {
-                    start: records.start,
-                    records: rows,
-                })
-            })
-            .transpose()?;
-        Ok(smelt_store::SessionCommit {
-            session_id,
-            expected,
-            identity: self.identity.clone(),
-            metadata: self.metadata.clone(),
-            history: self.history.clone(),
-            side_tables: self.side_tables.clone(),
-            transcript_records,
-        })
+    pub(crate) fn command(&self) -> &smelt_store::CompactSessionCommit {
+        self.frame.command()
+    }
+
+    pub(crate) fn matches_archive_base(&self, session: &Session) -> bool {
+        self.command().archive_base.as_ref() == session.archive_base()
     }
 }
 
@@ -339,8 +315,25 @@ impl TuiSessionDocument {
             && self.changes.current == self.changes.durable
     }
 
-    pub(crate) fn acknowledged_head(&self) -> smelt_store::StoreHead {
-        self.changes.acknowledged_head
+    pub(crate) fn published_head(&self) -> smelt_store::StoreHead {
+        self.changes.published_head
+    }
+
+    pub(crate) fn adopt_archive_publication(
+        &mut self,
+        acknowledgement: &crate::persist::PersistenceAcknowledgement,
+        session: &mut Session,
+    ) -> bool {
+        if self.persistence_epoch != Some(acknowledgement.epoch)
+            || !session.acknowledge_archive_save(&acknowledgement.frame, &acknowledgement.result)
+        {
+            return false;
+        }
+        self.changes.published_head = acknowledgement.result.receipt.current;
+        if let Some(live) = self.live_session.as_mut() {
+            live.header.revision = self.changes.published_head.revision.get();
+        }
+        true
     }
 
     pub(crate) fn bind_persistence(&mut self, epoch: SessionEpoch) {
@@ -424,7 +417,19 @@ impl TuiSessionDocument {
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
     ) -> Result<Option<PreparedSessionBatch>, SessionBatchPreparationError> {
-        self.prepare_save_with_history(session, metadata, None)
+        let _perf = smelt_perf::perf::begin("session:prepare_save_batch");
+        let Some(projection) = self.project_save_with_history(session, metadata, None)? else {
+            return Ok(None);
+        };
+        let record_projection = projection.record_projection;
+        let frame = projection
+            .prepare_archives(session, self.changes.published_head)
+            .map_err(|error| error.to_string())?;
+        Ok(Some(PreparedSessionBatch {
+            generation: self.changes.current,
+            record_projection,
+            frame: std::sync::Arc::new(frame),
+        }))
     }
 
     pub(crate) fn prepare_fork_save(
@@ -432,16 +437,17 @@ impl TuiSessionDocument {
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
         source_history: &[HistoryItem],
-    ) -> Result<Option<PreparedSessionBatch>, SessionBatchPreparationError> {
-        self.prepare_save_with_history(session, metadata, Some(source_history))
+    ) -> Result<Option<ProjectedSessionSave>, SessionBatchPreparationError> {
+        let _perf = smelt_perf::perf::begin("session:prepare_save_batch");
+        self.project_save_with_history(session, metadata, Some(source_history))
     }
 
-    fn prepare_save_with_history(
+    fn project_save_with_history(
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
         source_history: Option<&[HistoryItem]>,
-    ) -> Result<Option<PreparedSessionBatch>, SessionBatchPreparationError> {
+    ) -> Result<Option<ProjectedSessionSave>, SessionBatchPreparationError> {
         let history = SessionHistoryRef::for_save(
             self.live_session.as_ref(),
             &session.history,
@@ -491,16 +497,6 @@ impl TuiSessionDocument {
             final_len: smelt_store::HistoryLen::new(history_len as u64),
             items: history_items,
         };
-        let identity = smelt_core::session::store_identity_from_session(session)
-            .map_err(|error| error.to_string())?;
-        let metadata = smelt_core::session::store_metadata_from_session(session, history_len)
-            .map_err(|error| error.to_string())?;
-        let side_tables = smelt_core::session::store_side_table_suffixes_from_session_at(
-            session,
-            history_start,
-            history_len,
-        )
-        .map_err(|error| error.to_string())?;
         let record_bounds = self.transcript.record_save_bounds_at_or_before(
             self.changes.history_dirty_from,
             acknowledged_record_len,
@@ -520,21 +516,29 @@ impl TuiSessionDocument {
                     "hydrate canonical transcript record suffix".to_owned(),
                 ),
             })?;
-        let records = record_bounds.map(|bounds| PreparedTranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::new(bounds.record_start_idx as u64),
-            records: self
-                .transcript
-                .history()
-                .block_records_with_ids_from(bounds.order_start),
-        });
+        let records = record_bounds
+            .map(|bounds| {
+                let records = self
+                    .transcript
+                    .history()
+                    .block_records_with_ids_from(bounds.order_start)
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, record)| {
+                        transcript_record_row(bounds.record_start_idx + offset, record, &history)
+                    })
+                    .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
+                Ok::<_, smelt_store::StoreError>(smelt_store::TranscriptRecordSuffix {
+                    start: smelt_store::TranscriptRecordIndex::new(bounds.record_start_idx as u64),
+                    records,
+                })
+            })
+            .transpose();
         self.transcript.unpin_record_suffix_after_save();
-        Ok(Some(PreparedSessionBatch {
-            generation: self.changes.current,
+        let records = records.map_err(|error| error.to_string())?;
+        Ok(Some(ProjectedSessionSave {
             record_projection,
-            identity,
-            metadata,
             history,
-            side_tables,
             records,
         }))
     }
@@ -556,14 +560,46 @@ impl TuiSessionDocument {
         })
     }
 
+    pub(crate) fn acknowledge_startup_recovery(
+        &mut self,
+        epoch: SessionEpoch,
+        session: &mut Session,
+        result: &smelt_store::StartupRecoveryResult,
+    ) -> bool {
+        let receipt = &result.session.receipt;
+        if self.persistence_epoch != Some(epoch)
+            || receipt.previous != self.changes.published_head
+            || !session.acknowledge_startup_recovery(result)
+        {
+            return false;
+        }
+        if let Some(live) = self.live_session.as_mut() {
+            live.header.revision = receipt.current.revision.get();
+        }
+        if self.changes.acknowledged_head == receipt.previous {
+            self.changes.acknowledged_head = receipt.current;
+        }
+        self.changes.published_head = receipt.current;
+        true
+    }
+
+    #[cfg(test)]
     pub(crate) fn acknowledge(
         &mut self,
         acknowledgement: &crate::persist::PersistenceAcknowledgement,
-        session_id: &str,
+        session: &mut Session,
         history_len: usize,
-        checkpoint: Option<&ContextCheckpoint>,
     ) -> bool {
-        self.acknowledge_from(acknowledgement, false, session_id, history_len, checkpoint)
+        if !self.adopt_archive_publication(acknowledgement, session) {
+            return false;
+        }
+        self.acknowledge_from(
+            acknowledgement,
+            false,
+            &session.id,
+            history_len,
+            session.checkpoint.as_ref(),
+        )
     }
 
     pub(crate) fn acknowledge_coalesced_batch(
@@ -591,7 +627,7 @@ impl TuiSessionDocument {
         }
         let record_projection = acknowledgement.record_projection;
         let previous = acknowledgement.previous;
-        let receipt = &acknowledgement.receipt;
+        let receipt = &acknowledgement.result.receipt;
         let expected_record_len = record_projection.final_len;
         let revision_advanced_once = receipt
             .previous
@@ -1022,7 +1058,7 @@ impl SessionDocument {
             .map_or(session.history.len(), |live| live.history_len());
         if let Some(message) = first_user_message {
             if session.first_user_message.is_none() {
-                session.first_user_message = Some(message);
+                session.first_user_message = Some(message.into());
                 session.snapshot_metadata_at(idx + 1);
             }
         }
@@ -1210,16 +1246,13 @@ impl SessionDocument {
                 slug,
                 snapshot_history_len,
             } => {
-                let before_title = session.title.clone();
-                let before_slug = session.slug.clone();
-                let before_snapshots = session.metadata_snapshots.clone();
+                let changed =
+                    session.title.as_ref() != Some(&title) || session.slug.as_ref() != Some(&slug);
                 session.title = Some(title);
                 session.slug = Some(slug);
-                session.snapshot_metadata_at(snapshot_history_len);
+                let snapshots_changed = session.snapshot_metadata_at(snapshot_history_len);
                 DocumentChange {
-                    session_dirty: session.title != before_title
-                        || session.slug != before_slug
-                        || session.metadata_snapshots != before_snapshots,
+                    session_dirty: changed || snapshots_changed,
                     ..Default::default()
                 }
             }
@@ -1285,13 +1318,8 @@ impl SessionDocument {
                 meta,
                 update_context_token_history_len,
             } => {
-                let before_turn_metas = session.turn_metas.clone();
-                let before_context_snapshots = session.context_snapshots.clone();
-                let before_context_tokens_history_len = session.context_tokens_history_len;
-                session.finish_turn_state(history_len, meta, update_context_token_history_len);
-                let changed = session.turn_metas != before_turn_metas
-                    || session.context_snapshots != before_context_snapshots
-                    || session.context_tokens_history_len != before_context_tokens_history_len;
+                let changed =
+                    session.finish_turn_state(history_len, meta, update_context_token_history_len);
                 DocumentChange {
                     session_dirty: changed,
                     applied: changed,
@@ -1640,6 +1668,7 @@ fn transcript_record_row(
     record: &smelt_core::TranscriptBlockRecordWithId,
     history: &smelt_store::HistorySuffix,
 ) -> Result<smelt_store::StoredTranscriptBlock, smelt_store::StoreError> {
+    let _perf = smelt_perf::perf::begin("session:project_transcript_record");
     let owned_record;
     let record_ref = match record.record.origin {
         Some(BlockOrigin::History(index))
@@ -1732,7 +1761,7 @@ mod tests {
             }),
             history_len: Some(3),
             checkpoint: None,
-            checkpoint_events: Vec::new(),
+            checkpoint_events: Default::default(),
             text_bytes: Some(128),
         }
     }
@@ -2783,45 +2812,142 @@ mod tests {
         }
     }
 
-    fn receipt_for(
+    fn native_writer(session: &Session) -> (tempfile::TempDir, smelt_store::OwnedLineageWriter) {
+        let root = tempfile::tempdir().unwrap();
+        let writer = smelt_store::OwnedLineageWriter::open(root.path(), &session.id).unwrap();
+        (root, writer)
+    }
+
+    fn publish(
         intent: &PreparedSessionBatch,
-        previous: smelt_store::StoreHead,
-    ) -> smelt_store::SaveReceipt {
-        let record_len =
-            intent
-                .records
-                .as_ref()
-                .map_or(previous.transcript_record_count, |suffix| {
-                    smelt_store::TranscriptRecordCount::new(
-                        suffix.start.get()
-                            + u64::try_from(suffix.records.len()).expect("record count"),
-                    )
-                });
-        smelt_store::SaveReceipt {
-            session_id: intent.identity.id.clone(),
-            previous,
-            current: smelt_store::StoreHead {
-                revision: previous.revision.checked_add(1).expect("revision"),
-                history_len: intent.history.final_len,
-                transcript_record_count: record_len,
-            },
-            lineage_id: None,
-            history_text_bytes: 0,
-        }
+        writer: &mut smelt_store::OwnedLineageWriter,
+    ) -> smelt_store::SessionCommitResult {
+        writer.commit_compact_session(intent.command()).unwrap()
     }
 
     fn acknowledgement_for(
         epoch: SessionEpoch,
         intent: &PreparedSessionBatch,
-        receipt: smelt_store::SaveReceipt,
+        result: smelt_store::SessionCommitResult,
     ) -> crate::persist::PersistenceAcknowledgement {
         crate::persist::PersistenceAcknowledgement {
             epoch,
             generation: intent.generation,
             record_projection: intent.record_projection,
-            previous: receipt.previous,
-            receipt,
+            previous: result.receipt.previous,
+            frame: intent.frame.clone(),
+            result,
         }
+    }
+
+    #[test]
+    fn startup_recovery_advances_owned_heads_without_acknowledging_pending_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = smelt_core::session::SessionStorage::new(root.path().to_path_buf());
+        let mut original = Session::new(1, std::path::PathBuf::from("/synthetic"));
+        original
+            .history
+            .push(HistoryItem::user(Content::text("saved request")));
+        storage.save_result(&original).unwrap();
+        let mut writer =
+            smelt_store::SessionWriter::open(storage.sessions_dir(), &original.id).unwrap();
+        let mut command =
+            smelt_core::session::initial_store_commit_from_session(&original).unwrap();
+        command.expected = writer.store_head().unwrap();
+        writer
+            .submit_turn(&smelt_store::SubmitTurn {
+                session: command,
+                turn: smelt_store::NewTurn {
+                    kind: smelt_store::TurnKind::Command,
+                    submitted_history_idx: smelt_store::HistoryIndex::ZERO,
+                    continuation_of: None,
+                    created_at_ms: original.updated_at_ms,
+                },
+            })
+            .unwrap();
+        writer.release().unwrap();
+        let resume = storage
+            .load_store_resume_result(&original.id, 80, 24)
+            .unwrap()
+            .unwrap();
+        let mut session = resume.session;
+        let base = session.archive_base().unwrap().clone();
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        document.changes.install_head(resume.head);
+        document.live_session = Some(LiveSession::from_store(resume.header, resume.store_address));
+        let epoch = SessionEpoch::new(7);
+        document.bind_persistence(epoch);
+        document.apply_metadata(
+            &mut session,
+            MetadataMutation::SetTitle {
+                title: "pending title".into(),
+                slug: "pending-title".into(),
+                snapshot_history_len: 1,
+            },
+        );
+        document.apply_history(
+            &mut session,
+            HistoryMutation::AppendItem {
+                item: HistoryItem::user(Content::text("unsaved request")),
+            },
+        );
+        document.apply_transcript(TranscriptMutation::AppendBlock {
+            block: Block::Text {
+                content: "unsaved display record".into(),
+            },
+        });
+        let pending = document.changes;
+        let history = document.live_session.as_ref().unwrap().live_history.clone();
+        let record_dirty = document.transcript.history().record_dirty_from();
+        assert!(record_dirty.is_some());
+        let writer =
+            smelt_store::SessionWriter::open_existing(storage.sessions_dir(), &original.id)
+                .unwrap();
+        let recovery = writer.startup_recovery().unwrap();
+        assert_eq!(recovery.session.receipt.previous, resume.head);
+        assert_eq!(recovery.session.revision_id, base.revision_id);
+
+        assert!(!document.acknowledge_startup_recovery(
+            SessionEpoch::new(8),
+            &mut session,
+            recovery
+        ));
+        assert_eq!(document.changes, pending);
+        assert_eq!(session.archive_base(), Some(&base));
+        let mut foreign = recovery.clone();
+        foreign.session.revision_id = "0".repeat(64);
+        assert!(!document.acknowledge_startup_recovery(epoch, &mut session, &foreign));
+        assert_eq!(document.changes, pending);
+        assert_eq!(session.archive_base(), Some(&base));
+        assert!(document.acknowledge_startup_recovery(epoch, &mut session, recovery));
+        assert_eq!(
+            document.changes,
+            DocumentChanges {
+                acknowledged_head: recovery.head(),
+                published_head: recovery.head(),
+                ..pending
+            }
+        );
+        assert_eq!(
+            session.archive_base().unwrap().branch_sequence,
+            recovery.head().revision
+        );
+        assert_eq!(
+            session.archive_base().unwrap().revision_id,
+            base.revision_id
+        );
+        assert_eq!(session.title.as_deref(), Some("pending title"));
+        let live = document.live_session.as_ref().unwrap();
+        assert_eq!(live.header.revision, recovery.head().revision.get());
+        assert_eq!(live.live_history, history);
+        assert_eq!(live.history_len(), 2);
+        assert_eq!(
+            document.transcript.history().record_dirty_from(),
+            record_dirty
+        );
+        assert!(document.has_session_work());
+        assert!(!document.acknowledge_startup_recovery(epoch, &mut session, recovery));
+        assert!(document.has_session_work());
     }
 
     #[test]
@@ -2893,22 +3019,78 @@ mod tests {
             },
         );
 
-        let previous = document.acknowledged_head();
+        let (_root, mut writer) = native_writer(&session);
         let intent = document
             .prepare_event_batch(&mut session, runtime_metadata())
             .expect("prepare batch")
             .expect("dirty batch");
-        assert_eq!(intent.history.start, smelt_store::HistoryIndex::ZERO);
-        assert_eq!(intent.history.final_len, smelt_store::HistoryLen::new(2));
-        assert_eq!(intent.history.items.len(), 2);
+        assert_eq!(
+            intent.command().history.start,
+            smelt_store::HistoryIndex::ZERO
+        );
+        assert_eq!(
+            intent.command().history.final_len,
+            smelt_store::HistoryLen::new(2)
+        );
+        assert_eq!(intent.command().history.items.len(), 2);
 
         let epoch = SessionEpoch::new(7);
-        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
+        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
         document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &session.id, 2, None));
+        assert!(document.acknowledge(&acknowledgement, &mut session, 2));
         assert_eq!(document.durable_generation(), intent.generation);
         assert_eq!(document.dirty_history_from_for_test(), None);
         assert!(!document.has_session_work());
+    }
+
+    #[test]
+    fn prepared_record_rows_are_immutable_and_reused_at_different_dispatch_heads() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        document.apply_history(
+            &mut session,
+            HistoryMutation::CommitRequestItem {
+                item: HistoryItem::user(Content::text("submitted α\nrequest")),
+                block: Some(Box::new(Block::User {
+                    text: "submitted α\nrequest".into(),
+                    image_labels: Vec::new(),
+                    command: false,
+                    sent_at_ms: None,
+                })),
+                first_user_message: Some("submitted α\nrequest".into()),
+            },
+        );
+        let prepared = document
+            .prepare_event_batch(&mut session, runtime_metadata())
+            .unwrap()
+            .unwrap();
+        let suffix = prepared.command().transcript_records.as_ref().unwrap();
+        assert_eq!(suffix.records.len(), 1);
+        assert_eq!(suffix.records[0].history_idx, Some(0));
+        assert_eq!(suffix.records[0].kind, "user");
+        let bytes = serde_json::to_vec(suffix).unwrap();
+        document.apply_transcript(TranscriptMutation::AppendBlock {
+            block: Block::Text {
+                content: "later display-only record".into(),
+            },
+        });
+        let (_root, mut writer) = native_writer(&session);
+        let result = publish(&prepared, &mut writer);
+        let finalized = prepared
+            .frame
+            .as_ref()
+            .clone()
+            .finalize_after(&prepared.frame, &result)
+            .unwrap();
+        assert_eq!(finalized.command().expected, result.receipt.current);
+        for frame in [prepared.frame.as_ref(), &finalized] {
+            assert_eq!(
+                serde_json::to_vec(frame.command().transcript_records.as_ref().unwrap()).unwrap(),
+                bytes
+            );
+        }
+        writer.commit_compact_session(finalized.command()).unwrap();
+        assert!(document.generation() > prepared.generation);
     }
 
     #[test]
@@ -2921,7 +3103,7 @@ mod tests {
             },
         });
 
-        let previous = document.acknowledged_head();
+        let (_root, mut writer) = native_writer(&session);
         let intent = document
             .prepare_event_batch(&mut session, runtime_metadata())
             .expect("prepare batch")
@@ -2930,9 +3112,9 @@ mod tests {
         document.transcript.history_mut().clear_record_dirty();
 
         let epoch = SessionEpoch::new(8);
-        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
+        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
         document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &session.id, 0, None));
+        assert!(document.acknowledge(&acknowledgement, &mut session, 0));
         assert_eq!(document.durable_generation(), intent.generation);
     }
 
@@ -2959,15 +3141,15 @@ mod tests {
         assert!(document.transcript.history().is_live(id));
         assert!(document.transcript.pin_operation_blocks(&[id]));
 
-        let previous = document.acknowledged_head();
+        let (_root, mut writer) = native_writer(&session);
         let intent = document
             .prepare_event_batch(&mut session, runtime_metadata())
             .expect("prepare batch")
             .expect("dirty batch");
         let epoch = SessionEpoch::new(9);
-        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
+        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
         document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &session.id, 1, None));
+        assert!(document.acknowledge(&acknowledgement, &mut session, 1));
 
         assert!(!document.transcript.drain_compaction_slice());
         assert!(document.transcript.history().is_live(id));
@@ -2990,44 +3172,183 @@ mod tests {
                 item: HistoryItem::user(Content::text("dirty")),
             },
         );
-        let previous = document.acknowledged_head();
+        let (_root, mut writer) = native_writer(&session);
         let intent = document
             .prepare_event_batch(&mut session, runtime_metadata())
             .expect("prepare batch")
             .expect("dirty batch");
         let epoch = SessionEpoch::new(3);
-        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
+        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
         document.bind_persistence(epoch);
 
         let mut wrong_epoch = acknowledgement.clone();
         wrong_epoch.epoch = SessionEpoch::new(4);
-        assert!(!document.acknowledge(&wrong_epoch, &session.id, 1, None));
+        assert!(!document.acknowledge(&wrong_epoch, &mut session, 1));
         let mut older_generation = acknowledgement.clone();
         older_generation.generation = PersistenceGeneration::new(intent.generation.get() - 1);
-        assert!(!document.acknowledge(&older_generation, &session.id, 1, None));
+        assert!(!document.acknowledge(&older_generation, &mut session, 1));
         let mut newer_generation = acknowledgement.clone();
         newer_generation.generation = PersistenceGeneration::new(intent.generation.get() + 1);
-        assert!(!document.acknowledge(&newer_generation, &session.id, 1, None));
-        assert!(!document.acknowledge(&acknowledgement, &session.id, 2, None));
+        assert!(!document.acknowledge(&newer_generation, &mut session, 1));
+        assert!(!document.acknowledge(&acknowledgement, &mut session, 2));
         let mut wrong_session = acknowledgement.clone();
-        wrong_session.receipt.session_id = "different-session".into();
-        assert!(!document.acknowledge(&wrong_session, &session.id, 1, None));
+        wrong_session.result.receipt.session_id = "different-session".into();
+        assert!(!document.acknowledge(&wrong_session, &mut session, 1));
         let mut wrong_record_len = acknowledgement.clone();
-        wrong_record_len.receipt.current.transcript_record_count =
-            smelt_store::TranscriptRecordCount::new(1);
-        assert!(!document.acknowledge(&wrong_record_len, &session.id, 1, None));
+        wrong_record_len
+            .result
+            .receipt
+            .current
+            .transcript_record_count = smelt_store::TranscriptRecordCount::new(1);
+        assert!(!document.acknowledge(&wrong_record_len, &mut session, 1));
         let mut wrong_head = acknowledgement.clone();
-        wrong_head.receipt.previous.revision = smelt_store::Revision::new(9);
-        assert!(!document.acknowledge(&wrong_head, &session.id, 1, None));
+        wrong_head.result.receipt.previous.revision = smelt_store::Revision::new(9);
+        assert!(!document.acknowledge(&wrong_head, &mut session, 1));
         let mut skipped_revision = acknowledgement.clone();
-        skipped_revision.receipt.current.revision = skipped_revision
+        skipped_revision.result.receipt.current.revision = skipped_revision
+            .result
             .receipt
             .previous
             .revision
             .checked_add(2)
             .expect("revision");
-        assert!(!document.acknowledge(&skipped_revision, &session.id, 1, None));
+        assert!(!document.acknowledge(&skipped_revision, &mut session, 1));
         assert!(document.has_session_work());
+    }
+
+    #[test]
+    fn native_archive_adoption_preserves_newer_edits_and_invalidates_runtime_proofs() {
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.created_at_ms = 1;
+        session.updated_at_ms = 1;
+        session.first_user_message = Some(std::sync::Arc::from("synthetic message".repeat(4096)));
+        let message = session.first_user_message.clone().unwrap();
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        let epoch = SessionEpoch::new(7);
+        document.bind_persistence(epoch);
+        document.apply_history(
+            &mut session,
+            HistoryMutation::AppendItem {
+                item: HistoryItem::user(Content::text("first")),
+            },
+        );
+        document.apply_transcript(TranscriptMutation::AppendBlock {
+            block: Block::Text {
+                content: "first display".into(),
+            },
+        });
+        let first = document
+            .prepare_event_batch(&mut session, runtime_metadata())
+            .unwrap()
+            .unwrap();
+        let foreign_frame = session
+            .clone()
+            .prepare_archive_save(
+                first.command().expected,
+                first.command().history.clone(),
+                first.command().transcript_records.clone(),
+            )
+            .unwrap();
+        assert!(!first.frame.same_snapshot(&foreign_frame));
+        let (_root, mut writer) = native_writer(&session);
+        let first_ack = acknowledgement_for(epoch, &first, publish(&first, &mut writer));
+
+        document.apply_history(
+            &mut session,
+            HistoryMutation::AppendItem {
+                item: HistoryItem::user(Content::text("second")),
+            },
+        );
+        document.apply_transcript(TranscriptMutation::AppendBlock {
+            block: Block::Text {
+                content: "second display".into(),
+            },
+        });
+        document.apply_metadata(
+            &mut session,
+            MetadataMutation::SetTitle {
+                title: "newer title".into(),
+                slug: "newer-title".into(),
+                snapshot_history_len: 2,
+            },
+        );
+        let queued = document
+            .prepare_event_batch(&mut session, runtime_metadata())
+            .unwrap()
+            .unwrap();
+        let pending = document.changes;
+        let record_dirty = document.transcript.history().record_dirty_from();
+        let mut wrong_epoch = first_ack.clone();
+        wrong_epoch.epoch = SessionEpoch::new(8);
+        assert!(!document.adopt_archive_publication(&wrong_epoch, &mut session));
+        assert_eq!(document.changes, pending);
+        assert!(session.archive_base().is_none());
+        let mut foreign = first_ack.clone();
+        foreign.frame = std::sync::Arc::new(foreign_frame);
+        assert!(!document.adopt_archive_publication(&foreign, &mut session));
+        assert_eq!(document.changes, pending);
+        assert!(session.archive_base().is_none());
+
+        assert!(!document.acknowledge(&first_ack, &mut session, 2));
+        assert_eq!(
+            document.changes,
+            DocumentChanges {
+                published_head: first_ack.result.receipt.current,
+                ..pending
+            }
+        );
+        assert_eq!(
+            document.transcript.history().record_dirty_from(),
+            record_dirty
+        );
+        assert_eq!(session.history.len(), 2);
+        assert_eq!(session.title.as_deref(), Some("newer title"));
+        assert!(std::sync::Arc::ptr_eq(
+            session.first_user_message.as_ref().unwrap(),
+            &message
+        ));
+        assert_eq!(
+            session.archive_base().unwrap().revision_id,
+            first_ack.result.revision_id
+        );
+        assert!(!queued.matches_archive_base(&session));
+        let refreshed = document
+            .prepare_event_batch(&mut session, runtime_metadata())
+            .unwrap()
+            .unwrap();
+        assert!(refreshed.matches_archive_base(&session));
+        assert_eq!(queued, refreshed);
+        assert_ne!(queued.command(), refreshed.command());
+
+        let finalized = queued
+            .frame
+            .as_ref()
+            .clone()
+            .finalize_after(&first_ack.frame, &first_ack.result)
+            .unwrap();
+        let prepared = PreparedSessionBatch {
+            frame: std::sync::Arc::new(finalized),
+            ..queued
+        };
+        let mut latest = acknowledgement_for(epoch, &prepared, publish(&prepared, &mut writer));
+        latest.previous = first_ack.previous;
+        assert!(document.adopt_archive_publication(&latest, &mut session));
+        assert!(document.acknowledge_coalesced_batch(
+            &latest,
+            &session.id,
+            2,
+            session.checkpoint.as_ref()
+        ));
+        assert!(!document.has_session_work());
+        assert_eq!(document.published_head(), latest.result.receipt.current);
+        assert_eq!(
+            session.archive_base().unwrap().revision_id,
+            latest.result.revision_id
+        );
+        assert_eq!(
+            writer.snapshot().unwrap().metadata.title.as_deref(),
+            Some("newer title")
+        );
     }
 
     #[test]
@@ -3115,22 +3436,28 @@ mod tests {
                 .expect("prepare generated intent")
                 .expect("generated session has content");
             let history_len = session.history.len();
-            assert_eq!(intent.history.start, smelt_store::HistoryIndex::ZERO);
             assert_eq!(
-                intent.history.final_len,
+                intent.command().history.start,
+                smelt_store::HistoryIndex::ZERO
+            );
+            assert_eq!(
+                intent.command().history.final_len,
                 smelt_store::HistoryLen::new(history_len as u64)
             );
-            assert_eq!(intent.history.items, session.history);
+            assert_eq!(intent.command().history.items, session.history);
             assert_eq!(
-                intent.identity,
+                intent.command().identity,
                 smelt_core::session::store_identity_from_session(&session).unwrap()
             );
+            let (_root, mut writer) = native_writer(&session);
+            publish(&intent, &mut writer);
+            let stored = writer.snapshot().unwrap();
             assert_eq!(
-                intent.metadata,
+                stored.metadata,
                 smelt_core::session::store_metadata_from_session(&session, history_len).unwrap()
             );
             assert_eq!(
-                intent.side_tables,
+                stored.side_tables,
                 smelt_core::session::store_side_table_suffixes_from_session_at(
                     &session,
                     0,
@@ -3194,11 +3521,12 @@ mod tests {
         let target_head = target_snapshot.head;
         assert_eq!(target_head.transcript_record_count.get(), 316);
 
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.id = TEST_LINEAGE_SESSION_ID.into();
-        session.created_at_ms = u64::try_from(target_snapshot.identity.created_at)
-            .expect("non-negative creation timestamp");
-        session.parent_id = target_snapshot.identity.parent_id;
+        let mut session =
+            smelt_core::session::SessionStorage::new(target_root.path().to_path_buf())
+                .load_store_resume_result(TEST_LINEAGE_SESSION_ID, 80, 24)
+                .unwrap()
+                .unwrap()
+                .session;
         let mut document =
             TuiSessionDocument::new(TranscriptDocument::from_loaded_transcript(loaded));
         document.changes.install_head(target_head);
@@ -3225,7 +3553,11 @@ mod tests {
             .prepare_event_batch(&mut session, metadata)
             .expect("prepare hydrated sparse save")
             .expect("dirty sparse save");
-        let suffix = intent.records.as_ref().expect("record suffix");
+        let suffix = intent
+            .command()
+            .transcript_records
+            .as_ref()
+            .expect("record suffix");
         assert_eq!(suffix.start.get(), 300);
         assert_eq!(suffix.records.len(), 20);
 
@@ -3271,7 +3603,8 @@ mod tests {
             HistoryItem::user(Content::text("stored-0")),
             HistoryItem::user(Content::text("stored-1")),
         ];
-        let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), ID).expect("writer");
+        let sessions_root = root.path().join("sessions");
+        let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, ID).expect("writer");
         let command = smelt_core::session::initial_store_commit_from_session(&stored)
             .expect("initial commit");
         let receipt = writer.commit_session(&command).expect("store prefix");
@@ -3284,13 +3617,13 @@ mod tests {
             revision: receipt.current.revision.get(),
             degraded_warnings: Vec::new(),
         };
-        let store_address = SessionStoreAddress::new(
-            root.path().to_path_buf(),
-            ID.into(),
-            writer.lineage_id().to_string(),
-        );
-        let mut session = stored.clone();
-        session.history.clear();
+        let store_address =
+            SessionStoreAddress::new(sessions_root, ID.into(), writer.lineage_id().to_string());
+        let mut session = smelt_core::session::SessionStorage::new(root.path().to_path_buf())
+            .load_store_resume_result(ID, 80, 24)
+            .unwrap()
+            .unwrap()
+            .session;
         let mut document = TuiSessionDocument::new(TranscriptDocument::new());
         document.live_session = Some(LiveSession::from_store(header, store_address));
         document.changes.install_head(receipt.current);
@@ -3306,10 +3639,16 @@ mod tests {
             .prepare_event_batch(&mut session, runtime_metadata())
             .expect("prepare batch")
             .expect("dirty batch");
-        assert_eq!(intent.history.start, smelt_store::HistoryIndex::ZERO);
-        assert_eq!(intent.history.final_len, smelt_store::HistoryLen::new(3));
         assert_eq!(
-            intent.history.items,
+            intent.command().history.start,
+            smelt_store::HistoryIndex::ZERO
+        );
+        assert_eq!(
+            intent.command().history.final_len,
+            smelt_store::HistoryLen::new(3)
+        );
+        assert_eq!(
+            intent.command().history.items,
             vec![
                 HistoryItem::user(Content::text("stored-0")),
                 HistoryItem::user(Content::text("stored-1")),
@@ -3321,14 +3660,27 @@ mod tests {
 
     #[test]
     fn matching_store_backed_acknowledgement_compacts_live_suffix() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let root = tempfile::tempdir().unwrap();
+        let storage = smelt_core::session::SessionStorage::new(root.path().to_path_buf());
+        let mut original = Session::new(1, std::path::PathBuf::from("/tmp"));
+        original.created_at_ms = 1;
+        original.updated_at_ms = 1;
+        original.history = vec![
+            HistoryItem::user(Content::text("stored-0")),
+            HistoryItem::user(Content::text("stored-1")),
+        ];
+        storage.save_result(&original).unwrap();
+        let resume = storage
+            .load_store_resume_result(&original.id, 80, 24)
+            .unwrap()
+            .unwrap();
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open_existing(storage.sessions_dir(), &original.id)
+                .unwrap();
+        let mut session = resume.session;
         let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.live_session = Some(empty_live_session_for(&session, 2));
-        document.changes.install_head(smelt_store::StoreHead {
-            revision: smelt_store::Revision::new(5),
-            history_len: smelt_store::HistoryLen::new(2),
-            transcript_record_count: smelt_store::TranscriptRecordCount::ZERO,
-        });
+        document.live_session = Some(LiveSession::from_store(resume.header, resume.store_address));
+        document.changes.install_head(resume.head);
         document.apply_history(
             &mut session,
             HistoryMutation::AppendItem {
@@ -3336,17 +3688,19 @@ mod tests {
             },
         );
 
-        let previous = document.acknowledged_head();
         let intent = document
             .prepare_event_batch(&mut session, runtime_metadata())
             .expect("prepare batch")
             .expect("dirty batch");
-        assert_eq!(intent.history.start, smelt_store::HistoryIndex::new(2));
-        assert_eq!(intent.history.items.len(), 1);
+        assert_eq!(
+            intent.command().history.start,
+            smelt_store::HistoryIndex::new(2)
+        );
+        assert_eq!(intent.command().history.items.len(), 1);
         let epoch = SessionEpoch::new(9);
-        let acknowledgement = acknowledgement_for(epoch, &intent, receipt_for(&intent, previous));
+        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
         document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &session.id, 3, None));
+        assert!(document.acknowledge(&acknowledgement, &mut session, 3));
         assert_eq!(
             document
                 .live_session

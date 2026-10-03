@@ -194,23 +194,6 @@ struct PromptDisplayRows {
     ghost: bool,
 }
 
-pub(crate) fn build_prompt_display_lines(
-    source: &str,
-    attachment_ids: &[AttachmentId],
-    store: &AttachmentStore,
-    placeholder: Option<&str>,
-) -> Vec<String> {
-    build_prompt_display_rows(source, attachment_ids, store, placeholder)
-        .visual_lines
-        .into_iter()
-        .map(|(line, _)| line)
-        .collect()
-}
-
-pub(crate) fn prompt_display_uses_cursor_padding(source: &str, placeholder: Option<&str>) -> bool {
-    !source.is_empty() || placeholder.is_none_or(str::is_empty)
-}
-
 fn build_prompt_display_rows(
     source: &str,
     attachment_ids: &[AttachmentId],

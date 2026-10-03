@@ -137,6 +137,10 @@ pub(super) fn lineage_doctor_report(
     lineage: &LineageId,
     branch: Option<&BranchId>,
 ) -> Result<crate::DoctorReport> {
+    let _read = conn
+        .is_autocommit()
+        .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
+        .transpose()?;
     let schema_version = crate::schema::user_version(conn)?;
     let mut issues = Vec::new();
     if let Err(error) = crate::schema::validate_lineage_schema(conn) {
@@ -166,6 +170,26 @@ pub(super) fn lineage_doctor_report(
         issues.push(format!(
             "foreign_key_check: table={table} rowid={rowid:?} parent={parent} constraint={constraint}"
         ));
+    }
+    if schema_version == crate::schema::LINEAGE_SCHEMA_VERSION {
+        let hashes = conn
+            .prepare("SELECT object_hash FROM object_data_roots ORDER BY object_hash")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for hash in hashes {
+            if let Err(error) = crate::object::object(conn, &hash) {
+                issues.push(format!("shared object {hash}: {error}"));
+            }
+        }
+    }
+    if let Err(error) = lineage::verify_archive_coordinates(conn, lineage) {
+        issues.push(format!("archive coordinates: {error}"));
+    }
+    if let Err(error) = lineage::verify_revision_projections(conn, lineage) {
+        issues.push(format!("revision projection: {error}"));
+    }
+    if let Err(error) = lineage::verify_session_receipt_results(conn, lineage) {
+        issues.push(format!("session receipt result: {error}"));
     }
     let mut branches = conn.prepare(
         "SELECT session_id FROM lineage_branches

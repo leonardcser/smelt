@@ -211,7 +211,9 @@ async fn completed_background_process_output_expands_in_transcript() {
     app.press(KeyCode::Enter);
     assert!(!app.render_to_frame().text().contains("background stdout"));
 
+    app.wait_for_turn_persistence();
     assert!(app.finish_turn());
+    app.wait_for_turn_persistence();
     app.save_session_and_flush();
     let session_id = app.session_snapshot().id;
     drop(app);
@@ -329,6 +331,8 @@ fn job_completion_after_final_request_starts_follow_up_turn() {
     assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
 
     assert!(app.finish_turn());
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
 
     assert!(app.agent_running());
     assert!(app.actions().iter().any(|action| matches!(
@@ -367,7 +371,7 @@ fn platform_completion_before_ready_turn_complete_starts_follow_up_turn() {
     assert_eq!(app.conversation_probe().pending_history_append_count(), 1);
 
     let outcome = app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
-    app.wait_for_session_lifecycle();
+    app.wait_for_turn_persistence();
 
     assert_eq!(
         outcome,

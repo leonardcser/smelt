@@ -1939,7 +1939,7 @@ impl Window {
             };
         };
         let cpos = |cell: usize| {
-            let cell = resolve_cursor_col(buf, logical_row, cell as u16) as usize;
+            let cell = resolve_cursor_col(buf, logical_row, cell);
             buf.byte_at_display_pos(logical_row, cell)
         };
         if line.is_empty() {
@@ -2033,7 +2033,7 @@ impl Window {
         let Some((lrow, cell)) = self.logical_cell_at_visual(buf, vrow, vcell) else {
             return buf.byte_at_display_pos(last_logical, 0);
         };
-        let cell = resolve_cursor_col(buf, lrow, cell as u16) as usize;
+        let cell = resolve_cursor_col(buf, lrow, cell);
         buf.byte_at_display_pos(lrow, cell)
     }
 
@@ -3769,7 +3769,8 @@ impl Window {
                     .logical_at_visual(row_to_usize(row))
                     .map(|(lr, _)| lr)
                     .unwrap_or_else(|| row_to_usize(row));
-                let col = resolve_cursor_col(buf, logical_row, col);
+                let col =
+                    u16::try_from(resolve_cursor_col(buf, logical_row, usize::from(col))).ok()?;
                 Self::screen_row_at(self.absolute_row(row), self.scroll_top, viewport_height)
                     .map(|screen_row| (col, screen_row))
             });
@@ -3863,7 +3864,7 @@ fn cell_range_contains_selectable(
     })
 }
 
-fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
+fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: usize) -> usize {
     if buf.decoration_at(logical_row).cursor_policy == LineCursorPolicy::PreserveRequested {
         return col;
     }
@@ -3876,8 +3877,8 @@ fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
     loop {
         let mut advanced = false;
         for s in &spans {
-            if !s.meta.selectable && s.col_start <= col && col < s.col_end {
-                col = s.col_end;
+            if !s.meta.selectable && s.col_start as usize <= col && col < s.col_end as usize {
+                col = s.col_end as usize;
                 advanced = true;
             }
         }
@@ -3888,12 +3889,12 @@ fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
     let Some(line) = buf.get_line(logical_row) else {
         return col;
     };
-    let line_width = text::byte_to_cell(line, line.len()).min(u16::MAX as usize) as u16;
-    if col < line_width && cell_range_contains_selectable(&spans, col as usize, col as usize + 1) {
+    let line_width = text::byte_to_cell(line, line.len());
+    if col < line_width && cell_range_contains_selectable(&spans, col, col + 1) {
         return col;
     }
     let last_selectable_edge = (0..line_width)
-        .filter(|c| cell_range_contains_selectable(&spans, *c as usize, *c as usize + 1))
+        .filter(|c| cell_range_contains_selectable(&spans, *c, *c + 1))
         .map(|c| c.saturating_add(1))
         .next_back();
     match last_selectable_edge {
