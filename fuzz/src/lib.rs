@@ -2270,6 +2270,10 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
         } => {
             let pre = Snapshot::capture(app);
             app.handle_job_completed(id, exit_code, termination.into());
+            // Idle completion submits a canonical turn asynchronously. Observe
+            // its durable dispatch before checking the completed lifecycle.
+            app.wait_for_turn_persistence();
+            app.feed_one_within_budget(SourceEvent::Tick(0), AllocBudget::DEFAULT);
             let post = Snapshot::capture(app);
             let new_actions = app.actions_since(pre.action_count);
             run_check(PostCheck::JobCompleted, &pre, &post, new_actions);
@@ -2485,8 +2489,20 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         }
         op => plan(app, op),
     };
+    let settles_turn_lifecycle = matches!(check, PostCheck::TurnCompleted { .. })
+        || matches!(
+            &ev,
+            Some(SourceEvent::Term(TermEvent::Key(key))) if key.code == KeyCode::Enter
+        );
     if let Some(ev) = ev {
         app.feed_one_within_budget(ev, AllocBudget::DEFAULT);
+    }
+    if settles_turn_lifecycle {
+        // Submitted turns and queued follow-ups dispatch only after persistence
+        // is durable. Keep that work outside the event budget and settle it
+        // before a later macro can install a synthetic turn.
+        app.wait_for_turn_persistence();
+        app.feed_one_within_budget(SourceEvent::Tick(0), AllocBudget::DEFAULT);
     }
     let post = Snapshot::capture(app);
     let new_actions = app.actions_since(pre.action_count);
