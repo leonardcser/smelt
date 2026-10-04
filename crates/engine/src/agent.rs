@@ -1330,6 +1330,14 @@ impl<'a> Turn<'a> {
         }
     }
 
+    fn emit_output_limit_error(&self) {
+        self.emit(EngineEvent::TurnError {
+            message: "Response incomplete: provider reached the output token limit (finish_reason=length).".into(),
+            kind: None,
+            retry_at_ms: None,
+        });
+    }
+
     fn emit_turn_complete(&mut self, interrupted: bool) {
         let meta = self.build_meta(interrupted);
         let history = if interrupted {
@@ -1835,6 +1843,7 @@ impl<'a> Turn<'a> {
                 );
             }
 
+            let output_limited = resp.metadata.finish_reason.as_deref() == Some("length");
             let content = resp.content.map(Content::text);
             let tool_calls = resp.tool_calls;
             let reasoning = resp.reasoning_content;
@@ -1896,7 +1905,7 @@ impl<'a> Turn<'a> {
                         Some(HistoryItem::Assistant(t)) if !t.invocations.is_empty()
                     );
 
-                if is_empty && empty_retries < MAX_EMPTY_RETRIES {
+                if is_empty && !output_limited && empty_retries < MAX_EMPTY_RETRIES {
                     empty_retries += 1;
                     log::entry(
                         log::Level::Warn,
@@ -1922,6 +1931,9 @@ impl<'a> Turn<'a> {
                 let first_index = self.public_history_len();
                 self.push_assistant_step(turn);
                 self.emit_history_appended_from(first_index);
+                if output_limited {
+                    self.emit_output_limit_error();
+                }
                 self.emit_turn_complete(false);
                 return;
             }
@@ -2002,6 +2014,11 @@ impl<'a> Turn<'a> {
             if !cancelled {
                 provider_turn_cmds.extend(deferred_turn_cmds);
                 self.apply_deferred_turn_cmds(provider_turn_cmds);
+                if output_limited {
+                    self.emit_output_limit_error();
+                    self.emit_turn_complete(false);
+                    return;
+                }
             }
         }
     }

@@ -154,6 +154,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
     let usage = parse_usage(&data["usage"]);
 
     Ok(ParsedResponse {
+        finish_reason: choice["finish_reason"].as_str().map(str::to_owned),
         content,
         reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
         reasoning,
@@ -171,7 +172,7 @@ struct StreamState {
     /// content block index -> (id, name, args-json)
     tool_calls: HashMap<usize, (String, String, String)>,
     usage: TokenUsage,
-    saw_finish_reason: bool,
+    finish_reason: Option<String>,
     emitted_tool_finishes: bool,
 }
 
@@ -190,6 +191,7 @@ impl StreamState {
                 let tool_calls: Vec<ToolCall> =
                     from_content.into_iter().chain(from_reasoning).collect();
                 return ParsedResponse {
+                    finish_reason: self.finish_reason,
                     content: cleaned_content,
                     reasoning_parts: raw_reasoning_parts(cleaned_reasoning.as_deref()),
                     reasoning: cleaned_reasoning,
@@ -201,6 +203,7 @@ impl StreamState {
         }
 
         ParsedResponse {
+            finish_reason: self.finish_reason,
             content,
             reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
             reasoning,
@@ -215,7 +218,7 @@ fn finish_stream_state(
     state: StreamState,
     summary: sse::StreamSummary,
 ) -> Result<ParsedResponse, ProviderError> {
-    if !state.saw_finish_reason {
+    if state.finish_reason.is_none() {
         return Err(ProviderError::InvalidResponse(format!(
             "stream ended without finish_reason (data_events={}, done={})",
             summary.data_events, summary.saw_done
@@ -269,11 +272,9 @@ fn apply_sse_event(
 
     let choice = ev["choices"].get(0);
     let mut saw_finish_reason = false;
-    if let Some(reason) = choice.and_then(|c| c.get("finish_reason")) {
-        if !reason.is_null() {
-            state.saw_finish_reason = true;
-            saw_finish_reason = true;
-        }
+    if let Some(reason) = choice.and_then(|c| c["finish_reason"].as_str()) {
+        state.finish_reason = Some(reason.to_owned());
+        saw_finish_reason = true;
     }
 
     let Some(delta) = choice.and_then(|c| c.get("delta")) else {
@@ -1133,6 +1134,32 @@ mod tests {
         assert_eq!(finishes, 0);
         assert!(error.contains("tool-call arguments"));
         assert!(!error.contains("sensitive-fixture"));
+    }
+
+    #[test]
+    fn preserves_finish_reasons_in_batch_and_streaming_responses() {
+        for reason in [
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "provider_specific",
+        ] {
+            let batch = parse_response(&json!({"choices": [{
+                "message": {"reasoning_content": "thinking"}, "finish_reason": reason
+            }]}))
+            .unwrap();
+            assert_eq!(batch.finish_reason.as_deref(), Some(reason));
+            let events = [
+                json!({"choices": [{"delta": {"reasoning_content": "thinking"}}]}),
+                json!({"choices": [{"delta": {}, "finish_reason": reason}]}),
+                json!({"choices": [], "usage": {"completion_tokens": 10}}),
+            ];
+            let streamed = parse_stream_events(&events, &mut |_| {}).unwrap();
+            assert_eq!(streamed.finish_reason.as_deref(), Some(reason));
+            assert_eq!(streamed.reasoning.as_deref(), Some("thinking"));
+            assert_eq!(streamed.usage.completion_tokens, Some(10));
+        }
     }
 
     #[test]

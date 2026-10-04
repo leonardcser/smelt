@@ -367,6 +367,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
     let usage = parse_usage(&data["usage"]);
 
     Ok(ParsedResponse {
+        finish_reason: None,
         content,
         reasoning,
         reasoning_parts,
@@ -434,6 +435,7 @@ impl StreamState {
             })
             .collect();
         Ok(ParsedResponse {
+            finish_reason: None,
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
             reasoning_parts: Vec::new(),

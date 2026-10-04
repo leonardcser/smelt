@@ -23,6 +23,8 @@ pub struct ChatResponse {
 #[derive(Clone, Default)]
 pub struct ChatResponseMetadata {
     pub codex_turn_state: Option<String>,
+    /// Raw chat-completions finish reason, if supplied by the provider.
+    pub finish_reason: Option<String>,
 }
 
 impl ChatResponse {
@@ -33,8 +35,9 @@ impl ChatResponse {
     pub fn from_parsed_with_metadata(
         parsed: ParsedResponse,
         tokens_per_sec: Option<f64>,
-        metadata: ChatResponseMetadata,
+        mut metadata: ChatResponseMetadata,
     ) -> Self {
+        metadata.finish_reason = parsed.finish_reason;
         Self {
             content: parsed.content,
             reasoning_content: parsed.reasoning,
@@ -50,6 +53,8 @@ impl ChatResponse {
 
 /// Internal parsed fields from an API response.
 pub struct ParsedResponse {
+    /// Raw chat-completions finish reason, if supplied by the provider.
+    pub finish_reason: Option<String>,
     pub content: Option<String>,
     pub reasoning: Option<String>,
     pub reasoning_parts: Vec<CompletedReasoningPart>,

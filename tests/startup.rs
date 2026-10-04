@@ -2175,7 +2175,11 @@ fn stream_content() -> String {
 }
 
 fn stream_finish() -> String {
-    stream_event(serde_json::json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}))
+    stream_finish_reason("stop")
+}
+
+fn stream_finish_reason(reason: &str) -> String {
+    stream_event(serde_json::json!({"choices": [{"delta": {}, "finish_reason": reason}]}))
 }
 
 fn stream_tool(arguments: &str, start: bool) -> String {
@@ -2214,6 +2218,34 @@ fn assert_stream_failure(trial: &StreamingTrial, cause: &str) {
         .any(|ev| ev.to_string().contains("\"kind\":\"assistant\"")));
 }
 
+fn assert_output_limit(trial: &StreamingTrial, requests: usize) {
+    assert_eq!(trial.status.code(), Some(3), "{:?}", trial.events);
+    assert_eq!(
+        trial.requests, requests,
+        "output-limited response was continued"
+    );
+    let error = trial
+        .events
+        .iter()
+        .find_map(|ev| ev.get("TurnError"))
+        .expect("TurnError");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("output token limit"), "{error}");
+    assert!(message.contains("incomplete"), "{error}");
+}
+
+fn last_stream_assistant(trial: &StreamingTrial) -> &serde_json::Value {
+    trial
+        .events
+        .iter()
+        .rev()
+        .filter_map(|ev| ev.get("HistoryAppended"))
+        .filter_map(|ev| ev["delta"]["items"].as_array())
+        .flat_map(|items| items.iter().rev())
+        .find(|item| item["kind"] == "assistant")
+        .expect("committed assistant history")
+}
+
 #[test]
 fn headless_stream_valid_content_and_usage() {
     let usage = stream_event(
@@ -2238,6 +2270,103 @@ fn headless_stream_valid_content_and_usage() {
         .iter()
         .any(|ev| ev.get("TurnComplete").is_some()));
     assert!(trial.events.iter().any(|ev| ev.get("TokenUsage").is_some()));
+}
+
+#[test]
+fn headless_stream_reasoning_only_stop_is_complete() {
+    let body = format!(
+        "{}{}data: [DONE]\n\n",
+        stream_event(
+            serde_json::json!({"choices": [{"delta": {"reasoning_content": "thinking"}}]})
+        ),
+        stream_finish(),
+    );
+    let trial = run_headless_stream(&[body], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(0), "{:?}", trial.events);
+    assert_eq!(trial.requests, 1);
+    assert!(!trial.events.iter().any(|ev| ev.get("TurnError").is_some()));
+    assert!(trial
+        .events
+        .iter()
+        .any(|ev| ev.get("TurnComplete").is_some()));
+}
+
+#[test]
+fn headless_stream_output_limit_is_incomplete() {
+    for delta in [
+        serde_json::json!({"reasoning_content": "thinking"}),
+        serde_json::json!({"content": "partial answer"}),
+        serde_json::json!({}),
+    ] {
+        let body = format!(
+            "{}{}data: [DONE]\n\n",
+            stream_event(serde_json::json!({"choices": [{"delta": delta}]})),
+            stream_finish_reason("length"),
+        );
+        let trial = run_headless_stream(&[body], StreamEnding::Eof);
+        assert_output_limit(&trial, 1);
+        assert!(trial.tool_effect.is_none());
+        let assistant = last_stream_assistant(&trial);
+        assert_eq!(assistant["content"], delta["content"]);
+        assert_eq!(assistant["reasoning"], delta["reasoning_content"]);
+        assert!(assistant.get("invocations").is_none());
+    }
+}
+
+#[test]
+fn headless_stream_output_limited_tools_execute_then_stop() {
+    let body = format!(
+        "{}{}{}data: [DONE]\n\n",
+        stream_content(),
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("length"),
+    );
+    let trial = run_headless_stream(&[body], StreamEnding::Eof);
+    assert_eq!(
+        trial.tool_effect.as_deref(),
+        Some("recorded"),
+        "{:?}",
+        trial.events
+    );
+    assert_output_limit(&trial, 1);
+    let assistant = last_stream_assistant(&trial);
+    assert_eq!(assistant["content"], "partial 界");
+    assert_eq!(assistant["reasoning"], "thinking");
+    let invocations = assistant["invocations"]
+        .as_array()
+        .expect("committed tool results");
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0]["call_id"], "probe-1");
+    assert_eq!(invocations[0]["name"], "stream_probe");
+    assert_eq!(invocations[0]["result"]["content"], "recorded");
+    assert_eq!(invocations[0]["result"]["is_error"], false);
+    let tool_finished = trial
+        .events
+        .iter()
+        .position(|ev| ev.get("ToolFinished").is_some())
+        .expect("ToolFinished");
+    let error_index = trial
+        .events
+        .iter()
+        .position(|ev| ev.get("TurnError").is_some())
+        .unwrap();
+    assert!(tool_finished < error_index);
+}
+
+#[test]
+fn headless_stream_empty_output_limit_after_tool_is_not_retried() {
+    let tool = format!(
+        "{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish()
+    );
+    let trial = run_headless_stream(&[tool, stream_finish_reason("length")], StreamEnding::Eof);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    assert_output_limit(&trial, 2);
+    let assistant = last_stream_assistant(&trial);
+    assert!(assistant.get("content").is_none());
+    assert!(assistant.get("reasoning").is_none());
+    assert!(assistant.get("invocations").is_none());
 }
 
 #[test]

@@ -1690,6 +1690,7 @@ mod tests {
     #[test]
     fn parsed_into_response_propagates_fields() {
         let p = ParsedResponse {
+            finish_reason: Some("length".into()),
             content: Some("c".into()),
             reasoning: Some("r".into()),
             reasoning_parts: Vec::new(),
@@ -1708,5 +1709,6 @@ mod tests {
         assert_eq!(r.reasoning_content.as_deref(), Some("r"));
         assert_eq!(r.tool_calls.len(), 1);
         assert_eq!(r.tokens_per_sec, Some(12.5));
+        assert_eq!(r.metadata.finish_reason.as_deref(), Some("length"));
     }
 }

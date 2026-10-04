@@ -499,7 +499,10 @@ impl ProviderClient {
             let response = ChatResponse::from_parsed_with_metadata(
                 parsed,
                 tokens_per_sec,
-                ChatResponseMetadata { codex_turn_state },
+                ChatResponseMetadata {
+                    codex_turn_state,
+                    ..Default::default()
+                },
             );
             emit_attempt(AttemptEvent {
                 attempt: attempt as u32,
