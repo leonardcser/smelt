@@ -116,54 +116,63 @@ and arbitrary real-data errors must not appear in evidence logs.
 
 The optimized synthetic gates hold live context fixed while varying unchanged
 archives. Ten samples per fixture on source
-`9c0a68abf69cc04a6e16878878a5e1ec7b759174d677616ece476a6ac40b325a`
+`4a121e10bbde5f451cb3ec9977914a2802592c0417c80720e7e760d2d454f9ac`
 produced the following ranges:
 
 | Operation | Retained content | Observed work |
 | --- | --- | --- |
-| 20 title changes | 0 / 32 / 128 checkpoints | 20,660-25,684 additional physical object bytes |
-| 10 title changes | 128-byte / 256-KiB / 1-MiB initial message | 10,070-10,956 additional physical object bytes |
-| Title-save preparation | 0 / 32 / 128 checkpoints | 43,201-43,827 allocation bytes |
-| Actual-command clean fork capture | 0 / 4,096 / 16,384 retained records | 268,516-271,050 UI-thread allocation bytes |
-| Enter preparation | 0 / 16 / 64 / 128 checkpoints | About 137,620-138,428 allocation bytes |
-| Enter object hydration | Same checkpoint counts | 7,505-8,001 object bytes |
+| 20 title changes | 0 / 32 / 128 checkpoints | 20,660-26,630 additional physical object bytes |
+| 10 title changes | 128-byte / 256-KiB / 1-MiB initial message | 10,070 additional physical object bytes |
+| Title-save preparation | 0 / 32 / 128 checkpoints | 43,200-43,826 allocation bytes |
+| Actual-command clean fork capture | 0 / 4,096 / 16,384 retained records | 268,495-271,241 UI-thread allocation bytes |
+| Enter preparation | 0 / 16 / 64 / 128 checkpoints | About 137,619-138,426 allocation bytes |
+| Enter object hydration | Same checkpoint counts | 7,504-8,000 object bytes |
 
 Earlier matched reproductions added 15,867,200 physical object bytes for ten title
 changes with a 1-MiB initial message, and 20,982,720 bytes for twenty title changes
 with 128 checkpoints. Enter with 128 checkpoints allocated about 174 MB across
-the process; the accepted optimized fixture allocated about 2.30-2.38 MB.
+the process; the accepted optimized fixture allocated about 2.29-2.34 MB.
 
 These measurements demonstrate removal of the unchanged-archive slope, not a
 universal wall-clock speedup. The machine is shared. Actual live context and new
 unique retained content still require proportional work and storage.
 
-Historical maintenance on an isolated real-data copy reduced its canonical file
+Final-v4 maintenance on an isolated real-data copy reduced its canonical file
 from 11,981,516,800 to 2,591,383,552 bytes, recovering 9,390,133,248 bytes (78.4%).
-That measurement predates final-v4 consolidation and is not final-v4 real-data
-acceptance.
+Physical recovery was measured on source
+`9c0a68abf69cc04a6e16878878a5e1ec7b759174d677616ece476a6ac40b325a`.
+The store and core archive sources are byte-identical after the landing rebase;
+real-data integrity and lifecycle checks also passed on the rebased source.
 
 ## Validation
 
 Fresh automated acceptance passed on the measured final implementation source:
 
-- Optimized workspace: 6,233/6,233 tests passed, 22 skipped, including actual CLI
+- Optimized workspace: 6,250/6,250 tests passed, 22 skipped, including actual CLI
   maintenance, v3 migration/crash controls and applicable UI snapshots.
 - Optimized scaling/stress: 3,190/3,190 executions passed. Eight ignored scaling
   gates and the core archive, fork/load/document, persistence actor, history/load
   and writer groups each ran ten times.
 - Strict workspace all-target lint, formatting and tracked/untracked whitespace
   checks passed.
-- Actual CI: 6,220/6,220 tests passed, 12 skipped; 89.52% line coverage against the
+- Actual CI: 6,237/6,237 tests passed, 12 skipped; 89.53% line coverage against the
   unchanged 80% floor.
 - Independent audits reconciled selected counts, unique passing identities and
   every exact stress iteration. All 33 scaling fixtures and 12 preparation,
   hydration and dispatch groups had ten accepted samples; every measured turn
   dispatched exactly once and all native fingerprint inputs were verified.
 
-Final-v4 isolated real-data post-maintenance digests, retained graphs, file
-recovery, idempotence and historical lifecycle checks are still running. Integration
-readiness is not claimed until they pass. A previous real-data run was deliberately
-stopped during maintenance; its partial evidence is not acceptance.
+Isolated real-data acceptance also passed on the rebased source. Complete current
+snapshot, history, transcript and request digests matched the preserved v3 baseline.
+All 15,540 original revision graphs, required logical hashes and receipt rows were
+retained; doctor reported a healthy v4 database, and repeated maintenance was
+idempotent with unchanged file size and a truncated WAL.
+
+Two additional independent v3/v4 copies passed migration and historical lifecycle
+checks at revisions 15,000, 7,770, 1,000 and 1: exact source-bound forks, retained
+ranges, supplied no-op saves, receipt replay after reopen, rejection boundaries and
+integrity checks. Original data and preserved controls were not mutating targets;
+interrupted copies and complete validation evidence remain archived locally.
 
 Full acceptance includes optimized workspace tests, eight ignored scaling gates
 repeated ten times, core archive/fork/actor/history/writer stress, applicable CLI
