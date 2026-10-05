@@ -45,6 +45,8 @@ pub struct LuaProviderModel {
     pub cache_write_cost: Option<f64>,
     /// Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown.
     pub max_tokens: Option<u32>,
+    /// Per-response reasoning token limit for OpenAI-compatible servers. Sent only when configured.
+    pub thinking_token_budget: Option<u32>,
     /// Per-level token budgets for budget-based thinking.
     pub thinking_budgets: Option<LuaThinkingBudgets>,
     /// Total context window, in tokens.
@@ -169,6 +171,7 @@ impl FromLua for LuaModelEntry {
                     cache_read_cost: m.cache_read_cost,
                     cache_write_cost: m.cache_write_cost,
                     max_tokens: m.max_tokens,
+                    thinking_token_budget: m.thinking_token_budget,
                     thinking_budgets: m.thinking_budgets.map(Into::into),
                     context_window: m.context_window,
                     supports_reasoning: m.supports_reasoning,
@@ -294,6 +297,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         row.set("cache_read_cost", m.cache_read_cost)?;
                         row.set("cache_write_cost", m.cache_write_cost)?;
                         row.set("max_tokens", m.max_tokens)?;
+                        row.set("thinking_token_budget", m.thinking_token_budget)?;
                         row.set("supports_reasoning", m.supports_reasoning)?;
                         if let Some(efforts) = &m.supported_reasoning_efforts {
                             row.set("supported_reasoning_efforts", efforts.iter().map(|effort| effort.label()).collect::<Vec<_>>())?;
@@ -346,6 +350,26 @@ For streaming observation use `smelt.events.on(\"stream_delta\", ...)` - synchro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_parses_explicit_thinking_token_budget() {
+        let lua = Lua::new();
+        for budget in [0, 8192, u32::MAX] {
+            let model: LuaModelEntry = lua
+                .load(format!("return {{ thinking_token_budget = {budget} }}"))
+                .eval()
+                .unwrap();
+            assert_eq!(model.0.thinking_token_budget, Some(budget));
+        }
+        let model: LuaModelEntry = lua.load("return {}").eval().unwrap();
+        assert_eq!(model.0.thinking_token_budget, None);
+        for budget in ["-1", "4294967296"] {
+            assert!(lua
+                .load(format!("return {{ thinking_token_budget = {budget} }}"))
+                .eval::<LuaModelEntry>()
+                .is_err());
+        }
+    }
 
     #[test]
     fn custom_reasoning_model_parses_native_levels() {

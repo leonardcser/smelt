@@ -1042,6 +1042,7 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `cache_read_cost` | `number` |  | Cost per 1M cache-read tokens in USD. |
 | `cache_write_cost` | `number` |  | Cost per 1M cache-write tokens in USD. |
 | `max_tokens` | `integer` |  | Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown. |
+| `thinking_token_budget` | `integer` |  | Per-response reasoning token limit for OpenAI-compatible servers. Sent only when configured. |
 | `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
 | `context_window` | `integer` |  | Total context window, in tokens. |
 | `supports_reasoning` | `boolean` |  | Whether this model supports reasoning/thinking parameters. |

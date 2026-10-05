@@ -50,6 +50,8 @@ pub struct ModelConfig {
     pub cache_write_cost: Option<f64>,
     /// Maximum output tokens for this model.
     pub max_tokens: Option<u32>,
+    /// Per-response reasoning token limit for OpenAI-compatible servers.
+    pub thinking_token_budget: Option<u32>,
     /// Per-level token budgets for budget-based thinking.
     pub thinking_budgets: Option<ThinkingBudgets>,
     /// Total context window, in tokens, from provider/catalog metadata.

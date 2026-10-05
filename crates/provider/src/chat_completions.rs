@@ -181,6 +181,9 @@ pub fn build_body(
     if let Some(v) = config.max_tokens {
         body["max_tokens"] = serde_json::json!(v);
     }
+    if let Some(v) = config.thinking_token_budget {
+        body["thinking_token_budget"] = serde_json::json!(v);
+    }
     if let Some(kwargs) = &config.chat_template_kwargs {
         body["chat_template_kwargs"] = serde_json::json!(kwargs);
     }
@@ -783,6 +786,25 @@ mod tests {
         assert_eq!(body["model"], "model-x");
         assert!(body["messages"].is_array());
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn build_body_preserves_explicit_thinking_token_budget() {
+        for budget in [None, Some(0), Some(8192), Some(u32::MAX)] {
+            for effort in [ReasoningEffort::Off, ReasoningEffort::High] {
+                let config = ModelConfig {
+                    max_tokens: Some(32768),
+                    thinking_token_budget: budget,
+                    ..Default::default()
+                };
+                let body = build_body(&[user("hi")], &[], &target("m"), effort, &config);
+                assert_eq!(body["max_tokens"], 32768);
+                match budget {
+                    Some(value) => assert_eq!(body["thinking_token_budget"], value),
+                    None => assert!(body.get("thinking_token_budget").is_none()),
+                }
+            }
+        }
     }
 
     #[test]

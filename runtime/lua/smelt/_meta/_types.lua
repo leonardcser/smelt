@@ -695,6 +695,7 @@
 ---@field cache_read_cost? number Cost per 1M cache-read tokens in USD.
 ---@field cache_write_cost? number Cost per 1M cache-write tokens in USD.
 ---@field max_tokens? integer Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown.
+---@field thinking_token_budget? integer Per-response reasoning token limit for OpenAI-compatible servers. Sent only when configured.
 ---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
 ---@field context_window? integer Total context window, in tokens.
 ---@field supports_reasoning? boolean Whether this model supports reasoning/thinking parameters.

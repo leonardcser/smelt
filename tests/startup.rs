@@ -2403,7 +2403,7 @@ fn headless_stream_thinking_disabled_replays_only_received_reasoning_fields() {
         let trial = run_headless_stream_with_model(
             &[tool, final_response],
             StreamEnding::Eof,
-            r#"{ name = "test-model", supports_reasoning = true, chat_template_kwargs = { enable_thinking = false } }"#,
+            r#"{ name = "test-model", supports_reasoning = true, thinking_token_budget = 8192, max_tokens = 32768, chat_template_kwargs = { enable_thinking = false } }"#,
         );
         assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
         assert_eq!(trial.requests, 2);
@@ -2411,6 +2411,8 @@ fn headless_stream_thinking_disabled_replays_only_received_reasoning_fields() {
         for body in &trial.request_bodies {
             assert_eq!(body["reasoning_effort"], "none");
             assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+            assert_eq!(body["thinking_token_budget"], 8192);
+            assert_eq!(body["max_tokens"], 32768);
         }
         let assistant = trial.request_bodies[1]["messages"]
             .as_array()
