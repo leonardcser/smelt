@@ -10,8 +10,8 @@ pub struct Message {
     pub content: Option<Content>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reasoning_content: Option<String>,
-    /// Provider-shaped reasoning blocks captured verbatim and echoed back on
-    /// the next request. Anthropic needs the original `thinking` /
+    /// Provider-native reasoning blocks and raw-reasoning replay metadata.
+    /// Anthropic needs the original `thinking` /
     /// `redacted_thinking` blocks (with their `signature`) prepended to the
     /// assistant content; OpenAI Responses needs the original `reasoning`
     /// items (with `id` + `encrypted_content`) re-sent.
@@ -29,9 +29,9 @@ pub struct Message {
     pub tool_metadata: Option<serde_json::Value>,
 }
 
-/// Opaque reasoning block captured from a provider response. `provider`
-/// tags which provider it came from so build_body for a different provider
-/// can skip it; `data` is the verbatim block JSON.
+/// Provider-native reasoning block or internal Chat Completions replay metadata.
+/// `provider` identifies the wire API so other serializers can skip it;
+/// `data` holds the native block JSON or the raw reasoning field and origin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReasoningBlock {
     pub provider: String,
@@ -41,6 +41,8 @@ pub struct ReasoningBlock {
 impl ReasoningBlock {
     pub const ANTHROPIC: &'static str = "anthropic";
     pub const OPENAI_RESPONSES: &'static str = "openai_responses";
+    /// Internal origin marker for raw Chat Completions reasoning, never a wire block.
+    pub const CHAT_COMPLETIONS: &'static str = "chat_completions";
 }
 
 impl Message {

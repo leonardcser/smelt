@@ -80,18 +80,21 @@ impl ProviderClient {
     ) -> Result<ChatResponse, ProviderError> {
         let provider_kind = request.provider.kind();
         let mut wire_api = provider_kind.wire_api();
+        let mut reasoning_origin = None;
         let (url, mut body) = {
             let _perf = smelt_perf::perf::begin("provider:request:build_body");
             match provider_kind {
                 ProviderKind::OpenAiCompatible => {
                     let url = endpoint_url(request.api_base, "chat/completions");
+                    let target = chat_completions::Target::new(provider_kind, &url, request.model);
                     let body = chat_completions::build_body(
                         request.messages,
                         request.tools,
-                        request.model,
+                        &target,
                         request.effort,
                         request.config,
                     );
+                    reasoning_origin = Some(target.origin);
                     (url, body)
                 }
                 ProviderKind::OpenAi => {
@@ -138,15 +141,19 @@ impl ProviderClient {
                     };
                     wire_api = wire;
                     let url = wire.copilot_url(&tokens.api_base);
+                    let target = chat_completions::Target::new(provider_kind, &url, request.model);
                     let body = copilot_body(
                         wire,
                         request.messages,
                         request.tools,
-                        request.model,
+                        &target,
                         request.effort,
                         request.config,
                         &request.cache,
                     );
+                    if wire == WireApi::ChatCompletions {
+                        reasoning_origin = Some(target.origin);
+                    }
                     (url, body)
                 }
             }
@@ -205,7 +212,15 @@ impl ProviderClient {
             ChatProviderKind::None { .. } => {}
         }
 
-        self.chat_http(transport, opts).await
+        let mut response = self.chat_http(transport, opts).await?;
+        if let Some(origin) = reasoning_origin {
+            for block in response.reasoning_details.iter_mut().flatten() {
+                if block.provider == protocol::ReasoningBlock::CHAT_COMPLETIONS {
+                    block.data["origin"] = origin.clone();
+                }
+            }
+        }
+        Ok(response)
     }
 }
 
@@ -581,11 +596,11 @@ fn copilot_request_headers(
 fn copilot_chat_completions_body(
     messages: &[Message],
     tools: &[ToolDefinition],
-    model: &str,
+    target: &chat_completions::Target<'_>,
     effort: ReasoningEffort,
     config: &ModelConfig,
 ) -> serde_json::Value {
-    let mut body = chat_completions::build_body(messages, tools, model, effort, config);
+    let mut body = chat_completions::build_body(messages, tools, target, effort, config);
     if let Some(obj) = body.as_object_mut() {
         obj.remove("chat_template_kwargs");
         obj.remove("reasoning_effort");
@@ -597,22 +612,22 @@ fn copilot_body(
     wire: WireApi,
     messages: &[Message],
     tools: &[ToolDefinition],
-    model: &str,
+    target: &chat_completions::Target<'_>,
     effort: ReasoningEffort,
     config: &ModelConfig,
     cache: &CacheConfig,
 ) -> serde_json::Value {
     match wire {
         WireApi::ChatCompletions => {
-            copilot_chat_completions_body(messages, tools, model, effort, config)
+            copilot_chat_completions_body(messages, tools, target, effort, config)
         }
         WireApi::OpenAiResponses => {
-            let mut body = openai::build_body(messages, tools, model, effort, config);
+            let mut body = openai::build_body(messages, tools, target.model, effort, config);
             body["store"] = serde_json::json!(false);
             body
         }
         WireApi::AnthropicMessages => {
-            anthropic::build_body(messages, tools, model, effort, config, cache)
+            anthropic::build_body(messages, tools, target.model, effort, config, cache)
         }
     }
 }
@@ -901,6 +916,95 @@ mod tests {
             headers,
             request[header_end..header_end + content_length].to_vec(),
         )
+    }
+
+    #[tokio::test]
+    async fn chat_completions_replays_nonstream_reasoning_on_new_turn_but_not_model_switch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (_, body) = read_http_request(&mut stream).await;
+                bodies.push(serde_json::from_slice::<Value>(&body).unwrap());
+                let message = if index == 0 {
+                    json!({
+                        "reasoning": "choose a tool",
+                        "tool_calls": [{"id": "probe", "type": "function", "function": {"name": "probe", "arguments": "{}"}}],
+                    })
+                } else {
+                    json!({"content": "finished"})
+                };
+                let body =
+                    json!({"choices": [{"message": message, "finish_reason": "stop"}]}).to_string();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            bodies
+        });
+        let client = ProviderClient::new(reqwest::Client::new());
+        let cancel = CancellationToken::new();
+        let opts = ChatOptions::new(&cancel);
+        let config = ModelConfig::default();
+        let mut messages = vec![user_msg("first question")];
+        for index in 0..4 {
+            let response = client
+                .chat(
+                    ChatRequest {
+                        provider: ChatProvider::api_key(
+                            ProviderKind::OpenAiCompatible,
+                            "test-only",
+                        ),
+                        api_base: &api_base,
+                        model: if index == 3 {
+                            "other-model"
+                        } else {
+                            "custom-model"
+                        },
+                        messages: &messages,
+                        tools: &[],
+                        effort: ReasoningEffort::Off,
+                        config: &config,
+                        cache: CacheConfig::default(),
+                        response_format: None,
+                        fast_mode: false,
+                    },
+                    &opts,
+                )
+                .await
+                .unwrap();
+            if index == 0 {
+                assert_eq!(
+                    response.reasoning_details.as_ref().unwrap()[0].data["field"],
+                    "reasoning"
+                );
+            }
+            let tool_calls = (!response.tool_calls.is_empty()).then_some(response.tool_calls);
+            messages.push(Message::assistant_with_reasoning(
+                response.content.map(Content::text),
+                response.reasoning_content,
+                response.reasoning_details,
+                tool_calls,
+            ));
+            if index == 0 {
+                messages.push(Message::tool("probe".into(), "tool result", false));
+            } else if index == 1 {
+                messages.push(user_msg("new question"));
+            }
+        }
+        let bodies = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bodies[1]["messages"][1]["reasoning"], "choose a tool");
+        assert_eq!(bodies[1]["messages"][1]["tool_calls"][0]["id"], "probe");
+        assert_eq!(bodies[1]["messages"][2]["content"], "tool result");
+        assert_eq!(bodies[2]["messages"][1]["reasoning"], "choose a tool");
+        assert_eq!(bodies[2]["messages"][4]["content"], "new question");
+        assert!(bodies[3]["messages"][1].get("reasoning").is_none());
+        assert!(bodies
+            .iter()
+            .all(|body| !body.to_string().contains("reasoning_details")));
     }
 
     async fn spawn_sse_responses(
@@ -1245,7 +1349,11 @@ mod tests {
             WireApi::ChatCompletions,
             &[user_msg("hi")],
             &[],
-            "gpt-4.1",
+            &chat_completions::Target::new(
+                ProviderKind::Copilot,
+                "http://local/chat/completions",
+                "gpt-4.1",
+            ),
             ReasoningEffort::High,
             &ModelConfig::default(),
             &CacheConfig::default(),

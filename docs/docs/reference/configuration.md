@@ -183,6 +183,15 @@ server's default. Unknown or explicitly non-reasoning models receive no reasonin
 parameter when off. `/thinking off` only folds the displayed thinking blocks; it
 does not disable model reasoning.
 
+Chat Completions reasoning replay is automatic: smelt records the received field
+(`reasoning_content`, `reasoning`, or `reasoning_text`) and replays it only for the
+same provider type, endpoint, API and model. No extra setting is needed. Endpoints
+that return no recognized reasoning field receive no reasoning fields. Disabling
+new thinking does not discard existing tool-continuation reasoning. Earlier-turn
+filtering is left to the server's chat template; smelt does not assume which
+template is deployed. Reasoning without recorded origin, including older sessions,
+is kept in history but is not replayed in native reasoning fields.
+
 #### Pricing
 
 Cost tracking is built in for popular models (GPT, Claude, DeepSeek).

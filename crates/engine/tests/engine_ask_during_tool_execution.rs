@@ -699,6 +699,181 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
+    for execution_mode in [ToolExecutionMode::Concurrent, ToolExecutionMode::Sequential] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for step in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_json_request(&mut socket).await);
+                let delta = if step < 2 {
+                    serde_json::json!({
+                        "reasoning_content": if step == 0 { "original thought" } else { "next thought" },
+                        "tool_calls": [{"index": 0, "id": format!("{TOOL_CALL_ID}-{step}"), "type": "function", "function": {
+                            "name": TOOL_NAME, "arguments": serde_json::json!({"step": step}).to_string(),
+                        }}],
+                    })
+                } else {
+                    serde_json::json!({"content": "done"})
+                };
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    serde_json::json!({"choices": [{"delta": delta}]}),
+                    serde_json::json!({"choices": [{"delta": {}, "finish_reason": if step < 2 { "tool_calls" } else { "stop" }}]})
+                );
+                write_sse_response(&mut socket, &body).await;
+            }
+            requests
+        });
+        let config = EngineConfig {
+            system_prompt_override: Some("test system".into()),
+            host_callbacks: engine::HostCallbacks::Disabled,
+            ..EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock))
+        };
+        let target = ModelTarget {
+            model: "original-model".into(),
+            api_base: format!("http://{addr}"),
+            api_key: "test-only".into(),
+            provider_type: "openai-compatible".into(),
+            config: ModelConfig::default(),
+        };
+        let next_target = ModelTarget {
+            model: "next-model".into(),
+            ..target.clone()
+        };
+        let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
+        loop {
+            match handle.recv().await {
+                Some(EngineEvent::Ready) => break,
+                Some(_) => {}
+                None => panic!("engine stopped before ready"),
+            }
+        }
+        handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
+            turn_id: 1,
+            input: protocol::StartTurnInput::user(Content::text("go")),
+            mode: AgentMode::normal(),
+            model_target: target,
+            request_config: RequestRuntimeConfig { request_audit: protocol::RequestAuditMode::Off, ..Default::default() },
+            reasoning_effort: ReasoningEffort::Off,
+            fast_mode: false,
+            history: protocol::ModelHistorySource::items(Vec::new()),
+            session_id: "sess".into(),
+            sessions_root: PathBuf::from("/tmp"),
+            persistence: protocol::PersistenceScope::default(),
+            permission_overrides: None,
+            system_prompt: Some("test system".into()),
+            tools: vec![ToolDef {
+                name: TOOL_NAME.into(),
+                description: "probe reasoning replay across a model switch".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {"step": {"type": "integer"}}}),
+                modes: None,
+                execution_mode,
+                override_core: false,
+                hooks: ToolHookFlags::default(),
+                headless: true,
+            }],
+        })));
+        let mut dispatched = 0;
+        let mut recorded = Vec::new();
+        tokio::time::timeout(TEST_DEADLINE, async {
+            loop {
+                match handle.recv().await {
+                    Some(EngineEvent::ToolEvaluationRequest { request_id, .. }) => {
+                        handle.send(UiCommand::ToolEvaluationResponse {
+                            request_id,
+                            evaluation: protocol::ToolEvaluation {
+                                decision: protocol::Decision::Allow,
+                                metadata: ToolMetadata::default(),
+                            },
+                        });
+                    }
+                    Some(EngineEvent::ToolDispatch {
+                        request_id,
+                        invocation_id,
+                        call_id,
+                        ..
+                    }) => {
+                        if dispatched == 0 {
+                            handle.send(UiCommand::SetTurnModel {
+                                target: Box::new(next_target.clone()),
+                                system_prompt: "next system".into(),
+                            });
+                        }
+                        dispatched += 1;
+                        handle.send(UiCommand::ToolResult {
+                            request_id,
+                            invocation_id,
+                            call_id,
+                            content: format!("step {dispatched} finished"),
+                            is_error: false,
+                            metadata: None,
+                            display_content: Vec::new(),
+                            attachment: None,
+                        });
+                    }
+                    Some(EngineEvent::HistoryAppended { delta, .. }) => {
+                        for item in delta.items.iter() {
+                            if let protocol::HistoryItem::Assistant(step) = item {
+                                if let Some(reasoning) = &step.reasoning {
+                                    recorded.push((
+                                        reasoning.clone(),
+                                        step.reasoning_blocks[0].data["origin"]["model"]
+                                            .as_str()
+                                            .unwrap()
+                                            .to_owned(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Some(EngineEvent::TurnComplete { .. }) => break,
+                    Some(EngineEvent::TurnError { message, .. }) => {
+                        panic!("turn failed: {message}")
+                    }
+                    Some(_) => {}
+                    None => panic!("engine stopped before turn completion"),
+                }
+            }
+        })
+        .await
+        .expect("model-switch tool flow should finish");
+        let requests = server.await.unwrap();
+        assert_eq!(dispatched, 2);
+        assert_eq!(requests[0]["model"], "original-model");
+        assert_eq!(requests[1]["model"], "next-model");
+        assert!(requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message.get("reasoning_content").is_none()));
+        assert_eq!(requests[2]["model"], "next-model");
+        let messages = requests[2]["messages"].as_array().unwrap();
+        let assistants: Vec<_> = messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 2);
+        assert!(assistants[0].get("reasoning_content").is_none());
+        assert_eq!(assistants[1]["reasoning_content"], "next thought");
+        for (step, assistant) in assistants.iter().enumerate() {
+            assert!(messages.iter().any(|message| message["role"] == "tool"
+                && message["tool_call_id"] == assistant["tool_calls"][0]["id"]
+                && message["content"] == format!("step {} finished", step + 1)));
+        }
+        assert_eq!(
+            recorded,
+            [
+                ("original thought".into(), "original-model".into()),
+                ("next thought".into(), "next-model".into())
+            ]
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn model_switch_during_in_flight_request_applies_at_next_request_boundary() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -5,7 +5,11 @@ use crate::{
     CompletedReasoningPart, ModelConfig, ParsedResponse, ProviderError, ProviderStreamEvent,
     ReasoningStreamEvent, ToolCallStreamEvent, ToolDefinition,
 };
-use protocol::{Message, ReasoningEffort, ReasoningKind, TokenUsage, ToolCall};
+use base64::Engine as _;
+use protocol::{
+    Message, ReasoningBlock, ReasoningEffort, ReasoningKind, Role, TokenUsage, ToolCall,
+};
+use sha2::{Digest, Sha256};
 
 use std::collections::HashMap;
 
@@ -40,7 +44,82 @@ fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     }
 }
 
-fn sanitize_message_for_chat_completions(obj: &mut serde_json::Map<String, serde_json::Value>) {
+const REASONING_FIELDS: &[&str] = &["reasoning_content", "reasoning", "reasoning_text"];
+
+pub(crate) struct Target<'a> {
+    pub model: &'a str,
+    pub origin: serde_json::Value,
+}
+
+impl<'a> Target<'a> {
+    pub fn new(provider: crate::ProviderKind, endpoint: &str, model: &'a str) -> Self {
+        Self {
+            model,
+            origin: reasoning_origin(provider, endpoint, model),
+        }
+    }
+}
+
+/// Bind raw reasoning to its transport and model without persisting credentials in URLs.
+pub(crate) fn reasoning_origin(
+    provider: crate::ProviderKind,
+    endpoint: &str,
+    model: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "provider": provider.as_config_str(),
+        "endpoint_sha256": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(endpoint.as_bytes())),
+        "model": model,
+    })
+}
+
+/// All turns remain available to the server's chat template. Thinking-generation
+/// settings do not invalidate reasoning already produced during a tool flow.
+fn replay_field<'a>(message: &'a Message, origin: &serde_json::Value) -> Option<&'a str> {
+    if message.role != Role::Assistant {
+        return None;
+    }
+    message
+        .reasoning_details
+        .iter()
+        .flatten()
+        .find_map(|block| {
+            if block.provider != ReasoningBlock::CHAT_COMPLETIONS || block.data["origin"] != *origin
+            {
+                return None;
+            }
+            block.data["field"]
+                .as_str()
+                .filter(|field| REASONING_FIELDS.contains(field))
+        })
+}
+
+fn incoming_reasoning(message: &serde_json::Value) -> Option<(&'static str, &str)> {
+    // Prefer nonempty fields; some endpoints return multiple aliases in one delta.
+    let fields = || {
+        REASONING_FIELDS
+            .iter()
+            .filter_map(|&field| message[field].as_str().map(|text| (field, text)))
+    };
+    fields()
+        .find(|(_, text)| !text.is_empty())
+        .or_else(|| fields().next())
+}
+
+fn raw_reasoning_blocks(field: Option<&str>) -> Option<Vec<ReasoningBlock>> {
+    field.map(|field| {
+        vec![ReasoningBlock {
+            provider: ReasoningBlock::CHAT_COMPLETIONS.into(),
+            data: serde_json::json!({ "field": field }),
+        }]
+    })
+}
+
+fn sanitize_message_for_chat_completions(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    message: &Message,
+    origin: &serde_json::Value,
+) {
     let Some(role) = obj.get("role").and_then(|v| v.as_str()) else {
         return;
     };
@@ -50,13 +129,20 @@ fn sanitize_message_for_chat_completions(obj: &mut serde_json::Map<String, serde
         "tool" => &["role", "content", "tool_call_id"],
         _ => &["role", "content"],
     };
+    let reasoning = obj.remove("reasoning_content");
     obj.retain(|key, _| allowed.contains(&key.as_str()));
+    if let Some(field) = replay_field(message, origin) {
+        obj.insert(
+            field.into(),
+            reasoning.unwrap_or_else(|| serde_json::json!("")),
+        );
+    }
 }
 
 pub fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
-    model: &str,
+    target: &Target<'_>,
     effort: ReasoningEffort,
     config: &ModelConfig,
 ) -> serde_json::Value {
@@ -66,13 +152,13 @@ pub fn build_body(
             let mut v = serde_json::to_value(m).unwrap();
             if let Some(obj) = v.as_object_mut() {
                 sanitize_tool_call_arguments(obj);
-                sanitize_message_for_chat_completions(obj);
+                sanitize_message_for_chat_completions(obj, m, &target.origin);
             }
             v
         })
         .collect();
 
-    let mut body = serde_json::json!({ "model": model, "messages": api_messages });
+    let mut body = serde_json::json!({ "model": target.model, "messages": api_messages });
 
     if !tools.is_empty() {
         body["tools"] = serde_json::to_value(tools).unwrap();
@@ -127,10 +213,9 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
     let msg = &choice["message"];
 
     let mut content = msg["content"].as_str().map(|s| s.to_string());
-    let mut reasoning = msg["reasoning_content"]
-        .as_str()
-        .or_else(|| msg["reasoning"].as_str())
-        .map(|s| s.to_string());
+    let incoming = incoming_reasoning(msg);
+    let mut reasoning = incoming.map(|(_, text)| text.to_owned());
+    let reasoning_blocks = raw_reasoning_blocks(incoming.map(|(field, _)| field));
 
     let mut tool_calls: Vec<ToolCall> = if let Some(tcs) = msg.get("tool_calls") {
         serde_json::from_value(tcs.clone()).unwrap_or_default()
@@ -158,7 +243,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
         content,
         reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
         reasoning,
-        reasoning_blocks: None,
+        reasoning_blocks,
         tool_calls,
         usage,
     })
@@ -169,6 +254,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
 struct StreamState {
     content: String,
     reasoning: String,
+    reasoning_field: Option<&'static str>,
     /// content block index -> (id, name, args-json)
     tool_calls: HashMap<usize, (String, String, String)>,
     usage: TokenUsage,
@@ -180,6 +266,7 @@ impl StreamState {
     fn finalize(self) -> ParsedResponse {
         let content = non_empty(self.content);
         let reasoning = non_empty(self.reasoning);
+        let reasoning_blocks = raw_reasoning_blocks(self.reasoning_field);
         let tool_calls = collect_indexed_tool_calls(self.tool_calls);
         let usage = self.usage;
 
@@ -195,7 +282,7 @@ impl StreamState {
                     content: cleaned_content,
                     reasoning_parts: raw_reasoning_parts(cleaned_reasoning.as_deref()),
                     reasoning: cleaned_reasoning,
-                    reasoning_blocks: None,
+                    reasoning_blocks,
                     tool_calls,
                     usage,
                 };
@@ -207,7 +294,7 @@ impl StreamState {
             content,
             reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
             reasoning,
-            reasoning_blocks: None,
+            reasoning_blocks,
             tool_calls,
             usage,
         }
@@ -285,11 +372,10 @@ fn apply_sse_event(
     // A single delta can contain the reasoning tail and the answer prefix.
     // Emit reasoning first so downstream consumers see the channel transition
     // in semantic order, independent of how the provider batches tokens.
-    if let Some(text) = delta
-        .get("reasoning_content")
-        .or_else(|| delta.get("reasoning"))
-        .and_then(|v| v.as_str())
-    {
+    if let Some((field, text)) = incoming_reasoning(delta) {
+        if state.reasoning.is_empty() {
+            state.reasoning_field = Some(field);
+        }
         if !text.is_empty() {
             state.reasoning.push_str(text);
             on_delta(ProviderStreamEvent::Reasoning(
@@ -446,11 +532,254 @@ mod tests {
         keys
     }
 
+    fn replay_assistant(field: &str, origin: &serde_json::Value) -> Message {
+        let mut response = json!({"choices": [{"message": {"content": "answer"}}]});
+        response["choices"][0]["message"][field] = json!("prior thinking");
+        let mut parsed = parse_response(&response).unwrap();
+        for block in parsed.reasoning_blocks.iter_mut().flatten() {
+            block.data["origin"] = origin.clone();
+        }
+        Message::assistant_with_reasoning(
+            parsed.content.map(Content::text),
+            parsed.reasoning,
+            parsed.reasoning_blocks,
+            None,
+        )
+    }
+
+    fn target(model: &str) -> Target<'_> {
+        Target::new(
+            crate::ProviderKind::OpenAiCompatible,
+            "http://local/chat/completions",
+            model,
+        )
+    }
+
+    fn replay_body(messages: &[Message], origin: &serde_json::Value) -> serde_json::Value {
+        let target = Target {
+            model: origin["model"].as_str().unwrap(),
+            origin: origin.clone(),
+        };
+        build_body(messages, &[], &target, ReasoningEffort::Off, &cfg())
+    }
+
+    #[test]
+    fn reasoning_replay_preserves_received_field_and_excludes_internal_metadata() {
+        let origin = reasoning_origin(
+            crate::ProviderKind::OpenAiCompatible,
+            "http://local/v1/chat/completions",
+            "custom-model",
+        );
+        for &field in REASONING_FIELDS {
+            let mut assistant = replay_assistant(field, &origin);
+            assistant.tool_calls = Some(vec![ToolCall::new(
+                "call".into(),
+                FunctionCall {
+                    name: "probe".into(),
+                    arguments: "{}".into(),
+                },
+            )]);
+            assistant.is_error = true;
+            assistant.tool_metadata = Some(json!({"summary": "internal"}));
+            assistant.reasoning_details.as_mut().unwrap().push(ReasoningBlock {
+                provider: ReasoningBlock::ANTHROPIC.into(),
+                data: json!({"type": "thinking", "signature": "native-secret", "thinking": "native"}),
+            });
+            let mut user = user("hi");
+            user.reasoning_content = Some("user metadata".into());
+            user.reasoning_details = assistant.reasoning_details.clone();
+            let mut tool = tool_msg("call", "ok");
+            tool.reasoning_content = Some("tool metadata".into());
+            tool.reasoning_details = assistant.reasoning_details.clone();
+            tool.tool_metadata = Some(json!({"summary": "internal"}));
+            let body = replay_body(&[user, assistant, tool], &origin);
+            assert_eq!(body["messages"][1][field], "prior thinking");
+            let mut expected = vec!["content", "role", "tool_calls", field];
+            expected.sort();
+            assert_eq!(message_keys(&body["messages"][1]), expected);
+            assert_eq!(message_keys(&body["messages"][0]), ["content", "role"]);
+            assert_eq!(
+                message_keys(&body["messages"][2]),
+                ["content", "role", "tool_call_id"]
+            );
+            assert!(!body.to_string().contains("native-secret"));
+            assert!(!body.to_string().contains("endpoint_sha256"));
+        }
+    }
+
+    #[test]
+    fn reasoning_origin_does_not_persist_url_credentials() {
+        let origin = reasoning_origin(
+            crate::ProviderKind::OpenAiCompatible,
+            "https://user:synthetic-password@local/chat/completions?key=synthetic-key",
+            "custom-model",
+        );
+        let encoded = origin.to_string();
+        assert!(!encoded.contains("synthetic-password"));
+        assert!(!encoded.contains("synthetic-key"));
+    }
+
+    #[test]
+    fn reasoning_replay_rejects_switches_unknown_origin_and_unrecognized_fields() {
+        let kind = crate::ProviderKind::OpenAiCompatible;
+        let origin = reasoning_origin(kind, "http://local/chat/completions", "custom-model");
+        let assistant = replay_assistant("reasoning_content", &origin);
+        for switched in [
+            reasoning_origin(kind, "http://other/chat/completions", "custom-model"),
+            reasoning_origin(kind, "http://local/chat/completions", "other-model"),
+            reasoning_origin(
+                crate::ProviderKind::Copilot,
+                "http://local/chat/completions",
+                "custom-model",
+            ),
+        ] {
+            let body = replay_body(std::slice::from_ref(&assistant), &switched);
+            assert_eq!(message_keys(&body["messages"][0]), ["content", "role"]);
+        }
+        for details in [
+            None,
+            raw_reasoning_blocks(Some("reasoning_content")),
+            Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::ANTHROPIC.into(),
+                data: json!({"field": "reasoning_content", "origin": origin}),
+            }]),
+            Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::OPENAI_RESPONSES.into(),
+                data: json!({"field": "reasoning_content", "origin": origin}),
+            }]),
+            Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::CHAT_COMPLETIONS.into(),
+                data: json!({"field": "tool_metadata", "origin": origin}),
+            }]),
+        ] {
+            let mut assistant = assistant.clone();
+            assistant.reasoning_details = details;
+            let body = replay_body(&[assistant], &origin);
+            assert_eq!(message_keys(&body["messages"][0]), ["content", "role"]);
+        }
+    }
+
+    #[test]
+    fn reasoning_replay_keeps_older_turns_after_history_round_trip_and_thinking_off() {
+        let origin = reasoning_origin(
+            crate::ProviderKind::OpenAiCompatible,
+            "http://local/chat/completions",
+            "custom-model",
+        );
+        let messages = vec![
+            user("first question"),
+            replay_assistant("reasoning_content", &origin),
+            user("new question"),
+            replay_assistant("reasoning", &origin),
+        ];
+        let history = protocol::history_from_messages(messages);
+        let stored = serde_json::to_value(history).unwrap();
+        let restored: Vec<protocol::HistoryItem> = serde_json::from_value(stored).unwrap();
+        let messages = protocol::history_to_messages(&restored);
+        let config = ModelConfig {
+            supports_reasoning: Some(true),
+            chat_template_kwargs: Some(serde_json::Map::from_iter([(
+                "enable_thinking".into(),
+                json!(false),
+            )])),
+            ..Default::default()
+        };
+        let target = Target {
+            model: "custom-model",
+            origin,
+        };
+        let body = build_body(&messages, &[], &target, ReasoningEffort::Off, &config);
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(body["messages"][1]["reasoning_content"], "prior thinking");
+        assert_eq!(body["messages"][3]["reasoning"], "prior thinking");
+    }
+
+    #[test]
+    fn reasoning_replay_records_stream_and_nonstream_fields_including_empty_reasoning() {
+        let origin = reasoning_origin(
+            crate::ProviderKind::OpenAiCompatible,
+            "http://local/chat/completions",
+            "custom-model",
+        );
+        for &field in REASONING_FIELDS {
+            for text in ["", "thinking"] {
+                let mut message = json!({"content": "answer"});
+                message[field] = json!(text);
+                let response = json!({"choices": [{"message": message}]});
+                let events = [json!({"choices": [{"delta": message, "finish_reason": "stop"}]})];
+                for mut parsed in [
+                    parse_response(&response).unwrap(),
+                    parse_stream_events(&events, &mut |_| {}).unwrap(),
+                ] {
+                    let blocks = parsed.reasoning_blocks.as_mut().unwrap();
+                    assert_eq!(blocks[0].data["field"], field);
+                    blocks[0].data["origin"] = origin.clone();
+                    let assistant = Message::assistant_with_reasoning(
+                        parsed.content.map(Content::text),
+                        parsed.reasoning,
+                        parsed.reasoning_blocks,
+                        None,
+                    );
+                    assert_eq!(
+                        replay_body(&[assistant], &origin)["messages"][0][field],
+                        text
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chat_reasoning_is_not_replayed_as_anthropic_or_responses_reasoning() {
+        let origin = reasoning_origin(
+            crate::ProviderKind::OpenAiCompatible,
+            "http://local/chat/completions",
+            "custom-model",
+        );
+        let messages = [replay_assistant("reasoning_content", &origin)];
+        let anthropic = crate::anthropic::build_body(
+            &messages,
+            &[],
+            "claude",
+            ReasoningEffort::High,
+            &cfg(),
+            &crate::CacheConfig::default(),
+        );
+        let responses =
+            crate::openai::build_body(&messages, &[], "gpt", ReasoningEffort::High, &cfg());
+        for body in [anthropic, responses] {
+            assert!(!body.to_string().contains("prior thinking"));
+            assert!(!body.to_string().contains("endpoint_sha256"));
+            assert!(!body.to_string().contains("reasoning_content"));
+        }
+    }
+
+    #[test]
+    fn reasoning_parser_uses_nonempty_alias_without_duplicating_reasoning() {
+        let events = [
+            json!({"choices": [{"delta": {"reasoning_content": "", "reasoning": "first"}}]}),
+            json!({"choices": [{"delta": {"reasoning": " second", "reasoning_text": " second"}, "finish_reason": "stop"}]}),
+        ];
+        let parsed = parse_stream_events(&events, &mut |_| {}).unwrap();
+        assert_eq!(parsed.reasoning.as_deref(), Some("first second"));
+        assert_eq!(
+            parsed.reasoning_blocks.unwrap()[0].data["field"],
+            "reasoning"
+        );
+    }
+
     // ---- build_body ----
 
     #[test]
     fn build_body_includes_model_and_messages() {
-        let body = build_body(&[user("hi")], &[], "model-x", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            &target("model-x"),
+            ReasoningEffort::Off,
+            &cfg(),
+        );
         assert_eq!(body["model"], "model-x");
         assert!(body["messages"].is_array());
         assert_eq!(body["messages"][0]["role"], "user");
@@ -467,11 +796,23 @@ mod tests {
                 chat_template_kwargs: Some(kwargs.clone()),
                 ..Default::default()
             };
-            let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &config);
+            let body = build_body(
+                &[user("hi")],
+                &[],
+                &target("m"),
+                ReasoningEffort::Off,
+                &config,
+            );
             assert_eq!(body["chat_template_kwargs"], json!(kwargs));
             assert!(body.get("reasoning_effort").is_none());
         }
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            &target("m"),
+            ReasoningEffort::Off,
+            &cfg(),
+        );
         assert!(body.get("chat_template_kwargs").is_none());
     }
 
@@ -481,7 +822,7 @@ mod tests {
             is_error: true,
             ..user("hi")
         };
-        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(&[m], &[], &target("m"), ReasoningEffort::Off, &cfg());
         assert!(body["messages"][0].get("is_error").is_none());
     }
 
@@ -493,7 +834,7 @@ mod tests {
             provider: ReasoningBlock::ANTHROPIC.to_string(),
             data: serde_json::json!({"type": "thinking", "thinking": "x"}),
         }]);
-        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(&[m], &[], &target("m"), ReasoningEffort::Off, &cfg());
         assert!(body["messages"][0].get("reasoning_details").is_none());
     }
 
@@ -502,7 +843,7 @@ mod tests {
         let body = build_body(
             &[tool_msg("call-1", "ok")],
             &[],
-            "m",
+            &target("m"),
             ReasoningEffort::Off,
             &cfg(),
         );
@@ -540,7 +881,7 @@ mod tests {
         let body = build_body(
             &[user_msg, assistant, tool],
             &[],
-            "m",
+            &target("m"),
             ReasoningEffort::Off,
             &cfg(),
         );
@@ -575,7 +916,7 @@ mod tests {
             is_error: false,
             tool_metadata: None,
         };
-        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(&[m], &[], &target("m"), ReasoningEffort::Off, &cfg());
         let args = &body["messages"][0]["tool_calls"][0]["function"]["arguments"];
         assert_eq!(args, "{}");
     }
@@ -607,7 +948,7 @@ mod tests {
                 user("continue with thinking on"),
             ],
             &[],
-            "m",
+            &target("m"),
             ReasoningEffort::Low,
             &cfg(),
         );
@@ -635,7 +976,7 @@ mod tests {
             is_error: false,
             tool_metadata: None,
         };
-        let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(&[m], &[], &target("m"), ReasoningEffort::Off, &cfg());
         let args = &body["messages"][0]["tool_calls"][0]["function"]["arguments"];
         assert_eq!(args, r#"{"a":1}"#);
     }
@@ -647,14 +988,26 @@ mod tests {
             description: "d".into(),
             parameters: json!({"type":"object"}),
         })];
-        let body = build_body(&[user("hi")], &tools, "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &tools,
+            &target("m"),
+            ReasoningEffort::Off,
+            &cfg(),
+        );
         assert!(body["tools"].is_array());
         assert_eq!(body["tools"][0]["function"]["name"], "f");
     }
 
     #[test]
     fn build_body_omits_tools_when_empty() {
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            &target("m"),
+            ReasoningEffort::Off,
+            &cfg(),
+        );
         assert!(body.get("tools").is_none());
     }
 
@@ -666,7 +1019,7 @@ mod tests {
         c.top_k = Some(40);
         c.min_p = Some(0.05);
         c.repeat_penalty = Some(1.1);
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &c);
+        let body = build_body(&[user("hi")], &[], &target("m"), ReasoningEffort::Off, &c);
         assert_eq!(body["temperature"], 0.5);
         assert_eq!(body["top_p"], 0.9);
         assert_eq!(body["top_k"], 40);
@@ -676,7 +1029,13 @@ mod tests {
 
     #[test]
     fn build_body_omits_thinking_fields_when_effort_off() {
-        let body = build_body(&[user("hi")], &[], "m", ReasoningEffort::Off, &cfg());
+        let body = build_body(
+            &[user("hi")],
+            &[],
+            &target("m"),
+            ReasoningEffort::Off,
+            &cfg(),
+        );
         assert!(body.get("chat_template_kwargs").is_none());
         assert!(body.get("reasoning_effort").is_none());
     }
@@ -691,7 +1050,7 @@ mod tests {
             let body = build_body(
                 &[user("hi")],
                 &[],
-                "custom-model",
+                &target("custom-model"),
                 ReasoningEffort::Off,
                 &config,
             );
@@ -714,7 +1073,7 @@ mod tests {
             ReasoningEffort::Custom("persistent".into()),
         ] {
             let label = effort.label().to_string();
-            let body = build_body(&[user("hi")], &[], "m", effort, &cfg());
+            let body = build_body(&[user("hi")], &[], &target("m"), effort, &cfg());
             assert_eq!(body["reasoning_effort"], label);
             assert!(body.get("chat_template_kwargs").is_none());
         }

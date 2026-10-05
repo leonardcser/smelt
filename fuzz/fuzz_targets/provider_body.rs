@@ -6,12 +6,12 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use protocol::{Content, Message, ModelConfig, ReasoningEffort};
+use protocol::{Content, Message, ModelConfig, ReasoningBlock, ReasoningEffort, Role};
 use smelt_fuzz::cache_common::{build_tools, ArbTool};
 use smelt_provider::{
     fuzz_api_key_auth, fuzz_build_anthropic_body, fuzz_build_chat_completions_body,
-    fuzz_build_openai_body, fuzz_extract_tool_calls, fuzz_parse_catalog, normalize_api_base,
-    CacheConfig, ProviderKind,
+    fuzz_build_openai_body, fuzz_chat_reasoning_origin, fuzz_extract_tool_calls,
+    fuzz_parse_catalog, normalize_api_base, CacheConfig, ProviderKind,
 };
 
 #[derive(Arbitrary, Debug)]
@@ -36,20 +36,63 @@ struct ExpectedBodySchema<'a> {
     tool_count: usize,
     effort: ReasoningEffort,
     cache_key_chars: Option<usize>,
+    replay_field: Option<&'a str>,
+    reasoning: &'a str,
+    replay_messages: &'a [bool],
 }
 
 fn run(input: Input) {
     assert_provider_helpers(&input);
     let expected_message_count = input.texts.len().min(12);
     let expected_cache_key_chars = input.cache_key.as_ref().map(|s| s.chars().take(64).count());
-    let mut messages = Vec::new();
-    messages.push(Message::system(input.system));
+    let model = if input.model.is_empty() {
+        "fuzz"
+    } else {
+        &input.model
+    };
+    let provider = ProviderKind::from_config(&input.provider_type);
+    let origin = fuzz_chat_reasoning_origin(provider, &input.api_base, model);
+    let fields = [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_text",
+        "tool_metadata",
+    ];
+    let field = fields[usize::from(input.effort >> 2) % fields.len()];
+    let replay_field = (field != "tool_metadata").then_some(field);
+    let mut messages = vec![Message::system(input.system)];
+    let mut replay_messages = vec![false];
     for (i, text) in input.texts.into_iter().take(12).enumerate() {
-        if i % 3 == 2 {
-            messages.push(Message::assistant(Some(Content::text(text)), None, None));
+        let mut message = if i % 3 == 2 {
+            Message::assistant(Some(Content::text(text)), None, None)
         } else {
-            messages.push(Message::user(Content::text(text)));
-        }
+            Message::user(Content::text(text))
+        };
+        let scope = (i / 3 + usize::from(input.effort >> 4)) % 4;
+        let source = match scope {
+            0 => origin.clone(),
+            1 => fuzz_chat_reasoning_origin(
+                if provider == ProviderKind::Copilot {
+                    ProviderKind::OpenAiCompatible
+                } else {
+                    ProviderKind::Copilot
+                },
+                &input.api_base,
+                model,
+            ),
+            2 => fuzz_chat_reasoning_origin(provider, &format!("{}/other", input.api_base), model),
+            _ => fuzz_chat_reasoning_origin(provider, &input.api_base, &format!("{model}-other")),
+        };
+        message.reasoning_content = Some(input.extract_text.clone());
+        message.reasoning_details = Some(vec![ReasoningBlock {
+            provider: ReasoningBlock::CHAT_COMPLETIONS.into(),
+            data: serde_json::json!({"field": field, "origin": source}),
+        }]);
+        message.tool_metadata = Some(serde_json::json!({"summary": "internal"}));
+        message.is_error = true;
+        replay_messages
+            .push(message.role == Role::Assistant && scope == 0 && replay_field.is_some());
+        messages.push(message);
     }
     let tools = build_tools(&input.tools);
     let cfg = ModelConfig::default();
@@ -64,16 +107,17 @@ fn run(input: Input) {
         ttl_long: input.ttl_long,
         prompt_cache_key: input.cache_key,
     };
-    let model = if input.model.is_empty() {
-        "fuzz"
-    } else {
-        &input.model
-    };
-
     let anthropic =
         fuzz_build_anthropic_body(&messages, &tools, model, effort.clone(), &cfg, &cache);
-    let chat =
-        fuzz_build_chat_completions_body(&messages, &tools, model, effort.clone(), &cfg);
+    let chat = fuzz_build_chat_completions_body(
+        &messages,
+        &tools,
+        model,
+        effort.clone(),
+        &cfg,
+        provider,
+        &input.api_base,
+    );
     let openai = fuzz_build_openai_body(&messages, &tools, model, effort.clone(), &cfg, &cache);
 
     let expected = ExpectedBodySchema {
@@ -82,6 +126,9 @@ fn run(input: Input) {
         tool_count: tools.len(),
         effort,
         cache_key_chars: expected_cache_key_chars,
+        replay_field,
+        reasoning: &input.extract_text,
+        replay_messages: &replay_messages,
     };
     assert_provider_body_schema(&anthropic, &chat, &openai, &expected);
 }
@@ -129,7 +176,7 @@ fn assert_provider_body_schema(
         expected.message_count + 1,
         "chat completions message count changed"
     );
-    for message in chat_messages {
+    for (index, message) in chat_messages.iter().enumerate() {
         assert!(
             matches!(
                 message["role"].as_str(),
@@ -143,11 +190,25 @@ fn assert_provider_body_schema(
             _ => &["role", "content"][..],
         };
         assert!(
-            message
-                .as_object()
-                .is_some_and(|object| object.keys().all(|key| allowed.contains(&key.as_str()))),
+            message.as_object().is_some_and(|object| object
+                .keys()
+                .all(|key| allowed.contains(&key.as_str())
+                    || (expected.replay_messages[index]
+                        && expected.replay_field == Some(key.as_str())))),
             "chat completions message leaked internal fields: {message:?}"
         );
+        for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+            let value = message.get(field);
+            if expected.replay_messages[index] && expected.replay_field == Some(field) {
+                assert_eq!(
+                    value.and_then(serde_json::Value::as_str),
+                    Some(expected.reasoning),
+                    "same-origin reasoning was changed or lost"
+                );
+            } else {
+                assert!(value.is_none(), "incompatible reasoning was replayed");
+            }
+        }
     }
 
     let openai_input = openai["input"]

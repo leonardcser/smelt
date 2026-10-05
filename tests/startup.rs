@@ -2004,11 +2004,20 @@ struct StreamingTrial {
     status: std::process::ExitStatus,
     events: Vec<serde_json::Value>,
     requests: usize,
+    request_bodies: Vec<serde_json::Value>,
     tool_effect: Option<String>,
     stderr: String,
 }
 
 fn run_headless_stream(bodies: &[String], ending: StreamEnding) -> StreamingTrial {
+    run_headless_stream_with_model(bodies, ending, "\"test-model\"")
+}
+
+fn run_headless_stream_with_model(
+    bodies: &[String],
+    ending: StreamEnding,
+    model: &str,
+) -> StreamingTrial {
     let home = tempfile::tempdir().unwrap();
     let provider = TcpListener::bind("127.0.0.1:0").unwrap();
     provider.set_nonblocking(true).unwrap();
@@ -2023,7 +2032,7 @@ smelt.provider.register("test", {{
   type = "openai-compatible",
   api_base = "http://{}/v1",
   api_key_env = "SMELT_STREAM_TEST_KEY",
-  models = {{ "test-model" }},
+  models = {{ {model} }},
 }})
 smelt.tools.register({{
   name = "stream_probe",
@@ -2078,6 +2087,7 @@ smelt.tools.register({{
     };
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut requests = 0;
+    let mut request_bodies = Vec::new();
     let mut held_streams = Vec::new();
     let mut cancelled = false;
     let status = loop {
@@ -2108,12 +2118,14 @@ smelt.tools.register({{
                     }
                 }
             }
-            std::io::copy(&mut reader.take(length), &mut std::io::sink()).unwrap();
+            let mut request_body = Vec::new();
+            reader.take(length).read_to_end(&mut request_body).unwrap();
             if !post {
                 let body = r#"{"data":[]}"#;
                 write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
                 continue;
             }
+            request_bodies.push(serde_json::from_slice(&request_body).unwrap());
             let body = &bodies[requests.min(bodies.len() - 1)];
             requests += 1;
             assert!(requests <= bodies.len() + 3, "unexpected retries");
@@ -2159,6 +2171,7 @@ smelt.tools.register({{
         status,
         events,
         requests,
+        request_bodies,
         tool_effect: std::fs::read_to_string(home.path().join("tool-executed")).ok(),
         stderr: std::fs::read_to_string(stderr).unwrap(),
     }
@@ -2367,6 +2380,118 @@ fn headless_stream_empty_output_limit_after_tool_is_not_retried() {
     assert!(assistant.get("content").is_none());
     assert!(assistant.get("reasoning").is_none());
     assert!(assistant.get("invocations").is_none());
+}
+
+#[test]
+fn headless_stream_thinking_disabled_replays_only_received_reasoning_fields() {
+    for empty_reasoning in [false, true] {
+        let reasoning = if empty_reasoning {
+            stream_event(serde_json::json!({"choices": [{"delta": {"reasoning_content": ""}}]}))
+        } else {
+            String::new()
+        };
+        let tool = format!(
+            "{reasoning}{}{}data: [DONE]\n\n",
+            stream_tool("{\"value\":\"recorded\"}", true),
+            stream_finish_reason("tool_calls")
+        );
+        let final_response = format!(
+            "{}{}data: [DONE]\n\n",
+            stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+            stream_finish()
+        );
+        let trial = run_headless_stream_with_model(
+            &[tool, final_response],
+            StreamEnding::Eof,
+            r#"{ name = "test-model", supports_reasoning = true, chat_template_kwargs = { enable_thinking = false } }"#,
+        );
+        assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+        assert_eq!(trial.requests, 2);
+        assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+        for body in &trial.request_bodies {
+            assert_eq!(body["reasoning_effort"], "none");
+            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        }
+        let assistant = trial.request_bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .unwrap();
+        if empty_reasoning {
+            assert_eq!(assistant["reasoning_content"], "");
+        } else {
+            assert!(assistant.get("reasoning_content").is_none());
+        }
+    }
+}
+
+#[test]
+fn headless_stream_replays_reasoning_across_multiple_tool_continuations() {
+    for field in [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_text",
+        "unsupported_reasoning",
+    ] {
+        let reasoning = |text: &str| {
+            let mut delta = serde_json::json!({});
+            delta[field] = serde_json::json!(text);
+            stream_event(serde_json::json!({"choices": [{"delta": delta}]}))
+        };
+        let first = format!(
+            "{}{}{}data: [DONE]\n\n",
+            reasoning("first thought"),
+            stream_tool("{\"value\":\"first\"}", true),
+            stream_finish_reason("tool_calls")
+        );
+        let second = format!(
+            "{}{}{}data: [DONE]\n\n",
+            reasoning("second thought"),
+            stream_tool("{\"value\":\"second\"}", true).replace("probe-1", "probe-2"),
+            stream_finish_reason("tool_calls")
+        );
+        let final_response = format!(
+            "{}{}data: [DONE]\n\n",
+            stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+            stream_finish()
+        );
+        let trial = run_headless_stream(&[first, second, final_response], StreamEnding::Eof);
+        assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+        assert_eq!(trial.requests, 3);
+        assert_eq!(trial.tool_effect.as_deref(), Some("firstsecond"));
+        for (index, body) in trial.request_bodies.iter().enumerate() {
+            let messages = body["messages"].as_array().unwrap();
+            let assistants: Vec<_> = messages
+                .iter()
+                .filter(|message| message["role"] == "assistant")
+                .collect();
+            assert_eq!(assistants.len(), index);
+            for (step, assistant) in assistants.iter().enumerate() {
+                let expected = if step == 0 {
+                    "first thought"
+                } else {
+                    "second thought"
+                };
+                if field == "unsupported_reasoning" {
+                    assert!(assistant.get(field).is_none());
+                    assert_eq!(assistant.as_object().unwrap().len(), 2);
+                } else {
+                    assert_eq!(assistant[field], expected);
+                    assert_eq!(assistant.as_object().unwrap().len(), 3);
+                }
+                assert_eq!(
+                    assistant["tool_calls"][0]["id"],
+                    format!("probe-{}", step + 1)
+                );
+                assert!(messages.iter().any(|message| message["role"] == "tool"
+                    && message["tool_call_id"] == assistant["tool_calls"][0]["id"]));
+            }
+            assert!(!body.to_string().contains("reasoning_details"));
+            assert!(!body.to_string().contains("tool_metadata"));
+            assert!(!body.to_string().contains("endpoint_sha256"));
+        }
+    }
 }
 
 #[test]

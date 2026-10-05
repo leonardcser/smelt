@@ -193,8 +193,20 @@ pub fn fuzz_build_chat_completions_body(
     model: &str,
     effort: protocol::ReasoningEffort,
     config: &ModelConfig,
+    provider: ProviderKind,
+    endpoint: &str,
 ) -> serde_json::Value {
-    chat_completions::build_body(messages, tools, model, effort, config)
+    let target = chat_completions::Target::new(provider, endpoint, model);
+    chat_completions::build_body(messages, tools, &target, effort, config)
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_chat_reasoning_origin(
+    provider: ProviderKind,
+    endpoint: &str,
+    model: &str,
+) -> serde_json::Value {
+    chat_completions::reasoning_origin(provider, endpoint, model)
 }
 
 #[cfg(any(test, feature = "fuzz"))]
