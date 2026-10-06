@@ -702,6 +702,12 @@ pub struct EditFileOutcome {
     pub new_content: String,
 }
 
+#[derive(Debug)]
+pub struct PreparedEditFile {
+    pub outcome: EditFileOutcome,
+    pub mtime_ms: u64,
+}
+
 fn validate_edit_file_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("missing required parameter: file_path".into());
@@ -792,32 +798,20 @@ fn plan_edit_file(
     })
 }
 
-pub fn checked_validate_edit_file(
-    path: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-    cache: &FileStateCache,
-) -> Result<(), String> {
-    validate_edit_file_path(path)?;
-    cache
-        .with_state(path, |cached| {
-            ensure_cached_state_is_current(path, cached, "file")?;
-            validate_edit_replacement(&cached.content, old_string, new_string, replace_all)
-        })
-        .unwrap_or_else(|| Err("read the file with read_file before editing".into()))
-}
-
 pub fn checked_plan_edit_file(
     path: &str,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
     cache: &FileStateCache,
-) -> Result<EditFileOutcome, String> {
+) -> Result<PreparedEditFile, String> {
     validate_edit_file_path(path)?;
     let cached = fresh_cached_state(cache, path, "file")?;
-    plan_edit_file(cached.content, old_string, new_string, replace_all)
+    let outcome = plan_edit_file(cached.content, old_string, new_string, replace_all)?;
+    Ok(PreparedEditFile {
+        outcome,
+        mtime_ms: cached.mtime_ms,
+    })
 }
 
 pub fn checked_edit_file(
@@ -826,11 +820,17 @@ pub fn checked_edit_file(
     new_string: &str,
     replace_all: bool,
     cache: &FileStateCache,
+    expected_mtime_ms: Option<u64>,
 ) -> Result<EditFileOutcome, String> {
     validate_edit_file_path(path)?;
     let cached = cached_state(cache, path, "file")?;
     let _lock = try_flock(path)?;
     ensure_cached_state_is_current(path, &cached, "file")?;
+    if expected_mtime_ms.is_some_and(|expected| expected != cached.mtime_ms) {
+        return Err(
+            "file changed since edit preparation; read the file again before editing".into(),
+        );
+    }
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let outcome = plan_edit_file(content, old_string, new_string, replace_all)?;
 
@@ -882,6 +882,34 @@ mod edit_file_tests {
     use super::*;
 
     const CONTENT: &str = "alpha\nbeta\nalpha\n";
+
+    #[test]
+    fn prepared_edit_rejects_a_newer_read_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prepared.txt");
+        std::fs::write(&path, "old").unwrap();
+        let path = path.to_str().unwrap();
+        let cache = FileStateCache::new();
+        cache.record_read(path, "old".into(), (0, 1));
+        let prepared = checked_plan_edit_file(path, "old", "new", false, &cache).unwrap();
+        std::fs::write(path, "old plus external change").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(prepared.mtime_ms + 2000),
+            ))
+            .unwrap();
+        cache.record_read(path, "old plus external change".into(), (0, 1));
+        let error = checked_edit_file(path, "old", "new", false, &cache, Some(prepared.mtime_ms))
+            .unwrap_err();
+        assert!(error.contains("changed since edit preparation"));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "old plus external change"
+        );
+    }
 
     #[test]
     fn planner_replaces_one_unique_match() {

@@ -131,6 +131,7 @@ impl HeadlessApp {
     fn handle_tool_evaluation_request(
         &mut self,
         request_id: u64,
+        invocation_id: protocol::InvocationId,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
     ) {
@@ -154,9 +155,43 @@ impl HeadlessApp {
             });
             return;
         }
-        let metadata = crate::host::scope_core(&mut self.core, || {
-            lua.evaluate_tool_metadata(&tool_name, &args)
-        });
+        let request = crate::lua::ToolEvaluationRequest {
+            request_id,
+            invocation_id,
+            tool_name,
+            args,
+            mode: self.core.config.mode.clone(),
+        };
+        let now = self.core.clock.instant_now();
+        match crate::host::scope_core(&mut self.core, || lua.evaluate_tool_metadata(&request, now))
+        {
+            Ok(Some(metadata)) => self.finish_tool_evaluation(request, metadata),
+            Ok(None) => {}
+            Err(error) => self.finish_tool_evaluation(
+                request,
+                protocol::ToolMetadata {
+                    preflight_error: Some(error),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    fn finish_tool_evaluation(
+        &mut self,
+        request: crate::lua::ToolEvaluationRequest,
+        metadata: protocol::ToolMetadata,
+    ) {
+        let Some(lua) = self.lua.as_ref() else {
+            return;
+        };
+        let crate::lua::ToolEvaluationRequest {
+            request_id,
+            tool_name,
+            args,
+            mode,
+            ..
+        } = request;
         let decision = if let Some(err) = metadata.preflight_error.clone() {
             protocol::Decision::Error(err)
         } else {
@@ -168,7 +203,7 @@ impl HeadlessApp {
                         .permissions
                         .snapshot()
                         .evaluate_tool_with_paths_and_approvals(
-                            self.core.config.mode.clone(),
+                            mode,
                             crate::permissions::ToolOrigin::Lua,
                             &tool_name,
                             &args,
@@ -273,26 +308,35 @@ impl HeadlessApp {
             lua.drive_tasks(now)
         });
         for out in outputs {
-            if let crate::lua::TaskDriveOutput::ToolComplete {
-                invocation,
-                call_id,
-                content,
-                is_error,
-                metadata,
-                display_content,
-                attachment,
-            } = out
-            {
-                self.core.engine.send(UiCommand::ToolResult {
-                    request_id: invocation.request_id,
-                    invocation_id: invocation.invocation_id,
+            match out {
+                crate::lua::TaskDriveOutput::ToolComplete {
+                    invocation,
                     call_id,
                     content,
                     is_error,
                     metadata,
                     display_content,
-                    attachment: attachment.map(|attachment| *attachment),
-                });
+                    attachment,
+                } => {
+                    self.core.engine.send(UiCommand::ToolResult {
+                        request_id: invocation.request_id,
+                        invocation_id: invocation.invocation_id,
+                        call_id,
+                        content,
+                        is_error,
+                        metadata,
+                        display_content,
+                        attachment: attachment.map(|attachment| *attachment),
+                    });
+                }
+                crate::lua::TaskDriveOutput::ToolEvaluated { request, result } => {
+                    let lua = self.lua.as_ref().unwrap();
+                    let metadata = crate::host::scope_core(&mut self.core, || {
+                        lua.finish_tool_evaluation(&request, result)
+                    });
+                    self.finish_tool_evaluation(*request, metadata);
+                }
+                crate::lua::TaskDriveOutput::NotifyError(_) => {}
             }
         }
     }
@@ -305,6 +349,13 @@ impl HeadlessApp {
 
     fn handle_control_event(&mut self, ev: &EngineEvent) -> bool {
         match ev {
+            EngineEvent::ToolFinished { invocation_id, .. }
+            | EngineEvent::ToolRejected { invocation_id, .. } => {
+                if let Some(lua) = self.lua.as_ref() {
+                    lua.release_tool_preparation(*invocation_id);
+                }
+                false
+            }
             EngineEvent::RequestPermission {
                 request_id,
                 tool_name,
@@ -321,11 +372,17 @@ impl HeadlessApp {
             }
             EngineEvent::ToolEvaluationRequest {
                 request_id,
+                invocation_id,
                 tool_name,
                 args,
                 ..
             } => {
-                self.handle_tool_evaluation_request(*request_id, tool_name.clone(), args.clone());
+                self.handle_tool_evaluation_request(
+                    *request_id,
+                    *invocation_id,
+                    tool_name.clone(),
+                    args.clone(),
+                );
                 true
             }
             EngineEvent::ToolDispatch {
@@ -732,6 +789,10 @@ impl HeadlessApp {
         if let Some(compaction) = &compaction {
             compaction.cancel();
         }
+        if let Some(lua) = &self.lua {
+            lua.cancel_turn_tasks();
+        }
+
         if self.sink.format == OutputFormat::Text {
             self.sink
                 .log_token_usage(&total_usage, last_tps, total_cost);
@@ -857,6 +918,107 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn headless_notebook_preparation_retains_preview_and_rejects_newer_read() {
+        let (mut app, mut commands) = headless_app_with_cmd_rx(true);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prepared.ipynb");
+        let raw = serde_json::json!({ "nbformat": 4, "nbformat_minor": 5, "metadata": {},
+            "cells": [{ "cell_type": "code", "id": "cell", "metadata": {},
+                "source": ["PROBE_OLD\n"], "execution_count": null, "outputs": [] }] })
+        .to_string();
+        std::fs::write(&path, &raw).unwrap();
+        let path = path.to_str().unwrap();
+        app.core.files.record_read(path, raw.clone(), (0, 1));
+        let mtime = crate::fs::file_mtime_ms(path).unwrap();
+        let lua = app.lua.as_ref().unwrap();
+        lua.lua
+            .load(include_str!(
+                "../../../runtime/lua/smelt/tools/notebook_edit.lua"
+            ))
+            .set_environment(crate::lua::module::bundled_chunk_environment(&lua.lua).unwrap())
+            .exec()
+            .unwrap();
+        let args = HashMap::from([
+            ("notebook_path".into(), serde_json::json!(path)),
+            ("cell_number".into(), serde_json::json!(0)),
+            ("new_source".into(), serde_json::json!("PROBE_NEW\n")),
+        ]);
+        let invocation = protocol::InvocationId::new(91);
+        app.handle_tool_evaluation_request(91, invocation, "edit_notebook".into(), args.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.drive_lua_tasks();
+            if let Ok(UiCommand::ToolEvaluationResponse { evaluation, .. }) = commands.try_recv() {
+                assert!(
+                    evaluation.metadata.preflight_error.is_none(),
+                    "{:?}",
+                    evaluation.metadata
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "notebook preparation stalled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let updated = raw.replace("PROBE_OLD", "EXTERNAL_CHANGE");
+        std::fs::write(path, &updated).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(mtime + 2000),
+            ))
+            .unwrap();
+        app.core.files.record_read(path, updated.clone(), (0, 1));
+        let preview = app
+            .lua
+            .as_ref()
+            .unwrap()
+            .tool_preview_output("edit_notebook", &args, Some(invocation))
+            .unwrap();
+        assert!(preview
+            .content_fields
+            .iter()
+            .any(|field| field.name == "old_source" && field.content.contains("PROBE_OLD")));
+        app.handle_tool_dispatch(
+            92,
+            invocation,
+            "notebook-call".into(),
+            "edit_notebook".into(),
+            args.clone(),
+        );
+        loop {
+            app.drive_lua_tasks();
+            if let Ok(UiCommand::ToolResult {
+                content, is_error, ..
+            }) = commands.try_recv()
+            {
+                assert!(is_error);
+                assert!(
+                    content.contains("changed since edit preparation"),
+                    "{content}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "notebook execution stalled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), updated);
+        assert!(app
+            .lua
+            .as_ref()
+            .unwrap()
+            .tool_preview_output("edit_notebook", &args, Some(invocation))
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn headless_startup_dispatches_complete_target_and_request_config() {
         let (engine, mut cmd_rx, event_tx) = engine::EngineHandle::for_test();
         let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
@@ -941,7 +1103,12 @@ mod tests {
     #[test]
     fn headless_denies_ui_only_tool_evaluation() {
         let (mut app, mut cmd_rx) = headless_app_with_cmd_rx(true);
-        app.handle_tool_evaluation_request(7, "ui_only_probe".into(), HashMap::new());
+        app.handle_tool_evaluation_request(
+            7,
+            protocol::InvocationId::new(7),
+            "ui_only_probe".into(),
+            HashMap::new(),
+        );
 
         match cmd_rx.try_recv().unwrap() {
             UiCommand::ToolEvaluationResponse {

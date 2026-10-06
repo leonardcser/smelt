@@ -32,7 +32,17 @@ pub struct ToolInvocationContext {
     pub execution_mode: protocol::ToolExecutionMode,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolEvaluationRequest {
+    pub request_id: u64,
+    pub invocation_id: protocol::InvocationId,
+    pub tool_name: String,
+    pub args: std::collections::HashMap<String, serde_json::Value>,
+    pub mode: protocol::AgentMode,
+}
+
 pub enum TaskCompletion {
+    ToolEvaluation(Box<ToolEvaluationRequest>),
     FireAndForget,
     /// Slash-command dispatch. `name` carries the cmd name so an error
     /// surfaces as `cmd `<name>`: …` instead of the opaque `task <id>: …`.
@@ -96,6 +106,10 @@ pub(crate) struct LuaTask {
 
 #[derive(Debug)]
 pub enum TaskDriveOutput {
+    ToolEvaluated {
+        request: Box<ToolEvaluationRequest>,
+        result: Result<mlua::Table, String>,
+    },
     ToolComplete {
         invocation: ToolInvocationContext,
         call_id: String,
@@ -402,6 +416,16 @@ pub(crate) fn step_task_owned(
             if task.thread.is_finished() {
                 match &task.completion {
                     TaskCompletion::FireAndForget | TaskCompletion::Command { .. } => {}
+                    TaskCompletion::ToolEvaluation(request) => {
+                        let result = match v {
+                            LuaValue::Table(table) => Ok(table),
+                            _ => Err("tool evaluation must return a table".into()),
+                        };
+                        outputs.push(TaskDriveOutput::ToolEvaluated {
+                            request: request.clone(),
+                            result,
+                        });
+                    }
                     TaskCompletion::ToolResult {
                         invocation,
                         call_id,
@@ -577,6 +601,12 @@ fn is_cancelled_lua_error(err: &mlua::Error) -> bool {
 }
 
 fn fail_completion(completion: &TaskCompletion, msg: &str, outputs: &mut Vec<TaskDriveOutput>) {
+    if let TaskCompletion::ToolEvaluation(request) = completion {
+        outputs.push(TaskDriveOutput::ToolEvaluated {
+            request: request.clone(),
+            result: Err(msg.into()),
+        });
+    }
     if let TaskCompletion::ToolResult {
         invocation,
         call_id,
@@ -1034,7 +1064,7 @@ mod tests {
                     display_content,
                     ..
                 } => Some((content, is_error, metadata, display_content)),
-                TaskDriveOutput::NotifyError(_) => None,
+                TaskDriveOutput::NotifyError(_) | TaskDriveOutput::ToolEvaluated { .. } => None,
             })
             .unwrap();
         assert!(*completion.1);

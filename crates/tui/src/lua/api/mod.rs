@@ -13,7 +13,6 @@ mod keymap;
 mod layout;
 mod metrics;
 mod model;
-mod notebook;
 pub(crate) mod notify;
 mod overlay;
 pub(crate) mod overlay_layout;
@@ -56,8 +55,6 @@ pub(crate) const BUILD_TAG: &str = env!("SMELT_BUILD_TAG");
 pub(crate) const BUILD_COMMITS: &str = env!("SMELT_BUILD_COMMITS");
 pub(crate) const BUILD_DIRTY: &str = env!("SMELT_BUILD_DIRTY");
 pub const DISPLAY: &str = env!("SMELT_DISPLAY");
-
-pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
 
 /// `"unknown"` collapses to Lua nil so plugins can branch on `smelt.build.sha == nil`
 /// rather than string-matching a sentinel.
@@ -146,7 +143,6 @@ impl LuaRuntime {
         theme::register(lua, &smelt)?;
         confirm::register(lua, &smelt, shared)?;
         layout::register(lua, &smelt, shared)?;
-        notebook::register(lua, &smelt, shared)?;
         paint::register(lua, &smelt, shared)?;
         render::register(lua, &smelt)?;
         search::register(lua, &smelt)?;

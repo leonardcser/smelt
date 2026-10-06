@@ -139,6 +139,415 @@ fn drain_provider_requests(listener: &TcpListener) -> bool {
     model_request_seen
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_worktree_tool_keeps_typing_responsive_during_checkout() {
+    interactive_tool_keeps_typing_responsive(ToolProbe::Worktree).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_cwd_tool_keeps_typing_responsive_during_git_discovery() {
+    interactive_tool_keeps_typing_responsive(ToolProbe::Cwd).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_notebook_preview_keeps_typing_responsive_during_file_read() {
+    interactive_tool_keeps_typing_responsive(ToolProbe::Notebook).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_request_refreshes_external_git_changes_and_worktree_permissions() {
+    interactive_tool_keeps_typing_responsive(ToolProbe::Project).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolProbe {
+    Worktree,
+    Cwd,
+    Notebook,
+    Project,
+}
+
+async fn interactive_tool_keeps_typing_responsive(probe: ToolProbe) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let create_worktree = probe == ToolProbe::Worktree;
+    let notebook = probe == ToolProbe::Notebook;
+    let refresh_project = probe == ToolProbe::Project;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .expect("git executable");
+    let run_git = |cwd: &Path, args: &[&str]| {
+        let output = Command::new(&git)
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "smelt test")
+            .env("GIT_AUTHOR_EMAIL", "smelt-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "smelt test")
+            .env("GIT_COMMITTER_EMAIL", "smelt-test@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("hello.txt"), "hello\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "fixture"]);
+    let active = if refresh_project {
+        run_git(
+            &repo,
+            &["worktree", "add", ".worktrees/start", "-b", "start"],
+        );
+        repo.join(".worktrees/start")
+    } else {
+        repo.clone()
+    };
+    let target = if create_worktree {
+        repo.join(".worktrees/latency-probe")
+    } else if refresh_project {
+        repo.join(".worktrees/other/hello.txt")
+    } else if notebook {
+        let target = repo.join("probe.ipynb");
+        let path = std::ffi::CString::new(target.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        target
+    } else {
+        let target = repo.join("nested");
+        std::fs::create_dir(&target).unwrap();
+        run_git(&target, &["init", "-b", "main"]);
+        target
+    };
+    let started = home.path().join("operation-started");
+    let release = home.path().join("operation-release");
+    let completed = home.path().join("operation-completed");
+    let notebook_content = serde_json::json!({
+        "nbformat": 4, "nbformat_minor": 5, "metadata": {},
+        "cells": [{ "cell_type": "code", "id": "probe-cell", "metadata": {},
+            "source": ["PROBE_OLD\n"], "execution_count": null, "outputs": [] }]
+    })
+    .to_string();
+    if notebook {
+        let target = target.clone();
+        let started = started.clone();
+        let release = release.clone();
+        let content = notebook_content.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut writer = loop {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&target)
+                {
+                    Ok(writer) => break writer,
+                    Err(_) if Instant::now() < deadline && target.exists() => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => return,
+                }
+            };
+            std::fs::write(started, "ready").unwrap();
+            while !release.exists() && Instant::now() < deadline && target.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let modified = writer.metadata().unwrap().modified().unwrap();
+            writer.write_all(content.as_bytes()).unwrap();
+            writer
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        });
+    }
+    let wait = "touch \"$SMELT_PROBE_STARTED\"\nwhile [ ! -f \"$SMELT_PROBE_RELEASE\" ]; do sleep 0.01; done\n";
+    let wrappers = home.path().join("bin");
+    std::fs::create_dir(&wrappers).unwrap();
+    let script = if create_worktree {
+        let hook = repo.join(".git/hooks/post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\n{wait}")).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        None
+    } else if notebook || refresh_project {
+        None
+    } else {
+        Some(format!("#!/bin/sh\nif [ \"$PWD\" = \"$SMELT_PROBE_TARGET\" ] && [ ! -f \"$SMELT_PROBE_STARTED\" ]; then\n{wait}fi\nexec \"$SMELT_PROBE_GIT\" \"$@\"\n"))
+    };
+    if let Some(script) = script {
+        let path = wrappers.join("git");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let tool = if create_worktree {
+        "enter_worktree"
+    } else if notebook {
+        "edit_notebook"
+    } else if refresh_project {
+        "read_file"
+    } else {
+        "switch_cwd"
+    };
+    let args = if create_worktree {
+        serde_json::json!({ "name": "latency-probe" })
+    } else if notebook {
+        serde_json::json!({ "notebook_path": target, "cell_number": 0, "new_source": "PROBE_NEW\n" })
+    } else if refresh_project {
+        serde_json::json!({ "file_path": target })
+    } else {
+        serde_json::json!({ "path": target })
+    };
+    let provider = MockServer::start().await;
+    let provider_git = git.clone();
+    let provider_cwd = active.clone();
+    Mock::given(method("POST"))
+        .respond_with(move |request: &Request| {
+            if request.url.path().ends_with("/count_tokens") {
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({ "input_tokens": 10 }));
+            }
+            let request: serde_json::Value = request.body_json().unwrap();
+            let call_tool = request["tools"].as_array().is_some_and(|tools| !tools.is_empty())
+                && !request["messages"].to_string().contains("tool_result");
+            let mut events = vec![serde_json::json!({
+                "type": "message_start", "message": {
+                    "id": "msg_probe", "type": "message", "role": "assistant", "model": "test-model",
+                    "content": [], "stop_reason": null, "stop_sequence": null,
+                    "usage": { "input_tokens": 10, "output_tokens": 0 }
+                }
+            })];
+            let reason = if call_tool {
+                if refresh_project {
+                    let output = Command::new(&provider_git).current_dir(&provider_cwd).args(["checkout", "-b", "probe-after-tool"]).output().unwrap();
+                    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                }
+                events.push(serde_json::json!({ "type": "content_block_start", "index": 0,
+                    "content_block": { "type": "tool_use", "id": "call_probe", "name": tool, "input": {} } }));
+                events.push(serde_json::json!({ "type": "content_block_delta", "index": 0,
+                    "delta": { "type": "input_json_delta", "partial_json": args.to_string() } }));
+                "tool_use"
+            } else {
+                events.push(serde_json::json!({ "type": "content_block_start", "index": 0,
+                    "content_block": { "type": "text", "text": "done" } }));
+                "end_turn"
+            };
+            events.extend([
+                serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+                serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": reason }, "usage": { "output_tokens": 1 } }),
+                serde_json::json!({ "type": "message_stop" }),
+            ]);
+            let body: String = events.into_iter().map(|event| format!("data: {event}\n\n")).collect();
+            let response = ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(body);
+            if refresh_project { response.set_delay(Duration::from_millis(200)) } else { response }
+        })
+        .mount(&provider).await;
+    let notebook_setup = if notebook {
+        format!("smelt.permissions.extend({{ apply = {{ tools = {{ ask = {{ 'edit_notebook' }} }} }} }})\nsmelt.fs.file_state.record_read({}, {}, 0, 10000)\n",
+            serde_json::to_string(&target.to_string_lossy()).unwrap(),
+            serde_json::to_string(&notebook_content).unwrap())
+    } else {
+        String::new()
+    };
+    let project_setup = if refresh_project {
+        let command = format!(
+            "'{}' -C '{}' checkout -b probe-new && '{}' -C '{}' worktree add '{}' -b other",
+            git.display(),
+            active.display(),
+            git.display(),
+            active.display(),
+            target.parent().unwrap().display()
+        );
+        format!("smelt.settings.restrict_to_workspace = true\nsmelt.lifecycle.on('ready', function() assert(os.execute({})); local file = assert(io.open({}, 'w')); file:write('ready'); file:close() end)\n",
+            serde_json::to_string(&command).unwrap(), serde_json::to_string(&started.to_string_lossy()).unwrap())
+    } else {
+        String::new()
+    };
+    let config = home.path().join("init.lua");
+    std::fs::write(&config, format!(r#"
+{notebook_setup}
+{project_setup}
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_continue = "off"
+smelt.settings.auto_reload = false
+smelt.settings.show_prediction = false
+smelt.settings.vim = false
+smelt.settings.worktree_root = ".worktrees"
+smelt.events.on("turn_end", function()
+  local path = {}
+  local file = assert(io.open(path .. ".tmp", "w"))
+  file:write(smelt.session.cwd(), "\n", smelt.prompt.text())
+  if {refresh_project} then file:write("\n", smelt.signal.get("branch") or "") end
+  file:close()
+  assert(os.rename(path .. ".tmp", path))
+end)
+smelt.provider.register("probe", {{ type = "anthropic", api_base = "{}", api_key_env = "SMELT_PROBE_KEY", models = {{ "test-model" }} }})
+"#, serde_json::to_string(&completed.to_string_lossy()).unwrap(), provider.uri())).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
+    command
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--ephemeral",
+            "--mode",
+            if notebook { "apply" } else { "yolo" },
+            "-m",
+            "probe/test-model",
+        ])
+        .current_dir(&active)
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env("XDG_CACHE_HOME", home.path().join("cache"))
+        .env("TERM", "xterm-256color")
+        .env("SMELT_PROBE_KEY", "test-only")
+        .env("SMELT_PROBE_STARTED", &started)
+        .env("SMELT_PROBE_RELEASE", &release)
+        .env("SMELT_PROBE_TARGET", &target)
+        .env("SMELT_PROBE_GIT", &git)
+        .env(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(wrappers)
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
+        );
+    if !refresh_project {
+        command.arg("perform probe");
+    }
+    let (mut master, mut process) = spawn_in_pty(command);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut captured = Vec::new();
+    let mut terminal = vt100::Parser::new(24, 100, 0);
+    let mut typed = false;
+    let mut denied = false;
+    loop {
+        let previous_len = captured.len();
+        drain_pty(&mut master, &mut captured);
+        terminal.process(&captured[previous_len..]);
+        assert!(
+            process.child.try_wait().unwrap().is_none(),
+            "smelt exited: {}",
+            String::from_utf8_lossy(&captured)
+        );
+        if !typed && started.exists() {
+            if refresh_project {
+                master.write_all(b"perform probe\r").unwrap();
+            }
+            master.write_all(b"FREEZEPROBE").unwrap();
+            typed = true;
+        }
+        if typed && !release.exists() && terminal.screen().contents().contains("FREEZEPROBE") {
+            // The slow operation cannot finish before typing is visibly rendered.
+            std::fs::write(&release, "ready").unwrap();
+        }
+        if notebook
+            && !denied
+            && terminal.screen().contents().contains("PROBE_NEW")
+            && terminal.screen().contents().contains("allow once")
+        {
+            master.write_all(b"\x1b[B\r").unwrap();
+            denied = true;
+        }
+        if completed.exists() {
+            assert!(
+                release.exists(),
+                "turn completed without rendering input during slow work"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&completed).unwrap(),
+                format!(
+                    "{}\nFREEZEPROBE{}",
+                    if notebook || refresh_project {
+                        &active
+                    } else {
+                        &target
+                    }
+                    .display(),
+                    if refresh_project {
+                        "\nprobe-after-tool"
+                    } else {
+                        ""
+                    }
+                )
+            );
+            let requests = provider.received_requests().await.unwrap();
+            let tool_results: Vec<_> = requests
+                .iter()
+                .filter_map(|request| request.body_json::<serde_json::Value>().ok())
+                .flat_map(|body| body["messages"].as_array().cloned().unwrap_or_default())
+                .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+                .filter(|block| block["type"] == "tool_result")
+                .collect();
+            assert!(
+                !notebook || denied,
+                "notebook preview was not shown: {}\ntool results: {tool_results:?}",
+                terminal.screen().contents()
+            );
+            if refresh_project {
+                let first: serde_json::Value = requests
+                    .iter()
+                    .filter(|request| request.url.path().ends_with("/messages"))
+                    .filter_map(|request| request.body_json::<serde_json::Value>().ok())
+                    .find(|body| {
+                        body["tools"]
+                            .as_array()
+                            .is_some_and(|tools| !tools.is_empty())
+                    })
+                    .expect("provider tool-capable request");
+                assert!(
+                    first["messages"].to_string().contains("branch probe-new"),
+                    "first request used stale Git context: {}",
+                    first["messages"]
+                );
+                assert!(
+                    requests
+                        .iter()
+                        .filter(|request| request.url.path().ends_with("/messages"))
+                        .filter_map(|request| request.body_json::<serde_json::Value>().ok())
+                        .any(|body| body["messages"]
+                            .to_string()
+                            .contains("branch probe-after-tool")),
+                    "follow-up request used stale Git context"
+                );
+            }
+            assert!(
+                notebook
+                    || requests.iter().any(|request| {
+                        let Ok(body) = request.body_json::<serde_json::Value>() else {
+                            return false;
+                        };
+                        body["messages"].as_array().is_some_and(|messages| {
+                            messages.iter().any(|message| {
+                                message["content"].as_array().is_some_and(|blocks| {
+                                    blocks.iter().any(|block| {
+                                        block["type"] == "tool_result"
+                                            && block["tool_use_id"] == "call_probe"
+                                            && (notebook || block["is_error"] != true)
+                                    })
+                                })
+                            })
+                        })
+                    }),
+                "successful tool result was not released after cwd commit"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tool {tool} stalled (typed={typed}, released={}): {}",
+            release.exists(),
+            terminal.screen().contents()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[test]
 fn interactive_startup_renders_and_queues_prompt_while_mcp_discovery_is_stalled() {
     let home = tempfile::tempdir().expect("temporary home");

@@ -1956,6 +1956,11 @@ impl LuaRuntime {
     }
 
     pub fn cancel_turn_tasks(&self) {
+        self.shared
+            .tool_preparations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
         let Ok(mut rt) = self.shared.tasks.lock() else {
             return;
         };
@@ -2015,7 +2020,11 @@ impl LuaRuntime {
         let mut forward = Vec::with_capacity(outs.len());
         for out in outs {
             match out {
-                TaskDriveOutput::ToolComplete { .. } => forward.push(out),
+                TaskDriveOutput::ToolComplete { invocation, .. } => {
+                    self.release_tool_preparation(invocation.invocation_id);
+                    forward.push(out);
+                }
+                TaskDriveOutput::ToolEvaluated { .. } => forward.push(out),
                 TaskDriveOutput::NotifyError(msg) => self.record_error(msg),
             }
         }
@@ -2239,7 +2248,7 @@ impl LuaRuntime {
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
     ) -> Option<crate::content::block_layout::BlockLayout> {
-        match Self::call_tool_preview(&self.lua, &self.shared, tool_name, args) {
+        match Self::call_tool_preview(&self.lua, &self.shared, tool_name, args, None) {
             Ok(layout) => layout,
             Err(error) => {
                 self.record_error(error);
@@ -2256,6 +2265,7 @@ impl LuaRuntime {
         shared: &LuaShared,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
+        invocation_id: Option<protocol::InvocationId>,
     ) -> Result<Option<crate::content::block_layout::BlockLayout>, String> {
         let preview_fn = {
             let handlers = shared
@@ -2276,7 +2286,7 @@ impl LuaRuntime {
 
         let _perf = smelt_perf::perf::begin("lua:tool");
         let result: mlua::Value = preview_fn
-            .call(args_table)
+            .call((args_table, Self::tool_preparation(shared, invocation_id)))
             .map_err(|error| format!("tool preview `{tool_name}`: {error}"))?;
 
         match result {
@@ -2297,6 +2307,7 @@ impl LuaRuntime {
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
+        invocation_id: Option<protocol::InvocationId>,
     ) -> Option<ToolOutputRef> {
         let preview_output_fn = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
@@ -2314,7 +2325,10 @@ impl LuaRuntime {
         };
 
         let _perf = smelt_perf::perf::begin("lua:tool");
-        let result: mlua::Value = match preview_output_fn.call(args_table) {
+        let result: mlua::Value = match preview_output_fn.call((
+            args_table,
+            Self::tool_preparation(&self.shared, invocation_id),
+        )) {
             Ok(v) => v,
             Err(e) => {
                 self.record_error(format!("tool preview_output `{tool_name}`: {e}"));
@@ -2419,61 +2433,169 @@ impl LuaRuntime {
         }
     }
 
+    /// Run preparation and validation as a turn-scoped coroutine. `None` means
+    /// evaluation yielded; its result is delivered by `drive_tasks`.
     pub fn evaluate_tool_metadata(
         &self,
-        tool_name: &str,
-        args: &HashMap<String, serde_json::Value>,
-    ) -> protocol::ToolMetadata {
-        let mut out = protocol::ToolMetadata::default();
-
-        let (approval_patterns_fn, preflight_fn) = {
+        request: &super::ToolEvaluationRequest,
+        now: Instant,
+    ) -> Result<Option<protocol::ToolMetadata>, String> {
+        self.release_tool_preparation(request.invocation_id);
+        let (prepare, approval_patterns, preflight) = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(h) = handlers.get(tool_name) else {
-                return out;
+            let Some(handler) = handlers.get(&request.tool_name) else {
+                return Ok(Some(protocol::ToolMetadata::default()));
             };
-            let ap = h
-                .approval_patterns
-                .as_ref()
-                .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
-            let pf = h
-                .preflight
-                .as_ref()
-                .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
-            (ap, pf)
+            let function =
+                |handle: &Option<super::LuaHandle>| -> LuaResult<Option<mlua::Function>> {
+                    handle
+                        .as_ref()
+                        .map(|handle| self.lua.registry_value(&handle.key))
+                        .transpose()
+                };
+            (
+                function(&handler.prepare),
+                function(&handler.approval_patterns),
+                function(&handler.preflight),
+            )
         };
-
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool metadata: build args: {e}"));
-                return out;
-            }
-        };
-
-        if let Some(func) = approval_patterns_fn {
-            let _perf = smelt_perf::perf::begin("lua:tool");
-            match func.call::<Option<mlua::Table>>(args_table.clone()) {
-                Ok(Some(t)) => {
-                    out.approval_patterns = t
-                        .sequence_values::<String>()
-                        .filter_map(|r| r.ok())
-                        .collect();
+        let prepare = prepare.map_err(|error| error.to_string())?;
+        let approval_patterns = approval_patterns.map_err(|error| error.to_string())?;
+        let preflight = preflight.map_err(|error| error.to_string())?;
+        if prepare.is_none() && approval_patterns.is_none() && preflight.is_none() {
+            return Ok(Some(protocol::ToolMetadata {
+                summary: self.tool_summary(&request.tool_name, &request.args),
+                ..Default::default()
+            }));
+        }
+        let function = self.lua.load(r#"
+            return function(prepare, approval_patterns, preflight, args)
+                local prepared = prepare and prepare(args) or nil
+                return {
+                    prepared = prepared,
+                    approval_patterns = approval_patterns and approval_patterns(args, prepared) or nil,
+                    preflight_error = preflight and preflight(args, prepared) or nil,
                 }
-                Ok(None) => {}
-                Err(e) => self.record_error(format!("tool hook approval_patterns: {e}")),
+            end
+        "#).eval::<mlua::Function>().map_err(|error| error.to_string())?;
+        let initial = (
+            prepare,
+            approval_patterns,
+            preflight,
+            self.args_to_lua_table(&request.args)
+                .map_err(|error| error.to_string())?,
+        )
+            .into_lua_multi(&self.lua)
+            .map_err(|error| error.to_string())?;
+        let timeout_ms = self.tool_timeout_ms(&request.tool_name, &request.args);
+        let deadline = timeout_ms.map(|ms| super::task::TaskDeadline {
+            at: now + std::time::Duration::from_millis(ms),
+            label_ms: ms,
+            paused_at: None,
+        });
+        let task = {
+            let mut tasks = self
+                .shared
+                .tasks
+                .lock()
+                .map_err(|_| "task runtime poisoned".to_string())?;
+            let id = tasks
+                .spawn_scoped(
+                    &self.lua,
+                    function,
+                    initial,
+                    TaskCompletion::ToolEvaluation(Box::new(request.clone())),
+                    super::TaskScope::Turn,
+                    deadline,
+                )
+                .map_err(|error| error.to_string())?;
+            tasks.take_task(id)
+        };
+        let mut outputs = Vec::new();
+        if let Some(task) = task {
+            self.step_task_outside_runtime_lock(task, now, &mut outputs)
+                .map_err(|_| "task runtime poisoned".to_string())?;
+        }
+        let mut metadata = None;
+        for output in outputs {
+            match output {
+                TaskDriveOutput::ToolEvaluated { request, result } => {
+                    metadata = Some(self.finish_tool_evaluation(&request, result));
+                }
+                TaskDriveOutput::NotifyError(message) => self.record_error(message),
+                TaskDriveOutput::ToolComplete { .. } => {
+                    unreachable!("evaluation cannot complete a tool")
+                }
             }
         }
-        if let Some(func) = preflight_fn {
-            let _perf = smelt_perf::perf::begin("lua:tool");
-            match func.call::<Option<String>>(args_table) {
-                Ok(Some(s)) => out.preflight_error = Some(s),
-                Ok(None) => {}
-                Err(e) => self.record_error(format!("tool hook preflight: {e}")),
-            }
-        }
+        Ok(metadata)
+    }
 
-        out.summary = self.tool_summary(tool_name, args);
-        out
+    pub fn finish_tool_evaluation(
+        &self,
+        request: &super::ToolEvaluationRequest,
+        result: Result<mlua::Table, String>,
+    ) -> protocol::ToolMetadata {
+        let mut metadata = protocol::ToolMetadata {
+            summary: self.tool_summary(&request.tool_name, &request.args),
+            ..Default::default()
+        };
+        let parsed = result.and_then(|result| -> Result<_, String> {
+            let prepared = result
+                .get::<Option<mlua::Table>>("prepared")
+                .map_err(|error| error.to_string())?;
+            let error = result
+                .get::<Option<String>>("preflight_error")
+                .map_err(|error| error.to_string())?;
+            let patterns = result
+                .get::<Option<mlua::Table>>("approval_patterns")
+                .map_err(|error| error.to_string())?
+                .map(|patterns| {
+                    patterns
+                        .sequence_values::<String>()
+                        .collect::<LuaResult<Vec<_>>>()
+                })
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or_default();
+            Ok((prepared, error, patterns))
+        });
+        match parsed {
+            Ok((prepared, error, patterns)) => {
+                metadata.preflight_error = error;
+                metadata.approval_patterns = patterns;
+                if let Some(prepared) = prepared {
+                    self.shared
+                        .tool_preparations
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(request.invocation_id, prepared);
+                }
+            }
+            Err(error) => metadata.preflight_error = Some(format!("tool preparation: {error}")),
+        }
+        metadata
+    }
+
+    pub fn release_tool_preparation(&self, invocation_id: protocol::InvocationId) {
+        self.shared
+            .tool_preparations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&invocation_id);
+    }
+
+    fn tool_preparation(
+        shared: &LuaShared,
+        invocation_id: Option<protocol::InvocationId>,
+    ) -> Option<mlua::Table> {
+        let invocation_id = invocation_id?;
+        shared
+            .tool_preparations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&invocation_id)
+            .cloned()
     }
 
     pub fn transcript_renderer_generation(&self) -> u64 {
@@ -2798,6 +2920,18 @@ impl LuaRuntime {
             }
         };
 
+        if let Err(error) = ctx_table.set(
+            "prepared",
+            Self::tool_preparation(&self.shared, Some(invocation.invocation_id)),
+        ) {
+            return ToolExecResult::Immediate {
+                content: format!("tool preparation context: {error}"),
+                is_error: true,
+                metadata: None,
+                display_content: Vec::new(),
+                attachment: None,
+            };
+        }
         let mut initial = mlua::MultiValue::new();
         initial.push_back(mlua::Value::Table(args_table));
         initial.push_back(mlua::Value::Table(ctx_table));
@@ -2883,9 +3017,12 @@ impl LuaRuntime {
                         attachment: attachment.map(|attachment| *attachment),
                     });
                 }
-                TaskDriveOutput::ToolComplete { .. } => {}
+                TaskDriveOutput::ToolComplete { .. } | TaskDriveOutput::ToolEvaluated { .. } => {}
                 TaskDriveOutput::NotifyError(msg) => self.record_error(msg),
             }
+        }
+        if immediate.is_some() {
+            self.release_tool_preparation(invocation.invocation_id);
         }
         match immediate {
             Some(LuaToolResultParts {

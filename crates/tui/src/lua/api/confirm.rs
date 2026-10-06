@@ -84,6 +84,7 @@ pub(super) fn register(
                 &preview_shared.core,
                 &request.0,
                 &request.1,
+                Some(request.2),
             ) {
                 Ok(Some(layout)) => layout,
                 Ok(None) => return Ok(false),

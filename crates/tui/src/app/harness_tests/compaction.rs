@@ -497,6 +497,7 @@ fn ordered_prepare_request_paints_transient_streaming_state() {
             .is_none(),
         "final response should clear the transient preview"
     );
+    app.wait_for_project_context();
     assert!(matches!(
         rx.try_recv().expect("prepare request reply"),
         engine::HostRequestDecision::Continue
@@ -1206,6 +1207,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
 
             app.app
                 .dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
+            app.wait_for_project_context();
             let frame = app.render_to_frame().text();
             if is_prepare_request && waiting_frame.is_none() && frame.contains("compacting") {
                 waiting_frame = Some(frame.clone());
@@ -1656,6 +1658,7 @@ async fn real_engine_compaction_preserves_queued_inputs() {
                                 app.handle_app_event(event);
                             }
                             app.app.drain_persist_reports();
+                            app.drain_idle_work();
                             app.pump_lua();
                             continue;
                         }

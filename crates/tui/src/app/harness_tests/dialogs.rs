@@ -2272,6 +2272,7 @@ fn evaluate_tool(
             mode,
         },
     ));
+    app.wait_for_tool_evaluation(request_id);
 
     app.actions()
         .iter()
@@ -2432,6 +2433,7 @@ fn switch_cwd_outside_workspace_requires_destination_permission() {
         tool_name: "switch_cwd".into(),
         args,
     }));
+    app.wait_for_tool_result("switch-cwd");
 
     assert_eq!(app.core_probe().env.cwd(), target);
     assert_eq!(std::env::current_dir().unwrap(), target);

@@ -27,5 +27,5 @@ dim: 80 14
  13   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
  13  10   1 bg=AnsiValue(233)
  13  11  18 fg=AnsiValue(208) bg=AnsiValue(233) attrs=bold
- 13  29  43 bg=AnsiValue(233)
- 13  72   8 fg=AnsiValue(244) bg=AnsiValue(233)
+ 13  29  42 bg=AnsiValue(233)
+ 13  71   9 fg=AnsiValue(244) bg=AnsiValue(233)

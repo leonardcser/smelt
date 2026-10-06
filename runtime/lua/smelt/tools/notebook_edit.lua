@@ -1,8 +1,6 @@
 -- Built-in edit_notebook tool. Replace/insert/delete a Jupyter cell with
 -- staleness preflight and per-path flock.
 
-local transcript_defaults = require("smelt.transcript.defaults")
-
 local function preview_layout(meta)
   local lang = meta.syntax_ext
   local path = meta.path or ""
@@ -30,7 +28,7 @@ local function preview_layout(meta)
 end
 
 local function retained_layout(block)
-  local output = block.output
+  local output = block.output or block.preview_output
   local fields = output and output.content_fields
   local meta = (output and output.metadata) or {}
   if not fields then return nil end
@@ -63,7 +61,7 @@ local function retained_layout(block)
 end
 
 smelt.transcript.register_tool("edit_notebook", {
-  cache_key = "smelt.tool-presentation.edit_notebook:v2",
+  cache_key = "smelt.tool-presentation.edit_notebook:v3",
   body = function(block)
     return retained_layout(block)
   end,
@@ -121,28 +119,39 @@ smelt.tools.register({
   summary = function(args, ctx)
     return smelt.tools.path_summary(args.notebook_path or "", ctx)
   end,
-  preflight = function(args)
-    local path = args.notebook_path or ""
-    if path == "" then return nil end
-    return smelt.fs.file_state.staleness_error(path, "notebook")
+  prepare = function(args)
+    return smelt.task.external(function(id)
+      __smelt_internal.notebook.__start_prepare_edit(id, args)
+    end)
+  end,
+  preflight = function(_, prepared)
+    return prepared and prepared.err
   end,
   paths_for_workspace = function(args)
     local p = args.notebook_path or ""
     return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
-  preview = function(args)
-    local meta = __smelt_internal.notebook.preview_data(args)
-    if not meta then
-      return nil
-    end
+  preview = function(_, prepared)
+    local meta = prepared and prepared.preview
+    if not meta then return nil end
     return preview_layout(meta)
   end,
-  execute = function(args)
+  preview_output = function(_, prepared)
+    local meta = prepared and prepared.preview
+    if not meta then return nil end
+    return {
+      content = "",
+      metadata = { path = meta.path, edit_mode = meta.edit_mode, title = meta.title, syntax_ext = meta.syntax_ext },
+      display_content = { old_source = meta.old_source, new_source = meta.new_source },
+    }
+  end,
+  execute = function(args, ctx)
     local path = args.notebook_path or ""
     if path == "" then
       return { content = "notebook_path is required", is_error = true }
     end
-    local result, err = smelt.notebook.apply_edit_async(args)
+    local prepared = ctx and ctx.prepared
+    local result, err = smelt.notebook.apply_edit_async(args, prepared and prepared.mtime_ms)
     if not result then
       return { content = err or "notebook edit failed", is_error = true }
     end

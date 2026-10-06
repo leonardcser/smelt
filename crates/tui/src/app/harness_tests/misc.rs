@@ -1810,7 +1810,7 @@ fn system_prompt_omits_tool_guidance_when_tool_calling_disabled() {
 }
 
 #[test]
-fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
+fn prepared_edit_file_diff_survives_promotion_until_tool_finish() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(120, 40);
     app.start_turn(7);
@@ -1839,7 +1839,7 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
         .unwrap());
     assert!(app
         .eval_lua::<bool>(
-            "local p = smelt.transcript.get_tool_presentation('edit_file'); return p ~= nil and type(p.draft) == 'function'",
+            "local p = smelt.transcript.get_tool_presentation('edit_file'); return p ~= nil and type(p.body) == 'function'",
         )
         .unwrap());
     let args = std::collections::HashMap::from([
@@ -1868,7 +1868,14 @@ fn edit_file_diff_survives_draft_promotion_until_tool_finish() {
         arguments,
     }));
     let draft_frame = app.render_to_frame().text();
-    assert_edit_file_diff_visible(&draft_frame, "draft-finished");
+    assert!(
+        !draft_frame.contains("flicker-old") && !draft_frame.contains("flicker-new"),
+        "unprepared draft rendered a diff: {draft_frame}"
+    );
+    assert_eq!(
+        evaluate_tool_decision(&mut app, 1, &call_id, "edit_file", &args),
+        protocol::Decision::Ask
+    );
 
     let invocation_id = protocol::InvocationId::new(1);
     app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
@@ -1964,6 +1971,7 @@ fn evaluate_tool_decision(
         args: args.clone(),
         mode: protocol::AgentMode::parse("apply").unwrap(),
     }));
+    app.wait_for_tool_evaluation(request_id);
     app.actions()
         .iter()
         .rev()

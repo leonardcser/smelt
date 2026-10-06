@@ -19,11 +19,12 @@ Apply a notebook edit (cell insert/replace/delete) described by `args` and persi
 ## `smelt.notebook.apply_edit_async`
 
 ```lua
-fun(args: table): table?, string?
+fun(args: table, expected_mtime_ms?: integer): table?, string?
 ```
 
 Apply a notebook edit off the main thread. Same return shape as
 `smelt.notebook.apply_edit`.
+`expected_mtime_ms` rejects writes if the notebook changed after preparation.
 
 ## `smelt.notebook.is_notebook_path`
 

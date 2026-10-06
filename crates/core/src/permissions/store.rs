@@ -112,11 +112,24 @@ fn decode_path(encoded: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct PermissionStore {
     state_root: PathBuf,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PermissionStore {
     pub fn new(state_root: PathBuf) -> Self {
-        Self { state_root }
+        Self {
+            state_root,
+            generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn did_change(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     fn scope_dir(&self, root: &str) -> PathBuf {
@@ -178,6 +191,7 @@ impl PermissionStore {
         }
         let revision = next_revision(current.revision)?;
         save_path(&path, revision, &replacement)?;
+        self.did_change();
         Ok(revision)
     }
 
@@ -197,6 +211,7 @@ impl PermissionStore {
         if changed {
             permissions.normalize_order();
             save_path(&path, next_revision(current.revision)?, &permissions)?;
+            self.did_change();
         }
         Ok(changed)
     }
@@ -876,6 +891,8 @@ mod tests {
             .load_snapshot(&root, PersistenceScope::Workspace)
             .unwrap();
         assert_eq!(canonical.revision, 1);
+        assert_eq!(store.generation(), 1);
+        assert_eq!(store.clone().generation(), 1);
         assert_eq!(canonical.rules.len(), 1);
         assert_eq!(canonical.rules[0].patterns, vec!["git diff", "git status"]);
         assert_eq!(
@@ -891,6 +908,26 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn prepared_permissions_detect_grant_revocation() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = PermissionStore::new(state.path().to_path_buf());
+        let root = workspace.path().to_string_lossy();
+        store
+            .add_tool(&root, PersistenceScope::Workspace, "bash", vec![])
+            .unwrap();
+        let project = crate::worktree::project_context(workspace.path(), None);
+        let prepared =
+            crate::permissions::PermissionContext::load(workspace.path(), project, &store).unwrap();
+        assert!(prepared.is_current());
+        assert!(store
+            .clone()
+            .remove(&root, PersistenceScope::Workspace, "bash", "*")
+            .unwrap());
+        assert!(!prepared.is_current());
     }
 
     #[test]

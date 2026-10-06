@@ -31,7 +31,7 @@ pub use task::{
     current_command_queue_target, current_command_sent_at_ms, current_task_cancel,
     current_task_scope, current_tool_invocation, with_task_cancel, CommandQueueTarget,
     LuaTaskRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, TaskScope, ToolEnv,
-    ToolInvocationContext,
+    ToolEvaluationRequest, ToolInvocationContext,
 };
 
 /// Identifiers carried together through one plugin tool execution.

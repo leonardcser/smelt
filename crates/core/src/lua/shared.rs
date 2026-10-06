@@ -108,6 +108,7 @@ pub struct ToolHandles {
     pub execution_mode: protocol::ToolExecutionMode,
     pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
+    pub prepare: Option<LuaHandle>,
     pub paths_for_workspace: Option<LuaHandle>,
     pub preview: Option<LuaHandle>,
     pub preview_output: Option<LuaHandle>,
@@ -193,6 +194,7 @@ pub struct LuaShared {
     /// its backing buffer remains authoritative between runs.
     pub win_renderers: Mutex<HashMap<u64, RegisteredWinRenderer>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
+    pub(crate) tool_preparations: Mutex<HashMap<protocol::InvocationId, mlua::Table>>,
     pub transcript_renderer: Mutex<Option<LuaHandle>>,
     pub transcript_renderer_generation: AtomicU64,
     pub transcript_renderer_cache_key: AtomicU64,
@@ -390,6 +392,7 @@ impl Default for LuaShared {
             main_layout_composer: Mutex::new(None),
             win_renderers: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
+            tool_preparations: Mutex::new(HashMap::new()),
             transcript_renderer: Mutex::new(None),
             transcript_renderer_generation: AtomicU64::new(0),
             transcript_renderer_cache_key: AtomicU64::new(0),
@@ -662,6 +665,9 @@ impl LuaShared {
             m.clear();
         }
         if let Ok(mut m) = self.tools.lock() {
+            m.clear();
+        }
+        if let Ok(mut m) = self.tool_preparations.lock() {
             m.clear();
         }
         if let Ok(mut renderer) = self.transcript_renderer.lock() {

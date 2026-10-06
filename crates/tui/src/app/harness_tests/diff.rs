@@ -2016,7 +2016,8 @@ fn diff_closing_reopening_and_reload_release_native_documents() {
             .unwrap(),
     );
     let scratch = app.ui_probe().win(preview(&app)).unwrap().buf;
-    app.reload_lua();
+    app.exec_lua_entry("smelt.engine.reload()").unwrap();
+    app.wait_for_workspace();
     assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
     assert!(source.upgrade().is_none(), "reloaded document retained");
     assert!(

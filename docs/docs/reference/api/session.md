@@ -93,10 +93,19 @@ Delete the persisted session with `id`. Refuses to delete the currently active s
 ## `smelt.session.enter_worktree`
 
 ```lua
-fun(opts: table?): table
+fun(opts: { name: string, base?: string }): table
 ```
 
-Create or open a managed git worktree and request a coherent project-context transition. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. The transition updates Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ name, branch, path, base, created, pending }`.
+Create or open a managed git worktree off the UI thread, then request a
+coherent cwd transition. Must run in `smelt.spawn`, a command, or a tool.
+`opts.name` is required and is normalized to a safe folder/branch name;
+`opts.base` defaults to main, master, or HEAD. New worktrees use
+`smelt.settings.worktree_root`, inside the repository for relative roots
+or in a per-repository bucket for absolute roots. Returns
+`{ name, branch, path, base, created, pending }`. The cwd, Lua project
+config, prompt inputs, permissions, and watcher roots commit together.
+Sequential tool results wait for the commit; concurrent cwd-changing
+model tools are rejected. Other callers commit at an idle safe point.
 
 ## `smelt.session.fork`
 
@@ -310,5 +319,6 @@ Return rewindable user turns as `{ history_idx, block_idx, label }` rows where `
 fun(): table
 ```
 
-List smelt-managed git worktrees for the current repository. Rows are `{ name, branch, path, base, current }` and are sorted by name.
+List managed worktrees off the UI thread. Must run in `smelt.spawn`, a
+command, or a tool. Returns sorted `{ name, branch, path, base, current }` rows.
 

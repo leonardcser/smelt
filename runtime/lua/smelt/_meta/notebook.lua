@@ -14,8 +14,9 @@ notebook.apply_edit = nil
 
 --- Apply a notebook edit off the main thread. Same return shape as
 --- `smelt.notebook.apply_edit`.
+--- `expected_mtime_ms` rejects writes if the notebook changed after preparation.
 ---@see smelt.notebook.apply_edit
----@type fun(args: table): table?, string?
+---@type fun(args: table, expected_mtime_ms?: integer): table?, string?
 notebook.apply_edit_async = nil
 
 --- Return `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).

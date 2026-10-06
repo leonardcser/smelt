@@ -525,6 +525,41 @@ local function external_or_err(start)
   return result, nil
 end
 
+if smelt.session then
+  --- Create or open a managed git worktree off the UI thread, then request a
+  --- coherent cwd transition. Must run in `smelt.spawn`, a command, or a tool.
+  --- `opts.name` is required and is normalized to a safe folder/branch name;
+  --- `opts.base` defaults to main, master, or HEAD. New worktrees use
+  --- `smelt.settings.worktree_root`, inside the repository for relative roots
+  --- or in a per-repository bucket for absolute roots. Returns
+  --- `{ name, branch, path, base, created, pending }`. The cwd, Lua project
+  --- config, prompt inputs, permissions, and watcher roots commit together.
+  --- Sequential tool results wait for the commit; concurrent cwd-changing
+  --- model tools are rejected. Other callers commit at an idle safe point.
+  ---@tier ui_host
+  ---@type fun(opts: { name: string, base?: string }): table
+  function smelt.session.enter_worktree(opts)
+    local name = tostring(opts and opts.name or ""):match("^%s*(.-)%s*$")
+    if name == "" then error("name is required", 2) end
+    local result = smelt.task.external(function(id)
+      internal.session.__start_enter_worktree(id, name, opts and opts.base)
+    end)
+    if result.err then error(result.err, 2) end
+    result.pending = smelt.session.switch_cwd(result.path).pending
+    return result
+  end
+
+  --- List managed worktrees off the UI thread. Must run in `smelt.spawn`, a
+  --- command, or a tool. Returns sorted `{ name, branch, path, base, current }` rows.
+  ---@tier ui_host
+  ---@type fun(): table
+  function smelt.session.worktrees()
+    local result = smelt.task.external(function(id) internal.session.__start_worktrees(id) end)
+    if result.err then error(result.err, 2) end
+    return result.worktrees
+  end
+end
+
 -- Read `path` off the main thread. Must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 -- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
@@ -595,10 +630,11 @@ if smelt.notebook then
 
   -- Apply a notebook edit off the main thread. Same return shape as
   -- `smelt.notebook.apply_edit`.
-  ---@type fun(args: table): table?, string?
-  function smelt.notebook.apply_edit_async(args)
+  -- `expected_mtime_ms` rejects writes if the notebook changed after preparation.
+  ---@type fun(args: table, expected_mtime_ms?: integer): table?, string?
+  function smelt.notebook.apply_edit_async(args, expected_mtime_ms)
     local result = smelt.task.external(function(id)
-      internal.notebook.__start_apply_edit(id, args or {})
+      internal.notebook.__start_apply_edit(id, args or {}, expected_mtime_ms)
     end)
     if result.err ~= nil then return nil, result.err end
     return { message = result.message, metadata = result.metadata }, nil

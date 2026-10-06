@@ -6,8 +6,10 @@ local function edit_fields(args)
   return args.file_path or "", args.old_string or "", args.new_string or "", args.replace_all == true
 end
 
-local function plan_edit(args)
-  return __smelt_internal.fs.__plan_edit_file(edit_fields(args))
+local function prepare_edit(args)
+  return smelt.task.external(function(id)
+    __smelt_internal.fs.__start_prepare_edit_file(id, edit_fields(args))
+  end)
 end
 
 local function diff_from_content(path, old_content, new_content, anchor)
@@ -38,18 +40,16 @@ local function retained_diff(old_content, new_content, path, anchor, full_file)
   })
 end
 
-local function planned_diff(args)
+local function planned_diff(args, plan)
   local path, old_string = edit_fields(args)
-  local plan = plan_edit(args)
-  if plan.err then
+  if not plan or plan.err then
     return nil
   end
   return diff_from_content(path, plan.old_content, plan.new_content, old_string)
 end
 
-local function planned_output(args)
-  local plan = plan_edit(args)
-  if plan.err then
+local function planned_output(args, plan)
+  if not plan or plan.err then
     return nil
   end
 
@@ -79,25 +79,8 @@ local function replacement_line_detail(block)
   return line_label(old_lines, "old line") .. ", " .. line_label(new_lines, "new line")
 end
 
-local function draft_preview(args, block)
-  if not (block and block.draft_finished) then
-    return nil
-  end
-  if __smelt_internal.fs.__validate_edit_file(edit_fields(args)) then
-    return nil
-  end
-
-  return retained_diff(
-    argument_field(block, "old_string"),
-    argument_field(block, "new_string"),
-    args.file_path or "",
-    argument_field(block, "old_string"),
-    false
-  )
-end
-
 smelt.transcript.register_tool("edit_file", {
-  cache_key = "smelt.tool-presentation.edit_file:v2",
+  cache_key = "smelt.tool-presentation.edit_file:v3",
   body = function(block, ctx, opts)
     if block.output and block.output.is_error then
       return transcript_defaults.render_tool_output_tail(block.output, ctx, opts)
@@ -114,9 +97,6 @@ smelt.transcript.register_tool("edit_file", {
       argument_field(block, "old_string"),
       true
     )
-  end,
-  draft = function(block)
-    return draft_preview(block.args or {}, block)
   end,
   compact = function(block, ctx)
     if block.output and block.output.is_error then
@@ -162,24 +142,21 @@ smelt.tools.register({
   summary = function(args, ctx)
     return smelt.tools.path_summary(args.file_path or "", ctx)
   end,
-  preflight = function(args)
-    return __smelt_internal.fs.__validate_edit_file(edit_fields(args))
+  prepare = prepare_edit,
+  preflight = function(_, prepared)
+    return prepared and prepared.err
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
     return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
-  preview = function(args)
-    return planned_diff(args)
-  end,
-  preview_output = function(args)
-    return planned_output(args or {})
-  end,
-  execute = function(args)
+  preview = planned_diff,
+  preview_output = planned_output,
+  execute = function(args, ctx)
     local path, old_string, new_string, do_all = edit_fields(args)
-
+    local prepared = ctx and ctx.prepared
     local result = smelt.task.external(function(id)
-      __smelt_internal.fs.__start_edit_file(id, path, old_string, new_string, do_all)
+      __smelt_internal.fs.__start_edit_file(id, path, old_string, new_string, do_all, prepared and prepared.mtime_ms)
     end)
     if result.err then
       return { content = result.err, is_error = true }

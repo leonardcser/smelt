@@ -1583,9 +1583,7 @@ impl TuiApp {
     }
 
     pub(crate) fn current_context_note_text(&self) -> String {
-        self.workspace.context_note(std::path::Path::new(
-            &self.core.config.settings.worktree_root,
-        ))
+        self.workspace.context_note()
     }
 
     fn latest_context_note_text(&self, name: &str) -> Option<&str> {

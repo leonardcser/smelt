@@ -978,6 +978,7 @@ fn repeated_expired_quota_deadline_keeps_backoff_across_reload() {
     let generation = app.lua_probe().id;
     app.type_text("/reload");
     app.press(crossterm::event::KeyCode::Enter);
+    app.wait_for_workspace();
     assert_eq!(app.lua_probe().id, generation + 1);
     assert!(!has_started_turn(&run_due_timers(&mut app, 59_999)));
     assert!(has_started_turn(&run_due_timers(&mut app, 1)));

@@ -594,32 +594,85 @@ pub fn resolve_permissions(
     let PermissionRuntimePaths { cwd, home } = runtime_paths;
     let context =
         crate::worktree::project_context(cwd, Some(std::path::Path::new(&settings.worktree_root)));
-    let repository_key = context.repository_key.clone();
-    let mut policy = Permissions::from_raw_with_mode_behaviors(raw, tool_defaults, mode_behaviors);
-    policy.set_allowed_roots(context.active_root, context.allowed_roots);
-    policy.set_home(home.to_path_buf());
-    policy.set_restrict_to_workspace(settings.restrict_to_workspace);
-    if let Some(paths_fn) = paths_fn {
-        policy.set_paths_fn(paths_fn);
+    Ok(
+        PermissionContext::load(cwd, context, permission_store)?.resolve(
+            raw,
+            tool_defaults,
+            mode_behaviors,
+            settings,
+            home,
+            paths_fn,
+        ),
+    )
+}
+
+/// Filesystem-backed permission inputs. Load on a worker, then resolve Lua
+/// declarations without rediscovering Git or loading persisted grants.
+pub struct PermissionContext {
+    project: crate::worktree::ProjectContext,
+    workspace_approvals: store::CompiledApprovals,
+    repository_approvals: store::CompiledApprovals,
+    permission_store: store::PermissionStore,
+    store_generation: u64,
+    workspace: PathBuf,
+}
+
+impl PermissionContext {
+    pub fn load(
+        cwd: &Path,
+        project: crate::worktree::ProjectContext,
+        permission_store: &store::PermissionStore,
+    ) -> std::io::Result<Self> {
+        let store_generation = permission_store.generation();
+        let workspace_approvals = permission_store
+            .load_approvals(&cwd.to_string_lossy(), store::PersistenceScope::Workspace)?;
+        let repository_approvals = if let Some(key) = project.repository_key.as_deref() {
+            permission_store
+                .load_approvals(&key.to_string_lossy(), store::PersistenceScope::Repository)?
+        } else {
+            store::CompiledApprovals::default()
+        };
+        Ok(Self {
+            project,
+            workspace_approvals,
+            repository_approvals,
+            permission_store: permission_store.clone(),
+            store_generation,
+            workspace: cwd.to_path_buf(),
+        })
     }
-    let workspace_approvals = permission_store
-        .load_approvals(&cwd.to_string_lossy(), store::PersistenceScope::Workspace)?;
-    let repository_approvals = if let Some(repository_key) = repository_key.as_deref() {
-        permission_store.load_approvals(
-            &repository_key.to_string_lossy(),
-            store::PersistenceScope::Repository,
-        )?
-    } else {
-        store::CompiledApprovals::default()
-    };
-    Ok(PermissionResolution {
-        policy,
-        workspace_approvals,
-        repository_approvals,
-        permission_store: permission_store.clone(),
-        workspace: cwd.to_path_buf(),
-        repository_key,
-    })
+
+    /// Reject prepared grants after a local grant or revocation changed the store.
+    pub fn is_current(&self) -> bool {
+        self.store_generation == self.permission_store.generation()
+    }
+
+    pub fn resolve(
+        self,
+        raw: &RawPerms,
+        tool_defaults: &ToolDefaults,
+        mode_behaviors: HashMap<String, ModeBehavior>,
+        settings: &crate::config::ResolvedSettings,
+        home: &Path,
+        paths_fn: Option<Arc<PathsFn>>,
+    ) -> PermissionResolution {
+        let mut policy =
+            Permissions::from_raw_with_mode_behaviors(raw, tool_defaults, mode_behaviors);
+        policy.set_allowed_roots(self.project.active_root, self.project.allowed_roots);
+        policy.set_home(home.to_path_buf());
+        policy.set_restrict_to_workspace(settings.restrict_to_workspace);
+        if let Some(paths_fn) = paths_fn {
+            policy.set_paths_fn(paths_fn);
+        }
+        PermissionResolution {
+            policy,
+            workspace_approvals: self.workspace_approvals,
+            repository_approvals: self.repository_approvals,
+            permission_store: self.permission_store,
+            workspace: self.workspace,
+            repository_key: self.project.repository_key,
+        }
+    }
 }
 
 impl std::fmt::Debug for Permissions {

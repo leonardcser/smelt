@@ -35,6 +35,7 @@ mod lsp;
 mod mcp;
 mod messages;
 pub mod mode;
+mod notebook;
 mod os;
 mod parse;
 mod path;
@@ -366,6 +367,7 @@ pub fn register_host_api(
     lsp::register(lua, smelt, shared)?;
     mcp::register(lua, smelt, shared)?;
     messages::register(lua, smelt, shared)?;
+    notebook::register(lua, smelt, shared)?;
     mode::register(lua, smelt)?;
     os::register(lua, smelt, shared)?;
     reasoning::register(lua, smelt)?;

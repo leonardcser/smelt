@@ -396,58 +396,50 @@ pub(super) fn register(
             Ok(())
         },
     )?;
-    m.live_only_fn(
-        "enter_worktree",
-        "Create or open a managed git worktree and request a coherent project-context transition. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. The transition updates Lua project config, process and engine cwd, session metadata, prompt inputs, permissions, and watcher roots together. The returned `pending` field is true inside the Lua callback. Sequential model tool callbacks commit at tool completion before their result is released; concurrent model tool callbacks are rejected, and other callers commit when the event loop reaches an idle safe point. Returns `{ name, branch, path, base, created, pending }`.",
-        &["opts"],
-        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
-            let name: String = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<String>>("name").ok().flatten())
-                .map(|s| smelt_buffer::text::trim_whitespace(&s).to_owned())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| mlua::Error::external("name is required"))?;
-            let base: Option<String> = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<String>>("base").ok().flatten())
-                .map(|s| smelt_buffer::text::trim_whitespace(&s).to_owned())
-                .filter(|s| !s.is_empty());
-            let (info, pending) = crate::lua::with_session_host(|host| {
-                host.enter_worktree(name.as_str(), base.as_deref())
-            })
-            .map_err(mlua::Error::external)?;
-            let out = lua.create_table()?;
-            out.set("name", info.name)?;
-            out.set("branch", info.branch)?;
-            out.set("path", info.path.display().to_string())?;
-            out.set("base", info.base)?;
-            out.set("created", info.created)?;
-            out.set("pending", pending)?;
-            Ok(out)
+    let worktree_sink = shared.core.resume_sink();
+    m.private_live_only_fn(
+        "__start_enter_worktree",
+        &["task_id", "name", "base"],
+        move |_, (task_id, name, base): (u64, String, Option<String>)| -> LuaResult<()> {
+            let (cwd, root) = crate::lua::with_session_host(|host| host.worktree_paths());
+            worktree_sink
+                .clone()
+                .spawn_blocking_resolve(
+                    task_id,
+                    move || match smelt_core::worktree::enter_or_create(
+                        &cwd,
+                        smelt_core::worktree::WorktreeSpec {
+                            name: Some(&name),
+                            base: base.as_deref(),
+                            root: Some(&root),
+                        },
+                    ) {
+                        Ok(info) => serde_json::json!({
+                            "name": info.name, "branch": info.branch, "path": info.path.display().to_string(),
+                            "base": info.base, "created": info.created,
+                        }),
+                        Err(error) => serde_json::json!({ "err": error }),
+                    },
+                );
+            Ok(())
         },
     )?;
-    m.fn_(
-        "worktrees",
-        "List smelt-managed git worktrees for the current repository. Rows are `{ name, branch, path, base, current }` and are sorted by name.",
-        &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let out = lua.create_table()?;
-            if let Some(worktrees) = crate::lua::try_with_session_host(|host| host.managed_worktrees()) {
-                for (i, worktree) in worktrees
-                    .map_err(mlua::Error::external)?
-                    .iter()
-                    .enumerate()
-                {
-                    let row = lua.create_table()?;
-                    row.set("name", worktree.name.as_str())?;
-                    row.set("branch", worktree.branch.as_str())?;
-                    row.set("path", worktree.path.display().to_string())?;
-                    row.set("base", worktree.base.as_str())?;
-                    row.set("current", worktree.current)?;
-                    out.set(i + 1, row)?;
+    let worktrees_sink = shared.core.resume_sink();
+    m.private_live_only_fn(
+        "__start_worktrees",
+        &["task_id"],
+        move |_, task_id: u64| -> LuaResult<()> {
+            let (cwd, root) = crate::lua::with_session_host(|host| host.worktree_paths());
+            worktrees_sink.clone().spawn_blocking_resolve(task_id, move || {
+                match smelt_core::worktree::list_managed(&cwd, Some(&root)) {
+                    Ok(worktrees) => serde_json::json!({ "worktrees": worktrees.into_iter().map(|info| {
+                        serde_json::json!({ "name": info.name, "branch": info.branch, "path": info.path.display().to_string(),
+                            "base": info.base, "current": info.current })
+                    }).collect::<Vec<_>>() }),
+                    Err(error) => serde_json::json!({ "err": error }),
                 }
-            }
-            Ok(out)
+            });
+            Ok(())
         },
     )?;
     m.live_only_fn(

@@ -1099,6 +1099,177 @@ fn lsp_plugin_truncates_large_structured_results() {
     assert!(!content.contains("example205.rs"));
     assert_eq!(metadata, Some(serde_json::json!({ "syntax": "json" })));
 }
+fn evaluation_request(id: u64) -> smelt_core::lua::ToolEvaluationRequest {
+    smelt_core::lua::ToolEvaluationRequest {
+        request_id: id,
+        invocation_id: protocol::InvocationId::new(id),
+        tool_name: "prepared_tool".into(),
+        args: HashMap::new(),
+        mode: protocol::AgentMode::normal(),
+    }
+}
+
+#[test]
+fn tool_preparation_yields_and_retains_independent_invocation_snapshots() {
+    #[allow(clippy::arc_with_non_send_sync)]
+    let shared = Arc::new(LuaShared::default());
+    let rt = LuaRuntime::with_shared(Arc::clone(&shared));
+    rt.lua
+        .load(
+            r#"
+        preparation_ids = {}
+        smelt.tools.register({
+            name = "prepared_tool",
+            prepare = function()
+                return smelt.task.external(function(id)
+                    preparation_ids[#preparation_ids + 1] = id
+                end)
+            end,
+            preflight = function(_, prepared)
+                smelt.sleep(1)
+                assert(prepared.value ~= nil)
+            end,
+            preview = function(_, prepared)
+                return prepared and smelt.layout.text(prepared.value)
+            end,
+            preview_output = function(_, prepared)
+                return prepared and { content = prepared.value }
+            end,
+            execute = function(_, ctx) return ctx.prepared.value end,
+        })
+    "#,
+        )
+        .exec()
+        .unwrap();
+    let now = Instant::now();
+    for id in [91, 92] {
+        assert!(rt
+            .evaluate_tool_metadata(&evaluation_request(id), now)
+            .unwrap()
+            .is_none());
+    }
+    let ids: Vec<u64> = get_global::<mlua::Table>(&rt, "preparation_ids")
+        .sequence_values()
+        .collect::<mlua::Result<_>>()
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    for (external, value) in ids.into_iter().zip(["first", "second"]) {
+        let prepared = rt.lua.create_table().unwrap();
+        prepared.set("value", value).unwrap();
+        assert!(rt.resolve_external(external, mlua::Value::Table(prepared)));
+    }
+    assert!(rt.drive_tasks(now).is_empty(), "preflight must also yield");
+    let mut completed = 0;
+    for output in rt.drive_tasks(now + Duration::from_millis(2)) {
+        let TaskDriveOutput::ToolEvaluated { request, result } = output else {
+            panic!("unexpected task output");
+        };
+        assert!(rt
+            .finish_tool_evaluation(&request, result)
+            .preflight_error
+            .is_none());
+        completed += 1;
+    }
+    assert_eq!(completed, 2);
+    for (id, expected) in [(91, "first"), (92, "second")] {
+        let invocation = protocol::InvocationId::new(id);
+        let output = rt
+            .tool_preview_output("prepared_tool", &HashMap::new(), Some(invocation))
+            .unwrap();
+        assert_eq!(output.content.snapshot(), expected);
+        assert!(LuaRuntime::call_tool_preview(
+            &rt.lua,
+            &shared,
+            "prepared_tool",
+            &HashMap::new(),
+            Some(invocation)
+        )
+        .unwrap()
+        .is_some());
+        let result = execute_tool(
+            &rt,
+            "prepared_tool",
+            &HashMap::new(),
+            id,
+            "prepared-call",
+            ToolEnv {
+                mode: protocol::AgentMode::normal(),
+                session_id: "sess",
+                artifact_dir: Path::new("/tmp"),
+            },
+            now,
+        );
+        assert!(
+            matches!(result, ToolExecResult::Immediate { content, is_error: false, .. } if content == expected)
+        );
+        assert!(rt
+            .tool_preview_output("prepared_tool", &HashMap::new(), Some(invocation))
+            .is_none());
+    }
+}
+
+#[test]
+fn tool_preparation_errors_and_invalid_results_fail_closed() {
+    for hook in [
+        "prepare = function() error('preparation failed') end",
+        "prepare = function() return 42 end",
+        "preflight = function() error('validation failed') end",
+        "approval_patterns = function() return 42 end",
+    ] {
+        let rt = fresh();
+        rt.lua.load(format!("smelt.tools.register({{ name = 'prepared_tool', {hook}, execute = function() return '' end }})")).exec().unwrap();
+        let metadata = rt
+            .evaluate_tool_metadata(&evaluation_request(93), Instant::now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            metadata.preflight_error.is_some(),
+            "invalid hook authorized: {hook}"
+        );
+    }
+}
+
+#[test]
+fn tool_preparation_timeout_and_cancellation_discard_pending_work() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+        smelt.tools.register({
+            name = "prepared_tool",
+            prepare = function() return smelt.task.wait(12345) end,
+            execute = function() return "" end,
+        })
+    "#,
+        )
+        .exec()
+        .unwrap();
+    let now = Instant::now();
+    let mut request = evaluation_request(94);
+    request
+        .args
+        .insert("timeout_ms".into(), serde_json::json!(5));
+    assert!(rt.evaluate_tool_metadata(&request, now).unwrap().is_none());
+    let metadata = rt
+        .drive_tasks(now + Duration::from_millis(6))
+        .into_iter()
+        .find_map(|output| match output {
+            TaskDriveOutput::ToolEvaluated { request, result } => {
+                Some(rt.finish_tool_evaluation(&request, result))
+            }
+            _ => None,
+        })
+        .expect("timed out evaluation");
+    assert!(metadata.preflight_error.unwrap().contains("timed out"));
+    assert!(rt
+        .evaluate_tool_metadata(&evaluation_request(95), now)
+        .unwrap()
+        .is_none());
+    rt.cancel_turn_tasks();
+    assert!(!rt.resolve_external(12345, mlua::Value::Nil));
+    assert!(rt.drive_tasks(now + Duration::from_secs(1)).is_empty());
+}
+
 #[test]
 fn tool_timeout_completes_a_parked_tool_with_error() {
     let rt = fresh();

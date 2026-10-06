@@ -44,6 +44,7 @@ impl TestApp {
 
     pub(crate) fn dispatch_host_call(&mut self, call: engine::HostCall) {
         self.app.dispatch_host_call(call);
+        self.wait_for_project_context();
     }
 
     pub(crate) fn dispatch_confirm_request(
@@ -507,12 +508,24 @@ impl TestApp {
         approval_patterns: Vec<String>,
         summary: protocol::StyledLines,
     ) {
+        let invocation_id = next_synthetic_invocation_id();
+        let call_id = call_id.into();
+        let tool_name = tool_name.into();
+        self.engine_event(EngineEvent::ToolEvaluationRequest {
+            request_id: invocation_id.get(),
+            invocation_id,
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
+            args: args.clone(),
+            mode: self.app.core.config.mode.clone(),
+        });
+        self.wait_for_tool_evaluation(invocation_id.get());
         let called_at_ms = self.tool_called_at_ms();
         self.engine_event(EngineEvent::RequestPermission {
             request_id,
-            invocation_id: next_synthetic_invocation_id(),
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
+            invocation_id,
+            call_id,
+            tool_name,
             args,
             approval_patterns,
             called_at_ms,

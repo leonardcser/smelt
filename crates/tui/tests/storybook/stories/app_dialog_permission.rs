@@ -402,9 +402,7 @@ app_story!(edit_file_permission_dialog_multiline_diff, |ctx| {
 
 app_story!(notebook_edit_permission_dialog_with_diff, |ctx| {
     ctx.set_viewport(80, 28);
-    // notebook_edit's preview reads the source notebook from disk
-    // via `smelt.notebook.preview_data`. Seed a 2-cell fixture so
-    // the preview pipeline produces a real cell-level diff.
+    // Prepare a read snapshot of a two-cell notebook for the cell-level diff.
     let nb_json = r##"{
       "nbformat": 4,
       "nbformat_minor": 5,
@@ -418,6 +416,7 @@ app_story!(notebook_edit_permission_dialog_with_diff, |ctx| {
       ]
     }"##;
     let path = ctx.write_fixture("analysis.ipynb", nb_json);
+    ctx.cache_file_read(&path, nb_json);
     ctx.request_permission(
         "edit_notebook",
         args([
@@ -447,6 +446,7 @@ app_story!(notebook_edit_permission_dialog_insert_cell, |ctx| {
       ]
     }"##;
     let path = ctx.write_fixture("insert.ipynb", nb_json);
+    ctx.cache_file_read(&path, nb_json);
     ctx.request_permission(
         "edit_notebook",
         args([

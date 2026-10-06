@@ -73,7 +73,9 @@ impl TuiApp {
         let (stream_id, finished) = self.conversation.tool_draft_state(&call_id);
         let preview_output = if finished {
             let lua = self.lua.execution();
-            crate::lua::scope_app(self, || lua.tool_preview_output(&tool_name, &args))
+            crate::lua::scope_app(self, || {
+                lua.tool_preview_output(&tool_name, &args, Some(invocation_id))
+            })
         } else {
             None
         };

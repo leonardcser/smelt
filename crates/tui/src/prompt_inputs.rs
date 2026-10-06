@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 /// Sources + cached rendered values for everything the agent reads off
 /// disk at startup. Live on `TuiApp`; refreshed in place on `/reload`.
+#[derive(Clone)]
 pub struct PromptInputs {
     runtime_home: PathBuf,
     config_dir: PathBuf,

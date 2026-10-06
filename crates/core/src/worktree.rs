@@ -44,11 +44,24 @@ pub struct ProjectContext {
     pub project_name: String,
     pub active_root: PathBuf,
     pub branch: String,
+    pub default_base: String,
+    pub default_base_path: Option<PathBuf>,
     pub managed_worktree: bool,
     pub worktree_name: Option<String>,
     pub base_path: Option<PathBuf>,
     pub repository_key: Option<PathBuf>,
     pub allowed_roots: Vec<PathBuf>,
+}
+
+impl ProjectContext {
+    /// Apply the final config without repeating Git discovery.
+    pub fn set_worktree_root(&mut self, root: Option<&Path>) {
+        self.managed_worktree = is_managed_worktree_path(&self.active_root, root);
+        self.worktree_name = self
+            .managed_worktree
+            .then(|| self.branch.clone())
+            .filter(|name| !name.is_empty());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -272,7 +285,10 @@ pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
     let base = default_base_ref(&active_root);
     let worktrees = git_worktrees(&active_root).unwrap_or_default();
     let repository_key = git_common_dir(&active_root);
-    let base_path = find_branch_worktree(&worktrees, &base)
+    let default_base_path =
+        find_branch_worktree(&worktrees, &base).map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+    let base_path = default_base_path
+        .clone()
         .or_else(|| repository_key.as_deref().and_then(common_dir_repo_root))
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
     let managed_worktree = is_managed_worktree_path(&active_root, root);
@@ -294,6 +310,8 @@ pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
         project_name,
         active_root,
         branch: branch.clone(),
+        default_base: base,
+        default_base_path,
         managed_worktree,
         worktree_name: managed_worktree
             .then(|| branch.clone())
@@ -792,7 +810,14 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = project_context(&info.path, None);
+        let mut ctx = project_context(&info.path, Some(Path::new("other-root")));
+        assert!(!ctx.managed_worktree);
+        ctx.set_worktree_root(None);
+        assert_eq!(ctx.default_base, "main");
+        assert_eq!(
+            crate::context_notes::cwd_note_for_project(&info.path, &ctx),
+            crate::context_notes::cwd_note(&info.path, Path::new(".worktrees"))
+        );
 
         assert_eq!(
             ctx.project_name,

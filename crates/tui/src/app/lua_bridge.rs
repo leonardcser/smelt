@@ -225,6 +225,13 @@ impl TuiApp {
                         },
                     );
                 }
+                crate::lua::TaskDriveOutput::ToolEvaluated { request, result } => {
+                    let lua = self.lua.execution();
+                    let metadata = crate::lua::scope_app(self, || {
+                        lua.finish_tool_evaluation(&request, result)
+                    });
+                    self.finish_tool_evaluation(*request, metadata);
+                }
                 crate::lua::TaskDriveOutput::NotifyError(msg) => {
                     self.notify_error(msg);
                 }

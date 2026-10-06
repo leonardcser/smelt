@@ -503,7 +503,7 @@ impl TuiApp {
         }
     }
 
-    fn refresh_active_turn_permissions(&mut self) {
+    pub(super) fn refresh_active_turn_permissions(&mut self) {
         self.conversation
             .refresh_active_permissions(self.core.permissions.snapshot());
     }
@@ -1802,6 +1802,24 @@ impl TuiApp {
         call_id: String,
         completion: LuaToolCompletion,
     ) {
+        let cwd_change = match self.defer_tool_cwd_result(invocation, !completion.is_error) {
+            Ok(true) => {
+                self.park_cwd_tool_completion(call_id, completion);
+                return;
+            }
+            Ok(false) => Ok(false),
+            Err(error) => Err(error),
+        };
+        self.finish_lua_tool(invocation, call_id, completion, cwd_change);
+    }
+
+    pub(super) fn finish_lua_tool(
+        &mut self,
+        invocation: smelt_core::lua::ToolInvocationContext,
+        call_id: String,
+        completion: LuaToolCompletion,
+        cwd_change: Result<bool, String>,
+    ) {
         let LuaToolCompletion {
             mut content,
             mut is_error,
@@ -1809,7 +1827,7 @@ impl TuiApp {
             display_content,
             attachment,
         } = completion;
-        match self.commit_tool_cwd_change(invocation, !is_error) {
+        match cwd_change {
             Ok(true) => {
                 self.refresh_active_turn_permissions();
                 annotate_cwd_metadata(&mut metadata, true, None);
@@ -2146,6 +2164,7 @@ impl TuiApp {
                 false
             }
             ConfirmChoice::No => {
+                self.lua.release_tool_preparation(invocation_id);
                 let has_message = message.is_some();
                 self.send_permission_decision(request_id, false, message);
                 self.finish_tool(invocation_id, ToolStatus::Denied, None, None);

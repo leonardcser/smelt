@@ -485,60 +485,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let s = shared.clone();
-        fs.private_fn(
-            "__validate_edit_file",
-            &["path", "old_string", "new_string", "replace_all"],
-            move |_,
-                  (path, old_string, new_string, replace_all): (String, String, String, bool)|
-                  -> LuaResult<Option<String>> {
-                let result = match crate::host::try_with_core(|core| core.files.clone()) {
-                    Some(files) => {
-                        let path = s.resolve_project_path(path);
-                        crate::fs::checked_validate_edit_file(
-                            &path.to_string_lossy(),
-                            &old_string,
-                            &new_string,
-                            replace_all,
-                            &files,
-                        )
+        fs.private_live_only_fn(
+            "__start_prepare_edit_file",
+            &["task_id", "path", "old_string", "new_string", "replace_all"],
+            move |_, (task_id, path, old_string, new_string, replace_all): (u64, String, String, String, bool)| -> LuaResult<()> {
+                let files = crate::host::try_with_core(|core| core.files.clone());
+                let path = s.resolve_project_path(path);
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    let Some(files) = files else { return serde_json::json!({ "err": "edit_file: no app context" }); };
+                    match crate::fs::checked_plan_edit_file(&path.to_string_lossy(), &old_string, &new_string, replace_all, &files) {
+                        Ok(prepared) => serde_json::json!({ "old_content": prepared.outcome.old_content, "new_content": prepared.outcome.new_content, "mtime_ms": prepared.mtime_ms }),
+                        Err(error) => serde_json::json!({ "err": error }),
                     }
-                    None => Err("edit_file: no app context".into()),
-                };
-                Ok(result.err())
-            },
-        )?;
-    }
-
-    {
-        let s = shared.clone();
-        fs.private_fn(
-            "__plan_edit_file",
-            &["path", "old_string", "new_string", "replace_all"],
-            move |lua,
-                  (path, old_string, new_string, replace_all): (String, String, String, bool)|
-                  -> LuaResult<mlua::Table> {
-                let result = match crate::host::try_with_core(|core| core.files.clone()) {
-                    Some(files) => {
-                        let path = s.resolve_project_path(path);
-                        crate::fs::checked_plan_edit_file(
-                            &path.to_string_lossy(),
-                            &old_string,
-                            &new_string,
-                            replace_all,
-                            &files,
-                        )
-                    }
-                    None => Err("edit_file: no app context".into()),
-                };
-                let plan = lua.create_table()?;
-                match result {
-                    Ok(outcome) => {
-                        plan.set("old_content", outcome.old_content)?;
-                        plan.set("new_content", outcome.new_content)?;
-                    }
-                    Err(err) => plan.set("err", err)?,
-                }
-                Ok(plan)
+                });
+                Ok(())
             },
         )?;
     }
@@ -547,14 +507,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         fs.private_live_only_fn(
             "__start_edit_file",
-            &["task_id", "path", "old_string", "new_string", "replace_all"],
+            &[
+                "task_id",
+                "path",
+                "old_string",
+                "new_string",
+                "replace_all",
+                "expected_mtime_ms",
+            ],
             move |_,
-                  (task_id, path, old_string, new_string, replace_all): (
+                  (task_id, path, old_string, new_string, replace_all, expected_mtime_ms): (
                 u64,
                 String,
                 String,
                 String,
                 bool,
+                Option<u64>,
             )|
                   -> LuaResult<()> {
                 let files = crate::host::try_with_core(|core| core.files.clone());
@@ -573,6 +541,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         &new_string,
                         replace_all,
                         &files,
+                        expected_mtime_ms,
                     ) {
                         Ok(outcome) => serde_json::json!({
                             "old_content": outcome.old_content,

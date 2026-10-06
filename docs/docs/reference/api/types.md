@@ -1175,7 +1175,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | `string` | yes | Tool name; used as the engine-facing identifier. |
-| `execute` | `function` | yes | Required handler: `execute(args, ctx)` - returns the tool result. |
+| `execute` | `function` | yes | Required handler: `execute(args, ctx)` - returns the tool result. `ctx.prepared` contains this invocation's preparation snapshot, when provided. |
 | `description` | `string` |  | Human-readable description shown to the model. |
 | `parameters` | `table` |  | JSON-schema parameters table passed through to the model. |
 | `permission_defaults` | [smelt.tools.PermissionDefaults](types.md#smelttoolspermissiondefaults) |  | Per-mode default decisions. |
@@ -1185,11 +1185,12 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `modes` | `table` |  | Agent modes the tool is available in; nil means all modes. |
 | `execution_mode` | `string` |  | `"concurrent"` (default) or `"sequential"`. |
 | `summary` | `function` |  | `summary(args) -> string | styled_lines | nil` - styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` - same span shape as `buf:styled` plus optional `selectable = false` for chrome text and `title_suffix = true` for metadata rendered after the live tool timer. |
-| `approval_patterns` | `function` |  | `approval_patterns(args, ctx) -> string[]` - patterns offered as one-click approvals. |
-| `preflight` | `function` |  | `preflight(args, ctx) -> table?` - validation hook; nil result skips. |
+| `approval_patterns` | `function` |  | `approval_patterns(args, prepared) -> string[]?` - yielding hook for one-click approval patterns. |
+| `prepare` | `function` |  | `prepare(args) -> table?` - yielding, read-only preparation for this invocation. The returned snapshot is passed to preflight and preview callbacks. Use async APIs for file I/O; rendering callbacks must only format prepared data. |
+| `preflight` | `function` |  | `preflight(args, prepared) -> string?` - yielding validation hook; return an error string to reject execution. Errors and timeouts fail closed. |
 | `paths_for_workspace` | `function` |  | `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. Callback errors and malformed entries reject tool evaluation rather than being treated as no paths. |
-| `preview` | `function` |  | `preview(args) -> smelt.layout` - pre-execute preview render. The confirm dialog renders it directly into the preview pane. |
-| `preview_output` | `function` |  | `preview_output(args) -> { content, is_error?, metadata?, display_content? }|nil` - immutable pending transcript output derived from final streamed arguments before execution. Growing display payloads belong in `display_content`, not JSON metadata. |
+| `preview` | `function` |  | `preview(args, prepared) -> smelt.layout` - pure pre-execute preview render. The confirm dialog renders the invocation's prepared snapshot without I/O. |
+| `preview_output` | `function` |  | `preview_output(args, prepared) -> { content, is_error?, metadata?, display_content? }|nil` - immutable pending transcript output derived from final streamed arguments before execution. Growing display payloads belong in `display_content`, not JSON metadata. |
 | `draft_preview` | `function` |  | `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort renderer for streamed partial arguments in the transcript. |
 | `watchdog_timeout_ms` | `integer` |  | Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally. |
 | `watchdog_max_timeout_ms` | `integer` |  | Maximum watchdog deadline accepted from tool arguments, in milliseconds. |

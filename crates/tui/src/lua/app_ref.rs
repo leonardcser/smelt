@@ -595,12 +595,18 @@ impl AgentLuaHost<'_> {
     pub(crate) fn confirm_preview_request(
         &self,
         handle_id: u64,
-    ) -> Option<(String, std::collections::HashMap<String, serde_json::Value>)> {
-        self.app
-            .core
-            .confirms
-            .get(handle_id)
-            .map(|entry| (entry.req.tool_name.clone(), entry.req.args.clone()))
+    ) -> Option<(
+        String,
+        std::collections::HashMap<String, serde_json::Value>,
+        protocol::InvocationId,
+    )> {
+        self.app.core.confirms.get(handle_id).map(|entry| {
+            (
+                entry.req.tool_name.clone(),
+                entry.req.args.clone(),
+                entry.req.invocation_id,
+            )
+        })
     }
 
     pub(crate) fn resolve_confirm(
@@ -1410,30 +1416,11 @@ impl SessionLuaHost<'_> {
         self.app.workspace.cwd().to_owned()
     }
 
-    pub(crate) fn enter_worktree(
-        &mut self,
-        name: &str,
-        base: Option<&str>,
-    ) -> Result<(smelt_core::worktree::WorktreeInfo, bool), String> {
-        let cwd = self.app.workspace.cwd_path().to_owned();
-        let worktree_root = std::path::PathBuf::from(&self.app.core.config.settings.worktree_root);
-        let info = smelt_core::worktree::enter_or_create(
-            &cwd,
-            smelt_core::worktree::WorktreeSpec {
-                name: Some(name),
-                base,
-                root: Some(&worktree_root),
-            },
-        )?;
-        let (_, pending) = self.app.change_cwd(info.path.clone())?;
-        Ok((info, pending))
-    }
-
-    pub(crate) fn managed_worktrees(
-        &self,
-    ) -> Result<Vec<smelt_core::worktree::ManagedWorktreeInfo>, String> {
-        let root = std::path::Path::new(&self.app.core.config.settings.worktree_root);
-        smelt_core::worktree::list_managed(self.app.workspace.cwd_path(), Some(root))
+    pub(crate) fn worktree_paths(&self) -> (std::path::PathBuf, std::path::PathBuf) {
+        (
+            self.app.workspace.cwd_path().to_owned(),
+            std::path::PathBuf::from(&self.app.core.config.settings.worktree_root),
+        )
     }
 
     pub(crate) fn change_cwd(

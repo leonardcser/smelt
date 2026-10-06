@@ -33,9 +33,21 @@ enum DeferredRequestDecision {
 
 #[derive(Default)]
 pub(super) struct HostWorkState {
+    project_request: Option<ProjectRequest>,
     pending: Option<Rc<RequestHook>>,
     context_recalculation: Option<super::BusyToken>,
     handoff_turn: Option<u64>,
+}
+
+struct ProjectRequest {
+    turn_id: u64,
+    cancel_generation: u64,
+    lua_generation: u64,
+    runtime_revision: u64,
+    messages: PreparedRequestMessages,
+    estimated_tokens: u32,
+    reply: MessageReply,
+    preparation: super::cwd::ProjectPreparation,
 }
 
 struct RequestHook {
@@ -229,6 +241,9 @@ impl TuiApp {
     }
 
     pub(super) fn cancel_request_hook(&mut self) {
+        if let Some(request) = self.host_work.project_request.take() {
+            let _ = request.reply.send(HostRequestDecision::Stop);
+        }
         if let Some(owner) = self.host_work.pending.clone() {
             let decision = self.resolve_request_hook(&owner, DeferredRequestDecision::Stop);
             if let Some(reply) = owner.reply.borrow_mut().take() {
@@ -374,9 +389,96 @@ impl TuiApp {
                     let _ = reply.send(HostRequestDecision::Stop);
                     return;
                 }
-                self.dispatch_prepare_request(turn_id, messages, estimated_tokens, reply);
+                self.prepare_project_request(turn_id, messages, estimated_tokens, reply);
             }
         }
+    }
+
+    fn prepare_project_request(
+        &mut self,
+        turn_id: u64,
+        messages: PreparedRequestMessages,
+        estimated_tokens: u32,
+        reply: MessageReply,
+    ) {
+        if let Some(previous) = self.host_work.project_request.take() {
+            let _ = previous.reply.send(HostRequestDecision::Stop);
+        }
+        match self.prepare_project_context() {
+            Ok(preparation) => {
+                self.host_work.project_request = Some(ProjectRequest {
+                    turn_id,
+                    cancel_generation: self.conversation.cancel_generation(),
+                    lua_generation: self.lua.id,
+                    runtime_revision: self.core.config.revision,
+                    messages,
+                    estimated_tokens,
+                    reply,
+                    preparation,
+                })
+            }
+            Err(error) => {
+                let _ = reply.send(HostRequestDecision::Abort(error));
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    pub(super) fn project_context_pending(&self) -> bool {
+        self.host_work.project_request.is_some()
+    }
+
+    /// Refresh before every provider request, including those following tools.
+    /// The engine waits for the snapshot, while the terminal keeps processing input.
+    pub(super) fn poll_project_request(&mut self) -> bool {
+        let Some(request) = self.host_work.project_request.as_ref() else {
+            return false;
+        };
+        if self.active_agent_turn_id() != Some(request.turn_id)
+            || self.conversation.cancel_generation() != request.cancel_generation
+        {
+            let request = self.host_work.project_request.take().unwrap();
+            let _ = request.reply.send(HostRequestDecision::Stop);
+            return true;
+        }
+        let prepared = match request.preparation.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("project preparation worker stopped".into())
+            }
+        };
+        let request = self.host_work.project_request.take().unwrap();
+        if request.lua_generation != self.lua.id
+            || request.runtime_revision != self.core.config.revision
+            || prepared.as_ref().is_ok_and(|prepared| {
+                prepared.cwd != self.core.env.cwd() || !prepared.permissions.is_current()
+            })
+        {
+            self.prepare_project_request(
+                request.turn_id,
+                request.messages,
+                request.estimated_tokens,
+                request.reply,
+            );
+            return true;
+        }
+        match prepared {
+            Ok(prepared) => {
+                let context_changed = self.install_prepared_project_context(prepared);
+                self.dispatch_prepare_request(
+                    request.turn_id,
+                    request.messages,
+                    request.estimated_tokens,
+                    request.reply,
+                    context_changed,
+                );
+            }
+            Err(error) => {
+                let _ = request.reply.send(HostRequestDecision::Abort(error));
+            }
+        }
+        true
     }
 
     /// Hand the first registered `smelt.engine.on_context_limit` hook the
@@ -418,6 +520,7 @@ impl TuiApp {
         messages: PreparedRequestMessages,
         estimated_tokens: u32,
         reply: MessageReply,
+        context_changed: bool,
     ) {
         let lua = self.lua.lua().clone();
         let funcs = self
@@ -429,6 +532,11 @@ impl TuiApp {
         let Some(func) = funcs.into_iter().next() else {
             let _ = reply.send(HostRequestDecision::Continue);
             return;
+        };
+        let messages = if context_changed {
+            PreparedRequestMessages::model_only(self.model_history_messages())
+        } else {
+            messages
         };
         let identity = self.active_context_token_identity();
         let current_history_len = self.session_history_len();

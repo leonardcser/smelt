@@ -8,6 +8,7 @@ impl TestApp {
     /// generation are reaped.
     pub fn reload_lua(&mut self) {
         self.app.reload_lua();
+        self.wait_for_workspace();
     }
 
     pub fn schedule_lua_reload(&mut self) -> bool {
@@ -22,6 +23,64 @@ impl TestApp {
     pub fn settle_lua(&mut self) {
         for _ in 0..4 {
             self.feed_one(SourceEvent::LuaWakeup);
+        }
+    }
+
+    /// Drive preparation wakeups until a requested workspace transition or reload finishes.
+    pub fn wait_for_workspace(&mut self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while self.app.workspace.has_pending_change() || self.pending_lua_reload() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "workspace transition stalled"
+            );
+            self.app.drain_idle_work();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    pub fn wait_for_project_context(&mut self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while self.app.project_context_pending() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "project context preparation stalled"
+            );
+            self.app.drain_idle_work();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    pub fn wait_for_tool_result(&mut self, call_id: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !self.actions.iter().any(|action| {
+            matches!(action,
+            Action::EngineSend(command) if matches!(command.as_ref(),
+                protocol::UiCommand::ToolResult { call_id: completed, .. } if completed == call_id))
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tool {call_id} stalled"
+            );
+            self.feed_one(SourceEvent::LuaWakeup);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    pub fn wait_for_tool_evaluation(&mut self, request_id: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !self.actions.iter().any(|action| {
+            matches!(action,
+                Action::EngineSend(command) if matches!(command.as_ref(),
+                    protocol::UiCommand::ToolEvaluationResponse { request_id: completed, .. }
+                        if *completed == request_id))
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tool evaluation {request_id} stalled"
+            );
+            self.feed_one(SourceEvent::LuaWakeup);
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -59,6 +118,7 @@ impl TestApp {
 
     pub(crate) fn reload_lua_config(&mut self) {
         self.app.reload_lua_config();
+        self.wait_for_workspace();
     }
 
     pub(crate) fn apply_lua_command(&mut self, command: &str) {

@@ -180,6 +180,7 @@ impl TuiApp {
         elapsed_ms: Option<u64>,
         status: ToolStatus,
     ) {
+        self.lua.release_tool_preparation(invocation_id);
         let mut finished_tool_name: Option<String> = None;
         let mut finished_is_error = false;
         if let Some(idx) = pending
@@ -937,43 +938,32 @@ impl TuiApp {
             }
             EngineEvent::ToolEvaluationRequest {
                 request_id,
-                invocation_id: _,
+                invocation_id,
                 call_id: _,
                 tool_name,
                 args,
                 mode,
             } => {
-                let lua = self.lua.execution();
-                let metadata =
-                    crate::lua::scope_app(self, || lua.evaluate_tool_metadata(&tool_name, &args));
-                let decision = if let Some(err) = metadata.preflight_error.clone() {
-                    protocol::Decision::Error(err)
-                } else {
-                    let lua = self.lua.execution();
-                    match crate::lua::scope_app(self, || {
-                        lua.tool_paths_for_workspace(&tool_name, &args)
-                    }) {
-                        Ok(tool_paths) => {
-                            self.active_permissions()
-                                .evaluate_tool_with_paths_and_approvals(
-                                    mode,
-                                    smelt_core::permissions::ToolOrigin::Lua,
-                                    &tool_name,
-                                    &args,
-                                    tool_paths.as_slice(),
-                                )
-                                .decision
-                        }
-                        Err(error) => protocol::Decision::Error(error),
-                    }
+                let request = smelt_core::lua::ToolEvaluationRequest {
+                    request_id,
+                    invocation_id,
+                    tool_name,
+                    args,
+                    mode,
                 };
-                let evaluation = protocol::ToolEvaluation { decision, metadata };
-                self.core
-                    .engine
-                    .send(protocol::UiCommand::ToolEvaluationResponse {
-                        request_id,
-                        evaluation,
-                    });
+                let lua = self.lua.execution();
+                let now = self.core.clock.instant_now();
+                match crate::lua::scope_app(self, || lua.evaluate_tool_metadata(&request, now)) {
+                    Ok(Some(metadata)) => self.finish_tool_evaluation(request, metadata),
+                    Ok(None) => {}
+                    Err(error) => self.finish_tool_evaluation(
+                        request,
+                        protocol::ToolMetadata {
+                            preflight_error: Some(error),
+                            ..Default::default()
+                        },
+                    ),
+                }
                 SessionControl::Continue
             }
             EngineEvent::CoreToolResult {
@@ -997,6 +987,40 @@ impl TuiApp {
             assistant_output_started,
         }
     }
+    pub(super) fn finish_tool_evaluation(
+        &mut self,
+        request: smelt_core::lua::ToolEvaluationRequest,
+        metadata: protocol::ToolMetadata,
+    ) {
+        let decision = if let Some(error) = metadata.preflight_error.clone() {
+            protocol::Decision::Error(error)
+        } else {
+            let lua = self.lua.execution();
+            match crate::lua::scope_app(self, || {
+                lua.tool_paths_for_workspace(&request.tool_name, &request.args)
+            }) {
+                Ok(paths) => {
+                    self.active_permissions()
+                        .evaluate_tool_with_paths_and_approvals(
+                            request.mode,
+                            smelt_core::permissions::ToolOrigin::Lua,
+                            &request.tool_name,
+                            &request.args,
+                            paths.as_slice(),
+                        )
+                        .decision
+                }
+                Err(error) => protocol::Decision::Error(error),
+            }
+        };
+        self.core
+            .engine
+            .send(protocol::UiCommand::ToolEvaluationResponse {
+                request_id: request.request_id,
+                evaluation: protocol::ToolEvaluation { decision, metadata },
+            });
+    }
+
     /// Handle engine events that arrive when no turn is active.
     pub(crate) fn handle_idle_engine_event(&mut self, ev: EngineEvent) {
         match ev {

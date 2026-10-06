@@ -1695,6 +1695,7 @@ impl<'a> Turn<'a> {
                 }
             };
             self.drain_commands();
+            self.apply_pending_history_items_for_request();
             if self.target_revision != request_target_revision {
                 continue;
             }

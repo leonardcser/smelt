@@ -78,6 +78,7 @@ pub struct LuaToolDef {
     /// Tool name; used as the engine-facing identifier.
     pub name: String,
     /// Required handler: `execute(args, ctx)` - returns the tool result.
+    /// `ctx.prepared` contains this invocation's preparation snapshot, when provided.
     pub execute: mlua::Function,
     /// Human-readable description shown to the model.
     #[lua(default)]
@@ -104,16 +105,21 @@ pub struct LuaToolDef {
     /// shape as `buf:styled` plus optional `selectable = false` for chrome text and
     /// `title_suffix = true` for metadata rendered after the live tool timer.
     pub summary: Option<mlua::Function>,
-    /// `approval_patterns(args, ctx) -> string[]` - patterns offered as one-click approvals.
+    /// `approval_patterns(args, prepared) -> string[]?` - yielding hook for one-click approval patterns.
     pub approval_patterns: Option<mlua::Function>,
-    /// `preflight(args, ctx) -> table?` - validation hook; nil result skips.
+    /// `prepare(args) -> table?` - yielding, read-only preparation for this invocation.
+    /// The returned snapshot is passed to preflight and preview callbacks. Use async
+    /// APIs for file I/O; rendering callbacks must only format prepared data.
+    pub prepare: Option<mlua::Function>,
+    /// `preflight(args, prepared) -> string?` - yielding validation hook; return an
+    /// error string to reject execution. Errors and timeouts fail closed.
     pub preflight: Option<mlua::Function>,
     /// `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. Callback errors and malformed entries reject tool evaluation rather than being treated as no paths.
     pub paths_for_workspace: Option<mlua::Function>,
-    /// `preview(args) -> smelt.layout` - pre-execute preview render. The
-    /// confirm dialog renders it directly into the preview pane.
+    /// `preview(args, prepared) -> smelt.layout` - pure pre-execute preview render.
+    /// The confirm dialog renders the invocation's prepared snapshot without I/O.
     pub preview: Option<mlua::Function>,
-    /// `preview_output(args) -> { content, is_error?, metadata?, display_content? }|nil` -
+    /// `preview_output(args, prepared) -> { content, is_error?, metadata?, display_content? }|nil` -
     /// immutable pending transcript output derived from final streamed arguments before execution.
     /// Growing display payloads belong in `display_content`, not JSON metadata.
     pub preview_output: Option<mlua::Function>,
@@ -238,6 +244,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 };
                 let approval_patterns_handle = def.approval_patterns.map(stash).transpose()?;
                 let preflight_handle = def.preflight.map(stash).transpose()?;
+                let prepare_handle = def.prepare.map(stash).transpose()?;
                 let paths_for_workspace_handle = def.paths_for_workspace.map(stash).transpose()?;
                 let preview_handle = def.preview.map(stash).transpose()?;
                 let preview_output_handle = def.preview_output.map(stash).transpose()?;
@@ -262,7 +269,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     meta.set("execution_mode", mode_str)?;
                 }
                 meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
-                meta.set("hook_preflight", preflight_handle.is_some())?;
+                meta.set("hook_preflight", preflight_handle.is_some() || prepare_handle.is_some())?;
                 meta.set(
                     "hook_paths_for_workspace",
                     paths_for_workspace_handle.is_some(),
@@ -303,6 +310,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             execution_mode,
                             approval_patterns: approval_patterns_handle,
                             preflight: preflight_handle,
+                            prepare: prepare_handle,
                             paths_for_workspace: paths_for_workspace_handle,
                             preview: preview_handle,
                             preview_output: preview_output_handle,

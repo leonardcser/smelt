@@ -252,7 +252,7 @@ mod tests {
         let _ = expand_at_file_refs("edit @note.txt", &tmp.path().to_string_lossy(), &cache);
         let path = file.to_string_lossy();
 
-        crate::fs::checked_edit_file(&path, "hello", "hi", false, &cache).unwrap();
+        crate::fs::checked_edit_file(&path, "hello", "hi", false, &cache, None).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hi\nworld");
     }
 }

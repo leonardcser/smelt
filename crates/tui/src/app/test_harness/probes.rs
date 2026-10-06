@@ -489,13 +489,12 @@ impl TestApp {
         let full_history = protocol::history_to_messages(&self.app.model_history());
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         {
-            self.app
-                .dispatch_host_call(engine::HostCall::PrepareRequest {
-                    turn_id: self.current_turn_id().expect("active request turn"),
-                    messages: engine::PreparedRequestMessages::model_only(full_history),
-                    estimated_tokens: 200,
-                    reply: tx,
-                });
+            self.dispatch_host_call(engine::HostCall::PrepareRequest {
+                turn_id: self.current_turn_id().expect("active request turn"),
+                messages: engine::PreparedRequestMessages::model_only(full_history),
+                estimated_tokens: 200,
+                reply: tx,
+            });
         }
 
         let sends = self.drain_engine_sends();
