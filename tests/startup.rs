@@ -2006,6 +2006,7 @@ struct StreamingTrial {
     requests: usize,
     request_bodies: Vec<serde_json::Value>,
     tool_effect: Option<String>,
+    stdout: String,
     stderr: String,
 }
 
@@ -2018,6 +2019,16 @@ fn run_headless_stream_with_model(
     ending: StreamEnding,
     model: &str,
 ) -> StreamingTrial {
+    run_headless_stream_with_options(bodies, ending, model, "json", "openai-compatible")
+}
+
+fn run_headless_stream_with_options(
+    bodies: &[String],
+    ending: StreamEnding,
+    model: &str,
+    format: &str,
+    provider_type: &str,
+) -> StreamingTrial {
     let home = tempfile::tempdir().unwrap();
     let provider = TcpListener::bind("127.0.0.1:0").unwrap();
     provider.set_nonblocking(true).unwrap();
@@ -2029,7 +2040,7 @@ fn run_headless_stream_with_model(
 smelt.settings.autoupgrade = "off"
 smelt.settings.auto_continue = "off"
 smelt.provider.register("test", {{
-  type = "openai-compatible",
+  type = "{provider_type}",
   api_base = "http://{}/v1",
   api_key_env = "SMELT_STREAM_TEST_KEY",
   models = {{ {model} }},
@@ -2066,7 +2077,7 @@ smelt.tools.register({{
         .args([
             "--headless",
             "--format",
-            "json",
+            format,
             "--color",
             "never",
             "--model",
@@ -2121,7 +2132,7 @@ smelt.tools.register({{
             let mut request_body = Vec::new();
             reader.take(length).read_to_end(&mut request_body).unwrap();
             if !post {
-                let body = r#"{"data":[]}"#;
+                let body = r#"{"data":[{"id":"test-model","context_window":100000}]}"#;
                 write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
                 continue;
             }
@@ -2146,12 +2157,10 @@ smelt.tools.register({{
                 // Dropping a chunked response without its zero chunk is a transport error.
             }
         }
-        if matches!(ending, StreamEnding::Cancel)
-            && !cancelled
-            && std::fs::read_to_string(&stdout)
-                .unwrap()
-                .contains("TextDelta")
-        {
+        if matches!(ending, StreamEnding::Cancel) && !cancelled && {
+            let events = std::fs::read_to_string(&stdout).unwrap();
+            events.contains("TextDelta") || events.contains("EngineAskDelta")
+        } {
             assert_eq!(unsafe { libc::kill(process.id, libc::SIGINT) }, 0);
             cancelled = true;
         }
@@ -2162,17 +2171,22 @@ smelt.tools.register({{
         );
         std::thread::sleep(Duration::from_millis(10));
     };
-    let events = std::fs::read_to_string(stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("structured CLI event"))
-        .collect();
+    let stdout = std::fs::read_to_string(stdout).unwrap();
+    let events = if format == "json" {
+        stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("structured CLI event"))
+            .collect()
+    } else {
+        Vec::new()
+    };
     StreamingTrial {
         status,
         events,
         requests,
         request_bodies,
         tool_effect: std::fs::read_to_string(home.path().join("tool-executed")).ok(),
+        stdout,
         stderr: std::fs::read_to_string(stderr).unwrap(),
     }
 }
@@ -2205,8 +2219,12 @@ fn stream_tool(arguments: &str, start: bool) -> String {
 }
 
 fn assert_stream_failure(trial: &StreamingTrial, cause: &str) {
+    assert_stream_failure_attempts(trial, cause, 1);
+}
+
+fn assert_stream_failure_attempts(trial: &StreamingTrial, cause: &str, attempts: usize) {
     assert_eq!(trial.status.code(), Some(3), "{}", trial.stderr);
-    assert_eq!(trial.requests, 1, "failed stream was retried");
+    assert_eq!(trial.requests, attempts, "unexpected retry count");
     assert!(trial.tool_effect.is_none());
     let error = trial
         .events
@@ -2257,6 +2275,529 @@ fn last_stream_assistant(trial: &StreamingTrial) -> &serde_json::Value {
         .flat_map(|items| items.iter().rev())
         .find(|item| item["kind"] == "assistant")
         .expect("committed assistant history")
+}
+
+#[test]
+fn headless_stream_malformed_then_valid_retries_unchanged_request() {
+    let invalid = format!(
+        "{}{}{}{}",
+        stream_content(),
+        stream_tool("{\"sensitive-fixture\":", true),
+        stream_finish_reason("tool_calls"),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 4}})
+        )
+    );
+    let valid = format!(
+        "{}{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "recovered"}}]})),
+        stream_finish(),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2}})
+        )
+    );
+    let trial = run_headless_stream(&[invalid, valid], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(0), "{:?}", trial.events);
+    assert_eq!(trial.requests, 2);
+    assert_eq!(trial.request_bodies[0], trial.request_bodies[1]);
+    assert!(trial.tool_effect.is_none());
+    assert_eq!(last_stream_assistant(&trial)["content"], "recovered");
+    let usage: Vec<_> = trial
+        .events
+        .iter()
+        .filter_map(|event| event.get("TokenUsage"))
+        .collect();
+    assert_eq!(usage.len(), 2);
+    assert_eq!(
+        usage
+            .iter()
+            .map(|event| event["usage"]["prompt_tokens"].as_u64().unwrap())
+            .sum::<u64>(),
+        10
+    );
+    assert_eq!(
+        usage
+            .iter()
+            .map(|event| event["usage"]["completion_tokens"].as_u64().unwrap())
+            .sum::<u64>(),
+        6
+    );
+    assert!(trial
+        .events
+        .iter()
+        .any(|event| event.as_str() == Some("ResponseDraftRejected")));
+}
+
+#[test]
+fn headless_stream_malformed_retry_exhaustion_counts_usage_once() {
+    let body = format!(
+        "{}{}{}{}{}",
+        stream_content(),
+        stream_tool("{\"sensitive-fixture\":", true),
+        stream_finish_reason("length"),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 4}})
+        ),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 4}})
+        )
+    );
+    let trial = run_headless_stream(&[body], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(3));
+    assert_eq!(trial.requests, 3);
+    assert!(trial
+        .request_bodies
+        .windows(2)
+        .all(|pair| pair[0] == pair[1]));
+    assert!(trial.tool_effect.is_none());
+    let usage: Vec<_> = trial
+        .events
+        .iter()
+        .filter_map(|event| event.get("TokenUsage"))
+        .collect();
+    assert_eq!(usage.len(), 3);
+    assert_eq!(
+        usage
+            .iter()
+            .map(|event| event["usage"]["prompt_tokens"].as_u64().unwrap())
+            .sum::<u64>(),
+        21
+    );
+    assert_eq!(
+        usage
+            .iter()
+            .map(|event| event["usage"]["completion_tokens"].as_u64().unwrap())
+            .sum::<u64>(),
+        12
+    );
+    assert_eq!(
+        trial
+            .events
+            .iter()
+            .filter(|event| event.as_str() == Some("ResponseDraftRejected"))
+            .count(),
+        3
+    );
+    assert!(!trial
+        .events
+        .iter()
+        .any(|event| event.get("ToolStarted").is_some()));
+    let error = trial
+        .events
+        .iter()
+        .find_map(|event| event.get("TurnError"))
+        .unwrap();
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("malformed response"));
+    assert!(!error.to_string().contains("sensitive-fixture"));
+    assert!(!trial.stderr.contains("sensitive-fixture"));
+}
+
+#[test]
+fn headless_stream_mixed_batch_executes_only_after_valid_recovery() {
+    let invalid_batch = stream_event(serde_json::json!({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": "valid-call", "function": {"name": "stream_probe", "arguments": "{\"value\":\"must-not-run\"}"}},
+        {"index": 1, "id": "invalid-call", "function": {"name": "stream_probe", "arguments": "[1,2]"}}
+    ]}}]}));
+    let valid = format!(
+        "{}{}",
+        stream_tool("{\"value\":\"recovered\"}", true),
+        stream_finish_reason("tool_calls")
+    );
+    let final_answer = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+        stream_finish()
+    );
+    let trial = run_headless_stream(
+        &[
+            format!(
+                "{}{}{}",
+                stream_content(),
+                invalid_batch,
+                stream_finish_reason("tool_calls")
+            ),
+            valid,
+            final_answer,
+        ],
+        StreamEnding::Eof,
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 3);
+    assert_eq!(trial.request_bodies[0], trial.request_bodies[1]);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recovered"));
+    assert!(!trial.request_bodies[2]["messages"]
+        .to_string()
+        .contains("must-not-run"));
+    let assistants: Vec<_> = trial
+        .events
+        .iter()
+        .filter_map(|event| event.get("HistoryAppended"))
+        .flat_map(|event| event["delta"]["items"].as_array().unwrap())
+        .filter(|item| item["kind"] == "assistant")
+        .collect();
+    assert!(assistants
+        .iter()
+        .all(|item| item.get("reasoning").is_none()));
+    assert!(!assistants
+        .iter()
+        .any(|item| item["content"] == "partial 界"));
+}
+
+#[test]
+fn headless_compacts_before_next_request_using_reported_context() {
+    let tool = format!(
+        "{}{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls"),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 90000, "completion_tokens": 2}})
+        )
+    );
+    let answer = |content: &str| {
+        format!(
+            "{}{}",
+            stream_event(serde_json::json!({"choices": [{"delta": {"content": content}}]})),
+            stream_finish()
+        )
+    };
+    let bodies = [tool, answer("# Goal\nContinue the test"), answer("done")];
+    for model in [
+        r#"{ name = "test-model", context_window = 100000 }"#,
+        r#""test-model""#,
+    ] {
+        let trial = run_headless_stream_with_model(&bodies, StreamEnding::Eof, model);
+        assert_eq!(trial.status.code(), Some(0), "{:?}", trial.events);
+        assert_eq!(
+            trial.requests,
+            3,
+            "compaction was not invoked: usage={:?}, stderr={}",
+            trial
+                .events
+                .iter()
+                .filter_map(|event| event.get("TokenUsage"))
+                .collect::<Vec<_>>(),
+            trial.stderr
+        );
+        let summarizer = &trial.request_bodies[1];
+        assert!(
+            summarizer["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("CONTEXT CHECKPOINT COMPACTION")
+        );
+        assert_eq!(summarizer["tools"], trial.request_bodies[0]["tools"]);
+        let resumed = &trial.request_bodies[2]["messages"];
+        assert!(resumed.to_string().contains("# Goal\\nContinue the test"));
+        assert!(resumed.to_string().contains("probe-1"));
+        assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+        assert_eq!(last_stream_assistant(&trial)["content"], "done");
+    }
+}
+
+#[test]
+fn headless_compaction_retry_rejects_only_the_auxiliary_draft() {
+    let tool = format!(
+        "{}{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls"),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 90000, "completion_tokens": 2}})
+        ),
+    );
+    let malformed = format!(
+        "{}{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "rejected summary"}}]})),
+        stream_tool("[1,2]", true),
+        stream_finish_reason("tool_calls"),
+    );
+    let answer = |content: &str| {
+        format!(
+            "{}{}",
+            stream_event(serde_json::json!({"choices": [{"delta": {"content": content}}]})),
+            stream_finish(),
+        )
+    };
+    let trial = run_headless_stream_with_model(
+        &[
+            tool,
+            malformed,
+            answer("# Goal\nContinue safely"),
+            answer("done"),
+        ],
+        StreamEnding::Eof,
+        r#"{ name = "test-model", context_window = 100000 }"#,
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 4);
+    assert_eq!(trial.request_bodies[1], trial.request_bodies[2]);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    let rejection = trial
+        .events
+        .iter()
+        .find_map(|event| event.get("EngineAskDraftRejected"))
+        .expect("auxiliary retry must identify its rejected draft");
+    let id = &rejection["id"];
+    assert!(trial
+        .events
+        .iter()
+        .filter_map(|event| event.get("EngineAskDelta"))
+        .any(|event| &event["id"] == id && event["delta"] == "rejected summary"));
+    assert!(!trial
+        .events
+        .iter()
+        .any(|event| event.as_str() == Some("ResponseDraftRejected")));
+    assert!(!trial.request_bodies[3]
+        .to_string()
+        .contains("rejected summary"));
+    assert_eq!(last_stream_assistant(&trial)["content"], "done");
+}
+
+#[test]
+fn headless_cancellation_during_compaction_stops_requests() {
+    let tool = format!(
+        "{}{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls"),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 90000, "completion_tokens": 2}})
+        )
+    );
+    let summary =
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "draft summary"}}]}));
+    let trial = run_headless_stream_with_model(
+        &[tool, summary],
+        StreamEnding::Cancel,
+        r#"{ name = "test-model", context_window = 100000 }"#,
+    );
+    assert_eq!(trial.status.code(), Some(130), "{}", trial.stderr);
+    assert_eq!(trial.requests, 2);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    assert!(trial
+        .events
+        .iter()
+        .any(|event| event.get("EngineAskDelta").is_some()));
+}
+
+#[test]
+fn headless_text_output_resets_only_rejected_attempt() {
+    let tool = format!(
+        "{}{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "kept 界\n"}}]})),
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls"),
+    );
+    let malformed = format!(
+        "{}{}{}",
+        stream_content(),
+        stream_tool("{\"sensitive-fixture\":", true),
+        stream_finish_reason("length")
+    );
+    let recovered = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "recovered"}}]})),
+        stream_finish(),
+    );
+    let trial = run_headless_stream_with_options(
+        &[tool, malformed, recovered],
+        StreamEnding::Eof,
+        "\"test-model\"",
+        "text",
+        "openai-compatible",
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 3);
+    assert_eq!(trial.stdout, "kept 界\nrecovered\n");
+    assert_eq!(trial.request_bodies[1], trial.request_bodies[2]);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    assert!(!trial.stderr.contains("sensitive-fixture"));
+}
+
+#[test]
+fn headless_stream_responses_terminal_arguments_reject_entire_draft_batch() {
+    let completed = |input_tokens, output_tokens| {
+        stream_event(
+            serde_json::json!({"type": "response.completed", "response": {
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
+            }}),
+        )
+    };
+    let call = |id, draft, terminal| {
+        [
+            serde_json::json!({"type": "response.output_item.added", "item": {
+                "type": "function_call", "id": id, "call_id": id, "name": "stream_probe"
+            }}),
+            serde_json::json!({"type": "response.function_call_arguments.done", "item_id": id, "arguments": draft}),
+            serde_json::json!({"type": "response.output_item.done", "item": {
+                "type": "function_call", "id": id, "call_id": id, "name": "stream_probe", "arguments": terminal
+            }}),
+        ].into_iter().map(stream_event).collect::<String>()
+    };
+    let malformed = format!(
+        "{}{}{}{}",
+        stream_event(
+            serde_json::json!({"type": "response.output_text.delta", "delta": "rejected draft"})
+        ),
+        call(
+            "valid-call",
+            r#"{"value":"must-not-run"}"#,
+            r#"{"value":"must-not-run"}"#
+        ),
+        call("invalid-call", r#"{"value":"must-not-run"}"#, "[1,2]"),
+        completed(7, 4),
+    );
+    let recovered = format!(
+        "{}{}",
+        call("recovered-call", r#"{"value":"#, r#"{"value":"recovered"}"#),
+        completed(3, 2),
+    );
+    let answer = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"type": "response.output_text.delta", "delta": "done"})),
+        completed(2, 1),
+    );
+    let trial = run_headless_stream_with_options(
+        &[malformed, recovered, answer],
+        StreamEnding::Eof,
+        "\"test-model\"",
+        "json",
+        "openai",
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recovered"));
+    assert_eq!(trial.requests, 3);
+    assert_eq!(trial.request_bodies[0], trial.request_bodies[1]);
+    assert_eq!(last_stream_assistant(&trial)["content"], "done");
+    assert_eq!(
+        trial
+            .events
+            .iter()
+            .filter(|event| event.as_str() == Some("ResponseDraftRejected"))
+            .count(),
+        1
+    );
+    let usage: Vec<_> = trial
+        .events
+        .iter()
+        .filter_map(|event| event.get("TokenUsage"))
+        .collect();
+    assert_eq!(usage.len(), 3);
+    assert_eq!(
+        usage
+            .iter()
+            .map(|event| event["usage"]["prompt_tokens"].as_u64().unwrap())
+            .sum::<u64>(),
+        12
+    );
+    assert_eq!(
+        usage
+            .iter()
+            .map(|event| event["usage"]["completion_tokens"].as_u64().unwrap())
+            .sum::<u64>(),
+        7
+    );
+}
+
+#[test]
+fn headless_stream_anthropic_empty_tool_input_is_accepted() {
+    let tool = [
+        serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+        serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "probe-1", "name": "stream_probe", "input": {}}}),
+        serde_json::json!({"type": "content_block_stop", "index": 0}),
+        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 2}}),
+        serde_json::json!({"type": "message_stop"}),
+    ].into_iter().map(stream_event).collect::<String>();
+    let answer = [
+        serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "done"}}),
+        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+        serde_json::json!({"type": "message_stop"}),
+    ].into_iter().map(stream_event).collect::<String>();
+    let trial = run_headless_stream_with_options(
+        &[tool, answer],
+        StreamEnding::Eof,
+        "\"test-model\"",
+        "json",
+        "anthropic-compatible",
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 2);
+    assert_eq!(trial.tool_effect.as_deref(), Some("missing"));
+    assert_eq!(last_stream_assistant(&trial)["content"], "done");
+    assert!(!trial
+        .events
+        .iter()
+        .any(|event| event == "ResponseDraftRejected"));
+}
+
+#[test]
+fn headless_recovers_from_context_limit_with_compaction() {
+    let tool = format!(
+        "{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls")
+    );
+    let context_error = stream_event(
+        serde_json::json!({"error": {"code": "context_length_exceeded", "message": "private-provider-detail"}}),
+    );
+    let answer = |content: &str| {
+        format!(
+            "{}{}",
+            stream_event(serde_json::json!({"choices": [{"delta": {"content": content}}]})),
+            stream_finish()
+        )
+    };
+    let trial = run_headless_stream_with_model(
+        &[
+            tool,
+            context_error,
+            answer("# Goal\nResume safely"),
+            answer("done"),
+        ],
+        StreamEnding::Eof,
+        r#"{ name = "test-model", context_window = 100000 }"#,
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 4);
+    assert!(trial.request_bodies[2]["messages"]
+        .to_string()
+        .contains("CONTEXT CHECKPOINT COMPACTION"));
+    assert!(trial.request_bodies[3]["messages"]
+        .to_string()
+        .contains("# Goal\\nResume safely"));
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    assert_eq!(last_stream_assistant(&trial)["content"], "done");
+    assert!(!trial
+        .events
+        .iter()
+        .any(|event| event.get("TurnError").is_some()));
+}
+
+#[test]
+fn headless_compaction_quota_failure_aborts_without_looping() {
+    let tool = format!(
+        "{}{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls"),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 90000, "completion_tokens": 2}})
+        )
+    );
+    let quota = stream_event(serde_json::json!({"error": {"code": "insufficient_quota"}}));
+    let trial = run_headless_stream_with_model(
+        &[tool, quota],
+        StreamEnding::Eof,
+        r#"{ name = "test-model", context_window = 100000 }"#,
+    );
+    assert_eq!(trial.status.code(), Some(3), "{}", trial.stderr);
+    assert_eq!(trial.requests, 2);
+    let error = trial
+        .events
+        .iter()
+        .find_map(|event| event.get("TurnError"))
+        .expect("terminal error");
+    assert!(error["message"].as_str().unwrap().contains("quota"));
 }
 
 #[test]
@@ -2646,13 +3187,14 @@ fn headless_stream_incomplete_tool_is_not_executed() {
                 String::new()
             }
         );
-        assert_stream_failure(
+        assert_stream_failure_attempts(
             &run_headless_stream(&[body], StreamEnding::Eof),
             if finish {
                 "tool-call arguments"
             } else {
                 "without finish_reason"
             },
+            if finish { 3 } else { 1 },
         );
     }
 }

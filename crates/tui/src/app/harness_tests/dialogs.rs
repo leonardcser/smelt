@@ -3812,6 +3812,58 @@ fn btw_dialog_paints_a_selected_delta_before_a_coalesced_final_response() {
 }
 
 #[test]
+fn btw_dialog_resets_rejected_draft_and_recovers_without_waiting_styles() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    app.apply_lua_command("btw explain the retry");
+    app.drive_lua_tasks();
+    let id = app.pending_ask_id().expect("/btw registered ask callback");
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::EngineAskDelta {
+        id,
+        delta: "rejected side answer".into(),
+    }));
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("rejected side answer"));
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::EngineAskDraftRejected { id },
+    ));
+    assert!(!app
+        .render_to_frame()
+        .text()
+        .contains("rejected side answer"));
+    app.feed_one(SourceEvent::engine(protocol::EngineEvent::EngineAskDelta {
+        id,
+        delta: "accepted side answer".into(),
+    }));
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::EngineAskResponse {
+            id,
+            message: Some(protocol::Message::assistant(
+                Some(protocol::Content::text("accepted side answer")),
+                None,
+                None,
+            )),
+            error: None,
+        },
+    ));
+    let frame = app.render_to_frame();
+    let row = frame
+        .rows
+        .iter()
+        .position(|row| row.contains("accepted side answer"))
+        .expect("recovered side answer");
+    let col = frame.rows[row].find("accepted side answer").unwrap();
+    assert!(frame.styles[row][col..col + "accepted side answer".len()]
+        .iter()
+        .all(|style| !style.dim && !style.italic));
+    assert!(!frame.text().contains("rejected side answer"));
+    app.clear_timers();
+    app.assert_invariants();
+}
+
+#[test]
 fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(70, 22);

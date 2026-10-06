@@ -112,6 +112,12 @@ impl StreamParser {
         self.stream_exec_id = None;
     }
 
+    pub fn clear_response_output(&mut self) {
+        self.active_thinking.clear();
+        self.active_text.clear();
+        self.tool_drafts.clear();
+    }
+
     pub fn begin_turn(&mut self) {
         self.active_tools.clear();
         self.tool_drafts.clear();

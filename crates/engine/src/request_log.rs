@@ -124,6 +124,10 @@ fn build_entry(
             });
             (response, usage, cost, resp.tokens_per_sec)
         }
+        Err(ProviderError::MalformedResponse { usage, .. }) => {
+            let cost = (!pricing.pricing.is_zero()).then(|| pricing.pricing.cost(usage));
+            (None, Some(usage.clone()), cost, None)
+        }
         Err(_) => (None, None, None, None),
     };
 
@@ -200,6 +204,7 @@ fn provider_error_to_log_error(
         ProviderError::Network(_) => ("network", http_status),
         ProviderError::Stream(_) => ("stream", http_status),
         ProviderError::InvalidResponse(_) => ("invalid_response", http_status),
+        ProviderError::MalformedResponse { .. } => ("malformed_response", http_status),
         ProviderError::MaxRetries => ("max_retries", http_status),
     };
     RequestError {

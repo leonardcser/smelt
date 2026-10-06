@@ -58,6 +58,7 @@ expression: out.events
       }
     }
   },
+  "ResponseDraftAccepted",
   {
     "HistoryAppended": {
       "delta": {

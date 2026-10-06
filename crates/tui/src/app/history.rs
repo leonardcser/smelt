@@ -2769,7 +2769,10 @@ mod checkpoint_tests {
         );
         app.app.restore_screen();
         app.app.save_session();
-        let outcome = app.app.flush_persist();
+        // Fixture publication is a correctness barrier, not a latency assertion.
+        let outcome = app
+            .app
+            .flush_persist_until(std::time::Instant::now() + std::time::Duration::from_secs(30));
         assert!(
             matches!(
                 outcome,

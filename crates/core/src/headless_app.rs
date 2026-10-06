@@ -387,17 +387,20 @@ impl HeadlessApp {
         }
     }
 
-    fn report_engine_disconnect(&self) {
-        const MESSAGE: &str = "engine disconnected before the turn completed";
+    fn report_turn_error(&self, message: &str) {
         if self.sink.format == OutputFormat::Json {
             self.sink.emit_json(&EngineEvent::TurnError {
-                message: MESSAGE.into(),
+                message: message.into(),
                 kind: None,
                 retry_at_ms: None,
             });
         } else {
-            self.sink.log_error(MESSAGE);
+            self.sink.log_error(message);
         }
+    }
+
+    fn report_engine_disconnect(&self) {
+        self.report_turn_error("engine disconnected before the turn completed");
     }
 
     /// Send `message`, drain engine events, and print assistant text and usage.
@@ -459,6 +462,28 @@ impl HeadlessApp {
         )));
 
         let tools = self.tool_defs();
+        let compaction = if let Some(lua) = self
+            .lua
+            .as_ref()
+            .filter(|lua| !lua.disabled_modules().contains("smelt.plugins.compact"))
+        {
+            match crate::host::scope_core(&mut self.core, || {
+                crate::headless_compaction::HeadlessCompaction::new(
+                    lua,
+                    &self.session,
+                    self.system_prompt.clone(),
+                    tools.clone(),
+                )
+            }) {
+                Ok(compaction) => Some(compaction),
+                Err(error) => {
+                    self.report_turn_error(&format!("compaction initialization failed: {error}"));
+                    return HeadlessExit::Error;
+                }
+            }
+        } else {
+            None
+        };
         let Some(model_target) = self.model_target() else {
             eprintln!("error: no model is available for headless dispatch");
             return HeadlessExit::Error;
@@ -468,6 +493,7 @@ impl HeadlessApp {
             .fast_mode
             .unwrap_or(self.core.config.settings.fast_mode);
 
+        self.session.history = history.clone();
         self.core
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
@@ -487,7 +513,32 @@ impl HeadlessApp {
                 tools,
             })));
 
+        let target = self.core.config.active_model().cloned();
+        let clock = Arc::clone(&self.core.clock);
+        let context_discovery = async move {
+            let target = target?;
+            let client = engine::HttpClient::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .ok()?;
+            let provider = engine::EngineProvider::new(
+                target.api_base,
+                std::env::var(&target.api_key_env).unwrap_or_default(),
+                &target.provider_type,
+                client,
+                clock,
+            )
+            .with_model_config(target.config);
+            provider
+                .fetch_context_window(&target.model_name)
+                .await
+                .ok()
+                .flatten()
+        };
+        tokio::pin!(context_discovery);
+        let mut discovering_context = compaction.is_some();
         let mut final_message = String::new();
+        let mut draft_text_start = 0;
         let mut total_usage = protocol::TokenUsage::default();
         let mut last_tps: Option<f64> = None;
         let mut total_cost = 0.0_f64;
@@ -497,14 +548,24 @@ impl HeadlessApp {
         let outcome = loop {
             self.drive_lua_tasks();
             let wakeup = self.next_lua_wakeup();
-            let ev = tokio::select! {
+            if let Some(compaction) = &compaction {
+                compaction.sync_checkpoint(&mut self.session);
+            }
+            let output = tokio::select! {
                 biased;
                 _ = cancel.notified() => {
                     self.core.engine.send(protocol::UiCommand::Cancel);
                     break HeadlessExit::Interrupted;
                 }
-                ev = self.core.engine.recv() => match ev {
-                    Some(ev) => ev,
+                window = &mut context_discovery, if discovering_context => {
+                    discovering_context = false;
+                    if let Some(window) = window {
+                        self.core.config.context_window = Some(window);
+                    }
+                    continue;
+                }
+                output = self.core.engine.recv_output() => match output {
+                    Some(output) => output,
                     None => {
                         self.report_engine_disconnect();
                         break HeadlessExit::TurnError;
@@ -514,8 +575,34 @@ impl HeadlessApp {
                     continue;
                 }
             };
+            let ev = match output {
+                engine::EngineOutput::Event(ev) => ev,
+                engine::EngineOutput::HostCall(call) => {
+                    if let (Some(compaction), Some(lua)) = (&compaction, &self.lua) {
+                        if let Err(error) =
+                            compaction.dispatch(&lua.lua, &mut self.core, &self.session, call)
+                        {
+                            self.report_turn_error(&format!("compaction hook failed: {error}"));
+                            self.core.engine.send(UiCommand::Cancel);
+                            break HeadlessExit::TurnError;
+                        }
+                    }
+                    continue;
+                }
+            };
             if self.sink.format == OutputFormat::Json {
                 self.sink.emit_json(&ev);
+            }
+            if let (Some(compaction), Some(lua)) = (&compaction, &self.lua) {
+                match compaction.handle_event(&lua.lua, &mut self.core, &ev) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.report_turn_error(&format!("compaction callback failed: {error}"));
+                        self.core.engine.send(UiCommand::Cancel);
+                        break HeadlessExit::TurnError;
+                    }
+                }
             }
 
             if self.handle_control_event(&ev) {
@@ -530,6 +617,17 @@ impl HeadlessApp {
                     if self.sink.format == OutputFormat::Text =>
                 {
                     self.sink.log_thinking(content);
+                }
+                EngineEvent::ResponseDraftAccepted => {
+                    draft_text_start = final_message.len();
+                }
+                EngineEvent::ResponseDraftRejected => {
+                    let end = final_message.len();
+                    smelt_buffer::text::replace_range(
+                        &mut final_message,
+                        draft_text_start..end,
+                        "",
+                    );
                 }
                 EngineEvent::TextDelta { delta } => {
                     final_message.push_str(delta);
@@ -586,8 +684,12 @@ impl HeadlessApp {
                     usage,
                     tokens_per_sec,
                     cost_usd,
-                    ..
+                    background,
                 } => {
+                    if !background {
+                        self.session.context_tokens = usage.context_tokens;
+                        self.session.context_tokens_history_len = Some(self.session.history.len());
+                    }
                     total_cost += cost_usd.unwrap_or(0.0);
                     total_usage.accumulate(usage);
                     last_tps = tokens_per_sec.or(last_tps);
@@ -597,7 +699,14 @@ impl HeadlessApp {
                 {
                     self.sink.log_retry(*attempt, *delay_ms);
                 }
-                EngineEvent::HistoryUpdated { .. } => {}
+                EngineEvent::HistoryAppended { delta, .. }
+                | EngineEvent::HistoryUpdated { update: delta, .. } => {
+                    let first = delta.first_index.get();
+                    if first <= self.session.history.len() {
+                        self.session.history.truncate(first);
+                        self.session.history.extend(delta.items.iter().cloned());
+                    }
+                }
                 EngineEvent::RequestAuditError { message }
                     if self.sink.format == OutputFormat::Text =>
                 {
@@ -620,6 +729,9 @@ impl HeadlessApp {
             }
         };
 
+        if let Some(compaction) = &compaction {
+            compaction.cancel();
+        }
         if self.sink.format == OutputFormat::Text {
             self.sink
                 .log_token_usage(&total_usage, last_tps, total_cost);

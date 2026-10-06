@@ -24,6 +24,7 @@ expression: out.events
       "delta": "partial"
     }
   },
+  "ResponseDraftRejected",
   {
     "TurnError": {
       "kind": "invalid_response",

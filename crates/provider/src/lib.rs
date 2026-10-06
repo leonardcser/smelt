@@ -124,6 +124,7 @@ fn fuzz_summary(
 #[cfg(any(test, feature = "fuzz"))]
 fn count_delta(summary: &mut FuzzProviderSummary, event: ProviderStreamEvent<'_>) {
     match event {
+        ProviderStreamEvent::DraftRejected => {}
         ProviderStreamEvent::TextDelta(_) => summary.text_deltas += 1,
         ProviderStreamEvent::Reasoning(event) => {
             if matches!(event, ReasoningStreamEvent::Delta { .. }) {

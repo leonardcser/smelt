@@ -19,6 +19,46 @@ fn focus_transcript_in_normal_mode(app: &mut TestApp) {
     app.render_silent();
 }
 
+#[test]
+fn compaction_draft_rejection_clears_queued_preview() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    for index in 0..20 {
+        app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+            format!("history {index}"),
+        )));
+    }
+    app.set_context_token_baseline_for_harness(Some(500));
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+    let id = app
+        .pending_ask_id()
+        .expect("compaction registered callbacks");
+    app.dispatch_engine_event(EngineEvent::EngineAskDelta {
+        id,
+        delta: "rejected summary".into(),
+    });
+    assert!(app.render_to_frame().text().contains("rejected summary"));
+    app.app
+        .queue_engine_continuation(EngineEvent::EngineAskDelta {
+            id,
+            delta: " rejected queued".into(),
+        });
+    app.dispatch_engine_event(EngineEvent::EngineAskDraftRejected { id });
+    app.app
+        .queue_engine_continuation(EngineEvent::EngineAskDelta {
+            id,
+            delta: "recovered summary".into(),
+        });
+    while !app.app.transcript_work.is_empty() {
+        app.app.apply_pending_transcript_work();
+    }
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("recovered summary"));
+    assert!(!frame.contains("rejected"));
+    assert_eq!(app.pending_ask_id(), Some(id));
+    app.assert_invariants();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     let mut app = TestApp::builder().with_vim(true).build();

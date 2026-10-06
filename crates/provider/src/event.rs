@@ -2,6 +2,8 @@ use protocol::ReasoningKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderStreamEvent<'a> {
+    /// Discard all text, reasoning, and tool-call drafts from this attempt.
+    DraftRejected,
     TextDelta(&'a str),
     Reasoning(ReasoningStreamEvent<'a>),
     ToolCall(ToolCallStreamEvent<'a>),

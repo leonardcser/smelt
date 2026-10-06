@@ -495,6 +495,10 @@ impl LuaRuntime {
         }
     }
 
+    pub(crate) fn shared(&self) -> &Arc<LuaShared> {
+        &self.shared
+    }
+
     /// Clone the VM-facing portion needed for synchronous callback execution.
     pub fn execution(&self) -> LuaExecution {
         LuaExecution {

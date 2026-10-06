@@ -1421,11 +1421,7 @@ async fn async_main() {
             } else {
                 engine::SystemPromptBehavior::Interactive
             },
-            host_callbacks: if args.headless {
-                engine::HostCallbacks::Disabled
-            } else {
-                engine::HostCallbacks::Enabled
-            },
+            host_callbacks: engine::HostCallbacks::Enabled,
             skill_section: prompt_inputs.skill_section.clone(),
             ..engine::EngineConfig::new(cwd.clone(), Arc::clone(&clock))
         },
@@ -1467,11 +1463,7 @@ async fn async_main() {
             prompt_inputs.instructions.as_deref(),
             prompt_inputs.skill_section.as_deref(),
         );
-        let headless_lua = if capabilities.tool_calling {
-            Some(lua_runtime.into_core())
-        } else {
-            None
-        };
+        let headless_lua = Some(lua_runtime.into_core());
         let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = smelt_core::HeadlessApp::new(
             core,

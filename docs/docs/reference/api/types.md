@@ -344,7 +344,7 @@ Native random-access row source. Attach with `win:document(source)`; each window
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaExecution::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
+Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is serialized by the shared auxiliary callback dispatcher.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -387,9 +387,10 @@ Spec for `smelt.engine.ask`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | `string` |  | Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels. |
-| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires. |
+| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses all ask callbacks after the guard expires. |
 | `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
 | `on_delta` | `fun(value: string)` |  | Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message. |
+| `on_draft_rejected` | `fun()` |  | Discard the current streamed draft before a retry or terminal failure. Does not fire on cancellation, which preserves partial output. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.CommandOverrides`
@@ -438,9 +439,10 @@ Spec for `smelt.engine.ask_inherited`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | `string` |  | Reasoning effort override for the request. Provider-defined labels are accepted. When omitted, inherits the current session's effort and reconciles it to the selected model's advertised levels. |
-| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires. |
+| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses all ask callbacks after the guard expires. |
 | `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
 | `on_delta` | `fun(value: string)` |  | Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message. |
+| `on_draft_rejected` | `fun()` |  | Discard the current streamed draft before a retry or terminal failure. Does not fire on cancellation, which preserves partial output. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.PrepareContextEstimate`

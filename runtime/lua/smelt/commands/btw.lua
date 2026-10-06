@@ -88,6 +88,10 @@ smelt.cmd.register("btw", function(args)
       smelt.engine.ask_inherited({
         messages = messages,
         model = smelt.model.preferred("btw"),
+        on_draft_rejected = function()
+          stream:reset()
+          start_waiting()
+        end,
         on_delta = function(delta)
           if delta ~= "" then
             stop_waiting()

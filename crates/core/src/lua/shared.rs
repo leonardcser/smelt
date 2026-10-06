@@ -201,7 +201,7 @@ pub struct LuaShared {
     pub transcript_groups_cache_key: AtomicU64,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     /// Callbacks registered for `smelt.engine.ask`. Separate from
-    /// `callbacks` so `fire_ask_callback` can't accidentally fire a
+    /// `callbacks` so auxiliary dispatch cannot accidentally fire a
     /// paint/win/overlay handler that happens to share an id namespace:
     /// the two maps allocate ids from the same `next_id` counter but each
     /// call_id only ever lands in one of them.
@@ -288,6 +288,7 @@ pub struct LuaShared {
 pub struct AskCallbacks {
     pub response: Option<LuaHandle>,
     pub delta: Option<LuaHandle>,
+    pub rejected: Option<LuaHandle>,
 }
 
 /// Every hook-registry surface bundled into one struct. New callback streams

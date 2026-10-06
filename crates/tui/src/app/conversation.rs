@@ -103,6 +103,7 @@ pub(crate) struct ConversationRuntime {
     document: TuiSessionDocument,
     committed_transcript_view: Option<CommittedTranscriptView>,
     parser: smelt_core::content::stream_parser::StreamParser,
+    response_draft_blocks: Vec<smelt_core::transcript_model::BlockId>,
     /// Earliest canonical suffix whose transcript projection must be rebuilt
     /// after live stream-parser blocks finish.
     pending_transcript_history_rebuild_from: Option<usize>,
@@ -138,6 +139,7 @@ impl ConversationRuntime {
             document: TuiSessionDocument::new(transcript),
             committed_transcript_view: None,
             parser: smelt_core::content::stream_parser::StreamParser::new(),
+            response_draft_blocks: Vec::new(),
             pending_transcript_history_rebuild_from: None,
             resume_preview_cache,
             shared_session,
@@ -233,6 +235,10 @@ impl ConversationRuntime {
     pub(crate) fn promote_last_reasoning_summary(
         &mut self,
     ) -> Option<super::transcript::ReasoningSummarySnapshot> {
+        let id = self.document.transcript.history().last_block_id()?;
+        if !self.response_draft_blocks.contains(&id) {
+            return None;
+        }
         self.document.transcript.promote_last_reasoning_summary()
     }
 
@@ -1267,7 +1273,7 @@ impl ConversationRuntime {
         self.clear_pending_history_appends();
         self.clear_pending_transcript_history_rebuild();
         self.apply_transcript_mutation(super::session_document::TranscriptMutation::Clear);
-        self.parser.clear();
+        self.clear_stream_parser();
     }
 
     pub(crate) fn update_compaction_preview(
@@ -1465,6 +1471,46 @@ impl ConversationRuntime {
         .applied
     }
 
+    pub(crate) fn response_draft_boundary(&self) -> usize {
+        self.document.transcript.history().order.len()
+    }
+
+    pub(crate) fn track_response_draft_from(&mut self, first: usize) {
+        self.response_draft_blocks.extend(
+            self.document
+                .transcript
+                .history()
+                .order
+                .iter()
+                .skip(first)
+                .copied(),
+        );
+    }
+
+    pub(crate) fn accept_response_draft(&mut self) {
+        self.flush_streaming_text();
+        self.response_draft_blocks.clear();
+    }
+
+    pub(crate) fn reject_response_draft(&mut self) {
+        self.parser.clear_response_output();
+        for id in std::mem::take(&mut self.response_draft_blocks)
+            .into_iter()
+            .rev()
+        {
+            let index = self
+                .document
+                .transcript
+                .history()
+                .order
+                .iter()
+                .position(|block| *block == id);
+            if let Some(index) = index {
+                self.remove_unoriginated_block(index);
+            }
+        }
+    }
+
     pub(crate) fn clear_stream_tool_drafts(&mut self) {
         self.apply_stream_mutation(super::session_document::StreamMutation::ClearToolDrafts);
     }
@@ -1566,6 +1612,7 @@ impl ConversationRuntime {
 
     pub(crate) fn begin_turn(&mut self) {
         self.turn.clear_context_tokens_updated();
+        self.response_draft_blocks.clear();
         self.parser.begin_turn();
     }
 
@@ -1899,6 +1946,7 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn clear_stream_parser(&mut self) {
+        self.response_draft_blocks.clear();
         self.parser.clear();
     }
 

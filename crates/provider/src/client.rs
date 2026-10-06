@@ -269,6 +269,7 @@ struct RetryState {
     request_attempt: usize,
     standard_retries: usize,
     cyber_policy_retries: usize,
+    malformed_retries: usize,
 }
 
 impl RetryState {
@@ -279,6 +280,10 @@ impl RetryState {
         retry_after: Option<Duration>,
         now_secs: u64,
     ) -> Option<Duration> {
+        let is_malformed = matches!(error, ProviderError::MalformedResponse { .. });
+        if is_malformed && self.malformed_retries >= 2 {
+            return None;
+        }
         let is_cyber_policy = matches!(error, ProviderError::CyberPolicy { .. });
         let (retry_attempt, retry_limit) = if is_cyber_policy {
             (self.cyber_policy_retries, MAX_CYBER_POLICY_RETRIES)
@@ -294,6 +299,9 @@ impl RetryState {
             self.cyber_policy_retries += 1;
         } else {
             self.standard_retries += 1;
+        }
+        if is_malformed {
+            self.malformed_retries += 1;
         }
         self.request_attempt += 1;
         Some(delay)
@@ -392,7 +400,7 @@ impl ProviderClient {
                             unix_now(),
                         ) {
                             emit_retry(opts, delay, attempt);
-                            tokio::time::sleep(delay).await;
+                            wait_retry(opts, delay).await?;
                             continue;
                         }
                         return Err(err);
@@ -418,7 +426,7 @@ impl ProviderClient {
                     retry_state.schedule_provider_retry(&err, max_retries, retry_after, unix_now())
                 {
                     emit_retry(opts, delay, attempt);
-                    tokio::time::sleep(delay).await;
+                    wait_retry(opts, delay).await?;
                     continue;
                 }
                 return Err(err);
@@ -473,6 +481,12 @@ impl ProviderClient {
                 }
             };
 
+            let parsed_result = match parsed_result {
+                (Ok(parsed), raw, status, error_body) => {
+                    (parsed.validate().map(|()| parsed), raw, status, error_body)
+                }
+                result => result,
+            };
             let (parsed, raw, status) = match parsed_result {
                 (Ok(parsed), raw, status, _) => (parsed, raw, status),
                 (Err(err), _, status, error_body) => {
@@ -484,9 +498,16 @@ impl ProviderClient {
                         http_status: status,
                         error_body: error_body.as_deref(),
                     });
-                    // Once deltas are visible, replaying the request could duplicate
-                    // partial output or tool-call drafts.
-                    if streamed.load(std::sync::atomic::Ordering::Relaxed) {
+                    let malformed = matches!(err, ProviderError::MalformedResponse { .. });
+                    if malformed
+                        || (streamed.load(std::sync::atomic::Ordering::Relaxed)
+                            && !matches!(err, ProviderError::Cancelled))
+                    {
+                        on_delta(ProviderStreamEvent::DraftRejected);
+                    }
+                    // Transport failures with visible output are terminal. A validated
+                    // malformed response can be retried after rejecting its whole draft.
+                    if !malformed && streamed.load(std::sync::atomic::Ordering::Relaxed) {
                         return Err(err);
                     }
                     if let Some(delay) = retry_state.schedule_provider_retry(
@@ -496,7 +517,7 @@ impl ProviderClient {
                         unix_now(),
                     ) {
                         emit_retry(opts, delay, attempt);
-                        tokio::time::sleep(delay).await;
+                        wait_retry(opts, delay).await?;
                         continue;
                     }
                     return Err(err);
@@ -817,6 +838,14 @@ impl<'a> ChatOptions<'a> {
     }
 }
 
+async fn wait_retry(opts: &ChatOptions<'_>, delay: Duration) -> Result<(), ProviderError> {
+    tokio::select! {
+        biased;
+        _ = opts.cancel.cancelled() => Err(ProviderError::Cancelled),
+        _ = tokio::time::sleep(delay) => Ok(()),
+    }
+}
+
 pub fn emit_retry(opts: &ChatOptions<'_>, delay: Duration, attempt: usize) {
     if let Some(f) = opts.on_retry {
         f(delay, (attempt + 1) as u32);
@@ -916,6 +945,116 @@ mod tests {
             headers,
             request[header_end..header_end + content_length].to_vec(),
         )
+    }
+
+    #[test]
+    fn malformed_retries_share_the_standard_budget_and_stop_after_two() {
+        let error = ProviderError::MalformedResponse {
+            issue: "invalid arguments".into(),
+            finish_reason: Some("length".into()),
+            usage: Default::default(),
+        };
+        let mut retries = RetryState::default();
+        assert!(retries
+            .schedule_provider_retry(&error, 5, None, 0)
+            .is_some());
+        assert!(retries
+            .schedule_provider_retry(&error, 5, None, 0)
+            .is_some());
+        assert!(retries
+            .schedule_provider_retry(&error, 5, None, 0)
+            .is_none());
+        assert_eq!(retries.standard_retries, 2);
+        let mut retries = RetryState {
+            standard_retries: 4,
+            ..Default::default()
+        };
+        assert!(retries
+            .schedule_provider_retry(&error, 5, None, 0)
+            .is_some());
+        assert!(retries
+            .schedule_provider_retry(&error, 5, None, 0)
+            .is_none());
+        assert_eq!(retries.malformed_retries, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_backoff_honors_cancellation_and_outer_deadline() {
+        let cancel = CancellationToken::new();
+        let opts = ChatOptions::new(&cancel);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            wait_retry(&opts, Duration::from_secs(30))
+        )
+        .await
+        .is_err());
+        cancel.cancel();
+        assert!(matches!(
+            wait_retry(&opts, Duration::from_secs(30)).await,
+            Err(ProviderError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_nonstream_response_retries_without_changing_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (_, request) = read_http_request(&mut stream).await;
+                bodies.push(request);
+                let message = if index == 0 {
+                    json!({"tool_calls": [
+                        {"id": "valid", "type": "function", "function": {"name": "probe", "arguments": "{}"}},
+                        {"id": "invalid", "type": "function", "function": {"name": "probe", "arguments": "{\"private-argument\":"}}
+                    ]})
+                } else {
+                    json!({"content": "recovered"})
+                };
+                let body = json!({"choices": [{"message": message, "finish_reason": "stop"}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}).to_string();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            bodies
+        });
+        let cancel = CancellationToken::new();
+        let attempts = std::sync::Mutex::new(Vec::new());
+        let on_attempt = |info: RequestAttemptInfo<'_>| {
+            if let Err(error) = info.result {
+                attempts.lock().unwrap().push(error.clone());
+            }
+        };
+        let mut opts = ChatOptions::new(&cancel);
+        opts.on_attempt = Some(&on_attempt);
+        let response = ProviderClient::new(reqwest::Client::new())
+            .chat(
+                ChatRequest {
+                    provider: ChatProvider::api_key(ProviderKind::OpenAiCompatible, "test-only"),
+                    api_base: &api_base,
+                    model: "custom-model",
+                    messages: &[user_msg("test")],
+                    tools: &[],
+                    effort: ReasoningEffort::Off,
+                    config: &ModelConfig::default(),
+                    cache: CacheConfig::default(),
+                    response_format: None,
+                    fast_mode: false,
+                },
+                &opts,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.content.as_deref(), Some("recovered"));
+        let bodies = server.await.unwrap();
+        assert_eq!(bodies[0], bodies[1]);
+        let errors = attempts.into_inner().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(!format!("{:?}", errors[0]).contains("private-argument"));
+        assert!(
+            matches!(&errors[0], ProviderError::MalformedResponse { usage, finish_reason, .. }
+            if usage.prompt_tokens == Some(3) && finish_reason.as_deref() == Some("stop"))
+        );
     }
 
     #[tokio::test]

@@ -730,119 +730,59 @@ impl AgentLuaHost<'_> {
         started
     }
 
-    fn resolve_ask_reasoning_effort(
-        catalog: &protocol::ModelCatalogMetadata,
-        requested: Option<protocol::ReasoningEffort>,
-        default_effort: protocol::ReasoningEffort,
-        model: &str,
-    ) -> Result<protocol::ReasoningEffort, String> {
-        match requested {
-            Some(effort) if catalog.supports_reasoning_effort(&effort) => Ok(effort),
-            Some(effort) => Err(format!(
-                "reasoning effort '{}' is not supported by model '{}'",
-                effort.label(),
-                model
-            )),
-            None => Ok(catalog.reconcile_reasoning_effort(default_effort)),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_engine_ask(
         &mut self,
-        id: u64,
         system: String,
-        mut messages: Vec<protocol::Message>,
-        model_reference: Option<String>,
-        question: Option<String>,
-        response_format: Option<protocol::AskResponseFormat>,
-        reasoning_effort: Option<protocol::ReasoningEffort>,
-        stream: bool,
-        visible_retries: bool,
+        request: smelt_core::lua::ask::AskRequest,
     ) -> Result<(), String> {
-        if let Some(question) = question {
-            messages.push(protocol::Message::user(protocol::Content::text(&question)));
-        }
-        let Some((target, catalog)) = self.resolve_ask_target(model_reference.as_deref()) else {
-            return Err("no usable model is available".into());
-        };
-        let reasoning_effort = Self::resolve_ask_reasoning_effort(
-            &catalog,
-            reasoning_effort,
-            protocol::ReasoningEffort::Off,
-            &target.model,
-        )?;
-        let request_config = self.app.core.config.request_runtime_config();
-        let session_id = self.app.conversation.session().id.clone();
-        let persistence = self.app.conversation.persistence_scope();
-        self.app.core.engine.send(protocol::UiCommand::EngineAsk {
-            id,
+        let context = smelt_core::lua::ask::AskContext {
             system,
-            messages,
-            target: Box::new(target),
-            request_config,
-            response_format,
-            reasoning_effort,
-            fast_mode: false,
             tools: Vec::new(),
-            session_id,
-            persistence,
-            stream,
-            visible_retries,
-        });
-        Ok(())
+            reasoning_effort: protocol::ReasoningEffort::Off,
+            fast_mode: false,
+            session_id: self.app.conversation.session().id.clone(),
+            persistence: self.app.conversation.persistence_scope(),
+        };
+        self.dispatch_ask(context, request)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_inherited_engine_ask(
         &mut self,
-        id: u64,
-        mut messages: Vec<protocol::Message>,
-        model_reference: Option<String>,
-        question: Option<String>,
-        response_format: Option<protocol::AskResponseFormat>,
-        reasoning_effort: Option<protocol::ReasoningEffort>,
-        stream: bool,
-        visible_retries: bool,
+        mut request: smelt_core::lua::ask::AskRequest,
     ) -> Result<(), String> {
-        let system = self.app.assemble_system_prompt();
-        if messages.is_empty() {
-            messages = self.app.model_history_messages();
+        if request.messages.is_empty() {
+            request.messages = self.app.model_history_messages();
         }
-        if let Some(question) = question {
-            messages.push(protocol::Message::user(protocol::Content::text(&question)));
-        }
-        let Some((target, catalog)) = self.resolve_ask_target(model_reference.as_deref()) else {
-            return Err("no usable model is available".into());
-        };
-        let reasoning_effort = Self::resolve_ask_reasoning_effort(
-            &catalog,
-            reasoning_effort,
-            self.app.core.config.reasoning_effort.clone(),
-            &target.model,
-        )?;
-        let request_config = self.app.core.config.request_runtime_config();
-        let session_id = self.app.conversation.session().id.clone();
-        let persistence = self.app.conversation.persistence_scope();
-        let tools = self.app.lua.tool_defs(
-            self.app.core.config.mode.clone(),
-            smelt_core::lua::ToolVisibility::Interactive,
-        );
-        self.app.core.engine.send(protocol::UiCommand::EngineAsk {
-            id,
-            system,
-            messages,
-            target: Box::new(target),
-            request_config,
-            response_format,
-            reasoning_effort,
+        let context = smelt_core::lua::ask::AskContext {
+            system: self.app.assemble_system_prompt(),
+            tools: self.app.lua.tool_defs(
+                self.app.core.config.mode.clone(),
+                smelt_core::lua::ToolVisibility::Interactive,
+            ),
+            reasoning_effort: self.app.core.config.reasoning_effort.clone(),
             fast_mode: self.app.fast_mode(),
-            tools,
-            session_id,
-            persistence,
-            stream,
-            visible_retries,
-        });
+            session_id: self.app.conversation.session().id.clone(),
+            persistence: self.app.conversation.persistence_scope(),
+        };
+        self.dispatch_ask(context, request)
+    }
+
+    fn dispatch_ask(
+        &mut self,
+        context: smelt_core::lua::ask::AskContext,
+        request: smelt_core::lua::ask::AskRequest,
+    ) -> Result<(), String> {
+        let (target, catalog) = self
+            .resolve_ask_target(request.model.as_deref())
+            .ok_or("no usable model is available")?;
+        let command = smelt_core::lua::ask::prepare_request(
+            &self.app.core.config,
+            context,
+            request,
+            target,
+            &catalog,
+        )?;
+        self.app.core.engine.send(command);
         Ok(())
     }
 
@@ -863,19 +803,17 @@ impl AgentLuaHost<'_> {
                 .resolve_model_target()
                 .map(|target| (target, catalog));
         };
-        let resolved = match smelt_core::config::resolve_model_ref(
-            &self.app.core.config.available_models,
-            reference,
-        ) {
-            Ok(model) => model.clone(),
-            Err(error) => {
-                self.app.notify_operation_error_sticky(
-                    NotificationOperation::TurnStart,
-                    format!("smelt.engine: {error}"),
-                );
-                return None;
-            }
-        };
+        let resolved =
+            match smelt_core::lua::ask::select_model(&self.app.core.config, Some(reference)) {
+                Ok(model) => model,
+                Err(error) => {
+                    self.app.notify_operation_error_sticky(
+                        NotificationOperation::TurnStart,
+                        format!("smelt.engine: {error}"),
+                    );
+                    return None;
+                }
+            };
         let api_key = self.app.resolve_api_key_for_env(&resolved.api_key_env)?;
         let catalog = resolved.reasoning_catalog();
         Some((resolved.target(api_key), catalog))

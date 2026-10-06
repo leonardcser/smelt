@@ -81,6 +81,21 @@ Headless startup exits 1 if Lua configuration fails, including syntax errors,
 unknown settings, invalid setting types, and UI-only calls. It does not run tools
 or dispatch the requested model turn with a partially loaded configuration.
 
+## Context Management and Response Validation
+
+Headless mode uses the same automatic compaction algorithm and thresholds as
+interactive mode. It summarizes older context before requests near the model's
+context limit and can recover from context-limit errors. The compactor preserves
+recent message groups and uses configured or discovered model limits. Headless
+mode enables automatic compaction; `compact_threshold` and
+`compact_keep_recent_groups` apply without loading UI-only plugins.
+
+smelt validates the entire tool-call batch before executing any call. For a
+malformed response, it resends the unchanged request at most twice, within the
+existing retry budget. Failed attempts do not enter assistant history, but their
+reported token usage still counts toward the token and cost totals. Cancellation
+and request deadlines remain active during retries and compaction.
+
 ## Output Format
 
 ### Text (default)
@@ -106,9 +121,22 @@ answer suitable for files or downstream commands.
 smelt --headless --format json "summarize this repo"
 ```
 
-Every engine event is emitted as one JSON object per line (JSONL) to stdout.
+Every engine event is emitted as one JSON value per line (JSONL) to stdout.
 Nothing else is written to stdout in this mode: no token summary, no final
 message reprint. The stream ends after `TurnComplete` or `TurnError`.
+
+Streaming output is provisional until `"ResponseDraftAccepted"` closes the
+current main-response draft after provider validation. A `"ResponseDraftRejected"`
+event tells consumers to discard text, reasoning, and tool-call drafts from the
+current response attempt. It does not discard earlier accepted responses or
+completed tool output. A retry starts a fresh draft.
+
+Auxiliary requests, such as compaction summaries, have separate drafts keyed by
+request ID. `{"EngineAskDraftRejected":{"id":42}}` discards only that request's
+current `EngineAskDelta` output. `EngineAskResponse` supplies its validated final
+message or terminal error. Main-response draft events do not affect auxiliary
+requests. Lua streaming consumers can reset their draft in `on_draft_rejected`;
+like the other ask callbacks, it respects the request's lifecycle guard.
 
 ## Permissions
 
@@ -173,7 +201,7 @@ Stream structured events for programmatic consumption:
 
 ```bash
 smelt --headless --format json "fix the bug" \
-  | jq -c 'select(has("TurnComplete"))'
+  | jq -c 'select(type == "object" and has("TurnComplete"))'
 ```
 
 Use in a CI pipeline, logging stderr for inspection:

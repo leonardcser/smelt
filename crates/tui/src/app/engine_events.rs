@@ -18,6 +18,8 @@ fn waits_for_pending_transcript_work(event: &EngineEvent) -> bool {
             | EngineEvent::HistoryUpdated { .. }
             | EngineEvent::TurnComplete { .. }
             | EngineEvent::TurnError { .. }
+            | EngineEvent::ResponseDraftAccepted
+            | EngineEvent::ResponseDraftRejected
     )
 }
 
@@ -35,6 +37,21 @@ fn is_reasoning_summary(event: &EngineEvent) -> bool {
 }
 
 impl TuiApp {
+    fn dispatch_engine_ask_event(&mut self, event: &EngineEvent) {
+        match event {
+            EngineEvent::EngineAskDelta { id, .. } => {
+                self.continuing_engine_ask_ids.insert(*id);
+            }
+            EngineEvent::EngineAskDraftRejected { id }
+            | EngineEvent::EngineAskResponse { id, .. } => {
+                self.continuing_engine_ask_ids.remove(id);
+            }
+            _ => unreachable!("auxiliary request event"),
+        }
+        let lua = self.lua.execution();
+        crate::lua::scope_app(self, || lua.fire_ask_event(event));
+    }
+
     pub(crate) fn publish_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         self.core
             .signals
@@ -337,6 +354,15 @@ impl TuiApp {
     }
 
     fn dispatch_engine_event_inner(&mut self, ev: EngineEvent) -> bool {
+        if let EngineEvent::EngineAskDraftRejected { id }
+        | EngineEvent::EngineAskResponse { id, .. } = &ev
+        {
+            if self.transcript_work.has_auxiliary_work(*id) {
+                self.transcript_work.push_auxiliary_continuation(ev);
+                self.request_continuation_render();
+                return true;
+            }
+        }
         if is_reasoning_summary(&ev) {
             if let Some(block_id) = self.conversation.defer_last_reasoning_summary_hydration() {
                 self.transcript_work
@@ -435,6 +461,19 @@ impl TuiApp {
         pending: &mut Vec<PendingTool>,
     ) -> EngineEventResult {
         let mut assistant_output_started = false;
+        let draft_boundary = matches!(
+            ev,
+            EngineEvent::TextDelta { .. }
+                | EngineEvent::Text { .. }
+                | EngineEvent::Reasoning { .. }
+                | EngineEvent::ReasoningPartStarted { .. }
+                | EngineEvent::ReasoningPartDelta { .. }
+                | EngineEvent::ReasoningPartFinished { .. }
+                | EngineEvent::ToolCallDraftStarted { .. }
+                | EngineEvent::ToolCallDraftDelta { .. }
+                | EngineEvent::ToolCallDraftFinished { .. }
+        )
+        .then(|| self.conversation.response_draft_boundary());
         let control = match ev {
             EngineEvent::Ready => SessionControl::Continue,
             EngineEvent::TokenUsage {
@@ -575,6 +614,14 @@ impl TuiApp {
                         kind,
                     });
                 }
+                SessionControl::Continue
+            }
+            EngineEvent::ResponseDraftAccepted => {
+                self.conversation.accept_response_draft();
+                SessionControl::Continue
+            }
+            EngineEvent::ResponseDraftRejected => {
+                self.conversation.reject_response_draft();
                 SessionControl::Continue
             }
             EngineEvent::TextDelta { delta } => {
@@ -779,16 +826,10 @@ impl TuiApp {
                 self.notify_warn(message);
                 SessionControl::Continue
             }
-            EngineEvent::EngineAskDelta { id, delta } => {
-                self.continuing_engine_ask_ids.insert(id);
-                let lua = self.lua.execution();
-                crate::lua::scope_app(self, || lua.fire_ask_delta_callback(id, &delta));
-                SessionControl::Continue
-            }
-            EngineEvent::EngineAskResponse { id, message, error } => {
-                self.continuing_engine_ask_ids.remove(&id);
-                let lua = self.lua.execution();
-                crate::lua::scope_app(self, || lua.fire_ask_callback(id, message.as_ref(), error));
+            event @ (EngineEvent::EngineAskDelta { .. }
+            | EngineEvent::EngineAskDraftRejected { .. }
+            | EngineEvent::EngineAskResponse { .. }) => {
+                self.dispatch_engine_ask_event(&event);
                 SessionControl::Continue
             }
             EngineEvent::HistoryAppended { turn_id: id, delta } => {
@@ -948,6 +989,9 @@ impl TuiApp {
                 SessionControl::Continue
             }
         };
+        if let Some(first) = draft_boundary {
+            self.conversation.track_response_draft_from(first);
+        }
         EngineEventResult {
             control,
             assistant_output_started,
@@ -966,15 +1010,10 @@ impl TuiApp {
                 self.set_history_from(history.first_index.get(), history.items);
                 self.save_session();
             }
-            EngineEvent::EngineAskDelta { id, delta } => {
-                self.continuing_engine_ask_ids.insert(id);
-                let lua = self.lua.execution();
-                crate::lua::scope_app(self, || lua.fire_ask_delta_callback(id, &delta));
-            }
-            EngineEvent::EngineAskResponse { id, message, error } => {
-                self.continuing_engine_ask_ids.remove(&id);
-                let lua = self.lua.execution();
-                crate::lua::scope_app(self, || lua.fire_ask_callback(id, message.as_ref(), error));
+            event @ (EngineEvent::EngineAskDelta { .. }
+            | EngineEvent::EngineAskDraftRejected { .. }
+            | EngineEvent::EngineAskResponse { .. }) => {
+                self.dispatch_engine_ask_event(&event);
             }
             EngineEvent::TurnError { message, .. } => {
                 self.working.finish(TurnOutcome::Errored);

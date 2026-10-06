@@ -1667,6 +1667,58 @@ mod tests {
     }
 
     #[test]
+    fn response_draft_rejection_waits_for_queued_stream_continuations() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::TextDelta {
+                delta: "rejected first".into(),
+            });
+        app.app
+            .queue_engine_continuation(protocol::EngineEvent::TextDelta {
+                delta: " rejected queued".into(),
+            });
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::ResponseDraftRejected);
+        app.app
+            .queue_engine_continuation(protocol::EngineEvent::TextDelta {
+                delta: "valid answer".into(),
+            });
+        app.app.apply_pending_transcript_work();
+        let frame = app.render_to_frame().text();
+        assert!(frame.contains("valid answer"));
+        assert!(!frame.contains("rejected"));
+        app.assert_invariants();
+    }
+
+    #[test]
+    fn response_draft_acceptance_waits_for_queued_stream_continuations() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::TextDelta {
+                delta: "accepted first".into(),
+            });
+        app.app
+            .queue_engine_continuation(protocol::EngineEvent::TextDelta {
+                delta: " accepted queued".into(),
+            });
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::ResponseDraftAccepted);
+        app.app
+            .queue_engine_continuation(protocol::EngineEvent::TextDelta {
+                delta: "rejected next".into(),
+            });
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::ResponseDraftRejected);
+        app.app.apply_pending_transcript_work();
+        let frame = app.render_to_frame().text();
+        assert!(frame.contains("accepted first accepted queued"));
+        assert!(!frame.contains("rejected"));
+        app.assert_invariants();
+    }
+
+    #[test]
     fn every_engine_continuation_uses_the_shared_classification() {
         let events = [
             protocol::EngineEvent::ReasoningPartDelta {

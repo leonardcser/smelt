@@ -480,19 +480,13 @@ if smelt.engine and smelt.lifecycle then
       for k, v in pairs(spec) do
         if k ~= "guard" then wrapped[k] = v end
       end
-      local on_response = spec.on_response
-      if type(on_response) == "function" then
-        wrapped.on_response = function(...)
-          if guard:alive() then
-            return on_response(...)
-          end
-        end
-      end
-      local on_delta = spec.on_delta
-      if type(on_delta) == "function" then
-        wrapped.on_delta = function(...)
-          if guard:alive() then
-            return on_delta(...)
+      for _, name in ipairs({ "on_response", "on_delta", "on_draft_rejected" }) do
+        local callback = spec[name]
+        if type(callback) == "function" then
+          wrapped[name] = function(...)
+            if guard:alive() then
+              return callback(...)
+            end
           end
         end
       end

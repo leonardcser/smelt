@@ -1,12 +1,12 @@
 //! `smelt.engine` - cancel, ask, inherited ask, and submit_command for Lua-rendered turns.
 
-use crate::lua::{LuaHandle, LuaShared};
+use crate::lua::LuaShared;
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
+use smelt_core::lua::ask::{self, AskRequest};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
-use smelt_core::lua::AskCallbacks;
 use std::sync::Arc;
 
 /// Current continuation identity and automatic-dispatch pause. Scoped to the current session.
@@ -184,8 +184,7 @@ pub struct LuaAskResponseFormat {
 /// provider call fails. `kind` is a stable string the caller can branch
 /// on; `message` is a human-readable single-line description. The
 /// struct exists purely as a doc / LuaCATS schema target - the actual
-/// table is built in `LuaExecution::fire_ask_callback` because it lands
-/// on a callback path that bypasses `FromLua` decoding.
+/// table is serialized by the shared auxiliary callback dispatcher.
 #[allow(dead_code)]
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.engine.AskError")]
@@ -263,7 +262,7 @@ pub struct LuaAskSpec {
     /// Reasoning effort for the request. Provider-defined labels are accepted. When omitted, starts at `"off"` and reconciles to the selected model's advertised levels.
     pub reasoning_effort: Option<String>,
     /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
-    /// the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
+    /// the Lua bootstrap suppresses all ask callbacks after the guard expires.
     pub guard: Option<mlua::Table>,
     /// Surface provider retry events on the main work indicator. Intended
     /// for foreground auxiliary work such as compaction.
@@ -271,6 +270,9 @@ pub struct LuaAskSpec {
     /// Fires for each streamed assistant text delta when provided. The final
     /// `on_response` still fires once with the full assistant message.
     pub on_delta: Option<LuaCallback<(String,), ()>>,
+    /// Discard the current streamed draft before a retry or terminal failure.
+    /// Does not fire on cancellation, which preserves partial output.
+    pub on_draft_rejected: Option<LuaCallback<(), ()>>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
     /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
@@ -299,7 +301,7 @@ pub struct LuaInheritedAskSpec {
     /// Reasoning effort override for the request. Provider-defined labels are accepted. When omitted, inherits the current session's effort and reconciles it to the selected model's advertised levels.
     pub reasoning_effort: Option<String>,
     /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
-    /// the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
+    /// the Lua bootstrap suppresses all ask callbacks after the guard expires.
     pub guard: Option<mlua::Table>,
     /// Surface provider retry events on the main work indicator. Intended
     /// for foreground auxiliary work such as compaction.
@@ -307,6 +309,9 @@ pub struct LuaInheritedAskSpec {
     /// Fires for each streamed assistant text delta when provided. The final
     /// `on_response` still fires once with the full assistant message.
     pub on_delta: Option<LuaCallback<(String,), ()>>,
+    /// Discard the current streamed draft before a retry or terminal failure.
+    /// Does not fire on cancellation, which preserves partial output.
+    pub on_draft_rejected: Option<LuaCallback<(), ()>>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
     /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
@@ -507,14 +512,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .map(|table| crate::lua::api::session::lua_messages_to_protocol(lua, table))
                     .unwrap_or_default();
 
-                let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                let stream = register_ask_callbacks(
+                let reasoning_effort = parse_reasoning_effort(spec.reasoning_effort)?;
+                let (id, stream) = ask::register_callbacks(
                     &s,
                     lua,
-                    id,
-                    spec.on_response,
-                    spec.on_delta,
+                    spec.on_response.map(LuaCallback::into_inner),
+                    spec.on_delta.map(LuaCallback::into_inner),
+                    spec.on_draft_rejected.map(LuaCallback::into_inner),
                 )?;
 
                 let system = spec.system;
@@ -523,28 +527,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
                 });
-                let reasoning_effort = parse_reasoning_effort(spec.reasoning_effort)?;
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
+                let request = AskRequest {
+                    id,
+                    messages,
+                    model: model_ref,
+                    question,
+                    response_format,
+                    reasoning_effort,
+                    stream,
+                    visible_retries,
+                };
                 let dispatch = crate::lua::try_with_agent_host(|host| {
-                    host.dispatch_engine_ask(
-                        id,
-                        system,
-                        messages,
-                        model_ref,
-                        question,
-                        response_format,
-                        reasoning_effort,
-                        stream,
-                        visible_retries,
-                    )
+                    host.dispatch_engine_ask(system, request)
                 })
                 .unwrap_or_else(|| Err("app not initialized".into()));
                 if let Err(error) = dispatch {
-                    if let Ok(mut callbacks) = s.ask_callbacks.lock() {
-                        callbacks.remove(&id);
-                    }
+                    ask::remove_callbacks(&s, id);
                     return Err(LuaError::external(format!("smelt.engine.ask: {error}")));
                 }
                 Ok(id)
@@ -566,14 +567,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .map(|table| crate::lua::api::session::lua_messages_to_protocol(lua, table))
                     .unwrap_or_default();
 
-                let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                let stream = register_ask_callbacks(
+                let reasoning_effort = parse_reasoning_effort(spec.reasoning_effort)?;
+                let (id, stream) = ask::register_callbacks(
                     &s,
                     lua,
-                    id,
-                    spec.on_response,
-                    spec.on_delta,
+                    spec.on_response.map(LuaCallback::into_inner),
+                    spec.on_delta.map(LuaCallback::into_inner),
+                    spec.on_draft_rejected.map(LuaCallback::into_inner),
                 )?;
 
                 let _guard = spec.guard;
@@ -581,27 +581,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     name: f.name,
                     schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
                 });
-                let reasoning_effort = parse_reasoning_effort(spec.reasoning_effort)?;
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
+                let request = AskRequest {
+                    id,
+                    messages,
+                    model: model_ref,
+                    question,
+                    response_format,
+                    reasoning_effort,
+                    stream,
+                    visible_retries,
+                };
                 let dispatch = crate::lua::try_with_agent_host(|host| {
-                    host.dispatch_inherited_engine_ask(
-                        id,
-                        messages,
-                        model_ref,
-                        question,
-                        response_format,
-                        reasoning_effort,
-                        stream,
-                        visible_retries,
-                    )
+                    host.dispatch_inherited_engine_ask(request)
                 })
                 .unwrap_or_else(|| Err("app not initialized".into()));
                 if let Err(error) = dispatch {
-                    if let Ok(mut callbacks) = s.ask_callbacks.lock() {
-                        callbacks.remove(&id);
-                    }
+                    ask::remove_callbacks(&s, id);
                     return Err(LuaError::external(format!(
                         "smelt.engine.ask_inherited: {error}"
                     )));
@@ -612,26 +610,4 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
 
     Ok(())
-}
-
-fn register_ask_callbacks(
-    shared: &Arc<LuaShared>,
-    lua: &Lua,
-    id: u64,
-    on_response: Option<LuaCallback<(mlua::Value, Option<LuaAskErrorTable>), ()>>,
-    on_delta: Option<LuaCallback<(String,), ()>>,
-) -> LuaResult<bool> {
-    let stream = on_delta.is_some();
-    let response = on_response
-        .map(|cb| LuaHandle::from_func(lua, cb.into_inner()))
-        .transpose()?;
-    let delta = on_delta
-        .map(|cb| LuaHandle::from_func(lua, cb.into_inner()))
-        .transpose()?;
-    if response.is_some() || delta.is_some() {
-        if let Ok(mut cbs) = shared.ask_callbacks.lock() {
-            cbs.insert(id, AskCallbacks { response, delta });
-        }
-    }
-    Ok(stream)
 }

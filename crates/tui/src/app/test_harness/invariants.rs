@@ -452,7 +452,7 @@ impl TestApp {
         // Ask callbacks live in their own map keyed on the same `next_id`
         // counter as the win/overlay/paint registry - a duplicate id in
         // both means some new registration path forgot which map to write
-        // to, and `fire_ask_callback` could dispatch an unrelated handler
+        // to, and auxiliary dispatch could invoke an unrelated handler
         // with ask-shaped args.
         let shared = self.app.lua.shared();
         if let (Ok(cbs), Ok(ask)) = (shared.callbacks.lock(), shared.ask_callbacks.lock()) {

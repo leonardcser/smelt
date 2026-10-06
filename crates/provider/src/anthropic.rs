@@ -445,7 +445,7 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
     let usage = parse_usage(&data["usage"]);
 
     Ok(ParsedResponse {
-        finish_reason: None,
+        finish_reason: data["stop_reason"].as_str().map(str::to_owned),
         content,
         reasoning_parts,
         reasoning,
@@ -477,8 +477,11 @@ struct StreamState {
     thinking_blocks: BTreeMap<usize, ThinkingAccum>,
     /// content block index -> (id, name, args-json)
     tool_calls: HashMap<usize, (String, String, String)>,
+    initial_tool_inputs: HashMap<usize, String>,
     usage: TokenUsage,
     saw_message_stop: bool,
+    finish_reason: Option<String>,
+    invalid_tool_metadata: bool,
 }
 
 impl StreamState {
@@ -504,7 +507,7 @@ impl StreamState {
             })
             .collect();
         ParsedResponse {
-            finish_reason: None,
+            finish_reason: self.finish_reason,
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
             reasoning_parts: Vec::new(),
@@ -521,7 +524,16 @@ fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderErr
             "stream ended without message_stop".into(),
         ));
     }
-    Ok(state.finalize())
+    if state.invalid_tool_metadata {
+        return Err(ProviderError::MalformedResponse {
+            issue: "incomplete tool-call stream metadata".into(),
+            finish_reason: state.finish_reason,
+            usage: state.usage,
+        });
+    }
+    let parsed = state.finalize();
+    parsed.validate()?;
+    Ok(parsed)
 }
 
 fn stream_error(value: &serde_json::Value) -> ProviderError {
@@ -595,6 +607,11 @@ fn apply_sse_event(
             }
         }
         "content_block_start" => {
+            if ev["content_block"]["type"].as_str() == Some("tool_use")
+                && ev["index"].as_u64().is_none()
+            {
+                state.invalid_tool_metadata = true;
+            }
             if let Some(idx) = ev["index"].as_u64() {
                 if let Some(cb) = ev.get("content_block") {
                     match cb["type"].as_str() {
@@ -602,6 +619,11 @@ fn apply_sse_event(
                             let id = cb["id"].as_str().unwrap_or_default().to_string();
                             let name = cb["name"].as_str().unwrap_or_default().to_string();
                             let stream_id = idx.to_string();
+                            if let Some(input) = cb.get("input") {
+                                state
+                                    .initial_tool_inputs
+                                    .insert(idx as usize, input.to_string());
+                            }
                             state
                                 .tool_calls
                                 .insert(idx as usize, (id, name, String::new()));
@@ -749,6 +771,9 @@ fn apply_sse_event(
             }
         }
         "message_delta" => {
+            if let Some(reason) = ev["delta"]["stop_reason"].as_str() {
+                state.finish_reason = Some(reason.to_owned());
+            }
             if let Some(u) = ev.get("usage") {
                 state.usage.completion_tokens = u["output_tokens"].as_u64().map(|n| n as u32);
                 if state.usage.prompt_tokens.is_none() {
@@ -758,7 +783,12 @@ fn apply_sse_event(
             }
         }
         "message_stop" => {
-            for (idx, (call_id, name, args)) in &state.tool_calls {
+            for (idx, (call_id, name, args)) in &mut state.tool_calls {
+                if args.is_empty() {
+                    if let Some(input) = state.initial_tool_inputs.remove(idx) {
+                        *args = input;
+                    }
+                }
                 if call_id.is_empty() || name.is_empty() {
                     continue;
                 }
@@ -801,6 +831,85 @@ mod tests {
     use crate::FunctionSchema;
     use protocol::{Content, ContentPart, FunctionCall, Message, Role, ToolCall};
     use serde_json::json;
+
+    #[test]
+    fn malformed_stream_batch_preserves_finish_reason_and_usage() {
+        for invalid in [
+            json!({"type": "content_block_start", "content_block": {"type": "tool_use", "id": "bad", "name": "test"}}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "bad", "name": ""}}),
+        ] {
+            let events = [
+                json!({"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "valid", "name": "test"}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+                invalid,
+                json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 4}}),
+                json!({"type": "message_stop"}),
+            ];
+            let error = parse_stream_events(&events, &mut |_| {})
+                .err()
+                .expect("invalid batch must fail");
+            assert!(
+                matches!(error, ProviderError::MalformedResponse { finish_reason, usage, .. }
+                if finish_reason.as_deref() == Some("tool_use") && usage.prompt_tokens == Some(7) && usage.completion_tokens == Some(4))
+            );
+        }
+    }
+
+    #[test]
+    fn stream_uses_reported_initial_input_only_without_argument_deltas() {
+        for (input, delta, expected) in [
+            (json!({}), None, Some("{}")),
+            (json!({"value": 1}), None, Some("{\"value\":1}")),
+            (json!({}), Some("{\"value\":2}"), Some("{\"value\":2}")),
+            (json!([]), None, None),
+            (json!({}), Some("{"), None),
+        ] {
+            let mut events = vec![json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "id": "call", "name": "test", "input": input}})];
+            if let Some(delta) = delta {
+                events.push(json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": delta}}));
+            }
+            events.push(json!({"type": "message_stop"}));
+            let mut finished = String::new();
+            let parsed = parse_stream_events(&events, &mut |event| {
+                if let ProviderStreamEvent::ToolCall(ToolCallStreamEvent::Finished {
+                    arguments,
+                    ..
+                }) = event
+                {
+                    finished = arguments.to_owned();
+                }
+            });
+            match expected {
+                Some(expected) => {
+                    let parsed = parsed.unwrap();
+                    assert_eq!(parsed.tool_calls[0].function.arguments, expected);
+                    assert_eq!(finished, expected);
+                }
+                None => assert!(matches!(
+                    parsed,
+                    Err(ProviderError::MalformedResponse { .. })
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_batch_preserves_native_stop_reason() {
+        let parsed = parse_response(&json!({
+            "content": [{"type": "tool_use", "id": "call", "name": "test", "input": ["private-argument"]}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 7, "output_tokens": 4}
+        })).unwrap();
+        let error = parsed.validate().unwrap_err();
+        assert!(!format!("{error:?}").contains("private-argument"));
+        assert!(
+            matches!(error, ProviderError::MalformedResponse { finish_reason, usage, .. }
+            if finish_reason.as_deref() == Some("tool_use") && usage.prompt_tokens == Some(7) && usage.completion_tokens == Some(4))
+        );
+    }
 
     fn cfg() -> ModelConfig {
         ModelConfig::default()

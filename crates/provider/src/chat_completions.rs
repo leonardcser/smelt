@@ -220,10 +220,16 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
     let mut reasoning = incoming.map(|(_, text)| text.to_owned());
     let reasoning_blocks = raw_reasoning_blocks(incoming.map(|(field, _)| field));
 
-    let mut tool_calls: Vec<ToolCall> = if let Some(tcs) = msg.get("tool_calls") {
-        serde_json::from_value(tcs.clone()).unwrap_or_default()
-    } else {
-        vec![]
+    let mut tool_calls: Vec<ToolCall> = match msg.get("tool_calls").filter(|value| !value.is_null())
+    {
+        Some(tcs) => {
+            serde_json::from_value(tcs.clone()).map_err(|_| ProviderError::MalformedResponse {
+                issue: "invalid tool-call batch".into(),
+                finish_reason: choice["finish_reason"].as_str().map(str::to_owned),
+                usage: parse_usage(&data["usage"]),
+            })?
+        }
+        None => vec![],
     };
 
     // Fallback: some backends (vLLM with reasoning+tool calling) may
@@ -314,20 +320,9 @@ fn finish_stream_state(
             summary.data_events, summary.saw_done
         )));
     }
-    for (index, (id, name, args)) in &state.tool_calls {
-        if id.is_empty() || name.is_empty() {
-            return Err(ProviderError::InvalidResponse(format!(
-                "incomplete tool-call metadata (index={index})"
-            )));
-        }
-        if serde_json::from_str::<serde_json::Value>(args).is_err() {
-            return Err(ProviderError::InvalidResponse(format!(
-                "invalid or incomplete tool-call arguments (index={index}, bytes={})",
-                args.len()
-            )));
-        }
-    }
-    Ok(state.finalize())
+    let parsed = state.finalize();
+    parsed.validate()?;
+    Ok(parsed)
 }
 
 #[cfg_attr(not(any(test, feature = "fuzz")), allow(dead_code))]
@@ -355,7 +350,7 @@ fn apply_sse_event(
         let parsed = parse_usage(u);
         state.usage.context_tokens = parsed.context_tokens.or(state.usage.context_tokens);
         state.usage.prompt_tokens = parsed.prompt_tokens.or(state.usage.prompt_tokens);
-        state.usage.completion_tokens = state.usage.completion_tokens.or(parsed.completion_tokens);
+        state.usage.completion_tokens = parsed.completion_tokens.or(state.usage.completion_tokens);
         state.usage.cache_read_tokens = parsed.cache_read_tokens.or(state.usage.cache_read_tokens);
         state.usage.reasoning_tokens = parsed.reasoning_tokens.or(state.usage.reasoning_tokens);
     }
@@ -1229,10 +1224,13 @@ mod tests {
     }
 
     #[test]
-    fn sse_completion_tokens_only_set_when_unset() {
+    fn sse_completion_tokens_use_latest_cumulative_report() {
         let mut state = StreamState::default();
-        state.usage.completion_tokens = Some(99);
-        step(&mut state, json!({"usage": {"completion_tokens": 1}}));
+        for tokens in [1, 99, 99] {
+            step(&mut state, json!({"usage": {"completion_tokens": tokens}}));
+            assert_eq!(state.usage.completion_tokens, Some(tokens));
+        }
+        step(&mut state, json!({"usage": {"prompt_tokens": 2}}));
         assert_eq!(state.usage.completion_tokens, Some(99));
     }
 
@@ -1526,13 +1524,21 @@ mod tests {
             "content_filter",
             "provider_specific",
         ] {
+            let mut message = json!({"reasoning_content": "thinking"});
+            let mut delta = message.clone();
+            if reason == "tool_calls" {
+                let call = json!({"id": "call", "type": "function", "function": {"name": "test", "arguments": "{}"}});
+                message["tool_calls"] = json!([call]);
+                delta["tool_calls"] = message["tool_calls"].clone();
+                delta["tool_calls"][0]["index"] = json!(0);
+            }
             let batch = parse_response(&json!({"choices": [{
-                "message": {"reasoning_content": "thinking"}, "finish_reason": reason
+                "message": message, "finish_reason": reason
             }]}))
             .unwrap();
             assert_eq!(batch.finish_reason.as_deref(), Some(reason));
             let events = [
-                json!({"choices": [{"delta": {"reasoning_content": "thinking"}}]}),
+                json!({"choices": [{"delta": delta}]}),
                 json!({"choices": [{"delta": {}, "finish_reason": reason}]}),
                 json!({"choices": [], "usage": {"completion_tokens": 10}}),
             ];

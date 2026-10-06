@@ -156,6 +156,18 @@ impl TranscriptWorkQueue {
         std::mem::take(&mut self.pending_tool_draft_summaries)
     }
 
+    pub(super) fn has_auxiliary_work(&self, id: u64) -> bool {
+        self.items.iter().any(|work| {
+            matches!(work,
+                TranscriptWork::AuxiliaryContinuation(
+                    EngineEvent::EngineAskDelta { id: queued, .. }
+                    | EngineEvent::EngineAskDraftRejected { id: queued }
+                    | EngineEvent::EngineAskResponse { id: queued, .. }
+                ) if *queued == id
+            )
+        })
+    }
+
     pub(super) fn has_main_turn_work(&self) -> bool {
         self.main_turn_work_count > 0
     }

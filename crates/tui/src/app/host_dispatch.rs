@@ -5,6 +5,11 @@
 use crate::app::TuiApp;
 use engine::{HostCall, HostRequestDecision, PreparedRequestMessages};
 use protocol::Message;
+#[cfg(test)]
+use smelt_core::context_estimate::PrepareContextEstimateSource;
+use smelt_core::context_estimate::{
+    PrepareContextEstimate, HISTORY_DELTA_MAX_ITEMS as PREPARE_CONTEXT_HISTORY_DELTA_MAX_ITEMS,
+};
 use smelt_core::lua::{HookRegistry, LuaShared};
 use smelt_core::working::TurnPhase;
 use std::cell::RefCell;
@@ -13,7 +18,6 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 type MessageReply = oneshot::Sender<HostRequestDecision>;
-const PREPARE_CONTEXT_HISTORY_DELTA_MAX_ITEMS: usize = 256;
 
 thread_local! {
     static DEFERRED_HOST_REPLIES: RefCell<Vec<DeferredHostReply>> = const { RefCell::new(Vec::new()) };
@@ -546,146 +550,6 @@ impl TuiApp {
                 .then(|| smelt_core::lua::lua_to_serde::<T>(&lua, &current))
                 .flatten()
         })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrepareContextEstimateSource {
-    FullRequestEstimate,
-    ProviderSnapshot,
-    ProviderSnapshotPlusHistoryDelta,
-    CheckpointEstimate,
-    CheckpointEstimatePlusHistoryDelta,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PrepareContextEstimate {
-    total_context_tokens: u32,
-    provider_context_tokens: Option<u32>,
-    estimated_delta_tokens: u32,
-    latest_snapshot_history_len: Option<usize>,
-    current_history_len: usize,
-    source: PrepareContextEstimateSource,
-}
-
-impl PrepareContextEstimate {
-    #[cfg(test)]
-    fn from_request(
-        current_context_tokens: Option<u32>,
-        context_tokens_history_len: Option<usize>,
-        current_history: &[protocol::HistoryItem],
-        request_messages: &[Message],
-        full_request_estimate: u32,
-    ) -> Self {
-        let base_history_len = context_tokens_history_len.unwrap_or(current_history.len());
-        let history_delta = if base_history_len < current_history.len() {
-            &current_history[base_history_len..]
-        } else {
-            &[]
-        };
-        Self::from_history_delta(
-            current_context_tokens,
-            context_tokens_history_len,
-            None,
-            current_history.len(),
-            history_delta,
-            request_messages,
-            full_request_estimate,
-        )
-    }
-
-    fn from_history_delta(
-        current_context_tokens: Option<u32>,
-        context_tokens_history_len: Option<usize>,
-        checkpoint_context_tokens: Option<(u32, Option<usize>)>,
-        current_history_len: usize,
-        history_delta: &[protocol::HistoryItem],
-        _request_messages: &[Message],
-        full_request_estimate: u32,
-    ) -> Self {
-        let (base, base_history_len, exact_source, delta_source) =
-            if let Some(base) = current_context_tokens {
-                (
-                    base,
-                    context_tokens_history_len,
-                    PrepareContextEstimateSource::ProviderSnapshot,
-                    PrepareContextEstimateSource::ProviderSnapshotPlusHistoryDelta,
-                )
-            } else if let Some((base, history_len)) = checkpoint_context_tokens {
-                (
-                    base,
-                    history_len,
-                    PrepareContextEstimateSource::CheckpointEstimate,
-                    PrepareContextEstimateSource::CheckpointEstimatePlusHistoryDelta,
-                )
-            } else {
-                return Self::full_request(full_request_estimate, current_history_len);
-            };
-        let latest_snapshot_history_len = base_history_len;
-        let base_history_len = base_history_len.unwrap_or(current_history_len);
-
-        if base_history_len > current_history_len {
-            return Self::full_request(full_request_estimate, current_history_len);
-        }
-
-        if base_history_len == current_history_len {
-            return Self {
-                total_context_tokens: base,
-                provider_context_tokens: current_context_tokens,
-                estimated_delta_tokens: 0,
-                latest_snapshot_history_len,
-                current_history_len,
-                source: exact_source,
-            };
-        }
-
-        let added_messages = protocol::history_to_messages(history_delta);
-        let estimated_delta_tokens = smelt_core::session::estimate_message_tokens(&added_messages);
-        Self {
-            total_context_tokens: base.saturating_add(estimated_delta_tokens),
-            provider_context_tokens: current_context_tokens,
-            estimated_delta_tokens,
-            latest_snapshot_history_len,
-            current_history_len,
-            source: delta_source,
-        }
-    }
-
-    fn full_request(full_request_estimate: u32, current_history_len: usize) -> Self {
-        Self {
-            total_context_tokens: full_request_estimate,
-            provider_context_tokens: None,
-            estimated_delta_tokens: full_request_estimate,
-            latest_snapshot_history_len: None,
-            current_history_len,
-            source: PrepareContextEstimateSource::FullRequestEstimate,
-        }
-    }
-
-    fn into_lua_table(self, lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
-        let table = lua.create_table()?;
-        table.set("source", self.source.as_str())?;
-        table.set("total_context_tokens", self.total_context_tokens)?;
-        table.set("provider_context_tokens", self.provider_context_tokens)?;
-        table.set("estimated_delta_tokens", self.estimated_delta_tokens)?;
-        table.set(
-            "latest_snapshot_history_len",
-            self.latest_snapshot_history_len,
-        )?;
-        table.set("current_history_len", self.current_history_len)?;
-        Ok(table)
-    }
-}
-
-impl PrepareContextEstimateSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::FullRequestEstimate => "full_request_estimate",
-            Self::ProviderSnapshot => "provider_snapshot",
-            Self::ProviderSnapshotPlusHistoryDelta => "provider_snapshot_plus_history_delta",
-            Self::CheckpointEstimate => "checkpoint_estimate",
-            Self::CheckpointEstimatePlusHistoryDelta => "checkpoint_estimate_plus_history_delta",
-        }
     }
 }
 

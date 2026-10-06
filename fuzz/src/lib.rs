@@ -409,7 +409,7 @@ pub enum FuzzOp {
     /// going through accept / dismiss.
     ClearPlaceholder,
     /// Side channel: emit `EngineAskResponse` with the smallest pending ask
-    /// id, if any. Exercises `lua.fire_ask_callback` and plugin paths that
+    /// id, if any. Exercises auxiliary callback dispatch and plugin paths that
     /// depend on it (e.g., `/btw`, compaction plugins).
     EngineAskResponsePending {
         content: String,

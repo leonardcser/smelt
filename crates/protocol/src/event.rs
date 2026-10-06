@@ -364,6 +364,12 @@ pub enum EngineEvent {
         content: String,
     },
 
+    /// Accept the current main-response draft after provider validation.
+    ResponseDraftAccepted,
+
+    /// Discard the current provider attempt's speculative text, reasoning, and tools.
+    ResponseDraftRejected,
+
     /// Streamed assistant text (may arrive in chunks).
     Text { content: String },
 
@@ -475,6 +481,9 @@ pub enum EngineEvent {
     /// Incremental text token from a background `UiCommand::EngineAsk` request.
     /// The final `EngineAskResponse` still carries the full assistant message.
     EngineAskDelta { id: u64, delta: String },
+
+    /// Discard only this auxiliary request's current streamed draft.
+    EngineAskDraftRejected { id: u64 },
 
     /// Response to a `UiCommand::EngineAsk` request. On success
     /// `error` is `None` and `message` is the assistant reply in the

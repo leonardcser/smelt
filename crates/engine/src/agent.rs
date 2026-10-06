@@ -562,19 +562,29 @@ fn spawn_engine_ask(
             if visible_retries {
                 opts.on_retry = Some(&on_retry);
             }
-            let on_delta = |delta: ProviderStreamEvent| {
-                if let ProviderStreamEvent::TextDelta(text) = delta {
+            let on_delta = |delta: ProviderStreamEvent| match delta {
+                ProviderStreamEvent::TextDelta(text) => {
                     let _ = tx.send(EngineEvent::EngineAskDelta {
                         id,
                         delta: text.to_string(),
                     });
                 }
+                ProviderStreamEvent::DraftRejected => {
+                    let _ = tx.send(EngineEvent::EngineAskDraftRejected { id });
+                }
+                _ => {}
             };
             if stream {
                 opts.on_delta = Some(&on_delta);
             }
             let log_target = pricing_target.clone();
+            let usage_tx = tx.clone();
             let on_attempt = move |info: RequestAttemptInfo<'_>| {
+                if let Err(ProviderError::MalformedResponse { usage, .. }) = info.result {
+                    if usage.has_any() {
+                        send_usage(&usage_tx, &log_target, usage.clone(), None, true);
+                    }
+                }
                 let resolved = smelt_provider::resolve_pricing(
                     info.model,
                     &log_target.provider_type,
@@ -654,6 +664,7 @@ fn classify_provider_error(e: &ProviderError) -> EngineAskErrorKind {
                 EngineAskErrorKind::Network
             }
         }
+        ProviderError::MalformedResponse { .. } => EngineAskErrorKind::InvalidResponse,
         ProviderError::InvalidResponse(_) => {
             if is_context_window_error(e) {
                 EngineAskErrorKind::ContextWindow
@@ -1858,10 +1869,10 @@ impl<'a> Turn<'a> {
                 // An injected message arrived during the LLM call. Discard this
                 // response and loop so the model can respond to the new input.
                 if had_injected {
+                    self.emit(EngineEvent::ResponseDraftRejected);
                     continue;
                 }
             }
-
             // Streaming already delivered deltas; only emit batch events for non-streaming.
             if partial_text.is_empty() && partial_reasoning.is_empty() {
                 if reasoning_parts.is_empty() {
@@ -1896,6 +1907,7 @@ impl<'a> Turn<'a> {
                     }
                 }
             }
+            self.emit(EngineEvent::ResponseDraftAccepted);
 
             if tool_calls.is_empty() {
                 let is_empty = content.is_none()
@@ -2788,7 +2800,14 @@ impl<'a> Turn<'a> {
                     self.system_history_offset(),
                 )
             });
+            let usage_target = self.model_target.clone();
+            let usage_tx = self.event_tx;
             let on_attempt = move |info: RequestAttemptInfo<'_>| {
+                if let Err(ProviderError::MalformedResponse { usage, .. }) = info.result {
+                    if usage.has_any() {
+                        send_usage(usage_tx, &usage_target, usage.clone(), None, true);
+                    }
+                }
                 let ctx = crate::request_log::RequestContext {
                     request_id: turn_id,
                     kind: "turn".to_string(),
@@ -2938,6 +2957,12 @@ struct ProviderStreamState {
 impl ProviderStreamState {
     fn apply(&self, event: ProviderStreamEvent<'_>, event_tx: &crate::EngineEventSender) {
         match event {
+            ProviderStreamEvent::DraftRejected => {
+                self.text.lock().unwrap().clear();
+                self.reasoning.lock().unwrap().clear();
+                self.reasoning_parts.lock().unwrap().parts.clear();
+                let _ = event_tx.send(EngineEvent::ResponseDraftRejected);
+            }
             ProviderStreamEvent::TextDelta(text) => {
                 self.text.lock().unwrap().push_str(text);
                 let _ = event_tx.send(EngineEvent::TextDelta {
@@ -3552,6 +3577,20 @@ mod tests {
         assert_eq!(
             classify_provider_error(&err),
             EngineAskErrorKind::CyberPolicy
+        );
+    }
+
+    #[test]
+    fn malformed_responses_do_not_trigger_context_limit_recovery() {
+        let error = ProviderError::MalformedResponse {
+            issue: "context_length_exceeded in malformed metadata".into(),
+            finish_reason: Some("length".into()),
+            usage: protocol::TokenUsage::default(),
+        };
+        assert!(!is_context_window_error(&error));
+        assert_eq!(
+            classify_provider_error(&error),
+            EngineAskErrorKind::InvalidResponse
         );
     }
 

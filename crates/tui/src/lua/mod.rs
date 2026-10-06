@@ -566,17 +566,12 @@ impl LuaExecution {
         Ok(collect_desired_state(&self.core))
     }
 
-    pub(crate) fn fire_ask_callback(
-        &self,
-        id: u64,
-        message: Option<&protocol::Message>,
-        error: Option<protocol::EngineAskError>,
-    ) {
-        invoke_ask_callback(&self.core, &self.shared, id, message, error);
-    }
-
-    pub(crate) fn fire_ask_delta_callback(&self, id: u64, delta: &str) {
-        invoke_ask_delta_callback(&self.core, &self.shared, id, delta);
+    pub(crate) fn fire_ask_event(&self, event: &protocol::EngineEvent) {
+        if let Err(error) =
+            smelt_core::lua::ask::dispatch_callbacks(&self.shared, &self.core.lua, event)
+        {
+            self.core.record_error(format!("ask callback: {error}"));
+        }
     }
 
     pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
@@ -1152,77 +1147,6 @@ pub(crate) fn mode_block(
     }
 }
 
-fn invoke_ask_callback(
-    core: &smelt_core::lua::LuaRuntime,
-    shared: &LuaShared,
-    id: u64,
-    message: Option<&protocol::Message>,
-    error: Option<protocol::EngineAskError>,
-) {
-    let callbacks = {
-        let Ok(mut callbacks) = shared.ask_callbacks.lock() else {
-            return;
-        };
-        callbacks.remove(&id)
-    };
-    let Some(callbacks) = callbacks else {
-        return;
-    };
-    let Some(handle) = callbacks.response else {
-        return;
-    };
-    let Ok(func) = core.lua.registry_value::<mlua::Function>(&handle.key) else {
-        return;
-    };
-    let response_value = match message {
-        Some(message) => smelt_core::lua::serde_to_lua_preserving_nulls(&core.lua, message)
-            .unwrap_or(mlua::Value::Nil),
-        None => mlua::Value::Nil,
-    };
-    let error_value = match error {
-        None => mlua::Value::Nil,
-        Some(error) => match core.lua.create_table() {
-            Ok(table) => {
-                let _ = table.set("kind", error.kind.as_str());
-                let _ = table.set("message", error.message);
-                mlua::Value::Table(table)
-            }
-            Err(_) => mlua::Value::Nil,
-        },
-    };
-    let _perf = smelt_perf::perf::begin("lua:ask_cb");
-    if let Err(error) = func.call::<()>((response_value, error_value)) {
-        core.record_error(format!("ask callback: {error}"));
-    }
-}
-
-fn invoke_ask_delta_callback(
-    core: &smelt_core::lua::LuaRuntime,
-    shared: &LuaShared,
-    id: u64,
-    delta: &str,
-) {
-    let func = {
-        let Ok(callbacks) = shared.ask_callbacks.lock() else {
-            return;
-        };
-        let Some(callbacks) = callbacks.get(&id) else {
-            return;
-        };
-        let Some(handle) = callbacks.delta.as_ref() else {
-            return;
-        };
-        let Ok(func) = core.lua.registry_value::<mlua::Function>(&handle.key) else {
-            return;
-        };
-        func
-    };
-    let _perf = smelt_perf::perf::begin("lua:ask_delta_cb");
-    if let Err(error) = func.call::<()>(delta.to_string()) {
-        core.record_error(format!("ask delta callback: {error}"));
-    }
-}
-
 impl Default for LuaRuntime {
     fn default() -> Self {
         Self::new()
@@ -1426,11 +1350,11 @@ mod tests {
         assert_eq!(fired, 0);
     }
 
-    /// `fire_ask_callback` must only look at `ask_callbacks`. A non-ask
+    /// `ask_response_dispatch` must only look at `ask_callbacks`. A non-ask
     /// handler registered with the same id in the win/overlay/paint map
     /// must NOT fire when an `EngineAskResponse` arrives with that id.
     #[test]
-    fn fire_ask_callback_ignores_non_ask_handles() {
+    fn ask_response_dispatch_ignores_non_ask_handles() {
         let rt = LuaRuntime::new();
         rt.lua
             .load("_G.fired = 0; _G.cb = function() _G.fired = _G.fired + 1 end")
@@ -1446,14 +1370,19 @@ mod tests {
         // handler - verify the ask path stays in its own lane.
         let msg =
             protocol::Message::assistant(Some(protocol::Content::text("synthetic")), None, None);
-        rt.execution().fire_ask_callback(id, Some(&msg), None);
+        rt.execution()
+            .fire_ask_event(&protocol::EngineEvent::EngineAskResponse {
+                id,
+                message: Some(msg),
+                error: None,
+            });
 
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0, "non-ask handle must not fire on ask response");
     }
 
     #[test]
-    fn fire_ask_delta_callback_streams_until_final_response() {
+    fn ask_delta_dispatch_streams_until_final_response() {
         let rt = LuaRuntime::new();
         rt.lua
             .load("_G.delta = ''; _G.cb = function(d) _G.delta = _G.delta .. d end")
@@ -1466,17 +1395,26 @@ mod tests {
             smelt_core::lua::AskCallbacks {
                 response: None,
                 delta: Some(handle),
+                rejected: None,
             },
         );
 
         let execution = rt.execution();
-        execution.fire_ask_delta_callback(7, "hel");
-        execution.fire_ask_delta_callback(7, "lo");
+        for delta in ["hel", "lo"] {
+            execution.fire_ask_event(&protocol::EngineEvent::EngineAskDelta {
+                id: 7,
+                delta: delta.into(),
+            });
+        }
         let delta: String = rt.lua.load("return _G.delta").eval().unwrap();
         assert_eq!(delta, "hello");
 
         let msg = protocol::Message::assistant(Some(protocol::Content::text("hello")), None, None);
-        execution.fire_ask_callback(7, Some(&msg), None);
+        execution.fire_ask_event(&protocol::EngineEvent::EngineAskResponse {
+            id: 7,
+            message: Some(msg),
+            error: None,
+        });
         assert!(rt.shared.ask_callbacks.lock().unwrap().is_empty());
     }
 

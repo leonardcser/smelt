@@ -25,6 +25,12 @@ pub enum ProviderError {
     Stream(String),
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+    #[error("malformed response: {issue}")]
+    MalformedResponse {
+        issue: String,
+        finish_reason: Option<String>,
+        usage: protocol::TokenUsage,
+    },
     #[error("max retries exceeded")]
     MaxRetries,
 }
@@ -208,7 +214,10 @@ pub fn retry_delay_for(
         ProviderError::Network(_)
         | ProviderError::CyberPolicy { .. }
         | ProviderError::Server { .. }
-        | ProviderError::Stream(_) => Some(retry_after.map_or(backoff, |delay| delay.max(backoff))),
+        | ProviderError::Stream(_)
+        | ProviderError::MalformedResponse { .. } => {
+            Some(retry_after.map_or(backoff, |delay| delay.max(backoff)))
+        }
         ProviderError::RateLimited {
             resets_at: Some(epoch),
         } => {

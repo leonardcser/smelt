@@ -8,6 +8,219 @@ use crate::app::TuiApp;
 use crate::smelt_edit::RowIndex;
 
 #[test]
+fn response_draft_rejection_removes_only_attempt_output() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id: protocol::InvocationId::new(99),
+        call_id: "background".into(),
+        tool_name: "background_probe".into(),
+        args: Default::default(),
+        called_at_ms: 0,
+    }));
+    let before = app.conversation_probe().transcript().history().len();
+    app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartDelta {
+        id: "raw:0".into(),
+        kind: protocol::ReasoningKind::Raw,
+        delta: "rejected thought".into(),
+        title: None,
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "rejected answer".into(),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
+        stream_id: "draft".into(),
+        call_id: Some("bad-call".into()),
+        tool_name: Some("read_file".into()),
+    }));
+    // Background factual output must survive rejection of a model response.
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id: protocol::InvocationId::new(99),
+        call_id: "background".into(),
+        line: "background output".into(),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ResponseDraftRejected));
+    assert_eq!(
+        app.conversation_probe().transcript().history().len(),
+        before
+    );
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("rejected thought"));
+    assert!(!frame.contains("rejected answer"));
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "valid answer".into(),
+    }));
+    assert!(app.render_to_frame().text().contains("valid answer"));
+    app.assert_invariants();
+}
+
+#[test]
+fn response_draft_acceptance_separates_attempts() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    for event in [
+        EngineEvent::TextDelta {
+            delta: "accepted answer".into(),
+        },
+        EngineEvent::ResponseDraftAccepted,
+        EngineEvent::TextDelta {
+            delta: "rejected answer".into(),
+        },
+        EngineEvent::ResponseDraftRejected,
+    ] {
+        app.feed_one(SourceEvent::engine(event));
+    }
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("accepted answer"));
+    assert!(!frame.contains("rejected answer"));
+    app.assert_invariants();
+}
+
+#[test]
+fn response_draft_rejection_preserves_cancelled_previous_turn() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "retained partial answer".into(),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        history: None,
+        meta: Some(protocol::TurnMeta {
+            elapsed_ms: 1,
+            avg_tps: None,
+            display_tps: None,
+            interrupted: true,
+        }),
+    }));
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("retained partial answer"));
+    app.start_turn(2);
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "rejected next answer".into(),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ResponseDraftRejected));
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("retained partial answer"));
+    assert!(!frame.contains("rejected next answer"));
+    app.assert_invariants();
+}
+
+#[test]
+fn response_draft_acceptance_separates_reasoning_summaries() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    let summary = |title: &str| EngineEvent::ReasoningPartFinished {
+        id: title.into(),
+        kind: protocol::ReasoningKind::Summary,
+        title: Some(title.into()),
+        content: title.into(),
+    };
+    for event in [
+        summary("accepted summary"),
+        EngineEvent::ResponseDraftAccepted,
+        summary("rejected summary"),
+        EngineEvent::ResponseDraftRejected,
+    ] {
+        app.feed_one(SourceEvent::engine(event));
+    }
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("accepted summary"));
+    assert!(!frame.contains("rejected summary"));
+    app.assert_invariants();
+}
+
+#[test]
+fn response_draft_acceptance_separates_batched_output() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    for (label, boundary) in [
+        ("accepted", EngineEvent::ResponseDraftAccepted),
+        ("rejected", EngineEvent::ResponseDraftRejected),
+    ] {
+        app.feed_one(SourceEvent::engine(EngineEvent::Reasoning {
+            kind: protocol::ReasoningKind::Summary,
+            title: Some(format!("{label} summary")),
+            content: format!("{label} summary"),
+        }));
+        app.feed_one(SourceEvent::engine(EngineEvent::Text {
+            content: format!("{label} answer"),
+        }));
+        app.feed_one(SourceEvent::engine(boundary));
+    }
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("accepted summary"));
+    assert!(frame.contains("accepted answer"));
+    assert!(!frame.contains("rejected summary"));
+    assert!(!frame.contains("rejected answer"));
+    app.assert_invariants();
+}
+
+#[test]
+fn response_draft_rejection_survives_unrelated_tool_start() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "rejected answer".into(),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id: protocol::InvocationId::new(99),
+        call_id: "background".into(),
+        tool_name: "background_probe".into(),
+        args: Default::default(),
+        called_at_ms: 0,
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+        invocation_id: protocol::InvocationId::new(99),
+        call_id: "background".into(),
+        line: "factual output".into(),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ResponseDraftRejected));
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("rejected answer"));
+    assert!(frame.contains("background_probe"));
+    app.assert_invariants();
+}
+
+#[test]
+fn auxiliary_draft_callbacks_respect_expired_lifecycle_guard() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        __ask_guard = smelt.lifecycle.guard()
+        __ask_callbacks = 0
+        local function count() __ask_callbacks = __ask_callbacks + 1 end
+        smelt.engine.ask({ system = "test", question = "test", guard = __ask_guard,
+            on_delta = count, on_draft_rejected = count, on_response = count })
+    "#
+    ));
+    let id = app.pending_ask_id().expect("guarded ask callbacks");
+    app.feed_one(SourceEvent::engine(EngineEvent::EngineAskDraftRejected {
+        id,
+    }));
+    assert!(app.run_lua("assert(__ask_callbacks == 1); __ask_guard:cancel()"));
+    for event in [
+        EngineEvent::EngineAskDelta {
+            id,
+            delta: "stale".into(),
+        },
+        EngineEvent::EngineAskDraftRejected { id },
+        EngineEvent::EngineAskResponse {
+            id,
+            message: None,
+            error: None,
+        },
+    ] {
+        app.feed_one(SourceEvent::engine(event));
+    }
+    assert!(app.run_lua("assert(__ask_callbacks == 1)"));
+    assert!(app.pending_ask_id().is_none());
+    app.assert_invariants();
+}
+
+#[test]
 fn notification_highlight_uses_terminal_width_for_unicode() {
     let summary = "besta\u{308}tigt 日本 👩\u{200d}💻";
     let (line, _, _, msg_start, msg_end) =
