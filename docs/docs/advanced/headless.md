@@ -11,8 +11,15 @@ keyboard shortcuts, just stdout.
 smelt --headless "explain this codebase"
 ```
 
-A message argument is required. Without one, smelt exits with code 1 and prints
-`error: --headless requires a message argument` to stderr.
+Provide a message argument or use `--prompt-file`:
+
+```bash
+smelt --headless --prompt-file /runtime/prompt.txt
+```
+
+For automation, prefer file input to keep task text out of the process command
+line. See [Initial message](../reference/cli.md#initial-message) for the input
+rules. Without either input, smelt exits 1.
 
 The message follows the same rules as the TUI input box, including `@file`
 attachments:

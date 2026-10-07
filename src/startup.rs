@@ -21,16 +21,30 @@ fn validate_api_key(key_env: &str) -> Result<(), String> {
     resolve_api_key(key_env).map(drop)
 }
 
-pub fn resolve_project_cwd<I, S>(args: I, mut cwd: std::path::PathBuf) -> std::path::PathBuf
+pub fn prepare_launch<I, S>(
+    args: I,
+    mut cwd: std::path::PathBuf,
+) -> (std::path::PathBuf, Result<Option<String>, String>)
 where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString>,
 {
     let bootstrap = scan_bootstrap_args(args);
-    if let Some(ref requested) = bootstrap.worktree {
-        enter_startup_worktree(&mut cwd, requested, bootstrap.worktree_root.as_deref());
+    let prompt = bootstrap
+        .prompt_file
+        .map(|path| {
+            let path = cwd.join(path);
+            std::fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read prompt file {}: {error}", path.display()))
+        })
+        .transpose();
+    // Defer read errors until after the full CLI parse, but do not create a worktree.
+    if prompt.is_ok() {
+        if let Some(ref requested) = bootstrap.worktree {
+            enter_startup_worktree(&mut cwd, requested, bootstrap.worktree_root.as_deref());
+        }
     }
-    cwd
+    (cwd, prompt)
 }
 
 fn enter_startup_worktree(cwd: &mut std::path::PathBuf, requested: &str, root: Option<&str>) {
@@ -63,6 +77,7 @@ fn enter_startup_worktree(cwd: &mut std::path::PathBuf, requested: &str, root: O
 struct BootstrapArgs {
     worktree: Option<String>,
     worktree_root: Option<String>,
+    prompt_file: Option<std::path::PathBuf>,
 }
 
 fn scan_bootstrap_args<I, S>(args: I) -> BootstrapArgs
@@ -72,6 +87,7 @@ where
 {
     let mut worktree = None;
     let mut worktree_root = None;
+    let mut prompt_file = None;
     let mut after_separator = false;
     let mut iter = args.into_iter().map(Into::into).skip(1).peekable();
     while let Some(arg) = iter.next() {
@@ -84,6 +100,23 @@ where
             continue;
         }
         if after_separator {
+            continue;
+        }
+        if s == "--prompt-file" {
+            let Some(path) = iter.next() else {
+                return BootstrapArgs::default();
+            };
+            if path.to_string_lossy().starts_with('-') && path != "-" {
+                return BootstrapArgs::default();
+            }
+            prompt_file = Some(std::path::PathBuf::from(path));
+            continue;
+        }
+        if s.starts_with("--prompt-file=") {
+            let value = &arg.as_encoded_bytes()["--prompt-file=".len()..];
+            // SAFETY: Splitting after an ASCII prefix preserves OsStr's encoded boundaries.
+            let value = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(value) };
+            prompt_file = Some(std::path::PathBuf::from(value));
             continue;
         }
         if s == "--set" {
@@ -127,6 +160,7 @@ where
     BootstrapArgs {
         worktree,
         worktree_root,
+        prompt_file,
     }
 }
 

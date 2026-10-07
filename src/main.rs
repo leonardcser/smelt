@@ -21,6 +21,13 @@ pub struct Args {
     command: Option<Commands>,
     /// Initial message to send (auto-submits on startup)
     message: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "message",
+        help = "Read the initial message from a UTF-8 file (auto-submits on startup)"
+    )]
+    prompt_file: Option<PathBuf>,
     #[arg(long, value_name = "PATH", help = "Path to a custom init.lua")]
     config: Option<String>,
     #[arg(
@@ -96,7 +103,10 @@ pub struct Args {
     log_level: String,
     #[arg(long, help = "Print performance timing summary on exit")]
     bench: bool,
-    #[arg(long, help = "Run headless (no TUI), requires a message argument")]
+    #[arg(
+        long,
+        help = "Run headless (no TUI), requires a message or --prompt-file"
+    )]
     headless: bool,
     #[arg(
         long,
@@ -1091,7 +1101,7 @@ async fn async_main() {
     // We do the early run BEFORE detecting the `auth` subcommand
     // because clap can't know about Lua flags until early has fired.
     let lua_early_startup = smelt_perf::perf::begin("startup:lua_early");
-    let mut cwd = startup::resolve_project_cwd(std::env::args_os(), env.cwd());
+    let (mut cwd, initial_message) = startup::prepare_launch(std::env::args_os(), env.cwd());
     env.set_cwd(cwd.clone());
     let mut lua_runtime = tui::lua::LuaRuntime::new_for_runtime(
         &env,
@@ -1154,6 +1164,17 @@ async fn async_main() {
                 return;
             }
         }
+    }
+
+    let initial_message = initial_message
+        .unwrap_or_else(|error| {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        })
+        .or_else(|| args.message.take());
+    if args.headless && initial_message.is_none() {
+        eprintln!("error: --headless requires a message argument or --prompt-file");
+        std::process::exit(1);
     }
 
     if !args.headless {
@@ -1258,11 +1279,6 @@ async fn async_main() {
 
     std::thread::spawn(tui::warm_up_syntect);
     std::thread::spawn(engine::redact::warm_up);
-
-    if args.headless && args.message.is_none() {
-        eprintln!("error: --headless requires a message argument");
-        std::process::exit(1);
-    }
 
     if args.headless && runtime.active_model().is_none() {
         eprintln!(
@@ -1495,7 +1511,7 @@ async fn async_main() {
             );
         }
         let exit = headless
-            .run_oneshot(args.message.unwrap(), headless_cancel)
+            .run_oneshot(initial_message.unwrap(), headless_cancel)
             .await;
         if exit != smelt_core::HeadlessExit::Success {
             std::process::exit(exit.code());
@@ -1538,7 +1554,7 @@ async fn async_main() {
         redirect_stderr();
 
         println!();
-        app.run(startup_http_client.clone(), args.message).await;
+        app.run(startup_http_client.clone(), initial_message).await;
         // Fire `smelt.lifecycle.on("shutdown", fn)` hooks. The TUI is torn
         // down at this point so stdout is in cooked mode - plugins (e.g.
         // the bundled resume-hint banner) can `print(...)` straight to the

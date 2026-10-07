@@ -148,7 +148,10 @@ the next call.
   snapshots are evicted by count or aggregate memory usage
 
 Use `read_process_output` and `stop_process` with the returned job ID. `/ps`
-shows the same supervised jobs with bounded output, PID, and duration.
+shows the same supervised jobs with bounded output, PID, and duration. Avoid
+broad filename-based cleanup with `pkill -f` or `killall`: it can stop smelt or
+unrelated processes. For processes outside these managed jobs, identify and
+verify the exact target PID before stopping it.
 
 ### `read_process_output`
 

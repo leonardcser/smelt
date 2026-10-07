@@ -25,6 +25,24 @@ CLI flags always take precedence over config values. Runtime choices made inside
 the TUI, such as `/model`, are remembered for the next launch unless disabled
 with `smelt.remember.set(...)`.
 
+## Initial message
+
+Use either a positional message or `--prompt-file <PATH>`, not both:
+
+```bash
+smelt --prompt-file prompt.txt
+```
+
+Files must contain UTF-8 text and are read once without trimming whitespace.
+Relative paths resolve from the launch directory, even with worktree or resume
+options. Read failures exit 1 without creating a worktree. Stdin is not read;
+`-` is a literal file path.
+
+File input avoids argument size limits and process cleanup matches against task
+text. The path remains visible in the command line, so use a neutral filename
+such as `prompt.txt`. This changes transport only, not tool permissions, provider
+access to the prompt, or session storage.
+
 ## Subcommands
 
 | Subcommand                       | Description                                                                                         |
@@ -177,6 +195,7 @@ Auto-detection:
 
 | Flag                         | Description                                                                                      |
 | ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| `--prompt-file <PATH>`       | Read the initial message from a UTF-8 file; conflicts with the positional message                |
 | `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`                                                 |
 | `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)                                                  |
 | `--reasoning-effort <LEVEL>` | Starting reasoning. Known labels: `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; provider-defined labels are accepted |
@@ -226,7 +245,7 @@ with `--headless`. `--ephemeral` is for interactive sessions and conflicts with
 | Flag                  | Description                                                                   |
 | --------------------- | ----------------------------------------------------------------------------- |
 | `--version` / `-v`    | Print the smelt build identity (same as `/version`)                           |
-| `--headless`          | No TUI; requires a message argument. See [Headless](../advanced/headless.md). |
+| `--headless`          | No TUI; requires a message or `--prompt-file`. See [Headless](../advanced/headless.md). |
 | `--format <FORMAT>`   | Headless output format: `text` (default) or `json` (JSONL events)             |
 | `--verbose`           | Show tool output in headless mode                                             |
 | `--color <WHEN>`      | Color output: `auto` (default), `always`, `never`                             |

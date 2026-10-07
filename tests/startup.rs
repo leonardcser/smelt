@@ -2377,16 +2377,8 @@ fn run_headless_config(source: &str) -> std::process::Output {
         ),
     )
     .expect("write headless config");
-    Command::new(env!("CARGO_BIN_EXE_smelt"))
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", home.path().join("config"))
-        .env("XDG_DATA_HOME", home.path().join("data"))
-        .env("XDG_STATE_HOME", home.path().join("state"))
-        .env("XDG_CACHE_HOME", home.path().join("cache"))
+    isolated_smelt_command(home.path())
         .env("SMELT_HEADLESS_TEST_KEY", "test-only")
-        .current_dir(home.path())
         .args([
             "--headless",
             "--color",
@@ -2438,6 +2430,26 @@ fn run_headless_stream_with_options(
     format: &str,
     provider_type: &str,
 ) -> StreamingTrial {
+    run_headless_stream_with_launch(
+        bodies,
+        ending,
+        model,
+        format,
+        provider_type,
+        |_, command| {
+            command.arg("exercise the stream");
+        },
+    )
+}
+
+fn run_headless_stream_with_launch(
+    bodies: &[String],
+    ending: StreamEnding,
+    model: &str,
+    format: &str,
+    provider_type: &str,
+    launch: impl FnOnce(&Path, &mut Command),
+) -> StreamingTrial {
     let home = tempfile::tempdir().unwrap();
     let provider = TcpListener::bind("127.0.0.1:0").unwrap();
     provider.set_nonblocking(true).unwrap();
@@ -2473,16 +2485,9 @@ smelt.tools.register({{
     .unwrap();
     let stdout = home.path().join("events.jsonl");
     let stderr = home.path().join("stderr");
-    let child = Command::new(env!("CARGO_BIN_EXE_smelt"))
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", home.path().join("config"))
-        .env("XDG_DATA_HOME", home.path().join("data"))
-        .env("XDG_STATE_HOME", home.path().join("state"))
-        .env("XDG_CACHE_HOME", home.path().join("cache"))
+    let mut command = isolated_smelt_command(home.path());
+    command
         .env("SMELT_STREAM_TEST_KEY", "test-only")
-        .current_dir(home.path())
         .args([
             "--headless",
             "--format",
@@ -2494,13 +2499,12 @@ smelt.tools.register({{
             "--config",
         ])
         .arg(config)
-        .arg("exercise the stream")
         .stdin(Stdio::null())
         .stdout(File::create(&stdout).unwrap())
         .stderr(File::create(&stderr).unwrap())
-        .process_group(0)
-        .spawn()
-        .unwrap();
+        .process_group(0);
+    launch(home.path(), &mut command);
+    let child = command.spawn().unwrap();
     let mut process = ChildProcessGroup {
         id: child.id() as i32,
         child,
@@ -2602,6 +2606,450 @@ smelt.tools.register({{
 
 fn stream_event(value: serde_json::Value) -> String {
     format!("data: {value}\n\n")
+}
+
+fn isolated_smelt_command(home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .current_dir(home);
+    command
+}
+
+fn run_prompt_file_cli(home: &Path, args: &[&str]) -> std::process::Output {
+    isolated_smelt_command(home)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run prompt-file CLI")
+}
+
+#[test]
+fn prompt_file_cli_rejects_conflicting_or_missing_inputs() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--headless", "--prompt-file", "prompt.txt", "message"],
+        vec!["--headless", "message", "--prompt-file", "prompt.txt"],
+        vec!["--headless", "--prompt-file"],
+        vec!["--prompt-file", "prompt.txt", "auth"],
+    ] {
+        let output = run_prompt_file_cli(home.path(), &args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+    }
+    let output = run_prompt_file_cli(home.path(), &["--headless"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("--headless requires a message argument or --prompt-file"));
+}
+
+#[test]
+fn prompt_file_cli_read_failures_do_not_fall_back_to_prompt_text() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join("directory")).unwrap();
+    std::fs::write(home.path().join("invalid.txt"), b"private prompt text\xff").unwrap();
+    for path in ["missing.txt", "directory", "invalid.txt", "-"] {
+        let output = run_prompt_file_cli(home.path(), &["--headless", "--prompt-file", path]);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("failed to read prompt file"), "{stderr}");
+        assert!(stderr.contains(path), "{stderr}");
+        assert!(!stderr.contains("private prompt text"), "{stderr}");
+    }
+}
+
+#[test]
+fn prompt_file_preserves_large_multiline_utf8_input() {
+    let prompt = format!(
+        "  --not-a-flag 'quotes' $HOME 界\r\nembedded\0NUL\n{}\n\n",
+        "x".repeat(150_000)
+    );
+    let body = stream_finish();
+    let trial = run_headless_stream_with_launch(
+        &[body],
+        StreamEnding::Eof,
+        "\"test-model\"",
+        "json",
+        "openai-compatible",
+        |home, command| {
+            std::fs::write(home.join("prompt.txt"), &prompt).unwrap();
+            command.args(["--prompt-file", "prompt.txt"]);
+        },
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 1);
+    assert!(
+        trial.request_bodies[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user" && message["content"] == prompt),
+        "{}",
+        trial.request_bodies[0]["messages"]
+    );
+}
+
+#[test]
+fn prompt_file_absolute_path_keeps_shell_escape_behavior() {
+    let trial = run_headless_stream_with_launch(
+        &[],
+        StreamEnding::Eof,
+        "\"test-model\"",
+        "text",
+        "openai-compatible",
+        |home, command| {
+            let path = home.join("prompt 界.txt");
+            std::fs::write(&path, "!printf file-shell-ok\n").unwrap();
+            command.arg("--prompt-file").arg(path);
+        },
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 0);
+    assert_eq!(trial.stdout, "file-shell-ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_file_interactive_auto_submits_without_consuming_terminal_input() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let home = tempfile::tempdir().unwrap();
+    let provider = MockServer::start().await;
+    let response = stream_event(
+        serde_json::json!({"choices": [{"delta": {"content": "File prompt completed."}}]}),
+    ) + &stream_finish();
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(response),
+        )
+        .mount(&provider)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"data": [{"id": "test-model", "context_window": 100000}]}),
+        ))
+        .mount(&provider)
+        .await;
+    let config = home.path().join("init.lua");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_continue = "off"
+smelt.settings.show_prediction = false
+smelt.provider.register("test", {{
+  type = "openai-compatible", api_base = "{}",
+  models = {{ {{ name = "test-model", context_window = 100000 }} }},
+}})
+"#,
+            provider.uri()
+        ),
+    )
+    .unwrap();
+    let prompt = "Read this initial message.\nThen answer in 界.";
+    std::fs::write(home.path().join("prompt.txt"), prompt).unwrap();
+    let mut command = isolated_smelt_command(home.path());
+    command
+        .arg("--config")
+        .arg(config)
+        .args(["--model", "test/test-model", "--prompt-file", "prompt.txt"])
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1");
+    let (mut master, mut process) = spawn_in_pty(command);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut captured = Vec::new();
+    let mut consumed = 0;
+    let mut terminal = vt100::Parser::new(24, 100, 0);
+    loop {
+        drain_pty(&mut master, &mut captured);
+        terminal.process(&captured[consumed..]);
+        consumed = captured.len();
+        assert!(process.child.try_wait().unwrap().is_none(), "smelt exited");
+        if terminal
+            .screen()
+            .contents()
+            .contains("File prompt completed.")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "file prompt did not auto-submit:\n{}",
+            terminal.screen().contents()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let requests = provider.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .filter(|request| request.method == "POST")
+        .filter_map(|request| request.body_json::<serde_json::Value>().ok())
+        .any(|body| body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user" && message["content"] == prompt)));
+    master.write_all(b"terminal input still works").unwrap();
+    loop {
+        drain_pty(&mut master, &mut captured);
+        terminal.process(&captured[consumed..]);
+        consumed = captured.len();
+        if terminal
+            .screen()
+            .contents()
+            .contains("terminal input still works")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal input was not available:\n{}",
+            terminal.screen().contents()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn init_prompt_file_repo(home: &Path) -> std::path::PathBuf {
+    let repo = home.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(repo.join("hello.txt"), "hello\n").unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["add", "hello.txt"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    repo
+}
+
+#[test]
+fn prompt_file_read_failure_does_not_create_worktree_or_branch() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = init_prompt_file_repo(home.path());
+    std::fs::write(repo.join("invalid.txt"), b"private prompt text\xff").unwrap();
+    for path in ["missing.txt", "invalid.txt"] {
+        for inline in [false, true] {
+            let mut command = isolated_smelt_command(home.path());
+            command
+                .current_dir(&repo)
+                .args(["--headless", "--worktree", "probe"]);
+            if inline {
+                command.arg(format!("--prompt-file={path}"));
+            } else {
+                command.args(["--prompt-file", path]);
+            }
+            let output = command.stdin(Stdio::null()).output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(stderr.contains("failed to read prompt file"), "{stderr}");
+            assert!(
+                !repo.join(".worktrees").exists(),
+                "failed startup created a worktree"
+            );
+            let branch = Command::new("git")
+                .current_dir(&repo)
+                .args(["show-ref", "--verify", "--quiet", "refs/heads/probe"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                branch.status.code(),
+                Some(1),
+                "failed startup created a branch: {branch:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn prompt_file_read_error_preserves_cli_error_and_help_precedence() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = init_prompt_file_repo(home.path());
+    for (args, code) in [
+        (
+            vec![
+                "--worktree",
+                "probe",
+                "--prompt-file",
+                "missing.txt",
+                "message",
+            ],
+            2,
+        ),
+        (vec!["--worktree", "probe", "--prompt-file"], 2),
+        (vec!["--worktree", "probe", "--prompt-file", "--help"], 2),
+        (
+            vec!["--worktree", "probe", "--prompt-file=missing.txt", "--help"],
+            0,
+        ),
+    ] {
+        let output = isolated_smelt_command(home.path())
+            .current_dir(&repo)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code), "{args:?}: {output:?}");
+        assert!(
+            !repo.join(".worktrees").exists(),
+            "failed startup created a worktree"
+        );
+    }
+}
+
+#[test]
+fn prompt_file_non_unicode_paths_work_with_both_option_forms() {
+    use std::os::unix::ffi::OsStrExt;
+
+    for inline in [false, true] {
+        let trial = run_headless_stream_with_launch(
+            &[],
+            StreamEnding::Eof,
+            "\"test-model\"",
+            "text",
+            "openai-compatible",
+            |home, command| {
+                let path = home.join(std::ffi::OsStr::from_bytes(b"prompt-\xff.txt"));
+                std::fs::write(&path, "!printf file-path-ok").unwrap();
+                if inline {
+                    let mut arg = std::ffi::OsString::from("--prompt-file=");
+                    arg.push(path);
+                    command.arg(arg);
+                } else {
+                    command.arg("--prompt-file").arg(path);
+                }
+            },
+        );
+        assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+        assert_eq!(trial.stdout, "file-path-ok");
+    }
+}
+
+#[test]
+fn prompt_file_relative_path_survives_startup_worktree_change() {
+    let body = stream_finish();
+    let prompt = "Read the prompt from the launch directory.";
+    let trial = run_headless_stream_with_launch(
+        &[body],
+        StreamEnding::Eof,
+        "\"test-model\"",
+        "json",
+        "openai-compatible",
+        |home, command| {
+            let repo = init_prompt_file_repo(home);
+            std::fs::write(repo.join("prompt.txt"), prompt).unwrap();
+            command
+                .current_dir(repo)
+                .args(["--worktree", "probe", "--prompt-file", "prompt.txt"]);
+        },
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    let messages = &trial.request_bodies[0]["messages"];
+    assert!(
+        messages.to_string().contains(".worktrees/probe"),
+        "{messages}"
+    );
+    assert!(
+        messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user" && message["content"] == prompt),
+        "{messages}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn prompt_file_cleanup_does_not_kill_smelt() {
+    use std::os::unix::process::ExitStatusExt;
+
+    // A per-test random marker keeps pkill from matching unrelated processes.
+    let unique = tempfile::tempdir().unwrap();
+    let marker = format!(
+        "smelt_cleanup_{}",
+        unique.path().file_name().unwrap().to_string_lossy()
+    );
+    let prompt = format!("Clean up the process for {marker}.");
+    let bash = stream_event(serde_json::json!({
+        "choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "cleanup", "type": "function",
+            "function": {"name": "bash", "arguments": serde_json::json!({
+                "command": format!("pkill -9 -f {marker}"),
+                "description": "Isolated cleanup regression"
+            }).to_string()}
+        }]}}]
+    })) + &stream_finish_reason("tool_calls");
+    let done = stream_event(
+        serde_json::json!({"choices": [{"delta": {"content": "Cleanup completed."}}]}),
+    ) + &stream_finish();
+    let bodies = [bash, done];
+    for file_backed in [false, true] {
+        let trial = run_headless_stream_with_launch(
+            &bodies,
+            StreamEnding::Eof,
+            "\"test-model\"",
+            "json",
+            "openai-compatible",
+            |home, command| {
+                command.args(["--mode", "yolo"]);
+                if file_backed {
+                    std::fs::write(home.join("prompt.txt"), &prompt).unwrap();
+                    command.args(["--prompt-file", "prompt.txt"]);
+                } else {
+                    command.arg(&prompt);
+                }
+            },
+        );
+        if !file_backed {
+            assert_eq!(
+                trial.status.signal(),
+                Some(libc::SIGKILL),
+                "{}",
+                trial.stderr
+            );
+            assert_eq!(trial.requests, 1);
+            continue;
+        }
+        assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+        assert_eq!(trial.requests, 2);
+        assert!(trial.stdout.contains("Cleanup completed."));
+        assert!(trial
+            .events
+            .iter()
+            .any(|event| event.get("ToolFinished").is_some()));
+        let messages = trial.request_bodies[1]["messages"].as_array().unwrap();
+        assert!(messages
+            .iter()
+            .any(|message| message["role"] == "user" && message["content"] == prompt));
+        assert!(messages
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == "cleanup"));
+    }
 }
 
 fn stream_content() -> String {
