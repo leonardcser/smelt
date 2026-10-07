@@ -226,7 +226,9 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
             serde_json::from_value(tcs.clone()).map_err(|_| ProviderError::MalformedResponse {
                 issue: "invalid tool-call batch".into(),
                 finish_reason: choice["finish_reason"].as_str().map(str::to_owned),
-                usage: parse_usage(&data["usage"]),
+                stop_reason: protocol::request_log::StopReason::from_wire(&choice["stop_reason"]),
+                system_fingerprint: data["system_fingerprint"].as_str().map(str::to_owned),
+                usage: Box::new(parse_usage(&data["usage"])),
             })?
         }
         None => vec![],
@@ -249,6 +251,8 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
 
     Ok(ParsedResponse {
         finish_reason: choice["finish_reason"].as_str().map(str::to_owned),
+        stop_reason: protocol::request_log::StopReason::from_wire(&choice["stop_reason"]),
+        system_fingerprint: data["system_fingerprint"].as_str().map(str::to_owned),
         content,
         reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
         reasoning,
@@ -268,6 +272,8 @@ struct StreamState {
     tool_calls: HashMap<usize, (String, String, String)>,
     usage: TokenUsage,
     finish_reason: Option<String>,
+    stop_reason: Option<protocol::request_log::StopReason>,
+    system_fingerprint: Option<String>,
     emitted_tool_finishes: bool,
 }
 
@@ -288,6 +294,8 @@ impl StreamState {
                     from_content.into_iter().chain(from_reasoning).collect();
                 return ParsedResponse {
                     finish_reason: self.finish_reason,
+                    stop_reason: self.stop_reason,
+                    system_fingerprint: self.system_fingerprint,
                     content: cleaned_content,
                     reasoning_parts: raw_reasoning_parts(cleaned_reasoning.as_deref()),
                     reasoning: cleaned_reasoning,
@@ -300,6 +308,8 @@ impl StreamState {
 
         ParsedResponse {
             finish_reason: self.finish_reason,
+            stop_reason: self.stop_reason,
+            system_fingerprint: self.system_fingerprint,
             content,
             reasoning_parts: raw_reasoning_parts(reasoning.as_deref()),
             reasoning,
@@ -355,7 +365,15 @@ fn apply_sse_event(
         state.usage.reasoning_tokens = parsed.reasoning_tokens.or(state.usage.reasoning_tokens);
     }
 
+    if let Some(fingerprint) = ev["system_fingerprint"].as_str() {
+        state.system_fingerprint = Some(fingerprint.to_owned());
+    }
     let choice = ev["choices"].get(0);
+    if let Some(reason) =
+        choice.and_then(|c| protocol::request_log::StopReason::from_wire(&c["stop_reason"]))
+    {
+        state.stop_reason = Some(reason);
+    }
     let mut saw_finish_reason = false;
     if let Some(reason) = choice.and_then(|c| c["finish_reason"].as_str()) {
         state.finish_reason = Some(reason.to_owned());
@@ -497,6 +515,55 @@ mod tests {
     use crate::FunctionSchema;
     use protocol::{Content, FunctionCall, Message, Role, ToolCall};
     use serde_json::json;
+
+    #[test]
+    fn stop_diagnostics_survive_stream_and_batch_validation() {
+        use protocol::request_log::StopReason;
+        for arguments in ["{}", "{\"sensitive-fixture\":"] {
+            let tool = json!({"id": "call", "type": "function", "function": {"name": "probe", "arguments": arguments}});
+            let batch = json!({
+                "system_fingerprint": "vllm-test",
+                "choices": [{"message": {"tool_calls": [tool.clone()]}, "finish_reason": "tool_calls", "stop_reason": 248044}],
+            });
+            let parsed_batch = parse_response(&batch).unwrap();
+            let events = [
+                json!({"system_fingerprint": "vllm-test", "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call", "function": tool["function"]}]}}]}),
+                json!({"choices": [{"delta": {}, "finish_reason": "tool_calls", "stop_reason": 248044}]}),
+                json!({"system_fingerprint": null, "choices": [], "usage": {"completion_tokens": 2}}),
+            ];
+            let stream = parse_stream_events(events.iter(), &mut |_| {});
+            if arguments == "{}" {
+                for parsed in [parsed_batch, stream.unwrap()] {
+                    assert_eq!(parsed.finish_reason.as_deref(), Some("tool_calls"));
+                    assert_eq!(parsed.stop_reason, Some(StopReason::TokenId(248044)));
+                    assert_eq!(parsed.system_fingerprint.as_deref(), Some("vllm-test"));
+                }
+            } else {
+                for error in [parsed_batch.validate().unwrap_err(), stream.err().unwrap()] {
+                    assert!(!format!("{error:?}").contains("sensitive-fixture"));
+                    assert!(
+                        matches!(error, ProviderError::MalformedResponse { finish_reason, stop_reason, system_fingerprint, .. }
+                        if finish_reason.as_deref() == Some("tool_calls")
+                            && stop_reason == Some(StopReason::TokenId(248044))
+                            && system_fingerprint.as_deref() == Some("vllm-test"))
+                    );
+                }
+            }
+        }
+        let error = parse_response(&json!({
+            "system_fingerprint": "vllm-test",
+            "choices": [{"message": {"tool_calls": {}}, "finish_reason": "stop", "stop_reason": "sensitive-stop-sequence"}],
+        })).err().unwrap();
+        assert!(!format!("{error:?}").contains("sensitive-stop-sequence"));
+        assert!(matches!(
+            error,
+            ProviderError::MalformedResponse {
+                stop_reason: Some(StopReason::StopSequence),
+                system_fingerprint: Some(_),
+                ..
+            }
+        ));
+    }
 
     fn cfg() -> ModelConfig {
         ModelConfig::default()

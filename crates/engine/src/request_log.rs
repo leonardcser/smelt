@@ -121,12 +121,19 @@ fn build_entry(
                 raw: include_payloads
                     .then(|| info.raw_response.cloned())
                     .flatten(),
+                finish_reason: resp.metadata.finish_reason.clone(),
+                stop_reason: resp.metadata.stop_reason.clone(),
+                system_fingerprint: resp
+                    .metadata
+                    .system_fingerprint
+                    .as_deref()
+                    .map(|s| bounded_text(s, 128)),
             });
             (response, usage, cost, resp.tokens_per_sec)
         }
         Err(ProviderError::MalformedResponse { usage, .. }) => {
             let cost = (!pricing.pricing.is_zero()).then(|| pricing.pricing.cost(usage));
-            (None, Some(usage.clone()), cost, None)
+            (None, Some(usage.as_ref().clone()), cost, None)
         }
         Err(_) => (None, None, None, None),
     };
@@ -207,7 +214,23 @@ fn provider_error_to_log_error(
         ProviderError::MalformedResponse { .. } => ("malformed_response", http_status),
         ProviderError::MaxRetries => ("max_retries", http_status),
     };
+    let (finish_reason, stop_reason, system_fingerprint) = match err {
+        ProviderError::MalformedResponse {
+            finish_reason,
+            stop_reason,
+            system_fingerprint,
+            ..
+        } => (
+            finish_reason.clone(),
+            stop_reason.clone(),
+            system_fingerprint.as_deref().map(|s| bounded_text(s, 128)),
+        ),
+        _ => (None, None, None),
+    };
     RequestError {
+        finish_reason,
+        stop_reason,
+        system_fingerprint,
         kind: kind.to_string(),
         status,
         message: err.to_string(),
@@ -316,6 +339,126 @@ mod tests {
             serialized_json_len(&value),
             serde_json::to_vec(&value).unwrap().len()
         );
+    }
+
+    #[test]
+    fn audit_persists_minimal_stop_diagnostics_for_success_and_rejection() {
+        use protocol::request_log::StopReason;
+        for mode in [
+            protocol::RequestAuditMode::Summary,
+            protocol::RequestAuditMode::Full,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut writer = open_writer(tmp.path());
+            let body = serde_json::json!({"messages": [{"content": "sensitive-request"}]});
+            let response = ChatResponse {
+                content: Some("sensitive-answer".into()),
+                reasoning_content: None,
+                reasoning_parts: Vec::new(),
+                reasoning_details: None,
+                tool_calls: Vec::new(),
+                usage: sample_usage(),
+                tokens_per_sec: None,
+                metadata: smelt_provider::ChatResponseMetadata {
+                    finish_reason: Some("stop".into()),
+                    stop_reason: Some(StopReason::TokenId(248044)),
+                    system_fingerprint: Some("v".repeat(256)),
+                    ..Default::default()
+                },
+            };
+            let rejected = ProviderError::MalformedResponse {
+                issue: "incomplete tool-call arguments".into(),
+                finish_reason: Some("tool_calls".into()),
+                stop_reason: Some(StopReason::StopSequence),
+                system_fingerprint: Some("vllm-test".into()),
+                usage: Box::new(sample_usage()),
+            };
+            let mut ids = Vec::new();
+            for (index, result) in [Ok(&response), Err(&rejected)].into_iter().enumerate() {
+                let info = RequestAttemptInfo {
+                    url: "https://api.example.test/v1/chat/completions",
+                    provider_kind: ProviderKind::OpenAiCompatible,
+                    model: "test-model",
+                    body: &body,
+                    attempt: index as u32 + 1,
+                    elapsed_ms: 1,
+                    result,
+                    raw_response: None,
+                    http_status: Some(200),
+                    error_body: None,
+                };
+                let ctx = RequestContext {
+                    request_id: 1,
+                    kind: "turn".into(),
+                    turn_id: Some(1),
+                    ask_id: None,
+                    history_len: Some(1),
+                    background: false,
+                };
+                ids.push(
+                    append(&mut writer, ctx, &info, &zero_pricing(), mode)
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            writer.release().unwrap();
+            let reader =
+                smelt_store::LineageSessionReader::open_existing(tmp.path(), SESSION_ID).unwrap();
+            let stats = reader.request_audit_stats().unwrap();
+            assert_eq!(stats.request_count, 2);
+            assert_eq!(stats.error_count, 1);
+            assert_eq!(
+                stats.raw_response_count,
+                u64::from(mode == protocol::RequestAuditMode::Full)
+            );
+            let success = reader.request_payloads(ids[0]).unwrap().unwrap();
+            let expected_kind = if mode == protocol::RequestAuditMode::Full {
+                smelt_store::ResponsePayloadKind::Full
+            } else {
+                smelt_store::ResponsePayloadKind::Diagnostics
+            };
+            assert_eq!(success.response_payload_kind, Some(expected_kind));
+            let attempts = reader
+                .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+                .unwrap();
+            let attempt = attempts
+                .iter()
+                .find(|attempt| attempt.id == ids[0])
+                .unwrap();
+            assert_eq!(attempt.response_payload_kind, Some(expected_kind));
+            let mut exported = Vec::new();
+            reader.export_requests_jsonl(&mut exported).unwrap();
+            let exported: Vec<serde_json::Value> = String::from_utf8(exported)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                exported[0]["response_payload_kind"],
+                serde_json::to_value(expected_kind).unwrap()
+            );
+            let response = success.response.unwrap();
+            assert_eq!(response["finish_reason"], "stop");
+            assert_eq!(
+                response["stop_reason"],
+                serde_json::json!({"token_id": 248044})
+            );
+            assert_eq!(response["system_fingerprint"], "v".repeat(128));
+            let failure = reader.request_payloads(ids[1]).unwrap().unwrap();
+            let error = failure.error.unwrap();
+            assert_eq!(error["finish_reason"], "tool_calls");
+            assert_eq!(error["stop_reason"], "stop_sequence");
+            assert_eq!(error["system_fingerprint"], "vllm-test");
+            let _: RequestResponse = serde_json::from_value(response.clone()).unwrap();
+            let _: RequestError = serde_json::from_value(error.clone()).unwrap();
+            if mode == protocol::RequestAuditMode::Summary {
+                assert!(success.body.is_none());
+                assert!(failure.body.is_none());
+                assert_eq!(response.as_object().unwrap().len(), 3);
+                assert!(error.get("body").is_none());
+                assert!(!response.to_string().contains("sensitive-answer"));
+            }
+        }
     }
 
     #[test]

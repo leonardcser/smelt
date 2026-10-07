@@ -81,7 +81,7 @@ pub(crate) fn prepare_revision_state(
     compression: ObjectCompression,
 ) -> Result<PreparedRevisionState> {
     let metadata = normalize_revision_metadata(metadata.clone())?;
-    if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+    if crate::schema::has_shared_storage(conn)? {
         let projected;
         let previous = match previous {
             Some(StoredRevisionState::Shared(state)) => Some(state),

@@ -582,7 +582,7 @@ fn spawn_engine_ask(
             let on_attempt = move |info: RequestAttemptInfo<'_>| {
                 if let Err(ProviderError::MalformedResponse { usage, .. }) = info.result {
                     if usage.has_any() {
-                        send_usage(&usage_tx, &log_target, usage.clone(), None, true);
+                        send_usage(&usage_tx, &log_target, usage.as_ref().clone(), None, true);
                     }
                 }
                 let resolved = smelt_provider::resolve_pricing(
@@ -1615,9 +1615,9 @@ impl<'a> Turn<'a> {
         self.emit_messages_snapshot();
 
         let mut first = true;
-        let mut empty_retries: u8 = 0;
+        let mut unusable_retries: u8 = 0;
         let mut tool_replay_guard = ToolReplayGuard::default();
-        const MAX_EMPTY_RETRIES: u8 = 2;
+        const MAX_UNUSABLE_RETRIES: u8 = 2;
 
         loop {
             if !first {
@@ -1874,6 +1874,37 @@ impl<'a> Turn<'a> {
                     continue;
                 }
             }
+            if tool_calls.is_empty()
+                && !output_limited
+                && content.as_ref().is_none_or(|content| {
+                    smelt_buffer::text::trim_whitespace(content.as_text()).is_empty()
+                })
+            {
+                self.emit(EngineEvent::ResponseDraftRejected);
+                if unusable_retries < MAX_UNUSABLE_RETRIES {
+                    unusable_retries += 1;
+                    log::entry(
+                        log::Level::Warn,
+                        "unusable_response_retry",
+                        &serde_json::json!({ "attempt": unusable_retries }),
+                    );
+                    self.emit(EngineEvent::Retrying {
+                        delay_ms: 0,
+                        attempt: u32::from(unusable_retries),
+                    });
+                    continue;
+                }
+                self.emit(EngineEvent::TurnError {
+                    message: format!(
+                        "The model returned no answer or tool calls after {} attempts.",
+                        MAX_UNUSABLE_RETRIES + 1
+                    ),
+                    kind: Some(EngineAskErrorKind::InvalidResponse),
+                    retry_at_ms: None,
+                });
+                self.emit_turn_complete(false);
+                return;
+            }
             // Streaming already delivered deltas; only emit batch events for non-streaming.
             if partial_text.is_empty() && partial_reasoning.is_empty() {
                 if reasoning_parts.is_empty() {
@@ -1911,23 +1942,6 @@ impl<'a> Turn<'a> {
             self.emit(EngineEvent::ResponseDraftAccepted);
 
             if tool_calls.is_empty() {
-                let is_empty = content.is_none()
-                    && reasoning.is_none()
-                    && matches!(
-                        self.history.last(),
-                        Some(HistoryItem::Assistant(t)) if !t.invocations.is_empty()
-                    );
-
-                if is_empty && !output_limited && empty_retries < MAX_EMPTY_RETRIES {
-                    empty_retries += 1;
-                    log::entry(
-                        log::Level::Warn,
-                        "empty_response_retry",
-                        &serde_json::json!({ "attempt": empty_retries }),
-                    );
-                    continue;
-                }
-
                 let hooked = self
                     .apply_response_hooks(Message::assistant_with_reasoning(
                         content,
@@ -1951,7 +1965,7 @@ impl<'a> Turn<'a> {
                 return;
             }
 
-            empty_retries = 0;
+            unusable_retries = 0;
             let hooked = self
                 .apply_response_hooks(Message::assistant_with_reasoning(
                     content,
@@ -2806,7 +2820,7 @@ impl<'a> Turn<'a> {
             let on_attempt = move |info: RequestAttemptInfo<'_>| {
                 if let Err(ProviderError::MalformedResponse { usage, .. }) = info.result {
                     if usage.has_any() {
-                        send_usage(usage_tx, &usage_target, usage.clone(), None, true);
+                        send_usage(usage_tx, &usage_target, usage.as_ref().clone(), None, true);
                     }
                 }
                 let ctx = crate::request_log::RequestContext {
@@ -3586,7 +3600,9 @@ mod tests {
         let error = ProviderError::MalformedResponse {
             issue: "context_length_exceeded in malformed metadata".into(),
             finish_reason: Some("length".into()),
-            usage: protocol::TokenUsage::default(),
+            stop_reason: None,
+            system_fingerprint: None,
+            usage: Box::default(),
         };
         assert!(!is_context_window_error(&error));
         assert_eq!(

@@ -103,6 +103,19 @@ existing retry budget. Failed attempts do not enter assistant history, but their
 reported token usage still counts toward the token and cost totals. Cancellation
 and request deadlines remain active during retries and compaction.
 
+A main response with no non-whitespace answer and no tool calls is also retried
+at most twice, even if it contains reasoning. Rejected drafts do not enter
+assistant history, and completed tools are not replayed. If all three attempts
+are unusable, the turn ends with an explicit error (exit 3), not success.
+Output-limit errors remain terminal without this recovery.
+
+When supplied by the provider, the request audit retains finish reason, stop
+reason, and a bounded runtime fingerprint for successful and malformed attempts.
+Summary audits retain only these diagnostic fields, not response bodies or tool
+arguments. The stop-reason field retains token IDs or a sequence-match marker,
+not the matched sequence text. Existing full-payload audit retention is unchanged.
+These fields do not add token traces or user-facing diagnostic output.
+
 ## Output Format
 
 ### Text (default)

@@ -10,17 +10,29 @@ can be removed; schema migration alone does not retire historical bytes or recei
 ## `lineage-schema-v3`
 
 Deployed lineage databases use schema v3. Readers validate that original layout
-without writes; writers migrate it directly to v4 in one transaction. The migration
+without writes; writers migrate it directly to v5 in one transaction. The migration
 preserves original logical rows and object bytes, backfills completed-node proofs
 and history semantic indexes, restores installed guards, checks foreign keys, and
 publishes both version markers atomically. Fresh databases are created directly in
-v4. Only v3 and the exact final v4 layout are supported; unreleased development
+v5. Only v3, the exact v4 layout, and v5 are supported; unreleased development
 layouts are not migration sources, even if their version marker is 4.
 
 Remove the v3 DDL, migration and read-only layout handling only after retained v3
 databases have a verified lossless replacement and read-only v3 support is retired.
 Format-1 objects and deployed receipt domains have independent removal conditions;
 upgrading the schema does not retire their original bytes or hashes.
+
+## `lineage-schema-v4`
+
+Schema v4 stores retained full responses under the `response` request-object role.
+Readers validate that layout without writes. Writers upgrade it atomically to v5,
+which adds the distinct `response_diagnostics` role for metadata-only summaries.
+Existing roles, object bytes, hashes, receipts, and shared-state projections remain
+unchanged. The migration restores installed guards and validates foreign keys
+before publishing both version markers.
+
+Remove the v4 DDL, migration, and read-only layout handling only after retained v4
+databases have a verified lossless replacement and read-only v4 support is retired.
 
 ## `revision-state-v1`
 

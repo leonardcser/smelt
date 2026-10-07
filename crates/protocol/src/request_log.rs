@@ -57,9 +57,28 @@ pub struct RequestLogEntry {
     pub background: bool,
 }
 
+/// A provider stop token ID or a stop-sequence match without the sequence text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    TokenId(u64),
+    StopSequence,
+}
+
+impl StopReason {
+    pub fn from_wire(value: &serde_json::Value) -> Option<Self> {
+        value.as_u64().map(Self::TokenId).or_else(|| {
+            value
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(|_| Self::StopSequence)
+        })
+    }
+}
+
 /// Parsed response summary for the request log. Streaming responses do not
 /// retain the raw SSE body, only the final parsed content.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RequestResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -70,6 +89,12 @@ pub struct RequestResponse {
     /// Verbatim non-streaming response body, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
 }
 
 /// Provider-facing error captured for the request log.
@@ -81,4 +106,44 @@ pub struct RequestError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stop_reason_does_not_retain_sequence_text() {
+        assert_eq!(
+            StopReason::from_wire(&json!(248044)),
+            Some(StopReason::TokenId(248044))
+        );
+        let reason = StopReason::from_wire(&json!("sensitive-stop-sequence")).unwrap();
+        assert_eq!(
+            serde_json::to_value(reason).unwrap(),
+            json!("stop_sequence")
+        );
+        for invalid in [json!(null), json!(""), json!(-1), json!({"token": 1})] {
+            assert_eq!(StopReason::from_wire(&invalid), None);
+        }
+    }
+
+    #[test]
+    fn legacy_audit_payloads_omit_missing_diagnostics() {
+        let response: RequestResponse = serde_json::from_value(json!({"content": "done"})).unwrap();
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({"content": "done"})
+        );
+        let error = json!({"kind": "network", "message": "timeout"});
+        let parsed: RequestError = serde_json::from_value(error.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), error);
+    }
 }

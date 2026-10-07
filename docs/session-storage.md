@@ -53,19 +53,22 @@ command recovery remain durable.
 
 ## Supported schemas and compatibility
 
-Fresh databases are created directly with the final schema v4. A writable open of
-a genuine deployed v3 database migrates it to v4 in one transaction. Read-only v3
-access validates the original layout without writing or migrating it.
+Fresh databases are created directly with schema v5. A writable open of a genuine
+v3 or v4 database migrates it to v5 in one transaction. Read-only v3 and v4 access
+validates the original layout without writing or migrating it. Schema v5 adds a
+`response_diagnostics` request-object role; full responses retain the `response`
+role, independent of whether the request body is retained.
 
 Schema validation checks the exact layout, not just its version marker. Unreleased
 development layouts are not supported migration sources. Production DDL consists
-of `crates/store/src/lineage_schema.sql` and `crates/store/src/lineage_v3.sql`.
+of `crates/store/src/lineage_schema.sql`, `crates/store/src/lineage_v3.sql`, and
+`crates/store/src/lineage_v4.sql`.
 
 Migration preserves original logical bytes, hashes, revision identities and
 deployed receipt/journal domains. It backfills completed-node proofs and semantic
 indexes, preserves external guards, restores the caller's foreign-key mode and
 validates the final layout and foreign keys before publishing version markers.
-Crashes expose either the original v3 database or the complete v4 database.
+Crashes expose either the original v3/v4 database or the complete v5 database.
 
 Deployed format-1 revision states remain readable. Verified format-2 projections
 allow small envelope reads without rehashing their originals. Full historical

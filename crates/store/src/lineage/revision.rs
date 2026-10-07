@@ -110,7 +110,7 @@ pub(crate) fn insert_revision(
     revision: &RevisionRecord,
 ) -> Result<bool> {
     // COMPAT(history-semantic-v3): legacy revision publication precedes index migration.
-    if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+    if crate::schema::has_shared_storage(conn)? {
         let parent = revision
             .parent_id
             .as_ref()

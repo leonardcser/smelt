@@ -187,7 +187,7 @@ pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<Object
                 meta.hash, meta.stored_size
             )));
         }
-        if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+        if crate::schema::has_shared_storage(conn)? {
             let root = conn
                 .query_row(
                     "SELECT lineage_id, root_id FROM object_data_roots WHERE object_hash = ?1",

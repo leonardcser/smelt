@@ -2725,7 +2725,14 @@ mod tests {
 
     #[test]
     fn catalog_projection_preserves_metadata_without_hydrating_compact_archives() {
-        for (version, checkpoints) in [(3, 0), (3, 32), (3, 128), (4, 0), (4, 32), (4, 128)] {
+        for (version, checkpoints) in [
+            (3, 0),
+            (3, 32),
+            (3, 128),
+            (crate::schema::LINEAGE_SCHEMA_VERSION, 0),
+            (crate::schema::LINEAGE_SCHEMA_VERSION, 32),
+            (crate::schema::LINEAGE_SCHEMA_VERSION, 128),
+        ] {
             let root = tempfile::tempdir().unwrap();
             let id = session_id('1');
             let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();

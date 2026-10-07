@@ -20,6 +20,7 @@ pub(crate) enum RequestObjectRole {
     BodyItem,
     BodyParent,
     Response,
+    ResponseDiagnostics,
     Error,
 }
 
@@ -32,6 +33,7 @@ impl RequestObjectRole {
             Self::BodyItem => "body_item",
             Self::BodyParent => "body_parent",
             Self::Response => "response",
+            Self::ResponseDiagnostics => "response_diagnostics",
             Self::Error => "error",
         }
     }
@@ -44,10 +46,28 @@ impl RequestObjectRole {
             "body_item" => Ok(Self::BodyItem),
             "body_parent" => Ok(Self::BodyParent),
             "response" => Ok(Self::Response),
+            "response_diagnostics" => Ok(Self::ResponseDiagnostics),
             "error" => Ok(Self::Error),
             _ => Err(StoreError::Integrity(format!(
                 "unknown request object role {role:?}"
             ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsePayloadKind {
+    Full,
+    Diagnostics,
+}
+
+impl RequestObjectRole {
+    fn response_payload_kind(self) -> Option<ResponsePayloadKind> {
+        match self {
+            Self::Response => Some(ResponsePayloadKind::Full),
+            Self::ResponseDiagnostics => Some(ResponsePayloadKind::Diagnostics),
+            _ => None,
         }
     }
 }
@@ -135,6 +155,7 @@ pub struct RequestAuditSummary {
     pub raw_body_size: u64,
     pub body_hash: Option<String>,
     pub response_hash: Option<String>,
+    pub response_payload_kind: Option<ResponsePayloadKind>,
     pub response_summary: Option<String>,
     pub error_hash: Option<String>,
     pub error_summary: Option<String>,
@@ -167,6 +188,7 @@ pub struct RequestAuditStats {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestAuditPayloads {
     pub body: Option<Value>,
+    pub response_payload_kind: Option<ResponsePayloadKind>,
     pub response: Option<Value>,
     pub error: Option<Value>,
 }
@@ -256,6 +278,28 @@ pub(crate) fn append_request_attempt(
     )
 }
 
+fn stop_diagnostics(payload: Option<&Value>, error: bool) -> Option<Value> {
+    let payload = payload?.as_object()?;
+    let mut diagnostics = serde_json::Map::new();
+    for key in ["finish_reason", "stop_reason", "system_fingerprint"] {
+        if let Some(value) = payload.get(key).filter(|value| !value.is_null()) {
+            diagnostics.insert(key.into(), value.clone());
+        }
+    }
+    if diagnostics.is_empty() {
+        return None;
+    }
+    // Preserve the error envelope for exports, but never its provider body.
+    if error {
+        for key in ["kind", "status", "message"] {
+            if let Some(value) = payload.get(key) {
+                diagnostics.insert(key.into(), value.clone());
+            }
+        }
+    }
+    Some(Value::Object(diagnostics))
+}
+
 fn insert_request_record(
     conn: &Connection,
     record: RequestAuditRecord,
@@ -282,13 +326,21 @@ fn insert_request_record(
         RequestAuditPayloadMode::Full => put_request_body(conn, record.body.as_ref(), compression)?,
     };
     let response_hash = match payload_mode {
-        RequestAuditPayloadMode::Summary { .. } => None,
+        RequestAuditPayloadMode::Summary { .. } => put_json_object(
+            conn,
+            stop_diagnostics(record.response.as_ref(), false).as_ref(),
+            compression,
+        )?,
         RequestAuditPayloadMode::Full => {
             put_json_object(conn, record.response.as_ref(), compression)?
         }
     };
     let error_hash = match payload_mode {
-        RequestAuditPayloadMode::Summary { .. } => None,
+        RequestAuditPayloadMode::Summary { .. } => put_json_object(
+            conn,
+            stop_diagnostics(record.error.as_ref(), true).as_ref(),
+            compression,
+        )?,
         RequestAuditPayloadMode::Full => put_json_object(conn, record.error.as_ref(), compression)?,
     };
     let cost_micros = cost_micros(record.cost_usd)?;
@@ -345,7 +397,11 @@ fn insert_request_record(
         }
     }
     if let Some(hash) = response_hash.as_deref() {
-        insert_request_ref(conn, request_attempt_id, hash, RequestObjectRole::Response)?;
+        let role = match payload_mode {
+            RequestAuditPayloadMode::Full => RequestObjectRole::Response,
+            RequestAuditPayloadMode::Summary { .. } => RequestObjectRole::ResponseDiagnostics,
+        };
+        insert_request_ref(conn, request_attempt_id, hash, role)?;
     }
     if let Some(hash) = error_hash.as_deref() {
         insert_request_ref(conn, request_attempt_id, hash, RequestObjectRole::Error)?;
@@ -402,7 +458,7 @@ fn request_attempts_for_branch(
                 a.provider, a.model, a.api_base, a.url, a.http_status, a.history_len, a.attempt,
                 a.stream, a.prompt_cache_key, a.background, a.raw_body_size, body.object_hash,
                 response.object_hash, a.response_summary, error.object_hash, a.error_summary,
-                s.stats_json, s.total_cost_micros, s.tokens_per_sec
+                s.stats_json, s.total_cost_micros, s.tokens_per_sec, response.role
          FROM request_attempts a",
     );
     if branch.is_some() {
@@ -416,7 +472,7 @@ fn request_attempts_for_branch(
           LEFT JOIN request_object_refs body
             ON body.request_attempt_id = a.id AND body.role IN ('body_json', 'body_manifest')
           LEFT JOIN request_object_refs response
-            ON response.request_attempt_id = a.id AND response.role = 'response'
+            ON response.request_attempt_id = a.id AND response.role IN ('response', 'response_diagnostics')
           LEFT JOIN request_object_refs error
             ON error.request_attempt_id = a.id AND error.role = 'error'",
     );
@@ -505,6 +561,12 @@ fn request_attempts_for_branch(
             let raw_body_size: i64 = row.get(17)?;
             let stats_json: Option<String> = row.get(23)?;
             let cost_micros: Option<i64> = row.get(24)?;
+            let response_role: Option<String> = row.get(26)?;
+            let response_payload_kind = response_role
+                .map(|role| RequestObjectRole::from_str(&role))
+                .transpose()
+                .map_err(crate::error::to_sql_error)?
+                .and_then(RequestObjectRole::response_payload_kind);
             Ok(RequestAuditSummary {
                 id: row.get(0)?,
                 request_id: row.get(1)?,
@@ -526,6 +588,7 @@ fn request_attempts_for_branch(
                 raw_body_size: raw_body_size as u64,
                 body_hash: row.get(18)?,
                 response_hash: row.get(19)?,
+                response_payload_kind,
                 response_summary: row.get(20)?,
                 error_hash: row.get(21)?,
                 error_summary: row.get(22)?,
@@ -686,10 +749,14 @@ pub(crate) fn request_payloads(
     };
     Ok(Some(RequestAuditPayloads {
         body,
+        response_payload_kind: refs
+            .response
+            .as_ref()
+            .and_then(|(role, _)| role.response_payload_kind()),
         response: refs
             .response
-            .as_deref()
-            .map(|hash| read_json_object_required(conn, hash))
+            .as_ref()
+            .map(|(_, hash)| read_json_object_required(conn, hash))
             .transpose()?,
         error: refs
             .error
@@ -701,7 +768,7 @@ pub(crate) fn request_payloads(
 
 struct RequestPayloadRefs {
     body: Option<(RequestObjectRole, String)>,
-    response: Option<String>,
+    response: Option<(RequestObjectRole, String)>,
     error: Option<String>,
 }
 
@@ -710,7 +777,7 @@ fn request_payload_refs(conn: &Connection, request_attempt_id: i64) -> Result<Re
         "SELECT object_hash, role
          FROM request_object_refs
          WHERE request_attempt_id = ?1
-           AND role IN ('body_json', 'body_manifest', 'response', 'error')
+           AND role IN ('body_json', 'body_manifest', 'response', 'response_diagnostics', 'error')
          ORDER BY role, object_hash",
     )?;
     let rows = stmt.query_map([request_attempt_id], |row| {
@@ -733,7 +800,14 @@ fn request_payload_refs(conn: &Connection, request_attempt_id: i64) -> Result<Re
                 }
                 continue;
             }
-            RequestObjectRole::Response => &mut refs.response,
+            RequestObjectRole::Response | RequestObjectRole::ResponseDiagnostics => {
+                if refs.response.replace((role, hash)).is_some() {
+                    return Err(StoreError::Integrity(format!(
+                        "request {request_attempt_id} has multiple response references"
+                    )));
+                }
+                continue;
+            }
             RequestObjectRole::Error => &mut refs.error,
             _ => unreachable!("query selects only payload root roles"),
         };
@@ -1514,6 +1588,22 @@ mod tests {
         let payloads = request_payloads(&conn, request_id).unwrap().unwrap();
         assert_eq!(payloads.body, Some(serde_json::json!({})));
         assert_eq!(payloads.response, Some(serde_json::json!({})));
+        assert_eq!(
+            payloads.response_payload_kind,
+            Some(ResponsePayloadKind::Full)
+        );
         assert!(object::object_meta(&conn, &hash).unwrap().is_some());
+        insert_request_ref(
+            &conn,
+            request_id,
+            &hash,
+            RequestObjectRole::ResponseDiagnostics,
+        )
+        .unwrap();
+        let error = request_payloads(&conn, request_id).unwrap_err();
+        assert!(
+            error.to_string().contains("multiple response references"),
+            "{error}"
+        );
     }
 }

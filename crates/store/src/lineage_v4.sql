@@ -525,13 +525,12 @@ CREATE TABLE request_attempts (
     response_summary TEXT
 ) STRICT;
 
-CREATE TABLE "request_object_refs" (
+CREATE TABLE request_object_refs (
     request_attempt_id INTEGER NOT NULL
         REFERENCES request_attempts(id) ON DELETE CASCADE CHECK (request_attempt_id > 0),
     object_hash TEXT NOT NULL REFERENCES objects(hash) ON DELETE RESTRICT,
     role TEXT NOT NULL CHECK (role IN (
-        'body_json', 'body_manifest', 'body_top', 'body_item', 'body_parent',
-        'response', 'response_diagnostics', 'error'
+        'body_json', 'body_manifest', 'body_top', 'body_item', 'body_parent', 'response', 'error'
     )),
     PRIMARY KEY (request_attempt_id, object_hash, role)
 ) STRICT;

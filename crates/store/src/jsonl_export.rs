@@ -109,6 +109,8 @@ pub(crate) fn export_lineage_requests_jsonl(
             }
             if let Some(response) = payloads.response {
                 value["response"] = response;
+                value["response_payload_kind"] =
+                    serde_json::to_value(payloads.response_payload_kind)?;
             }
             if let Some(error) = payloads.error {
                 value["error"] = error;

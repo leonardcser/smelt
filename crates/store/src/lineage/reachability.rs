@@ -45,7 +45,7 @@ pub(crate) fn inspect_reachability(
     )? {
         revision_queue.push_back(RevisionId::from_db(revision)?);
     }
-    if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+    if crate::schema::has_shared_storage(conn)? {
         for revision in query_strings(
             conn,
             "SELECT result_revision_id FROM lineage_session_receipt_results WHERE lineage_id = ?1",
@@ -68,7 +68,7 @@ pub(crate) fn inspect_reachability(
         reachable_roots.insert(revision.history_root.id.as_str().to_owned());
         reachable_roots.insert(revision.transcript_root.id.as_str().to_owned());
         let mut owners = vec![revision.state_payload_id.as_str().to_owned()];
-        if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+        if crate::schema::has_shared_storage(conn)? {
             let projected = conn
                 .query_row(
                     "SELECT projected_payload_id FROM lineage_revision_state_projections
@@ -81,7 +81,7 @@ pub(crate) fn inspect_reachability(
         }
         for owner in owners {
             reachable_payloads.insert(owner.clone());
-            if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+            if crate::schema::has_shared_storage(conn)? {
                 let roots = conn
                     .prepare(
                         "SELECT root_id FROM lineage_revision_state_roots

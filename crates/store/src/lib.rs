@@ -136,7 +136,7 @@ pub use meta::{SessionCostUsd, SessionIdentity, SessionMetadata};
 pub use object::{ObjectCodec, ObjectLayout, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
 pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
-    RequestAuditStats, RequestAuditSummary,
+    RequestAuditStats, RequestAuditSummary, ResponsePayloadKind,
 };
 pub use schema::LINEAGE_SCHEMA_VERSION;
 pub use session_command::{

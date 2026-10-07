@@ -29,7 +29,9 @@ pub enum ProviderError {
     MalformedResponse {
         issue: String,
         finish_reason: Option<String>,
-        usage: protocol::TokenUsage,
+        stop_reason: Option<protocol::request_log::StopReason>,
+        system_fingerprint: Option<String>,
+        usage: Box<protocol::TokenUsage>,
     },
     #[error("max retries exceeded")]
     MaxRetries,

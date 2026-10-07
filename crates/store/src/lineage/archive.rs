@@ -1096,7 +1096,7 @@ pub(super) fn register_revision_archive_roots(
 }
 
 fn validate_shared_metadata(conn: &Connection, state: &SharedRevisionState) -> Result<()> {
-    if crate::schema::user_version(conn)? != crate::schema::LINEAGE_SCHEMA_VERSION
+    if !crate::schema::has_shared_storage(conn)?
         || state.format_version != SHARED_REVISION_STATE_VERSION
         || state.metadata.first_user_message.is_some()
         || state.metadata.checkpoint_json.is_some()

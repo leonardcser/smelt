@@ -446,6 +446,8 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
 
     Ok(ParsedResponse {
         finish_reason: data["stop_reason"].as_str().map(str::to_owned),
+        stop_reason: None,
+        system_fingerprint: None,
         content,
         reasoning_parts,
         reasoning,
@@ -508,6 +510,8 @@ impl StreamState {
             .collect();
         ParsedResponse {
             finish_reason: self.finish_reason,
+            stop_reason: None,
+            system_fingerprint: None,
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
             reasoning_parts: Vec::new(),
@@ -528,7 +532,9 @@ fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderErr
         return Err(ProviderError::MalformedResponse {
             issue: "incomplete tool-call stream metadata".into(),
             finish_reason: state.finish_reason,
-            usage: state.usage,
+            stop_reason: None,
+            system_fingerprint: None,
+            usage: Box::new(state.usage),
         });
     }
     let parsed = state.finalize();

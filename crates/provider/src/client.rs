@@ -952,6 +952,8 @@ mod tests {
         let error = ProviderError::MalformedResponse {
             issue: "invalid arguments".into(),
             finish_reason: Some("length".into()),
+            stop_reason: None,
+            system_fingerprint: None,
             usage: Default::default(),
         };
         let mut retries = RetryState::default();

@@ -25,6 +25,8 @@ pub struct ChatResponseMetadata {
     pub codex_turn_state: Option<String>,
     /// Raw chat-completions finish reason, if supplied by the provider.
     pub finish_reason: Option<String>,
+    pub stop_reason: Option<protocol::request_log::StopReason>,
+    pub system_fingerprint: Option<String>,
 }
 
 impl ChatResponse {
@@ -38,6 +40,8 @@ impl ChatResponse {
         mut metadata: ChatResponseMetadata,
     ) -> Self {
         metadata.finish_reason = parsed.finish_reason;
+        metadata.stop_reason = parsed.stop_reason;
+        metadata.system_fingerprint = parsed.system_fingerprint;
         Self {
             content: parsed.content,
             reasoning_content: parsed.reasoning,
@@ -55,6 +59,8 @@ impl ChatResponse {
 pub struct ParsedResponse {
     /// Raw chat-completions finish reason, if supplied by the provider.
     pub finish_reason: Option<String>,
+    pub stop_reason: Option<protocol::request_log::StopReason>,
+    pub system_fingerprint: Option<String>,
     pub content: Option<String>,
     pub reasoning: Option<String>,
     pub reasoning_parts: Vec<CompletedReasoningPart>,
@@ -69,7 +75,9 @@ impl ParsedResponse {
         crate::ProviderError::MalformedResponse {
             issue: issue.into(),
             finish_reason: self.finish_reason.clone(),
-            usage: self.usage.clone(),
+            stop_reason: self.stop_reason.clone(),
+            system_fingerprint: self.system_fingerprint.clone(),
+            usage: Box::new(self.usage.clone()),
         }
     }
 
@@ -160,6 +168,8 @@ mod tests {
     fn response(tool_calls: Vec<ToolCall>) -> ParsedResponse {
         ParsedResponse {
             finish_reason: Some("tool_calls".into()),
+            stop_reason: None,
+            system_fingerprint: None,
             content: None,
             reasoning: None,
             reasoning_parts: Vec::new(),
@@ -199,13 +209,14 @@ mod tests {
                 issue,
                 finish_reason,
                 usage,
+                ..
             } = error
             else {
                 panic!("expected malformed response")
             };
             assert!(issue.contains("index=1"));
             assert_eq!(finish_reason.as_deref(), Some("tool_calls"));
-            assert_eq!(usage, parsed.usage);
+            assert_eq!(*usage, parsed.usage);
         }
     }
 

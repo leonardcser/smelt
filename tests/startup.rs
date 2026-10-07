@@ -3684,22 +3684,164 @@ fn headless_stream_valid_content_and_usage() {
 }
 
 #[test]
-fn headless_stream_reasoning_only_stop_is_complete() {
-    let body = format!(
-        "{}{}data: [DONE]\n\n",
+fn headless_stream_unusable_response_exhaustion_is_an_error() {
+    for delta in [
+        serde_json::json!({"reasoning_content": "sensitive-fixture"}),
+        serde_json::json!({}),
+        serde_json::json!({"content": " \n\t", "reasoning_content": "thinking"}),
+    ] {
+        let body = format!(
+            "{}{}data: [DONE]\n\n",
+            stream_event(serde_json::json!({"choices": [{"delta": delta}]})),
+            stream_finish(),
+        );
+        let trial = run_headless_stream(&[body], StreamEnding::Eof);
+        assert_stream_failure_attempts(&trial, "no answer or tool calls after 3 attempts", 3);
+        assert!(trial
+            .request_bodies
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]));
+        assert_eq!(
+            trial
+                .events
+                .iter()
+                .filter(|ev| ev.as_str() == Some("ResponseDraftRejected"))
+                .count(),
+            3
+        );
+        assert!(!trial
+            .events
+            .iter()
+            .any(|ev| ev.as_str() == Some("ResponseDraftAccepted")));
+    }
+}
+
+#[test]
+fn headless_stream_unusable_initial_response_recovers() {
+    let unusable = format!(
+        "{}{}",
         stream_event(
-            serde_json::json!({"choices": [{"delta": {"reasoning_content": "thinking"}}]})
+            serde_json::json!({"choices": [{"delta": {"reasoning_content": "rejected-plan"}}]})
+        ),
+        stream_finish()
+    );
+    let answer = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+        stream_finish()
+    );
+    let trial = run_headless_stream(&[unusable, answer], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 2);
+    assert_eq!(trial.request_bodies[0], trial.request_bodies[1]);
+    assert_eq!(last_stream_assistant(&trial)["content"], "done");
+    assert!(trial.tool_effect.is_none());
+}
+
+#[test]
+fn headless_stream_valid_tool_arguments_preserve_special_token_literals() {
+    let value = "literal <|endoftext|> and <|im_end|>";
+    let arguments = serde_json::json!({"value": value}).to_string();
+    let tool = format!(
+        "{}{}",
+        stream_tool(&arguments, true),
+        stream_finish_reason("tool_calls")
+    );
+    let answer = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+        stream_finish()
+    );
+    let trial = run_headless_stream(&[tool, answer], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 2);
+    assert_eq!(trial.tool_effect.as_deref(), Some(value));
+    assert_eq!(last_stream_assistant(&trial)["content"], "done");
+    assert!(!trial
+        .events
+        .iter()
+        .any(|event| event == "ResponseDraftRejected"));
+}
+
+#[test]
+fn headless_stream_unusable_response_recovers_without_replaying_tools() {
+    let tool = format!(
+        "{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls")
+    );
+    let unusable = format!(
+        "{}{}{}",
+        stream_event(
+            serde_json::json!({"choices": [{"delta": {"reasoning_content": "rejected-plan"}}]})
         ),
         stream_finish(),
+        stream_event(
+            serde_json::json!({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 4}})
+        ),
     );
-    let trial = run_headless_stream(&[body], StreamEnding::Eof);
+    let valid = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+        stream_finish()
+    );
+    let trial = run_headless_stream(
+        &[tool, unusable.clone(), unusable, valid],
+        StreamEnding::Eof,
+    );
     assert_eq!(trial.status.code(), Some(0), "{:?}", trial.events);
-    assert_eq!(trial.requests, 1);
-    assert!(!trial.events.iter().any(|ev| ev.get("TurnError").is_some()));
+    assert_eq!(trial.requests, 4);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    assert_eq!(trial.request_bodies[1], trial.request_bodies[2]);
+    assert_eq!(trial.request_bodies[2], trial.request_bodies[3]);
+    assert!(!trial.request_bodies[3]["messages"]
+        .to_string()
+        .contains("rejected-plan"));
+    assert_eq!(last_stream_assistant(&trial)["content"], "done");
+    assert_eq!(
+        trial
+            .events
+            .iter()
+            .filter(|ev| ev.as_str() == Some("ResponseDraftRejected"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        trial
+            .events
+            .iter()
+            .filter_map(|ev| ev.get("TokenUsage"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn headless_stream_unusable_response_after_tool_exhaustion_is_an_error() {
+    let tool = format!(
+        "{}{}",
+        stream_tool("{\"value\":\"recorded\"}", true),
+        stream_finish_reason("tool_calls")
+    );
+    let trial = run_headless_stream(&[tool, stream_finish()], StreamEnding::Eof);
+    assert_eq!(trial.status.code(), Some(3));
+    assert_eq!(trial.requests, 4);
+    assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+    assert_eq!(
+        last_stream_assistant(&trial)["invocations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(trial
         .events
         .iter()
-        .any(|ev| ev.get("TurnComplete").is_some()));
+        .filter_map(|ev| ev.get("TurnError"))
+        .any(|ev| ev["message"]
+            .as_str()
+            .unwrap()
+            .contains("no answer or tool calls")));
 }
 
 #[test]

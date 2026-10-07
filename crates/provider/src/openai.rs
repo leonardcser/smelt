@@ -368,6 +368,8 @@ pub fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse, Provid
 
     Ok(ParsedResponse {
         finish_reason: None,
+        stop_reason: None,
+        system_fingerprint: None,
         content,
         reasoning,
         reasoning_parts,
@@ -412,7 +414,9 @@ impl StreamState {
             return Err(ProviderError::MalformedResponse {
                 issue: "incomplete tool-call stream metadata".into(),
                 finish_reason: None,
-                usage: self.usage,
+                stop_reason: None,
+                system_fingerprint: None,
+                usage: Box::new(self.usage),
             });
         }
         let mut tool_order = self.tool_order;
@@ -443,6 +447,8 @@ impl StreamState {
             .collect();
         Ok(ParsedResponse {
             finish_reason: None,
+            stop_reason: None,
+            system_fingerprint: None,
             content: non_empty(self.content),
             reasoning: non_empty(self.reasoning),
             reasoning_parts: Vec::new(),

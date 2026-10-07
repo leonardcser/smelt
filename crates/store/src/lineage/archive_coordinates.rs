@@ -304,7 +304,7 @@ pub(crate) fn verify_archive_coordinates(conn: &Connection, lineage: &LineageId)
             ));
         }
     }
-    if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+    if crate::schema::has_shared_storage(conn)? {
         let headers = conn.prepare(
             "SELECT header_payload_id FROM lineage_checkpoint_summary_presence WHERE lineage_id = ?1",
         )?.query_map([lineage.as_str()], |row| row.get::<_, String>(0))?

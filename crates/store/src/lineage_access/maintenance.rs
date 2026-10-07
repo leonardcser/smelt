@@ -171,7 +171,7 @@ pub(super) fn lineage_doctor_report(
             "foreign_key_check: table={table} rowid={rowid:?} parent={parent} constraint={constraint}"
         ));
     }
-    if schema_version == crate::schema::LINEAGE_SCHEMA_VERSION {
+    if crate::schema::has_shared_storage(conn)? {
         let hashes = conn
             .prepare("SELECT object_hash FROM object_data_roots ORDER BY object_hash")?
             .query_map([], |row| row.get::<_, String>(0))?

@@ -717,6 +717,7 @@ fn request_payload_json(
     serde_json::to_string(&serde_json::json!({
         "body": payloads.body,
         "response": payloads.response,
+        "response_payload_kind": payloads.response_payload_kind,
         "error": payloads.error,
     }))
     .map(Some)
@@ -762,7 +763,8 @@ fn request_summary_json(entry: &smelt_store::RequestAuditSummary) -> serde_json:
         "has_body": entry.body_hash.is_some(),
         "has_response": entry.response_hash.is_some(),
         "has_error": entry.error_hash.is_some(),
-        "has_raw_response": entry.response_hash.is_some(),
+        "has_raw_response": entry.response_payload_kind == Some(smelt_store::ResponsePayloadKind::Full),
+        "response_payload_kind": entry.response_payload_kind,
         "response": response,
         "error": error,
     });
@@ -936,7 +938,11 @@ mod tests {
             .expect("save canonical session");
     }
 
-    fn append_request_audit(sessions: &smelt_core::session::SessionStorage, id: &str) -> i64 {
+    fn append_request_audit(
+        sessions: &smelt_core::session::SessionStorage,
+        id: &str,
+        mode: smelt_store::RequestAuditPayloadMode,
+    ) -> i64 {
         let sessions_dir = sessions.sessions_dir();
         let mut writer = smelt_store::OwnedLineageWriter::open_existing(sessions_dir, id)
             .expect("open canonical lineage writer");
@@ -965,6 +971,8 @@ mod tests {
                         reasoning: None,
                         tool_calls: None,
                         raw: Some(serde_json::json!({"id": "response-1"})),
+                        finish_reason: Some("stop".into()),
+                        ..Default::default()
                     }),
                     usage: Some(protocol::TokenUsage {
                         prompt_tokens: Some(10),
@@ -978,7 +986,7 @@ mod tests {
                     error: None,
                     background: false,
                 },
-                smelt_store::RequestAuditPayloadMode::Full,
+                mode,
             )
             .expect("append request audit");
         writer.release().expect("release canonical session writer");
@@ -1049,7 +1057,11 @@ mod tests {
             "/workspace/canonical",
             200,
         );
-        append_request_audit(&state.sessions, NEWER_SESSION_ID);
+        append_request_audit(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            smelt_store::RequestAuditPayloadMode::Full,
+        );
 
         let (head, body) = fetch(
             &state.sessions,
@@ -1086,7 +1098,11 @@ mod tests {
             "/work/requests",
             200,
         );
-        let attempt_id = append_request_audit(&state.sessions, NEWER_SESSION_ID);
+        let attempt_id = append_request_audit(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            smelt_store::RequestAuditPayloadMode::Full,
+        );
         let session_prefix = &NEWER_SESSION_ID[..12];
 
         let (head, body) = fetch(
@@ -1114,6 +1130,114 @@ mod tests {
         assert_eq!(payload["body"]["prompt"], "hello");
         assert_eq!(payload["response"]["raw"]["id"], "response-1");
         assert!(payload["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn full_response_retention_does_not_depend_on_request_body_retention() {
+        let state = IsolatedState::new();
+        seed_session(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            "requests",
+            "/work/requests",
+            200,
+        );
+        let attempt_id = append_request_audit(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            smelt_store::RequestAuditPayloadMode::Full,
+        );
+        let reader = smelt_store::LineageSessionReader::open_existing(
+            state.sessions.sessions_dir(),
+            NEWER_SESSION_ID,
+        )
+        .unwrap();
+        let path = reader.database_path().to_path_buf();
+        drop(reader);
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "DELETE FROM request_object_refs WHERE request_attempt_id = ?1 AND role = 'body_json'",
+            [attempt_id],
+        )
+        .unwrap();
+        drop(conn);
+        let prefix = format!("/api/sessions/{NEWER_SESSION_ID}");
+        let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests")).await;
+        assert_status(&head, "200 OK");
+        let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(requests[0]["has_body"], false);
+        assert_eq!(requests[0]["has_raw_response"], true);
+        assert_eq!(requests[0]["response_payload_kind"], "full");
+        let (head, body) = fetch(&state.sessions, &format!("{prefix}/summary")).await;
+        assert_status(&head, "200 OK");
+        let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(summary["request_stats"]["raw_response_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn summary_stop_diagnostics_do_not_claim_raw_response_retention() {
+        let state = IsolatedState::new();
+        seed_session(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            "requests",
+            "/work/requests",
+            200,
+        );
+        let attempt_id = append_request_audit(
+            &state.sessions,
+            NEWER_SESSION_ID,
+            smelt_store::RequestAuditPayloadMode::SUMMARY,
+        );
+        let prefix = format!("/api/sessions/{NEWER_SESSION_ID}");
+        let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests")).await;
+        assert_status(&head, "200 OK");
+        let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(requests[0]["has_response"], true);
+        assert_eq!(requests[0]["has_raw_response"], false);
+        assert_eq!(requests[0]["response_payload_kind"], "diagnostics");
+        assert_eq!(requests[0]["has_body"], false);
+
+        let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests/{attempt_id}")).await;
+        assert_status(&head, "200 OK");
+        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            payload["response"],
+            serde_json::json!({"finish_reason": "stop"})
+        );
+        assert!(payload["body"].is_null());
+
+        let (head, body) = fetch(&state.sessions, &format!("{prefix}/summary")).await;
+        assert_status(&head, "200 OK");
+        let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(summary["request_stats"]["raw_response_count"], 0);
+
+        let reader = smelt_store::LineageSessionReader::open_existing(
+            state.sessions.sessions_dir(),
+            NEWER_SESSION_ID,
+        )
+        .unwrap();
+        let path = reader.database_path().to_path_buf();
+        drop(reader);
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
+             SELECT request_attempt_id, object_hash, 'body_json' FROM request_object_refs
+             WHERE request_attempt_id = ?1 AND role = 'response_diagnostics'",
+            [attempt_id],
+        )
+        .unwrap();
+        drop(conn);
+        let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests")).await;
+        assert_status(&head, "200 OK");
+        let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(requests[0]["has_body"], true);
+        assert_eq!(requests[0]["has_raw_response"], false);
+        assert_eq!(requests[0]["response_payload_kind"], "diagnostics");
+        let (head, body) = fetch(&state.sessions, &format!("{prefix}/summary")).await;
+        assert_status(&head, "200 OK");
+        let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(summary["request_stats"]["raw_response_count"], 0);
     }
 
     #[tokio::test]

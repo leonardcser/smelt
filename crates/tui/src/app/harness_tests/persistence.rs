@@ -1876,6 +1876,7 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
         reasoning: None,
         tool_calls: None,
         raw: None,
+        ..Default::default()
     });
 
     app.dispatch_host_call(engine::HostCall::RequestAudit {
