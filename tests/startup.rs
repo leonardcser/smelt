@@ -2671,7 +2671,11 @@ fn prompt_file_preserves_large_multiline_utf8_input() {
         "  --not-a-flag 'quotes' $HOME 界\r\nembedded\0NUL\n{}\n\n",
         "x".repeat(150_000)
     );
-    let body = stream_finish();
+    let body = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+        stream_finish()
+    );
     let trial = run_headless_stream_with_launch(
         &[body],
         StreamEnding::Eof,
@@ -2951,7 +2955,11 @@ fn prompt_file_non_unicode_paths_work_with_both_option_forms() {
 
 #[test]
 fn prompt_file_relative_path_survives_startup_worktree_change() {
-    let body = stream_finish();
+    let body = format!(
+        "{}{}",
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "done"}}]})),
+        stream_finish()
+    );
     let prompt = "Read the prompt from the launch directory.";
     let trial = run_headless_stream_with_launch(
         &[body],
