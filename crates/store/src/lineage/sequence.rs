@@ -686,8 +686,10 @@ pub(crate) fn create_node(
         )));
     }
     let id = node_id(lineage, kind, level, &entries, item_count, byte_count);
+    // BEFORE INSERT immutability triggers run before SQLite handles conflicts.
+    // Reused content-addressed nodes must not reach the insert at all.
     let inserted = conn.execute(
-        "INSERT OR IGNORE INTO lineage_sequence_nodes (
+        "INSERT INTO lineage_sequence_nodes (
              lineage_id, node_id, sequence_kind, node_kind, level,
              entry_count, item_count, byte_count
          ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8

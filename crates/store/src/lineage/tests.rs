@@ -3692,6 +3692,46 @@ fn root_publication_sql_work_is_independent_of_archive_size() {
 }
 
 #[test]
+fn rebuilding_sequences_reuses_completed_leaf_and_internal_nodes() {
+    let (conn, lineage) = setup();
+    for kind in [
+        SequenceKind::History,
+        SequenceKind::Transcript,
+        SequenceKind::Data,
+    ] {
+        let items: Vec<_> = (0..65)
+            .map(|index| format!("item {index}").into_bytes())
+            .collect();
+        let mut first_stats = OperationStats::default();
+        let first = build_sequence_from_empty(
+            &conn,
+            &lineage,
+            kind,
+            &items,
+            ObjectCompression::None,
+            &mut first_stats,
+        )
+        .unwrap();
+        insert_root(&conn, &lineage, &first, &mut first_stats).unwrap();
+        assert!(first.depth > 1);
+        assert!(first_stats.nodes_written > 0);
+        let mut repeated_stats = OperationStats::default();
+        let repeated = build_sequence_from_empty(
+            &conn,
+            &lineage,
+            kind,
+            &items,
+            ObjectCompression::None,
+            &mut repeated_stats,
+        )
+        .unwrap();
+        assert_eq!(repeated, first);
+        assert_eq!(repeated_stats.nodes_written, 0);
+        validate_sequence(&conn, &lineage, &repeated).unwrap();
+    }
+}
+
+#[test]
 fn completed_nodes_reject_direct_sql_mutation_and_incomplete_publication() {
     let (mut conn, lineage) = setup();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -3714,13 +3754,20 @@ fn completed_nodes_reject_direct_sql_mutation_and_incomplete_publication() {
     ] {
         assert!(conn.execute(sql, (lineage.as_str(), node)).is_err(), "accepted {sql}");
     }
-    assert!(conn
-        .execute(
-            "INSERT OR REPLACE INTO lineage_sequence_nodes
-         SELECT * FROM lineage_sequence_nodes WHERE lineage_id = ?1 AND node_id = ?2",
-            (lineage.as_str(), node),
-        )
-        .is_err());
+    for conflict in ["IGNORE", "REPLACE"] {
+        let error = conn
+            .execute(
+                &format!(
+                    "INSERT OR {conflict} INTO lineage_sequence_nodes
+                     SELECT * FROM lineage_sequence_nodes WHERE lineage_id = ?1 AND node_id = ?2"
+                ),
+                (lineage.as_str(), node),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lineage sequence nodes are immutable"));
+    }
     // The immutable leaf remains usable for another publication.
     insert_root(&conn, &lineage, &root, &mut OperationStats::default()).unwrap();
     validate_sequence(&conn, &lineage, &root).unwrap();

@@ -20,7 +20,7 @@ fn title_catalog_refresh_does_not_materialize_retained_archive_values() {
     session.snapshot_metadata_at(4);
     app.app.load_session(session);
     app.ensure_writer_ready();
-    save_record_backed_session(&mut app);
+    save_full_history_fixture(&mut app);
     let outcome = app.app.flush_persist();
     let crate::persist::PersistenceFlushOutcome::Durable {
         receipt: Some(receipt),
@@ -788,7 +788,12 @@ fn session_revision(_app: &TestApp, id: &str) -> u64 {
     lineage_reader(id).snapshot().unwrap().head.revision.get()
 }
 
-fn save_record_backed_session(app: &mut TestApp) {
+fn save_full_history_fixture(app: &mut TestApp) {
+    assert_eq!(
+        app.app.conversation.session().history.len(),
+        app.app.conversation.history_len(),
+        "record-backed fixture requires complete in-memory history"
+    );
     let transcript = crate::app::history::build_transcript_from_session(
         &app.app.lua,
         app.app.conversation.session(),
@@ -799,8 +804,8 @@ fn save_record_backed_session(app: &mut TestApp) {
     app.save_session_and_flush();
 }
 
-fn save_and_close_record_backed_session(mut app: TestApp) -> String {
-    save_record_backed_session(&mut app);
+fn save_and_close_full_history_fixture(mut app: TestApp) -> String {
+    save_full_history_fixture(&mut app);
     let session_id = app.session_snapshot().id.clone();
     app.app
         .shutdown_persist()
@@ -828,7 +833,7 @@ fn save_and_close_record_backed_session(mut app: TestApp) -> String {
 fn saved_one_row_session(guard: &smelt_test_support::ProcessEnvironmentGuard) -> String {
     let mut app = TestApp::builder().build_with_test_home_guard(guard);
     app.session_append_history(HistoryItem::user(Content::text("persisted before resume")));
-    save_and_close_record_backed_session(app)
+    save_and_close_full_history_fixture(app)
 }
 
 fn wait_for_session_load(app: &mut TestApp, id: &str) {
@@ -1927,12 +1932,172 @@ fn stale_request_audit_after_session_switch_is_rejected() {
 }
 
 #[test]
+fn full_history_fixture_rejects_sparse_fork_without_erasing_transcript() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    app.session_append_history(HistoryItem::user(Content::text("complete source history")));
+    save_full_history_fixture(&mut app);
+    let source_id = app.session_snapshot().id.clone();
+    app.fork_session();
+    let fork_id = app.session_snapshot().id.clone();
+    assert_ne!(fork_id, source_id);
+    assert!(app.app.conversation.session().history.is_empty());
+    assert_eq!(app.app.conversation.history_len(), 1);
+    let reader = lineage_reader(&fork_id);
+    let before = reader.snapshot().unwrap();
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        save_full_history_fixture(&mut app);
+    }));
+    assert!(
+        rejected.is_err(),
+        "fixture accepted sparse history and changed transcript root from {} to {}",
+        before.transcript_root_id,
+        reader.snapshot().unwrap().transcript_root_id
+    );
+    let panic = rejected.unwrap_err();
+    assert!(panic
+        .downcast_ref::<String>()
+        .unwrap()
+        .contains("requires complete in-memory history"));
+    app.save_session_and_flush();
+    let after = reader.snapshot().unwrap();
+    assert_eq!(after.transcript_root_id, before.transcript_root_id);
+    assert_eq!(after.head.history_len, before.head.history_len);
+
+    app.app.shutdown_persist().unwrap();
+    assert!(app
+        .app
+        .core
+        .sessions
+        .wait_for_session_catalog(Duration::from_secs(120)));
+    drop(app);
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(
+        resumed.load_session_by_id(&fork_id),
+        "{:?}",
+        resumed.overlays_probe().notification()
+    );
+}
+
+#[test]
+fn turn_transitions_remain_durable_before_and_after_fork() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    app.type_text("source request");
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    assert!(app.agent_running(), "{:?}", app.flush_persist());
+    assert!(app.finish_turn());
+    app.wait_for_turn_persistence();
+    // An unchanged transcript rebuild must reuse already stored sequence nodes.
+    save_full_history_fixture(&mut app);
+    let outcome = app.flush_persist();
+    assert!(
+        matches!(
+            outcome,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ),
+        "source turn must be durable: {outcome:?}"
+    );
+    let source_id = app.session_snapshot().id.clone();
+    let source_reader = lineage_reader(&source_id);
+    assert_eq!(
+        source_reader.turns().unwrap()[0].state,
+        smelt_store::TurnState::Completed
+    );
+
+    app.fork_session();
+    let fork_id = app.session_snapshot().id.clone();
+    assert_ne!(
+        fork_id,
+        source_id,
+        "{:?}",
+        app.overlays_probe().notification()
+    );
+    let fork_reader = lineage_reader(&fork_id);
+    let source = source_reader.snapshot().unwrap();
+    assert_eq!(
+        fork_reader
+            .snapshot()
+            .unwrap()
+            .identity
+            .parent_id
+            .as_deref(),
+        Some(source_id.as_str())
+    );
+    assert_eq!(
+        fork_reader.history_range(0, 1).unwrap(),
+        source_reader.history_range(0, 1).unwrap()
+    );
+
+    app.type_text("fork request");
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    assert!(app.agent_running(), "{:?}", app.flush_persist());
+    assert!(app.finish_turn());
+    app.wait_for_turn_persistence();
+    let outcome = app.flush_persist();
+    assert!(
+        matches!(
+            outcome,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ),
+        "fork turn must be durable: {outcome:?}"
+    );
+    let fork = fork_reader.snapshot().unwrap();
+    assert_eq!(
+        fork.head.history_len.get(),
+        source.head.history_len.get() + 1
+    );
+    let turns = fork_reader.turns().unwrap();
+    assert!(!turns.is_empty());
+    assert!(turns
+        .iter()
+        .all(|turn| turn.state == smelt_store::TurnState::Completed));
+    assert_eq!(source_reader.snapshot().unwrap(), source);
+
+    app.app.shutdown_persist().unwrap();
+    assert!(app
+        .app
+        .core
+        .sessions
+        .wait_for_session_catalog(Duration::from_secs(120)));
+    drop(app);
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(
+        resumed.load_session_by_id(&fork_id),
+        "{:?}",
+        resumed.overlays_probe().notification()
+    );
+    resumed.type_text("resumed fork request");
+    resumed.press(KeyCode::Enter);
+    resumed.wait_for_turn_persistence();
+    assert!(resumed.agent_running(), "{:?}", resumed.flush_persist());
+    assert!(resumed.finish_turn());
+    resumed.wait_for_turn_persistence();
+    let outcome = resumed.flush_persist();
+    assert!(
+        matches!(
+            outcome,
+            crate::persist::PersistenceFlushOutcome::Durable { .. }
+        ),
+        "resumed fork turn must be durable: {outcome:?}"
+    );
+    assert_eq!(
+        fork_reader.snapshot().unwrap().head.history_len.get(),
+        fork.head.history_len.get() + 1
+    );
+    assert_eq!(source_reader.snapshot().unwrap(), source);
+}
+
+#[test]
 fn sparse_fork_publishes_a_complete_destination() {
     let guard = test_home_guard();
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("fork source")));
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(
@@ -1966,7 +2131,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
     let source_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("shared root")));
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(
@@ -2017,7 +2182,7 @@ fn deleting_source_branch_leaves_active_fork_intact() {
     let source_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("shared fork history")));
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(
@@ -2530,7 +2695,7 @@ fn store_backed_resume_preserves_context_token_identity() {
             context_tokens: Some(1234),
             ..Default::default()
         });
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -2578,7 +2743,7 @@ fn store_backed_resume_uses_provider_snapshot_for_pre_request_compaction() {
             context_tokens: Some(100),
             ..Default::default()
         });
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -2627,7 +2792,7 @@ fn store_backed_usage_records_canonical_history_coordinate() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.session_append_history(HistoryItem::user(Content::text("stored prompt")));
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -3027,7 +3192,7 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
         for item in tool_history() {
             app.session_append_history(item);
         }
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -3060,7 +3225,7 @@ fn store_backed_resume_then_continue_preserves_prior_tool_invocations() {
         for item in tool_history() {
             app.session_append_history(item);
         }
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -3085,7 +3250,7 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
         for item in tool_history() {
             app.session_append_history(item);
         }
-        save_and_close_record_backed_session(app)
+        save_and_close_full_history_fixture(app)
     };
 
     for cycle in 0..4 {
@@ -3176,7 +3341,7 @@ fn read_only_session_can_fork_while_its_owner_keeps_writing() {
     let guard = test_home_guard();
     let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
     owner.session_append_history(HistoryItem::user(Content::text("shared history")));
-    save_record_backed_session(&mut owner);
+    save_full_history_fixture(&mut owner);
     let source_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(reader.load_session_by_id(&source_id));
@@ -3253,7 +3418,7 @@ fn fork_storage_contention_does_not_block_the_ui() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     app.session_append_history(HistoryItem::user(Content::text("shared history")));
-    save_record_backed_session(&mut app);
+    save_full_history_fixture(&mut app);
     let source_id = app.session_snapshot().id.clone();
     let address = app
         .core_probe()
@@ -3286,7 +3451,7 @@ fn resuming_fork_while_parent_has_active_writer_is_writable() {
     let guard = test_home_guard();
     let mut parent = TestApp::builder().build_with_test_home_guard(&guard);
     parent.session_append_history(HistoryItem::user(Content::text("shared history")));
-    save_record_backed_session(&mut parent);
+    save_full_history_fixture(&mut parent);
     let parent_id = parent.session_snapshot().id.clone();
 
     assert!(parent.run_lua("smelt.session.fork()"));
@@ -3359,7 +3524,7 @@ fn resuming_session_with_active_writer_is_read_only() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);
     writer.session_append_history(HistoryItem::user(Content::text("owned history")));
-    save_record_backed_session(&mut writer);
+    save_full_history_fixture(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
     let before = lineage_reader(&session_id).snapshot().unwrap();
@@ -3440,7 +3605,7 @@ fn loading_writable_session_clears_prior_ownership_conflict_notification() {
     let writable_session_id = saved_one_row_session(&guard);
     let mut owner = TestApp::builder().build_without_test_home_reset(&guard);
     owner.session_append_history(HistoryItem::user(Content::text("owned history")));
-    save_record_backed_session(&mut owner);
+    save_full_history_fixture(&mut owner);
     let owned_session_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
 
@@ -3523,7 +3688,7 @@ fn session_switch_dismisses_suspended_ownership_conflict_notification() {
     let writable_session_id = saved_one_row_session(&guard);
     let mut owner = TestApp::builder().build_without_test_home_reset(&guard);
     owner.session_append_history(HistoryItem::user(Content::text("owned history")));
-    save_record_backed_session(&mut owner);
+    save_full_history_fixture(&mut owner);
     let owned_session_id = owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     reader.load_session_by_id(&owned_session_id);
@@ -3560,11 +3725,11 @@ fn loading_another_owned_session_replaces_warning_with_target_session_scope() {
     let guard = test_home_guard();
     let mut first_owner = TestApp::builder().build_with_test_home_guard(&guard);
     first_owner.session_append_history(HistoryItem::user(Content::text("first owned history")));
-    save_record_backed_session(&mut first_owner);
+    save_full_history_fixture(&mut first_owner);
     let first_id = first_owner.session_snapshot().id.clone();
     let mut second_owner = TestApp::builder().build_without_test_home_reset(&guard);
     second_owner.session_append_history(HistoryItem::user(Content::text("second owned history")));
-    save_record_backed_session(&mut second_owner);
+    save_full_history_fixture(&mut second_owner);
     let second_id = second_owner.session_snapshot().id.clone();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
 
@@ -4087,7 +4252,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     let guard = test_home_guard();
     let mut writer = TestApp::builder().build_with_test_home_guard(&guard);
     writer.session_append_history(HistoryItem::user(Content::text("writer row")));
-    save_record_backed_session(&mut writer);
+    save_full_history_fixture(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
     let before = lineage_reader(&session_id).snapshot().unwrap();
