@@ -9,13 +9,20 @@ enum LuaReloadKind {
     AutoConfig,
 }
 
+struct LuaReloadPreparation {
+    kind: LuaReloadKind,
+    generation: u64,
+    target_cwd: std::path::PathBuf,
+    preparation: super::cwd::LuaPreparation,
+}
+
 pub(crate) struct LuaRuntimeController {
     generation: crate::lua::LuaGeneration,
     wakeup_tx: tokio::sync::mpsc::UnboundedSender<()>,
     wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     pending_runtime_reconcile: bool,
     pending_reload: Option<LuaReloadKind>,
-    reload_preparation: Option<(LuaReloadKind, u64, super::cwd::LuaPreparation)>,
+    reload_preparation: Option<LuaReloadPreparation>,
     failure: Option<LuaBringUpError>,
 }
 
@@ -53,7 +60,7 @@ impl LuaRuntimeController {
 
     fn schedule_reload(&mut self, kind: LuaReloadKind) -> bool {
         let was_pending = self.pending_reload();
-        let preparing = self.reload_preparation.as_ref().map(|(kind, _, _)| *kind);
+        let preparing = self.reload_preparation.as_ref().map(|pending| pending.kind);
         if preparing == Some(kind) || preparing == Some(LuaReloadKind::Manual) {
             return false;
         }
@@ -228,7 +235,7 @@ impl TuiApp {
         self.lua.clear_pending_reload();
         self.lua.reload_preparation = None;
         let prepared = self
-            .prepare_lua_inputs(self.core.env.cwd().clone(), true)
+            .prepare_lua_inputs(self.current_project_cwd(), true)
             .and_then(|preparation| {
                 preparation
                     .recv_timeout(std::time::Duration::from_secs(10))
@@ -251,22 +258,25 @@ impl TuiApp {
     }
 
     fn reload_lua_inner(&mut self, kind: LuaReloadKind) {
-        let preparation = self.prepare_lua_inputs(
-            self.core.env.cwd().clone(),
-            LuaBringUpKind::Reload(kind).refresh_agent_inputs(),
-        );
-        self.replace_reload_preparation(kind, preparation);
+        let target_cwd = self.current_project_cwd();
+        let refresh_agent_inputs = target_cwd != self.core.env.cwd()
+            || LuaBringUpKind::Reload(kind).refresh_agent_inputs();
+        let pending = self
+            .prepare_lua_inputs(target_cwd.clone(), refresh_agent_inputs)
+            .map(|preparation| LuaReloadPreparation {
+                kind,
+                generation: self.lua.id,
+                target_cwd,
+                preparation,
+            });
+        self.replace_reload_preparation(pending);
     }
 
-    fn replace_reload_preparation(
-        &mut self,
-        kind: LuaReloadKind,
-        preparation: Result<super::cwd::LuaPreparation, String>,
-    ) {
+    fn replace_reload_preparation(&mut self, pending: Result<LuaReloadPreparation, String>) {
         self.lua.clear_pending_reload();
         self.lua.reload_preparation = None;
-        match preparation {
-            Ok(preparation) => self.lua.reload_preparation = Some((kind, self.lua.id, preparation)),
+        match pending {
+            Ok(pending) => self.lua.reload_preparation = Some(pending),
             Err(error) => self.finish_lua_reload(Some(bring_up_error("prepare", None, error))),
         }
     }
@@ -373,21 +383,22 @@ impl TuiApp {
                 return true;
             }
         }
-        if let Some((kind, generation, preparation)) = &self.lua.reload_preparation {
-            if *generation != self.lua.id {
-                let kind = *kind;
+        if let Some(pending) = &self.lua.reload_preparation {
+            if pending.generation != self.lua.id || pending.target_cwd != self.current_project_cwd()
+            {
+                let kind = pending.kind;
                 self.lua.reload_preparation = None;
                 self.reload_lua_inner(kind);
                 return true;
             }
-            let prepared = match preparation.try_recv() {
+            let prepared = match pending.preparation.try_recv() {
                 Ok(result) => result,
                 Err(std::sync::mpsc::TryRecvError::Empty) => return false,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     Err("workspace preparation worker stopped".into())
                 }
             };
-            let kind = *kind;
+            let kind = pending.kind;
             if prepared
                 .as_ref()
                 .is_ok_and(|prepared| !prepared.permissions.is_current())
@@ -550,7 +561,8 @@ impl TuiApp {
         kind: LuaBringUpKind,
         prepared: super::cwd::PreparedLuaInputs,
     ) -> Option<LuaBringUpError> {
-        self.bring_up_lua_at(kind, None, prepared)
+        let cwd_transition = (prepared.cwd != self.core.env.cwd()).then_some(true);
+        self.bring_up_lua_at(kind, cwd_transition, prepared)
     }
 
     pub(super) fn bring_up_lua_for_cwd(
@@ -567,7 +579,7 @@ impl TuiApp {
         cwd_transition: Option<bool>,
         prepared: super::cwd::PreparedLuaInputs,
     ) -> Option<LuaBringUpError> {
-        let refresh_agent_inputs = kind.refresh_agent_inputs();
+        let refresh_agent_inputs = kind.refresh_agent_inputs() || cwd_transition.is_some();
         let lua = self.lua.execution();
         let flush_error = crate::lua::scope_app(self, move || lua.flush_persistent_state());
         if let Some(error) = flush_error {
@@ -1104,6 +1116,45 @@ mod controller_tests {
     }
 
     #[test]
+    fn reload_retries_when_cwd_is_renamed_during_preparation() {
+        use crate::app::test_harness::{test_environment_guard, TestApp};
+
+        for stale_error in [false, true] {
+            let environment = test_environment_guard();
+            let root = tempfile::tempdir().unwrap();
+            let root_path = std::fs::canonicalize(root.path()).unwrap();
+            let original = root_path.join("original");
+            let renamed = root_path.join("renamed");
+            std::fs::create_dir(&original).unwrap();
+            std::env::set_current_dir(&original).unwrap();
+            let mut app = TestApp::builder()
+                .with_cwd(&original)
+                .build_with_test_environment_guard(&environment);
+            let generation = app.lua_probe().id;
+            let prepared = app
+                .app
+                .prepare_lua_inputs(original.clone(), true)
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            app.app.reload_lua_inner(LuaReloadKind::Manual);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.app.lua.reload_preparation.as_mut().unwrap().preparation = rx;
+            std::fs::rename(&original, &renamed).unwrap();
+            tx.send(if stale_error {
+                Err("stale missing cwd".into())
+            } else {
+                prepared
+            })
+            .unwrap();
+            app.wait_for_workspace();
+            assert_eq!(app.core_probe().env.cwd(), renamed);
+            assert_eq!(app.lua_probe().id, generation.wrapping_add(1));
+            assert!(app.app.lua_reload_failure().is_none());
+        }
+    }
+
+    #[test]
     fn manual_reload_upgrades_pending_config_reload() {
         let mut controller = controller();
 
@@ -1121,12 +1172,15 @@ mod controller_tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let generation = app.app.lua.id;
         let (tx, rx) = std::sync::mpsc::channel();
-        app.app.lua.reload_preparation = Some((LuaReloadKind::AutoConfig, generation, rx));
+        app.app.lua.reload_preparation = Some(LuaReloadPreparation {
+            kind: LuaReloadKind::AutoConfig,
+            generation,
+            target_cwd: app.core_probe().env.cwd(),
+            preparation: rx,
+        });
         app.app.schedule_lua_reload();
-        app.app.replace_reload_preparation(
-            LuaReloadKind::Manual,
-            Err("thread creation failed".into()),
-        );
+        app.app
+            .replace_reload_preparation(Err("thread creation failed".into()));
 
         assert!(!app.app.lua_reload_pending());
         assert!(app

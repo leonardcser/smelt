@@ -22,8 +22,21 @@ pub(super) struct PreparedLuaInputs {
 }
 
 pub(super) type LuaPreparation = std::sync::mpsc::Receiver<Result<PreparedLuaInputs, String>>;
-pub(super) type ProjectPreparation =
-    std::sync::mpsc::Receiver<Result<PreparedProjectContext, String>>;
+pub(super) type ProjectPreparation = std::sync::mpsc::Receiver<Result<PreparedWorkspace, String>>;
+
+pub(super) enum PreparedWorkspace {
+    Context(Box<PreparedProjectContext>),
+    Cwd(Box<PreparedLuaInputs>),
+}
+
+impl PreparedWorkspace {
+    pub(super) fn permissions(&self) -> &smelt_core::permissions::PermissionContext {
+        match self {
+            Self::Context(prepared) => &prepared.permissions,
+            Self::Cwd(prepared) => &prepared.permissions,
+        }
+    }
+}
 
 pub(super) struct PreparedProjectContext {
     pub(super) cwd: std::path::PathBuf,
@@ -51,6 +64,27 @@ impl PreparedProjectContext {
             project,
             permissions,
         })
+    }
+
+    fn with_lua_inputs(
+        self,
+        mut prompt_inputs: crate::prompt_inputs::PromptInputs,
+        refresh_agent_inputs: bool,
+    ) -> PreparedLuaInputs {
+        let (skills, system_prompt_read_error) = if refresh_agent_inputs {
+            let outcome = prompt_inputs.refresh(&self.cwd);
+            (outcome.loader, outcome.system_prompt_read_error)
+        } else {
+            (prompt_inputs.skill_loader_for_cwd(&self.cwd), None)
+        };
+        PreparedLuaInputs {
+            cwd: self.cwd,
+            project: self.project,
+            prompt_inputs,
+            skills,
+            system_prompt_read_error,
+            permissions: self.permissions,
+        }
     }
 }
 
@@ -129,6 +163,8 @@ impl Drop for StagedCwdTransition {
 
 pub(crate) struct WorkspaceState {
     cwd: String,
+    #[cfg(unix)]
+    cwd_directory: Option<std::fs::File>,
     home: std::path::PathBuf,
     context: smelt_core::worktree::ProjectContext,
     worktree_path: String,
@@ -145,6 +181,8 @@ impl WorkspaceState {
             smelt_core::worktree::project_context(std::path::Path::new(&cwd), Some(worktree_root));
         let worktree_path = worktree_display_path(&context, &home);
         Self {
+            #[cfg(unix)]
+            cwd_directory: std::fs::File::open(&cwd).ok(),
             cwd,
             home,
             context,
@@ -199,7 +237,32 @@ impl WorkspaceState {
     }
 
     pub(crate) fn install_cwd(&mut self, cwd: std::path::PathBuf) {
+        #[cfg(unix)]
+        {
+            self.cwd_directory = std::fs::File::open(&cwd).ok();
+        }
         self.cwd = cwd.to_string_lossy().into_owned();
+    }
+
+    fn renamed_process_cwd(&self) -> Option<std::path::PathBuf> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let cwd = std::env::current_dir().ok()?;
+            if cwd == self.cwd_path() {
+                return None;
+            }
+            // A rename changes the path, not the directory the process occupies.
+            // Keep a handle so a replacement at the old path cannot be mistaken
+            // for the workspace, and never adopt an unrelated process cwd.
+            let previous = self.cwd_directory.as_ref()?.metadata().ok()?;
+            let current = std::fs::metadata(&cwd).ok()?;
+            if previous.dev() == current.dev() && previous.ino() == current.ino() {
+                return Some(cwd);
+            }
+        }
+        None
     }
 
     pub(crate) fn refresh(&mut self, worktree_root: &std::path::Path) {
@@ -286,7 +349,8 @@ impl TuiApp {
     }
 
     fn resolve_cwd_target(&self, path: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
-        let path = smelt_core::path::resolve_from(path, self.core.env.cwd(), self.core.env.home());
+        let path =
+            smelt_core::path::resolve_from(path, self.current_project_cwd(), self.core.env.home());
         let path = std::fs::canonicalize(&path)
             .map_err(|error| format!("resolve cwd {}: {error}", path.display()))?;
         if !path.is_dir() {
@@ -300,65 +364,72 @@ impl TuiApp {
         target: std::path::PathBuf,
         refresh_agent_inputs: bool,
     ) -> Result<LuaPreparation, String> {
-        let mut prompt_inputs = self.prompt_inputs.clone();
+        let prompt_inputs = self.prompt_inputs.clone();
         let root = std::path::PathBuf::from(&self.core.config.settings.worktree_root);
         let permission_store = self.core.permission_store.clone();
         spawn_workspace_preparation(self.lua.wakeup_sender(), move || {
-            let PreparedProjectContext {
-                cwd,
-                project,
-                permissions,
-            } = PreparedProjectContext::load(target, root, permission_store)?;
-            let (skills, system_prompt_read_error) = if refresh_agent_inputs {
-                let outcome = prompt_inputs.refresh(&cwd);
-                (outcome.loader, outcome.system_prompt_read_error)
-            } else {
-                (prompt_inputs.skill_loader_for_cwd(&cwd), None)
-            };
-            Ok(PreparedLuaInputs {
-                cwd,
-                project,
-                prompt_inputs,
-                skills,
-                system_prompt_read_error,
-                permissions,
-            })
+            let prepared = PreparedProjectContext::load(target, root, permission_store)?;
+            Ok(prepared.with_lua_inputs(prompt_inputs, refresh_agent_inputs))
         })
     }
 
-    pub(super) fn prepare_project_context(&self) -> Result<ProjectPreparation, String> {
-        let cwd = self.core.env.cwd();
+    pub(super) fn current_project_cwd(&self) -> std::path::PathBuf {
+        self.workspace
+            .renamed_process_cwd()
+            .unwrap_or_else(|| self.core.env.cwd())
+    }
+
+    pub(super) fn prepare_project_context(
+        &self,
+        cwd: std::path::PathBuf,
+    ) -> Result<ProjectPreparation, String> {
+        let prompt_inputs = (cwd != self.core.env.cwd()).then(|| self.prompt_inputs.clone());
         let root = std::path::PathBuf::from(&self.core.config.settings.worktree_root);
         let store = self.core.permission_store.clone();
         spawn_workspace_preparation(self.lua.wakeup_sender(), move || {
-            PreparedProjectContext::load(cwd, root, store)
+            let prepared = PreparedProjectContext::load(cwd, root, store)?;
+            Ok(match prompt_inputs {
+                Some(inputs) => {
+                    PreparedWorkspace::Cwd(Box::new(prepared.with_lua_inputs(inputs, true)))
+                }
+                None => PreparedWorkspace::Context(Box::new(prepared)),
+            })
         })
     }
 
     pub(super) fn install_prepared_project_context(
         &mut self,
-        prepared: PreparedProjectContext,
-    ) -> bool {
+        prepared: PreparedWorkspace,
+    ) -> Result<bool, String> {
         let previous_context = self.current_context_note_text();
-        let desired = self.lua.desired();
-        let permissions = prepared.permissions.resolve(
-            &desired.permissions.rules,
-            &desired.permissions.tool_defaults,
-            desired.modes.behaviors.clone(),
-            &self.core.config.settings,
-            self.core.env.home(),
-            self.core.permissions.paths_fn(),
-        );
-        self.core.permissions.apply_resolution(permissions);
-        self.workspace.install_context(prepared.project);
+        match prepared {
+            PreparedWorkspace::Cwd(prepared) => {
+                if let Some(error) = self.bring_up_lua_for_cwd(*prepared, true) {
+                    return Err(error.to_string());
+                }
+            }
+            PreparedWorkspace::Context(prepared) => {
+                let desired = self.lua.desired();
+                let permissions = prepared.permissions.resolve(
+                    &desired.permissions.rules,
+                    &desired.permissions.tool_defaults,
+                    desired.modes.behaviors.clone(),
+                    &self.core.config.settings,
+                    self.core.env.home(),
+                    self.core.permissions.paths_fn(),
+                );
+                self.core.permissions.apply_resolution(permissions);
+                self.workspace.install_context(prepared.project);
+                self.publish_workspace_signals();
+            }
+        }
         self.refresh_active_turn_permissions();
-        self.publish_workspace_signals();
         let context_changed = previous_context != self.current_context_note_text();
         if context_changed {
             self.ensure_current_context_note();
             self.apply_pending_history_appends_for_request();
         }
-        context_changed
+        Ok(context_changed)
     }
 
     pub(crate) fn try_perform_scheduled_cwd_change(&mut self) -> bool {
@@ -560,6 +631,297 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::{worktree_display_path, StagedCwdTransition};
+
+    #[tokio::test]
+    async fn bash_rename_of_cwd_keeps_the_next_request_and_relative_tools_working() {
+        use crate::app::test_harness::{test_environment_guard, Action, SourceEvent, TestApp};
+        use engine::{HostCall, HostRequestDecision, PreparedRequestMessages};
+
+        async fn wait_for_bash(app: &mut TestApp, call_id: &str) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !app.actions().iter().any(|action| matches!(action,
+                Action::EngineSend(command) if matches!(command.as_ref(),
+                    protocol::UiCommand::ToolResult { call_id: completed, .. } if completed == call_id)))
+            {
+                assert!(std::time::Instant::now() < deadline, "bash tool stalled");
+                app.feed_one(SourceEvent::LuaWakeup);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+
+        let environment = test_environment_guard();
+        let parent = tempfile::tempdir().unwrap();
+        let parent_path = std::fs::canonicalize(parent.path()).unwrap();
+        let original = parent_path.join("EV charger holder");
+        let renamed = parent_path.join("ev-charger-holder");
+        std::fs::create_dir(&original).unwrap();
+        std::env::set_current_dir(&original).unwrap();
+        let mut app = TestApp::builder()
+            .with_cwd(&original)
+            .build_with_test_environment_guard(&environment);
+        app.start_turn(42);
+        app.app.lua.core_shared().hooks.prepare_request.clear();
+
+        let command = format!(
+            "if [ -e '{}' ]; then printf 'Destination already exists; not renaming.\\n'; exit 1; fi; mv '{}' '{}'",
+            renamed.display(), original.display(), renamed.display()
+        );
+        app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+            invocation_id: protocol::InvocationId::new(91),
+            request_id: 91,
+            call_id: "rename-cwd".into(),
+            tool_name: "bash".into(),
+            args: std::collections::HashMap::from([("command".into(), command.into())]),
+        }));
+        wait_for_bash(&mut app, "rename-cwd").await;
+        assert!(app.actions().iter().any(|action| matches!(action,
+            Action::EngineSend(command) if matches!(command.as_ref(),
+                protocol::UiCommand::ToolResult { call_id, is_error: false, .. }
+                if call_id == "rename-cwd"))));
+        assert_eq!(std::env::current_dir().unwrap(), renamed);
+
+        let (reply, mut response) = tokio::sync::oneshot::channel();
+        app.dispatch_host_call(HostCall::PrepareRequest {
+            turn_id: 42,
+            messages: PreparedRequestMessages::model_only(Vec::new()),
+            estimated_tokens: 0,
+            reply,
+        });
+        let decision = response.try_recv().unwrap();
+        assert!(
+            matches!(decision, HostRequestDecision::Continue),
+            "{decision:?}"
+        );
+        assert_eq!(app.core_probe().env.cwd(), renamed);
+        assert_eq!(app.workspace_probe().cwd_path(), renamed);
+        assert_eq!(app.session_snapshot().cwd.as_deref(), renamed.to_str());
+        assert_eq!(
+            std::env::var_os("PWD").as_deref(),
+            Some(renamed.as_os_str())
+        );
+        assert!(app
+            .drain_engine_sends()
+            .iter()
+            .any(|command| matches!(command,
+            protocol::UiCommand::UpdateAgentProjectContext(context) if context.cwd == renamed)));
+        assert!(app
+            .app
+            .model_history_messages()
+            .iter()
+            .any(
+                |message| message.content.as_ref().is_some_and(|content| content
+                    .text_content()
+                    .contains(&format!(
+                        "Current working directory: {}.",
+                        renamed.display()
+                    )))
+            ));
+
+        app.feed_one(SourceEvent::engine(protocol::EngineEvent::ToolDispatch {
+            invocation_id: protocol::InvocationId::new(92),
+            request_id: 92,
+            call_id: "relative-write".into(),
+            tool_name: "bash".into(),
+            args: std::collections::HashMap::from([(
+                "command".into(),
+                "printf ok > probe.txt".into(),
+            )]),
+        }));
+        wait_for_bash(&mut app, "relative-write").await;
+        assert_eq!(
+            std::fs::read_to_string(renamed.join("probe.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn cwd_rename_refreshes_project_paths_at_workspace_boundaries() {
+        use crate::app::test_harness::{test_environment_guard, TestApp};
+        use crossterm::event::KeyCode;
+        use engine::{HostCall, HostRequestDecision, PreparedRequestMessages};
+
+        for boundary in ["reload", "request", "auto_reload", "switch"] {
+            let environment = test_environment_guard();
+            let root = tempfile::tempdir().unwrap();
+            let root_path = std::fs::canonicalize(root.path()).unwrap();
+            let original = root_path.join("original");
+            let renamed = root_path.join("renamed");
+            std::fs::create_dir_all(original.join(".smelt/runtime")).unwrap();
+            std::fs::create_dir_all(original.join(".smelt/skills/local-probe")).unwrap();
+            std::fs::write(
+                original.join(".smelt/runtime/rename_probe.lua"),
+                "return 42",
+            )
+            .unwrap();
+            std::fs::write(
+                original.join(".smelt/skills/local-probe/SKILL.md"),
+                "---\nname: local-probe\ndescription: Local rename probe\n---\nUse local files.\n",
+            )
+            .unwrap();
+            std::fs::write(original.join("AGENTS.md"), "Rename probe instructions").unwrap();
+            std::env::set_current_dir(&original).unwrap();
+            let mut app = TestApp::builder()
+                .with_cwd(&original)
+                .build_with_test_environment_guard(&environment);
+            app.mark_project_trusted(&original).unwrap();
+            app.reload_lua();
+            let generation = app.lua_probe().id;
+            std::fs::rename(&original, &renamed).unwrap();
+            app.mark_project_trusted(&renamed).unwrap();
+
+            if boundary == "request" {
+                app.start_turn(42);
+                let (reply, mut response) = tokio::sync::oneshot::channel();
+                app.dispatch_host_call(HostCall::PrepareRequest {
+                    turn_id: 42,
+                    messages: PreparedRequestMessages::model_only(Vec::new()),
+                    estimated_tokens: 0,
+                    reply,
+                });
+                assert!(matches!(
+                    response.try_recv().unwrap(),
+                    HostRequestDecision::Continue
+                ));
+            } else {
+                match boundary {
+                    "reload" => {
+                        app.type_text("/reload");
+                        app.press(KeyCode::Enter);
+                    }
+                    "auto_reload" => app.app.reload_lua_config(),
+                    "switch" => assert!(app.run_lua("smelt.session.switch_cwd('.')")),
+                    _ => unreachable!(),
+                }
+                app.wait_for_workspace();
+            }
+            assert_eq!(app.core_probe().env.cwd(), renamed, "{boundary}");
+            assert!(app.run_lua("assert(require('rename_probe') == 42)"));
+            assert_eq!(app.lua_probe().id, generation.wrapping_add(1), "{boundary}");
+            assert_eq!(
+                app.lua_probe().manifest.target_cwd.as_deref(),
+                Some(renamed.as_path())
+            );
+            assert!(app
+                .lua_probe()
+                .manifest
+                .roots
+                .iter()
+                .all(|path| !path.starts_with(&original)));
+            let skills = app.core_probe().skills.as_ref().unwrap().info();
+            let local = skills
+                .iter()
+                .find(|skill| skill.name == "local-probe")
+                .unwrap();
+            assert!(std::path::Path::new(&local.location).starts_with(&renamed));
+        }
+    }
+
+    #[test]
+    fn failed_rename_transition_keeps_committed_state_and_can_be_retried() {
+        use crate::app::test_harness::{test_environment_guard, TestApp};
+        use engine::{HostCall, HostRequestDecision, PreparedRequestMessages};
+
+        for boundary in ["request", "reload"] {
+            let environment = test_environment_guard();
+            let root = tempfile::tempdir().unwrap();
+            let root_path = std::fs::canonicalize(root.path()).unwrap();
+            let original = root_path.join("original");
+            let renamed = root_path.join("renamed");
+            let init = root_path.join("init.lua");
+            std::fs::write(&init, "_G.rename_marker = 'original'").unwrap();
+            std::fs::create_dir(&original).unwrap();
+            std::env::set_current_dir(&original).unwrap();
+            let mut app = TestApp::builder()
+                .with_cwd(&original)
+                .with_init_lua(&init)
+                .build_with_test_environment_guard(&environment);
+            let generation = app.lua_probe().id;
+            let permissions = app.active_permissions();
+            let session_cwd = app.session_snapshot().cwd;
+            std::fs::rename(&original, &renamed).unwrap();
+            std::fs::write(&init, "error('rename config rejected')").unwrap();
+            if boundary == "request" {
+                app.start_turn(42);
+                let (reply, mut response) = tokio::sync::oneshot::channel();
+                app.dispatch_host_call(HostCall::PrepareRequest {
+                    turn_id: 42,
+                    messages: PreparedRequestMessages::model_only(Vec::new()),
+                    estimated_tokens: 0,
+                    reply,
+                });
+                assert!(
+                    matches!(response.try_recv().unwrap(), HostRequestDecision::Abort(error)
+                    if error.contains("rename config rejected"))
+                );
+                app.discard_turn(crate::app::TurnEnd::Cancelled);
+            } else {
+                app.schedule_lua_reload();
+                app.wait_for_workspace();
+                assert!(app
+                    .app
+                    .lua_reload_failure()
+                    .unwrap()
+                    .message
+                    .contains("rename config rejected"));
+            }
+            assert_eq!(std::env::current_dir().unwrap(), renamed);
+            assert_eq!(app.core_probe().env.cwd(), original);
+            assert_eq!(app.lua_probe().id, generation);
+            assert_eq!(app.lua_probe().core_shared().evaluation_cwd(), original);
+            assert_eq!(app.session_snapshot().cwd, session_cwd);
+            assert!(std::sync::Arc::ptr_eq(
+                &permissions,
+                &app.active_permissions()
+            ));
+            assert!(app.run_lua("assert(rename_marker == 'original')"));
+            std::fs::write(&init, "_G.rename_marker = 'renamed'").unwrap();
+            app.schedule_lua_reload();
+            app.wait_for_workspace();
+            assert_eq!(app.core_probe().env.cwd(), renamed);
+            assert!(app.run_lua("assert(rename_marker == 'renamed')"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_process_cwd_tracks_directory_identity_not_path_existence() {
+        let _environment = smelt_test_support::ProcessEnvironmentGuard::capture();
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let original_parent = root_path.join("original");
+        let renamed_parent = root_path.join("renamed");
+        let original = original_parent.join("child");
+        let renamed = renamed_parent.join("child");
+        std::fs::create_dir_all(&original).unwrap();
+        std::env::set_current_dir(&original).unwrap();
+        let mut workspace = super::WorkspaceState::new(
+            original.to_string_lossy().into_owned(),
+            root_path.clone(),
+            std::path::Path::new(".worktrees"),
+        );
+        assert!(workspace.renamed_process_cwd().is_none());
+
+        std::fs::rename(&original_parent, &renamed_parent).unwrap();
+        std::fs::create_dir_all(&original).unwrap();
+        assert_eq!(workspace.renamed_process_cwd(), Some(renamed.clone()));
+
+        std::env::set_current_dir(&original).unwrap();
+        assert!(workspace.renamed_process_cwd().is_none());
+        std::env::set_current_dir(&root_path).unwrap();
+        assert!(workspace.renamed_process_cwd().is_none());
+
+        workspace.install_cwd(original.clone());
+        std::env::set_current_dir(&renamed).unwrap();
+        assert!(workspace.renamed_process_cwd().is_none());
+        std::env::set_current_dir(&original).unwrap();
+        let moved_again = root_path.join("moved-again");
+        std::fs::rename(&original, &moved_again).unwrap();
+        assert_eq!(workspace.renamed_process_cwd(), Some(moved_again.clone()));
+
+        std::fs::remove_dir(&moved_again).unwrap();
+        assert!(workspace.renamed_process_cwd().is_none());
+        std::env::set_current_dir(&root_path).unwrap();
+    }
 
     #[test]
     fn staged_cwd_transition_rolls_back_when_not_committed() {
