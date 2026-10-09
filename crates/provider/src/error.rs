@@ -56,7 +56,7 @@ const CYBER_POLICY_ERROR_CODE: &str = "cyber_policy";
 const CYBER_POLICY_FALLBACK_MESSAGE: &str =
     "This request has been flagged for possible cybersecurity risk.";
 
-pub(crate) struct OpenAiErrorPayload<'a> {
+struct OpenAiErrorPayload<'a> {
     code: &'a str,
     kind: &'a str,
     message: &'a str,
@@ -81,10 +81,6 @@ impl<'a> OpenAiErrorPayload<'a> {
             resets_at: None,
         }
     }
-
-    pub(crate) fn message(&self) -> &str {
-        self.message
-    }
 }
 
 fn is_cyber_policy_message(message: &str) -> bool {
@@ -104,7 +100,7 @@ fn cyber_policy_error(message: &str) -> ProviderError {
     }
 }
 
-pub(crate) fn classify_openai_error(
+fn classify_openai_error(
     error: &OpenAiErrorPayload<'_>,
     retry_after: Option<Duration>,
     now_secs: u64,
@@ -132,27 +128,52 @@ pub(crate) fn classify_openai_error(
     }
 }
 
-pub(crate) fn classify_openai_stream_error(value: &serde_json::Value) -> ProviderError {
-    let value = value
-        .get("error")
-        .filter(|error| !error.is_null())
-        .unwrap_or(value);
-    let payload = OpenAiErrorPayload::from_value(value);
-    let message = if payload.code == "context_length_exceeded" {
-        "upstream error event: context_length_exceeded"
+pub(crate) fn classify_openai_stream_error(
+    value: &serde_json::Value,
+    now_secs: u64,
+) -> ProviderError {
+    let value = value.get("response").unwrap_or(value);
+    let payload = OpenAiErrorPayload::from_value(value.get("error").unwrap_or(value));
+    let code = if payload.code.is_empty() {
+        payload.kind
     } else {
-        "upstream error event"
+        payload.code
     };
-    let payload = OpenAiErrorPayload { message, ..payload };
-    classify_openai_error(&payload, None, crate::unix_now())
-        .unwrap_or_else(|| ProviderError::InvalidResponse(message.into()))
+    let transient = matches!(
+        code,
+        "server_error"
+            | "internal_error"
+            | "internal_server_error"
+            | "server_is_overloaded"
+            | "service_unavailable"
+            | "temporarily_unavailable"
+            | "request_timeout"
+    );
+    let diagnostic = if transient || code == "context_length_exceeded" {
+        format!("upstream error event: {code}")
+    } else {
+        "upstream error event".into()
+    };
+    match classify_openai_error(&payload, None, now_secs) {
+        Some(error @ ProviderError::RateLimited { .. }) => error,
+        Some(ProviderError::QuotaExceeded { resets_at, .. }) => ProviderError::QuotaExceeded {
+            body: diagnostic,
+            resets_at,
+        },
+        Some(ProviderError::CyberPolicy { .. }) => cyber_policy_error(""),
+        _ if transient => ProviderError::Server {
+            status: 0,
+            body: diagnostic,
+        },
+        _ => ProviderError::InvalidResponse(diagnostic),
+    }
 }
 
 pub(crate) fn check_openai_stream_error(value: &serde_json::Value) -> Result<(), ProviderError> {
     if value.get("error").is_some_and(|error| !error.is_null())
         || value["type"].as_str() == Some("error")
     {
-        return Err(classify_openai_stream_error(value));
+        return Err(classify_openai_stream_error(value, crate::unix_now()));
     }
     Ok(())
 }
@@ -162,7 +183,7 @@ pub(crate) fn parse_openai_stream_event(
 ) -> Result<serde_json::Value, ProviderError> {
     if event.name == "error" {
         let value = serde_json::from_slice(&event.data).unwrap_or_default();
-        return Err(classify_openai_stream_error(&value));
+        return Err(classify_openai_stream_error(&value, crate::unix_now()));
     }
     let value = event.json()?;
     check_openai_stream_error(&value)?;
@@ -362,6 +383,58 @@ pub fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_stream_errors_are_retryable_and_sanitized() {
+        for code in [
+            "server_error",
+            "internal_error",
+            "internal_server_error",
+            "server_is_overloaded",
+            "service_unavailable",
+            "temporarily_unavailable",
+            "request_timeout",
+        ] {
+            for field in ["code", "type"] {
+                let payload = serde_json::json!({field: code, "message": "sensitive-fixture"});
+                for value in [
+                    serde_json::json!({"error": payload}),
+                    serde_json::json!({"response": {"error": payload}}),
+                ] {
+                    let error = classify_openai_stream_error(&value, 0);
+                    assert!(matches!(error, ProviderError::Server { status: 0, .. }));
+                    assert_eq!(
+                        retry_delay_for(&error, 0, None, 0),
+                        Some(Duration::from_millis(500))
+                    );
+                    assert!(error.to_string().contains(code));
+                    assert!(!error.to_string().contains("sensitive-fixture"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_stream_errors_do_not_retry_or_expose_payloads() {
+        for code in [
+            "invalid_request_error",
+            "invalid_prompt",
+            "authentication_error",
+            "context_length_exceeded",
+            "insufficient_quota",
+            "unknown_error",
+        ] {
+            let payload = serde_json::json!({"code": code, "type": "server_error", "message": "sensitive-fixture"});
+            for value in [
+                serde_json::json!({"error": payload}),
+                serde_json::json!({"response": {"error": payload}}),
+            ] {
+                let error = classify_openai_stream_error(&value, 0);
+                assert_eq!(retry_delay_for(&error, 0, None, 0), None);
+                assert!(!error.to_string().contains("sensitive-fixture"));
+            }
+        }
+    }
 
     #[test]
     fn http_cyber_policy_code_preserves_provider_message() {

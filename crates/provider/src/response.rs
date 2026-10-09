@@ -23,7 +23,7 @@ pub struct ChatResponse {
 #[derive(Clone, Default)]
 pub struct ChatResponseMetadata {
     pub codex_turn_state: Option<String>,
-    /// Raw chat-completions finish reason, if supplied by the provider.
+    /// Provider finish reason, including normalized output-limit reasons.
     pub finish_reason: Option<String>,
     pub stop_reason: Option<protocol::request_log::StopReason>,
     pub system_fingerprint: Option<String>,
@@ -57,7 +57,7 @@ impl ChatResponse {
 
 /// Internal parsed fields from an API response.
 pub struct ParsedResponse {
-    /// Raw chat-completions finish reason, if supplied by the provider.
+    /// Provider finish reason, including normalized output-limit reasons.
     pub finish_reason: Option<String>,
     pub stop_reason: Option<protocol::request_log::StopReason>,
     pub system_fingerprint: Option<String>,

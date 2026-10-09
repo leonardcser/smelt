@@ -2398,7 +2398,9 @@ fn run_headless_config(source: &str) -> std::process::Output {
 enum StreamEnding {
     Eof,
     NetworkFailure,
+    NetworkFailures { first: usize, count: usize },
     Cancel,
+    CancelDuringRetry,
 }
 
 struct StreamingTrial {
@@ -2509,7 +2511,7 @@ smelt.tools.register({{
         id: child.id() as i32,
         child,
     };
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut requests = 0;
     let mut request_bodies = Vec::new();
     let mut held_streams = Vec::new();
@@ -2552,8 +2554,17 @@ smelt.tools.register({{
             request_bodies.push(serde_json::from_slice(&request_body).unwrap());
             let body = &bodies[requests.min(bodies.len() - 1)];
             requests += 1;
-            assert!(requests <= bodies.len() + 3, "unexpected retries");
-            if requests < bodies.len() || matches!(ending, StreamEnding::Eof) {
+            assert!(requests <= bodies.len() + 5, "unexpected retries");
+            let network_failure = match ending {
+                StreamEnding::NetworkFailures { first, count } => {
+                    (first..first + count).contains(&requests)
+                }
+                StreamEnding::NetworkFailure
+                | StreamEnding::Cancel
+                | StreamEnding::CancelDuringRetry => requests >= bodies.len(),
+                StreamEnding::Eof => false,
+            };
+            if !network_failure {
                 write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).unwrap();
                 // Small writes exercise arbitrary transport boundaries; decoder tests
                 // separately check every split, including mid-codepoint UTF-8.
@@ -2570,9 +2581,15 @@ smelt.tools.register({{
                 // Dropping a chunked response without its zero chunk is a transport error.
             }
         }
-        if matches!(ending, StreamEnding::Cancel) && !cancelled && {
+        if !cancelled && {
             let events = std::fs::read_to_string(&stdout).unwrap();
-            events.contains("TextDelta") || events.contains("EngineAskDelta")
+            match ending {
+                StreamEnding::Cancel => {
+                    events.contains("TextDelta") || events.contains("EngineAskDelta")
+                }
+                StreamEnding::CancelDuringRetry => events.contains("Retrying"),
+                _ => false,
+            }
         } {
             assert_eq!(unsafe { libc::kill(process.id, libc::SIGINT) }, 0);
             cancelled = true;
@@ -3081,6 +3098,14 @@ fn stream_tool(arguments: &str, start: bool) -> String {
         tool["function"]["name"] = serde_json::json!("stream_probe");
     }
     stream_event(serde_json::json!({"choices": [{"delta": {"tool_calls": [tool]}}]}))
+}
+
+fn stream_event_count(trial: &StreamingTrial, name: &str) -> usize {
+    trial
+        .events
+        .iter()
+        .filter(|event| event.as_str() == Some(name) || event.get(name).is_some())
+        .count()
 }
 
 fn assert_stream_failure(trial: &StreamingTrial, cause: &str) {
@@ -4075,11 +4100,123 @@ fn headless_stream_valid_fragmented_tool_call() {
 }
 
 #[test]
+fn headless_responses_upstream_errors_share_retry_policy() {
+    use serde_json::json;
+
+    for (code, retry) in [
+        ("server_error", true),
+        ("rate_limit_exceeded", true),
+        ("invalid_prompt", false),
+        ("unknown_error", false),
+    ] {
+        let payload = json!({"code": code, "resets_at": 0, "message": "sensitive-fixture"});
+        for error in [
+            json!({"type": "error", "error": payload}),
+            json!({"type": "response.failed", "response": {"error": payload}}),
+        ] {
+            let failed = stream_event(
+                json!({"type": "response.output_text.delta", "delta": "rejected-answer"}),
+            ) + &stream_event(error);
+            let answer =
+                stream_event(json!({"type": "response.output_text.delta", "delta": "recovered"}))
+                    + &stream_event(
+                        json!({"type": "response.completed", "response": {"usage": {}}}),
+                    );
+            let trial = run_headless_stream_with_options(
+                &[failed, answer],
+                StreamEnding::Eof,
+                "\"test-model\"",
+                "json",
+                "openai",
+            );
+            if !retry {
+                assert_stream_failure(&trial, "upstream error event");
+                continue;
+            }
+            assert_eq!(trial.status.code(), Some(0), "{:?}", trial.events);
+            assert_eq!(trial.requests, 2);
+            assert_eq!(trial.request_bodies[0], trial.request_bodies[1]);
+            assert_eq!(last_stream_assistant(&trial)["content"], "recovered");
+            assert!(trial
+                .events
+                .iter()
+                .any(|event| *event == "ResponseDraftRejected"));
+            assert!(!trial.stdout.contains("sensitive-fixture"));
+            assert!(!trial.stderr.contains("sensitive-fixture"));
+            assert!(!trial
+                .events
+                .iter()
+                .any(|event| event.get("TurnError").is_some()));
+        }
+    }
+}
+
+#[test]
+fn headless_responses_output_limit_and_filter_are_not_retried() {
+    for reason in ["max_output_tokens", "content_filter"] {
+        let body = stream_event(
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial answer"}),
+        ) + &stream_event(
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "incomplete_details": {"reason": reason}, "usage": {"input_tokens": 7, "output_tokens": 2}
+            }}),
+        );
+        let trial = run_headless_stream_with_options(
+            &[body],
+            StreamEnding::Eof,
+            "\"test-model\"",
+            "json",
+            "openai",
+        );
+        if reason == "max_output_tokens" {
+            assert_output_limit(&trial, 1);
+            assert_eq!(last_stream_assistant(&trial)["content"], "partial answer");
+            let usage = trial
+                .events
+                .iter()
+                .find_map(|event| event.get("TokenUsage"))
+                .unwrap();
+            assert_eq!(usage["usage"]["prompt_tokens"], 7);
+            assert_eq!(usage["usage"]["completion_tokens"], 2);
+        } else {
+            assert_stream_failure(&trial, reason);
+        }
+    }
+}
+
+#[test]
+fn headless_responses_output_limit_validates_tools_before_execution() {
+    for (arguments, valid) in [(r#"{"value":"recorded"}"#, true), ("{", false)] {
+        let body = [
+            serde_json::json!({"type": "response.output_item.done", "item": {
+                "type": "function_call", "id": "probe", "call_id": "probe", "name": "stream_probe", "arguments": arguments
+            }}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "incomplete_details": {"reason": "max_output_tokens"}, "usage": {"input_tokens": 7, "output_tokens": 2}
+            }}),
+        ].into_iter().map(stream_event).collect::<String>();
+        let trial = run_headless_stream_with_options(
+            &[body],
+            StreamEnding::Eof,
+            "\"test-model\"",
+            "json",
+            "openai",
+        );
+        if valid {
+            assert_output_limit(&trial, 1);
+            assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
+        } else {
+            assert_stream_failure_attempts(&trial, "tool-call arguments", 3);
+        }
+    }
+}
+
+#[test]
 fn headless_stream_upstream_error() {
     for (error, cause) in [
         (
             stream_event(
-                serde_json::json!({"error": {"message": "sensitive-fixture", "code": "server_error"}}),
+                serde_json::json!({"error": {"message": "sensitive-fixture", "code": "invalid_request_error"}}),
             ),
             "upstream error event",
         ),
@@ -4096,7 +4233,7 @@ fn headless_stream_upstream_error() {
         ),
         (
             stream_event(
-                serde_json::json!({"error": {"message": "sensitive-fixture", "code": "rate_limit_exceeded", "resets_at": 0}}),
+                serde_json::json!({"error": {"message": "sensitive-fixture", "code": "rate_limit_exceeded"}}),
             ),
             "rate limited",
         ),
@@ -4127,15 +4264,14 @@ fn headless_stream_malformed_json() {
 }
 
 #[test]
-fn headless_stream_eof_during_event() {
+fn headless_stream_eof_during_event_recovers() {
     for tail in ["data: {\"sensitive-fixture\":", "data: {\"ok\":true}\n"] {
-        assert_stream_failure(
-            &run_headless_stream(
-                &[format!("{}{}{tail}", stream_content(), stream_finish())],
-                StreamEnding::Eof,
-            ),
-            "incomplete SSE event",
-        );
+        let valid = stream_content() + &stream_finish();
+        let trial = run_headless_stream(&[valid.clone() + tail, valid], StreamEnding::Eof);
+        assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+        assert_eq!(trial.requests, 2);
+        assert_eq!(trial.request_bodies[0], trial.request_bodies[1]);
+        assert_eq!(last_stream_assistant(&trial)["content"], "partial 界");
     }
 }
 
@@ -4163,11 +4299,86 @@ fn headless_stream_done_without_finish_reason() {
 }
 
 #[test]
-fn headless_stream_network_interruption() {
-    assert_stream_failure(
-        &run_headless_stream(&[stream_content()], StreamEnding::NetworkFailure),
-        "network error",
-    );
+fn headless_responses_stream_interruption_recovers_without_executing_drafts() {
+    use serde_json::json;
+
+    let draft = [
+        json!({"type": "response.reasoning_summary_text.delta", "item_id": "reasoning-1", "summary_index": 0, "delta": "rejected-plan"}),
+        json!({"type": "response.output_text.delta", "delta": "rejected-answer"}),
+        json!({"type": "response.output_item.added", "item": {
+            "type": "function_call", "id": "draft-1", "call_id": "draft-1", "name": "stream_probe", "arguments": ""
+        }}),
+        json!({"type": "response.function_call_arguments.delta", "item_id": "draft-1", "delta": "{\"value\":\"rejected-effect\"}"}),
+        json!({"type": "response.output_item.done", "item": {
+            "type": "function_call", "id": "draft-1", "call_id": "draft-1", "name": "stream_probe", "arguments": "{\"value\":\"rejected-effect\"}"
+        }}),
+    ].into_iter().map(stream_event).collect::<String>();
+    let answer = [
+        json!({"type": "response.output_text.delta", "delta": "recovered 界"}),
+        json!({"type": "response.completed", "response": {"usage": {"input_tokens": 7, "output_tokens": 2}}}),
+    ].into_iter().map(stream_event).collect::<String>();
+
+    // Both an abruptly closed HTTP body and a clean EOF before response.completed
+    // must restart the request, not accept or execute the streamed draft.
+    for (ending, tail) in [
+        (StreamEnding::NetworkFailures { first: 1, count: 2 }, ""),
+        (StreamEnding::Eof, ""),
+        (StreamEnding::Eof, "data: {\"sensitive-fixture\":"),
+    ] {
+        let failed = draft.clone() + tail;
+        let trial = run_headless_stream_with_options(
+            &[failed.clone(), failed, answer.clone()],
+            ending,
+            "\"test-model\"",
+            "json",
+            "openai",
+        );
+        assert_eq!(trial.status.code(), Some(0), "{:?}", trial.events);
+        assert_eq!(trial.requests, 3);
+        assert!(trial
+            .request_bodies
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]));
+        assert!(trial.tool_effect.is_none());
+        let assistant = last_stream_assistant(&trial);
+        assert_eq!(assistant["content"], "recovered 界");
+        assert!(!assistant.to_string().contains("rejected-"));
+        assert_eq!(stream_event_count(&trial, "ResponseDraftRejected"), 2);
+        assert_eq!(stream_event_count(&trial, "Retrying"), 2);
+        assert_eq!(stream_event_count(&trial, "TokenUsage"), 1);
+        assert!(!trial
+            .events
+            .iter()
+            .any(|event| event.get("TurnError").is_some() || event.get("ToolStarted").is_some()));
+    }
+}
+
+#[test]
+fn headless_stream_network_interruption_exhausts_retry_budget() {
+    let trial = run_headless_stream(&[stream_content()], StreamEnding::NetworkFailure);
+    assert_stream_failure_attempts(&trial, "SSE network read failed", 6);
+    assert!(trial
+        .request_bodies
+        .windows(2)
+        .all(|pair| pair[0] == pair[1]));
+    assert_eq!(stream_event_count(&trial, "ResponseDraftRejected"), 6);
+    assert_eq!(stream_event_count(&trial, "Retrying"), 5);
+}
+
+#[test]
+fn headless_stream_cancellation_during_network_retry() {
+    let trial = run_headless_stream(&[stream_content()], StreamEnding::CancelDuringRetry);
+    assert_eq!(trial.status.code(), Some(130), "{}", trial.stderr);
+    assert_eq!(trial.requests, 1);
+    assert!(trial.tool_effect.is_none());
+    assert!(trial
+        .events
+        .iter()
+        .any(|event| event.get("Retrying").is_some()));
+    assert!(!trial
+        .events
+        .iter()
+        .any(|event| event.get("TurnError").is_some()));
 }
 
 #[test]
@@ -4218,17 +4429,24 @@ fn headless_stream_tool_finish_does_not_execute_before_stream_validation() {
         "data: {sensitive-fixture}\n\n",
         "data: {",
     ] {
-        let trial = run_headless_stream(&[format!("{tool}{tail}")], StreamEnding::Eof);
-        assert_stream_failure(
-            &trial,
-            if tail.contains("error") {
-                "upstream error event"
-            } else if tail.ends_with("\n\n") {
-                "malformed JSON"
-            } else {
-                "incomplete SSE event"
-            },
+        let trial = run_headless_stream(
+            &[format!("{tool}{tail}"), stream_content() + &stream_finish()],
+            StreamEnding::Eof,
         );
+        if tail.ends_with("\n\n") {
+            assert_stream_failure(
+                &trial,
+                if tail.contains("error") {
+                    "upstream error event"
+                } else {
+                    "malformed JSON"
+                },
+            );
+        } else {
+            assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+            assert_eq!(trial.requests, 2);
+            assert!(trial.tool_effect.is_none());
+        }
         assert!(trial
             .events
             .iter()
@@ -4247,20 +4465,27 @@ fn headless_stream_failure_after_tool_effect_does_not_replay() {
         stream_tool("{\"value\":\"recorded\"}", true),
         stream_finish()
     );
-    let trial = run_headless_stream(&[tool, stream_content()], StreamEnding::NetworkFailure);
-    assert_eq!(trial.status.code(), Some(3), "{}", trial.stderr);
-    assert_eq!(trial.requests, 2, "failed response was retried");
+    let answer =
+        stream_event(serde_json::json!({"choices": [{"delta": {"content": "recovered"}}]}))
+            + &stream_finish();
+    let trial = run_headless_stream(
+        &[tool, stream_content(), answer],
+        StreamEnding::NetworkFailures { first: 2, count: 1 },
+    );
+    assert_eq!(trial.status.code(), Some(0), "{}", trial.stderr);
+    assert_eq!(trial.requests, 3);
+    assert_eq!(trial.request_bodies[1], trial.request_bodies[2]);
     assert_eq!(trial.tool_effect.as_deref(), Some("recorded"));
-    let error = trial
-        .events
-        .iter()
-        .find_map(|ev| ev.get("TurnError"))
-        .unwrap();
-    assert!(error["message"].as_str().unwrap().contains("network error"));
-    assert!(!trial
-        .events
-        .iter()
-        .any(|ev| ev.get("TurnComplete").is_some()));
+    assert_eq!(last_stream_assistant(&trial)["content"], "recovered");
+    assert_eq!(
+        trial
+            .events
+            .iter()
+            .filter(|ev| ev.get("ToolStarted").is_some())
+            .count(),
+        1
+    );
+    assert!(!trial.events.iter().any(|ev| ev.get("TurnError").is_some()));
 }
 
 #[test]

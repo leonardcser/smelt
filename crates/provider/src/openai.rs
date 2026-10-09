@@ -1,4 +1,4 @@
-use crate::error::{classify_openai_error, OpenAiErrorPayload};
+use crate::error::classify_openai_stream_error;
 use crate::sse;
 use crate::{
     non_empty, non_empty_blocks,
@@ -397,6 +397,7 @@ struct StreamState {
     usage: TokenUsage,
     error: Option<ProviderError>,
     saw_completed: bool,
+    finish_reason: Option<&'static str>,
     invalid_tool_metadata: bool,
 }
 
@@ -405,7 +406,7 @@ impl StreamState {
         if let Some(err) = self.error {
             return Err(err);
         }
-        if !self.saw_completed {
+        if !self.saw_completed && self.finish_reason != Some("length") {
             return Err(ProviderError::Stream(
                 "stream ended without response.completed".into(),
             ));
@@ -413,7 +414,7 @@ impl StreamState {
         if self.invalid_tool_metadata {
             return Err(ProviderError::MalformedResponse {
                 issue: "incomplete tool-call stream metadata".into(),
-                finish_reason: None,
+                finish_reason: self.finish_reason.map(str::to_owned),
                 stop_reason: None,
                 system_fingerprint: None,
                 usage: Box::new(self.usage),
@@ -446,7 +447,7 @@ impl StreamState {
             })
             .collect();
         Ok(ParsedResponse {
-            finish_reason: None,
+            finish_reason: self.finish_reason.map(str::to_owned),
             stop_reason: None,
             system_fingerprint: None,
             content: non_empty(self.content),
@@ -688,19 +689,7 @@ fn apply_sse_event(
                 state.usage = parse_usage(u);
             }
         }
-        "response.failed" => {
-            if let Some(error) = ev.get("response").and_then(|r| r.get("error")) {
-                let error = OpenAiErrorPayload::from_value(error);
-                state.error = Some(
-                    classify_openai_error(&error, None, now_secs).unwrap_or_else(|| {
-                        ProviderError::Server {
-                            status: 0,
-                            body: error.message().to_string(),
-                        }
-                    }),
-                );
-            }
-        }
+        "response.failed" => state.error = Some(classify_openai_stream_error(ev, now_secs)),
         "response.incomplete" => {
             let reason = ev
                 .get("response")
@@ -708,9 +697,19 @@ fn apply_sse_event(
                 .and_then(|d| d.get("reason"))
                 .and_then(|r| r.as_str())
                 .unwrap_or("unknown");
-            state.error = Some(ProviderError::Stream(format!(
-                "incomplete response returned, reason: {reason}"
-            )));
+            if reason == "max_output_tokens" {
+                state.finish_reason = Some("length");
+                if let Some(usage) = ev.get("response").and_then(|r| r.get("usage")) {
+                    state.usage = parse_usage(usage);
+                }
+            } else {
+                let message = format!("incomplete response returned, reason: {reason}");
+                state.error = Some(if reason == "content_filter" {
+                    ProviderError::InvalidResponse(message)
+                } else {
+                    ProviderError::Stream(message)
+                });
+            }
         }
         _ => {}
     }
@@ -2197,7 +2196,7 @@ mod tests {
     }
 
     #[test]
-    fn sse_failed_unknown_code_falls_through_to_server_error() {
+    fn sse_failed_unknown_code_is_terminal_and_sanitized() {
         let mut state = StreamState::default();
         step(
             &mut state,
@@ -2207,27 +2206,35 @@ mod tests {
             }),
         );
         match state.error.unwrap() {
-            ProviderError::Server { status, body } => {
-                assert_eq!(status, 0);
-                assert_eq!(body, "oops");
-            }
-            e => panic!("expected Server, got {e:?}"),
+            ProviderError::InvalidResponse(message) => assert_eq!(message, "upstream error event"),
+            e => panic!("expected InvalidResponse, got {e:?}"),
         }
     }
 
     #[test]
-    fn sse_incomplete_sets_stream_error() {
-        let mut state = StreamState::default();
-        step(
-            &mut state,
-            json!({
-                "type": "response.incomplete",
-                "response": {"incomplete_details": {"reason": "max_output_tokens"}}
-            }),
-        );
-        match state.error.unwrap() {
-            ProviderError::Stream(message) => assert!(message.contains("max_output_tokens")),
-            e => panic!("expected Stream, got {e:?}"),
+    fn sse_incomplete_retries_only_transient_failures() {
+        for reason in ["max_output_tokens", "content_filter", "interrupted"] {
+            let mut state = StreamState::default();
+            step(
+                &mut state,
+                json!({
+                    "type": "response.incomplete",
+                    "response": {"incomplete_details": {"reason": reason}}
+                }),
+            );
+            if reason == "max_output_tokens" {
+                assert_eq!(
+                    state.finalize().unwrap().finish_reason.as_deref(),
+                    Some("length")
+                );
+            } else {
+                let error = state.error.unwrap();
+                assert!(error.to_string().contains(reason));
+                assert_eq!(
+                    crate::retry_delay_for(&error, 0, None, 0).is_some(),
+                    reason == "interrupted"
+                );
+            }
         }
     }
 

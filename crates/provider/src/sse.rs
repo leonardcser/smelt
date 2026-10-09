@@ -129,7 +129,7 @@ impl Decoder {
             line.is_empty() || line.starts_with(b":")
         });
         if !comments_only {
-            return Err(ProviderError::InvalidResponse(format!(
+            return Err(ProviderError::Stream(format!(
                 "EOF with incomplete SSE event ({})",
                 self.diagnostic()
             )));
@@ -328,7 +328,9 @@ mod tests {
             let (decoder, events) = decode(&[raw.as_bytes()]);
             assert_eq!(events, vec![json!({"a": 1})]);
             assert_eq!(decoder.buffered_bytes(), tail.len());
-            let error = decoder.finish().unwrap_err().to_string();
+            let error = decoder.finish().unwrap_err();
+            assert!(matches!(error, ProviderError::Stream(_)));
+            let error = error.to_string();
             assert!(error.contains("EOF with incomplete SSE event"));
             assert!(error.contains(&format!("buffered_bytes={}", tail.len())));
         }

@@ -505,11 +505,8 @@ impl ProviderClient {
                     {
                         on_delta(ProviderStreamEvent::DraftRejected);
                     }
-                    // Transport failures with visible output are terminal. A validated
-                    // malformed response can be retried after rejecting its whole draft.
-                    if !malformed && streamed.load(std::sync::atomic::Ordering::Relaxed) {
-                        return Err(err);
-                    }
+                    // Streamed output is only a draft. Replaying the unchanged request
+                    // after a retryable failure is safe once the whole draft is rejected.
                     if let Some(delay) = retry_state.schedule_provider_retry(
                         &err,
                         max_stream_retries,
@@ -1254,7 +1251,10 @@ mod tests {
 
         assert_eq!(server.await.unwrap(), 4);
         assert!(matches!(error, ProviderError::CyberPolicy { .. }));
-        assert_eq!(attempt_errors.into_inner().unwrap(), vec![MESSAGE; 4]);
+        assert_eq!(
+            attempt_errors.into_inner().unwrap(),
+            vec![error.to_string(); 4]
+        );
         assert_eq!(
             retries.into_inner().unwrap(),
             vec![
@@ -1291,13 +1291,11 @@ mod tests {
         assert!(matches!(error, ProviderError::CyberPolicy { .. }));
         assert_eq!(
             attempt_errors.into_inner().unwrap(),
-            vec![
-                "server error 500: temporary",
-                MESSAGE,
-                MESSAGE,
-                MESSAGE,
-                MESSAGE,
+            [
+                vec!["server error 500: temporary".to_string()],
+                vec![error.to_string(); 4]
             ]
+            .concat()
         );
         assert_eq!(
             retries.into_inner().unwrap(),
@@ -1336,7 +1334,7 @@ mod tests {
         assert_eq!(server.await.unwrap(), 3);
         assert_eq!(
             attempt_errors.into_inner().unwrap(),
-            vec![format!("server error 0: {MESSAGE}"); 2]
+            vec!["server error 0: upstream error event: server_error"; 2]
         );
         assert_eq!(
             retries.into_inner().unwrap(),
@@ -1417,6 +1415,72 @@ mod tests {
             headers,
             attempts.into_inner().expect("attempt callback mutex"),
         )
+    }
+
+    #[tokio::test]
+    async fn codex_disconnect_retries_with_same_auth_and_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}/codex", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (headers, body) = read_http_request(&mut stream).await;
+                assert_eq!(
+                    headers.lines().next(),
+                    Some("POST /codex/responses HTTP/1.1")
+                );
+                assert!(headers
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("authorization: Bearer access")));
+                assert!(headers
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("chatgpt-account-id: acct")));
+                assert!(headers
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("x-codex-turn-state: turn")));
+                bodies.push(body);
+                let text = ["rejected", "recovered"][attempt];
+                let mut body = format!(
+                    "data: {}\n\n",
+                    json!({"type": "response.output_text.delta", "delta": text})
+                );
+                if attempt == 1 {
+                    body.push_str(
+                        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+                    );
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{body}\r\n{}",
+                    body.len(), if attempt == 1 { "0\r\n\r\n" } else { "" }
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            assert_eq!(bodies[0], bodies[1]);
+        });
+        let tokens = test_codex_tokens();
+        let cancel = CancellationToken::new();
+        let opts = ChatOptions::new(&cancel);
+        let response = ProviderClient::new(reqwest::Client::new())
+            .chat(
+                ChatRequest {
+                    provider: ChatProvider::codex(&tokens, Some("turn")),
+                    api_base: &api_base,
+                    model: "gpt-test",
+                    messages: &[user_msg("hi")],
+                    tools: &[],
+                    effort: ReasoningEffort::Max,
+                    config: &ModelConfig::default(),
+                    cache: CacheConfig::default(),
+                    response_format: None,
+                    fast_mode: false,
+                },
+                &opts,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.content.as_deref(), Some("recovered"));
+        server.await.unwrap();
     }
 
     #[tokio::test]
