@@ -152,6 +152,35 @@ Per-model overrides:
 | `supports_fast_mode` | Whether this model supports accelerated inference. Enables `fast_mode` and `/fast` when true.              |
 | `input_modalities`   | Array of accepted inputs such as `{ "text", "image", "pdf" }`; overrides discovered metadata.         |
 
+#### Tsubasa
+
+Set `TSUBASA_API_KEY` in your environment and register the provider in `init.lua`:
+
+```lua
+smelt.provider.register("tsubasa", {
+  type = "openai-compatible",
+  api_base = "https://api.tsubasa.sh/v1",
+  api_key_env = "TSUBASA_API_KEY",
+  models = {
+    {
+      name = "tsubasa-fast", context_window = 32768, max_tokens = 8192,
+      tool_calling = false, supports_reasoning = false, input_modalities = { "text" },
+    },
+    {
+      name = "tsubasa-pro", context_window = 32768, max_tokens = 16384,
+      tool_calling = false, supports_reasoning = false, input_modalities = { "text" },
+    },
+  },
+})
+```
+
+Run `smelt --model tsubasa/tsubasa-fast`, or select `tsubasa/tsubasa-pro` for Pro.
+This text-chat configuration sends prompts and your API key to `api.tsubasa.sh`
+through the existing Chat Completions transport. It disables tools, reasoning
+parameters and non-text inputs. Instructions, loaded skills and conversation
+history must share the 32,768-token context with the requested output; reduce
+`max_tokens` or loaded context when needed. See the [Tsubasa API documentation](https://tsubasa.sh/docs/api).
+
 #### Custom reasoning models
 
 For a custom endpoint that does not advertise reasoning capabilities, declare
