@@ -62,6 +62,15 @@ pub(super) fn rows(
     wanted: Range<usize>,
     cancelled: impl Fn() -> bool,
 ) -> Option<Vec<InlineRow>> {
+    rows_with_budget(diff, wanted, cancelled, WORK_BUDGET)
+}
+
+fn rows_with_budget(
+    diff: &Diff,
+    wanted: Range<usize>,
+    cancelled: impl Fn() -> bool,
+    work_budget: Duration,
+) -> Option<Vec<InlineRow>> {
     let first = diff
         .changes
         .partition_point(|block| block.new.end <= wanted.start);
@@ -95,7 +104,7 @@ pub(super) fn rows(
             align_changed_lines_deadline(
                 &old.iter().map(String::as_str).collect::<Vec<_>>(),
                 &new.iter().map(String::as_str).collect::<Vec<_>>(),
-                Some(Instant::now() + WORK_BUDGET),
+                Some(Instant::now() + work_budget),
             )
             .into_iter()
             .map(|pair| match pair {
@@ -146,7 +155,7 @@ pub(super) fn rows(
             let (old_ranges, new_ranges) = inline_highlights_for_pair_deadline(
                 &display_text(old_text),
                 &display_text(new_text),
-                Instant::now() + WORK_BUDGET,
+                Instant::now() + work_budget,
             );
             for (raw, ranges) in [(old, old_ranges), (new, new_ranges)] {
                 if let Some(raw) = raw.filter(|raw| wanted.contains(raw)) {
@@ -168,7 +177,9 @@ mod tests {
     #[test]
     fn inline_alignment_skips_inserted_lines_and_pairs_across_no_newline_markers() {
         let diff = Diff::parse("diff --git a/main.rs b/main.rs\n@@ -1,2 +1,3 @@\n-let count = 41;\n-return count;\n+log!(\"start\");\n+let count = 42;\n+return count;\n".into());
-        let actual = rows(&diff, 0..7, || false).unwrap();
+        // Check alignment independently of the UI deadline and scheduler load.
+        let work_budget = Duration::from_secs(5);
+        let actual = rows_with_budget(&diff, 0..7, || false, work_budget).unwrap();
         assert_eq!(
             actual.iter().map(|row| row.raw).collect::<Vec<_>>(),
             [2, 4, 5]
@@ -176,12 +187,17 @@ mod tests {
         let (old, new) = inline_highlights_for_pair_deadline(
             "let count = 41;",
             "let count = 42;",
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + work_budget,
         );
         assert_eq!(actual[0].ranges, old);
         assert_eq!(actual[2].ranges, new);
+        let fallback = rows_with_budget(&diff, 0..7, || false, Duration::ZERO).unwrap();
+        assert_eq!(
+            fallback.iter().map(|row| row.raw).collect::<Vec<_>>(),
+            [2, 3, 4, 5, 6]
+        );
         let diff = Diff::parse("diff --git a/main.rs b/main.rs\n@@ -1 +1 @@\n-let count = 41;\n\\ No newline at end of file\n+let count = 42;\n\\ No newline at end of file\n".into());
-        let actual = rows(&diff, 0..6, || false).unwrap();
+        let actual = rows_with_budget(&diff, 0..6, || false, work_budget).unwrap();
         assert_eq!(actual.iter().map(|row| row.raw).collect::<Vec<_>>(), [2, 4]);
         assert_eq!(actual[0].ranges, old);
         assert_eq!(actual[1].ranges, new);

@@ -2555,7 +2555,9 @@ mod tests {
         .expect("save canonical transcript records");
     }
 
-    fn assert_catalog_converged(app: &crate::app::test_harness::TestApp) {
+    fn assert_catalog_converged(app: &mut crate::app::test_harness::TestApp) {
+        // Catalog work can be queued by a canonical commit still in flight.
+        app.wait_for_turn_persistence();
         assert!(app
             .app
             .core
@@ -3083,7 +3085,7 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "interrupt waited {elapsed:?} for derived catalog persistence"
         );
-        assert_catalog_converged(&app);
+        assert_catalog_converged(&mut app);
     }
 
     #[test]
@@ -3391,7 +3393,7 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "close waited {elapsed:?} for derived catalog persistence"
         );
-        assert_catalog_converged(&app);
+        assert_catalog_converged(&mut app);
     }
 
     #[test]
@@ -3651,7 +3653,7 @@ mod tests {
             .sessions
             .resolve_session_for_read_result(&fork_id)
             .is_ok());
-        assert_catalog_converged(&app);
+        assert_catalog_converged(&mut app);
     }
 
     #[test]
