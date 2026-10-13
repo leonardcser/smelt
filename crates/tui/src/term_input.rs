@@ -871,6 +871,7 @@ fn parse_csi_u(params: &[u8], consumed: usize) -> ParseResult {
         KeyCode::Char((b'a' + codepoint_value as u8 - 1) as char)
     } else {
         match codepoint_value {
+            9 if mods.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
             9 => KeyCode::Tab,
             10 | 13 => KeyCode::Enter,
             27 => KeyCode::Esc,
@@ -1221,6 +1222,27 @@ mod tests {
                 modifiers,
                 ..
             })] if modifiers.contains(KeyModifiers::SHIFT)
+        ));
+    }
+
+    #[test]
+    fn csi_u_shift_tab_is_parsed_as_backtab() {
+        let mut p = Parser::new();
+        assert!(matches!(
+            p.advance(b"\x1b[9;2u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::BackTab,
+                modifiers,
+                ..
+            })] if modifiers.contains(KeyModifiers::SHIFT)
+        ));
+        // Unshifted tab must stay Tab.
+        assert!(matches!(
+            p.advance(b"\x1b[9u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::Tab,
+                ..
+            })]
         ));
     }
 
