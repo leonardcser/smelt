@@ -34,7 +34,7 @@ static NEXT_TABLE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn fresh_table_id() -> u64 {
     NEXT_TABLE_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .expect("snapshot table identity overflow")
 }
 
