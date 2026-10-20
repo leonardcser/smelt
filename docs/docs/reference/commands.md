@@ -70,7 +70,7 @@ cleared before another can be created.
 | `/goal resume` | Reactivate the goal, enable auto-continue, and schedule continuation |
 | `/goal block [reason]`, `/goal blocked [reason]` | Mark the goal blocked and disable auto-continue |
 | `/goal done` | Mark the goal complete and disable auto-continue |
-| `/goal clear`, `/goal stop` | Remove the goal from the session |
+| `/goal clear` (aliases: `/goal cancel`, `/goal stop`) | Remove the goal from the session |
 | `/goal auto on`, `/goal auto off` | Enable or disable auto-continue; this also activates or pauses the goal |
 
 All goal controls above run immediately, including with Enter or Ctrl+Enter

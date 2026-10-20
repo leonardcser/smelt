@@ -63,6 +63,10 @@ working, without interrupting the current turn. For example, `/goal auto off`
 stops future goal auto-continuation while letting the current turn finish.
 Queued user messages always run before auto-continue.
 
+To remove the goal, use `/goal clear` (aliases: `/goal cancel`, `/goal stop`),
+or ask the agent to clear or cancel it. This hides the goal bar and stops
+future goal-driven continuation without marking the objective complete.
+
 The default `smelt.settings.auto_continue = "goal"` continues active auto goals
 only. Set it to `"off"` to disable automatic continuation, or `"always"` to
 continue any idle session. See [Commands](../reference/commands.md#goals-and-auto-continue)

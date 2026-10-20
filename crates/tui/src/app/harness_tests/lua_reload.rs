@@ -1861,6 +1861,18 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
     assert!(update
         .description
         .contains("cannot pause, resume, clear, or rewrite"));
+    assert!(update.description.contains("Use clear_goal only when"));
+
+    let clear = tools
+        .iter()
+        .find(|tool| tool.name == "clear_goal")
+        .expect("clear_goal should be registered");
+    assert!(clear
+        .description
+        .contains("only when the user explicitly asks"));
+    assert!(clear.description.contains("clear, cancel, stop, or remove"));
+    assert_eq!(clear.parameters["required"], serde_json::json!([]));
+    assert_eq!(clear.parameters["properties"], serde_json::json!({}));
     assert_eq!(
         update.parameters["properties"]["state"]["enum"],
         serde_json::json!(["done", "blocked"])

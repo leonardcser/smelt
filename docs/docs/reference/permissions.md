@@ -50,6 +50,7 @@ to tool, effect, and mode defaults.
 | `create_goal`         | Ask    | Ask                | Ask   | Allow |
 | `update_goal_progress` | Ask   | Ask                | Ask   | Allow |
 | `update_goal`         | Ask    | Ask                | Ask   | Allow |
+| `clear_goal`          | Ask    | Ask                | Ask   | Allow |
 | `present_plan`        | N/A    | Allow              | N/A   | N/A   |
 | `smelt_reload`        | Ask    | Deny               | Ask   | Allow |
 

@@ -328,6 +328,13 @@ exact external blocker. It cannot pause, resume, clear, or rewrite a goal.
 | `state` | `done` or `blocked` (required) |
 | `reason` | Completion evidence or blocker |
 
+### `clear_goal`
+
+Removes the current session goal only when you explicitly ask to clear, cancel,
+stop, or remove it. It takes no parameters and is safe to call when no goal is
+set. Clearing hides the goal bar and stops future goal-driven auto-continuation
+without marking the objective complete or interrupting the current turn.
+
 ## Mode-Specific
 
 Tools that only appear in certain modes.
