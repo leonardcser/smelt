@@ -13,7 +13,13 @@ use crate::content::highlight::diff::DiffByteRange;
 
 const ALIGN_BYTES: usize = 8192;
 const PAIR_BYTES: usize = 8192;
-const WORK_BUDGET: Duration = Duration::from_millis(5);
+// Tests compare highlights across views, so scheduler load must not decide
+// whether a row gets word-level or whole-line ranges.
+const WORK_BUDGET: Duration = if cfg!(test) {
+    Duration::from_secs(5)
+} else {
+    Duration::from_millis(5)
+};
 
 #[derive(Debug)]
 pub(super) struct ChangeBlock {
