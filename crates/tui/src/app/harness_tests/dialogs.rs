@@ -3980,3 +3980,66 @@ fn btw_command_denies_tool_calls_then_retries_same_request_shape() {
     respond_pending_ask_with_text(&mut app, "done");
     app.clear_timers();
 }
+
+#[test]
+fn rejected_dialog_construction_keeps_the_active_dialog() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        first_leaf = smelt.dialog.content({ text = "first dialog" })
+        first = smelt.dialog.new({ panels = { { leaf = first_leaf, height = "fit" } } })
+        second_leaf = smelt.dialog.content({ text = "second dialog" })
+        "#,
+    )
+    .unwrap();
+    assert!(app.render_to_frame().text().contains("first dialog"));
+
+    let rejected = app.run_lua_result(
+        r#"
+        smelt.dialog.new({
+          panels = { { leaf = second_leaf, height = "fit" } },
+          focus = "not a window",
+        })
+        "#,
+    );
+    assert!(rejected.is_err(), "construction must raise");
+
+    app.run_lua_result(
+        r#"
+        assert(smelt.dialog.current() ~= nil, "active dialog lost")
+        assert(smelt.dialog.current().win == first.win, "active dialog replaced")
+        "#,
+    )
+    .unwrap();
+    let frame = app.render_to_frame();
+    assert!(frame.text().contains("first dialog"));
+    assert!(!frame.text().contains("second dialog"));
+
+    app.run_lua_result(
+        r#"
+        second = smelt.dialog.new({ panels = { { leaf = second_leaf, height = "fit" } } })
+        assert(smelt.dialog.current().win == second.win)
+        "#,
+    )
+    .expect("a rejected construction leaves the caller's panel usable");
+    assert!(app.render_to_frame().text().contains("second dialog"));
+}
+
+#[test]
+fn dialog_with_unknown_keymap_chord_is_rejected_before_opening() {
+    let mut app = TestApp::builder().build();
+    let rejected = app.run_lua_result(
+        r#"
+        leaf = smelt.dialog.content({ text = "never shown" })
+        smelt.dialog.new({
+          panels = { { leaf = leaf, height = "fit" } },
+          keymaps = { { key = "not-a-chord", on_press = function() end } },
+        })
+        "#,
+    );
+    let err = rejected.expect_err("unknown chord must raise");
+    assert!(err.contains("unknown chord"), "{err}");
+    app.run_lua_result("assert(smelt.dialog.current() == nil)")
+        .unwrap();
+    assert!(!app.render_to_frame().text().contains("never shown"));
+}

@@ -854,25 +854,19 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
   ctx.resolve = resolve
   ctx.close   = function() resolve(nil) end
 
-  ctx.host = __smelt_internal.dialog.__open({
-    layout = layout,
-    height = height,
-    min_height = opts.min_height,
-    max_height = opts.max_height,
-    blocks_agent = opts.blocks_agent or false,
-    resizable = opts.resizable ~= false,
-  })
-  ctx.toggle_expanded = function() ctx.host:toggle_expanded() end
-  table.insert(dialog_stack, ctx)
-
-  -- Explicit focus override; otherwise the modal host focuses the first
-  -- focusable leaf after mounting the dialog in the root layout.
-  if opts.focus then opts.focus:focus() end
-
-  for _, leaf in ipairs(leaves) do
-    leaf:on("focus", function()
-      ctx.focused_leaf = leaf
-    end)
+  -- Reject bad options before the host opens: closing a half-built dialog
+  -- would destroy the caller's panels and leave the previous dialog covered.
+  if opts.focus ~= nil and type(opts.focus) ~= "userdata" then
+    error("smelt.dialog: focus must be a window handle", 4)
+  end
+  local keymaps = dialog_keymaps(opts)
+  for _, km in ipairs(keymaps) do
+    if km.key and type(km.on_press) == "function" then
+      if type(km.key) ~= "string" then
+        error("smelt.dialog: keymap key must be a string", 4)
+      end
+      __smelt_internal.dialog.__check_chord(km.key)
+    end
   end
 
   -- Build a ctx for user callbacks. Raw event fields (`text`, `index`, `code`,
@@ -893,20 +887,10 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
     return out
   end
 
-  -- Dialog-level keymaps belong to the modal scope, independent of whether
-  -- the dialog is mounted in the root layout or a future floating container.
-  ctx.host:key("ctrl-o", function() ctx.toggle_expanded() end)
-  local keymaps = dialog_keymaps(opts)
-  if #keymaps > 0 then
-    for _, km in ipairs(keymaps) do
-      if type(km) == "table" and km.key and type(km.on_press) == "function" then
-        local on_press = km.on_press
-        ctx.host:key(km.key, function(raw_ctx)
-          local ok, err = pcall(on_press, make_ctx(raw_ctx))
-          if not ok then report_callback_error("keymap", err) end
-        end)
-      end
-    end
+  for _, leaf in ipairs(leaves) do
+    leaf:on("focus", function()
+      ctx.focused_leaf = leaf
+    end)
   end
 
   -- Events fire on the leaf that emits them (no implicit bubbling), so dialog-wide
@@ -950,6 +934,36 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
         register_on_all(event_name, function(raw_ctx)
           local ok, err = pcall(fn, make_ctx(raw_ctx))
           if not ok then report_callback_error("on_event[" .. event_name .. "]", err) end
+        end)
+      end
+    end
+  end
+
+  ctx.host = __smelt_internal.dialog.__open({
+    layout = layout,
+    height = height,
+    min_height = opts.min_height,
+    max_height = opts.max_height,
+    blocks_agent = opts.blocks_agent or false,
+    resizable = opts.resizable ~= false,
+  })
+  ctx.toggle_expanded = function() ctx.host:toggle_expanded() end
+  table.insert(dialog_stack, ctx)
+
+  -- Explicit focus override; otherwise the modal host focuses the first
+  -- focusable leaf after mounting the dialog in the root layout.
+  if opts.focus then opts.focus:focus() end
+
+  -- Dialog-level keymaps belong to the modal scope, independent of whether
+  -- the dialog is mounted in the root layout or a future floating container.
+  ctx.host:key("ctrl-o", function() ctx.toggle_expanded() end)
+  if #keymaps > 0 then
+    for _, km in ipairs(keymaps) do
+      if type(km) == "table" and km.key and type(km.on_press) == "function" then
+        local on_press = km.on_press
+        ctx.host:key(km.key, function(raw_ctx)
+          local ok, err = pcall(on_press, make_ctx(raw_ctx))
+          if not ok then report_callback_error("keymap", err) end
         end)
       end
     end
