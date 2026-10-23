@@ -12,14 +12,6 @@ local function format_duration(secs)
   return string.format("%dh %02dm", h, rest // 60)
 end
 
-local function job_rows()
-  local rows = smelt.process.list()
-  for _, p in ipairs(rows) do
-    p._hay = table.concat({ p.pid or "", p.id or "", p.command or "" }, " "):lower()
-  end
-  return rows
-end
-
 local META_LABEL_WIDTH = 8
 
 local function append_label_value(lines, label, value, width, opts)
@@ -152,77 +144,65 @@ local function show_logs(job)
 end
 
 local function open_ps()
-  local query = ""
-  local rows = job_rows()
-  local timer = nil
-  local list_ctx = nil
-
-  local function make_filter()
-    local q = query:lower()
-    return function(job)
-      return q == "" or (job._hay or ""):find(q, 1, true) ~= nil
-    end
-  end
-
-  local function refresh_list()
-    rows = job_rows()
-    if list_ctx then
-      list_ctx.list:set_items_preserve(rows, job_key)
-    end
-  end
-
-  local function stop_timer()
-    if timer then timer:remove(); timer = nil end
-    list_ctx = nil
-  end
-
-  local function kill_selected(ctx)
-    local job = ctx.list:selected()
-    if not job then return end
-    smelt.process.kill(job.id)
-    for i, row in ipairs(rows) do
-      if row.id == job.id then table.remove(rows, i); break end
-    end
-    ctx.list:set_items(rows)
-  end
-
   while true do
-    query = ""
-    rows = job_rows()
-    timer = nil
-    list_ctx = nil
-    local picked = smelt.dialog.picker({
-      title       = "ps",
-      height      = DIALOG_HEIGHT,
-      placeholder = "filter jobs…",
-      items       = rows,
-      render      = render_job,
-      filter      = make_filter(),
-      empty_text  = "  (no jobs)",
+    local rows = smelt.process.list()
+    local buf = smelt.buf.new()
+    local leaf = smelt.dialog.list(buf)
+    local list = smelt.list.new({
+      leaf = leaf,
+      buf = buf,
+      items = rows,
+      render = render_job,
+      empty_text = "  (no jobs)",
+    })
 
-      on_open = function(ctx)
-        list_ctx = ctx
-        timer = smelt.timer.every(1000, refresh_list)
-      end,
+    local function refresh_list()
+      rows = smelt.process.list()
+      list:set_items_preserve(rows, job_key)
+    end
 
-      on_query = function(q, ctx)
-        query = q or ""
-        list_ctx = ctx
-        ctx.list:set_filter(make_filter())
-      end,
+    local function kill_selected()
+      local job = list:selected()
+      if not job then return end
+      local index = list:selected_index()
+      smelt.process.kill(job.id)
+      for i, row in ipairs(rows) do
+        if row.id == job.id then table.remove(rows, i); break end
+      end
+      list:set_items(rows)
+      list:set_cursor(index)
+    end
 
+    -- Focused-leaf bindings take precedence over editor actions such as Ctrl-K.
+    for _, binding in ipairs({
+      { "j", 1 }, { "k", -1 },
+      { "down", 1 }, { "up", -1 },
+      { "ctrl-j", 1 }, { "ctrl-k", -1 },
+      { "ctrl-n", 1 }, { "ctrl-p", -1 },
+      { "pgdn", 10 }, { "pgup", -10 },
+      { "ctrl-d", 5 }, { "ctrl-u", -5 },
+    }) do
+      leaf:key(binding[1], function() list:move_cursor(binding[2]) end)
+    end
+
+    local timer = smelt.timer.every(1000, refresh_list)
+    local picked = smelt.dialog.open({
+      title = "ps",
+      height = DIALOG_HEIGHT,
+      panels = { { leaf = leaf, height = "fill" } },
+      focus = leaf,
+      close_with_q = true,
       keymaps = {
         { key = "alt-d", hint = "⌥d: kill", on_press = kill_selected },
-        { key = "ctrl-r", hint = "^r: refresh", on_press = function(ctx)
-            list_ctx = ctx
-            refresh_list()
-          end },
+        { key = "ctrl-r", hint = "^r: refresh", on_press = refresh_list },
       },
-
       on_submit = function(ctx)
-        if ctx.item ~= nil then ctx.resolve(ctx.item) end
+        local job = list:selected()
+        if job then ctx.resolve(job) end
       end,
-      on_close = stop_timer,
+      on_close = function()
+        if timer then timer:remove(); timer = nil end
+      end,
     })
 
     if not picked then break end
