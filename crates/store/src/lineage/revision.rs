@@ -110,7 +110,7 @@ pub(crate) fn insert_revision(
     revision: &RevisionRecord,
 ) -> Result<bool> {
     // COMPAT(lineage-schema-v4): historical fixtures publish before index migration.
-    if crate::schema::user_version(conn)? == crate::schema::LINEAGE_SCHEMA_VERSION {
+    if crate::schema::user_version(conn)? >= 6 {
         let parent = revision
             .parent_id
             .as_ref()
@@ -184,9 +184,9 @@ pub(crate) fn load_revision(
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
@@ -212,9 +212,15 @@ pub(crate) fn load_revision(
             )))
         }
     };
-    let history_root = load_root(conn, lineage, &RootId::from_db(row.3)?)?;
-    let transcript_root = load_root(conn, lineage, &RootId::from_db(row.4)?)?;
-    let state_payload_id = PayloadId::from_db(row.5)?;
+    let (Some(history_root), Some(transcript_root), Some(state_payload_id)) = (row.3, row.4, row.5)
+    else {
+        return Err(StoreError::MissingObject {
+            reference: format!("released content of lineage revision {}", id.as_str()),
+        });
+    };
+    let history_root = load_root(conn, lineage, &RootId::from_db(history_root)?)?;
+    let transcript_root = load_root(conn, lineage, &RootId::from_db(transcript_root)?)?;
+    let state_payload_id = PayloadId::from_db(state_payload_id)?;
     let history_len = nonnegative_u64(row.6, "revision history_len")?;
     let transcript_record_count = nonnegative_u64(row.7, "revision transcript_record_count")?;
     let transcript_byte_count = nonnegative_u64(row.8, "revision transcript_byte_count")?;
@@ -264,6 +270,28 @@ pub(crate) fn load_revision(
     Ok(revision)
 }
 
+/// Reads only the chain link and whether the revision's content was released,
+/// so walks can pass through released revisions.
+pub(crate) fn revision_link(
+    conn: &Connection,
+    lineage: &LineageId,
+    id: &RevisionId,
+) -> Result<(Option<RevisionId>, bool)> {
+    let (parent, released) = conn
+        .prepare_cached(
+            "SELECT parent_revision_id, state_payload_id IS NULL FROM lineage_revisions
+             WHERE lineage_id = ?1 AND revision_id = ?2",
+        )?
+        .query_row((lineage.as_str(), id.as_str()), |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?))
+        })
+        .optional()?
+        .ok_or_else(|| StoreError::MissingObject {
+            reference: format!("lineage revision {}", id.as_str()),
+        })?;
+    Ok((parent.map(RevisionId::from_db).transpose()?, released))
+}
+
 pub(crate) fn require_revision_ancestor(
     conn: &Connection,
     lineage: &LineageId,
@@ -279,11 +307,10 @@ pub(crate) fn require_revision_ancestor(
                 descendant.as_str()
             )));
         }
-        let revision = load_revision(conn, lineage, &current)?;
-        if &revision.id == target {
+        if &current == target {
             return Ok(());
         }
-        let Some(parent) = revision.parent_id else {
+        let (Some(parent), _) = revision_link(conn, lineage, &current)? else {
             return Err(StoreError::Integrity(format!(
                 "revision {} is not an ancestor of {}",
                 target.as_str(),

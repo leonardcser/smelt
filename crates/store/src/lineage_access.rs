@@ -2386,7 +2386,7 @@ mod tests {
                         |row| row.get(0),
                     )
                     .unwrap();
-                if phase == 9 {
+                if phase == 10 {
                     complete = true;
                     break;
                 }
@@ -2420,6 +2420,148 @@ mod tests {
             assert_eq!(writer.commit_session(&command).unwrap(), receipt);
             println!("public GC marking: history_len={history_len} peak_vm_steps={peak}");
         }
+    }
+
+    #[test]
+    fn reclamation_releases_superseded_revision_content_and_keeps_turn_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('7');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut current = writer.commit_session(&initial_commit(&id)).unwrap().current;
+        let turns = lineage::RECENT_TURNS as usize + 4;
+        for turn in 0..turns {
+            for save in 0..4 {
+                let len = current.history_len.get();
+                let mut command = initial_commit(&id);
+                command.expected = current;
+                command.metadata = metadata(len as i64 + 2, "saved");
+                command.history = HistorySuffix {
+                    start: HistoryIndex::new(len),
+                    final_len: HistoryLen::new(len + 1),
+                    items: vec![protocol::HistoryItem::system(format!(
+                        "turn {turn} save {save}"
+                    ))],
+                };
+                current = if save == 0 {
+                    writer
+                        .submit_turn(&SubmitTurn {
+                            session: command,
+                            turn: NewTurn {
+                                kind: TurnKind::User,
+                                submitted_history_idx: HistoryIndex::new(len),
+                                continuation_of: None,
+                                created_at_ms: len,
+                            },
+                        })
+                        .unwrap()
+                        .session
+                        .current
+                } else {
+                    writer.commit_session(&command).unwrap().current
+                };
+            }
+        }
+        let snapshot = writer.snapshot().unwrap();
+        let count = |writer: &OwnedLineageWriter, sql: &str| -> i64 {
+            writer.conn.query_row(sql, [], |row| row.get(0)).unwrap()
+        };
+        let entries_before = count(&writer, "SELECT count(*) FROM lineage_sequence_entries");
+        while !writer.reclaim_step(64).unwrap().complete {}
+
+        let revisions = count(&writer, "SELECT count(*) FROM lineage_revisions");
+        let released = count(
+            &writer,
+            "SELECT count(*) FROM lineage_revisions WHERE state_payload_id IS NULL",
+        );
+        assert_eq!(revisions, 1 + 4 * turns as i64);
+        // Old turns keep their submitted revision and its parent; the newest
+        // RECENT_TURNS turns and the branch endpoints keep everything.
+        assert_eq!(released, 2 * (turns as i64 - lineage::RECENT_TURNS));
+        assert_eq!(
+            count(
+                &writer,
+                "SELECT count(*) FROM lineage_revisions revision
+                 JOIN lineage_turns turn ON turn.lineage_id = revision.lineage_id
+                  AND (turn.submitted_revision_id = revision.revision_id
+                       OR EXISTS (SELECT 1 FROM lineage_revisions child
+                                  WHERE child.revision_id = turn.submitted_revision_id
+                                    AND child.parent_revision_id = revision.revision_id))
+                 WHERE revision.state_payload_id IS NULL",
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &writer,
+                "SELECT count(*) FROM lineage_session_receipt_results result
+                 JOIN lineage_revisions revision ON revision.lineage_id = result.lineage_id
+                  AND revision.revision_id = result.result_revision_id
+                 WHERE revision.state_payload_id IS NULL",
+            ),
+            0
+        );
+        assert!(count(&writer, "SELECT count(*) FROM lineage_sequence_entries") < entries_before);
+        let report = lineage::inspect_reachability(&writer.conn, &writer.lineage).unwrap();
+        assert!(report.unreachable_revisions.is_empty());
+        assert!(report.unreachable_roots.is_empty());
+        assert!(report.unreachable_nodes.is_empty());
+        assert!(report.unreachable_payloads.is_empty());
+        let report = lineage_doctor_report(
+            &writer.conn,
+            Path::new(writer.conn.path().unwrap()),
+            &writer.lineage,
+            Some((&writer.branch, &writer.search_database_path())),
+        )
+        .unwrap();
+        assert!(report.healthy, "{:?}", report.issues);
+        assert_eq!(
+            report.search.unwrap().state,
+            crate::SearchProjectionState::Missing
+        );
+        assert_eq!(writer.snapshot().unwrap(), snapshot);
+
+        let head: String = writer
+            .conn
+            .query_row(
+                "SELECT head_revision_id FROM lineage_branches WHERE session_id = ?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for (sql, target) in [
+            (
+                "UPDATE lineage_revisions SET history_root_id = NULL, transcript_root_id = NULL,
+                 state_payload_id = NULL WHERE revision_id = ?1",
+                head.as_str(),
+            ),
+            (
+                "UPDATE lineage_revisions SET history_len = history_len + 1
+                 WHERE revision_id = (SELECT revision_id FROM lineage_revisions
+                                      WHERE state_payload_id IS NULL LIMIT 1) OR ?1 IS NULL",
+                "",
+            ),
+        ] {
+            assert!(writer.conn.execute(sql, [target]).is_err());
+        }
+
+        let len = current.history_len.get();
+        let mut command = initial_commit(&id);
+        command.expected = current;
+        command.metadata = metadata(len as i64 + 2, "after release");
+        command.history = HistorySuffix {
+            start: HistoryIndex::new(len),
+            final_len: HistoryLen::new(len + 1),
+            items: vec![protocol::HistoryItem::system("after release")],
+        };
+        writer.commit_session(&command).unwrap();
+        let report = lineage_doctor_report(
+            &writer.conn,
+            Path::new(writer.conn.path().unwrap()),
+            &writer.lineage,
+            Some((&writer.branch, &writer.search_database_path())),
+        )
+        .unwrap();
+        assert!(report.healthy, "{:?}", report.issues);
     }
 
     #[test]

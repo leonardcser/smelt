@@ -44,8 +44,9 @@ const MARK_ROOT: i64 = 1;
 const MARK_NODE: i64 = 2;
 const MARK_PAYLOAD: i64 = 3;
 const MARK_HISTORY_INDEX: i64 = 4;
-const MARK_FRONTIER: i64 = 8;
-const SWEEP: i64 = 9;
+const RELEASE: i64 = 0;
+const MARK_FRONTIER: i64 = 9;
+const SWEEP: i64 = 10;
 const COMPLETE: i64 = SWEEP + SWEEP_SPECS.len() as i64;
 
 struct ReclamationPass {
@@ -61,7 +62,7 @@ impl ReclamationPass {
             .epoch
             .checked_add(1)
             .ok_or_else(|| StoreError::Integrity("reclamation epoch exhausted".into()))?;
-        self.phase = 0;
+        self.phase = RELEASE;
         self.cursor = i64::MIN;
         self.dirty = false;
         Ok(())
@@ -206,6 +207,7 @@ fn expand_mark(
 ) -> Result<()> {
     match kind {
         MARK_REVISION => {
+            // Released revisions keep only their chain link.
             let (parent, history, transcript, state) = tx.query_row(
                 "SELECT parent_revision_id, history_root_id, transcript_root_id, state_payload_id
                  FROM lineage_revisions WHERE lineage_id = ?1 AND revision_id = ?2",
@@ -213,16 +215,16 @@ fn expand_mark(
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )?;
             mark(tx, epoch, MARK_REVISION, parent.as_deref())?;
-            mark(tx, epoch, MARK_ROOT, Some(&history))?;
-            mark(tx, epoch, MARK_ROOT, Some(&transcript))?;
-            mark(tx, epoch, MARK_PAYLOAD, Some(&state))?;
+            mark(tx, epoch, MARK_ROOT, history.as_deref())?;
+            mark(tx, epoch, MARK_ROOT, transcript.as_deref())?;
+            mark(tx, epoch, MARK_PAYLOAD, state.as_deref())?;
         }
         MARK_ROOT => {
             let node: Option<String> = tx.query_row(
@@ -303,7 +305,29 @@ fn advance_reclamation_marks(
     let phase = pass.phase;
     let mut examined = 0;
     match phase {
-        0 => {
+        RELEASE => {
+            let rows = tx
+                .prepare(
+                    "SELECT rowid FROM lineage_revisions NOT INDEXED
+                     WHERE rowid >= ?1 ORDER BY rowid LIMIT ?2",
+                )?
+                .query_map((pass.cursor, limit), |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            examined = rows.len();
+            match (rows.first(), rows.last()) {
+                (Some(&lower), Some(&upper)) => {
+                    release_revision_content(tx, lineage, lower, upper)?;
+                    match upper.checked_add(1) {
+                        Some(next) if examined == usize::try_from(limit).unwrap() => {
+                            pass.cursor = next;
+                        }
+                        _ => pass.advance(),
+                    }
+                }
+                _ => pass.advance(),
+            }
+        }
+        1 => {
             examined = tx.execute(
                 "DELETE FROM smelt_gc_marks WHERE (epoch, kind, id) IN (
                      SELECT epoch, kind, id FROM smelt_gc_marks WHERE epoch < ?1 LIMIT ?2)",
@@ -313,7 +337,7 @@ fn advance_reclamation_marks(
                 pass.advance();
             }
         }
-        1 => {
+        2 => {
             examined = tx.execute(
                 "DELETE FROM smelt_gc_receipts WHERE (epoch, session_id, fingerprint) IN (
                      SELECT epoch, session_id, fingerprint FROM smelt_gc_receipts WHERE epoch < ?1 LIMIT ?2)",
@@ -343,20 +367,20 @@ fn advance_reclamation_marks(
                 examined += 1;
             }
         }
-        2..=7 => {
+        3..=8 => {
             let (table, columns) = match phase {
-                2 => (
+                3 => (
                     "lineage_branches",
                     "initial_revision_id, CASE WHEN deleted_at IS NULL THEN head_revision_id END",
                 ),
-                3 => ("lineage_retained_revisions", "revision_id, NULL"),
-                4 => (
+                4 => ("lineage_retained_revisions", "revision_id, NULL"),
+                5 => (
                     "lineage_session_receipt_results",
                     "result_revision_id, session_id, fingerprint",
                 ),
-                5 => ("object_data_roots", "root_id, NULL"),
-                6 => ("lineage_revision_state_roots", "root_id, NULL"),
-                7 => (
+                6 => ("object_data_roots", "root_id, NULL"),
+                7 => ("lineage_revision_state_roots", "root_id, NULL"),
+                8 => (
                     "lineage_revision_state_projections",
                     "projected_payload_id, NULL",
                 ),
@@ -375,7 +399,7 @@ fn advance_reclamation_marks(
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        if phase == 4 {
+                        if phase == 5 {
                             row.get::<_, Option<String>>(4)?
                         } else {
                             None
@@ -388,18 +412,18 @@ fn advance_reclamation_marks(
                 if owner != lineage.as_str() {
                     continue;
                 }
-                let kind = if phase <= 4 {
+                let kind = if phase <= 5 {
                     MARK_REVISION
-                } else if phase <= 6 {
+                } else if phase <= 7 {
                     MARK_ROOT
                 } else {
                     MARK_PAYLOAD
                 };
                 mark(tx, pass.epoch, kind, first.as_deref())?;
-                if phase == 2 {
+                if phase == 3 {
                     mark(tx, pass.epoch, MARK_REVISION, second.as_deref())?;
                 }
-                if phase == 4 {
+                if phase == 5 {
                     tx.execute(
                         "INSERT OR IGNORE INTO smelt_gc_receipts VALUES (?1, ?2, ?3)",
                         (pass.epoch, second.as_deref(), fingerprint.as_deref()),

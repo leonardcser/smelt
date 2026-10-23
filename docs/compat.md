@@ -10,11 +10,11 @@ can be removed; schema migration alone does not retire historical bytes or recei
 ## `lineage-schema-v3`
 
 Readers validate the original v3 layout without writes; writers migrate it directly
-to v6 in one transaction. The migration preserves original logical rows and object
+to v7 in one transaction. The migration preserves original logical rows and object
 bytes, backfills completed-node proofs and history semantic indexes, restores
 installed guards, checks foreign keys, and publishes both version markers atomically.
-Fresh databases use v6. Exact deployed v3, v4 and v5 layouts and the current v6 layout
-are supported; unreleased development layouts are not migration sources.
+Fresh databases use v7. Exact deployed v3, v4, v5 and v6 layouts and the current v7
+layout are supported; unreleased development layouts are not migration sources.
 
 Remove the v3 DDL, migration and read-only layout handling only after retained v3
 databases have a verified lossless replacement and read-only v3 support is retired.
@@ -24,7 +24,7 @@ upgrading the schema does not retire their original bytes or hashes.
 ## `lineage-schema-v4`
 
 The exact v4 schema snapshot remains available for write-free historical reads.
-Writers migrate to v6 atomically, adding the `response_diagnostics` request-object
+Writers migrate to v7 atomically, adding the `response_diagnostics` request-object
 role and rebuilding root mappings with cumulative user ordinals while retaining
 canonical object bytes, revisions and receipts. Full responses keep the `response`
 role. Legacy summaries, mode changes and process-status messages stored as User
@@ -44,10 +44,21 @@ stores have verified lossless replacements and read-only v4 support is retired.
 
 Schema v5 retains shared storage and response diagnostics but has no cumulative
 user ordinals. Its exact DDL remains available for write-free validation. Writers
-migrate to v6 in one transaction with the same index rebuild and publication fencing
+migrate to v7 in one transaction with the same index rebuild and publication fencing
 as v4, preserving response roles, immutable objects, revisions and receipts.
 Remove the v5 snapshot and count/semantic fallbacks only after retained v5 stores
 have verified lossless replacements and read-only v5 support is retired.
+
+## `lineage-schema-v6`
+
+Schema v6 stores revision content references as immutable and non-null. Its exact
+DDL remains available for write-free validation. Writers migrate to v7 in one
+transaction by rebuilding `lineage_revisions` with releasable content references
+and installing the release-only update guard and the receipt-result delete guard;
+every row, identity and receipt is preserved. Historical v6 fixtures publish
+revisions with the same semantic-index guard as v7. Remove the v6 snapshot and its
+migration path only after retained v6 stores have verified lossless replacements
+and read-only v6 support is retired.
 
 ## `revision-state-v1`
 

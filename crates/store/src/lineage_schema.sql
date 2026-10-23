@@ -249,7 +249,7 @@ CREATE TABLE "lineage_revision_state_roots" (
         REFERENCES lineage_sequence_roots(lineage_id, root_id)
 ) STRICT;
 
-CREATE TABLE lineage_revisions (
+CREATE TABLE "lineage_revisions" (
     lineage_id TEXT NOT NULL,
     revision_id TEXT NOT NULL
         CHECK (length(revision_id) = 64 AND revision_id NOT GLOB '*[^0-9a-f]*'),
@@ -257,9 +257,9 @@ CREATE TABLE lineage_revisions (
     parent_revision_id TEXT,
     operation_kind TEXT NOT NULL
         CHECK (operation_kind IN ('initial', 'append', 'split', 'rewind')),
-    history_root_id TEXT NOT NULL,
-    transcript_root_id TEXT NOT NULL,
-    state_payload_id TEXT NOT NULL,
+    history_root_id TEXT,
+    transcript_root_id TEXT,
+    state_payload_id TEXT,
     history_len INTEGER NOT NULL CHECK (history_len >= 0),
     transcript_record_count INTEGER NOT NULL CHECK (transcript_record_count >= 0),
     transcript_byte_count INTEGER NOT NULL CHECK (transcript_byte_count >= 0),
@@ -279,6 +279,10 @@ CREATE TABLE lineage_revisions (
         OR
         (operation_kind != 'initial' AND parent_revision_id IS NOT NULL
             AND commit_fingerprint IS NOT NULL)
+    ),
+    CHECK (
+        (history_root_id IS NULL) = (transcript_root_id IS NULL)
+        AND (history_root_id IS NULL) = (state_payload_id IS NULL)
     ),
     FOREIGN KEY (lineage_id, created_by_session_id)
         REFERENCES lineage_branches(lineage_id, session_id),
@@ -1043,10 +1047,39 @@ BEGIN
     SELECT RAISE(ABORT, 'revision archive roots are immutable');
 END;
 
+-- Releasing content clears all three content references and nothing else.
+-- Branch endpoints, retained revisions and submitted turns keep their content.
 CREATE TRIGGER lineage_revision_update
 BEFORE UPDATE ON lineage_revisions
+WHEN NOT (
+    OLD.state_payload_id IS NOT NULL
+    AND NEW.history_root_id IS NULL AND NEW.transcript_root_id IS NULL
+    AND NEW.state_payload_id IS NULL
+    AND NEW.lineage_id = OLD.lineage_id AND NEW.revision_id = OLD.revision_id
+    AND NEW.created_by_session_id = OLD.created_by_session_id
+    AND NEW.parent_revision_id IS OLD.parent_revision_id
+    AND NEW.operation_kind = OLD.operation_kind
+    AND NEW.history_len = OLD.history_len
+    AND NEW.transcript_record_count = OLD.transcript_record_count
+    AND NEW.transcript_byte_count = OLD.transcript_byte_count
+    AND NEW.commit_fingerprint IS OLD.commit_fingerprint
+    AND NEW.history_start_idx IS OLD.history_start_idx
+    AND NEW.transcript_start_idx IS OLD.transcript_start_idx
+    AND NEW.turn_id IS OLD.turn_id
+    AND NEW.created_at = OLD.created_at
+) OR EXISTS (
+    SELECT 1 FROM lineage_branches
+    WHERE lineage_id = OLD.lineage_id
+      AND (head_revision_id = OLD.revision_id OR initial_revision_id = OLD.revision_id)
+) OR EXISTS (
+    SELECT 1 FROM lineage_retained_revisions
+    WHERE lineage_id = OLD.lineage_id AND revision_id = OLD.revision_id
+) OR EXISTS (
+    SELECT 1 FROM lineage_turns
+    WHERE lineage_id = OLD.lineage_id AND submitted_revision_id = OLD.revision_id
+)
 BEGIN
-    SELECT RAISE(ABORT, 'lineage revisions are immutable');
+    SELECT RAISE(ABORT, 'lineage revisions are immutable except for releasing content');
 END;
 
 CREATE TRIGGER lineage_sequence_entry_complete
@@ -1195,6 +1228,10 @@ WHEN EXISTS (
     SELECT 1 FROM lineage_session_receipts
     WHERE lineage_id = OLD.lineage_id AND session_id = OLD.session_id
       AND fingerprint = OLD.fingerprint
+) AND EXISTS (
+    SELECT 1 FROM lineage_revisions
+    WHERE lineage_id = OLD.lineage_id AND revision_id = OLD.result_revision_id
+      AND state_payload_id IS NOT NULL
 )
 BEGIN
     SELECT RAISE(ABORT, 'session receipt results belong to their retained receipts');

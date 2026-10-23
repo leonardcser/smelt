@@ -1,8 +1,9 @@
 # Session storage
 
-Session storage retains lossless current and historical state without copying
-unchanged archives into every revision. New unique content and revision metadata
-still consume space; this is not a fixed-size retention policy.
+Session storage retains lossless current state, every turn boundary and the
+recent revisions in full, without copying unchanged archives into every revision.
+Older intermediate saves keep only their chain link. New unique content and
+revision metadata still consume space; this is not a fixed-size retention policy.
 
 ## Persistent representation
 
@@ -130,10 +131,10 @@ truncation and compaction maintain those counts without re-ranking the retained
 suffix. Metadata-only saves preserve the prefix count, and older acknowledgements
 cannot erase newer users.
 
-Schema v6 stores cumulative user ordinals in its canonical history index. Exact
-prefix counts require a bounded lookup without history-body reads, including users
-without transcript records and excluding legacy synthetic User messages. Changed
-suffixes inherit the retained prefix ordinal. Resume captures the initial count,
+Schema v6 and later store cumulative user ordinals in their canonical history
+index. Exact prefix counts require a bounded lookup without history-body reads,
+including users without transcript records and excluding legacy synthetic User
+messages. Changed suffixes inherit the retained prefix ordinal. Resume captures the initial count,
 header, archives and transcript tail in one SQLite snapshot. Rewind workers capture
 the boundary count in their existing snapshot; application does not read storage.
 Submission rollback retains its pre-submission count even after durable compaction.
@@ -227,8 +228,8 @@ changed batches are cheap.
 
 ## Supported schemas and compatibility
 
-Fresh databases use schema v6. A writable open migrates an exact deployed v3, v4
-or v5 database in one transaction. Read-only access validates the original layout
+Fresh databases use schema v7. A writable open migrates an exact deployed v3, v4,
+v5 or v6 database in one transaction. Read-only access validates the original layout
 without writing or migrating it. The `response_diagnostics` request-object role
 introduced in v5 remains distinct from full responses under the `response` role,
 independent of whether the request body is retained.
@@ -236,8 +237,8 @@ independent of whether the request body is retained.
 Schema validation checks the exact layout, not just its version marker. Unreleased
 development layouts are not supported migration sources. Production DDL consists
 of `crates/store/src/lineage_schema.sql` and the historical snapshots
-`crates/store/src/lineage_v3.sql`, `crates/store/src/lineage_v4.sql` and
-`crates/store/src/lineage_v5.sql`.
+`crates/store/src/lineage_v3.sql`, `crates/store/src/lineage_v4.sql`,
+`crates/store/src/lineage_v5.sql` and `crates/store/src/lineage_v6.sql`.
 
 Migration preserves original logical bytes, hashes, revision identities and
 deployed receipt/journal domains. It backfills completed-node proofs where needed
@@ -245,7 +246,7 @@ and builds count-capable history semantic mappings in parent-first order. The v4
 derived root mappings are replaced; existing immutable semantic nodes remain exact.
 Migration restores installed canonical guards and the caller's foreign-key mode,
 and validates the final layout and foreign keys before publishing version markers.
-Crashes expose either the original database or the complete v6 database.
+Crashes expose either the original database or the complete v7 database.
 
 Every new revision must reference a completed current-format history semantic
 mapping. This SQL guard fences writers opened before migration: an unchanged,
@@ -261,11 +262,32 @@ See [compatibility debt](compat.md) for independent removal conditions.
 
 ## Retention and maintenance
 
-One epoch-fenced, resumable canonical collector marks and sweeps in bounded
-transactions. Reachability protects historical revisions, fork roots, receipt
-results, journal recovery and request objects. Deleted branches retain their
-initial revision for creation replay. Idle persistence uses this collector; it
-does not perform global physical sharing, search pruning or vacuuming.
+One epoch-fenced, resumable canonical collector releases, marks and sweeps in
+bounded transactions. Each pass first releases the content of revisions the
+retention policy no longer needs: their history root, transcript root and state
+references become NULL together, and their session receipt results are dropped
+because they can no longer replay. The revision row stays as a chain link, so
+revision identities, parents, extents, commit receipts and turns are unchanged.
+
+Content is kept for:
+
+- branch heads and initial revisions;
+- retained revisions;
+- turn boundaries: each submitted turn revision and its parent;
+- every revision from the 16th newest submitted turn of a branch onwards, which
+  covers archive bases and recent command replay.
+
+SQL guards make release the only permitted revision update, refuse it for branch
+endpoints, retained revisions and submitted turns, and only allow dropping a
+receipt result once its revision is released. Loading a released revision
+reports its content as missing; ancestry checks walk chain links only.
+
+Reachability then protects revision chains, the content of unreleased revisions,
+fork roots, receipt results, journal recovery and request objects, and the sweep
+reclaims sequence trees, states and objects that only released revisions used.
+Deleted branches retain their initial revision for creation replay. Idle
+persistence uses this collector; it does not perform global physical sharing,
+search pruning or vacuuming.
 
 Explicit cold maintenance runs through the same collector:
 

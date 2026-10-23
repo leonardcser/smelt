@@ -61,10 +61,14 @@ pub(crate) fn inspect_reachability(
         if !reachable_revisions.insert(id.as_str().to_owned()) {
             continue;
         }
-        let revision = load_revision(conn, lineage, &id)?;
-        if let Some(parent) = revision.parent_id {
+        let (parent, released) = revision_link(conn, lineage, &id)?;
+        if let Some(parent) = parent {
             revision_queue.push_back(parent);
         }
+        if released {
+            continue;
+        }
+        let revision = load_revision(conn, lineage, &id)?;
         reachable_roots.insert(revision.history_root.id.as_str().to_owned());
         reachable_roots.insert(revision.transcript_root.id.as_str().to_owned());
         let mut owners = vec![revision.state_payload_id.as_str().to_owned()];

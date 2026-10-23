@@ -37,6 +37,8 @@ mod receipt_results;
 pub(crate) use receipt_results::*;
 mod reclamation;
 pub(crate) use reclamation::*;
+mod retention;
+pub(crate) use retention::*;
 mod object_storage;
 pub(crate) use object_storage::*;
 pub use object_storage::{ObjectSharingCursor, ObjectSharingStep};

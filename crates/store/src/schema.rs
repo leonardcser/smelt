@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{Result, StoreError};
 
-pub const LINEAGE_SCHEMA_VERSION: i32 = 6;
+pub const LINEAGE_SCHEMA_VERSION: i32 = 7;
 
 const LINEAGE_SCHEMA: &str = include_str!("lineage_schema.sql");
 // COMPAT(lineage-schema-v3): retained databases migrate atomically; reads remain write-free.
@@ -13,6 +13,8 @@ const LINEAGE_SCHEMA_V3: &str = include_str!("lineage_v3.sql");
 const LINEAGE_SCHEMA_V4: &str = include_str!("lineage_v4.sql");
 // COMPAT(lineage-schema-v5): preserve response diagnostics before count-index migration.
 const LINEAGE_SCHEMA_V5: &str = include_str!("lineage_v5.sql");
+// COMPAT(lineage-schema-v6): preserve immutable revision content for read-only validation.
+const LINEAGE_SCHEMA_V6: &str = include_str!("lineage_v6.sql");
 
 // COMPAT(lineage-schema-v3): shared storage was introduced in v4.
 pub(crate) fn has_shared_storage(conn: &Connection) -> Result<bool> {
@@ -45,12 +47,20 @@ pub(crate) fn initialize_lineage_schema(conn: &mut Connection) -> Result<()> {
             3 => {
                 validate_schema_shape(&tx, lineage_schema_shape(3)?)?;
                 migrate_lineage_schema_v3(&tx)?;
+                migrate_revision_release(&tx)?;
                 set_user_version(&tx, LINEAGE_SCHEMA_VERSION)?;
                 write_store_meta(&tx)?;
             }
             version @ (4 | 5) => {
                 validate_schema_shape(&tx, lineage_schema_shape(version)?)?;
                 migrate_shared_lineage_schema(&tx)?;
+                migrate_revision_release(&tx)?;
+                set_user_version(&tx, LINEAGE_SCHEMA_VERSION)?;
+                write_store_meta(&tx)?;
+            }
+            6 => {
+                validate_schema_shape(&tx, lineage_schema_shape(6)?)?;
+                migrate_revision_release(&tx)?;
                 set_user_version(&tx, LINEAGE_SCHEMA_VERSION)?;
                 write_store_meta(&tx)?;
             }
@@ -82,7 +92,7 @@ pub(crate) fn initialize_lineage_schema(conn: &mut Connection) -> Result<()> {
 
 pub(crate) fn validate_lineage_schema(conn: &Connection) -> Result<()> {
     let version = user_version(conn)?;
-    if !matches!(version, 3..=5 | LINEAGE_SCHEMA_VERSION) {
+    if !matches!(version, 3..=6 | LINEAGE_SCHEMA_VERSION) {
         return Err(StoreError::UnsupportedSchema {
             found: version,
             expected: LINEAGE_SCHEMA_VERSION,
@@ -165,6 +175,24 @@ fn migrate_shared_lineage_schema(conn: &Connection) -> Result<()> {
         &replaced,
     )?;
     crate::lineage::backfill_history_indexes(conn)
+}
+
+/// Rebuilds revisions with releasable content references and installs the
+/// guards that only allow clearing them together.
+fn migrate_revision_release(conn: &Connection) -> Result<()> {
+    let current = lineage_schema_shape(LINEAGE_SCHEMA_VERSION)?;
+    let replaced = [
+        "lineage_revision_update",
+        "lineage_session_receipt_result_delete",
+    ];
+    let mut migration = replacement_table_sql(current, "lineage_revisions")?;
+    for object in &current.objects {
+        if replaced.contains(&object.name.as_str()) {
+            migration.push_str(&object.sql);
+            migration.push_str(";\n");
+        }
+    }
+    replace_lineage_tables(conn, &migration, &["lineage_revisions"], &replaced)
 }
 
 fn replacement_table_sql(shape: &SchemaShape, name: &str) -> Result<String> {
@@ -376,11 +404,13 @@ fn lineage_schema_shape(version: i32) -> Result<&'static SchemaShape> {
     static LEGACY: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
     static V4: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
     static V5: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
+    static V6: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
     static CURRENT: OnceLock<std::result::Result<SchemaShape, String>> = OnceLock::new();
     let cache = match version {
         3 => &LEGACY,
         4 => &V4,
         5 => &V5,
+        6 => &V6,
         LINEAGE_SCHEMA_VERSION => &CURRENT,
         found => {
             return Err(StoreError::UnsupportedSchema {
@@ -403,6 +433,7 @@ fn load_lineage_schema_shape(version: i32) -> std::result::Result<SchemaShape, S
         3 => LINEAGE_SCHEMA_V3,
         4 => LINEAGE_SCHEMA_V4,
         5 => LINEAGE_SCHEMA_V5,
+        6 => LINEAGE_SCHEMA_V6,
         LINEAGE_SCHEMA_VERSION => LINEAGE_SCHEMA,
         found => return Err(format!("unsupported canonical schema version {found}")),
     };
@@ -574,11 +605,25 @@ pub(crate) mod tests {
         conn
     }
 
+    pub(crate) fn v6_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute_batch(LINEAGE_SCHEMA_V6).unwrap();
+        set_user_version(&conn, 6).unwrap();
+        conn.execute(
+            "INSERT INTO store_meta (key, value, updated_at) VALUES ('schema_version', '6', 1)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
     fn historical_connection(version: i32) -> Connection {
         match version {
             3 => v3_connection(),
             4 => v4_connection(),
             5 => v5_connection(),
+            6 => v6_connection(),
             _ => panic!("unsupported historical schema {version}"),
         }
     }
@@ -654,7 +699,44 @@ pub(crate) mod tests {
         assert_eq!(boundaries.len(), count, "duplicate migration boundary");
         assert_eq!(current.tables.len() + current.objects.len(), 136);
         assert_eq!(legacy.tables.len() + legacy.objects.len(), 76);
+        // Release rebuilds revisions again; its first boundaries are the crash points.
+        boundaries.extend(revision_release_boundaries());
+        boundaries.sort();
+        boundaries.dedup();
         boundaries
+    }
+
+    fn revision_release_boundaries() -> Vec<String> {
+        let conn = v6_connection();
+        let mut boundaries = vec![
+            "table:lineage_revisions_migration".into(),
+            "drop:lineage_revisions".into(),
+            "rename:lineage_revisions_migration".into(),
+        ];
+        for index in conn
+            .prepare(
+                "SELECT name FROM sqlite_schema
+                 WHERE type = 'index' AND tbl_name = 'lineage_revisions' AND sql IS NOT NULL",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+        {
+            boundaries.push(format!("index:{}", index.unwrap()));
+        }
+        boundaries
+    }
+
+    fn release_migration_boundaries() -> Vec<String> {
+        let current = lineage_schema_shape(LINEAGE_SCHEMA_VERSION).unwrap();
+        let mut stages = revision_release_boundaries();
+        stages.extend(["published", "store_meta", "foreign_key_check", "commit"].map(String::from));
+        for object in &current.objects {
+            if object.kind == "trigger" {
+                stages.push(format!("trigger:{}", object.name));
+            }
+        }
+        stages
     }
 
     fn migration_boundary(context: rusqlite::hooks::AuthContext<'_>) -> Option<String> {
@@ -1358,11 +1440,11 @@ pub(crate) mod tests {
                 .unwrap()
         }
         let dir = tempfile::tempdir().unwrap();
-        for version in [3, 4, 5] {
-            let stages = if version == 3 {
-                migration_boundaries()
-            } else {
-                shared_migration_boundaries()
+        for version in [3, 4, 5, 6] {
+            let stages = match version {
+                3 => migration_boundaries(),
+                6 => release_migration_boundaries(),
+                _ => shared_migration_boundaries(),
             }
             .into_iter()
             .chain(["after_commit".into()])
@@ -1394,7 +1476,7 @@ pub(crate) mod tests {
                     ObjectCompression::none(),
                 )
                 .unwrap();
-                if version >= 4 {
+                if matches!(version, 4 | 5) {
                     lineage::backfill_shared_fixture_indexes(&source).unwrap();
                 }
                 let before_definitions = definitions(&source);
@@ -1876,6 +1958,7 @@ pub(crate) mod tests {
             "foreign_key_check".into(),
             "commit".into(),
         ];
+        stages.extend(revision_release_boundaries());
         for object in &current.objects {
             if object.kind == "trigger" || !legacy.objects.iter().any(|old| old.name == object.name)
             {
