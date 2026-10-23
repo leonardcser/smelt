@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 88 namespace(s), 444 function(s), 109 class(es), 13 alias(es).
+**Coverage:** 91 namespace(s), 450 function(s), 111 class(es), 13 alias(es).
 
 `Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.
 
@@ -33,6 +33,7 @@ Available in every runtime, including headless mode.
 - [`smelt.fuzzy`](fuzzy.md) - 2 function(s)
 - [`smelt.git`](git.md) - 2 function(s) - Advanced namespace
 - [`smelt.grep`](grep.md) - 1 function(s)
+- [`smelt.headerline`](headerline.md) - 0 function(s)
 - [`smelt.html`](html.md) - 5 function(s)
 - [`smelt.http`](http.md) - 2 function(s)
 - [`smelt.http.cache`](http_cache.md) - 2 function(s)
@@ -92,7 +93,9 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.session.messages`](session_messages.md) - 1 function(s)
 - [`smelt.session.slug`](session_slug.md) - 1 function(s)
 - [`smelt.session.title`](session_title.md) - 2 function(s)
+- [`smelt.statusline`](statusline.md) - 3 function(s)
 - [`smelt.terminal`](terminal.md) - 7 function(s)
+- [`smelt.tips`](tips.md) - 3 function(s)
 - [`smelt.ui`](ui.md) - 1 function(s)
 - [`smelt.ui.layout`](ui_layout.md) - 11 function(s) - Advanced namespace
 - [`smelt.vim`](vim.md) - 2 function(s)

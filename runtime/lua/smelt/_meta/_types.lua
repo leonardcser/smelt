@@ -741,6 +741,21 @@
 ---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
 ---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
 
+--- One piece of statusline content. Items are laid out left to right, with
+--- `align_right` items packed against the right edge. When the line is too
+--- narrow, whole items drop from the highest `priority` down, and truncatable
+--- items of the highest remaining priority shrink first.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.statusline.Item
+---@field text string Text to show.
+---@field style? smelt.buf.MarkOpts Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
+---@field priority? integer Drop order when space runs out; higher values drop first. Defaults to 0.
+---@field separated? boolean Draw a separator between this item and the previous separated item on the same side.
+---@field truncatable? boolean Allow shrinking this item before dropping it.
+---@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
+---@field align_right? boolean Pack against the right edge instead of the left.
+---@field selectable? boolean Include the text in drag-copy. Defaults to true.
+
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.theme.ColorDecl
@@ -768,6 +783,16 @@
 ---@field syntax? string Bundled syntect/two-face syntax theme name for code highlighting.
 ---@field light? boolean Whether this colorscheme is light. Omit to use terminal background detection.
 ---@field groups table<string, string | smelt.theme.StyleDecl> Highlight groups keyed by group name.
+
+--- A discovery tip shown in the prompt bar.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.tips.Tip
+---@field id string Stable identifier. Registering an existing `id` replaces that tip.
+---@field text string Short tip text.
+---@field detail? string Longer explanation.
+---@field key? string Key or key sequence the tip is about, shown beside the text.
+---@field when? "vim_enabled"|"vim_disabled"|fun(): boolean Show the tip only while the condition holds. Defaults to always.
+---@field placement? string Only `"prompt"` tips are kept for the prompt bar. Defaults to `"prompt"`.
 
 --- Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

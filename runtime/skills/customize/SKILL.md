@@ -576,6 +576,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.fuzzy` - Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
 - `smelt.git` - Asynchronous Git snapshots and explicit file-level staging.
 - `smelt.grep` - Ripgrep wrapper for searching files.
+- `smelt.headerline` - Optional row above the transcript.
 - `smelt.html` - HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 - `smelt.http` - Asynchronous HTTP get/post.
 - `smelt.http.cache` - Runtime-owned HTTP response cache.
@@ -633,7 +634,9 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.session.messages` - Session messages.
 - `smelt.session.slug` - Session slug.
 - `smelt.session.title` - Session title.
+- `smelt.statusline` - The statusline at the bottom of the screen.
 - `smelt.terminal` - Terminal integration helpers.
+- `smelt.tips` - Discovery tips shown in the prompt bar and banner.
 - `smelt.ui` - Screen-composition primitives: main layout composer and per-window renderer registration.
 - `smelt.ui.layout` - Composable layout-tree primitives for the retained main TUI layout.
 - `smelt.vim` - Read and write the vim mode of the focused vim-enabled surface.

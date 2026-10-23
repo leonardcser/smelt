@@ -354,6 +354,87 @@ fn headerline_explicit_invalidation_recomposes_plugin_visibility() {
 }
 
 #[test]
+fn bar_namespaces_are_public_and_match_required_modules() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        assert(smelt.statusline == require("smelt.statusline"))
+        assert(smelt.headerline == require("smelt.headerline"))
+        assert(smelt.tips == require("smelt.tips"))
+        "#,
+    ));
+}
+
+#[test]
+fn statusline_add_returns_identity_guarded_reg() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        _G.__first = smelt.statusline.add("probe", function()
+          return { { text = "first source", align_right = true } }
+        end)
+        "#,
+    ));
+    assert!(app.render_to_frame().rows[11].contains("first source"));
+
+    assert!(app.run_lua(
+        r#"
+        smelt.statusline.add("probe", function()
+          return { { text = "second source", align_right = true } }
+        end)
+        _G.__first:remove()
+        "#,
+    ));
+    let replaced = app.render_to_frame();
+    assert!(replaced.rows[11].contains("second source"));
+    assert!(!replaced.rows[11].contains("first source"));
+
+    assert!(app.run_lua(r#"smelt.statusline.remove("probe")"#));
+    assert!(!app.render_to_frame().rows[11].contains("second source"));
+}
+
+#[test]
+fn statusline_add_rejects_invalid_arguments() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        assert(not pcall(smelt.statusline.add, "", function() return {} end))
+        assert(not pcall(smelt.statusline.add, "x", "not a function"))
+        assert(not pcall(smelt.headerline.add, "", function() return { text = "" } end))
+        assert(not pcall(smelt.headerline.add, "x", {}))
+        "#,
+    ));
+}
+
+#[test]
+fn headerline_add_reg_removes_only_its_own_source() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        _G.__reg = smelt.headerline.add("probe", function()
+          return { text = "header one", highlights = {} }
+        end)
+        "#,
+    ));
+    assert!(app.render_to_frame().rows[0].contains("header one"));
+
+    assert!(app.run_lua(
+        r#"
+        smelt.headerline.add("probe", function()
+          return { text = "header two", highlights = {} }
+        end)
+        _G.__reg:remove()
+        "#,
+    ));
+    assert!(app.render_to_frame().rows[0].contains("header two"));
+
+    assert!(app.run_lua(r#"smelt.headerline.remove("probe")"#));
+    assert!(!app.render_to_frame().text().contains("header two"));
+}
+
+#[test]
 fn fresh_session_render_does_not_probe_uncreated_transcript_store() {
     let mut app = TestApp::builder().build();
     let session_dir = app.app.conversation.current_artifact_dir();

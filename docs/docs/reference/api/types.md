@@ -1113,6 +1113,26 @@ Options for `smelt.render.text`.
 | `hl_group` | `string` |  | Highlight group applied to the whole block. When omitted, text renders dim. |
 | `width` | `integer` |  | Wrapping width in terminal cells. Defaults to the current terminal width. |
 
+### `smelt.statusline.Item`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+One piece of statusline content. Items are laid out left to right, with
+`align_right` items packed against the right edge. When the line is too
+narrow, whole items drop from the highest `priority` down, and truncatable
+items of the highest remaining priority shrink first.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `text` | `string` | yes | Text to show. |
+| `style` | [smelt.buf.MarkOpts](types.md#smeltbufmarkopts) |  | Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`). |
+| `priority` | `integer` |  | Drop order when space runs out; higher values drop first. Defaults to 0. |
+| `separated` | `boolean` |  | Draw a separator between this item and the previous separated item on the same side. |
+| `truncatable` | `boolean` |  | Allow shrinking this item before dropping it. |
+| `truncate` | `"end"\|"middle"` |  | Where to cut a truncated item. Defaults to `"end"`. |
+| `align_right` | `boolean` |  | Pack against the right edge instead of the left. |
+| `selectable` | `boolean` |  | Include the text in drag-copy. Defaults to true. |
+
 ### `smelt.theme.ColorDecl`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
@@ -1155,6 +1175,21 @@ Colorscheme table with optional metadata and a required `groups` map. `syntax` s
 | `syntax` | `string` |  | Bundled syntect/two-face syntax theme name for code highlighting. |
 | `light` | `boolean` |  | Whether this colorscheme is light. Omit to use terminal background detection. |
 | `groups` | `table<string, string \| smelt.theme.StyleDecl>` | yes | Highlight groups keyed by group name. |
+
+### `smelt.tips.Tip`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+A discovery tip shown in the prompt bar.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `string` | yes | Stable identifier. Registering an existing `id` replaces that tip. |
+| `text` | `string` | yes | Short tip text. |
+| `detail` | `string` |  | Longer explanation. |
+| `key` | `string` |  | Key or key sequence the tip is about, shown beside the text. |
+| `when` | `"vim_enabled"\|"vim_disabled"\|fun(): boolean` |  | Show the tip only while the condition holds. Defaults to always. |
+| `placement` | `string` |  | Only `"prompt"` tips are kept for the prompt bar. Defaults to `"prompt"`. |
 
 ### `smelt.tools.PermissionDefaults`
 
