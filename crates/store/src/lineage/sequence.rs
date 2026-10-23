@@ -1089,105 +1089,141 @@ pub(crate) fn empty_sequence(
     Ok(root)
 }
 
-pub(crate) enum AppendResult {
-    Replaced(SequenceNode),
-    Carry(SequenceNode),
+/// The open right edge of a sequence tree during an append. `levels[0]` holds
+/// the open leaf's entries; each higher level holds the completed children of
+/// its open internal node, excluding the open child below it. Nodes are written
+/// once, when they fill or when the append finishes, so the resulting tree is
+/// identical to appending each payload separately without persisting every
+/// intermediate right edge.
+struct RightEdge {
+    kind: SequenceKind,
+    levels: Vec<Vec<NodeEntry>>,
+    leaf_bytes: u64,
 }
 
-pub(crate) fn append_node(
-    conn: &Connection,
-    lineage: &LineageId,
-    id: &NodeId,
-    expected_kind: SequenceKind,
-    expected_level: u32,
-    item: &PayloadRef,
-    stats: &mut OperationStats,
-) -> Result<AppendResult> {
-    let node = load_node_shallow(conn, lineage, id, Some(stats))?;
-    if node.kind != expected_kind || node.level != expected_level {
-        return Err(StoreError::Integrity(format!(
-            "sequence append reached node {} at the wrong kind or level",
-            id.as_str()
-        )));
-    }
-    if node.level == 0 {
-        let combined_byte_count =
-            node.byte_count
-                .checked_add(item.byte_count)
-                .ok_or_else(|| {
-                    StoreError::Integrity("lineage sequence leaf byte extent overflow".into())
-                })?;
-        if node.entries.len() < SEQUENCE_FANOUT
-            && (node.entries.is_empty() || combined_byte_count <= LEAF_TARGET_BYTES)
-        {
-            let mut entries = node.entries;
-            entries.push(NodeEntry {
-                target: EntryTarget::Item(item.id.clone()),
-                item_count: 1,
-                byte_count: item.byte_count,
-                cumulative_item_count: 0,
-                cumulative_byte_count: 0,
-            });
-            return create_node(conn, lineage, node.kind, 0, entries, stats)
-                .map(AppendResult::Replaced);
+impl RightEdge {
+    fn load(
+        conn: &Connection,
+        lineage: &LineageId,
+        root: &SequenceRoot,
+        node_id: &NodeId,
+        stats: &mut OperationStats,
+    ) -> Result<Self> {
+        let mut levels = vec![Vec::new(); root.depth as usize];
+        let mut id = node_id.clone();
+        let mut expected_level = root
+            .depth
+            .checked_sub(1)
+            .ok_or_else(|| StoreError::Integrity("nonempty sequence root has zero depth".into()))?;
+        loop {
+            let mut node = load_node_shallow(conn, lineage, &id, Some(stats))?;
+            if node.kind != root.kind || node.level != expected_level {
+                return Err(StoreError::Integrity(format!(
+                    "sequence append reached node {} at the wrong kind or level",
+                    id.as_str()
+                )));
+            }
+            if node.level == 0 {
+                levels[0] = node.entries;
+                return Ok(Self {
+                    kind: root.kind,
+                    levels,
+                    leaf_bytes: node.byte_count,
+                });
+            }
+            let Some(NodeEntry {
+                target: EntryTarget::Child(child),
+                ..
+            }) = node.entries.pop()
+            else {
+                return Err(StoreError::Integrity(
+                    "internal sequence node ends in an item".into(),
+                ));
+            };
+            levels[node.level as usize] = node.entries;
+            id = child;
+            expected_level -= 1;
         }
-        return create_node(
-            conn,
-            lineage,
-            node.kind,
-            0,
-            vec![NodeEntry {
-                target: EntryTarget::Item(item.id.clone()),
-                item_count: 1,
-                byte_count: item.byte_count,
-                cumulative_item_count: 0,
-                cumulative_byte_count: 0,
-            }],
-            stats,
-        )
-        .map(AppendResult::Carry);
     }
 
-    let last = node
-        .entries
-        .last()
-        .expect("validated sequence node is nonempty");
-    let EntryTarget::Child(last_id) = &last.target else {
-        return Err(StoreError::Integrity(
-            "internal sequence node ends in an item".into(),
-        ));
-    };
-    match append_node(
-        conn,
-        lineage,
-        last_id,
-        expected_kind,
-        expected_level - 1,
-        item,
-        stats,
-    )? {
-        AppendResult::Replaced(child) => {
-            let mut entries = node.entries;
-            *entries.last_mut().expect("nonempty entries") = child.as_entry();
-            create_node(conn, lineage, node.kind, node.level, entries, stats)
-                .map(AppendResult::Replaced)
+    fn push_item(
+        &mut self,
+        conn: &Connection,
+        lineage: &LineageId,
+        item: &PayloadRef,
+        stats: &mut OperationStats,
+    ) -> Result<()> {
+        let entry = NodeEntry {
+            target: EntryTarget::Item(item.id.clone()),
+            item_count: 1,
+            byte_count: item.byte_count,
+            cumulative_item_count: 0,
+            cumulative_byte_count: 0,
+        };
+        let combined_bytes = self
+            .leaf_bytes
+            .checked_add(item.byte_count)
+            .ok_or_else(|| {
+                StoreError::Integrity("lineage sequence leaf byte extent overflow".into())
+            })?;
+        let leaf = &mut self.levels[0];
+        if leaf.len() < SEQUENCE_FANOUT && (leaf.is_empty() || combined_bytes <= LEAF_TARGET_BYTES)
+        {
+            leaf.push(entry);
+            self.leaf_bytes = combined_bytes;
+            return Ok(());
         }
-        AppendResult::Carry(child) if node.entries.len() < SEQUENCE_FANOUT => {
-            let mut entries = node.entries;
-            entries.push(child.as_entry());
-            create_node(conn, lineage, node.kind, node.level, entries, stats)
-                .map(AppendResult::Replaced)
-        }
-        AppendResult::Carry(child) => create_node(
-            conn,
-            lineage,
-            node.kind,
-            node.level,
-            vec![child.as_entry()],
-            stats,
-        )
-        .map(AppendResult::Carry),
+        let full = std::mem::replace(leaf, vec![entry]);
+        self.leaf_bytes = item.byte_count;
+        let node = create_node(conn, lineage, self.kind, 0, full, stats)?;
+        self.push_child(conn, lineage, 1, node.as_entry(), stats)
     }
+
+    fn push_child(
+        &mut self,
+        conn: &Connection,
+        lineage: &LineageId,
+        level: usize,
+        entry: NodeEntry,
+        stats: &mut OperationStats,
+    ) -> Result<()> {
+        if self.levels.len() == level {
+            self.levels.push(Vec::new());
+        }
+        self.levels[level].push(entry);
+        if self.levels[level].len() < SEQUENCE_FANOUT {
+            return Ok(());
+        }
+        let full = std::mem::take(&mut self.levels[level]);
+        let node = create_node(conn, lineage, self.kind, node_level(level)?, full, stats)?;
+        self.push_child(conn, lineage, level + 1, node.as_entry(), stats)
+    }
+
+    fn finish(
+        self,
+        conn: &Connection,
+        lineage: &LineageId,
+        stats: &mut OperationStats,
+    ) -> Result<SequenceNode> {
+        let mut open = None::<SequenceNode>;
+        for (level, mut entries) in self.levels.into_iter().enumerate() {
+            entries.extend(open.as_ref().map(SequenceNode::as_entry));
+            open = Some(create_node(
+                conn,
+                lineage,
+                self.kind,
+                node_level(level)?,
+                entries,
+                stats,
+            )?);
+        }
+        open.ok_or_else(|| StoreError::Integrity("sequence append produced no nodes".into()))
+    }
+}
+
+fn node_level(level: usize) -> Result<u32> {
+    u32::try_from(level)
+        .map_err(|_| StoreError::Integrity("lineage sequence depth exceeds u32".into()))
 }
 
 pub(crate) fn build_sequence_from_empty<B: AsRef<[u8]>>(
@@ -1327,49 +1363,22 @@ pub(crate) fn append_sequence_payloads_in(
         insert_root(conn, lineage, &current, &mut stats)?;
         return Ok((current, stats));
     }
+    let Some(node_id) = current
+        .node_id
+        .clone()
+        .filter(|_| payloads.peek().is_some())
+    else {
+        insert_root(conn, lineage, &current, &mut stats)?;
+        return Ok((current, stats));
+    };
+    let mut edge = RightEdge::load(conn, lineage, &current, &node_id, &mut stats)?;
     for payload in payloads {
         let payload = payload?;
         validate_sequence_payload(conn, lineage, current.kind, &payload)?;
-        let next_node = match current.node_id.as_ref() {
-            None => create_node(
-                conn,
-                lineage,
-                current.kind,
-                0,
-                vec![NodeEntry {
-                    target: EntryTarget::Item(payload.id),
-                    item_count: 1,
-                    byte_count: payload.byte_count,
-                    cumulative_item_count: 0,
-                    cumulative_byte_count: 0,
-                }],
-                &mut stats,
-            )?,
-            Some(node_id) => match append_node(
-                conn,
-                lineage,
-                node_id,
-                current.kind,
-                current.depth - 1,
-                &payload,
-                &mut stats,
-            )? {
-                AppendResult::Replaced(node) => node,
-                AppendResult::Carry(sibling) => {
-                    let old_root = load_node_shallow(conn, lineage, node_id, Some(&mut stats))?;
-                    create_node(
-                        conn,
-                        lineage,
-                        current.kind,
-                        current.depth,
-                        vec![old_root.as_entry(), sibling.as_entry()],
-                        &mut stats,
-                    )?
-                }
-            },
-        };
-        current = make_root(lineage, current.kind, Some(&next_node));
+        edge.push_item(conn, lineage, &payload, &mut stats)?;
     }
+    let node = edge.finish(conn, lineage, &mut stats)?;
+    current = make_root(lineage, current.kind, Some(&node));
     insert_root(conn, lineage, &current, &mut stats)?;
     Ok((current, stats))
 }

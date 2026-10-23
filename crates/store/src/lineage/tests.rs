@@ -86,6 +86,75 @@ fn reachable_leaves(
 }
 
 #[test]
+fn batched_append_matches_item_by_item_tree_and_writes_each_node_once() {
+    let kind = SequenceKind::History;
+    for (prefix_len, batch_len) in [
+        (1, 1),
+        (31, 1),
+        (32, 1),
+        (1, 256),
+        (33, 999),
+        (1023, 3),
+        (1024, 1100),
+    ] {
+        let (conn, lineage) = setup();
+        let empty = empty_sequence(&conn, &lineage, kind).unwrap();
+        let mut payload_stats = OperationStats::default();
+        let payloads = (0..prefix_len + batch_len)
+            .map(|index| {
+                put_payload(
+                    &conn,
+                    &lineage,
+                    kind.into(),
+                    &history_bytes(format!("item-{index}")),
+                    ObjectCompression::none(),
+                    &mut payload_stats,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let (prefix, _) = append_sequence_payloads_in(
+            &conn,
+            &lineage,
+            &empty,
+            payloads[..prefix_len].iter().cloned().map(Ok),
+        )
+        .unwrap();
+
+        let mut item_by_item = prefix.clone();
+        for payload in &payloads[prefix_len..] {
+            item_by_item =
+                append_sequence_payloads_in(&conn, &lineage, &item_by_item, [Ok(payload.clone())])
+                    .unwrap()
+                    .0;
+        }
+        let (batched, stats) = append_sequence_payloads_in(
+            &conn,
+            &lineage,
+            &prefix,
+            payloads[prefix_len..].iter().cloned().map(Ok),
+        )
+        .unwrap();
+        let (bulk, _) =
+            append_sequence_payloads_in(&conn, &lineage, &empty, payloads.iter().cloned().map(Ok))
+                .unwrap();
+
+        assert_eq!(
+            batched, item_by_item,
+            "prefix={prefix_len} batch={batch_len}"
+        );
+        assert_eq!(batched, bulk, "prefix={prefix_len} batch={batch_len}");
+        validate_sequence(&conn, &lineage, &batched).unwrap();
+        let final_nodes = (prefix_len + batch_len).div_ceil(SEQUENCE_FANOUT) as u64 * 2 + 8;
+        assert!(
+            stats.nodes_written <= final_nodes,
+            "prefix={prefix_len} batch={batch_len} wrote {} nodes",
+            stats.nodes_written
+        );
+    }
+}
+
+#[test]
 fn mixed_payload_append_preserves_bulk_and_frontier_content_addresses() {
     for kind in [
         SequenceKind::History,
