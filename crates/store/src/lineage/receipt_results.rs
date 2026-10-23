@@ -180,6 +180,9 @@ pub(crate) fn verify_session_receipt_results(conn: &Connection, lineage: &Lineag
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut verified = HashSet::new();
+    // Kept revisions share nearly all of their sequence structure.
+    let mut sequences = ValidationState::default();
+    let mut indexes = TranscriptIndexValidation::default();
     for (branch, fingerprint) in owners {
         let branch = BranchId::new(branch)?;
         let result = load_session_receipt_result(conn, lineage, &branch, &fingerprint)?
@@ -194,9 +197,9 @@ pub(crate) fn verify_session_receipt_results(conn: &Connection, lineage: &Lineag
         let id = RevisionId::from_db(result.revision_id)?;
         let revision = load_revision(conn, lineage, &id)?;
         load_revision_state(conn, lineage, &revision)?;
-        validate_sequence(conn, lineage, &revision.history_root)?;
-        validate_sequence(conn, lineage, &revision.transcript_root)?;
-        validate_transcript_indexes(conn, lineage, &revision.transcript_root)?;
+        validate_sequence_in(conn, lineage, &revision.history_root, &mut sequences)?;
+        validate_sequence_in(conn, lineage, &revision.transcript_root, &mut sequences)?;
+        validate_transcript_indexes_in(conn, lineage, &revision.transcript_root, &mut indexes)?;
     }
     Ok(())
 }

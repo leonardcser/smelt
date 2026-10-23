@@ -135,7 +135,7 @@ pub(super) fn lineage_doctor_report(
     conn: &Connection,
     path: &Path,
     lineage: &LineageId,
-    branch: Option<&BranchId>,
+    branch: Option<(&BranchId, &Path)>,
 ) -> Result<crate::DoctorReport> {
     let _read = conn
         .is_autocommit()
@@ -215,9 +215,11 @@ pub(super) fn lineage_doctor_report(
             issues.push(format!("canonical branch: {error}"));
         }
     }
-    let stats = lineage_storage_stats(conn, path, branch)?;
+    let stats = lineage_storage_stats(conn, path, branch.map(|(branch, _)| branch))?;
     let search = branch
-        .map(|branch| crate::lineage_search::search_projection_status(conn, path, lineage, branch))
+        .map(|(branch, search_path)| {
+            crate::lineage_search::search_projection_status(conn, search_path, lineage, branch)
+        })
         .transpose()?;
     Ok(crate::DoctorReport {
         schema_version,

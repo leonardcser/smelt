@@ -409,12 +409,28 @@ pub(crate) fn install_transcript_node_profile(
     Ok(())
 }
 
+/// Transcript nodes whose aggregate index was already proven, with their level.
+#[derive(Default)]
+pub(crate) struct TranscriptIndexValidation {
+    profiles: HashMap<NodeId, (u32, TranscriptNodeProfile)>,
+}
+
 fn validate_node_profile(
     conn: &Connection,
     lineage: &LineageId,
     node_id: &NodeId,
     expected_level: u32,
+    validated: &mut TranscriptIndexValidation,
 ) -> Result<TranscriptNodeProfile> {
+    if let Some((level, profile)) = validated.profiles.get(node_id) {
+        if *level != expected_level {
+            return Err(StoreError::Integrity(format!(
+                "transcript index reached invalid node {}",
+                node_id.as_str()
+            )));
+        }
+        return Ok(profile.clone());
+    }
     let node = load_node_shallow(conn, lineage, node_id, None)?;
     if node.kind != SequenceKind::Transcript || node.level != expected_level {
         return Err(StoreError::Integrity(format!(
@@ -428,9 +444,13 @@ fn validate_node_profile(
             EntryTarget::Item(payload) => {
                 TranscriptNodeProfile::from_record(&load_record_profile(conn, lineage, payload)?)?
             }
-            EntryTarget::Child(child) => {
-                validate_node_profile(conn, lineage, child, expected_level.saturating_sub(1))?
-            }
+            EntryTarget::Child(child) => validate_node_profile(
+                conn,
+                lineage,
+                child,
+                expected_level.saturating_sub(1),
+                validated,
+            )?,
         };
         if profile.record_count != entry.item_count {
             return Err(StoreError::Integrity(format!(
@@ -456,6 +476,9 @@ fn validate_node_profile(
             node_id.as_str()
         )));
     }
+    validated
+        .profiles
+        .insert(node_id.clone(), (expected_level, computed.clone()));
     Ok(computed)
 }
 
@@ -463,6 +486,20 @@ pub(crate) fn validate_transcript_indexes(
     conn: &Connection,
     lineage: &LineageId,
     root: &SequenceRoot,
+) -> Result<()> {
+    validate_transcript_indexes_in(
+        conn,
+        lineage,
+        root,
+        &mut TranscriptIndexValidation::default(),
+    )
+}
+
+pub(crate) fn validate_transcript_indexes_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    root: &SequenceRoot,
+    validated: &mut TranscriptIndexValidation,
 ) -> Result<()> {
     validate_transcript_root(root)?;
     let Some(node) = &root.node_id else {
@@ -473,7 +510,8 @@ pub(crate) fn validate_transcript_indexes(
             "nonempty transcript root has no indexed node".into(),
         ));
     };
-    let profile = validate_node_profile(conn, lineage, node, root.depth.saturating_sub(1))?;
+    let profile =
+        validate_node_profile(conn, lineage, node, root.depth.saturating_sub(1), validated)?;
     if profile.record_count != root.item_count {
         return Err(StoreError::Integrity(
             "transcript root and aggregate index disagree".into(),

@@ -1760,6 +1760,7 @@ pub(crate) fn split_sequence(
     Ok(result)
 }
 
+#[derive(Default)]
 pub(crate) struct ValidationState {
     pub(super) active_nodes: HashSet<NodeId>,
     pub(super) validated_nodes: HashMap<NodeId, SequenceNode>,
@@ -1869,23 +1870,23 @@ pub(crate) fn validate_sequence(
     lineage: &LineageId,
     root: &SequenceRoot,
 ) -> Result<OperationStats> {
+    let mut state = ValidationState::default();
+    validate_sequence_in(conn, lineage, root, &mut state)?;
+    Ok(state.stats)
+}
+
+/// Validates a root against nodes and payloads already proven in `state`, so
+/// roots sharing structure are validated once in total.
+pub(crate) fn validate_sequence_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    root: &SequenceRoot,
+    state: &mut ValidationState,
+) -> Result<()> {
     let root = load_matching_root(conn, lineage, root)?;
-    let mut state = ValidationState {
-        active_nodes: HashSet::new(),
-        validated_nodes: HashMap::new(),
-        validated_payloads: HashMap::new(),
-        stats: OperationStats::default(),
-    };
     match &root.node_id {
         Some(node_id) => {
-            let node = validate_node(
-                conn,
-                lineage,
-                node_id,
-                root.kind,
-                root.depth - 1,
-                &mut state,
-            )?;
+            let node = validate_node(conn, lineage, node_id, root.kind, root.depth - 1, state)?;
             if node.item_count != root.item_count || node.byte_count != root.byte_count {
                 return Err(StoreError::Integrity(
                     "sequence root extents do not match its node".into(),
@@ -1899,7 +1900,7 @@ pub(crate) fn validate_sequence(
             ))
         }
     }
-    Ok(state.stats)
+    Ok(())
 }
 
 pub(crate) fn nonnegative_u64(value: i64, field: &str) -> Result<u64> {

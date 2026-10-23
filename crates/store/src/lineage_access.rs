@@ -1733,7 +1733,12 @@ impl LineageSessionReader {
     }
 
     pub fn doctor_report(&self) -> Result<crate::DoctorReport> {
-        lineage_doctor_report(&self.conn, &self.path, &self.lineage, Some(&self.branch))
+        lineage_doctor_report(
+            &self.conn,
+            &self.path,
+            &self.lineage,
+            Some((&self.branch, &self.search_database_path())),
+        )
     }
 
     pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<()> {
