@@ -566,6 +566,7 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
         .map_err(store_failure)?;
     let branch_metadata =
         branch_metadata_from_session(&command.identity, &metadata).map_err(store_failure)?;
+    let archives_perf = smelt_perf::perf::begin("store:lineage:commit:prepare_archives");
     let state = prepare_compact_archives(
         &tx,
         lineage,
@@ -590,6 +591,7 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
         metadata: state.metadata,
         archives_unchanged,
     };
+    drop(archives_perf);
     let empty_history;
     let empty_transcript;
     let previous = match &current {
@@ -605,6 +607,7 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
             (&empty_history, &empty_transcript)
         }
     };
+    let sequences_perf = smelt_perf::perf::begin("store:lineage:commit:sequences");
     let (history_root, transcript_root) = prepare_session_sequences_in(
         &tx,
         lineage,
@@ -614,6 +617,7 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
         compression,
     )
     .map_err(store_failure)?;
+    drop(sequences_perf);
     let base = match &current {
         Some(current) => SessionSaveBase::Existing {
             current,
@@ -632,6 +636,7 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
             branch_created_at: command.identity.created_at as u64,
         },
     };
+    let _publish_perf = smelt_perf::perf::begin("store:lineage:commit:publish");
     let receipt = publish_session_save_in(
         &tx,
         lineage,

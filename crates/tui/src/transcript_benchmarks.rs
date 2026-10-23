@@ -6707,3 +6707,419 @@ fn transcript_active_memory_benchmark_suite() {
     eprintln!("TRANSCRIPT_ACTIVE_MEMORY_JSON {report}");
     smelt_perf::perf::set_enabled(false);
 }
+
+fn scaling_bench_enabled() -> bool {
+    std::env::var("SMELT_TRANSCRIPT_SCALING_BENCH").as_deref() == Ok("1")
+}
+
+fn scaling_bench_block_counts() -> Vec<usize> {
+    std::env::var("SMELT_TRANSCRIPT_SCALING_BLOCKS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|count| count.trim().parse::<usize>().ok())
+                .filter(|count| *count >= 64)
+                .collect::<Vec<_>>()
+        })
+        .filter(|counts| !counts.is_empty())
+        .unwrap_or_else(|| vec![2_000, 8_000, 32_000])
+}
+
+fn scaling_bench_compacted() -> bool {
+    std::env::var("SMELT_TRANSCRIPT_SCALING_COMPACTED").as_deref() == Ok("1")
+}
+
+fn scaling_bench_reps() -> usize {
+    env_positive_usize("SMELT_TRANSCRIPT_SCALING_REPS", 24)
+}
+
+/// One block of a repeating user/thinking/tool/answer agent turn.
+fn scaling_bench_block(index: usize) -> smelt_core::transcript_model::Block {
+    use smelt_core::transcript_model::Block;
+    match index % 4 {
+        0 => Block::User {
+            text: format!("scaling prompt {index}: inspect the failing test and propose a fix"),
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: None,
+        },
+        1 => Block::Thinking {
+            title: None,
+            summary_titles: Vec::new(),
+            content: format!("Reading the output of step {index} and checking the module.").into(),
+            kind: protocol::ReasoningKind::Raw,
+        },
+        2 => Block::Exec {
+            command: format!("cargo test scaling_{index}"),
+            output: (0..12)
+                .map(|line| format!("test scaling_{index}::case_{line} ... ok"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        },
+        _ => Block::Text {
+            content: format!(
+                "## Result {index}\n\n- checked output\n- updated module\n\n{}",
+                "alpha beta gamma delta ".repeat(6)
+            )
+            .into(),
+        },
+    }
+}
+
+fn scaling_bench_block_bytes(block: &smelt_core::transcript_model::Block) -> usize {
+    block.raw_text().map(|text| text.len()).unwrap_or_default()
+}
+
+struct ScalingFixture {
+    app: TestApp,
+    build_ms: f64,
+    content_bytes: usize,
+    retained_bytes: i64,
+    save_ms: Vec<f64>,
+}
+
+fn directory_bytes(path: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match entry.metadata() {
+            Ok(meta) if meta.is_dir() => directory_bytes(&entry.path()),
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+fn directory_files(path: &std::path::Path, out: &mut Vec<(u64, String)>) {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        match entry.metadata() {
+            Ok(meta) if meta.is_dir() => directory_files(&entry.path(), out),
+            Ok(meta) => out.push((meta.len(), entry.file_name().to_string_lossy().into_owned())),
+            Err(_) => {}
+        }
+    }
+}
+
+fn scaling_save(app: &mut TestApp, save_ms: &mut Vec<f64>) {
+    let started_at = std::time::Instant::now();
+    save_bench_fixture(app, "scaling");
+    while app.app.conversation.drain_transcript_compaction_slice() {}
+    save_ms.push(elapsed_ms(started_at.elapsed()));
+}
+
+fn scaling_bench_app(blocks: usize, compacted: bool) -> ScalingFixture {
+    const SAVE_BATCH_BLOCKS: usize = 256;
+    const RENDER_EVERY_BLOCKS: usize = 64;
+
+    let heap_before = smelt_perf::alloc::snapshot().current_bytes as i64;
+    if compacted && scaling_bench_perf() {
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+    }
+    let mut save_ms = Vec::new();
+    let started_at = std::time::Instant::now();
+    let mut app = TestApp::builder().build();
+    app.app.handle_resize(100, 32);
+    let mut content_bytes = 0usize;
+    for index in 0..blocks {
+        let block = scaling_bench_block(index);
+        content_bytes += scaling_bench_block_bytes(&block);
+        app.app.push_block(block);
+        if (index + 1) % RENDER_EVERY_BLOCKS == 0 {
+            app.render_silent();
+        }
+        if compacted && (index + 1) % SAVE_BATCH_BLOCKS == 0 {
+            scaling_save(&mut app, &mut save_ms);
+        }
+    }
+    if compacted {
+        scaling_save(&mut app, &mut save_ms);
+    }
+    app.render_silent();
+    let build_ms = elapsed_ms(started_at.elapsed());
+    if compacted && scaling_bench_perf() {
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        for row in snapshot.durations.iter().take(30) {
+            eprintln!(
+                "TRANSCRIPT_SCALING_SAVE_PERF blocks={blocks} metric={} count={} total_us={} max_us={}",
+                row.label, row.count, row.total_us, row.max_us
+            );
+        }
+    }
+    let retained_bytes = smelt_perf::alloc::snapshot().current_bytes as i64 - heap_before;
+    ScalingFixture {
+        app,
+        build_ms,
+        content_bytes,
+        retained_bytes,
+        save_ms,
+    }
+}
+
+struct ScalingOpSample {
+    median_ms: f64,
+    max_ms: f64,
+    alloc_bytes_per_op: u64,
+    perf: Option<smelt_perf::perf::Snapshot>,
+}
+
+fn scaling_bench_perf() -> bool {
+    std::env::var("SMELT_TRANSCRIPT_SCALING_PERF").as_deref() == Ok("1")
+}
+
+fn scaling_measure(
+    app: &mut TestApp,
+    reps: usize,
+    mut op: impl FnMut(&mut TestApp, usize),
+) -> ScalingOpSample {
+    for rep in 0..2 {
+        op(app, rep);
+    }
+    let perf = scaling_bench_perf();
+    if perf {
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+    }
+    smelt_perf::alloc::set_enabled(true);
+    let (_, bytes_before) = smelt_perf::alloc::thread_snapshot();
+    let mut times = Vec::with_capacity(reps);
+    for rep in 0..reps {
+        let started_at = std::time::Instant::now();
+        op(app, rep + 2);
+        times.push(elapsed_ms(started_at.elapsed()));
+    }
+    let (_, bytes_after) = smelt_perf::alloc::thread_snapshot();
+    smelt_perf::alloc::set_enabled(false);
+    let perf = perf.then(|| {
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        snapshot
+    });
+    times.sort_by(f64::total_cmp);
+    ScalingOpSample {
+        median_ms: times[times.len() / 2],
+        max_ms: *times.last().expect("scaling samples"),
+        alloc_bytes_per_op: bytes_after.saturating_sub(bytes_before) / reps as u64,
+        perf,
+    }
+}
+
+fn scaling_focus_transcript(app: &mut TestApp) {
+    app.focus_transcript();
+    let win = app.app.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+}
+
+const SCALING_OPS: [&str; 9] = [
+    "prompt_key",
+    "idle_frame",
+    "gg_then_G",
+    "ctrl_d",
+    "fold_mid",
+    "resize_width",
+    "append_block",
+    "stream_delta",
+    "spinner_frame",
+];
+
+fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<ScalingOpSample> {
+    use crate::content::transcript_buf::FoldAction;
+    use crate::content::transcript_scene::RenderNodeId;
+
+    let ScalingFixture {
+        mut app,
+        build_ms,
+        content_bytes,
+        retained_bytes,
+        save_ms,
+    } = scaling_bench_app(blocks, compacted);
+    if compacted {
+        let disk_bytes = directory_bytes(app.app.core.sessions.layout().sessions_root());
+        let first = save_ms.first().copied().unwrap_or_default();
+        let last = save_ms.iter().rev().nth(1).copied().unwrap_or(first);
+        eprintln!(
+            "TRANSCRIPT_SCALING_STORAGE blocks={blocks} saves={} disk_bytes={disk_bytes} disk_bytes_per_block={:.0} disk_per_content_byte={:.2} first_save_ms={first:.1} last_full_save_ms={last:.1}",
+            save_ms.len(),
+            disk_bytes as f64 / blocks as f64,
+            disk_bytes as f64 / content_bytes as f64,
+        );
+        let mut files = Vec::new();
+        directory_files(app.app.core.sessions.layout().sessions_root(), &mut files);
+        files.sort_by(|a, b| b.cmp(a));
+        for (bytes, name) in files.iter().take(6) {
+            eprintln!("TRANSCRIPT_SCALING_STORAGE_FILE blocks={blocks} bytes={bytes} name={name}");
+        }
+        eprintln!(
+            "TRANSCRIPT_SCALING_SAVE_MS blocks={blocks} {}",
+            save_ms
+                .iter()
+                .map(|ms| format!("{ms:.0}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    let memory = app
+        .app
+        .conversation
+        .transcript_memory_snapshot_for_harness();
+    eprintln!(
+        "TRANSCRIPT_SCALING_FIXTURE compacted={compacted} blocks={blocks} build_ms={build_ms:.1} build_us_per_block={:.2} content_bytes={content_bytes} heap_retained_bytes={retained_bytes} heap_overhead_bytes_per_block={:.0} live_blocks={} stored_blocks={} compact_record_bytes={} height_index_bytes={} layout_bytes={} visible_rows_bytes={}",
+        build_ms * 1000.0 / blocks as f64,
+        (retained_bytes - content_bytes as i64) as f64 / blocks as f64,
+        memory.live_blocks,
+        memory.stored_blocks,
+        memory.compact_record_bytes,
+        memory.height_index_bytes,
+        memory.layout_bytes,
+        memory.visible_rows_bytes,
+    );
+
+    let mut samples = Vec::with_capacity(SCALING_OPS.len());
+
+    app.focus_prompt();
+    samples.push(scaling_measure(&mut app, reps, |app, _| {
+        app.type_char('x');
+        app.render_silent();
+    }));
+    samples.push(scaling_measure(&mut app, reps, |app, _| {
+        app.app.request_urgent_render();
+        app.render_silent();
+    }));
+
+    scaling_focus_transcript(&mut app);
+    app.render_silent();
+    samples.push(scaling_measure(&mut app, reps, |app, _| {
+        app.type_char('g');
+        app.type_char('g');
+        app.render_silent();
+        app.type_char('G');
+        app.render_silent();
+    }));
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+    samples.push(scaling_measure(&mut app, reps, |app, _| {
+        app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        app.render_silent();
+    }));
+
+    let order = &app.app.conversation.transcript().history().order;
+    let mid = blocks / 2;
+    let fold_id = order[mid - mid % 4 + 2];
+    samples.push(scaling_measure(&mut app, reps, |app, _| {
+        app.app
+            .fold_transcript_node(RenderNodeId::Block(fold_id), FoldAction::Toggle);
+        app.render_silent();
+    }));
+    samples.push(scaling_measure(&mut app, reps, |app, rep| {
+        let width = if rep.is_multiple_of(2) { 120 } else { 100 };
+        app.app.handle_resize(width, 32);
+        app.render_silent();
+    }));
+
+    app.type_char('G');
+    app.render_silent();
+    samples.push(scaling_measure(&mut app, reps, |app, rep| {
+        app.app
+            .push_block(scaling_bench_block(blocks + rep * 4 + 3));
+        app.render_silent();
+    }));
+
+    begin_autonomous_text_turn(&mut app, 9_001, 4);
+    samples.push(scaling_measure(&mut app, reps, |app, rep| {
+        app.app.dispatch_engine_event_in_render_loop_to(
+            protocol::EngineEvent::TextDelta {
+                delta: format!(" streamed token {rep}"),
+            },
+            &mut std::io::sink(),
+            |_| {},
+        );
+        app.app.request_urgent_render();
+        app.render_silent();
+    }));
+    samples.push(scaling_measure(&mut app, reps, |app, _| {
+        render_autonomous_frames(app, 1);
+    }));
+
+    for (op, sample) in SCALING_OPS.iter().zip(&samples) {
+        eprintln!(
+            "TRANSCRIPT_SCALING_SAMPLE compacted={compacted} blocks={blocks} op={op} median_ms={:.3} max_ms={:.3} alloc_bytes_per_op={}",
+            sample.median_ms, sample.max_ms, sample.alloc_bytes_per_op
+        );
+        let Some(perf) = &sample.perf else {
+            continue;
+        };
+        for row in perf.durations.iter().take(16) {
+            eprintln!(
+                "TRANSCRIPT_SCALING_PERF compacted={compacted} blocks={blocks} op={op} metric={} count={} total_us={} max_us={}",
+                row.label, row.count, row.total_us, row.max_us
+            );
+        }
+    }
+    samples
+}
+
+/// Sweeps transcript block count and reports how interactions that should not
+/// depend on session size actually scale. The exponent column is the fitted
+/// power between the smallest and largest session: ~0 is constant, ~1 linear.
+#[test]
+fn transcript_scaling_benchmark_suite() {
+    if !benchmark_target_enabled() || !scaling_bench_enabled() {
+        return;
+    }
+    let counts = scaling_bench_block_counts();
+    let compacted = scaling_bench_compacted();
+    let reps = scaling_bench_reps();
+    let results = counts
+        .iter()
+        .map(|blocks| run_scaling_sample(*blocks, compacted, reps))
+        .collect::<Vec<_>>();
+
+    let first = *counts.first().expect("scaling block counts") as f64;
+    let last = *counts.last().expect("scaling block counts") as f64;
+    eprintln!();
+    eprintln!(
+        "TRANSCRIPT_SCALING_SUMMARY compacted={compacted} reps={reps} blocks={}",
+        counts
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    eprintln!(
+        "{:<14} {} {:>9}",
+        "op",
+        counts
+            .iter()
+            .map(|blocks| format!("{:>12}", format!("{blocks} ms")))
+            .collect::<String>(),
+        "exponent"
+    );
+    for (index, op) in SCALING_OPS.iter().enumerate() {
+        let medians = results
+            .iter()
+            .map(|samples| samples[index].median_ms)
+            .collect::<Vec<_>>();
+        let exponent = if counts.len() > 1 && medians[0] > 0.0 {
+            (medians[medians.len() - 1] / medians[0]).ln() / (last / first).ln()
+        } else {
+            0.0
+        };
+        eprintln!(
+            "{op:<14} {} {exponent:>9.2}",
+            medians
+                .iter()
+                .map(|ms| format!("{ms:>12.3}"))
+                .collect::<String>()
+        );
+    }
+}
