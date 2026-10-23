@@ -1519,7 +1519,6 @@ impl TranscriptProjection {
             );
             if refresh.structure_changed {
                 self.pending_changed_blocks.clear();
-                self.layout_cache.retain_nodes(self.transcript_scene.ids());
             } else {
                 for (block_id, appends) in &refresh.appended_ranges {
                     let Some(index) = self.transcript_scene.index_for_block(*block_id) else {
@@ -1548,7 +1547,9 @@ impl TranscriptProjection {
                 self.pending_changed_blocks.extend(refresh.changed_blocks);
             }
             if refresh.prune_required {
-                self.presentation.prune(self.transcript_scene.ids());
+                let scene = &self.transcript_scene;
+                self.layout_cache.retain_nodes(|id| scene.contains_id(id));
+                self.presentation.prune(|id| scene.contains_id(id));
             }
         }
     }

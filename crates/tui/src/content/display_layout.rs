@@ -985,18 +985,17 @@ impl LayoutCache {
         self.enforce_budget();
     }
 
-    pub(crate) fn retain_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
-        let live: HashSet<RenderNodeId> = ids.into_iter().collect();
+    pub(crate) fn retain_nodes(&mut self, live: impl Fn(RenderNodeId) -> bool) {
         self.blocks.retain(|id, entry| {
-            if live.contains(id) {
+            if live(*id) {
                 true
             } else {
                 self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
                 false
             }
         });
-        self.lru.borrow_mut().retain(|id| live.contains(id));
-        self.pinned.retain(|id| live.contains(id));
+        self.lru.borrow_mut().retain(|id| live(*id));
+        self.pinned.retain(|id| live(*id));
         self.enforce_budget();
     }
 
@@ -2550,7 +2549,7 @@ mod tests {
             layout.clone(),
             Some(start + std::time::Duration::from_secs(1)),
         )]);
-        model.retain_nodes([static_node]);
+        model.retain_nodes(|id| id == static_node);
         assert_eq!(model.next_refresh_at(), None);
 
         model.insert_compiled_blocks(vec![(

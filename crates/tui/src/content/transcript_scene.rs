@@ -450,10 +450,9 @@ impl TranscriptPresentationState {
         changed
     }
 
-    pub(crate) fn prune(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
-        let live: HashSet<RenderNodeId> = ids.into_iter().collect();
+    pub(crate) fn prune(&mut self, live: impl Fn(RenderNodeId) -> bool) {
         let before = self.overrides.len();
-        self.overrides.retain(|id, _| live.contains(id));
+        self.overrides.retain(|id, _| live(*id));
         if self.overrides.len() != before {
             self.bump();
             self.changes.clear();
@@ -723,12 +722,7 @@ impl TranscriptScene {
         group_generation: u64,
         group_cache_key: Option<u64>,
     ) -> Option<bool> {
-        if groups.is_empty()
-            && self
-                .nodes
-                .iter()
-                .any(|node| matches!(node, RenderNode::Group(_)))
-        {
+        if groups.is_empty() && !self.grouped_block_index_by_id.is_empty() {
             return None;
         }
         if !groups.is_empty()
