@@ -111,7 +111,8 @@ local function aggregate(entries)
     local total = prompt + completion
     local c = tonumber(e.cost_usd) or 0
     local model = e.model or "unknown"
-    stats.calls = stats.calls + 1
+    local calls = tonumber(e.calls) or 1
+    stats.calls = stats.calls + calls
     stats.prompt = stats.prompt + prompt
     stats.completion = stats.completion + completion
     stats.cache_read = stats.cache_read + cache_read
@@ -120,7 +121,7 @@ local function aggregate(entries)
     stats.cost = stats.cost + c
 
     local m = stats.by_model[model] or { model = model, calls = 0, prompt = 0, completion = 0, cache_read = 0, cache_write = 0, reasoning = 0, cost = 0 }
-    m.calls = m.calls + 1
+    m.calls = m.calls + calls
     m.prompt = m.prompt + prompt
     m.completion = m.completion + completion
     m.cache_read = m.cache_read + cache_read
