@@ -1,7 +1,7 @@
 //! Integration tests for the Lua plugin API surface.
 //!
 //! Boots a [`LuaRuntime`] with the host-tier API registered and the
-//! bundled `_bootstrap.lua` evaluated, then exercises the public
+//! bundled bootstrap chunks evaluated, then exercises the public
 //! primitives (`smelt.task.timeout/race/all`, `smelt.reg.compose`,
 //! `smelt.fs.watch`, `smelt.fs.read_async`, `smelt.process.run`,
 //! cancellation behavior, …) end-to-end.
@@ -1661,7 +1661,7 @@ fn runtime_constructor_defers_bootstrap_until_explicit_load() {
         let relative_path = chunk.path;
         let path = runtime_dir.join("smelt").join(relative_path);
         std::fs::create_dir_all(path.parent().unwrap()).expect("bootstrap parent");
-        let source = if relative_path == "_bootstrap.lua" {
+        let source = if relative_path == smelt_core::lua::runtime::BOOTSTRAP_CHUNKS[0].path {
             "BOOTSTRAP_COUNT = (BOOTSTRAP_COUNT or 0) + 1\n"
         } else {
             ""

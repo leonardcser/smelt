@@ -96,7 +96,17 @@ impl BootstrapChunk {
 
 /// Bundled chunks executed at bootstrap time, in dependency order.
 pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
-    BootstrapChunk::host("_bootstrap.lua"),
+    BootstrapChunk::host("bootstrap/task.lua"),
+    BootstrapChunk::host("bootstrap/tools.lua"),
+    BootstrapChunk::host("bootstrap/provider.lua"),
+    BootstrapChunk::host("bootstrap/reg.lua"),
+    BootstrapChunk::host("bootstrap/lifecycle.lua"),
+    BootstrapChunk::host("bootstrap/async.lua"),
+    BootstrapChunk::host("bootstrap/watch.lua"),
+    BootstrapChunk::host("bootstrap/appearance.lua"),
+    BootstrapChunk::host("bootstrap/state.lua"),
+    BootstrapChunk::host("bootstrap/notify.lua"),
+    BootstrapChunk::host("bootstrap/model.lua"),
     BootstrapChunk::host("transcript/defaults.lua"),
     BootstrapChunk::host("transcript.lua"),
     BootstrapChunk::ui("dialog.lua"),

@@ -1104,7 +1104,8 @@ fn failed_candidate_at_each_filesystem_load_phase_recovers() {
     assert!(app.lua_probe().manifest.files.contains(&autoload_override));
     std::fs::remove_file(&autoload_override).unwrap();
 
-    let bootstrap_override = runtime_smelt.join("_bootstrap.lua");
+    let bootstrap_override = runtime_smelt.join("bootstrap/task.lua");
+    std::fs::create_dir_all(bootstrap_override.parent().unwrap()).unwrap();
     let bootstrap_effect = runtime.path().join("bootstrap-effect.txt");
     let bootstrap_effect_json = serde_json::to_string(&bootstrap_effect.to_string_lossy()).unwrap();
     std::fs::write(
