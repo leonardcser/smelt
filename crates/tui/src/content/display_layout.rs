@@ -512,10 +512,6 @@ impl<K> Default for Lru<K> {
 }
 
 impl<K: Copy + Eq + Hash> Lru<K> {
-    fn len(&self) -> usize {
-        self.order.len()
-    }
-
     fn clear(&mut self) {
         self.stamps.clear();
         self.order.clear();
@@ -692,9 +688,26 @@ impl LayoutCache {
     }
 
     pub(crate) fn set_pinned_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
-        self.pinned.clear();
+        let previous = std::mem::take(&mut self.pinned);
         self.pinned.extend(ids);
+        {
+            let mut lru = self.lru.borrow_mut();
+            for id in &self.pinned {
+                lru.remove(id);
+            }
+            for id in previous.difference(&self.pinned) {
+                if self.blocks.contains_key(id) {
+                    lru.touch(*id);
+                }
+            }
+        }
         self.enforce_budget();
+        if smelt_perf::perf::enabled() {
+            smelt_perf::perf::record_value(
+                "transcript:render_cache:pinned_bytes",
+                self.memory_snapshot().pinned_layout_bytes as u64,
+            );
+        }
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -757,7 +770,9 @@ impl LayoutCache {
     }
 
     fn touch(&self, id: RenderNodeId) {
-        self.lru.borrow_mut().touch(id);
+        if !self.pinned.contains(&id) {
+            self.lru.borrow_mut().touch(id);
+        }
     }
 
     fn recompute_earliest_refresh_at(&mut self) {
@@ -769,21 +784,14 @@ impl LayoutCache {
     }
 
     fn enforce_budget(&mut self) {
-        let mut attempts = self.lru.borrow().len();
         let mut evicted_refresh = false;
-        while self.retained_bytes() > self.budget && attempts > 0 {
-            attempts -= 1;
+        while self.retained_bytes() > self.budget {
             let Some(id) = self.lru.borrow_mut().pop_oldest() else {
                 break;
             };
-            if self.pinned.contains(&id) {
-                self.lru.borrow_mut().touch(id);
-                continue;
-            }
             if let Some(entry) = self.blocks.remove(&id) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
                 evicted_refresh |= entry.refresh_at.is_some();
-                attempts = self.lru.borrow().len();
             }
         }
         while self.retained_bytes() > self.budget && self.inline_syntax.evict_oldest() {}
@@ -796,13 +804,6 @@ impl LayoutCache {
         smelt_perf::perf::record_value(
             "transcript:render_cache:retained_bytes",
             self.retained_bytes() as u64,
-        );
-        smelt_perf::perf::record_value(
-            "transcript:render_cache:pinned_bytes",
-            self.pinned
-                .iter()
-                .filter_map(|id| self.blocks.get(id).map(|entry| entry.weight))
-                .sum::<usize>() as u64,
         );
         smelt_perf::perf::record_value(
             "transcript:render_cache:oversize_debt_bytes",
