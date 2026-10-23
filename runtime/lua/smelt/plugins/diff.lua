@@ -398,7 +398,7 @@ function M.open()
 end
 
 smelt.cmd.register("diff", function() M.open() end, {
-  desc = "view local Git changes in a continuous diff", busy = "run",
+  desc = "review staged, unstaged, and untracked Git changes", busy = "run",
 })
 
 return M
