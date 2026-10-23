@@ -1,54 +1,27 @@
-# Incremental transcript architecture objective
+# Incremental transcript architecture
 
-Status: complete
+The transcript pipeline is incremental and retained: work is proportional to new
+data and changed visible rows, not to accumulated history, active tool output,
+group size, or sparse session state. Tool output, local command output, streamed
+tool arguments, persisted history, layout, and viewport projection all share one
+bounded data flow.
 
-## Objective
+Invariants:
 
-Replace smelt's snapshot-oriented transcript pipeline with one incremental,
-retained architecture whose work is proportional to new data and changed visible
-rows.
-
-The finished system must remain responsive while an agent works without user
-input, regardless of accumulated transcript history, active tool output, group
-size, or sparse session state. Tool output, local command output, streamed tool
-arguments, persisted history, layout, and viewport projection must use the same
-bounded data flow instead of separate clone, hash, serialization, and rendering
-paths.
-
-This is a replacement, not a compatibility retrofit. We will remove or redesign
-APIs, data structures, Lua contracts, caches, and storage queries that obstruct
-the target architecture. We will not preserve a costly abstraction solely to
-minimize migration work.
-
-## Definition of done
-
-This objective is complete only when all of the following are true:
-
-1. Live transcript mutations are append-oriented typed operations over stable
-   node identities. No continuation update replaces or snapshots accumulated
-   output.
-2. The render path consumes retained node revisions and bounded source ranges.
-   It never receives a JSON copy of complete live tool, exec, draft, or group
-   state.
-3. Layout and projection work is limited to dirty visible nodes and requested
-   rows. A visual cap is also a computational cap.
-4. All continuation events are merged at the frame boundary. First output,
-   lifecycle transitions, errors, permissions, and user interaction remain
-   urgent.
-5. Draft parsing, ANSI decoding, line indexing, display hashing, and group
-   aggregation are incremental. Their total work is linear in bytes appended or
-   children changed.
-6. Sparse extent and semantic navigation queries use retained or persisted
-   metadata and never deserialize transcript payloads merely to compute a row
-   estimate or nearest semantic neighbor.
-7. Animation-only frames reuse transcript layout, extents, navigation, and
-   visible rows.
-8. Frame preparation performs no synchronous storage opens and no unbounded
-   storage reads.
-9. The superseded snapshot, replacement, full-payload hash, full-child group,
-   synchronous navigation-scan, and payload-backed extent paths are deleted.
-10. Correctness, allocation, timing, and scaling gates in this document pass in
-    release mode, and the final benchmark results are recorded.
+- Live mutations are append-oriented typed operations over stable node
+  identities; no continuation update replaces or snapshots accumulated output.
+- The render path consumes retained node revisions and bounded source ranges,
+  never a JSON copy of complete tool, exec, draft, or group state.
+- Layout and projection touch only dirty visible nodes and requested rows. A
+  visual cap is also a computational cap.
+- Continuation events merge at the frame boundary. First output, lifecycle
+  transitions, errors, permissions, and user interaction stay urgent.
+- Draft parsing, ANSI decoding, line indexing, display hashing, and group
+  aggregation are linear in bytes appended or children changed.
+- Sparse extent and semantic navigation queries use retained or persisted
+  metadata and never deserialize payloads to estimate rows or find a neighbor.
+- Animation-only frames reuse transcript layout, extents, navigation, and rows.
+- Frame preparation performs no synchronous storage opens or unbounded reads.
 
 ## Architectural principles
 
@@ -91,14 +64,12 @@ structure, presentation, extent, navigation, or animation. A spinner tick cannot
 invalidate transcript content. Updating one group child cannot invalidate an
 unchanged sibling.
 
-### Delete the old path
+### No parallel paths
 
-There will be no long-lived dual renderer, compatibility mirror, or shadow model.
-Each migration slice must remove the path it replaces. Temporary adapters are
-allowed only inside an incomplete slice and must not survive the slice's final
-commit.
+There is one renderer and one model: no compatibility mirror or shadow model. A
+change that replaces a path removes the old one in the same commit.
 
-## Target data flow
+## Data flow
 
 ```text
 provider / local exec / draft / persistence
@@ -361,280 +332,8 @@ requested blocks from remaining materialized simultaneously. Changing an
 immutable store address explicitly replaces both retained readers and invalidates
 only indexes tied to the old root.
 
-## Simplicity and deletion plan
+## Ownership
 
-The new architecture should reduce concepts, not add a cache beside every old
-abstraction. The final implementation has:
-
-- one transcript node model;
-- one chunked content store;
-- one typed mutation/change-set path;
-- one retained render store;
-- one row/extent query abstraction for live and sparse content;
-- one semantic frame scheduler;
-- one hydration service per session.
-
-Delete these obstructing mechanisms after their replacements land:
-
-- complete `ToolState` display hashing for render invalidation;
-- full block and group JSON snapshots for Lua layout;
-- mirrored Lua source views containing complete live payloads;
-- clone-and-replace local exec appends;
-- per-character cloned draft preview values and final replay;
-- group cache keys derived from complete child payloads;
-- full-child measurement before visual capping;
-- row-range rendering that rescans ANSI content from the start;
-- urgent scheduling of continuation-only tool output;
-- duplicate sparse prefix and total reconstruction;
-- payload deserialization for extent boundaries;
-- synchronous 256-record semantic navigation scans;
-- per-operation lineage reader opens in live session paths;
-- animation-driven transcript projection invalidation;
-- manual broad cache-clear calls made unnecessary by change sets.
-
-Do not retain deprecated aliases or compatibility branches for removed internal
-APIs. Update built-in Lua, generated API documentation, tests, and examples in
-the same slice that changes a contract.
-
-## Implementation sequence
-
-The sequence is architectural, but each phase must end with one production path
-and passing tests.
-
-### Phase 1: canonical mutations and content
-
-- Introduce the shared chunked content store and typed transcript mutations.
-- Move provider output and local exec to ownership-transferring append operations.
-- Replace payload-derived render invalidation with stable revisions.
-- Preserve all transcript semantics and persistence receipts.
-- Delete clone-and-replace append paths as each producer migrates.
-
-### Phase 2: drafts and groups
-
-- Replace draft preview cloning with retained incremental parser state.
-- Make final draft arguments reuse streamed parser/content state.
-- Store group membership by child identity and revision.
-- Remove whole-group snapshots and payload-derived group keys.
-
-### Phase 3: retained renderer and Lua contract
-
-- Introduce stable retained render nodes and typed content leaves.
-- Replace full-payload Lua snapshots with compact metadata templates.
-- Compile structural templates only on metadata revisions.
-- Move source mapping, copy metadata, and bounded row resolution into Rust.
-- Delete the old snapshot renderer and source-view mirrors.
-
-### Phase 4: bounded row indexes and caps
-
-- Incrementally retain line, ANSI, Markdown suffix, and visual-row checkpoints.
-- Make all measurement and rendering APIs range-based.
-- Make caps, prefixes, gutters, and nested layouts preserve bounded row work.
-- Delete full-child cap measurement and prefix rescans.
-
-The Phase 4 implementation carries a retained `MeasuredLayout` through every
-production viewport row query. Vboxes, Hboxes, panels, prefixes, gutters, and
-style wrappers consume child measurements from that plan and cannot fall back to
-complete child measurement. One-off complete previews use an explicit complete
-render mode instead of the viewport API. Caps resolve retained text, Markdown,
-code, file, and nested layout edges directly. Transient cap children are accepted
-only within 64 KiB, 4,096-node, 4,096-span, and 32-level budgets; larger content
-uses a bounded omission row.
-
-Retained content diffs compare chunk streams, narrow compilation by common byte
-prefix and suffix, expand only to complete lines plus three context rows, and
-materialize only that changed window. On the 20,000-line and 80,000-line release
-fixtures, first-render allocation was 3,948,287 and 3,948,438 bytes respectively,
-while full retained rows remained zero. This validates allocation independence
-from unchanged source size; detailed commands and timing are recorded in
-`docs/transcript-layout-benchmarks.md`.
-
-Provider output now transfers into one shared source allocation and exposes
-UTF-8-safe ranged slices to the retained content store. The first slice is
-available immediately; output beyond the 4 MiB ingestion budget advances one
-slice per semantic render boundary. Tool completion, history replacement, and
-terminal turn events remain ordered behind pending slices. Cancellation and
-transcript clearing discard both pending slices and deferred lifecycle events.
-Final provider output reuses the streamed content identity instead of replaying
-its complete payload.
-
-Text layouts retain line extents plus at most 64 visual tail rows per width and
-ANSI mode. An append invalidates cached rows only from the changed logical line
-onward. Cap selection metadata stays stack-bounded, non-truncated caps render
-directly, and visible block-layout and row-identity capacities are reused across
-projections. These bounds do not retain complete visual rows or eagerly measure
-an appended payload.
-
-The final optimized release measurements passed all three provider gates:
-
-- The warmed 64 KiB, 2,048-chunk workload used 131 frames, allocated 16,273,090
-  bytes in the measured hot path, and recorded 0.260/0.390/2.540 ms frame
-  p95/p99/maximum. This is 504,126 bytes below the 16 MiB limit.
-- The 8 MiB, 128-chunk workload used 11 frames, allocated 5,708,304 bytes, and
-  recorded 2.107 ms frame p95, p99, and maximum.
-- The single-event 96 MiB workload was indexed in 4 MiB slices over 27 frames.
-  It allocated 31,772,080 bytes in total and recorded
-  14.800/15.357/15.357 ms frame p95/p99/maximum. No ingestion, compositor, or
-  transcript-projection frame approached the 33 ms limit.
-
-The final Phase 4 correctness matrix passed 5,126 workspace tests with 2 skipped.
-Strict workspace clippy, formatting, Lua API generation, the `release-fast` smelt
-build, and `git diff --check` passed. Line coverage was 86.33 percent against the
-80 percent gate, and no generated `.snap.new` files remained.
-
-### Phase 5: semantic scheduler and compositor
-
-- Route every continuation producer through one coalescing scheduler.
-- Apply pending changes once per frame.
-- Separate animation, content, metadata, structure, and viewport invalidation.
-- Render dirty viewport ranges and paint terminal row/cell diffs.
-- Delete continuation-specific urgent paths and broad cache clears.
-
-Production autonomous work now enters one typed frame-boundary queue. Continued
-provider text, reasoning, tool drafts, tool output, auxiliary engine asks, and
-local exec output share that queue. The first visible output remains synchronous
-and urgent. Auxiliary asks retain an explicit per-request continuation identity
-because idle asks can update Lua UI without creating parser-owned transcript
-blocks. Local exec start is likewise urgent because it creates the visible block;
-append, finish, and finalize mutations stay ordered in the shared queue.
-
-At compositor frame start, the queue is drained exactly once before animation,
-signal, layout, and paint work. The release benchmark records
-`transcript:pending_work:applied` once per traced frame and asserts the
-counts match. Completion, errors, and other urgent lifecycle events apply pending
-continuations before their visible effects, so completion cannot overtake output.
-Cancellation, rewind cancellation, and transcript clearing use one pending-work
-discard operation for continuation mutations, provider slices, and deferred
-lifecycle events. The obsolete benchmark-only exec scheduler override was deleted.
-
-Typed transcript patches keep invalidation semantic. Content appends update
-retained byte ranges and changed nodes; metadata and structure revisions invalidate
-only their affected retained state; viewport changes retain source and measurement
-ownership; animation patches never enter transcript scene or sparse projection.
-Broad clears remain only at renderer or policy contract changes, complete source
-replacement, width changes, theme changes, and full reset boundaries. Timed
-renderer refreshes now resolve dirty height nodes through the retained scene index
-and clear the bounded complete-width snapshot set instead of scanning every prior
-node. That removed the only measured streaming-frame cost proportional to a
-10,000-block in-memory history.
-
-Dirty viewport rows continue through the retained projection and terminal's
-existing double-buffered compositor. `Ui::flush_prepared_frame` forwards the grid
-to `Compositor::flush_frame`; `Grid::diff` yields changed cells and `flush_diff`
-emits only those cells. No parallel transcript compositor or full-grid terminal
-paint path was introduced.
-
-The final Phase 5 release scheduler measurements were:
-
-- A 64 KiB provider response in 2,048 chunks used 131 frames. The final narrow
-  typed-queue sample allocated 16,321,104 bytes, 456,112 bytes below 16 MiB, with
-  0.378/0.430/2.199 ms frame p95/p99/maximum. Every frame recorded one queue
-  application pass and 130 frames performed transcript projection.
-- The equivalent local exec stream used 130 frames, allocated 10,674,526 bytes,
-  and recorded 0.219/0.343/0.568 ms frame p95/p99/maximum.
-- Adding 120 spinner-only frames increased compositor frames from 131 to 251 while
-  transcript projection, viewport planning, sparse planning, and scene refresh
-  remained at 130. The idle segment performed no transcript work.
-- The 8 MiB, 128-chunk provider workload used 11 frames and recorded
-  4.663/4.663/4.663 ms frame p95/p99/maximum. The single-event 96 MiB workload
-  advanced over 28 bounded frames and recorded 13.158/15.528/15.528 ms. Both
-  remained below the frame gates.
-- Across warmed samples, increasing prior history from 5 to 10,000 blocks changed
-  mean frame cost from 0.233 to 0.222 ms. Mean frame p99 across three runs changed
-  from 0.497 to 0.388 ms. Streaming frame cost therefore did not grow with prior
-  transcript size.
-
-The final Phase 5 correctness matrix passed 5,132 workspace tests with 2 skipped.
-Strict workspace clippy, formatting, Lua API generation, the `release-fast` smelt
-build, snapshot review, and `git diff --check` passed. Line coverage was 86.34
-percent against the 80 percent gate, and no generated `.snap.new` files remained.
-
-### Phase 6: sparse indexes and hydration
-
-- Persist payload-independent extent profiles and aggregate indexes.
-- Persist semantic role/kind navigation indexes.
-- Share retained sparse extent state across viewport consumers.
-- Add persistent readers and merged asynchronous hydration.
-- Remove payload-backed boundary estimation and synchronous navigation scans.
-
-Schema version 3 stores one immutable transcript profile per payload and one
-aggregate profile per persistent sequence node. Profiles contain bounded preview,
-kind, broad semantic role, block bounds, estimated text bytes, and row extents at
-the supported widths. Sequence aggregates retain record count, block and
-canonical history-index bounds, kind/role masks, and summed extents. Range extent,
-row lookup, previous/next kind or role, block lookup, and transcript-boundary
-lookup descend the content-addressed sequence tree. They do not deserialize
-transcript payloads or construct root-sized side indexes. Existing version 1 and
-2 databases migrate transactionally: the migration validates the exact old
-shape, backfills payload and node profiles, removes the old root-scoped extent
-table when present, and advances both schema version markers. A corrupt payload
-rolls the entire migration back after partial backfill work.
-
-The transcript document retains one metadata reader for the immutable session
-store address, while the persistent per-session hydration worker retains a second
-reader for payload reads off the UI thread. Changing the store address explicitly
-replaces both retained readers. Viewport,
-semantic navigation, search, persistence, and rewind planning enqueue typed record
-or block requests without opening a store or waiting for payloads during frame
-preparation. The request queue merges adjacent windows and gives explicit semantic
-requests priority. Worker results carry their document context and revision, so
-stale results are rejected; missing or unreadable storage returns a typed terminal
-failure instead of redispatching forever. Successful installation requests redraw
-and consumes a pending projection restore only after planning succeeds.
-
-Scrollbar far seeks are transactional. Pointer movement updates a pending semantic
-seek and an independently painted thumb position, but it never mutates the exact
-committed content viewport. Until the latest hydration generation can resolve an
-exact source anchor and bounded row tape, rendering retains the previous committed
-viewport. The exact tape, semantic anchor, content scroll, cursor target, and
-scrollbar projection then commit together. Pending projections replace their
-superseded hydration pins instead of retaining every crossed record window. Every
-visible absolute row must be covered by the committed materialized range; sparse
-placeholder rows are not a valid interactive viewport.
-
-Sparse prefix, scrollbar total, and row lookup share one retained width/root extent
-result. Its ad hoc prefix and row-location query caches each evict after 256
-entries, while exact observations remain limited to loaded record windows.
-
-Navigation first locates one payload-free metadata target and then hydrates only
-that target when the Lua contract requires a complete `StoredBlockWithId`.
-Committed-view publication itself contains bounded metadata and never opens a
-store. The former 64-record root extent chunks, root-sized prefix vectors,
-payload-backed extent boundaries, and 256-record navigation scan are deleted from
-the production schema and TUI path.
-
-The optimized Phase 6 sparse-index matrix completed every lookup with zero
-payload hydration:
-
-| Records | Previous kind p99 | Next role p99 | Block lookup p99 | Row lookup p99 | 129-record extent p99 | Total extent p99 |
-|---:|---:|---:|---:|---:|---:|---:|
-| 10,000 | 391 us | 419 us | 921 us | 997 us | 909 us | 18 us |
-| 100,000 | 222 us | 200 us | 553 us | 542 us | 403 us | 10 us |
-| 1,000,000 | 449 us | 251 us | 953 us | 904 us | 718 us | 14 us |
-
-A 5,000-block committed-view watcher ran 1,001 dispatches at 450 us p99
-and 1,725 us maximum with one metadata reader, one hydration reader, and no
-additional store open. Over
-600 warmed autonomous frames with equivalent 5 MiB visible history, hydrated
-frames used 35,340 us of compositor time and allocated 22,936,808 thread bytes;
-sparse frames used 35,792 us and 23,336,589 bytes. Sparse/hydrated ratios were
-1.013 for compositor time, 1.005 for allocation count, and 1.017 for allocation
-bytes, all within the 1.25 gate. The warmed sparse interval loaded zero transcript
-payloads and did not replace or reopen either reader. A separate resumed 64 KiB
-provider turn applied 2,049 events over 252 scheduled frames, including 120 idle
-frames, while retaining both readers and making zero additional open attempts.
-
-### Phase 7: consolidation
-
-- Remove superseded types, APIs, metrics, feature flags, and dead tests.
-- Rename remaining concepts around nodes, mutations, revisions, retained rows,
-  extents, and hydration so ownership is obvious.
-- Regenerate Lua stubs and reference documentation.
-- Add architecture invariants and focused regression tests.
-- Run the complete correctness and performance matrix.
-- Record final measurements and mark this objective complete only after all
-  obsolete paths are gone.
-
-#### Final architecture and ownership
 
 The consolidated production path has one owner for each kind of state:
 
@@ -653,7 +352,7 @@ The consolidated production path has one owner for each kind of state:
   per semantic frame before projection; incremental indexes provide pending-tool
   lookup and main-turn cancellation without repeated queue scans. Animation state
   is independent of transcript revisions.
-- Schema version 3 owns immutable payload profiles and persistent sequence-node
+- The lineage store owns immutable payload profiles and persistent sequence-node
   aggregates. Extent, row, block, canonical history-boundary, role, and kind
   queries descend that sequence without loading payloads or building a root-sized
   index.
@@ -675,109 +374,6 @@ The consolidated production path has one owner for each kind of state:
   owns horizontal composition, cap-row selection, and style/panel chrome. The root
   modules coordinate those owners while each extracted subsystem retains its own
   state and invariants.
-
-#### Post-reflection architecture closure
-
-A final architecture reflection identified four consolidation gaps. All four are
-closed in the accepted path:
-
-1. Payload hydration no longer runs synchronously from compositor preparation.
-   `TranscriptHydrationWorker` is a persistent per-session background service with
-   coalesced requests, context/revision rejection, terminal failure results, and
-   UI-thread result installation.
-2. Harness settling no longer activates a `cfg(test)` direct-read service. It
-   submits requests to the production worker, waits for production results, and
-   enforces the unchanged 16-round convergence limit. Deferred hydration behavior
-   in correctness tests is therefore production-identical.
-3. Provider continuations, auxiliary continuations, tool-output appends, deferred
-   reasoning summaries, ordered lifecycle events, and local-exec work use one
-   insertion-ordered queue. Incrementally maintained invocation and main-turn
-   indexes replace the former coordinated queues and repeated application scans.
-4. The transcript and retained-layout implementations are divided by ownership:
-   `transcript/{memory,storage,sparse_records,sparse_extent,adapters,app_integration}.rs`
-   isolate memory policy, persistence, sparse planning, display consumers, and
-   application lifecycle/view integration;
-   `layout_ir/{hbox,cap_rows,chrome}.rs` isolate horizontal layout, bounded cap
-   selection, and style/panel composition. This leaves document and layout
-   orchestration explicit instead of mixing every subsystem in one root file.
-
-Main transcript hydration and resume-preview hydration deliberately remain
-separate workers. Preview cancellation cannot interfere with the active document,
-and preview completion commits directly on the UI thread and requests redraw
-without Lua polling.
-
-#### Deleted superseded paths
-
-The final implementation removes complete tool and group JSON transport to Lua,
-payload-derived display hashes, source-view payload mirrors, clone-and-replace
-provider and local-exec appends, per-character draft value cloning and final
-replay, whole-child group cache keys, full-child cap measurement, ANSI prefix
-rescans, continuation-specific urgent scheduling, duplicate sparse prefix/total
-reconstruction, payload-backed extent boundaries, the 256-record navigation scan,
-per-frame reader opens, and animation-driven transcript projection. The former
-root-scoped 64-record extent table exists only as version 1 migration vocabulary;
-the current migration drops it transactionally. A final symbol and metric scan
-found no production prefix-index type, old extent chunk type, obsolete renderer mirror, or
-obsolete navigation and extent metric.
-
-Explicit complete materialization remains only in read-only fallback and test or
-old in-memory load seams that request a complete session. Normal store-backed
-resume, render, save, rewind, and fork do not enter those seams, and focused
-regressions fail if they do. They are not reachable from autonomous transcript
-frames, committed-view callbacks, sparse planning, or hydration.
-
-#### Final before and after results
-
-The complete release results and raw reproduction commands are recorded in
-`docs/transcript-layout-benchmarks.md`. The principal comparisons are:
-
-| Workload | Investigation reference | Final retained result |
-|---|---:|---:|
-| Provider bash, 64 KiB | 512 chunks: 3.80-3.85 s, 3.99 GB, 14.58-14.80 ms frame p99 | 2,048 chunks: 32.805 ms, 16,325,277 bytes, 0.414 ms frame p99 |
-| Provider bash, 8 MiB / 128 chunks | 153.37 ms frame p99, 7.85 GB allocated | 3.406 ms frame p99, 5,754,773 bytes allocated |
-| Provider bash, 96 MiB / one chunk | 2.088 s worst frame, 981 MB worst-frame allocation | 29 bounded frames, 11.889 ms maximum frame, 31,951,620 bytes total allocation |
-| Sparse autonomous, 600 frames | 1.573 s, 1.220 GB allocated | 35.737 ms, 23,336,589 bytes, zero payload loads |
-| 5,000-block committed-view watcher | 142.0 ms, 534 MB, up to 256 payload records | 509 us p99, two retained readers, zero measured-interval opens, metadata-only dispatch |
-| Sparse semantic lookup, 1,000,000 records | Payload-backed linear fallback | At most 747 us p99, zero payload loads |
-| Indexed search, 500 MiB | Canonical source reconstruction per candidate page: 404.847 ms rare, 404.268 ms absent, 409.717 ms after append | Format-2 root manifest: 199.065 ms rare with 512 returned candidates, 45.224 ms absent, 15.312 ms after append |
-| Active retained memory, 500 MiB | Committed content could remain proportional to transcript bytes | Zero live committed content, 33,533,570 hydrated bytes under budget, 55,967,090 allocator retained-byte delta |
-
-The post-reflection sparse/hydrated ratios are 0.996 for compositor time, 1.005
-for allocation count, and 1.017 for allocation bytes. In the final three-run
-history comparison, growth from 5 to 10,000 prior blocks changed warmed mean frame
-cost from about 0.218 to 0.238 ms, a 9.2 percent increase against the 10 percent
-gate; mean p99 remained effectively flat at 0.426 and 0.427 ms. Adding 120
-animation-only frames added no transcript projection, sparse planning, hydration
-planning, structural compilation, payload hashing, or storage reads. Retained diff
-first-render allocation was 3,985,838 bytes at 20,000 lines and 3,985,989 bytes at
-80,000 lines, a 151-byte difference; warm renders were 0.070 and 0.071 ms and full
-retained rows remained zero.
-
-Search projection setup is explicitly outside measured interaction intervals.
-Every indexed release sample proves that both the persisted candidate index and
-current content-addressed root manifest were used. The 50 and 500 MiB
-active-memory gates submit all 1,200 adversarial hydration IDs in one request,
-settle in eight and seven canonical ranges respectively, preserve zero working-set
-rereads, and keep hydrated content below the 32 MiB budget through normal LRU
-eviction.
-
-The 96 MiB provider event is transferred once and advanced in UTF-8-safe 4 MiB
-slices at semantic render boundaries. This is the only payload-size ingestion
-bound. It preserves urgent first output and lifecycle ordering while preventing an
-arbitrary provider event from monopolizing one frame. It is retained as a
-production safety bound, not as a compatibility path.
-
-#### Final correctness and release validation
-
-The post-reflection workspace matrix passed 5,167 tests with 3 skipped. Line
-coverage is 86.25 percent against the 80 percent gate. Strict full-workspace clippy,
-the explicit `harness,transcript-bench` clippy gate, formatting, Lua API generation,
-permission and transcript/tool storybooks, the optimized `release-fast` smelt
-build, and `git diff --check` passed. Changed storybooks were manually inspected,
-and no generated `.snap.new` files remain. Sparse scale, watcher, autonomous
-comparison, provider sizing, draft, group, history scaling, animation isolation,
-retained-reader, and retained-diff release benchmarks comprise the final
-performance matrix.
 
 ## Performance acceptance gates
 
@@ -866,34 +462,3 @@ The measured implementation must demonstrate these bounds:
 - Lua callbacks cannot retain invalid content handles or trigger unbounded reads.
 - Memory budgets account for chunks, checkpoints, retained rows, sparse profiles,
   and hydrated payloads, and all caches have explicit eviction ownership.
-
-## Validation commands
-
-```bash
-cargo fmt -- --check
-cargo nextest run --workspace --features smelt-tui/harness
-cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings
-cargo build --profile release-fast --bin smelt
-cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80
-cargo xtask gen-lua-docs
-```
-
-Run transcript storybook snapshots whenever transcript scenes, renderers, Lua
-layout templates, permissions, or committed-view UI change. Run the release
-streaming and sparse matrix after every phase and the full acceptance matrix in
-Phase 7.
-
-## Required final report
-
-The completion report must include:
-
-- the final architecture and ownership map;
-- all deleted legacy mechanisms and APIs;
-- before/after CPU, frame, allocation, reader-open, and scaling results;
-- acceptance-gate results and raw reproduction commands;
-- correctness, lint, coverage, snapshot, and release-build validation;
-- any remaining bound with a precise reason and follow-up objective.
-
-No objective may be called complete while a known full-state, payload-backed,
-unbounded synchronous, or frame-per-event path remains in autonomous transcript
-work.
