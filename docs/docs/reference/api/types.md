@@ -371,7 +371,7 @@ Structured JSON-output specification for `smelt.engine.ask`.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | `string` | yes | Schema name (used by some providers as the response_format label). |
-| `schema` | `table` | yes | JSON schema describing the expected response shape. Accepts a Lua table that round-trips through `lua_table_to_json` into a JSON value. |
+| `schema` | `table` | yes | JSON schema describing the expected response shape. Accepts a Lua table that converts to a JSON value. |
 
 ### `smelt.engine.AskSpec`
 

@@ -176,7 +176,7 @@ pub struct LuaAskResponseFormat {
     /// Schema name (used by some providers as the response_format label).
     pub name: String,
     /// JSON schema describing the expected response shape. Accepts a Lua
-    /// table that round-trips through `lua_table_to_json` into a JSON value.
+    /// table that converts to a JSON value.
     pub schema: mlua::Table,
 }
 
@@ -523,10 +523,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
                 let system = spec.system;
                 let _guard = spec.guard;
-                let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
-                    name: f.name,
-                    schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
-                });
+                let response_format = spec
+                    .response_format
+                    .map(|f| -> LuaResult<_> {
+                        Ok(protocol::AskResponseFormat {
+                            name: f.name,
+                            schema: smelt_core::lua::value::table_to_json(lua, &f.schema)?,
+                        })
+                    })
+                    .transpose()?;
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);
@@ -577,10 +582,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 )?;
 
                 let _guard = spec.guard;
-                let response_format = spec.response_format.map(|f| protocol::AskResponseFormat {
-                    name: f.name,
-                    schema: smelt_core::lua::api::lua_table_to_json(lua, &f.schema),
-                });
+                let response_format = spec
+                    .response_format
+                    .map(|f| -> LuaResult<_> {
+                        Ok(protocol::AskResponseFormat {
+                            name: f.name,
+                            schema: smelt_core::lua::value::table_to_json(lua, &f.schema)?,
+                        })
+                    })
+                    .transpose()?;
                 let model_ref = spec.model;
                 let question = spec.question;
                 let visible_retries = spec.visible_retries.unwrap_or(false);

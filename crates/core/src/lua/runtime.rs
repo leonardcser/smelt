@@ -15,8 +15,8 @@ use crate::content::display_safe_text;
 #[cfg(test)]
 use crate::content::markdown_stream::thinking_summary;
 use crate::lua::{
-    json_to_lua, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent,
-    ToolCallIds, ToolEnv, ToolExecResult, TranscriptGroupSpec,
+    value, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent, ToolCallIds,
+    ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
 use crate::transcript_model::{Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus};
@@ -1140,7 +1140,7 @@ impl LuaRuntime {
     }
 
     fn install_state_snapshot(&self, state: &serde_json::Value) -> LuaResult<()> {
-        let value = crate::lua::json_to_lua(&self.lua, state)?;
+        let value = crate::lua::value::from_json(&self.lua, state)?;
         crate::lua::module::internal_api_root(&self.lua)?.raw_set("__state", value)
     }
 
@@ -1910,7 +1910,7 @@ impl LuaRuntime {
             return;
         }
         if let Some(meta) = metadata {
-            match json_to_lua(&self.lua, &meta) {
+            match value::from_json(&self.lua, &meta) {
                 Ok(v) => {
                     let _ = table.set("metadata", v);
                 }
@@ -1945,7 +1945,7 @@ impl LuaRuntime {
                     self.resolve_external(external_id, v);
                 }
                 TaskEvent::ExternalResolvedJson { external_id, value } => {
-                    let v = json_to_lua(&self.lua, &value).unwrap_or(mlua::Value::Nil);
+                    let v = value::from_json(&self.lua, &value).unwrap_or(mlua::Value::Nil);
                     self.resolve_external(external_id, v);
                 }
             }
@@ -2642,7 +2642,7 @@ impl LuaRuntime {
                     .flatten()
             })?;
         Some(crate::utils::hash_serializable(
-            &crate::lua::api::lua_table_to_json(&self.lua, &transcript),
+            &value::table_to_json(&self.lua, &transcript).ok()?,
         ))
     }
 
@@ -3212,7 +3212,7 @@ fn tool_output_to_lua_table(
     set_content_metadata(&table, &output.content)?;
     table.set("is_error", output.is_error)?;
     if let Some(metadata) = output.metadata.as_ref() {
-        table.set("metadata", json_to_lua(lua, metadata)?)?;
+        table.set("metadata", value::from_json(lua, metadata)?)?;
     }
     if !output.content_fields.is_empty() {
         let fields = lua.create_table_with_capacity(0, output.content_fields.len())?;
@@ -3879,7 +3879,7 @@ fn args_to_lua_table(
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     for (key, value) in args {
-        t.set(key.as_str(), json_to_lua(lua, value)?)?;
+        t.set(key.as_str(), value::from_json(lua, value)?)?;
     }
     Ok(t)
 }

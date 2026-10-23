@@ -1,7 +1,6 @@
 //! `smelt.provider` - config-time provider and model registration.
 
-use crate::lua::api::lua_value_to_json;
-use crate::lua::json_to_lua;
+use crate::lua::value;
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -157,7 +156,7 @@ impl FromLua for LuaModelEntry {
                     chat_template_kwargs: m
                         .chat_template_kwargs
                         .map(|table| {
-                            lua_value_to_json(lua, &mlua::Value::Table(table))
+                            value::table_to_json(lua, &table)?
                                 .as_object()
                                 .cloned()
                                 .ok_or_else(|| {
@@ -289,7 +288,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         row.set("min_p", m.min_p)?;
                         row.set("repeat_penalty", m.repeat_penalty)?;
                         if let Some(kwargs) = &m.chat_template_kwargs {
-                            row.set("chat_template_kwargs", json_to_lua(lua, &serde_json::json!(kwargs))?)?;
+                            row.set("chat_template_kwargs", value::from_json(lua, &serde_json::json!(kwargs))?)?;
                         }
                         row.set("tool_calling", m.tool_calling)?;
                         row.set("input_cost", m.input_cost)?;

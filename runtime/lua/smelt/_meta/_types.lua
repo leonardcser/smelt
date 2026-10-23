@@ -253,7 +253,7 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskResponseFormat
 ---@field name string Schema name (used by some providers as the response_format label).
----@field schema table JSON schema describing the expected response shape. Accepts a Lua table that round-trips through `lua_table_to_json` into a JSON value.
+---@field schema table JSON schema describing the expected response shape. Accepts a Lua table that converts to a JSON value.
 
 --- Spec for `smelt.engine.ask`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

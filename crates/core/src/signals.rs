@@ -794,7 +794,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         let _ = t.set("tool", s.tool.as_str());
         if let Ok(args) = lua.create_table() {
             for (k, v) in &s.args {
-                if let Ok(lv) = crate::lua::json_to_lua(lua, v) {
+                if let Ok(lv) = crate::lua::value::from_json(lua, v) {
                     let _ = args.set(k.as_str(), lv);
                 }
             }
@@ -847,7 +847,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         }
         if let Ok(args) = lua.create_table() {
             for (k, v) in &r.args {
-                if let Ok(lv) = crate::lua::json_to_lua(lua, v) {
+                if let Ok(lv) = crate::lua::value::from_json(lua, v) {
                     let _ = args.set(k.as_str(), lv);
                 }
             }

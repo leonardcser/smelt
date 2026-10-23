@@ -223,7 +223,10 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
                         result.set("content", inv.result.content.as_str())?;
                         result.set("is_error", inv.result.is_error)?;
                         if let Some(metadata) = &inv.result.metadata {
-                            result.set("metadata", smelt_core::lua::json_to_lua(lua, metadata)?)?;
+                            result.set(
+                                "metadata",
+                                smelt_core::lua::value::from_json(lua, metadata)?,
+                            )?;
                         }
                         row.set("result", result)?;
                         invocations.set(j + 1, row)?;

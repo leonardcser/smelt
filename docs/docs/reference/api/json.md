@@ -30,5 +30,5 @@ Decode JSON into a Lua value. Returns `(value, nil)` on success or `(nil, err_st
 fun(value: any, opts: table?): string
 ```
 
-Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` for an empty array.
+Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` for an empty array. Raises an error for cycles, nesting deeper than 128 levels, functions and other non-data values, non-finite numbers, and strings that are not valid UTF-8.
 

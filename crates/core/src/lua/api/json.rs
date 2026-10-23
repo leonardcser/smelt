@@ -1,9 +1,8 @@
 //! `smelt.json` - JSON encode/decode helpers for Lua plugins.
 
-use crate::lua::api::{lua_value_to_json, new_json_array};
 use crate::lua::doc::Tier;
-use crate::lua::json_to_lua;
 use crate::lua::module::LuaMod;
+use crate::lua::value;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -19,15 +18,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "array",
         "Create an empty JSON array table. Unlike `{}`, it encodes as `[]` while empty.",
         &[],
-        |lua, ()| new_json_array(lua),
+        |lua, ()| value::new_array(lua),
     )?;
 
     m.fn_(
         "encode",
-        "Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` for an empty array.",
+        "Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` for an empty array. Raises an error for cycles, nesting deeper than 128 levels, functions and other non-data values, non-finite numbers, and strings that are not valid UTF-8.",
         &["value", "opts"],
-        |lua, (value, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<String> {
-            let json = lua_value_to_json(lua, &value);
+        |lua, (input, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<String> {
+            let json = value::to_json(lua, &input)?;
             let pretty = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<bool>>("pretty").ok().flatten())
@@ -46,7 +45,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["text"],
         |lua, text: String| -> LuaResult<(mlua::Value, Option<String>)> {
             match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(json) => Ok((json_to_lua(lua, &json)?, None)),
+                Ok(json) => Ok((value::from_json(lua, &json)?, None)),
                 Err(err) => Ok((mlua::Value::Nil, Some(err.to_string()))),
             }
         },

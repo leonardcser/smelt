@@ -2,6 +2,7 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::value;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -18,7 +19,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["content"],
         |lua, content: String| -> LuaResult<mlua::Value> {
             match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(v) => json_to_lua(lua, v),
+                Ok(v) => value::from_json(lua, &v),
                 Err(_) => Ok(mlua::Value::Nil),
             }
         },
@@ -41,8 +42,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             } else {
                 String::new()
             };
-            let value = yaml_to_json(yaml);
-            let lua_value = json_to_lua(lua, value)?;
+            let frontmatter = yaml_to_json(yaml);
+            let lua_value = value::from_json(lua, &frontmatter)?;
             Ok((lua_value, body))
         },
     )?;
@@ -96,38 +97,6 @@ fn unquote(s: &str) -> String {
         return s[first.len()..last_start].to_string();
     }
     s.to_string()
-}
-
-fn json_to_lua(lua: &Lua, v: serde_json::Value) -> LuaResult<mlua::Value> {
-    use serde_json::Value;
-    match v {
-        Value::Null => Ok(mlua::Value::Nil),
-        Value::Bool(b) => Ok(mlua::Value::Boolean(b)),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(mlua::Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(mlua::Value::Number(f))
-            } else {
-                Ok(mlua::Value::Nil)
-            }
-        }
-        Value::String(s) => Ok(mlua::Value::String(lua.create_string(&s)?)),
-        Value::Array(arr) => {
-            let t = lua.create_table()?;
-            for (i, item) in arr.into_iter().enumerate() {
-                t.set(i + 1, json_to_lua(lua, item)?)?;
-            }
-            Ok(mlua::Value::Table(t))
-        }
-        Value::Object(map) => {
-            let t = lua.create_table()?;
-            for (k, item) in map {
-                t.set(k, json_to_lua(lua, item)?)?;
-            }
-            Ok(mlua::Value::Table(t))
-        }
-    }
 }
 
 #[cfg(test)]

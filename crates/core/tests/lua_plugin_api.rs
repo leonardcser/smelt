@@ -217,6 +217,41 @@ fn json_api_round_trips_tables_and_reports_decode_errors() {
         .expect("json api round trip");
 }
 
+#[test]
+fn json_encode_rejects_values_it_cannot_represent() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            local function fails(value, pattern)
+                local ok, err = pcall(smelt.json.encode, value)
+                assert(not ok, "expected an error")
+                assert(tostring(err):find(pattern, 1, true), tostring(err))
+            end
+
+            local cyclic = {}
+            cyclic.self = cyclic
+            fails(cyclic, "table cycle")
+
+            local deep = {}
+            local node = deep
+            for _ = 1, 100000 do
+                local child = {}
+                node[1] = child
+                node = child
+            end
+            fails(deep, "depth limit")
+
+            fails({ value = 0 / 0 }, "non-finite")
+            fails({ value = math.huge }, "non-finite")
+            fails({ callback = function() end }, "unsupported Lua function")
+            fails({ text = "\255" }, "UTF-8")
+            "#,
+        )
+        .exec()
+        .expect("json encode failures");
+}
+
 // -- tools.register -------------------------------------------------------
 
 #[test]
