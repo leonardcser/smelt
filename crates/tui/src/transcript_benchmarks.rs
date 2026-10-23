@@ -6919,13 +6919,14 @@ fn scaling_focus_transcript(app: &mut TestApp) {
     win.set_vim_mode(VimMode::Normal);
 }
 
-const SCALING_OPS: [&str; 9] = [
+const SCALING_OPS: [&str; 10] = [
     "prompt_key",
     "idle_frame",
     "gg_then_G",
     "ctrl_d",
     "fold_mid",
     "resize_width",
+    "search_key",
     "append_block",
     "stream_delta",
     "spinner_frame",
@@ -7025,6 +7026,19 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         app.app.handle_resize(width, 32);
         app.render_silent();
     }));
+    app.type_char('/');
+    app.type_text("scaling missing");
+    app.render_silent();
+    samples.push(scaling_measure(&mut app, reps, |app, rep| {
+        if rep.is_multiple_of(2) {
+            app.type_char('x');
+        } else {
+            app.press(KeyCode::Backspace);
+        }
+        app.render_silent();
+    }));
+    app.press(KeyCode::Esc);
+    app.render_silent();
 
     app.type_char('G');
     app.render_silent();

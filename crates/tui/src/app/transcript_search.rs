@@ -13,6 +13,39 @@ use std::thread;
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
 const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
 
+/// Indexed text of the unsaved transcript suffix, reused across keystrokes
+/// while the history is unchanged.
+#[derive(Debug)]
+pub(crate) struct DirtyTranscriptText {
+    generation: u64,
+    start: usize,
+    blocks: Vec<(smelt_core::transcript_model::BlockId, Box<str>)>,
+}
+
+impl DirtyTranscriptText {
+    fn build(history: &smelt_core::transcript_model::BlockHistory, start: usize) -> Self {
+        let blocks = history
+            .order
+            .iter()
+            .skip(start.min(history.order.len()))
+            .filter_map(|id| {
+                let record = history.block(*id)?;
+                let indexed = smelt_core::transcript_model::transcript_indexed_text(
+                    record,
+                    history.tool_state(*id),
+                )
+                .indexed_text;
+                Some((*id, indexed.into_boxed_str()))
+            })
+            .collect();
+        Self {
+            generation: history.generation(),
+            start,
+            blocks,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TranscriptSearchSession {
     pub(super) key: TranscriptSearchKey,
@@ -442,12 +475,12 @@ impl TuiApp {
         let history = self.conversation.transcript().history();
         let mut text = String::new();
         for id in &entry.block_ids {
-            let Some(record) = history.cloned_block(*id) else {
+            let Some(record) = history.block(*id) else {
                 continue;
             };
             let tool_state = history.tool_state(*id);
             let block_text =
-                smelt_core::transcript_model::transcript_indexed_text(&record, tool_state)
+                smelt_core::transcript_model::transcript_indexed_text(record, tool_state)
                     .indexed_text;
             if !text.is_empty() {
                 text.push('\n');
@@ -491,28 +524,28 @@ impl TuiApp {
         );
     }
 
-    pub(super) fn dirty_transcript_candidate_blocks(&self, query: &str) -> Vec<u64> {
-        let Some(start) = self.conversation.transcript().history().record_dirty_from() else {
+    pub(super) fn dirty_transcript_candidate_blocks(&mut self, query: &str) -> Vec<u64> {
+        let history = self.conversation.transcript().history();
+        let Some(start) = history.record_dirty_from() else {
             return Vec::new();
         };
         let _perf = smelt_perf::perf::begin("search:transcript:dirty_candidate_scan");
-        let history = self.conversation.transcript().history();
-        let mut scanned = 0u64;
-        let mut out = Vec::new();
-        for id in history.order.iter().skip(start.min(history.order.len())) {
-            let Some(record) = history.cloned_block(*id) else {
-                continue;
-            };
-            scanned = scanned.saturating_add(1);
-            let tool_state = history.tool_state(*id);
-            if smelt_core::transcript_model::transcript_indexed_text(&record, tool_state)
-                .indexed_text
-                .contains(query)
-            {
-                out.push(id.get());
-            }
-        }
-        smelt_perf::perf::record_value("search:transcript:dirty_candidates_scanned", scanned);
+        let search = self.overlays.search_state_mut();
+        let text = match search.dirty_text.take() {
+            Some(text) if text.generation == history.generation() && text.start == start => text,
+            _ => DirtyTranscriptText::build(history, start),
+        };
+        let out: Vec<u64> = text
+            .blocks
+            .iter()
+            .filter(|(_, indexed)| indexed.contains(query))
+            .map(|(id, _)| id.get())
+            .collect();
+        smelt_perf::perf::record_value(
+            "search:transcript:dirty_candidates_scanned",
+            text.blocks.len() as u64,
+        );
+        search.dirty_text = Some(text);
         smelt_perf::perf::record_value(
             "search:transcript:dirty_candidate_blocks",
             out.len() as u64,
