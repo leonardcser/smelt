@@ -561,6 +561,7 @@ Use the generated Lua API reference for complete signatures and types.
 
 - `smelt.agent` - Agent-facing prompt customization for Lua plugins.
 - `smelt.auth` - Authenticated provider helpers.
+- `smelt.banner` - Startup banner extension point.
 - `smelt.build` - Compile-time build identity and version metadata for plugins.
 - `smelt.builtins` - Opt out of bundled `smelt.<dotted>` modules.
 - `smelt.cli` - Declare and read CLI flags from Lua.
@@ -602,6 +603,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.shell` - Shell command splitting and interactive/background-operator validators.
 - `smelt.signal` - Named reactive values.
 - `smelt.skills` - List and load skill content from the SkillLoader populated at startup.
+- `smelt.spinner` - Shared spinner glyph and traveling-wave grayscale color for plugin animations.
 - `smelt.state` - Per-plugin state.
 - `smelt.task` - Yield-then-resume coroutine bridge: alloc and resume external tasks.
 - `smelt.text` - Terminal-cell measurement and pure text formatting.

@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 91 namespace(s), 450 function(s), 111 class(es), 13 alias(es).
+**Coverage:** 93 namespace(s), 450 function(s), 111 class(es), 13 alias(es).
 
 `Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.
 
@@ -18,6 +18,7 @@ Available in every runtime, including headless mode.
 
 - [`smelt.agent`](agent.md) - 1 function(s)
 - [`smelt.auth`](auth.md) - 2 function(s)
+- [`smelt.banner`](banner.md) - 0 function(s)
 - [`smelt.build`](build.md) - 0 function(s)
 - [`smelt.builtins`](builtins.md) - 4 function(s)
 - [`smelt.cli`](cli.md) - 3 function(s)
@@ -59,6 +60,7 @@ Available in every runtime, including headless mode.
 - [`smelt.shell`](shell.md) - 6 function(s)
 - [`smelt.signal`](signal.md) - 5 function(s)
 - [`smelt.skills`](skills.md) - 3 function(s)
+- [`smelt.spinner`](spinner.md) - 0 function(s)
 - [`smelt.state`](state.md) - 2 function(s)
 - [`smelt.task`](task.md) - 8 function(s) - Advanced namespace
 - [`smelt.text`](text.md) - 11 function(s) - Advanced namespace

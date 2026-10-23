@@ -117,6 +117,16 @@ impl LuaRuntime {
             ApiClassification::Supported,
         );
         record_module_doc(
+            "smelt.banner",
+            "Startup banner extension point. `smelt.banner.source(name, fn)` adds subtitle lines under the logo and returns a `Reg` that removes them. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.spinner",
+            "Shared spinner glyph and traveling-wave grayscale color for plugin animations. Frames derive from wall-clock time, so every animation in every process stays in lockstep. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
             "smelt.statusline",
             "The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority. `add` returns a `Reg` that removes the source. UiHost-only.",
             ApiClassification::Supported,

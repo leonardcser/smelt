@@ -1,6 +1,6 @@
 -- Shared spinner - pure Lua, loaded once so plugins see the same table.
 if smelt.time and smelt.time.now_ms then
-  smelt.spinner = smelt.spinner or require("smelt.spinner")
+  require("smelt.spinner")
 end
 
 -- `smelt.theme` is UiHost. Only attach the convenience loader when it exists.

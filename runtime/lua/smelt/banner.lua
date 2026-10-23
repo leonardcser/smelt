@@ -181,6 +181,19 @@ end
 
 smelt.banner = smelt.banner or {}
 
+--- A subtitle line under the banner logo.
+---@class smelt.banner.Subtitle
+---@field text string Line text.
+---@field dim? boolean Render dimmed. Defaults to true.
+---@field style_group? string Highlight group applied to the line.
+
+--- Add a named source of banner subtitle lines. `fn` runs whenever the banner is
+--- built and returns nil, a string (one dim line), a `smelt.banner.Subtitle`, or
+--- a list of them. Errors in `fn` are reported as notifications. Adding a name
+--- that already exists replaces that source. Returns a `Reg` that removes this
+--- source, unless a later `source` with the same name has replaced it.
+---@tier ui_host
+---@type fun(name: string, fn: fun(): string|smelt.banner.Subtitle|smelt.banner.Subtitle[]|nil): smelt.Reg
 function smelt.banner.source(name, fn)
 	if type(name) ~= "string" or name == "" then
 		error("smelt.banner.source: name must be a non-empty string", 2)
