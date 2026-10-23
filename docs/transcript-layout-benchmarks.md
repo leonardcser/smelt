@@ -1611,3 +1611,25 @@ The Phase 7 raw outputs were retained at:
   large sessions.
 - Session listing reads the rebuildable catalog. Search and resume read canonical
   SQLite directly, so no transcript-sized compatibility export exists.
+
+## Session-size scaling
+
+`cargo xtask bench-transcript-layout --scaling` sweeps the transcript block
+count (`--scaling-blocks`, default `2000,8000,32000`) and reports the median
+cost of interactions that should not depend on session size, plus a fitted
+exponent between the smallest and largest session (about 0 is constant, about 1
+is linear). `--scaling-compacted` saves every 256 blocks and dematerializes the
+fixture first, and additionally reports on-disk bytes per block and every save
+duration. `SMELT_TRANSCRIPT_SCALING_PERF=1` prints the top perf spans per
+operation.
+
+Operations: `prompt_key`, `idle_frame`, `gg_then_G`, `ctrl_d`, `fold_mid`,
+`resize_width`, `search_key` (one keystroke of an incremental transcript
+search), `append_block`, `debug_panel_toggle` and `perf_panel_toggle` (open,
+render, close, render the F3 and F12 panels), `debug_panel_tick` and
+`perf_panel_tick` (one timer repaint with the panel open), `stream_delta`, and
+`spinner_frame`.
+
+Every operation stays under 1 ms at 32000 blocks with exponents of 0.25 or less,
+except unsaved `search_key` (0.85 ms, exponent about 0.4, one substring scan
+over cached indexed text per keystroke).

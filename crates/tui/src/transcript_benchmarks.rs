@@ -6919,7 +6919,7 @@ fn scaling_focus_transcript(app: &mut TestApp) {
     win.set_vim_mode(VimMode::Normal);
 }
 
-const SCALING_OPS: [&str; 10] = [
+const SCALING_OPS: [&str; 14] = [
     "prompt_key",
     "idle_frame",
     "gg_then_G",
@@ -6928,6 +6928,10 @@ const SCALING_OPS: [&str; 10] = [
     "resize_width",
     "search_key",
     "append_block",
+    "debug_panel_toggle",
+    "debug_panel_tick",
+    "perf_panel_toggle",
+    "perf_panel_tick",
     "stream_delta",
     "spinner_frame",
 ];
@@ -7048,6 +7052,28 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         app.render_silent();
     }));
 
+    for (key, repaint_ms) in [(KeyCode::F(3), 500), (KeyCode::F(12), 250)] {
+        samples.push(scaling_measure(&mut app, reps, |app, _| {
+            app.press(key);
+            app.render_silent();
+            app.press(key);
+            app.render_silent();
+        }));
+        app.press(key);
+        app.render_silent();
+        assert!(
+            app.ui_probe().focused_overlay().is_some(),
+            "{key:?} should open its panel"
+        );
+        samples.push(scaling_measure(&mut app, reps, |app, _| {
+            app.feed_one(SourceEvent::Tick(repaint_ms));
+            app.tick_timers();
+            app.render_silent();
+        }));
+        app.press(key);
+        app.render_silent();
+    }
+
     begin_autonomous_text_turn(&mut app, 9_001, 4);
     samples.push(scaling_measure(&mut app, reps, |app, rep| {
         app.app.dispatch_engine_event_in_render_loop_to(
@@ -7110,7 +7136,7 @@ fn transcript_scaling_benchmark_suite() {
             .join(",")
     );
     eprintln!(
-        "{:<14} {} {:>9}",
+        "{:<20} {} {:>9}",
         "op",
         counts
             .iter()
@@ -7129,7 +7155,7 @@ fn transcript_scaling_benchmark_suite() {
             0.0
         };
         eprintln!(
-            "{op:<14} {} {exponent:>9.2}",
+            "{op:<20} {} {exponent:>9.2}",
             medians
                 .iter()
                 .map(|ms| format!("{ms:>12.3}"))
