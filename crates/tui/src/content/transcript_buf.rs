@@ -460,6 +460,79 @@ impl TranscriptHeightIndex {
             };
             changed_indices.push(index);
         }
+        if !self.reset_nodes(
+            history,
+            hints,
+            plan,
+            policy,
+            presentation,
+            key,
+            changed_indices,
+        ) {
+            return false;
+        }
+        self.generation = plan.revision;
+        true
+    }
+
+    /// Brings a current index up to a newer presentation generation by
+    /// re-estimating only the nodes whose view state changed.
+    fn apply_presentation_changes(
+        &mut self,
+        history: &BlockHistory,
+        hints: &RowHints,
+        plan: &TranscriptScene,
+        policy: &TranscriptDefaultViewPolicy,
+        presentation: &TranscriptPresentationState,
+        key: RowIndexKey,
+    ) -> bool {
+        if self.presentation_generation == key.presentation_generation {
+            return true;
+        }
+        if self.generation != plan.revision
+            || self.renderer_generation != key.renderer_generation
+            || self.renderer_cache_key != key.renderer_cache_key
+            || self.width != key.width
+            || self.nodes.len() != plan.len()
+        {
+            return false;
+        }
+        let Some(changed) = presentation.changed_since(self.presentation_generation) else {
+            return false;
+        };
+        let mut changed_indices = Vec::new();
+        for id in changed {
+            let Some(index) = plan.index_of(id) else {
+                return false;
+            };
+            changed_indices.push(index);
+        }
+        if !self.reset_nodes(
+            history,
+            hints,
+            plan,
+            policy,
+            presentation,
+            key,
+            changed_indices,
+        ) {
+            return false;
+        }
+        self.presentation_generation = key.presentation_generation;
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reset_nodes(
+        &mut self,
+        history: &BlockHistory,
+        hints: &RowHints,
+        plan: &TranscriptScene,
+        policy: &TranscriptDefaultViewPolicy,
+        presentation: &TranscriptPresentationState,
+        key: RowIndexKey,
+        mut changed_indices: Vec<usize>,
+    ) -> bool {
         changed_indices.sort_unstable();
         changed_indices.dedup();
         let mut dirty_from = None;
@@ -490,7 +563,6 @@ impl TranscriptHeightIndex {
         if let Some(index) = dirty_from {
             self.mark_prefix_dirty_from(index);
         }
-        self.generation = plan.revision;
         true
     }
 
@@ -1904,21 +1976,40 @@ impl TranscriptProjection {
             renderer_cache_key,
             self.presentation.generation(),
         );
+        if self.update_active_index(history, row_key) {
+            self.measurements.active.refresh_prefix_rows();
+        }
+        row_key
+    }
+
+    /// Updates the active height index for `row_key`, patching changed nodes
+    /// when possible. Returns whether the existing index was reused.
+    fn update_active_index(&mut self, history: &BlockHistory, row_key: RowIndexKey) -> bool {
+        let plan = &self.transcript_scene;
+        let active = &mut self.measurements.active;
+        let presentation_current = active.apply_presentation_changes(
+            history,
+            &self.row_hints,
+            plan,
+            &self.default_view_policy,
+            &self.presentation,
+            row_key,
+        );
         let changed_blocks = std::mem::take(&mut self.pending_changed_blocks);
-        let patched_index = !changed_blocks.is_empty()
-            && self.measurements.active.apply_changed_blocks(
+        let patched_index = presentation_current
+            && !changed_blocks.is_empty()
+            && active.apply_changed_blocks(
                 history,
                 &self.row_hints,
-                &self.transcript_scene,
+                plan,
                 &self.default_view_policy,
                 &self.presentation,
                 row_key,
                 &changed_blocks,
             );
-        let plan = &self.transcript_scene;
         let hydrated_index = !patched_index
             && Self::try_hydrate_row_index(
-                &mut self.measurements.active,
+                active,
                 &self.measurements.entries,
                 history,
                 plan,
@@ -1928,7 +2019,7 @@ impl TranscriptProjection {
             );
         let reused_index = patched_index
             || hydrated_index
-            || self.measurements.active.try_reuse_or_extend(
+            || active.try_reuse_or_extend(
                 history,
                 &self.row_hints,
                 plan,
@@ -1942,7 +2033,7 @@ impl TranscriptProjection {
         );
         if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:prepare_row_index:rebuild_index");
-            self.measurements.active.rebuild_if_stale(
+            active.rebuild_if_stale(
                 history,
                 &self.row_hints,
                 plan,
@@ -1950,10 +2041,8 @@ impl TranscriptProjection {
                 &self.presentation,
                 row_key,
             );
-        } else {
-            self.measurements.active.refresh_prefix_rows();
         }
-        row_key
+        reused_index
     }
 
     fn collect_missing_node_indices(&self, indices: impl IntoIterator<Item = usize>) -> Vec<usize> {
@@ -3840,48 +3929,7 @@ impl TranscriptProjection {
             renderer_cache_key,
             self.presentation.generation(),
         );
-        let changed_blocks = std::mem::take(&mut self.pending_changed_blocks);
-        let patched_index = !changed_blocks.is_empty()
-            && self.measurements.active.apply_changed_blocks(
-                history,
-                &self.row_hints,
-                &self.transcript_scene,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-                &changed_blocks,
-            );
-        let plan = &self.transcript_scene;
-        let hydrated_index = !patched_index
-            && Self::try_hydrate_row_index(
-                &mut self.measurements.active,
-                &self.measurements.entries,
-                history,
-                plan,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-            );
-        let reused_index = patched_index
-            || hydrated_index
-            || self.measurements.active.try_reuse_or_extend(
-                history,
-                &self.row_hints,
-                plan,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-            );
-        if !reused_index {
-            self.measurements.active.rebuild_if_stale(
-                history,
-                &self.row_hints,
-                plan,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-            );
-        }
+        self.update_active_index(history, row_key);
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.measurements.active.nodes.len();
         self.ensure_node_indices(env, history, block_indices.clone());

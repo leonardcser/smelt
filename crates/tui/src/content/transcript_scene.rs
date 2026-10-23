@@ -5,7 +5,7 @@ use smelt_core::transcript_model::{
     BlockHistory, BlockId, ContentChannel, LayoutKey, TranscriptGroupChildMetadata,
     TranscriptPatchOperation, ViewState,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -332,11 +332,32 @@ fn parse_lua_view_state(value: &str) -> mlua::Result<ViewState> {
 pub(crate) struct TranscriptPresentationState {
     overrides: HashMap<RenderNodeId, ViewState>,
     generation: u64,
+    /// Nodes changed by recent generations, complete for generations after
+    /// `changes_floor`. Lets row indexes patch single folds instead of
+    /// remeasuring every node.
+    changes: VecDeque<(u64, RenderNodeId)>,
+    changes_floor: u64,
 }
+
+const PRESENTATION_CHANGE_LOG_CAPACITY: usize = 64;
 
 impl TranscriptPresentationState {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Nodes whose view state changed after `generation`, or `None` when the
+    /// change log no longer covers it.
+    pub(crate) fn changed_since(
+        &self,
+        generation: u64,
+    ) -> Option<impl Iterator<Item = RenderNodeId> + '_> {
+        (generation >= self.changes_floor && generation <= self.generation).then(|| {
+            self.changes
+                .iter()
+                .filter(move |(changed_at, _)| *changed_at > generation)
+                .map(|(_, id)| *id)
+        })
     }
 
     pub(crate) fn effective_view_state(
@@ -377,6 +398,12 @@ impl TranscriptPresentationState {
         };
         if changed {
             self.bump();
+            self.changes.push_back((self.generation, id));
+            if self.changes.len() > PRESENTATION_CHANGE_LOG_CAPACITY {
+                if let Some((changed_at, _)) = self.changes.pop_front() {
+                    self.changes_floor = changed_at;
+                }
+            }
         }
         changed
     }
@@ -429,6 +456,8 @@ impl TranscriptPresentationState {
         self.overrides.retain(|id, _| live.contains(id));
         if self.overrides.len() != before {
             self.bump();
+            self.changes.clear();
+            self.changes_floor = self.generation;
         }
     }
 
