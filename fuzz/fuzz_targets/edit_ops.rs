@@ -226,6 +226,12 @@ fn insert_via_dispatch(
 ) {
     let source = ui.buf(buf).unwrap().source();
     let pos = pos.min(source.len());
+    // An empty paste edits nothing, so a stale offset would stay as the cursor.
+    let pos = if text.is_empty() {
+        smelt_buffer::text::snap_grapheme(source, pos)
+    } else {
+        pos
+    };
     let window = ui.win_mut(win).unwrap();
     window.set_cpos(pos);
     window.clear_selection_anchor();
@@ -243,6 +249,14 @@ fn replace_via_dispatch(
     let source = ui.buf(buf).unwrap().source();
     let start = start.min(source.len());
     let end = end.min(source.len()).max(start);
+    let (start, end) = if text.is_empty() {
+        (
+            smelt_buffer::text::snap_grapheme(source, start),
+            smelt_buffer::text::snap_grapheme(source, end),
+        )
+    } else {
+        (start, end)
+    };
     let window = ui.win_mut(win).unwrap();
     window.set_selection_anchor(Some(start));
     window.set_cpos(end);
