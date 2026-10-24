@@ -31,7 +31,7 @@ The implementation has three main ownership boundaries:
   two-phase writer close; explicit replacement helpers still use a bounded
   synchronous close. A blocked save requires explicit retry.
 - `crates/store/src/lineage/` owns transactional publication, immutable archive
-  storage, semantic queries, physical sharing and canonical reclamation.
+  storage, semantic queries and canonical reclamation.
 
 ## Execution and persistence lifecycle
 
@@ -306,8 +306,7 @@ Maintenance runs automatically in bounded steps of 256 rows:
   another connection commits. Exiting cancels it between steps; an unfinished
   migration rolls back.
 
-Automatic maintenance does not perform global physical sharing or search
-pruning.
+Automatic maintenance does not prune search data.
 
 Explicit cold maintenance runs through the same collector:
 
@@ -317,14 +316,8 @@ smelt session gc <session>
 smelt session doctor --json <session>
 ```
 
-`session gc` shares repeated physical object content, prunes cold search data,
-reclaims unreachable canonical rows and objects, then vacuums and checkpoints the
-database.
-Sharing preserves logical object hashes and bytes and commits only cohorts that
-save occupied pages. It can reclaim repetition inside still-reachable historical
-objects, which ordinary reachability GC alone cannot remove.
-
-The command reports sharing, deletion, page-recovery and WAL-truncation counters.
+`session gc` prunes cold search data, reclaims unreachable canonical rows and
+objects, then vacuums and checkpoints the database. It reports deletion, page-recovery and WAL-truncation counters.
 Object-byte accounting, occupied SQLite pages, free pages and database/WAL file
 sizes are different measurements. Free pages alone do not prove file-space recovery.
 Large retained histories make this cold operation expensive; it is not an

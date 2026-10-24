@@ -55,10 +55,12 @@ Schema v6 stores revision content references as immutable and non-null. Its exac
 DDL remains available for write-free validation. Writers migrate to v7 in one
 transaction by rebuilding `lineage_revisions` with releasable content references
 and installing the release-only update guard and the receipt-result delete guard;
-every row, identity and receipt is preserved. Historical v6 fixtures publish
-revisions with the same semantic-index guard as v7. Remove the v6 snapshot and its
-migration path only after retained v6 stores have verified lossless replacements
-and read-only v6 support is retired.
+every row, identity and receipt is preserved. The same migration drops the
+`object_data_roots` chunked-object layout of v4 to v6 and refuses a database that
+uses it; read-only doctor reports such objects as unsupported. Historical v6
+fixtures publish revisions with the same semantic-index guard as v7. Remove the v6
+snapshot and its migration path only after retained v6 stores have verified
+lossless replacements and read-only v6 support is retired.
 
 ## `revision-state-v1`
 

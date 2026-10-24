@@ -171,15 +171,13 @@ pub(super) fn lineage_doctor_report(
             "foreign_key_check: table={table} rowid={rowid:?} parent={parent} constraint={constraint}"
         ));
     }
-    if crate::schema::has_shared_storage(conn)? {
-        let hashes = conn
-            .prepare("SELECT object_hash FROM object_data_roots ORDER BY object_hash")?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for hash in hashes {
-            if let Err(error) = crate::object::object(conn, &hash) {
-                issues.push(format!("shared object {hash}: {error}"));
-            }
+    // COMPAT(lineage-schema-v6): v4 to v6 layouts can hold chunked objects.
+    if (4..crate::schema::LINEAGE_SCHEMA_VERSION).contains(&schema_version) {
+        let chunked: i64 = conn.query_row("SELECT count(*) FROM object_data_roots", [], |row| {
+            row.get(0)
+        })?;
+        if chunked > 0 {
+            issues.push(format!("{chunked} chunked objects are unsupported"));
         }
     }
     if let Err(error) = lineage::verify_archive_coordinates(conn, lineage) {

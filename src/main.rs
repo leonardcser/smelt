@@ -909,23 +909,6 @@ fn run_session_command(args: SessionArgs) {
             result
         }
         SessionCommand::Gc(args) => with_lineage_writer(&args.session, |writer| {
-            const RECLAMATION_ROWS_PER_TRANSACTION: usize = 256;
-            let mut sharing_cursor = smelt_store::ObjectSharingCursor::default();
-            let mut objects_shared = 0usize;
-            let mut sharing_pages_saved = 0u64;
-            loop {
-                let step = writer
-                    .share_objects(&mut sharing_cursor)
-                    .map_err(|err| format!("failed to share lineage objects: {err}"))?;
-                objects_shared += step.objects_shared;
-                sharing_pages_saved += step.pages_saved;
-                if step.complete {
-                    break;
-                }
-                if step.objects_scanned == 0 {
-                    return Err("object sharing made no bounded progress".into());
-                }
-            }
             let mut branch_heads_cleared = 0usize;
             let mut canonical_rows_deleted = 0usize;
             let mut objects_deleted = 0usize;
@@ -935,7 +918,7 @@ fn run_session_command(args: SessionArgs) {
             let mut transactions = 0usize;
             loop {
                 let step = writer
-                    .reclaim_step(RECLAMATION_ROWS_PER_TRANSACTION)
+                    .reclaim_step(smelt_store::RECLAMATION_STEP_ROWS)
                     .map_err(|err| format!("failed to reclaim lineage data: {err}"))?;
                 transactions = transactions.saturating_add(1);
                 branch_heads_cleared =
@@ -953,8 +936,6 @@ fn run_session_command(args: SessionArgs) {
             let vacuum = writer
                 .vacuum()
                 .map_err(|err| format!("failed to vacuum reclaimed lineage pages: {err}"))?;
-            println!("shared_objects: {objects_shared}");
-            println!("sharing_pages_saved: {sharing_pages_saved}");
             println!("cleared_branch_heads: {branch_heads_cleared}");
             println!("deleted_canonical_rows: {canonical_rows_deleted}");
             println!("deleted_objects: {objects_deleted}");

@@ -45,8 +45,8 @@ const MARK_NODE: i64 = 2;
 const MARK_PAYLOAD: i64 = 3;
 const MARK_HISTORY_INDEX: i64 = 4;
 const RELEASE: i64 = 0;
-const MARK_FRONTIER: i64 = 9;
-const SWEEP: i64 = 10;
+const MARK_FRONTIER: i64 = 8;
+const SWEEP: i64 = 9;
 const COMPLETE: i64 = SWEEP + SWEEP_SPECS.len() as i64;
 
 struct ReclamationPass {
@@ -370,7 +370,7 @@ fn advance_reclamation_marks(
                 examined += 1;
             }
         }
-        3..=8 => {
+        3..=7 => {
             let (table, columns) = match phase {
                 3 => (
                     "lineage_branches",
@@ -381,9 +381,8 @@ fn advance_reclamation_marks(
                     "lineage_session_receipt_results",
                     "result_revision_id, session_id, fingerprint",
                 ),
-                6 => ("object_data_roots", "root_id, NULL"),
-                7 => ("lineage_revision_state_roots", "root_id, NULL"),
-                8 => (
+                6 => ("lineage_revision_state_roots", "root_id, NULL"),
+                7 => (
                     "lineage_revision_state_projections",
                     "projected_payload_id, NULL",
                 ),
@@ -417,7 +416,7 @@ fn advance_reclamation_marks(
                 }
                 let kind = if phase <= 5 {
                     MARK_REVISION
-                } else if phase <= 7 {
+                } else if phase == 6 {
                     MARK_ROOT
                 } else {
                     MARK_PAYLOAD
@@ -594,7 +593,6 @@ const RECLAMATION_ROOTS: &[&str] = &[
     "lineage_turns",
     "lineage_retained_revisions",
     "lineage_session_receipt_results",
-    "object_data_roots",
     "lineage_revision_state_roots",
     "lineage_revision_state_projections",
     "request_object_refs",
@@ -722,8 +720,6 @@ const SWEEP_SPECS: &[(&str, &str)] = &[
         SELECT 1 FROM lineage_revisions revision WHERE revision.lineage_id = candidate.lineage_id AND revision.history_root_id = candidate.root_id
     ) AND NOT EXISTS (
         SELECT 1 FROM lineage_revisions revision WHERE revision.lineage_id = candidate.lineage_id AND revision.transcript_root_id = candidate.root_id
-    ) AND NOT EXISTS (
-        SELECT 1 FROM object_data_roots object WHERE object.lineage_id = candidate.lineage_id AND object.root_id = candidate.root_id
     ) AND NOT EXISTS (
         SELECT 1 FROM lineage_revision_state_roots archive WHERE archive.lineage_id = candidate.lineage_id AND archive.root_id = candidate.root_id
     )"),

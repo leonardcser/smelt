@@ -177,13 +177,18 @@ fn migrate_shared_lineage_schema(conn: &Connection) -> Result<()> {
     crate::lineage::backfill_history_indexes(conn)
 }
 
-/// Rebuilds revisions with releasable content references and installs the
-/// guards that only allow clearing them together.
+/// Rebuilds revisions with releasable content references, installs the guards
+/// that only allow clearing them together, and drops the empty chunked object
+/// layout of v4 to v6.
 fn migrate_revision_release(conn: &Connection) -> Result<()> {
     let current = lineage_schema_shape(LINEAGE_SCHEMA_VERSION)?;
     let replaced = [
         "lineage_revision_update",
         "lineage_session_receipt_result_delete",
+        "object_data_root_delete",
+        "object_data_root_insert",
+        "object_data_root_object_update",
+        "object_data_root_update",
     ];
     let mut migration = replacement_table_sql(current, "lineage_revisions")?;
     for object in &current.objects {
@@ -191,6 +196,19 @@ fn migrate_revision_release(conn: &Connection) -> Result<()> {
             migration.push_str(&object.sql);
             migration.push_str(";\n");
         }
+    }
+    if has_shared_storage(conn)? {
+        let chunked: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM object_data_roots)",
+            [],
+            |row| row.get(0),
+        )?;
+        if chunked {
+            return Err(StoreError::Integrity(
+                "cannot migrate a database that stores chunked objects".into(),
+            ));
+        }
+        migration.push_str("DROP TABLE object_data_roots;\n");
     }
     replace_lineage_tables(conn, &migration, &["lineage_revisions"], &replaced)
 }
@@ -697,7 +715,7 @@ pub(crate) mod tests {
         let count = boundaries.len();
         boundaries.dedup();
         assert_eq!(boundaries.len(), count, "duplicate migration boundary");
-        assert_eq!(current.tables.len() + current.objects.len(), 136);
+        assert_eq!(current.tables.len() + current.objects.len(), 130);
         assert_eq!(legacy.tables.len() + legacy.objects.len(), 76);
         // Release rebuilds revisions again; its first boundaries are the crash points.
         boundaries.extend(revision_release_boundaries());
@@ -934,7 +952,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn read_only_v4_doctor_checks_shared_objects_without_upgrading() {
+    fn chunked_v4_objects_are_reported_and_refuse_migration() {
         use crate::compression::ObjectCompression;
         use crate::lineage::{self, BranchId, LineageId};
         let mut conn = v4_connection();
@@ -989,11 +1007,16 @@ pub(crate) mod tests {
             report
                 .issues
                 .iter()
-                .any(|issue| issue.starts_with(&format!("shared object {hash}:"))),
+                .any(|issue| issue == "1 chunked objects are unsupported"),
             "{:?}",
             report.issues
         );
         assert_eq!(user_version(&corrupt).unwrap(), 4);
+        drop(reader);
+        let mut corrupt = corrupt;
+        assert!(initialize_lineage_schema(&mut corrupt).is_err());
+        assert_eq!(user_version(&corrupt).unwrap(), 4);
+        validate_schema_shape(&corrupt, lineage_schema_shape(4).unwrap()).unwrap();
     }
 
     #[test]
@@ -1510,7 +1533,12 @@ pub(crate) mod tests {
                     assert_eq!(user_version(&conn).unwrap(), LINEAGE_SCHEMA_VERSION);
                     assert_eq!(
                         definitions(&conn).len(),
-                        before_definitions.len() + if version == 3 { 60 } else { 0 }
+                        // v3 gains the shared layout; v4 to v6 drop chunked objects.
+                        if version == 3 {
+                            before_definitions.len() + 54
+                        } else {
+                            before_definitions.len() - 6
+                        }
                     );
                 } else {
                     assert_eq!(user_version(&conn).unwrap(), version);
@@ -1811,7 +1839,8 @@ pub(crate) mod tests {
     ) {
         let after = retained_data(conn);
         for (name, rows) in before {
-            if name == "lineage_history_indexes" {
+            if name == "lineage_history_indexes" || name == "object_data_roots" {
+                assert!(name != "object_data_roots" || rows.is_empty());
                 continue;
             }
             let found = &after.iter().find(|(table, _)| table == name).unwrap().1;
@@ -2222,7 +2251,7 @@ pub(crate) mod tests {
                 "commit".into(),
             ])
             .collect::<Vec<_>>();
-        assert_eq!(stages.len(), 140);
+        assert_eq!(stages.len(), 134);
         for foreign_keys in [false, true] {
             for stage in &stages {
                 let mut conn = Connection::open_in_memory().unwrap();

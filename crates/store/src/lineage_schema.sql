@@ -490,14 +490,6 @@ CREATE TABLE lineage_turns (
         REFERENCES lineage_turns(lineage_id, session_id, turn_id)
 ) STRICT;
 
-CREATE TABLE object_data_roots (
-    object_hash TEXT PRIMARY KEY REFERENCES objects(hash) ON DELETE CASCADE,
-    lineage_id TEXT NOT NULL,
-    root_id TEXT NOT NULL,
-    FOREIGN KEY (lineage_id, root_id)
-        REFERENCES lineage_sequence_roots(lineage_id, root_id)
-) STRICT;
-
 CREATE TABLE objects (
     hash TEXT PRIMARY KEY CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
     codec TEXT NOT NULL CHECK (codec IN ('none', 'zstd')),
@@ -659,7 +651,6 @@ CREATE INDEX lineage_turns_revision_idx
 CREATE INDEX lineage_turns_state_idx
     ON lineage_turns(lineage_id, session_id, turn_state, turn_id DESC);
 
-CREATE INDEX object_data_roots_root_idx ON object_data_roots(lineage_id, root_id);
 
 CREATE INDEX objects_sharing_idx ON objects(raw_size, hash) WHERE raw_size >= 131072;
 
@@ -1309,37 +1300,3 @@ BEGIN
     SELECT RAISE(ABORT, 'lineage turn transitions are immutable');
 END;
 
-CREATE TRIGGER object_data_root_delete
-BEFORE DELETE ON object_data_roots
-WHEN EXISTS (SELECT 1 FROM objects WHERE hash = OLD.object_hash)
-BEGIN
-    SELECT RAISE(ABORT, 'object data roots belong to their logical object');
-END;
-
-CREATE TRIGGER object_data_root_insert
-BEFORE INSERT ON object_data_roots
-BEGIN
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM objects object
-        JOIN lineage_sequence_roots root
-          ON root.lineage_id = NEW.lineage_id AND root.root_id = NEW.root_id
-        WHERE object.hash = NEW.object_hash
-          AND object.codec = 'none' AND object.stored_size = 0
-          AND object.raw_size BETWEEN 131072 AND 67108864
-          AND root.root_kind = 'data' AND root.byte_count = object.raw_size
-          AND root.depth BETWEEN 1 AND 3 AND root.item_count BETWEEN 2 AND 8192
-    ) THEN RAISE(ABORT, 'object data root does not match logical object') END;
-END;
-
-CREATE TRIGGER object_data_root_object_update
-BEFORE UPDATE ON objects
-WHEN EXISTS (SELECT 1 FROM object_data_roots WHERE object_hash = OLD.hash)
-BEGIN
-    SELECT RAISE(ABORT, 'shared logical objects are immutable');
-END;
-
-CREATE TRIGGER object_data_root_update
-BEFORE UPDATE ON object_data_roots
-BEGIN
-    SELECT RAISE(ABORT, 'object data roots are immutable');
-END;

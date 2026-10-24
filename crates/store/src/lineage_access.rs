@@ -904,18 +904,6 @@ impl OwnedLineageWriter {
         )
     }
 
-    /// Losslessly share one aggregate-cost cohort, scanning at most 256 large
-    /// object headers and processing at most 128 MiB, enough for two maximum-sized
-    /// logical objects. Keep the cursor until the pass reports complete.
-    /// A rejected cohort rolls back all allocations and still advances the pass.
-    /// This is cold maintenance, never part of key handling or rendering.
-    pub fn share_objects(
-        &mut self,
-        cursor: &mut crate::ObjectSharingCursor,
-    ) -> Result<crate::ObjectSharingStep> {
-        lineage::share_objects(&mut self.conn, &self.lineage, cursor)
-    }
-
     /// Returns free pages beyond a small reuse reserve to the filesystem in one
     /// bounded step. Returns the pages released; 0 means nothing is due.
     pub fn release_free_pages(&mut self) -> Result<u64> {
@@ -3303,104 +3291,6 @@ mod tests {
             assert_eq!(stats.wal_bytes, 0);
             assert_eq!(writer.snapshot().unwrap(), snapshot);
         }
-    }
-
-    #[test]
-    fn explicit_object_sharing_preserves_session_receipts_forks_and_backups() {
-        let root = tempfile::tempdir().unwrap();
-        let id = session_id('1');
-        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
-        install_legacy_fixture(&mut writer);
-        let mut initial = initial_commit(&id);
-        let mut state = 0x123456789abcdef0_u64;
-        let summary = (0..512 * 1024)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                char::from(b'!' + (state % 90) as u8)
-            })
-            .collect::<String>();
-        initial.metadata.checkpoint_events_json = Some(serde_json::json!([{
-            "kind": "auto", "summary": summary, "first_live_index": 0,
-            "completed_at_history_len": 0, "created_at_ms": 1,
-        }]));
-        let first = writer.commit_session(&initial).unwrap();
-        let mut current = first.current;
-        for index in 0..3 {
-            let mut command = initial.clone();
-            command.expected = current;
-            command.metadata.updated_at = index + 2;
-            command.metadata.title = Some(format!("title-{index}"));
-            command.history.start = HistoryIndex::new(1);
-            command.history.items.clear();
-            current = writer.commit_session(&command).unwrap().current;
-        }
-        crate::schema::initialize_lineage_schema(&mut writer.conn).unwrap();
-        let before = writer.snapshot().unwrap();
-        let before_stats =
-            lineage_storage_stats(&writer.conn, &writer.database_path(), Some(&writer.branch))
-                .unwrap();
-        let hashes = writer
-            .conn
-            .prepare("SELECT hash FROM objects WHERE raw_size >= 131072 ORDER BY hash")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(hashes.len(), 4);
-        let mut cursor = crate::ObjectSharingCursor::default();
-        let step = writer.share_objects(&mut cursor).unwrap();
-        assert!(step.complete);
-        assert_eq!(step.objects_scanned, hashes.len());
-        assert_eq!(step.objects_shared, hashes.len());
-        assert!(step.pages_saved > 0);
-        assert_eq!(writer.store_head().unwrap(), current);
-        assert_eq!(
-            writer.share_objects(&mut cursor).unwrap().objects_scanned,
-            0
-        );
-        let repeat = writer
-            .share_objects(&mut crate::ObjectSharingCursor::default())
-            .unwrap();
-        assert!(repeat.complete);
-        assert_eq!(repeat.objects_scanned, hashes.len());
-        assert_eq!(repeat.objects_shared, 0);
-        let after_stats =
-            lineage_storage_stats(&writer.conn, &writer.database_path(), Some(&writer.branch))
-                .unwrap();
-        assert!(
-            after_stats.object_stored_bytes < before_stats.object_stored_bytes / 2,
-            "shared compressed archives must reclaim repeated physical payload bytes"
-        );
-        let after = writer.snapshot().unwrap();
-        assert_eq!(after.metadata, before.metadata);
-        assert_eq!(after.history_root_id, before.history_root_id);
-        assert_eq!(after.transcript_root_id, before.transcript_root_id);
-        assert_eq!(after.revision_id, before.revision_id);
-        assert_eq!(writer.commit_session(&initial).unwrap(), first);
-        assert_eq!(writer.store_head().unwrap(), current);
-        for hash in hashes {
-            let object = crate::object::object(&writer.conn, &hash).unwrap().unwrap();
-            assert_eq!(crate::object::sha256_hex(&object.bytes), hash);
-        }
-        let fork_id = session_id('2');
-        writer.fork_current(&fork_id, 10).unwrap();
-        let reader = LineageSessionReader::open_existing(root.path(), &fork_id).unwrap();
-        assert_eq!(
-            reader.snapshot().unwrap().metadata.checkpoint_events_json,
-            before.metadata.checkpoint_events_json
-        );
-        assert_eq!(reader.history_range(0, 1).unwrap(), initial.history.items);
-        assert!(reader.doctor_report().unwrap().healthy);
-        let backup = root.path().join("isolated-sharing-backup.db");
-        reader.backup_to(&backup).unwrap();
-        assert!(
-            verify_lineage_backup(&backup, writer.lineage_id())
-                .unwrap()
-                .healthy
-        );
     }
 
     #[test]
