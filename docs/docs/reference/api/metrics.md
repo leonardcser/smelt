@@ -14,5 +14,5 @@ Metrics ledger access and live perf instrumentation. UiHost-only.
 fun(): table
 ```
 
-Return raw entries from the on-disk metrics ledger. Lua commands aggregate and render these records into UI.
+Return entries from the on-disk metrics ledger. Recent entries are single calls; entries older than yesterday are per-day, per-model totals whose `calls` field counts the calls they summarize. Lua commands aggregate and render these records into UI.
 
