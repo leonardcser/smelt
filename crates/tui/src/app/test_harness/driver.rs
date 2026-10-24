@@ -158,7 +158,7 @@ impl TestApp {
                     std::time::Instant::now() < idle_deadline,
                     "background transcript hydration did not make progress within {HYDRATION_IDLE_TIMEOUT:?}"
                 );
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(super::POLL_INTERVAL);
             };
             self.app.handle_app_event(event);
             if self.app.frame_scheduler.has_pending() {
