@@ -2513,6 +2513,10 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         app.wait_for_turn_persistence();
         app.feed_one_within_budget(SourceEvent::Tick(0), AllocBudget::DEFAULT);
     }
+    if matches!(check, PostCheck::ExecCleared) {
+        // Finishing an exec is queued transcript work that the next frame applies.
+        app.render_silent();
+    }
     let post = Snapshot::capture(app);
     let new_actions = app.actions_since(pre.action_count);
     run_check(check, &pre, &post, new_actions);
