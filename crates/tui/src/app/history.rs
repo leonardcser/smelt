@@ -9,8 +9,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 const REWIND_HISTORY_SCAN_CHUNK_ITEMS: usize = 256;
-const LEGACY_REWIND_MAX_ITEMS: usize = 1024;
-const LEGACY_REWIND_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct RewindTurn {
@@ -126,8 +124,6 @@ enum RewindPreparation {
 struct StoredRewindRequest {
     store: smelt_core::session::SessionStoreAddress,
     history_idx: usize,
-    history_len: usize,
-    history_is_dirty: bool,
     user_turn_count: Option<usize>,
     input: Option<RewindInput>,
     transcript: Option<TranscriptRewindTarget>,
@@ -155,7 +151,7 @@ impl StoredRewindRequest {
         reader
             .read_snapshot(|reader| {
                 check()?;
-                let item = if self.input.is_none() || self.transcript.is_none() {
+                let item = if self.input.is_none() {
                     reader
                         .history_range(
                             self.history_idx as u64,
@@ -170,13 +166,7 @@ impl StoredRewindRequest {
                 check()?;
                 let transcript = match self.transcript.take() {
                     Some(transcript) => transcript,
-                    None => stored_transcript_rewind_target(
-                        reader,
-                        &self,
-                        item.as_ref()
-                            .ok_or_else(|| "cannot rewind to this history item".to_string())?,
-                        cancelled,
-                    )?,
+                    None => stored_transcript_rewind_target(reader, &self)?,
                 };
                 check()?;
                 let input = match self.input {
@@ -241,116 +231,14 @@ impl std::fmt::Debug for RewindWorkerResult {
     }
 }
 
-// COMPAT(unlinked-steering-rewind): old acknowledgements saved user rows without origins.
-fn legacy_steering_rewind_record(
-    reader: &smelt_store::LineageSessionReader,
-    request: &StoredRewindRequest,
-    item: &HistoryItem,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Option<usize>, String> {
-    let Some(expected) = legacy_steering_block(item) else {
-        return Ok(None);
-    };
-    let history_idx = request.history_idx;
-    let head = reader
-        .store_head()
-        .map_err(|error| format!("read legacy rewind head: {error}"))?;
-    if request.history_is_dirty || head.history_len.get() != request.history_len as u64 {
-        return Err("save the session before recovering an unlinked rewind boundary".into());
-    }
-    if cancelled() {
-        return Err("rewind cancelled".into());
-    }
-    let history = reader
-        .history_tail(
-            request.history_len,
-            LEGACY_REWIND_MAX_ITEMS,
-            Some(LEGACY_REWIND_MAX_BYTES),
-        )
-        .map_err(|error| format!("read legacy rewind history: {error}"))?;
-    if cancelled() {
-        return Err("rewind cancelled".into());
-    }
-    if history.len() != request.history_len {
-        return Err("legacy rewind recovery exceeds the history scan budget".into());
-    }
-    if history.get(history_idx) != Some(item) {
-        return Err("save the session before recovering an unlinked rewind boundary".into());
-    }
-    if history
-        .iter()
-        .filter_map(legacy_steering_block)
-        .filter(|block| block == &expected)
-        .count()
-        != 1
-    {
-        return Err("legacy rewind boundary is ambiguous in canonical history".into());
-    }
-    let mut cursor = 0;
-    let mut found = None;
-    let mut bytes = 0u64;
-    let mut previous_history_idx = None;
-    for scanned in 0..=LEGACY_REWIND_MAX_ITEMS {
-        if cancelled() {
-            return Err("rewind cancelled".into());
-        }
-        let Some(nav) = reader
-            .transcript_record_after_kind("user", cursor)
-            .map_err(|error| format!("find legacy user row: {error}"))?
-        else {
-            return Ok(found);
-        };
-        if scanned == LEGACY_REWIND_MAX_ITEMS {
-            return Err("legacy rewind recovery exceeds the transcript scan budget".into());
-        }
-        let index = nav.record_index.get();
-        cursor = index.saturating_add(1);
-        if let Some(origin) = nav.profile.history_idx {
-            if found.is_some() && origin <= history_idx as u64 {
-                return Err("legacy rewind boundary conflicts with transcript order".into());
-            }
-            previous_history_idx =
-                Some(previous_history_idx.map_or(origin, |previous: u64| previous.max(origin)));
-            continue;
-        }
-        bytes = bytes.saturating_add(nav.profile.estimated_text_bytes);
-        if bytes > LEGACY_REWIND_MAX_BYTES as u64 {
-            return Err("legacy rewind recovery exceeds the transcript scan budget".into());
-        }
-        let rows = reader
-            .transcript_object_backed_range(index as u64, cursor as u64)
-            .map_err(|error| format!("read legacy user row: {error}"))?;
-        let row = rows
-            .first()
-            .ok_or_else(|| "legacy user row is missing".to_string())?;
-        let block: Block = serde_json::from_str(&row.block_json)
-            .map_err(|error| format!("decode legacy user row: {error}"))?;
-        if row.origin_json.is_none() && block == expected {
-            if previous_history_idx.is_some_and(|origin| origin >= history_idx as u64) {
-                return Err("legacy rewind boundary conflicts with transcript order".into());
-            }
-            if found.replace(index).is_some() {
-                return Err("legacy rewind boundary is ambiguous in the transcript".into());
-            }
-        }
-    }
-    Err("legacy rewind recovery exceeds the transcript scan budget".into())
-}
-
 fn stored_transcript_rewind_target(
     reader: &smelt_store::LineageSessionReader,
     request: &StoredRewindRequest,
-    item: &HistoryItem,
-    cancelled: &dyn Fn() -> bool,
 ) -> Result<TranscriptRewindTarget, String> {
-    let record_count = match reader
+    let record_count = reader
         .transcript_record_index_for_history_idx(request.history_idx as u64)
         .map_err(|error| format!("find transcript rewind boundary: {error}"))?
-    {
-        Some(index) => index,
-        None => legacy_steering_rewind_record(reader, request, item, cancelled)?
-            .ok_or_else(|| "transcript has no record for this history item".to_string())?,
-    };
+        .ok_or_else(|| "transcript has no record for this history item".to_string())?;
     let address = crate::app::transcript::TranscriptStoreAddress::new(
         request.store.sessions_root.clone(),
         request.store.session_id.clone(),
@@ -1000,26 +888,6 @@ fn plain_user_history_block(
         command,
         sent_at_ms,
     }
-}
-
-fn legacy_steering_block(item: &HistoryItem) -> Option<Block> {
-    let HistoryItem::User {
-        content,
-        display,
-        command,
-        sent_at_ms: Some(sent_at_ms),
-        ..
-    } = item
-    else {
-        return None;
-    };
-    rewindable_user(item)?;
-    let mut block =
-        plain_user_history_block(content, display.as_deref(), *command, Some(*sent_at_ms));
-    if let Block::User { image_labels, .. } = &mut block {
-        image_labels.clear();
-    }
-    Some(block)
 }
 
 fn push_assistant_blocks(
@@ -2971,8 +2839,6 @@ impl TuiApp {
                         "transcript has no block for this history item".to_string()
                     })?,
                     history_idx,
-                    history_len: self.session_history_len(),
-                    history_is_dirty: self.conversation.has_document_work(),
                     user_turn_count,
                     input,
                     transcript,
@@ -3237,167 +3103,6 @@ mod checkpoint_tests {
         reader
             .transcript_range(0, state.transcript_len)
             .expect("read canonical transcript")
-    }
-
-    fn saved_unlinked_steering_app(
-        prepare: impl FnOnce(&mut session::Session, &mut Vec<smelt_core::TranscriptBlockRecordWithId>),
-    ) -> crate::app::test_harness::TestApp {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut saved = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        saved.first_user_message = Some("initial request".into());
-        saved.history = vec![
-            user("initial request").with_sent_at_ms(100),
-            assistant("prior output"),
-            user("old follow-up").with_sent_at_ms(200),
-        ];
-        let transcript = build_transcript_from_session(&app.app.lua, &saved);
-        let mut records = transcript.history.block_records_with_ids_from(0);
-        records[1].record.block = Block::Text {
-            content: "exact rendered prior output".into(),
-        };
-        records[2].record.origin = None;
-        prepare(&mut saved, &mut records);
-        for record in &mut records {
-            record.record.content_hash = record.record.block.content_hash();
-        }
-        let mut command = smelt_core::session::initial_store_commit_from_session(&saved).unwrap();
-        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::ZERO,
-            records: records
-                .iter()
-                .enumerate()
-                .map(|(index, record)| {
-                    smelt_core::transcript_model::transcript_block_row_with_block_idx(
-                        index,
-                        index as u64,
-                        &record.record,
-                    )
-                    .unwrap()
-                })
-                .collect(),
-        });
-        let mut writer =
-            smelt_store::OwnedLineageWriter::open(app.app.core.sessions.sessions_dir(), &saved.id)
-                .unwrap();
-        writer.commit_session(&command).unwrap();
-        writer.release().unwrap();
-        assert!(app.resume_session(&saved.id));
-        app
-    }
-
-    #[test]
-    fn saved_unlinked_steering_row_can_be_rewound_without_rebuilding_prior_output() {
-        let mut app = saved_unlinked_steering_app(|_, _| {});
-        let id = app.session_snapshot().id;
-        let before = app.render_to_frame().text();
-        assert!(before.contains("exact rendered prior output"), "{before}");
-        app.rewind_to_history_index(Some(2), false);
-        app.wait_for_rewind();
-
-        assert_eq!(app.state().prompt_text, "old follow-up");
-        assert_eq!(app.session_message_count(), 2);
-        let frame = app.render_to_frame().text();
-        assert!(frame.contains("exact rendered prior output"), "{frame}");
-        app.save_session_and_flush();
-        let records = lineage_transcript(&lineage_reader(&app, &id));
-        assert_eq!(records.len(), 2);
-        assert!(records[1]
-            .block_json
-            .contains("exact rendered prior output"));
-    }
-
-    #[test]
-    fn legacy_steering_rewind_refuses_unsaved_same_length_history_changes() {
-        let mut app = saved_unlinked_steering_app(|_, _| {});
-        let target = user("old follow-up").with_sent_at_ms(200);
-        app.app.session_truncate_from(0).unwrap();
-        for item in [target.clone(), assistant("changed prior output"), target] {
-            app.app.session_append_history(item);
-        }
-        let before = app.session_history().to_vec();
-        app.rewind_to_history_index(Some(2), false);
-        app.wait_for_rewind();
-        assert_eq!(app.session_message_count(), 3);
-        assert_eq!(app.session_history(), before);
-        assert_eq!(app.state().prompt_text, "");
-    }
-
-    #[test]
-    fn legacy_steering_rewind_refuses_ambiguous_mismatched_or_unbounded_recovery() {
-        for case in [
-            "duplicate history",
-            "duplicate transcript",
-            "missing timestamp",
-            "wrong timestamp",
-            "wrong command",
-            "earlier conflicting origin",
-            "later conflicting origin",
-            "history item budget",
-            "history byte budget",
-            "transcript item budget",
-            "transcript byte budget",
-        ] {
-            let mut app = saved_unlinked_steering_app(|saved, records| match case {
-                "duplicate history" => saved.history.push(saved.history[2].clone()),
-                "duplicate transcript" => records.push(records[2].clone()),
-                "missing timestamp" => {
-                    if let HistoryItem::User { sent_at_ms, .. } = &mut saved.history[2] {
-                        *sent_at_ms = None;
-                    }
-                }
-                "wrong timestamp" => {
-                    if let Block::User { sent_at_ms, .. } = &mut records[2].record.block {
-                        *sent_at_ms = Some(201);
-                    }
-                }
-                "wrong command" => {
-                    if let Block::User { command, .. } = &mut records[2].record.block {
-                        *command = true;
-                    }
-                }
-                "earlier conflicting origin" => {
-                    saved
-                        .history
-                        .push(user("later request").with_sent_at_ms(300));
-                    records[0].record.origin = Some(smelt_core::BlockOrigin::History(3));
-                }
-                "later conflicting origin" => records.push(records[0].clone()),
-                "history item budget" => saved.history.extend(std::iter::repeat_n(
-                    assistant("other output"),
-                    LEGACY_REWIND_MAX_ITEMS,
-                )),
-                "history byte budget" => saved
-                    .history
-                    .push(assistant(&"x".repeat(LEGACY_REWIND_MAX_BYTES + 1))),
-                "transcript item budget" => {
-                    let mut other = records[0].clone();
-                    other.record.origin = None;
-                    records.extend(std::iter::repeat_n(other, LEGACY_REWIND_MAX_ITEMS));
-                }
-                "transcript byte budget" => {
-                    let mut oversized = records[2].clone();
-                    oversized.record.block = Block::User {
-                        text: "x".repeat(LEGACY_REWIND_MAX_BYTES + 1),
-                        image_labels: vec![],
-                        command: false,
-                        sent_at_ms: Some(300),
-                    };
-                    records.push(oversized);
-                }
-                _ => unreachable!(),
-            });
-            let id = app.session_snapshot().id;
-            let reader = lineage_reader(&app, &id);
-            let before_history = lineage_history(&reader);
-            let before_transcript = lineage_transcript(&reader);
-            let history_len = app.session_message_count();
-            assert!(app.rewind_to_history(2).is_none(), "{case}");
-            assert_eq!(app.session_message_count(), history_len, "{case}");
-            app.save_session_and_flush();
-            let reader = lineage_reader(&app, &id);
-            assert_eq!(lineage_history(&reader), before_history, "{case}");
-            assert_eq!(lineage_transcript(&reader), before_transcript, "{case}");
-        }
     }
 
     #[test]
@@ -4542,30 +4247,6 @@ mod checkpoint_tests {
                         if session_id == &id
                 )
         }));
-    }
-
-    #[test]
-    fn deprecated_lua_block_index_alias_uses_canonical_history_identity() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut session = app.app.conversation.session().clone();
-        session.history = vec![
-            user("first"),
-            assistant("first reply"),
-            user("second"),
-            assistant("second reply"),
-        ];
-        app.app.conversation.install_session_for_harness(session);
-        app.app.restore_screen();
-
-        app.run_lua_result(
-            "local turns = smelt.session.turns()\n\
-             assert(turns[2].block_idx == turns[2].history_idx)\n\
-             smelt.session.rewind_to(turns[2].block_idx)",
-        )
-        .expect("legacy rewind dialog fields remain safe");
-
-        assert_eq!(app.prompt_source(), "second");
-        assert_eq!(app.app.session_history_len(), 2);
     }
 
     #[test]

@@ -311,7 +311,7 @@ an id not present in `entries` are treated as roots.
 fun(): table
 ```
 
-Return rewindable user turns as `{ history_idx, block_idx, label }` rows where `history_idx` is the canonical rewind coordinate, deprecated `block_idx` is its compatibility alias, and `label` is the first line of the user message.
+Return rewindable user turns as `{ history_idx, label }` rows where `history_idx` is the rewind coordinate and `label` is the first line of the user message.
 
 ## `smelt.session.turns_page`
 
