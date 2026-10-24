@@ -32,8 +32,8 @@ pub use cache::{clamp_prompt_cache_key, sort_tools_for_cache_stability, CacheCon
 #[cfg(feature = "test-support")]
 pub use client::{context_window_from_models_entry, emit_retry, models_entry_matches};
 pub use client::{
-    ChatOptions, ChatProvider, ChatRequest, ChatRequestOptions, CopilotInitiator, ProviderClient,
-    RequestAttemptInfo,
+    ChatOptions, ChatProvider, ChatRequest, ChatRequestOptions, ChatTransport, CopilotInitiator,
+    ProviderClient, RequestAttemptInfo,
 };
 pub use config::{effective_reasoning_effort, reasoning_catalog};
 #[cfg(not(feature = "test-support"))]

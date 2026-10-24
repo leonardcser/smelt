@@ -1,6 +1,6 @@
 # smelt fuzz
 
-Seventeen targets covering distinct surfaces:
+Eighteen targets covering distinct surfaces:
 
 | target                    | what it fuzzes                                                               | how                                                                                             |
 | ------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -21,6 +21,7 @@ Seventeen targets covering distinct surfaces:
 | `permissions_rules`       | permission rule compilation/evaluation                                       | random rule sets, shell-aware subpatterns, mode behavior, workspace downgrade oracle            |
 | `store_state`             | canonical session persistence and maintenance                                | file-backed writer/reader state machine + independent history, transcript-record, and revision model   |
 | `engine_events`           | engine lifecycle and canonical-history application                           | focused event state machine + independent active-turn and canonical-suffix model                |
+| `engine_turns`            | real engine turn loop (steering, tools, permissions, cancellation, retries)  | scripted provider transport + virtual time + frontend answering tool events; wire, lifecycle, and history oracles |
 
 ## Setup once
 
@@ -203,6 +204,8 @@ scenario directly:
 ```sh
 cargo run --manifest-path fuzz/Cargo.toml --features scenario-tools --bin replay_scenario -- \
   --target lua_loop /path/to/shrunk.json
+# engine_turns artifacts replay through the sim test (SMELT_SIM_TRACE=1 prints every event):
+SMELT_SIM_ARTIFACT=/path/to/crash cargo test --manifest-path fuzz/Cargo.toml --lib replay_artifact -- --ignored
 # Or step through it visually (smelt_loop only):
 cargo run --manifest-path fuzz/Cargo.toml --features scenario-tools --bin play_scenario -- /path/to/shrunk.json
 ```

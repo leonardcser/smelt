@@ -143,10 +143,12 @@ pub(crate) async fn engine_task(
         .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    smelt_provider::catalog::spawn_fetch(
-        client.clone(),
-        Some(crate::paths::cache_dir().join("web")),
-    );
+    if config.transport.is_none() {
+        smelt_provider::catalog::spawn_fetch(
+            client.clone(),
+            Some(crate::paths::cache_dir().join("web")),
+        );
+    }
 
     let _ = event_tx.send(EngineEvent::Ready);
 
@@ -227,8 +229,7 @@ pub(crate) async fn engine_task(
                     }
                 };
 
-                let provider =
-                    build_provider(&model_target, &client, std::sync::Arc::clone(&config.clock));
+                let provider = build_provider(&model_target, &client, &config);
                 let system_prompt = tui_system_prompt
                     .or_else(|| config.system_prompt_override.clone())
                     .unwrap_or_else(|| {
@@ -644,7 +645,7 @@ fn spawn_engine_ask(
     } else {
         dispatcher.definitions()
     };
-    let provider = build_provider(&target, client, std::sync::Arc::clone(&config.clock));
+    let provider = build_provider(&target, client, config);
     let model_name = target.model.clone();
     let pricing_target = target.clone();
     let tx = event_tx.clone();
@@ -844,15 +845,16 @@ fn is_context_window_error(e: &ProviderError) -> bool {
 fn build_provider(
     target: &ModelTarget,
     client: &reqwest::Client,
-    clock: std::sync::Arc<dyn crate::clock::Clock>,
+    config: &EngineConfig,
 ) -> EngineProvider {
     EngineProvider::new(
         target.api_base.clone(),
         target.api_key.clone(),
         &target.provider_type,
         client.clone(),
-        clock,
+        std::sync::Arc::clone(&config.clock),
     )
+    .with_transport(config.transport.clone())
     .with_model_config(target.config.clone())
 }
 
@@ -1525,11 +1527,7 @@ impl<'a> Turn<'a> {
     }
 
     fn apply_model_change(&mut self, target: ModelTarget, system_prompt: String) {
-        self.provider = build_provider(
-            &target,
-            self.http_client,
-            std::sync::Arc::clone(&self.config.clock),
-        );
+        self.provider = build_provider(&target, self.http_client, self.config);
         self.model_target = target;
         self.target_revision = self.target_revision.wrapping_add(1);
         self.install_system_prompt(system_prompt);
@@ -4541,11 +4539,11 @@ mod tests {
             },
             ..model_target()
         };
-        let provider = build_provider(
-            &target,
-            &reqwest::Client::new(),
+        let config = EngineConfig::new(
+            std::path::PathBuf::from("/tmp"),
             std::sync::Arc::new(crate::clock::RealClock),
         );
+        let provider = build_provider(&target, &reqwest::Client::new(), &config);
 
         assert_eq!(provider.api_base(), "https://target.example/v1");
         assert_eq!(provider.api_key(), "target-key");
