@@ -1177,6 +1177,7 @@ struct Snapshot {
     streaming: tui::app::test_harness::StreamingState,
     session_messages: usize,
     queued_messages: usize,
+    queue_empty: bool,
     queued_next_starts: bool,
     follow_up_context_append: bool,
     working: tui::app::test_harness::WorkingSnapshot,
@@ -1209,6 +1210,7 @@ impl Snapshot {
             streaming: app.streaming_state(),
             session_messages: app.session_message_count(),
             queued_messages: app.queued_message_count(),
+            queue_empty: app.queue_is_empty(),
             queued_next_starts: app.next_queued_input_starts_turn(),
             follow_up_context_append: app.next_follow_up_appends_context_note(),
             working: app.working_state(),
@@ -1547,7 +1549,8 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             }
         }
         PostCheck::JobCompleted => {
-            if !pre.agent_running && !pre.working.busy {
+            // A queued input holds the completion back as the next turn input.
+            if !pre.agent_running && !pre.working.busy && pre.queue_empty {
                 assert_eq!(
                     post.transcript_blocks,
                     pre.transcript_blocks + 1,
@@ -1739,12 +1742,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 "prompt char {ch:?} inserted at wrong location: pre cpos {}, pre {:?}, post {:?}",
                 pre.prompt_cpos, pre.prompt_source, post.prompt_source,
             );
+            // Text already to the right can join the new char into one grapheme.
+            let expected_cpos = smelt_buffer::text::ceil_grapheme(&expected, at + ch.len_utf8());
             assert_eq!(
+                post.prompt_cpos, expected_cpos,
+                "prompt char {ch:?} left cursor at {}, expected {expected_cpos}",
                 post.prompt_cpos,
-                at + ch.len_utf8(),
-                "prompt char {ch:?} left cursor at {}, expected {}",
-                post.prompt_cpos,
-                at + ch.len_utf8(),
             );
         }
         PostCheck::PromptTextInserted { text } => {
@@ -1760,6 +1763,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 let at = smelt_buffer::text::insert_str(&mut expected, pre.prompt_cpos, &inserted);
                 at + inserted.len()
             };
+            let expected_cpos = smelt_buffer::text::ceil_grapheme(&expected, expected_cpos);
             assert_eq!(
                 post.prompt_source, expected,
                 "prompt paste changed source incorrectly: pre cpos {}, selection {:?}, pasted {:?}, normalized {:?}, pre {:?}, post {:?}",

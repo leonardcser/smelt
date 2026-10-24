@@ -1,0 +1,18 @@
+{
+  "vim": false,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "key_unicode",
+      "data": 3328
+    },
+    {
+      "kind": "key_special",
+      "data": 255
+    },
+    {
+      "kind": "key_unicode",
+      "data": 118
+    }
+  ]
+}
