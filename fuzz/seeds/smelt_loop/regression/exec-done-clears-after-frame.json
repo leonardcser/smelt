@@ -1,0 +1,16 @@
+{
+  "vim": false,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "exec_done",
+      "data": null
+    }
+  ]
+}
