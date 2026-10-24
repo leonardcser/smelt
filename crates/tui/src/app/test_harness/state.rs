@@ -178,6 +178,11 @@ impl TestApp {
         self.app.prompt.queued_request_len()
     }
 
+    /// Whether no input of any stage waits behind the running work.
+    pub fn queue_is_empty(&self) -> bool {
+        self.app.prompt.queue_is_empty()
+    }
+
     /// Whether completing the active turn would immediately start a queued
     /// input with non-empty display text.
     pub fn next_queued_input_starts_turn(&self) -> bool {

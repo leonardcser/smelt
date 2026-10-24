@@ -1,0 +1,18 @@
+{
+  "vim": true,
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "push_queued_message",
+      "data": "."
+    },
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "exited"
+      }
+    }
+  ]
+}
