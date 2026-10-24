@@ -70,7 +70,7 @@ impl TestApp {
         while self.state().active_modal.is_none() {
             self.feed_one(SourceEvent::LuaWakeup);
             assert!(std::time::Instant::now() < deadline, "Lua dialog timed out");
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -83,7 +83,7 @@ impl TestApp {
                 self.app.pump_lua();
             }
             assert!(std::time::Instant::now() < deadline, "rewind timed out");
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -103,7 +103,7 @@ impl TestApp {
                 std::time::Instant::now() < deadline,
                 "turn persistence timed out"
             );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -615,7 +615,7 @@ impl TestApp {
                 std::time::Instant::now() < deadline,
                 "writer startup timed out"
             );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -630,7 +630,7 @@ impl TestApp {
                     std::time::Instant::now() < deadline,
                     "session lifecycle timed out"
                 );
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(super::POLL_INTERVAL);
             }
         }
     }

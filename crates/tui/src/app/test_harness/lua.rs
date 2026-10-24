@@ -35,7 +35,7 @@ impl TestApp {
                 "workspace transition stalled"
             );
             self.app.drain_idle_work();
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -47,7 +47,7 @@ impl TestApp {
                 "project context preparation stalled"
             );
             self.app.drain_idle_work();
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -63,7 +63,7 @@ impl TestApp {
                 "tool {call_id} stalled"
             );
             self.feed_one(SourceEvent::LuaWakeup);
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -80,7 +80,7 @@ impl TestApp {
                 "tool evaluation {request_id} stalled"
             );
             self.feed_one(SourceEvent::LuaWakeup);
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -105,7 +105,7 @@ impl TestApp {
                 std::time::Instant::now() < deadline,
                 "{name}: background document work stalled"
             );
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
             self.feed_one(SourceEvent::LuaWakeup);
             self.render_silent();
         }

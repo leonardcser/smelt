@@ -23,6 +23,9 @@ use tokio::sync::mpsc;
 
 pub use crate::event_source::SourceEvent;
 
+/// Pause between polls while a wait helper watches a background worker finish.
+const POLL_INTERVAL: Duration = Duration::from_micros(100);
+
 mod driver;
 mod invariants;
 mod lua;
