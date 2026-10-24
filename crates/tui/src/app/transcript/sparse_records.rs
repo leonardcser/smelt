@@ -107,33 +107,9 @@ impl SparseTranscriptRecords {
         self.total_count
     }
 
+    #[cfg(test)]
     pub(super) fn loaded_record_count(&self) -> usize {
         self.records.len()
-    }
-
-    pub(super) fn missing_prefix_count_for_range(
-        &self,
-        range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
-    ) -> usize {
-        range
-            .map(|range| range.start.get())
-            .unwrap_or_default()
-            .min(self.total_count.unwrap_or_default())
-    }
-
-    pub(super) fn missing_suffix_count_for_range(
-        &self,
-        range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
-    ) -> usize {
-        self.total_count
-            .map(|total| {
-                total.saturating_sub(
-                    range
-                        .map(|range| range.end.get())
-                        .unwrap_or_else(|| self.records.len()),
-                )
-            })
-            .unwrap_or_default()
     }
 
     pub(super) fn range_is_loaded(

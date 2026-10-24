@@ -118,9 +118,9 @@ pub use compression::{
 pub use diagnostics::{DoctorReport, StorageStats};
 pub use error::{Result, StoreError};
 pub use history::{
-    StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptExtentProfile,
-    TranscriptNavigationRecord, TranscriptRecordHydration, TranscriptRecordOffset,
-    TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice, TranscriptRowLocation,
+    transcript_text_extent_profile, StoredTranscriptBlock, TranscriptBlockMetadataRecord,
+    TranscriptExtentProfile, TranscriptNavigationRecord, TranscriptRecordHydration,
+    TranscriptRecordOffset, TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice,
     TranscriptSearchCandidate, TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 pub use lineage::{ObjectSharingCursor, ObjectSharingStep};

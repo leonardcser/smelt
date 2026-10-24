@@ -83,35 +83,16 @@ impl TranscriptExtentProfile {
         self.rows
     }
 
+    /// Rows at the widest profile width that fits `width`.
+    ///
+    /// Snapping (instead of interpolating) keeps estimates additive: the rows of
+    /// a range always equal the sum of its records' rows.
     pub fn estimated_rows(self, width: u16) -> u64 {
-        let width = width.max(1);
-        let first_width = TRANSCRIPT_EXTENT_PROFILE_WIDTHS[0];
-        if width < first_width {
-            let slope = self.rows[0].saturating_sub(self.rows[1]);
-            let extra = slope
-                .saturating_mul(u64::from(first_width - width))
-                .div_ceil(u64::from(TRANSCRIPT_EXTENT_PROFILE_WIDTHS[1] - first_width));
-            return self.rows[0].saturating_add(extra);
-        }
-
-        for index in 0..TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len() - 1 {
-            let lower_width = TRANSCRIPT_EXTENT_PROFILE_WIDTHS[index];
-            let upper_width = TRANSCRIPT_EXTENT_PROFILE_WIDTHS[index + 1];
-            if width <= upper_width {
-                let lower_rows = self.rows[index];
-                let upper_rows = self.rows[index + 1];
-                let row_drop = lower_rows.saturating_sub(upper_rows);
-                let width_offset = u64::from(width - lower_width);
-                let width_span = u64::from(upper_width - lower_width);
-                let interpolated_drop = row_drop
-                    .saturating_mul(width_offset)
-                    .saturating_add(width_span / 2)
-                    / width_span;
-                return lower_rows.saturating_sub(interpolated_drop);
-            }
-        }
-
-        self.rows.last().copied().unwrap_or_default()
+        let bucket = TRANSCRIPT_EXTENT_PROFILE_WIDTHS
+            .iter()
+            .rposition(|bucket| *bucket <= width)
+            .unwrap_or(0);
+        self.rows[bucket]
     }
 }
 
@@ -136,12 +117,6 @@ impl TranscriptRecordProfile {
 pub struct TranscriptNavigationRecord {
     pub record_index: TranscriptRecordOffset,
     pub profile: TranscriptRecordProfile,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TranscriptRowLocation {
-    pub record_index: TranscriptRecordOffset,
-    pub row_offset: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -176,28 +151,36 @@ fn estimated_text_row_profile(text: &str) -> [u64; TRANSCRIPT_EXTENT_PROFILE_WID
 pub(crate) fn transcript_record_extent_profile(
     record: &StoredTranscriptBlock,
 ) -> TranscriptExtentProfile {
-    let compact = matches!(
-        record.kind.as_str(),
-        "tool" | "thinking" | "process_status" | "mode"
-    );
-    let text =
-        if matches!(record.kind.as_str(), "tool" | "thinking") && !record.preview_text.is_empty() {
-            record
-                .preview_text
-                .lines()
-                .find(|line| !line.is_empty())
-                .unwrap_or_default()
-        } else if compact && !record.preview_text.is_empty() {
-            &record.preview_text
-        } else {
-            &record.indexed_text
-        };
+    transcript_text_extent_profile(
+        &record.kind,
+        &record.preview_text,
+        &record.indexed_text,
+        record.estimated_text_bytes,
+    )
+}
+
+/// Row estimate profile of one transcript record from its indexed text.
+pub fn transcript_text_extent_profile(
+    kind: &str,
+    preview_text: &str,
+    indexed_text: &str,
+    estimated_text_bytes: u64,
+) -> TranscriptExtentProfile {
+    let compact = matches!(kind, "tool" | "thinking" | "process_status" | "mode");
+    let text = if matches!(kind, "tool" | "thinking") && !preview_text.is_empty() {
+        preview_text
+            .lines()
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+    } else if compact && !preview_text.is_empty() {
+        preview_text
+    } else {
+        indexed_text
+    };
     let omitted_bytes = if compact {
         0
     } else {
-        record
-            .estimated_text_bytes
-            .saturating_sub(text.len() as u64)
+        estimated_text_bytes.saturating_sub(text.len() as u64)
     };
     let text_rows = estimated_text_row_profile(text);
     TranscriptExtentProfile::new(std::array::from_fn(|index| {

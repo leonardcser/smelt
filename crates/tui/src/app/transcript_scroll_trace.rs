@@ -76,8 +76,6 @@ pub(crate) enum TranscriptScrollIntent {
     ScrollbarFraction {
         numerator: u64,
         denominator: u64,
-        total_rows: RowIndex,
-        viewport_rows: u16,
     },
     ApproximateRowSeek(RowIndex),
     RevealPosition {
@@ -94,7 +92,6 @@ impl TranscriptScrollIntent {
             Self::ScrollbarFraction {
                 numerator,
                 denominator,
-                ..
             } => *numerator >= (*denominator).max(1),
             Self::ApproximateRowSeek(_) => true,
             Self::PreserveViewport

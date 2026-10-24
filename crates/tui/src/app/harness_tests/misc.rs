@@ -3608,16 +3608,13 @@ fn resumed_sparse_width_resize_keeps_content_anchor_identity() {
 }
 
 #[test]
-fn resumed_sparse_page_delta_uses_exact_tape_without_extent_reads() {
+fn resumed_sparse_page_delta_moves_one_viewport_without_extent_reads() {
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(700, 78, 18);
     app.set_transcript_scroll_trace_for_harness(true);
     app.take_transcript_scroll_trace_frames_for_harness();
 
     let before_scroll = app.transcript_window().scroll_top;
-    let rows = app
-        .transcript_window()
-        .materialized_rows()
-        .expect("resumed transcript rows");
+    let before_lines = transcript_viewport_lines(&app);
     let viewport_rows = app
         .transcript_window()
         .viewport
@@ -3642,18 +3639,9 @@ fn resumed_sparse_page_delta_uses_exact_tape_without_extent_reads() {
         .last()
         .expect("page delta trace frame");
 
-    assert_eq!(
-        app.transcript_window().scroll_top,
-        before_scroll.saturating_sub(u64::from(viewport_rows)),
-        "page delta did not move by one exact viewport: {frame:?}"
-    );
-    assert_eq!(
-        app.transcript_window()
-            .materialized_rows()
-            .expect("rows after page delta")
-            .total_rows,
-        rows.total_rows,
-        "page delta changed the stable source-space extent: {frame:?}"
+    assert!(
+        !transcript_viewport_lines(&app).contains(&before_lines[1]),
+        "page delta did not move a whole viewport: {frame:?}"
     );
     assert_eq!(
         app.app
@@ -3677,6 +3665,19 @@ fn resumed_sparse_page_delta_uses_exact_tape_without_extent_reads() {
     assert!(
         !frame.placeholder_rows_visible,
         "page delta exposed sparse placeholders: {frame:?}"
+    );
+
+    let after_scroll = app.transcript_window().scroll_top;
+    app.record_transcript_scroll_intent(
+        "page_down",
+        TranscriptScrollIntent::PageDelta { pages: 1 },
+        after_scroll,
+    );
+    app.render_silent();
+    assert_eq!(
+        transcript_viewport_lines(&app),
+        before_lines,
+        "page up then down did not return to the same content"
     );
 }
 
@@ -3723,6 +3724,7 @@ fn resumed_session_wheel_moves_exact_visible_rows_end_to_end() {
 
 #[test]
 fn resumed_sparse_wheel_moves_exact_visible_rows_across_pages() {
+    use crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
     let (mut app, _dir) = resumed_heterogeneous_transcript_app(900, 78, 18);
     app.set_transcript_scroll_trace_for_harness(true);
     app.take_transcript_scroll_trace_frames_for_harness();
@@ -3730,89 +3732,32 @@ fn resumed_sparse_wheel_moves_exact_visible_rows_across_pages() {
         .app
         .conversation
         .transcript_extent_store_read_count_for_harness();
-    let scrollbar_total_rows = app
-        .transcript_window()
-        .materialized_rows()
-        .expect("resumed transcript rows")
-        .total_rows;
+    let mut window_switches = 0;
 
-    for step in 0..500 {
-        let before = transcript_viewport_lines(&app);
-        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollUp);
-        app.render_silent();
-        let after = transcript_viewport_lines(&app);
-        assert_viewport_shifted_up_rows(step, &before, &after, 3);
-        assert_eq!(
-            app.app
-                .conversation
-                .transcript_extent_store_read_count_for_harness(),
-            extent_reads,
-            "upward local wheel step {step} read the source-space extent index"
-        );
-        let frame = app
-            .take_transcript_scroll_trace_frames_for_harness()
-            .into_iter()
-            .last()
-            .expect("upward local wheel trace frame");
-        assert_eq!(
-            app.transcript_window()
-                .materialized_rows()
-                .expect("rows after upward local wheel step")
-                .total_rows,
-            scrollbar_total_rows,
-            "upward local wheel step {step} changed the source-space scrollbar extent: {frame:?}"
-        );
+    for kind in [ScrollUp, ScrollDown] {
+        for step in 0..500 {
+            let before = transcript_viewport_lines(&app);
+            wheel_transcript(&mut app, kind);
+            app.render_silent();
+            let after = transcript_viewport_lines(&app);
+            if kind == ScrollUp {
+                assert_viewport_shifted_up_rows(step, &before, &after, 3);
+            } else {
+                assert_viewport_shifted_down_rows(step, &before, &after, 3);
+            }
+            window_switches += app
+                .take_transcript_scroll_trace_frames_for_harness()
+                .iter()
+                .filter(|frame| frame.active_record_range_before != frame.active_record_range_after)
+                .count();
+        }
     }
-    assert_eq!(
+    assert!(
         app.app
             .conversation
-            .transcript_extent_store_read_count_for_harness(),
-        extent_reads,
-        "upward local wheel movement read the source-space extent index"
-    );
-    assert_eq!(
-        app.transcript_window()
-            .materialized_rows()
-            .expect("rows after upward local scrolling")
-            .total_rows,
-        scrollbar_total_rows,
-        "upward local scrolling changed the source-space scrollbar extent"
-    );
-
-    for step in 0..500 {
-        let before = transcript_viewport_lines(&app);
-        wheel_transcript(&mut app, crossterm::event::MouseEventKind::ScrollDown);
-        app.render_silent();
-        let after = transcript_viewport_lines(&app);
-        assert_viewport_shifted_down_rows(step, &before, &after, 3);
-        let frame = app
-            .take_transcript_scroll_trace_frames_for_harness()
-            .into_iter()
-            .last()
-            .expect("downward local wheel trace frame");
-        assert_eq!(
-            app.transcript_window()
-                .materialized_rows()
-                .expect("rows after downward local wheel step")
-                .total_rows,
-            scrollbar_total_rows,
-            "downward local wheel step {step} changed the source-space scrollbar extent: {frame:?}"
-        );
-    }
-    assert_eq!(
-        app.app
-            .conversation
-            .transcript_extent_store_read_count_for_harness(),
-        extent_reads,
-        "downward local wheel movement read the source-space extent index"
-    );
-    assert_eq!(
-        app.transcript_window()
-            .materialized_rows()
-            .expect("rows after downward local scrolling")
-            .total_rows,
-        scrollbar_total_rows,
-        "downward local scrolling changed the source-space scrollbar extent"
+            .transcript_extent_store_read_count_for_harness()
+            <= extent_reads + 2 * window_switches,
+        "local wheel movement read the extent index beyond one prefix pair per window"
     );
 }
 
@@ -5124,7 +5069,7 @@ impl TranscriptScrollReplay {
                 }
                 TranscriptReplayStep::ScrollbarFarSeek { rel_row } => {
                     let before = app.transcript_window().scroll_top;
-                    let (row, col, numerator, denominator, total_rows, viewport_rows) =
+                    let (row, col, numerator, denominator) =
                         transcript_scrollbar_point(app, rel_row);
                     app.feed_one(SourceEvent::Term(Event::Mouse(
                         crossterm::event::MouseEvent {
@@ -5142,8 +5087,6 @@ impl TranscriptScrollReplay {
                         TranscriptScrollIntent::ScrollbarFraction {
                             numerator,
                             denominator,
-                            total_rows,
-                            viewport_rows,
                         },
                         before,
                     );
@@ -5229,10 +5172,7 @@ fn transcript_content_point(app: &TestApp, rel_row: u16) -> (u16, u16) {
     )
 }
 
-fn transcript_scrollbar_point(
-    app: &TestApp,
-    rel_row: u16,
-) -> (u16, u16, u64, u64, crate::smelt_edit::RowIndex, u16) {
+fn transcript_scrollbar_point(app: &TestApp, rel_row: u16) -> (u16, u16, u64, u64) {
     let vp = app
         .transcript_window()
         .viewport
@@ -5247,8 +5187,6 @@ fn transcript_scrollbar_point(
         scrollbar.col,
         numerator,
         denominator,
-        scrollbar.total_rows,
-        scrollbar.viewport_rows,
     )
 }
 
@@ -6176,14 +6114,18 @@ fn transcript_gg_then_key_repeat_burst_without_intermediate_render_uses_top_base
     );
 
     app.render_silent();
-    assert_eq!(
+    let frames = app.take_transcript_scroll_trace_frames_for_harness();
+    let window_switches = frames
+        .iter()
+        .filter(|frame| frame.active_record_range_before != frame.active_record_range_after)
+        .count();
+    assert!(
         app.app
             .conversation
-            .transcript_extent_store_read_count_for_harness(),
-        extent_reads,
-        "queued local motion after gg read the source-space extent index"
+            .transcript_extent_store_read_count_for_harness()
+            <= extent_reads + 2 * window_switches,
+        "queued local motion after gg read the extent index beyond one prefix pair per window"
     );
-    let frames = app.take_transcript_scroll_trace_frames_for_harness();
     assert_local_scroll_frames_are_exact_and_timed(&frames);
     assert_user_delta_targets_exact_rows(&frames);
     assert_user_delta_inputs_do_not_pre_scroll(&frames);
@@ -6603,7 +6545,7 @@ fn transcript_scrollbar_click_preserves_fraction_intent() {
     app.set_transcript_scroll_trace_for_harness(true);
     app.take_transcript_scroll_trace_frames_for_harness();
 
-    let (row, column, _, _, _, _) = transcript_scrollbar_point(&app, 3);
+    let (row, column, _, _) = transcript_scrollbar_point(&app, 3);
     app.feed_one(SourceEvent::Term(Event::Mouse(
         crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -6642,7 +6584,6 @@ fn resumed_transcript_scrollbar_drag_is_continuous_through_exact_boundaries() {
     let scrollbar = viewport.scrollbar.expect("transcript scrollbar");
     let initial_metrics = scrollbar.metrics(app.transcript_window().scroll_top);
     let start_rel_row = initial_metrics.thumb_top;
-    let frozen_total_rows = scrollbar.total_rows;
     let mouse = |kind, rel_row: u16| {
         SourceEvent::Term(Event::Mouse(crossterm::event::MouseEvent {
             kind,
@@ -6680,7 +6621,7 @@ fn resumed_transcript_scrollbar_drag_is_continuous_through_exact_boundaries() {
                 frame.scroll_intent,
                 TranscriptScrollIntent::ScrollbarFraction { .. }
             ),
-            "scrollbar drag collapsed frozen source geometry to a numeric row: {frame:?}"
+            "scrollbar drag collapsed to a numeric row: {frame:?}"
         );
         assert!(
             matches!(
@@ -6691,10 +6632,6 @@ fn resumed_transcript_scrollbar_drag_is_continuous_through_exact_boundaries() {
                 }
             ),
             "scrollbar drag did not resolve through an exact semantic anchor: {frame:?}"
-        );
-        assert_eq!(
-            current_scrollbar.total_rows, frozen_total_rows,
-            "scrollbar extent changed during frozen drag geometry: {frame:?}"
         );
         assert!(
             thumb_top.abs_diff(pointer_row) <= 1,
@@ -7075,7 +7012,7 @@ fn resumed_heterogeneous_transcript_app(
     resumed_transcript_app_from_records(heterogeneous_resume_records(count), width, height)
 }
 
-fn resumed_transcript_app_from_records(
+pub(super) fn resumed_transcript_app_from_records(
     records: Vec<smelt_core::TranscriptBlockRecord>,
     width: u16,
     height: u16,

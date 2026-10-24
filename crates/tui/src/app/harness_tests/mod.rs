@@ -20,6 +20,7 @@ mod process_status;
 mod prompt;
 mod resize;
 mod resources;
+mod scroll_geometry;
 mod search;
 mod transcript_folds;
 mod vim;

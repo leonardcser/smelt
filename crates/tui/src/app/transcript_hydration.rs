@@ -65,15 +65,15 @@ impl LoadedRecordWindow {
                 .into_iter()
                 .enumerate()
                 .map(|(offset, mut row)| {
+                    let indexed_text = std::mem::take(&mut row.indexed_text);
                     let estimated_text_bytes = row.estimated_text_bytes;
-                    let preview = std::mem::take(&mut row.preview_text);
                     let record = TranscriptBlockRecordWithId::try_from(row).ok()?;
                     let (block_id, stored) = StoredBlockRef::from_record(
                         start.get().saturating_add(offset),
                         record.block_id,
                         &record.record,
+                        &indexed_text,
                         estimated_text_bytes,
-                        preview,
                     );
                     if materialize_block_ids.contains(&block_id) {
                         materialized.insert(block_id, (Arc::clone(&stored), record));
@@ -833,15 +833,15 @@ mod tests {
             .into_records()
             .pop()
             .unwrap();
+        let indexed_text = std::mem::take(&mut row.indexed_text);
         let estimated_text_bytes = row.estimated_text_bytes;
-        let preview = std::mem::take(&mut row.preview_text);
         let record = TranscriptBlockRecordWithId::try_from(row).unwrap();
         let (block_id, stored) = StoredBlockRef::from_record(
             5,
             record.block_id,
             &record.record,
+            &indexed_text,
             estimated_text_bytes,
-            preview,
         );
         let mut request = record_request(1, address, 0..10);
         request.blocks.insert(5, (block_id, stored));

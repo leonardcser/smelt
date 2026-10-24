@@ -19,7 +19,7 @@ use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::transcript_content::TranscriptContent;
 use smelt_core::transcript_model::{
-    Block, BlockHistory, BlockId, LayoutKey, Status, StoredBlockWithId, ToolOutputRef, ToolStatus,
+    Block, BlockHistory, BlockId, Status, StoredBlockWithId, ToolOutputRef, ToolStatus,
     TranscriptBlockRecordWithId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -33,7 +33,6 @@ const TRANSCRIPT_ACTIVE_RECORD_WINDOW_MAX_MULTIPLIER: usize = 3;
 const TRANSCRIPT_RECORD_WINDOW_MIN_RECORDS: usize = 512;
 const TRANSCRIPT_RECORD_PAGE_SIZE: usize = 128;
 const TRANSCRIPT_RECORD_CACHE_GUARD_PAGES: usize = 2;
-const TRANSCRIPT_RETAINED_EXTENT_QUERY_LIMIT: usize = 256;
 const TRANSCRIPT_LOCAL_PAGE_GUARD_VIEWPORTS: RowIndex = 8;
 const TRANSCRIPT_IDLE_COMPACTION_BLOCKS: usize = 64;
 const TRANSCRIPT_IDLE_COMPACTION_BYTES: usize = 2 * 1024 * 1024;
@@ -160,10 +159,8 @@ mod sparse_records;
 use sparse_records::RecordRangeState;
 use sparse_records::SparseTranscriptRecords;
 
-mod sparse_extent;
-#[cfg(test)]
-use sparse_extent::RetainedTranscriptExtent;
-use sparse_extent::TranscriptExtentIndex;
+mod extent;
+use extent::{ExtentEstimates, ExtentLayoutKey, TranscriptExtent};
 
 pub(crate) struct ReasoningSummarySnapshot {
     pub(crate) id: BlockId,
@@ -218,7 +215,10 @@ pub(crate) struct TranscriptDocument {
     content: TranscriptContentState,
     records: TranscriptRecordState,
     store_cache: TranscriptStoreCache,
-    extent_index: TranscriptExtentIndex,
+    extent: TranscriptExtent,
+    /// Width, active window and extent generation the history's row hints
+    /// were last computed for.
+    row_hints_key: Option<(u16, usize, usize, u64)>,
     viewport: TranscriptViewportRuntime,
     memory_budget: TranscriptMemoryBudget,
     hydration: TranscriptHydrationState,
@@ -283,11 +283,20 @@ impl TranscriptRecordState {
         self.store_address.as_ref()
     }
 
-    fn extent_store_address(&self) -> Option<&TranscriptStoreAddress> {
-        if self.total_count()? == 0 {
-            return None;
+    fn extent_estimates<'a>(
+        &'a self,
+        store_cache: &'a TranscriptStoreCache,
+        width: u16,
+    ) -> ExtentEstimates<'a> {
+        let store = self
+            .store_address()
+            .filter(|_| self.total_count().is_some_and(|total| total > 0))
+            .and_then(|address| store_cache.cached_store_for_session(address));
+        ExtentEstimates {
+            store,
+            records: &self.sparse,
+            width,
         }
-        self.store_address()
     }
 
     fn total_count(&self) -> Option<usize> {
@@ -511,15 +520,6 @@ struct TranscriptExactViewport {
     row_offset: RowIndex,
     global_total_rows: RowIndex,
     active_record_range: Option<(usize, usize)>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LoadedRowOffsetPolicy {
-    /// Interpret rows from the currently rendered loaded projection. Falls back
-    /// to the sparse prefix estimate when no matching exact viewport is active.
-    RenderedViewportOrEstimate,
-    /// Interpret rows in semantic sparse space while planning a new projection.
-    SparseEstimate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -776,7 +776,6 @@ pub(crate) struct TranscriptProjectionPlan {
     row_offset: RowIndex,
     total_rows: RowIndex,
     planned_loaded_rows: RowIndex,
-    preserve_total_rows: bool,
     requested_scroll: Option<RowIndex>,
     repin_at_semantic_tail: bool,
     cursor_target: Option<TranscriptCursorTarget>,
@@ -815,14 +814,12 @@ enum TranscriptTailRecordWindowState {
 #[derive(Clone, Copy, Debug)]
 struct TranscriptSemanticFarSeek {
     scroll_top: RowIndex,
-    total_rows: RowIndex,
     row_anchor: TranscriptRowAnchor,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct TranscriptProjectionOptions {
     repin_at_semantic_tail: bool,
-    semantic_far_seek: Option<TranscriptSemanticFarSeek>,
 }
 
 struct TranscriptScrollTraceFinishContext {
@@ -877,7 +874,8 @@ impl TranscriptDocument {
             },
             records,
             store_cache,
-            extent_index: TranscriptExtentIndex::default(),
+            extent: TranscriptExtent::default(),
+            row_hints_key: None,
             viewport: TranscriptViewportRuntime::default(),
             memory_budget: TranscriptMemoryBudget::default(),
             hydration: TranscriptHydrationState::default(),
@@ -1445,8 +1443,7 @@ impl TranscriptDocument {
             } else {
                 self.records.projection_start = self.records.projection_start.min(total_count);
             }
-            self.extent_index.clear_persisted_record_estimates();
-            self.clear_transcript_layout_caches();
+            self.extent.invalidate_from(bounds.record_start_idx);
         }
     }
 
@@ -1842,12 +1839,8 @@ impl TranscriptDocument {
     }
 
     fn merge_record_cache_window(&mut self, window: &LoadedRecordWindow) -> bool {
-        let previous_total = self.records.total_count();
         if !self.records.sparse.merge(window) {
             return false;
-        }
-        if previous_total != self.records.total_count() {
-            self.extent_index.clear_persisted_record_estimates();
         }
         record_record_window_metrics(window);
         true
@@ -2386,19 +2379,22 @@ impl TranscriptDocument {
         }
     }
 
-    pub(crate) fn pending_scrollbar_display_scroll_top(&self) -> Option<RowIndex> {
+    /// Where the scrollbar thumb belongs while a seek is still hydrating.
+    pub(crate) fn pending_scrollbar_display_scroll_top(
+        &self,
+        total_rows: RowIndex,
+        viewport_rows: u16,
+    ) -> Option<RowIndex> {
         let pending = self.viewport.state.pending_projection.as_ref()?;
         match &pending.intent {
             TranscriptScrollIntent::ScrollbarFraction {
                 numerator,
                 denominator,
-                total_rows,
-                viewport_rows,
             } => Some(Self::scrollbar_fraction_scroll_top(
                 *numerator,
                 *denominator,
-                *total_rows,
-                *viewport_rows,
+                total_rows,
+                viewport_rows,
             )),
             TranscriptScrollIntent::ApproximateRowSeek(row) => Some(*row),
             _ => None,
@@ -2484,7 +2480,7 @@ impl TranscriptDocument {
                 record_index: anchor.record_index,
                 block_id: anchor.block_id,
                 node_id: anchor.row_anchor.id,
-                row_offset: anchor.block_row_offset,
+                row_offset: anchor.row_anchor.row_offset,
             },
             TranscriptScrollAnchor::EstimatedRow(row) => TranscriptTraceAnchor::EstimatedRow(row),
         }
@@ -2496,17 +2492,15 @@ impl TranscriptDocument {
         width: u16,
         row: RowIndex,
     ) -> TranscriptTraceAnchor {
+        let row_offset = self.row_offset(width);
         let anchor = self
-            .cached_local_row_offset(width)
-            .and_then(|row_offset| {
-                self.content_anchor_at_row_with_offset(
-                    lua,
-                    width,
-                    row,
-                    row_offset,
-                    TranscriptAnchorBias::Top,
-                )
-            })
+            .content_anchor_at_row_with_offset(
+                lua,
+                width,
+                row,
+                row_offset,
+                TranscriptAnchorBias::Top,
+            )
             .map(TranscriptScrollAnchor::Content)
             .unwrap_or(TranscriptScrollAnchor::EstimatedRow(row));
         Self::trace_anchor(anchor)
@@ -2565,13 +2559,12 @@ impl TranscriptDocument {
                         )
                     })
             })
-            .or_else(|| {
-                let row_offset = self.cached_local_row_offset(width)?;
-                let total_rows = self.cached_total_rows(width)?;
-                Some((row_offset, total_rows.saturating_sub(row_offset)))
-            })
-            .unwrap_or_default();
-        let exact_observation_count = self.extent_index.exact_observation_count();
+            .unwrap_or_else(|| {
+                let row_offset = self.row_offset(width);
+                let total_rows = self.scrollbar_total_rows(width, 0);
+                (row_offset, total_rows.saturating_sub(row_offset))
+            });
+        let exact_observation_count = self.extent.span_count();
         let started_at = record_timings.then(Instant::now);
         Some((
             TranscriptScrollTraceFrameStart {
@@ -2674,6 +2667,9 @@ impl TranscriptDocument {
     }
 
     fn install_active_record_projection(&mut self) {
+        if let Some((width, ..)) = self.row_hints_key {
+            self.sync_row_hints(width);
+        }
         let records = self.records.records_for_active_range();
         smelt_perf::perf::record_value(
             "transcript:record_window:active_records",
@@ -2724,8 +2720,15 @@ impl TranscriptDocument {
     }
 
     fn approximate_average_record_rows(&self, width: u16) -> RowIndex {
-        self.extent_index
-            .fallback_average_rows_per_loaded_record(&self.records.sparse, width)
+        let records = &self.records.sparse.records;
+        if records.is_empty() {
+            return 2;
+        }
+        let rows: RowIndex = records
+            .values()
+            .map(|record| record.stored.extent.estimated_rows(width))
+            .sum();
+        (rows / records.len() as RowIndex).max(1)
     }
 
     fn active_record_range_key(&self) -> Option<(usize, usize)> {
@@ -2734,80 +2737,151 @@ impl TranscriptDocument {
             .map(|range| (range.start.get(), range.end.get()))
     }
 
-    fn current_rendered_loaded_row_offset(&self, width: u16) -> Option<RowIndex> {
-        let active_record_range = self.active_record_range_key();
-        self.viewport
-            .state
-            .exact_viewport
-            .filter(|exact| {
-                exact.width == width && exact.active_record_range == active_record_range
+    /// Hand the extent's rows for the active window to the projection, so its
+    /// unmeasured nodes estimate exactly what the extent already knows.
+    fn sync_row_hints(&mut self, width: u16) {
+        let Some(active) = self.records.active_range().cloned() else {
+            return;
+        };
+        let (start, end) = (active.start.get(), active.end.get());
+        let key = (width, start, end, self.extent.generation());
+        if self.row_hints_key == Some(key) {
+            return;
+        }
+        self.row_hints_key = Some(key);
+        let estimates = self.records.extent_estimates(&self.store_cache, width);
+        let rows = self.extent.record_rows(&estimates, start..end);
+        let hints = (start..end)
+            .zip(rows)
+            .filter_map(|(record, rows)| {
+                let record = self
+                    .records
+                    .sparse
+                    .record(smelt_store::TranscriptRecordOffset::new(record))?;
+                Some((record.block_id, rows))
             })
-            .map(|exact| exact.row_offset)
+            .collect();
+        self.content
+            .projection
+            .set_row_hints(&self.content.transcript.history, width, hints);
     }
 
-    fn loaded_row_offset(&mut self, width: u16, policy: LoadedRowOffsetPolicy) -> RowIndex {
-        match policy {
-            LoadedRowOffsetPolicy::RenderedViewportOrEstimate => self
-                .current_rendered_loaded_row_offset(width)
-                .unwrap_or_else(|| self.approximate_sparse_prefix_row_offset(width)),
-            LoadedRowOffsetPolicy::SparseEstimate => {
-                self.approximate_sparse_prefix_row_offset(width)
+    /// Rows above `record` in transcript coordinates.
+    fn rows_before_record(&mut self, width: u16, record: usize) -> RowIndex {
+        let estimates = self.records.extent_estimates(&self.store_cache, width);
+        self.extent.rows_before(&estimates, record)
+    }
+
+    /// The record at transcript row `row` and the row's offset inside it.
+    fn record_at_row(&mut self, width: u16, row: RowIndex) -> Option<(usize, RowIndex)> {
+        let total = self.records.total_count()?;
+        let estimates = self.records.extent_estimates(&self.store_cache, width);
+        self.extent.record_at_row(&estimates, total, row)
+    }
+
+    /// Transcript row of the first loaded row.
+    fn row_offset(&mut self, width: u16) -> RowIndex {
+        match self.records.active_range() {
+            Some(active) if self.records.total_count().is_some() => {
+                let start = active.start.get();
+                self.rows_before_record(width, start)
             }
+            _ => 0,
         }
     }
 
-    fn cached_sparse_prefix_row_offset(&self, width: u16) -> Option<RowIndex> {
-        self.extent_index.cached_rows_before_record(
-            width,
-            self.records.total_count()?,
-            self.records.active_range()?.start.get(),
-        )
+    /// Feed what the projection laid out back into the extent so records keep
+    /// their projected rows after they leave the loaded window.
+    fn observe_projected_heights(&mut self) {
+        let (Some(total), Some(active)) = (
+            self.records.total_count(),
+            self.records.active_range().cloned(),
+        ) else {
+            return;
+        };
+        let heights = self.content.projection.node_heights();
+        let (start, end) = (active.start.get(), active.end.get());
+        let last = heights.nodes.len().saturating_sub(1);
+        // Only measured nodes count. Edge nodes are skipped unless they are the
+        // transcript's edges: their leading gap depends on the window, and
+        // groups may be cut by it. The extent counts one separator row above
+        // every record, so record 0 gets back the one it never renders.
+        let spans: Vec<(Range<usize>, RowIndex)> = heights
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (*index > 0 || start == 0) && (*index < last || end == total))
+            .filter_map(|(_, node)| {
+                let rows = node.rows?;
+                let mut records = node
+                    .blocks
+                    .iter()
+                    .map(|block_id| self.records.sparse.record_index_for_block_id(*block_id));
+                let first = records.next()??.get();
+                let last = records.try_fold(first, |last, record| Some(last.max(record?.get())))?;
+                let rows = rows + RowIndex::from(first == 0);
+                (start <= first && last < end).then_some((first..last + 1, rows))
+            })
+            .collect();
+        self.observe_spans(heights.width, spans, start);
     }
 
-    fn cached_local_row_offset(&self, width: u16) -> Option<RowIndex> {
-        if self.records.total_count().is_none() {
-            return Some(0);
+    /// The active window's records and the transcript rows above and below it.
+    fn rows_around_window(&mut self, width: u16) -> Option<(Range<usize>, RowIndex, RowIndex)> {
+        let total = self.records.total_count()?;
+        let active = self.records.active_range()?;
+        let (start, end) = (active.start.get(), active.end.get());
+        let before = self.rows_before_record(width, start);
+        let after = self
+            .rows_before_record(width, total)
+            .saturating_sub(self.rows_before_record(width, end));
+        Some((start..end, before, after))
+    }
+
+    /// A window that renders shorter than the viewport has its neighbors folded
+    /// into its edge groups, so the unloaded records around it render nothing
+    /// until they are loaded. Returns whether that changed the extent.
+    fn observe_underfilled_window(&mut self, width: u16) -> bool {
+        let Some((window, before, after)) = self.rows_around_window(width) else {
+            return false;
+        };
+        if before == 0 && after == 0 {
+            return false;
         }
-        self.cached_sparse_prefix_row_offset(width)
-            .or_else(|| self.current_rendered_loaded_row_offset(width))
-    }
-
-    fn cached_total_rows(&self, width: u16) -> Option<RowIndex> {
-        let total_count = self.records.total_count()?;
-        self.extent_index.cached_total_rows(width, total_count)
-    }
-
-    fn approximate_sparse_prefix_row_offset(&mut self, width: u16) -> RowIndex {
-        let store = self
-            .records
-            .extent_store_address()
-            .and_then(|address| self.store_cache.cached_store_for_session(address));
-        self.extent_index.approximate_sparse_prefix_rows(
-            &self.records.sparse,
-            self.records.active_range(),
-            store,
+        let total = self.records.total_count().unwrap_or(window.end);
+        self.observe_spans(
             width,
-        )
+            [(0..window.start, 0), (window.end..total, 0)],
+            window.start,
+        );
+        true
     }
 
-    fn observe_exact_loaded_record_rows(&mut self) {
-        let snapshot = self.content.projection.exact_height_snapshot();
-        self.extent_index
-            .observe_exact_loaded_record_rows(&self.records.sparse, snapshot);
-    }
-
-    fn scrollbar_total_rows(&mut self, width: u16, exact_loaded_rows: RowIndex) -> RowIndex {
-        let store = self
-            .records
-            .extent_store_address()
-            .and_then(|address| self.store_cache.cached_store_for_session(address));
-        self.extent_index.scrollbar_total_rows(
-            &self.records.sparse,
-            self.records.active_range(),
-            store,
+    fn observe_spans(
+        &mut self,
+        width: u16,
+        spans: impl IntoIterator<Item = (Range<usize>, RowIndex)>,
+        keep_near: usize,
+    ) {
+        let (renderer_generation, renderer_cache_key) = self.content.projection.measured_renderer();
+        let layout = ExtentLayoutKey {
             width,
-            exact_loaded_rows,
-        )
+            renderer_generation,
+            renderer_cache_key,
+        };
+        let estimates = self.records.extent_estimates(&self.store_cache, width);
+        self.extent.observe(&estimates, layout, spans, keep_near);
+    }
+
+    /// Scrollbar total: estimated rows around the loaded window plus its exact rows.
+    fn scrollbar_total_rows(&mut self, width: u16, loaded_rows: RowIndex) -> RowIndex {
+        if let Some((_, before, after)) = self.rows_around_window(width) {
+            return before.saturating_add(loaded_rows).saturating_add(after);
+        }
+        match self.records.total_count() {
+            Some(total) => self.rows_before_record(width, total),
+            None => loaded_rows,
+        }
     }
 
     fn exact_loaded_row_for_virtual_content_row(
@@ -2816,8 +2890,7 @@ impl TranscriptDocument {
         width: u16,
         row: RowIndex,
     ) -> Option<RowIndex> {
-        let row_offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let row_offset = self.row_offset(width);
         self.exact_loaded_row_for_virtual_content_row_with_offset(lua, width, row, row_offset)
     }
 
@@ -2842,14 +2915,9 @@ impl TranscriptDocument {
         width: u16,
         mut node: crate::content::transcript_buf::TranscriptNodeRow,
     ) -> crate::content::transcript_buf::TranscriptNodeRow {
-        let offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let offset = self.row_offset(width);
         node.first_row = node.first_row.saturating_add(offset);
         node
-    }
-
-    fn clear_transcript_layout_caches(&mut self) {
-        self.extent_index.clear_exact_local_record_rows();
     }
 
     #[cfg(test)]
@@ -2894,7 +2962,7 @@ impl TranscriptDocument {
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
         self.content.projection.set_inline_options(options);
-        self.clear_transcript_layout_caches();
+        self.extent.forget_layout();
     }
 
     pub(crate) fn invalidate_theme(&mut self) {
@@ -2921,11 +2989,8 @@ impl TranscriptDocument {
         rows
     }
 
-    pub(crate) fn approximate_scrollbar_total_rows(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-    ) -> crate::smelt_edit::RowIndex {
+    /// Total transcript rows, the extent the scrollbar spans.
+    pub(crate) fn total_rows(&mut self, lua: &LuaRuntime, width: u16) -> RowIndex {
         let loaded_rows = self.content.projection.estimated_total_rows(
             lua,
             &mut self.content.transcript.history,
@@ -2960,7 +3025,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
-        let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
+        let row_offset = self.row_offset(width);
         self.materialize_exact_loaded_block_layout_with_offset(lua, width, row_offset)
     }
 
@@ -3171,36 +3236,19 @@ impl TranscriptDocument {
             .unwrap_or(TranscriptSearchAnchor::EstimatedRow(row))
     }
 
+    /// Activate a window containing `record_index` and return its row offset.
     fn semantic_row_offset(
         &mut self,
-        lua: &LuaRuntime,
         width: u16,
         viewport_rows: u16,
         record_index: usize,
     ) -> Option<RowIndex> {
-        let active_changed = if self.records.total_count().is_some() {
+        if self.records.total_count().is_some() {
             let range =
                 self.record_window_range_around_center(width, record_index, viewport_rows, true)?;
-            self.activate_record_window_range(range)
-        } else {
-            false
-        };
-        let active_record_range = self
-            .records
-            .active_range()
-            .map(|range| (range.start.get(), range.end.get()));
-        Some(
-            if !active_changed {
-                self.exact_viewport_state(lua, width, viewport_rows)
-                    .filter(|(exact, _)| exact.active_record_range == active_record_range)
-                    .map(|(exact, _)| exact.row_offset)
-            } else {
-                None
-            }
-            .unwrap_or_else(|| {
-                self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate)
-            }),
-        )
+            self.activate_record_window_range(range);
+        }
+        Some(self.row_offset(width))
     }
 
     fn row_for_content_anchor(
@@ -3210,29 +3258,7 @@ impl TranscriptDocument {
         viewport_rows: u16,
         anchor: TranscriptContentAnchor,
     ) -> Option<RowIndex> {
-        if let (Some(total_count), Some(active)) = (
-            self.records.total_count(),
-            self.records.active_range().cloned(),
-        ) {
-            let active_contains_anchor =
-                active.start.get() <= anchor.record_index && anchor.record_index < active.end.get();
-            let rendered_offset_is_current =
-                self.current_rendered_loaded_row_offset(width).is_some();
-            if active_contains_anchor && !rendered_offset_is_current {
-                if let Some(local_row) =
-                    self.row_for_content_anchor_with_offset(lua, width, anchor, 0)
-                {
-                    self.extent_index.cache_rows_before_record(
-                        width,
-                        total_count,
-                        active.start.get(),
-                        anchor.fallback_row.saturating_sub(local_row),
-                    );
-                }
-            }
-        }
-        let row_offset =
-            self.semantic_row_offset(lua, width, viewport_rows, anchor.record_index)?;
+        let row_offset = self.semantic_row_offset(width, viewport_rows, anchor.record_index)?;
         self.row_for_content_anchor_with_offset(lua, width, anchor, row_offset)
     }
 
@@ -3292,7 +3318,7 @@ impl TranscriptDocument {
         if !self.content.transcript.history.is_materialized(block_id) {
             let _ = self.ensure_hydrated_ids(&[block_id]);
         }
-        let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
+        let row_offset = self.row_offset(width);
         self.row_for_content_anchor_with_offset(lua, width, anchor, row_offset)
     }
 
@@ -3325,8 +3351,7 @@ impl TranscriptDocument {
         viewport_rows: u16,
         anchor: TranscriptNodeAnchor,
     ) -> Option<RowIndex> {
-        let row_offset =
-            self.semantic_row_offset(lua, width, viewport_rows, anchor.record_index)?;
+        let row_offset = self.semantic_row_offset(width, viewport_rows, anchor.record_index)?;
         self.row_for_node_anchor_with_offset(lua, width, anchor, row_offset)
     }
 
@@ -3407,7 +3432,7 @@ impl TranscriptDocument {
         let _perf = smelt_perf::perf::begin("transcript:navigation:record_from_store");
         let store_address = self.records.store_address()?;
         let store = self.store_cache.cached_store_for_session(store_address)?;
-        let (index, record) = match direction {
+        let (index, mut record) = match direction {
             TranscriptNavigationDirection::Previous => {
                 let before = anchor_index.checked_sub(1)?;
                 store.record_before_kind(role, before).ok().flatten()?
@@ -3418,14 +3443,14 @@ impl TranscriptDocument {
                 .flatten()?,
         };
         let estimated_text_bytes = record.estimated_text_bytes;
-        let preview = record.preview_text.clone();
+        let indexed_text = std::mem::take(&mut record.indexed_text);
         let record = TranscriptBlockRecordWithId::try_from(record).ok()?;
         let (block_id, stored) = smelt_core::transcript_model::StoredBlockRef::from_record(
             index,
             record.block_id,
             &record.record,
+            &indexed_text,
             estimated_text_bytes,
-            preview,
         );
         Some((index, StoredBlockWithId { block_id, stored }))
     }
@@ -3605,7 +3630,7 @@ impl TranscriptDocument {
             self.history().order.get(record_index).copied()?
         };
 
-        let global_row_offset = self.approximate_sparse_prefix_row_offset(width);
+        let global_row_offset = self.row_offset(width);
         if !self.pin_operation_blocks(&[block_id]) {
             return None;
         }
@@ -3647,8 +3672,7 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        let offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let offset = self.row_offset(width);
         let mut layout = self.content.projection.materialize_search_layout(
             lua,
             &mut self.content.transcript.history,
@@ -3681,8 +3705,7 @@ impl TranscriptDocument {
                 entries: Vec::new(),
             };
         }
-        let offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let offset = self.row_offset(width);
         let mut layout = self
             .content
             .projection
@@ -3796,24 +3819,6 @@ impl TranscriptDocument {
         Some(self.record_window_range_for_center(width, center, viewport_rows, total))
     }
 
-    fn estimated_record_for_display_row(
-        &mut self,
-        width: u16,
-        row: RowIndex,
-    ) -> Option<(usize, RowIndex)> {
-        let store = self
-            .records
-            .extent_store_address()
-            .and_then(|address| self.store_cache.cached_store_for_session(address));
-        let model = self.extent_index.record_extent_model(
-            &self.records.sparse,
-            self.records.active_range(),
-            store,
-            width,
-        );
-        self.extent_index.estimated_record_for_row(&model, row)
-    }
-
     fn record_window_range_for_approximate_display_row(
         &mut self,
         width: u16,
@@ -3822,7 +3827,7 @@ impl TranscriptDocument {
     ) -> Option<Range<smelt_store::TranscriptRecordOffset>> {
         let total = self.records.total_count()?;
         let center = self
-            .estimated_record_for_display_row(width, row)
+            .record_at_row(width, row)
             .map(|(record_index, _)| record_index)
             .unwrap_or_else(|| {
                 let avg_rows = self.approximate_average_record_rows(width).max(1);
@@ -3841,8 +3846,10 @@ impl TranscriptDocument {
         if total == 0 {
             return None;
         }
-        let start = record_index.min(total.saturating_sub(1));
+        // The window starts at the target record; near the end it extends
+        // backwards instead so the viewport below the target stays filled.
         let count = self.record_window_count(width, viewport_rows, total);
+        let start = record_index.min(total.saturating_sub(count));
         let end = start.saturating_add(count).min(total);
         Some(
             smelt_store::TranscriptRecordOffset::new(start)
@@ -3879,10 +3886,8 @@ impl TranscriptDocument {
         width: u16,
         viewport_rows: u16,
         scroll_top: RowIndex,
-        total_rows: RowIndex,
     ) -> Option<TranscriptSemanticFarSeek> {
-        let (record_index, in_record_row) =
-            self.estimated_record_for_display_row(width, scroll_top)?;
+        let (record_index, in_record_row) = self.record_at_row(width, scroll_top)?;
         let _ = self.activate_semantic_far_seek_record_window(width, record_index, viewport_rows);
         let record = self
             .records
@@ -3898,7 +3903,6 @@ impl TranscriptDocument {
         )?;
         Some(TranscriptSemanticFarSeek {
             scroll_top,
-            total_rows,
             row_anchor,
         })
     }
@@ -4039,7 +4043,7 @@ impl TranscriptDocument {
                 .is_none()
                 .then_some((0, loaded_rows));
         }
-        let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
+        let row_offset = self.row_offset(width);
         Some((row_offset, row_offset.saturating_add(loaded_rows)))
     }
 
@@ -4347,36 +4351,30 @@ impl TranscriptDocument {
         viewport_rows: u16,
         intent: &TranscriptScrollIntent,
     ) -> Option<TranscriptSemanticFarSeek> {
-        let (scroll_top, total_rows) = match intent {
+        let scroll_top = match intent {
             TranscriptScrollIntent::ScrollbarFraction {
                 numerator,
                 denominator,
-                total_rows,
-                viewport_rows: gesture_viewport_rows,
             } => {
                 let denominator = (*denominator).max(1);
                 if *numerator >= denominator {
                     return None;
                 }
-                let total_rows = (*total_rows).max(RowIndex::from((*gesture_viewport_rows).max(1)));
-                let scroll_top = Self::scrollbar_fraction_scroll_top(
+                let total_rows = self.total_rows(lua, width);
+                Self::scrollbar_fraction_scroll_top(
                     *numerator,
                     denominator,
                     total_rows,
-                    *gesture_viewport_rows,
-                );
-                (scroll_top, total_rows)
+                    viewport_rows,
+                )
             }
             TranscriptScrollIntent::ApproximateRowSeek(row) => {
-                let total_rows = self.approximate_scrollbar_total_for_viewport(lua, width);
-                (
-                    (*row).min(Self::max_scroll_for_total(total_rows, viewport_rows)),
-                    total_rows,
-                )
+                let total_rows = self.total_rows(lua, width);
+                (*row).min(Self::max_scroll_for_total(total_rows, viewport_rows))
             }
             _ => return None,
         };
-        self.resolve_semantic_far_seek(lua, width, viewport_rows, scroll_top, total_rows)
+        self.resolve_semantic_far_seek(lua, width, viewport_rows, scroll_top)
     }
 
     fn persisted_tail_record_is_materialized(&self) -> bool {
@@ -4432,7 +4430,7 @@ impl TranscriptDocument {
                 .is_some_and(|anchor| self.content.projection.height_suffix_is_exact(anchor))
             });
         }
-        let row_offset = self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate);
+        let row_offset = self.row_offset(width);
         let loaded_rows = self.content.projection.estimated_total_rows(
             lua,
             &mut self.content.transcript.history,
@@ -4574,19 +4572,6 @@ impl TranscriptDocument {
                 Self::clamp_viewport_anchor_offset(anchor.offset_rows, viewport_rows),
             )
         })
-    }
-
-    fn approximate_scrollbar_total_for_viewport(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-    ) -> RowIndex {
-        let loaded_rows = self.content.projection.estimated_total_rows(
-            lua,
-            &mut self.content.transcript.history,
-            width,
-        );
-        self.scrollbar_total_rows(width, loaded_rows)
     }
 
     fn activate_record_window_for_local_delta(
@@ -4850,10 +4835,7 @@ impl TranscriptDocument {
                     );
                 }
                 if self.records.total_count().is_some() {
-                    let row_offset = self.loaded_row_offset(
-                        width,
-                        LoadedRowOffsetPolicy::RenderedViewportOrEstimate,
-                    );
+                    let row_offset = self.row_offset(width);
                     if let Some((anchor, offset_rows)) = self
                         .content_anchor_at_or_after_row_with_offset(
                             lua,
@@ -5156,8 +5138,6 @@ impl TranscriptDocument {
             TranscriptScrollIntent::ScrollbarFraction {
                 numerator,
                 denominator,
-                total_rows,
-                viewport_rows: gesture_viewport_rows,
             } => {
                 let denominator = (*denominator).max(1);
                 if *numerator >= denominator {
@@ -5166,11 +5146,12 @@ impl TranscriptDocument {
                         None,
                     );
                 }
+                let total_rows = self.total_rows(lua, width);
                 let row = Self::scrollbar_fraction_scroll_top(
                     *numerator,
                     denominator,
-                    *total_rows,
-                    *gesture_viewport_rows,
+                    total_rows,
+                    viewport_rows,
                 );
                 (
                     crate::content::transcript_buf::ScrollTarget::visible_row(row),
@@ -5254,8 +5235,7 @@ impl TranscriptDocument {
         )?;
         let local_rows = inner.rows();
         let target_top_anchor = inner.top_anchor();
-        let preserve_total_rows = self.records.total_count().is_some();
-        if preserve_total_rows && rows != 0 {
+        if self.records.total_count().is_some() && rows != 0 {
             let target_anchor_record = target_top_anchor
                 .and_then(|anchor| anchor.block_id())
                 .and_then(|block_id| self.record_index_for_block_id(block_id));
@@ -5273,14 +5253,7 @@ impl TranscriptDocument {
                 return None;
             }
         }
-        let total_rows = if preserve_total_rows {
-            exact.global_total_rows
-        } else {
-            exact
-                .global_total_rows
-                .saturating_sub(tape.rows.total_rows)
-                .saturating_add(local_rows.total_rows)
-        };
+        let total_rows = self.scrollbar_total_rows(width, local_rows.total_rows);
         let reaches_loaded_tail = rows > 0
             && local_rows
                 .clamped_scroll
@@ -5291,11 +5264,7 @@ impl TranscriptDocument {
             return None;
         }
         let repin_at_semantic_tail = reaches_loaded_tail;
-        let row_offset = if preserve_total_rows && repin_at_semantic_tail {
-            total_rows.saturating_sub(local_rows.total_rows)
-        } else {
-            exact.row_offset
-        };
+        let row_offset = self.row_offset(width);
         let target = local_rows.clamped_scroll.saturating_add(row_offset);
         let scroll_target = if rows == 0 {
             crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
@@ -5316,7 +5285,6 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             planned_loaded_rows: local_rows.total_rows,
-            preserve_total_rows,
             requested_scroll: None,
             repin_at_semantic_tail,
             cursor_target: None,
@@ -5342,6 +5310,7 @@ impl TranscriptDocument {
         {
             self.viewport.projection_count = self.viewport.projection_count.saturating_add(1);
         }
+        self.sync_row_hints(width);
         let previous_top_anchor = self.viewport.state.resolved_anchor.map(|anchor| anchor.top);
         let deferred_projection = self.viewport.state.pending_projection.clone();
         let active_record_range_before = deferred_projection
@@ -5526,7 +5495,6 @@ impl TranscriptDocument {
             viewport_rows,
             TranscriptProjectionOptions {
                 repin_at_semantic_tail: behavior.repin_at_semantic_tail,
-                semantic_far_seek,
             },
         ) {
             Ok(plan) => plan,
@@ -5581,7 +5549,6 @@ impl TranscriptDocument {
             viewport_rows,
             TranscriptProjectionOptions {
                 repin_at_semantic_tail: false,
-                semantic_far_seek: None,
             },
         )
     }
@@ -5595,6 +5562,7 @@ impl TranscriptDocument {
         viewport_rows: u16,
         options: TranscriptProjectionOptions,
     ) -> Result<TranscriptProjectionPlan, TranscriptProjectionHydrationError> {
+        self.sync_row_hints(width);
         let _perf = smelt_perf::perf::begin("transcript:plan_sparse_projection");
         let scroll_anchor = self.scroll_anchor_for_projection_target(scroll_target);
         match scroll_target {
@@ -5627,96 +5595,19 @@ impl TranscriptDocument {
                 }
             }
         }
-        let stable_local_delta = options.semantic_far_seek.is_none()
-            && matches!(
-                scroll_target,
-                crate::content::transcript_buf::ScrollTarget::Visible(
-                    crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
-                )
-            );
-        let active_record_range = self.active_record_range_key();
-        let stable_total_rows = options
-            .semantic_far_seek
-            .map(|far_seek| far_seek.total_rows)
-            .or_else(|| {
-                stable_local_delta
-                    .then(|| {
-                        self.viewport
-                            .state
-                            .exact_viewport
-                            .filter(|exact| {
-                                exact.width == width
-                                    && exact.active_record_range == active_record_range
-                            })
-                            .map(|exact| exact.global_total_rows)
-                    })
-                    .flatten()
-            });
-        let stable_requested_scroll = match scroll_target {
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
-            ) => Some(add_signed_row(row, delta)),
-            _ => None,
-        };
-        let stable_row_offset = stable_local_delta
-            .then(|| {
-                self.viewport
-                    .state
-                    .exact_viewport
-                    .filter(|exact| {
-                        exact.width == width && exact.active_record_range == active_record_range
-                    })
-                    .map(|exact| exact.row_offset)
-            })
-            .flatten()
-            .or_else(|| match scroll_target {
-                crate::content::transcript_buf::ScrollTarget::Visible(
-                    crate::content::transcript_buf::ScrollAnchor::StableRowDelta {
-                        row,
-                        anchor: Some(anchor),
-                        ..
-                    },
-                ) => self
-                    .content
-                    .projection
-                    .row_for_stable_anchor(
-                        lua,
-                        &mut self.content.transcript.history,
-                        width,
-                        theme,
-                        anchor,
-                    )
-                    .map(|local_row| row.saturating_sub(local_row)),
-                _ => None,
-            })
-            .or_else(|| {
-                stable_local_delta
-                    .then(|| self.cached_sparse_prefix_row_offset(width))
-                    .flatten()
-            });
-        let mut row_offset = {
-            let _perf = smelt_perf::perf::begin("transcript:sparse:loaded_row_offset");
-            if stable_local_delta {
-                stable_row_offset.unwrap_or_default()
-            } else {
-                self.loaded_row_offset(width, LoadedRowOffsetPolicy::SparseEstimate)
-            }
-        };
+        let mut row_offset = self.row_offset(width);
         let viewport_row_count = RowIndex::from(viewport_rows.max(1));
         let projection_covers_persisted_tail = self.records.projection_covers_persisted_tail();
-        let requested_scroll = options
-            .semantic_far_seek
-            .map(|far_seek| far_seek.scroll_top)
-            .or(match scroll_target {
-                crate::content::transcript_buf::ScrollTarget::Visible(
-                    crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
-                ) => Some(row),
-                crate::content::transcript_buf::ScrollTarget::Visible(
-                    crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
-                    | crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
-                    | crate::content::transcript_buf::ScrollAnchor::Tail,
-                ) => None,
-            });
+        let requested_scroll = match scroll_target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
+            ) => Some(row),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
+                | crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
+                | crate::content::transcript_buf::ScrollAnchor::Tail,
+            ) => None,
+        };
         let local_target = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
@@ -5752,17 +5643,13 @@ impl TranscriptDocument {
         };
         let mut inner = self.hydrate_projection_plan(lua, theme, hydration_ids, hydration_plan)?;
         let mut loaded_rows = inner.total_rows();
-        let mut preserve_total_rows = self.records.total_count().is_some();
-        let mut total_rows = stable_total_rows.unwrap_or_else(|| {
+        if loaded_rows < viewport_row_count && self.observe_underfilled_window(width) {
+            row_offset = self.row_offset(width);
+        }
+        let mut total_rows = {
             let _perf = smelt_perf::perf::begin("transcript:sparse:scrollbar_total_rows");
             self.scrollbar_total_rows(width, loaded_rows)
-        });
-        if let Some(far_seek) = options.semantic_far_seek {
-            row_offset = far_seek.scroll_top.saturating_sub(inner.scroll_top());
-        } else if let Some(requested) = stable_requested_scroll {
-            let requested = requested.min(Self::max_scroll_for_total(total_rows, viewport_rows));
-            row_offset = requested.saturating_sub(inner.scroll_top());
-        }
+        };
         let target_reaches_tail = match scroll_target {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
@@ -5803,12 +5690,6 @@ impl TranscriptDocument {
                 loaded_rows = inner.total_rows();
                 total_rows = self.scrollbar_total_rows(width, loaded_rows);
             }
-            row_offset = total_rows.saturating_sub(loaded_rows);
-        }
-        if preserve_total_rows && loaded_rows < viewport_row_count && total_rows > loaded_rows {
-            preserve_total_rows = false;
-            total_rows = loaded_rows;
-            row_offset = 0;
         }
         let materialization = TranscriptMaterializationPlan::Loaded(inner);
         let (trace_frame, trace_started_at) = self
@@ -5821,7 +5702,6 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             planned_loaded_rows: loaded_rows,
-            preserve_total_rows,
             requested_scroll,
             repin_at_semantic_tail: options.repin_at_semantic_tail,
             cursor_target: None,
@@ -5874,7 +5754,6 @@ impl TranscriptDocument {
             row_offset,
             total_rows,
             planned_loaded_rows,
-            preserve_total_rows,
             requested_scroll,
             repin_at_semantic_tail,
             cursor_target,
@@ -5906,25 +5785,18 @@ impl TranscriptDocument {
         let mut exact_rows = rows;
         let local_total_rows = rows.total_rows;
         let mut row_offset = row_offset;
-        let mut total_rows = if preserve_total_rows {
-            total_rows
-        } else {
-            total_rows
-                .saturating_sub(planned_loaded_rows)
-                .saturating_add(local_total_rows)
-        };
-        if preserve_total_rows
-            && local_total_rows < RowIndex::from(viewport_rows.max(1))
-            && total_rows > local_total_rows
+        let mut total_rows = total_rows
+            .saturating_sub(planned_loaded_rows)
+            .saturating_add(local_total_rows);
+        self.observe_projected_heights();
+        // A block can shrink after planning (for example, a streaming reply).
+        if local_total_rows < RowIndex::from(viewport_rows.max(1))
+            && self.observe_underfilled_window(width)
         {
-            // A block can shrink after planning (for example, a streaming reply).
-            // The estimated rows cannot fill this viewport; use the exact loaded
-            // rows as the planner does for a short sparse transcript.
-            row_offset = 0;
-            total_rows = local_total_rows;
+            row_offset = self.row_offset(width);
+            total_rows = self.scrollbar_total_rows(width, local_total_rows);
+            trace_ctx.row_offset = row_offset;
         }
-        trace_ctx.row_offset = row_offset;
-        self.observe_exact_loaded_record_rows();
         rows.clamped_scroll = rows.clamped_scroll.saturating_add(row_offset);
         rows.row_base = rows.row_base.saturating_add(row_offset);
         let viewport_rows_count = RowIndex::from(viewport_rows.max(1));
@@ -6027,8 +5899,7 @@ impl TranscriptDocument {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
-        let row_offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let row_offset = self.row_offset(width);
         let end = start.saturating_add(count);
         if count == 0 || end <= start {
             return DisplayRows::empty();
@@ -6138,8 +6009,7 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<TranscriptRowAnchor> {
-        let row_offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let row_offset = self.row_offset(width);
         self.row_anchor_at_row_with_offset(lua, width, row, row_offset)
     }
 
@@ -6170,8 +6040,7 @@ impl TranscriptDocument {
         width: u16,
         anchor: TranscriptRowAnchor,
     ) -> Option<crate::smelt_edit::RowIndex> {
-        let row_offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let row_offset = self.row_offset(width);
         self.row_for_anchor_with_offset(lua, width, anchor, row_offset)
     }
 
@@ -6307,7 +6176,7 @@ impl TranscriptDocument {
         let Some(local_row) = self.exact_loaded_row_for_virtual_content_row(lua, width, row) else {
             return false;
         };
-        let changed = self.content.projection.fold_node_at_row(
+        self.content.projection.fold_node_at_row(
             lua,
             &mut self.content.transcript.history,
             width,
@@ -6316,11 +6185,7 @@ impl TranscriptDocument {
                 action,
                 activation,
             },
-        );
-        if changed {
-            self.clear_transcript_layout_caches();
-        }
-        changed
+        )
     }
 
     pub(crate) fn prepare_layout(&mut self, lua: &LuaRuntime, width: u16) {
@@ -6337,14 +6202,9 @@ impl TranscriptDocument {
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.prepare_layout(lua, width);
-        let changed =
-            self.content
-                .projection
-                .fold_node(&self.content.transcript.history, id, action);
-        if changed {
-            self.clear_transcript_layout_caches();
-        }
-        changed
+        self.content
+            .projection
+            .fold_node(&self.content.transcript.history, id, action)
     }
 
     pub(crate) fn fold_all(
@@ -6359,7 +6219,7 @@ impl TranscriptDocument {
             .projection
             .fold_all(&self.content.transcript.history, action);
         if changed {
-            self.clear_transcript_layout_caches();
+            self.extent.forget_layout();
         }
         changed
     }
@@ -6377,7 +6237,7 @@ impl TranscriptDocument {
                 .projection
                 .fold_block_kind(&self.content.transcript.history, kind, action);
         if changed {
-            self.clear_transcript_layout_caches();
+            self.extent.forget_layout();
         }
         changed
     }
@@ -6389,8 +6249,7 @@ impl TranscriptDocument {
         theme: &Theme,
         range: crate::smelt_edit::DocRange,
     ) -> crate::smelt_edit::CopyOutput {
-        let row_offset =
-            self.loaded_row_offset(width, LoadedRowOffsetPolicy::RenderedViewportOrEstimate);
+        let row_offset = self.row_offset(width);
         if range.end.row < row_offset || (range.end.row == row_offset && range.end.byte_col == 0) {
             return crate::smelt_edit::CopyOutput::default();
         }
@@ -6474,7 +6333,6 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn history_mut(&mut self) -> &mut BlockHistory {
-        self.clear_transcript_layout_caches();
         &mut self.content.transcript.history
     }
 
@@ -6498,7 +6356,7 @@ impl TranscriptDocument {
             .projection
             .invalidate_renderer_if_changed(generation, cache_key);
         if changed {
-            self.clear_transcript_layout_caches();
+            self.extent.forget_layout();
         }
         changed
     }
@@ -6519,6 +6377,11 @@ impl TranscriptDocument {
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn record_total_count(&self) -> Option<usize> {
         self.records.total_count()
+    }
+
+    #[cfg(test)]
+    fn observe_record_rows(&mut self, width: u16, record: usize, rows: RowIndex) {
+        self.observe_spans(width, [(record..record + 1, rows)], record);
     }
 
     #[cfg(test)]
@@ -6558,13 +6421,10 @@ impl TranscriptDocument {
 
     pub(crate) fn push(&mut self, block: Block) {
         self.content.transcript.push(block);
-        self.clear_transcript_layout_caches();
     }
 
     pub(crate) fn insert_before(&mut self, before: BlockId, block: Block) -> Option<BlockId> {
-        let id = self.content.transcript.insert_before(before, block)?;
-        self.clear_transcript_layout_caches();
-        Some(id)
+        self.content.transcript.insert_before(before, block)
     }
 
     pub(crate) fn push_with_origin(
@@ -6573,7 +6433,6 @@ impl TranscriptDocument {
         origin: smelt_core::transcript_model::BlockOrigin,
     ) {
         self.content.transcript.push_with_origin(block, origin);
-        self.clear_transcript_layout_caches();
     }
 
     pub(crate) fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
@@ -6584,7 +6443,6 @@ impl TranscriptDocument {
                 self.content
                     .transcript
                     .rewrite_compaction_preview(id, summary);
-                self.clear_transcript_layout_caches();
                 return Some(id);
             }
             self.content.compaction_preview_id = None;
@@ -6592,14 +6450,12 @@ impl TranscriptDocument {
 
         let id = self.content.transcript.push_compaction_preview(summary)?;
         self.content.compaction_preview_id = Some(id);
-        self.clear_transcript_layout_caches();
         Some(id)
     }
 
     pub(crate) fn clear_compaction_preview(&mut self) -> Option<BlockId> {
         let id = self.content.compaction_preview_id.take()?;
         self.content.transcript.remove_compaction_preview(id);
-        self.clear_transcript_layout_caches();
         Some(id)
     }
 
@@ -6616,23 +6472,14 @@ impl TranscriptDocument {
         self.content
             .transcript
             .insert_checkpoint_marker_at(block_index, history_index, block);
-        self.clear_transcript_layout_caches();
     }
 
     pub(crate) fn remove_unoriginated_at(&mut self, block_index: usize) -> Option<Block> {
-        let removed = self.content.transcript.remove_unoriginated_at(block_index);
-        if removed.is_some() {
-            self.clear_transcript_layout_caches();
-        }
-        removed
+        self.content.transcript.remove_unoriginated_at(block_index)
     }
 
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
-        let drained = self.content.transcript.drain_finished_blocks();
-        if !drained.is_empty() {
-            self.clear_transcript_layout_caches();
-        }
-        drained
+        self.content.transcript.drain_finished_blocks()
     }
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {
@@ -6649,7 +6496,7 @@ impl TranscriptDocument {
         if let Some(record_len) = record_len {
             self.invalidate_hydration_requests();
             self.records.truncate(record_len);
-            self.extent_index.clear_persisted_record_estimates();
+            self.extent.invalidate_from(record_len);
         }
     }
 }
@@ -6986,7 +6833,7 @@ mod document_tests {
     }
 
     #[test]
-    fn sparse_prefix_and_scrollbar_share_retained_extent_state() {
+    fn sparse_offset_and_scrollbar_share_memoized_extent() {
         let records = transcript_records(300);
         let dir = tempfile::tempdir().unwrap();
         let store_address = create_test_lineage_session(dir.path());
@@ -6997,51 +6844,16 @@ mod document_tests {
             Some(store_address),
         ));
 
-        let prefix = document.approximate_sparse_prefix_row_offset(80);
-        assert!(prefix > 0);
+        let offset = document.row_offset(80);
+        assert!(offset > 0);
+        assert_eq!(offset, document.rows_before_record(80, 200));
+        let total = document.scrollbar_total_rows(80, 20);
+        assert!(total >= offset + 20);
         let reads = document.extent_store_read_count_for_harness();
         assert!(reads > 0);
-        let total = document.scrollbar_total_rows(80, 20);
-        assert!(total >= prefix);
+        assert_eq!(document.row_offset(80), offset);
+        assert_eq!(document.scrollbar_total_rows(80, 20), total);
         assert_eq!(document.extent_store_read_count_for_harness(), reads);
-        let extent = document.extent_index.retained.as_ref().unwrap();
-        assert_eq!(extent.total_count, records.len());
-        assert_eq!(extent.prefix_rows.get(&200), Some(&prefix));
-    }
-
-    #[test]
-    fn retained_sparse_extent_query_caches_are_bounded() {
-        let total_count = TRANSCRIPT_RETAINED_EXTENT_QUERY_LIMIT * 4;
-        let mut extent = RetainedTranscriptExtent {
-            width: 80,
-            total_count,
-            total_record_rows: total_count as RowIndex,
-            prefix_rows: HashMap::from([(0, 0), (total_count, total_count as RowIndex)]),
-            prefix_order: VecDeque::new(),
-            row_locations: HashMap::new(),
-            row_location_order: VecDeque::new(),
-        };
-
-        for index in 1..total_count {
-            extent.insert_prefix_rows(index, index as RowIndex);
-            extent.insert_row_location(index as RowIndex, (index, 0));
-        }
-
-        assert_eq!(
-            extent.prefix_rows.len(),
-            TRANSCRIPT_RETAINED_EXTENT_QUERY_LIMIT + 2
-        );
-        assert_eq!(
-            extent.row_locations.len(),
-            TRANSCRIPT_RETAINED_EXTENT_QUERY_LIMIT
-        );
-        assert_eq!(extent.prefix_rows.get(&0), Some(&0));
-        assert_eq!(
-            extent.prefix_rows.get(&total_count),
-            Some(&(total_count as RowIndex))
-        );
-        assert!(!extent.prefix_rows.contains_key(&1));
-        assert!(!extent.row_locations.contains_key(&1));
     }
 
     #[test]
@@ -7613,10 +7425,10 @@ mod document_tests {
             80,
         );
 
-        let total_rows = document.approximate_scrollbar_total_rows(&lua, 80);
+        let total_rows = document.total_rows(&lua, 80);
 
         assert!(total_rows > loaded_rows);
-        assert!(document.approximate_sparse_prefix_row_offset(80) > 0);
+        assert!(document.row_offset(80) > 0);
     }
 
     #[test]
@@ -7646,7 +7458,6 @@ mod document_tests {
             crate::content::transcript_buf::ScrollTarget::visible_row(0),
             36,
         );
-        assert!(plan.preserve_total_rows);
         assert!(plan.total_rows >= 36);
         assert!(plan.planned_loaded_rows >= 36);
         document.history_mut().rewrite(
@@ -7680,7 +7491,7 @@ mod document_tests {
         let records = source.history.block_records();
         let loaded = loaded_transcript_with_window(&records, 8, 10, None);
         let mut document = TranscriptDocument::from_loaded_transcript(loaded);
-        let offset = document.approximate_sparse_prefix_row_offset(80);
+        let offset = document.row_offset(80);
         let plan = document.plan_projection_measured(
             &lua,
             80,
@@ -8007,7 +7818,7 @@ mod document_tests {
             None,
         ));
         let mut buf = Buffer::new(crate::smelt_edit::BufId(416), Default::default());
-        let loaded_start = document.approximate_sparse_prefix_row_offset(width);
+        let loaded_start = document.row_offset(width);
         let initial_scroll = loaded_start.saturating_add(300);
         let plan = document.plan_projection_measured(
             &lua,
@@ -8113,12 +7924,9 @@ mod document_tests {
         );
         assert!(local.top_anchor.is_some());
 
-        let far_total_rows = document.approximate_scrollbar_total_rows(&lua, width);
         document.set_pending_scroll_intent(TranscriptScrollIntent::ScrollbarFraction {
             numerator: 0,
             denominator: 1,
-            total_rows: far_total_rows,
-            viewport_rows,
         });
         let far_plan = document.plan_viewport_projection_measured(
             &lua,
@@ -8161,7 +7969,7 @@ mod document_tests {
             Some(store_address.clone()),
         ));
         let mut buf = Buffer::new(crate::smelt_edit::BufId(414), Default::default());
-        let loaded_start = document.approximate_sparse_prefix_row_offset(width);
+        let loaded_start = document.row_offset(width);
         let plan = plan_projection_after_hydration(
             &mut document,
             &lua,
@@ -8326,10 +8134,7 @@ mod document_tests {
             0..4,
             None,
         ));
-        document.extent_index.observe_exact_loaded_record_rows(
-            &document.records.sparse,
-            exact_height_snapshot(BlockId::new(1), width, records[1].content_hash, 17),
-        );
+        document.observe_record_rows(width, 1, 17);
         document.set_scroll_trace_enabled(true);
         document.set_next_scroll_trace_input(TranscriptScrollTraceRenderInput {
             input_event_or_tick: "exact_height_refinement_probe".to_string(),
@@ -8363,7 +8168,7 @@ mod document_tests {
             40..48,
             None,
         ));
-        let offset = document.approximate_sparse_prefix_row_offset(80);
+        let offset = document.row_offset(80);
         let loaded_rows = document.content.projection.estimated_total_rows(
             &lua,
             &mut document.content.transcript.history,
@@ -8412,7 +8217,7 @@ mod document_tests {
             None,
         ));
         let width = 80;
-        let offset = document.approximate_sparse_prefix_row_offset(width);
+        let offset = document.row_offset(width);
         let gap_row = offset.saturating_sub(1);
         assert!(gap_row > 0);
 
@@ -8539,7 +8344,7 @@ mod document_tests {
         ));
         let coarse_rows = 2000 * document.approximate_average_record_rows(20);
 
-        let prefix_rows = document.approximate_sparse_prefix_row_offset(20);
+        let prefix_rows = document.row_offset(20);
 
         assert!(prefix_rows > coarse_rows);
         assert_eq!(
@@ -8559,7 +8364,7 @@ mod document_tests {
     }
 
     #[test]
-    fn viewport_content_anchor_survives_sparse_prefix_estimate_refinement() {
+    fn viewport_content_anchor_follows_observed_prefix_rows() {
         let lua = LuaRuntime::new();
         let theme = Theme::default();
         let records = transcript_records(100);
@@ -8570,7 +8375,7 @@ mod document_tests {
         ));
         let width = 80;
         let viewport_rows = 10;
-        let original_top = document.approximate_sparse_prefix_row_offset(width);
+        let original_top = document.row_offset(width);
         let mut buf = Buffer::new(crate::smelt_edit::BufId(408), Default::default());
         let plan = document.plan_projection_measured(
             &lua,
@@ -8585,17 +8390,7 @@ mod document_tests {
         assert!(buf.lines().iter().any(|line| line.contains("block 64")));
 
         let refined_top = original_top.saturating_add(25);
-        let extent = document
-            .extent_index
-            .retained
-            .as_mut()
-            .expect("retained extent");
-        extent.total_record_rows = extent.total_record_rows.saturating_add(25);
-        for (record_index, prefix_rows) in &mut extent.prefix_rows {
-            if *record_index > 0 {
-                *prefix_rows = prefix_rows.saturating_add(25);
-            }
-        }
+        document.observe_record_rows(width, 10, 27);
         let plan = plan_viewport_after_hydration(
             &mut document,
             &lua,
@@ -8612,10 +8407,9 @@ mod document_tests {
         let rows = document.project_planned(&lua, &mut buf, &theme, plan);
 
         assert_eq!(
-            rows.clamped_scroll, original_top,
-            "extent refinement must not move the exact semantic viewport coordinate"
+            rows.clamped_scroll, refined_top,
+            "rows observed above the window shift its coordinate with the content"
         );
-        assert_ne!(rows.clamped_scroll, refined_top);
         assert!(buf.lines().iter().any(|line| line.contains("block 64")));
     }
 
@@ -8894,34 +8688,8 @@ mod document_tests {
         );
     }
 
-    fn exact_height_snapshot(
-        block_id: BlockId,
-        width: u16,
-        content_hash: u64,
-        rows: RowIndex,
-    ) -> crate::content::transcript_buf::TranscriptExactHeightSnapshot {
-        crate::content::transcript_buf::TranscriptExactHeightSnapshot {
-            width,
-            renderer_generation: 7,
-            renderer_cache_key: Some(11),
-            presentation_generation: 13,
-            observations: vec![
-                crate::content::transcript_buf::TranscriptExactHeightObservation {
-                    block_id,
-                    key: LayoutKey {
-                        width,
-                        view_state: smelt_core::transcript_model::ViewState::Expanded,
-                        content_hash,
-                        sidecar_hash: 0,
-                    },
-                    rows,
-                },
-            ],
-        }
-    }
-
     #[test]
-    fn exact_loaded_record_rows_override_text_estimates() {
+    fn observed_record_rows_override_estimates() {
         let records = transcript_records(3);
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
@@ -8929,26 +8697,16 @@ mod document_tests {
             None,
         ));
         let width = 80;
-        let block_id = BlockId::new(1);
-        let raw_estimate = document
-            .extent_index
-            .local_rows_for_loaded_records(&document.records.sparse, width);
+        assert_eq!(document.rows_before_record(width, 3), 6);
 
-        document.extent_index.observe_exact_loaded_record_rows(
-            &document.records.sparse,
-            exact_height_snapshot(block_id, width, records[1].content_hash, 17),
-        );
+        document.observe_record_rows(width, 1, 17);
 
-        let refined = document
-            .extent_index
-            .local_rows_for_loaded_records(&document.records.sparse, width);
-        assert_eq!(raw_estimate, 6);
-        assert_eq!(refined, 21);
-        assert_eq!(document.approximate_average_record_rows(width), 7);
+        assert_eq!(document.rows_before_record(width, 1), 2);
+        assert_eq!(document.rows_before_record(width, 3), 21);
     }
 
     #[test]
-    fn exact_loaded_record_rows_are_width_and_invalidation_scoped() {
+    fn observed_record_rows_are_width_and_invalidation_scoped() {
         let records = transcript_records(2);
         let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
             &records,
@@ -8957,66 +8715,23 @@ mod document_tests {
         ));
         let width = 80;
         assert!(!document.invalidate_renderer_if_changed(7, Some(11)));
-        let block_id = BlockId::new(0);
-        document.extent_index.observe_exact_loaded_record_rows(
-            &document.records.sparse,
-            exact_height_snapshot(block_id, width, records[0].content_hash, 19),
-        );
-
-        assert_eq!(
-            document.extent_index.exact_local_rows_for_record(0, width),
-            Some(19)
-        );
-        assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_record(0, width - 1),
-            None
-        );
-        document.extent_index.observe_exact_loaded_record_rows(
-            &document.records.sparse,
-            exact_height_snapshot(block_id, width - 1, records[0].content_hash, 23),
-        );
-        assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_record(0, width - 1),
-            Some(23)
-        );
-        assert_eq!(
-            document.extent_index.exact_local_rows_for_record(0, width),
-            Some(19)
-        );
+        document.observe_record_rows(width, 0, 19);
+        assert_eq!(document.rows_before_record(width, 1), 19);
+        assert_eq!(document.rows_before_record(width - 1, 1), 2);
 
         document.invalidate_theme();
         assert_eq!(
-            document.extent_index.exact_local_rows_for_record(0, width),
-            Some(19),
-            "theme invalidation should keep exact record heights"
-        );
-        assert_eq!(
-            document
-                .extent_index
-                .exact_local_rows_for_record(0, width - 1),
-            Some(23),
-            "theme invalidation should keep width-scoped exact record heights"
+            document.rows_before_record(width, 1),
+            19,
+            "theme invalidation should keep observed record rows"
         );
 
         assert!(document.invalidate_renderer_if_changed(8, Some(11)));
-        assert_eq!(
-            document.extent_index.exact_local_rows_for_record(0, width),
-            None
-        );
+        assert_eq!(document.rows_before_record(width, 1), 2);
 
-        document.extent_index.observe_exact_loaded_record_rows(
-            &document.records.sparse,
-            exact_height_snapshot(block_id, width, records[0].content_hash, 19),
-        );
+        document.observe_record_rows(width, 0, 19);
         document.set_inline_options(InlineOptions::default());
-        assert_eq!(
-            document.extent_index.exact_local_rows_for_record(0, width),
-            None
-        );
+        assert_eq!(document.rows_before_record(width, 1), 2);
     }
 
     fn skewed_transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
@@ -9048,14 +8763,11 @@ mod document_tests {
             Some(store_address),
         ));
 
-        assert_eq!(
-            document.approximate_sparse_prefix_row_offset(width),
-            expected
-        );
+        assert_eq!(document.row_offset(width), expected);
     }
 
     #[test]
-    fn exact_record_rows_survive_active_window_switch_without_refining_prefix_estimate() {
+    fn observed_record_rows_survive_active_window_switch() {
         let width = 80;
         let records = transcript_records(8);
         let dir = tempfile::tempdir().unwrap();
@@ -9066,10 +8778,7 @@ mod document_tests {
             0..3,
             Some(store_address.clone()),
         ));
-        document.extent_index.observe_exact_loaded_record_rows(
-            &document.records.sparse,
-            exact_height_snapshot(BlockId::new(1), width, records[1].content_hash, 17),
-        );
+        document.observe_record_rows(width, 1, 17);
 
         let window = LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(5),
@@ -9082,14 +8791,7 @@ mod document_tests {
             .unwrap()
             .estimated_record_rows(width, 0..5)
             .unwrap() as RowIndex;
-        assert_eq!(
-            document.extent_index.exact_local_rows_for_record(1, width),
-            Some(17)
-        );
-        assert_eq!(
-            document.approximate_sparse_prefix_row_offset(width),
-            persisted_prefix
-        );
+        assert_eq!(document.row_offset(width), persisted_prefix + 17 - 2);
     }
 
     fn assert_sparse_projection_is_bounded(
@@ -9396,15 +9098,12 @@ mod document_tests {
         win: &mut crate::smelt_edit::Window,
         buf: &mut Buffer,
         ctx: ProjectionHarness<'_>,
-        total_rows: RowIndex,
         thumb_top: u16,
         max_thumb_top: u16,
     ) -> AppliedTranscriptViewport {
         document.set_pending_scroll_intent(TranscriptScrollIntent::ScrollbarFraction {
             numerator: u64::from(thumb_top),
             denominator: u64::from(max_thumb_top),
-            total_rows,
-            viewport_rows: ctx.viewport_rows,
         });
         let plan = plan_viewport_after_hydration(
             document,
@@ -9709,7 +9408,7 @@ mod document_tests {
                 LoadedTranscript::tail_from_sqlite(store_address.clone(), width, viewport_rows)
                     .expect("tail transcript");
             let mut sparse_document = TranscriptDocument::from_loaded_transcript(loaded);
-            let estimated_total = sparse_document.approximate_scrollbar_total_rows(&lua, width);
+            let estimated_total = sparse_document.total_rows(&lua, width);
             let total_error = estimated_total.abs_diff(exact_total);
             assert!(
                 total_error.saturating_mul(100) <= exact_total.saturating_mul(10),
@@ -9764,7 +9463,7 @@ mod document_tests {
                     .record_index_for_block_id(exact_block_id)
                     .expect("exact source record");
                 let estimated_record = sparse_document
-                    .estimated_record_for_display_row(width, estimated_row)
+                    .record_at_row(width, estimated_row)
                     .expect("estimated source record")
                     .0;
                 assert!(
@@ -9851,7 +9550,6 @@ mod document_tests {
                 &mut win,
                 &mut buf,
                 ctx(),
-                sparse_rows.total_rows,
                 thumb_top,
                 sparse_metrics.max_thumb_top,
             );
@@ -9883,7 +9581,6 @@ mod document_tests {
                 &mut win,
                 &mut buf,
                 ctx(),
-                sparse_rows.total_rows,
                 thumb_top,
                 sparse_metrics.max_thumb_top,
             );
@@ -10032,17 +9729,7 @@ mod document_tests {
             .start
             .get();
         assert!(active_start > 0);
-        let extent = document
-            .extent_index
-            .retained
-            .as_mut()
-            .expect("retained extent");
-        extent.total_record_rows = extent.total_record_rows.saturating_add(123);
-        for (record_index, prefix_rows) in &mut extent.prefix_rows {
-            if *record_index > 0 {
-                *prefix_rows = prefix_rows.saturating_add(123);
-            }
-        }
+        document.observe_record_rows(width, 0, 125);
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
             record_index,
             block_id,
@@ -11728,11 +11415,13 @@ mod tests {
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
 
         let range = document
-            .record_window_range_for_approximate_display_row(10, 120, 10)
+            .record_window_range_for_approximate_display_row(20, 60, 10)
             .expect("record range");
 
+        // Record 0 estimates 52 rows at width 20 and every later record 2, so
+        // row 60 falls in record 5.
         assert!(
-            range.start.get() <= 10 && 10 < range.end.get(),
+            range.start.get() <= 5 && 5 < range.end.get(),
             "seek should center near the record whose cumulative estimate contains the row: {range:?}"
         );
         assert!(
@@ -11742,7 +11431,7 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_total_ignores_exact_loaded_height_refinements_for_sparse_sessions() {
+    fn observed_loaded_rows_do_not_change_the_scrollbar_total() {
         let dir = tempfile::tempdir().unwrap();
         let records = (0..16).map(test_record_record).collect::<Vec<_>>();
         let store_address = seed_test_transcript_rows(dir.path(), records);
@@ -11759,33 +11448,7 @@ mod tests {
         let before = document.scrollbar_total_rows(10, 1_000);
 
         let active_start = document.records.active_range().unwrap().start.get();
-        let block_id = document
-            .records
-            .sparse
-            .record(smelt_store::TranscriptRecordOffset::new(active_start))
-            .unwrap()
-            .block_id;
-        let snapshot = crate::content::transcript_buf::TranscriptExactHeightSnapshot {
-            width: 10,
-            renderer_generation: 0,
-            renderer_cache_key: None,
-            presentation_generation: 0,
-            observations: vec![
-                crate::content::transcript_buf::TranscriptExactHeightObservation {
-                    block_id,
-                    key: smelt_core::transcript_model::LayoutKey {
-                        width: 10,
-                        view_state: smelt_core::transcript_model::ViewState::Expanded,
-                        content_hash: 0,
-                        sidecar_hash: 0,
-                    },
-                    rows: 1_000,
-                },
-            ],
-        };
-        document
-            .extent_index
-            .observe_exact_loaded_record_rows(&document.records.sparse, snapshot);
+        document.observe_record_rows(10, active_start, 1_000);
         let after = document.scrollbar_total_rows(10, 1_000);
 
         assert_eq!(before, after);

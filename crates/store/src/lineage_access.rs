@@ -1457,21 +1457,6 @@ impl LineageSessionReader {
         )
     }
 
-    pub fn transcript_record_for_row(
-        &self,
-        width: u16,
-        row: u64,
-    ) -> Result<Option<crate::TranscriptRowLocation>> {
-        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
-        lineage::lineage_transcript_row_location(
-            &self.conn,
-            &self.lineage,
-            &snapshot.transcript_root,
-            width,
-            row,
-        )
-    }
-
     pub fn transcript_record_before_kind(
         &self,
         kind: &str,
@@ -4287,7 +4272,6 @@ mod tests {
                 >= 80
         );
         assert!(reader.transcript_total_estimated_rows(80).unwrap() >= 100);
-        assert!(reader.transcript_record_for_row(80, 75).unwrap().is_some());
         let tool = reader
             .transcript_record_before_kind("tool", 99)
             .unwrap()

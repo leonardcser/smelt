@@ -611,8 +611,17 @@ impl TuiApp {
             }
         }
         let pending_scrollbar_top = self
-            .conversation
-            .pending_transcript_scrollbar_display_scroll_top();
+            .ui
+            .win(crate::app::TRANSCRIPT_WIN)
+            .and_then(|window| window.viewport)
+            .and_then(|viewport| viewport.scrollbar)
+            .and_then(|bar| {
+                self.conversation
+                    .pending_transcript_scrollbar_display_scroll_top(
+                        bar.total_rows,
+                        bar.viewport_rows,
+                    )
+            });
         if let Some(window) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
             window.set_scrollbar_display_scroll_top(pending_scrollbar_top);
         }

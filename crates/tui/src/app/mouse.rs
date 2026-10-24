@@ -267,14 +267,12 @@ impl TuiApp {
         let intent = self
             .ui
             .scrollbar_pointer_fraction(owner, me.row)
-            .map(|(numerator, denominator, total_rows, viewport_rows)| {
-                TranscriptScrollIntent::ScrollbarFraction {
+            .map(
+                |(numerator, denominator)| TranscriptScrollIntent::ScrollbarFraction {
                     numerator,
                     denominator,
-                    total_rows,
-                    viewport_rows,
-                }
-            })
+                },
+            )
             .unwrap_or(TranscriptScrollIntent::ApproximateRowSeek(
                 window_scroll_before,
             ));
