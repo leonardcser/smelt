@@ -269,6 +269,14 @@ impl EngineProvider {
         &self.api_key
     }
 
+    pub fn with_transport(
+        mut self,
+        transport: Option<std::sync::Arc<dyn smelt_provider::ChatTransport>>,
+    ) -> Self {
+        self.client = self.client.with_transport(transport);
+        self
+    }
+
     pub fn with_model_config(mut self, config: ModelConfig) -> Self {
         self.model_config = config;
         self
@@ -555,6 +563,9 @@ impl EngineProvider {
     }
 
     async fn ensure_catalog_loaded(&self) {
+        if self.client.has_transport() {
+            return;
+        }
         let catalog_cache_dir = crate::paths::cache_dir().join("web");
         smelt_provider::catalog::ensure_loaded(self.client.http(), Some(&catalog_cache_dir)).await;
     }

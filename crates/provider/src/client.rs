@@ -6,17 +6,55 @@ use crate::{
 };
 use protocol::{Message, ReasoningEffort};
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Carries chat requests to a server. Production uses `reqwest` directly;
+/// deterministic harnesses install a transport that answers in-process.
+pub trait ChatTransport: Send + Sync {
+    fn send(
+        &self,
+        request: reqwest::Request,
+    ) -> Pin<Box<dyn Future<Output = Result<reqwest::Response, String>> + Send>>;
+}
 
 /// HTTP client wrapper for provider chat integrations.
 #[derive(Clone)]
 pub struct ProviderClient {
     client: reqwest::Client,
+    transport: Option<Arc<dyn ChatTransport>>,
 }
 
 impl ProviderClient {
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            transport: None,
+        }
+    }
+
+    pub fn with_transport(mut self, transport: Option<Arc<dyn ChatTransport>>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    pub fn has_transport(&self) -> bool {
+        self.transport.is_some()
+    }
+
+    async fn send_chat(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        match &self.transport {
+            None => request.send().await.map_err(|e| e.to_string()),
+            Some(transport) => {
+                let request = request.build().map_err(|e| e.to_string())?;
+                transport.send(request).await
+            }
+        }
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -381,10 +419,10 @@ impl ProviderClient {
                     });
                     return Err(err);
                 }
-                result = req.send() => match result {
+                result = self.send_chat(req) => match result {
                     Ok(r) => r,
-                    Err(e) => {
-                        let err = ProviderError::Network(e.to_string());
+                    Err(message) => {
+                        let err = ProviderError::Network(message);
                         emit_attempt(AttemptEvent {
                             attempt: attempt as u32,
                             elapsed_ms: request_start.elapsed().as_millis() as u64,

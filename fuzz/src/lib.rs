@@ -5,6 +5,7 @@
 //! lossy translation.
 
 pub mod cache_common;
+pub mod engine_sim;
 pub mod lua_loop;
 pub mod runtime;
 pub mod shrink;
