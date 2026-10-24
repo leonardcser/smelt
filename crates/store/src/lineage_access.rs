@@ -2,8 +2,9 @@ use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
@@ -21,6 +22,7 @@ use crate::session_commit::{SaveReceipt, SessionCommit, SessionCommitFailure, St
 
 mod maintenance;
 use maintenance::*;
+pub use maintenance::{maintain_idle_lineages, IdleMaintenance, RECLAMATION_STEP_ROWS};
 mod storage;
 use storage::*;
 
@@ -912,6 +914,12 @@ impl OwnedLineageWriter {
         cursor: &mut crate::ObjectSharingCursor,
     ) -> Result<crate::ObjectSharingStep> {
         lineage::share_objects(&mut self.conn, &self.lineage, cursor)
+    }
+
+    /// Returns free pages beyond a small reuse reserve to the filesystem in one
+    /// bounded step. Returns the pages released; 0 means nothing is due.
+    pub fn release_free_pages(&mut self) -> Result<u64> {
+        release_free_pages(&self.conn)
     }
 
     /// Cold compaction of the pages free at entry. Each incremental statement is
@@ -2422,17 +2430,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reclamation_releases_superseded_revision_content_and_keeps_turn_boundaries() {
-        let root = tempfile::tempdir().unwrap();
-        let id = session_id('7');
-        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
-        let mut current = writer.commit_session(&initial_commit(&id)).unwrap().current;
-        let turns = lineage::RECENT_TURNS as usize + 4;
+    /// Submits `turns` user turns of four saves each and returns the head.
+    fn commit_turns(
+        writer: &mut OwnedLineageWriter,
+        id: &str,
+        mut current: StoreHead,
+        turns: usize,
+    ) -> StoreHead {
         for turn in 0..turns {
             for save in 0..4 {
                 let len = current.history_len.get();
-                let mut command = initial_commit(&id);
+                let mut command = initial_commit(id);
                 command.expected = current;
                 command.metadata = metadata(len as i64 + 2, "saved");
                 command.history = HistorySuffix {
@@ -2461,6 +2469,17 @@ mod tests {
                 };
             }
         }
+        current
+    }
+
+    #[test]
+    fn reclamation_releases_superseded_revision_content_and_keeps_turn_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('7');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let initial = writer.commit_session(&initial_commit(&id)).unwrap().current;
+        let turns = lineage::RECENT_TURNS as usize + 4;
+        let current = commit_turns(&mut writer, &id, initial, turns);
         let snapshot = writer.snapshot().unwrap();
         let count = |writer: &OwnedLineageWriter, sql: &str| -> i64 {
             writer.conn.query_row(sql, [], |row| row.get(0)).unwrap()
@@ -2562,6 +2581,99 @@ mod tests {
         )
         .unwrap();
         assert!(report.healthy, "{:?}", report.issues);
+    }
+
+    #[test]
+    fn idle_maintenance_reclaims_each_change_once_and_skips_current_lineages() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('8');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let initial = writer.commit_session(&initial_commit(&id)).unwrap().current;
+        let turns = lineage::RECENT_TURNS as usize + 2;
+        commit_turns(&mut writer, &id, initial, turns);
+        writer.release().unwrap();
+        let released = || -> i64 {
+            let writer = OwnedLineageWriter::open_existing(root.path(), &id).unwrap();
+            let released = writer
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM lineage_revisions WHERE state_payload_id IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            writer.release().unwrap();
+            released
+        };
+
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            maintain_idle_lineages(root.path(), &cancelled).unwrap(),
+            IdleMaintenance::default()
+        );
+        assert_eq!(released(), 0);
+
+        let cancel = AtomicBool::new(false);
+        let report = maintain_idle_lineages(root.path(), &cancel).unwrap();
+        assert_eq!((report.lineages_maintained, report.lineages_failed), (1, 0));
+        assert_eq!(released(), 2 * (turns as i64 - lineage::RECENT_TURNS));
+        assert_eq!(
+            maintain_idle_lineages(root.path(), &cancel).unwrap(),
+            IdleMaintenance::default()
+        );
+
+        // A completed pass already covers the reopened lineage.
+        let mut writer = OwnedLineageWriter::open_existing(root.path(), &id).unwrap();
+        let step = writer.reclaim_step(1).unwrap();
+        assert!(step.complete && step.rows_examined == 0);
+        let head = writer.snapshot().unwrap().head;
+        commit_turns(&mut writer, &id, head, 1);
+        assert!(!writer.reclaim_step(1).unwrap().complete);
+        writer.release().unwrap();
+        let report = maintain_idle_lineages(root.path(), &cancel).unwrap();
+        assert_eq!(report.lineages_maintained, 1);
+        assert_eq!(released(), 2 * (turns as i64 + 1 - lineage::RECENT_TURNS));
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        assert!(reader.doctor_report().unwrap().healthy);
+    }
+
+    #[test]
+    fn free_page_release_keeps_a_reuse_reserve() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('9');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        writer
+            .conn
+            .execute_batch(
+                "CREATE TABLE filler (data BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4096)
+                 INSERT INTO filler SELECT randomblob(4096) FROM n;
+                 DROP TABLE filler;",
+            )
+            .unwrap();
+        let free_bytes = |writer: &OwnedLineageWriter| -> u64 {
+            let pragma = |name| -> i64 {
+                writer
+                    .conn
+                    .pragma_query_value(None, name, |row| row.get(0))
+                    .unwrap()
+            };
+            (pragma("freelist_count") * pragma("page_size")) as u64
+        };
+        assert!(free_bytes(&writer) > 16 * 1024 * 1024);
+        let mut released = 0;
+        loop {
+            let step = writer.release_free_pages().unwrap();
+            if step == 0 {
+                break;
+            }
+            assert!(step <= 256);
+            released += step;
+        }
+        assert!(released > 0);
+        let free = free_bytes(&writer);
+        assert!(free <= 4 * 1024 * 1024 && free > 3 * 1024 * 1024, "{free}");
+        writer.release().unwrap();
     }
 
     #[test]
@@ -2678,8 +2790,11 @@ mod tests {
                 }
                 let snapshot = writer.snapshot().unwrap();
                 let step = writer.reclaim_step(1).unwrap();
-                assert!(step.made_progress());
-                assert!(!step.complete);
+                // A completed pass still covers writes that leave the reclaimed
+                // fingerprint unchanged.
+                let covered = phase == -1 && mutation != "own";
+                assert_eq!(step.made_progress(), !covered);
+                assert_eq!(step.complete, covered);
                 assert!(step.work_rows() <= 1);
                 assert_eq!(
                     step.canonical_rows_deleted + step.objects_deleted + step.branch_heads_cleared,

@@ -285,9 +285,29 @@ reports its content as missing; ancestry checks walk chain links only.
 Reachability then protects revision chains, the content of unreleased revisions,
 fork roots, receipt results, journal recovery and request objects, and the sweep
 reclaims sequence trees, states and objects that only released revisions used.
-Deleted branches retain their initial revision for creation replay. Idle
-persistence uses this collector; it does not perform global physical sharing,
-search pruning or vacuuming.
+Deleted branches retain their initial revision for creation replay.
+
+A completed pass records a fingerprint of the reachability roots (row counts and
+highest rowids of the root tables, plus branch heads) in `store_meta` under
+`reclaimed_through`. A pass that restarts over the same fingerprint completes
+immediately. A fingerprint collision can only defer reclamation to the next
+change, never reclaim reachable data.
+
+Maintenance runs automatically in bounded steps of 256 rows:
+
+- The persistence actor of an open session waits until its head has been stable
+  for 5 seconds, completes a pass, then returns free pages beyond a 4 MiB reuse
+  reserve to the filesystem with incremental vacuum.
+- Thirty seconds after an interactive launch, a background worker removes
+  abandoned lineages, then visits every lineage whose schema is older, whose
+  fingerprint changed or whose free pages exceed the reserve. It migrates,
+  reclaims and compacts under shared ownership at half duty cycle, so opening a
+  session is never blocked, and it leaves a lineage to its owner as soon as
+  another connection commits. Exiting cancels it between steps; an unfinished
+  migration rolls back.
+
+Automatic maintenance does not perform global physical sharing or search
+pruning.
 
 Explicit cold maintenance runs through the same collector:
 

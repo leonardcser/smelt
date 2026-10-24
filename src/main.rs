@@ -1552,6 +1552,8 @@ async fn async_main() {
         );
         drop(tui_construct_startup);
         redirect_stderr();
+        let _idle_maintenance = (!args.ephemeral)
+            .then(|| smelt_core::session::SessionStorage::from_env(&env).spawn_idle_maintenance());
 
         println!();
         app.run(startup_http_client.clone(), initial_message).await;

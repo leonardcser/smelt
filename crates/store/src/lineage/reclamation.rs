@@ -150,6 +150,9 @@ fn prepare_reclamation_pass(tx: &Transaction<'_>, lineage: &LineageId) -> Result
         || schema_version != main_pragma(tx, "schema_version")?
     {
         pass.restart()?;
+        if reclaimed_marker(tx)? == Some(reclaimed_fingerprint(tx)?) {
+            pass.phase = COMPLETE;
+        }
     }
     // Publish the epoch before querying the reachability views in this transaction.
     tx.execute(
@@ -569,10 +572,61 @@ fn advance_reclamation_sweep(
                 [pass.epoch],
             )?;
         } else {
+            tx.execute(
+                "INSERT INTO store_meta (key, value, updated_at) VALUES (?1, ?2, unixepoch())
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (RECLAIMED_THROUGH, reclaimed_fingerprint(tx)?),
+            )?;
             step.complete = true;
         }
     }
     Ok(step)
+}
+
+/// `store_meta` key naming the fingerprint the last completed pass covered.
+const RECLAIMED_THROUGH: &str = "reclaimed_through";
+
+/// Tables whose rows root reachability or select retained revision content.
+/// Content-addressed edges below them never change, so a pass that completed
+/// over the same roots and branch heads has nothing left to reclaim.
+const RECLAMATION_ROOTS: &[&str] = &[
+    "lineage_revisions",
+    "lineage_turns",
+    "lineage_retained_revisions",
+    "lineage_session_receipt_results",
+    "object_data_roots",
+    "lineage_revision_state_roots",
+    "lineage_revision_state_projections",
+    "request_object_refs",
+];
+
+/// Summarizes the roots a completed pass covered by row count, highest rowid
+/// and branch heads. A collision can only defer reclamation to the next change.
+pub(crate) fn reclaimed_fingerprint(conn: &Connection) -> Result<String> {
+    let roots = RECLAMATION_ROOTS
+        .iter()
+        .map(|table| format!("(SELECT count(*) || '.' || coalesce(max(rowid), 0) FROM {table})"))
+        .collect::<Vec<_>>()
+        .join(" || ':' || ");
+    Ok(conn.query_row(
+        &format!(
+            "SELECT {roots} || ':' || (SELECT coalesce(group_concat(head, ','), '') FROM (
+                 SELECT session_id || '=' || coalesce(head_revision_id, '') AS head
+                 FROM lineage_branches ORDER BY session_id))"
+        ),
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn reclaimed_marker(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM store_meta WHERE key = ?1",
+            [RECLAIMED_THROUGH],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 const SWEEP_SPECS: &[(&str, &str)] = &[

@@ -7,9 +7,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static SESSION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -1368,6 +1368,70 @@ impl SessionStorage {
 
 pub fn cleanup_abandoned_lineages() {
     process_storage().cleanup_abandoned_lineages();
+}
+
+/// Delay before idle maintenance starts, so it never competes with startup.
+const IDLE_MAINTENANCE_DELAY: Duration = Duration::from_secs(30);
+const IDLE_MAINTENANCE_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(50);
+
+/// Background maintenance of the sessions no process is writing: removes
+/// abandoned lineages, then migrates, reclaims and compacts the rest. Dropping
+/// it cancels the work between bounded steps.
+pub struct IdleMaintenance {
+    cancel: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SessionStorage {
+    pub fn spawn_idle_maintenance(&self) -> IdleMaintenance {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let sessions_root = self.sessions_dir();
+        let thread = std::thread::Builder::new()
+            .name("smelt-session-maintenance".into())
+            .spawn(move || {
+                let started = Instant::now();
+                while started.elapsed() < IDLE_MAINTENANCE_DELAY {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let _ =
+                    smelt_store::cleanup_abandoned_lineages(&sessions_root, LINEAGE_CLEANUP_BATCH);
+                match smelt_store::maintain_idle_lineages(&sessions_root, &worker_cancel) {
+                    Ok(report) => engine::log::entry(
+                        engine::log::Level::Info,
+                        "session_idle_maintenance",
+                        &report,
+                    ),
+                    Err(error) => engine::log::entry(
+                        engine::log::Level::Warn,
+                        "session_idle_maintenance_failed",
+                        &error.to_string(),
+                    ),
+                }
+            })
+            .ok();
+        IdleMaintenance { cancel, thread }
+    }
+}
+
+impl Drop for IdleMaintenance {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // A migration step is not interruptible; an unfinished one rolls back.
+        let deadline = Instant::now() + IDLE_MAINTENANCE_SHUTDOWN_DEADLINE;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

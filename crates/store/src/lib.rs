@@ -126,8 +126,9 @@ pub use history::{
 pub use lineage::{ObjectSharingCursor, ObjectSharingStep};
 pub use lineage_access::{
     cleanup_abandoned_lineages, lineage_session_ids, lineage_session_locations,
-    verify_lineage_backup, LineageReclamation, LineageSessionLocation, LineageSessionReader,
-    LineageSessionState, LineageVacuum, OwnedLineageWriter,
+    maintain_idle_lineages, verify_lineage_backup, IdleMaintenance, LineageReclamation,
+    LineageSessionLocation, LineageSessionReader, LineageSessionState, LineageVacuum,
+    OwnedLineageWriter, RECLAMATION_STEP_ROWS,
 };
 pub use lineage_search::{
     LineageSearchProjector, SearchProjectionState, SearchProjectionStatus, SEARCH_FORMAT_VERSION,
