@@ -615,13 +615,17 @@ fn ask_round_trip(
     response: String,
     fail: bool,
 ) {
+    let before = app.actions_since(0).len();
     app.start_engine_ask_probe(&small_text(question));
     let id = app
-        .drain_engine_sends()
-        .into_iter()
-        .find_map(|command| match command {
-            UiCommand::EngineAsk { id, .. } => Some(id),
-            _ => None,
+        .actions_since(before)
+        .iter()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                UiCommand::EngineAsk { id, .. } => Some(*id),
+                _ => None,
+            },
+            Action::Quit => None,
         })
         .expect("engine ask probe did not send a request");
     feed(
