@@ -289,9 +289,6 @@ fn native_checkpoint_references_do_not_hydrate_old_headers_or_summaries() {
             let envelope =
                 load_revision_envelope(&conn, &lineage, &revision, &mut OperationStats::default())
                     .unwrap();
-            let StoredRevisionState::Shared(envelope) = envelope else {
-                panic!("shared fixture")
-            };
             let wire = serde_json::to_value(envelope).unwrap();
             let mut hashes = BTreeSet::new();
             for (role, ordinal) in [
@@ -655,9 +652,6 @@ fn native_compact_retained_bodies_and_headers_are_not_read_or_fingerprinted() {
             let envelope =
                 load_revision_envelope(&conn, &lineage, &revision, &mut OperationStats::default())
                     .unwrap();
-            let StoredRevisionState::Shared(envelope) = envelope else {
-                panic!("shared fixture")
-            };
             let wire = serde_json::to_value(envelope).unwrap();
             let mut hashes = BTreeSet::new();
             for (role, id, ordinal) in [
@@ -1065,36 +1059,6 @@ fn native_compact_fingerprint_domains_and_closed_wire_are_frozen() {
     let mut value: serde_json::Value = serde_json::from_str(WIRE).unwrap();
     value["scalars"]["accounting"] = serde_json::json!({"kind":"replace","value":{"session_usage":{"archive_body":"rejected"},"context_token_identity":null,"display_context_token_identity":null}});
     assert!(serde_json::from_value::<CompactSessionCommit>(value).is_err());
-}
-
-#[test]
-fn native_compact_legacy_noop_preserves_original_bytes_and_revision() {
-    let (mut conn, lineage, branch, legacy, original) = legacy_projection_fixture(2);
-    let before = load_branch_snapshot(&conn, &lineage, &branch, false).unwrap();
-    let payload = load_payload_ref(&conn, &lineage, &original.state_payload_id).unwrap();
-    let original_bytes = object(&conn, &payload.object_hash).unwrap().unwrap().bytes;
-    let command = CompactSessionCommit {
-        session_id: legacy.session_id.clone(),
-        expected: legacy.expected,
-        identity: legacy.identity.clone(),
-        scalars: scalars(&legacy.metadata),
-        archive_base: Some(SessionArchiveBase {
-            lineage_id: lineage.as_str().to_owned(),
-            revision_id: original.id.as_str().to_owned(),
-            branch_sequence: legacy.expected.revision,
-        }),
-        archives: CompactSessionArchives::default(),
-        history: legacy.history.clone(),
-        transcript_records: None,
-    };
-    let result = apply(&mut conn, &lineage, &branch, &command);
-    assert_eq!(result.revision_id, original.id.as_str());
-    assert_eq!(result.receipt.current, legacy.expected);
-    assert!(load_branch_snapshot(&conn, &lineage, &branch, false).unwrap() == before);
-    assert!(object(&conn, &payload.object_hash).unwrap().unwrap().bytes == original_bytes);
-    assert_eq!(apply(&mut conn, &lineage, &branch, &command), result);
-    verify_revision_projections(&conn, &lineage).unwrap();
-    verify_archive_coordinates(&conn, &lineage).unwrap();
 }
 
 #[test]

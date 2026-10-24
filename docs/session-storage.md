@@ -131,21 +131,19 @@ truncation and compaction maintain those counts without re-ranking the retained
 suffix. Metadata-only saves preserve the prefix count, and older acknowledgements
 cannot erase newer users.
 
-Schema v6 and later store cumulative user ordinals in their canonical history
-index. Exact prefix counts require a bounded lookup without history-body reads,
-including users without transcript records and excluding legacy synthetic User
-messages. Changed suffixes inherit the retained prefix ordinal. Resume captures the initial count,
+The canonical history index stores cumulative user ordinals. Exact prefix counts
+require a bounded lookup without history-body reads, including users without
+transcript records and excluding synthetic User messages. Changed suffixes inherit the retained prefix ordinal. Resume captures the initial count,
 header, archives and transcript tail in one SQLite snapshot. Rewind workers capture
 the boundary count in their existing snapshot; application does not read storage.
 Submission rollback retains its pre-submission count even after durable compaction.
-Read-only v3/v4/v5 fallback scans use chunks of at most 256 and check cancellation
-between chunks on the resume/rewind workers. Explicit synchronous history
+Explicit synchronous history
 replacement prepares its count before mutation and fails without appending a suffix
 if preparation fails.
 
 These boundaries do not make every session operation nonblocking. Explicit
 synchronous replacement helpers retain their bounded close deadline. Full-history
-materialization, migration and maintenance remain cold operations.
+materialization and maintenance remain cold operations.
 
 ## Preparation, publication and forks
 
@@ -226,39 +224,17 @@ it is not a universal commit-time guarantee. The retained-history results and ex
 recovery requirements support the canonical boundary without claiming that large
 changed batches are cheap.
 
-## Supported schemas and compatibility
+## Supported schemas
 
-Fresh databases use schema v7. A writable open migrates an exact deployed v3, v4,
-v5 or v6 database in one transaction. Read-only access validates the original layout
-without writing or migrating it. The `response_diagnostics` request-object role
-introduced in v5 remains distinct from full responses under the `response` role,
-independent of whether the request body is retained.
+Databases use schema v7, defined by `crates/store/src/lineage_schema.sql`. Schema
+validation checks the exact layout, not just its version marker, and any other
+version is refused without writing. Earlier layouts are not migrated.
 
-Schema validation checks the exact layout, not just its version marker. Unreleased
-development layouts are not supported migration sources. Production DDL consists
-of `crates/store/src/lineage_schema.sql` and the historical snapshots
-`crates/store/src/lineage_v3.sql`, `crates/store/src/lineage_v4.sql`,
-`crates/store/src/lineage_v5.sql` and `crates/store/src/lineage_v6.sql`.
-
-Migration preserves original logical bytes, hashes, revision identities and
-deployed receipt/journal domains. It backfills completed-node proofs where needed
-and builds count-capable history semantic mappings in parent-first order. The v4/v5
-derived root mappings are replaced; existing immutable semantic nodes remain exact.
-Migration restores installed canonical guards and the caller's foreign-key mode,
-and validates the final layout and foreign keys before publishing version markers.
-Crashes expose either the original database or the complete v7 database.
-
-Every new revision must reference a completed current-format history semantic
-mapping. This SQL guard fences writers opened before migration: an unchanged,
-already-indexed root remains safe, but an unindexed changed root cannot publish.
-
-Deployed format-1 revision states remain readable. Verified format-2 projections
-allow small envelope reads without rehashing their originals. Full historical
-reads remain original-authoritative; cold integrity checks verify projections and
-reconstructed bytes. A schema upgrade does not authorize deletion of original
-objects or inference of missing legacy receipt outcomes.
-
-See [compatibility debt](compat.md) for independent removal conditions.
+Every new revision must reference a completed history semantic mapping, and every
+revision state is a format-2 shared state whose archives live in sequence roots.
+The `response_diagnostics` request-object role remains distinct from full
+responses under the `response` role, independent of whether the request body is
+retained.
 
 ## Retention and maintenance
 
@@ -299,12 +275,10 @@ Maintenance runs automatically in bounded steps of 256 rows:
   for 5 seconds, completes a pass, then returns free pages beyond a 4 MiB reuse
   reserve to the filesystem with incremental vacuum.
 - Thirty seconds after an interactive launch, a background worker removes
-  abandoned lineages, then visits every lineage whose schema is older, whose
-  fingerprint changed or whose free pages exceed the reserve. It migrates,
-  reclaims and compacts under shared ownership at half duty cycle, so opening a
+  abandoned lineages, then visits every lineage whose fingerprint changed or
+  whose free pages exceed the reserve. It reclaims and compacts under shared ownership at half duty cycle, so opening a
   session is never blocked, and it leaves a lineage to its owner as soon as
-  another connection commits. Exiting cancels it between steps; an unfinished
-  migration rolls back.
+  another connection commits. Exiting cancels it between steps.
 
 Automatic maintenance does not prune search data.
 

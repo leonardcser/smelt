@@ -897,30 +897,6 @@ fn open_catalog_connection(path: &Path) -> Result<Connection> {
          VALUES (1, ?1, 1, 0, NULL)",
         [CATALOG_SCHEMA_VERSION],
     )?;
-    let version: i32 = tx.query_row(
-        "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
-        [],
-        |row| row.get(0),
-    )?;
-    if version == 1 {
-        let has_inline_message: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('sessions')
-             WHERE name = 'first_user_message')",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_inline_message {
-            return Err(StoreError::Integrity(
-                "legacy catalog has no inline message column".into(),
-            ));
-        }
-        tx.execute_batch(
-            "INSERT INTO session_messages (session_id, source_id, body)
-             SELECT id, NULL, first_user_message FROM sessions;
-             ALTER TABLE sessions DROP COLUMN first_user_message;
-             UPDATE catalog_meta SET schema_version = 2 WHERE singleton = 1;",
-        )?;
-    }
     validate_schema(&tx)?;
     tx.commit()?;
     Ok(conn)
@@ -1249,95 +1225,6 @@ mod tests {
         }
     }
 
-    fn legacy_catalog(path: &Path) -> Connection {
-        let legacy = Connection::open(path).unwrap();
-        legacy.execute_batch(
-            "CREATE TABLE catalog_meta (singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL,
-                next_scan_id INTEGER NOT NULL, completed_scan_id INTEGER NOT NULL, reconciled_at INTEGER);
-             INSERT INTO catalog_meta VALUES (1, 1, 7, 6, 123);
-             CREATE TABLE sessions (id TEXT PRIMARY KEY, lineage_id TEXT, title TEXT, slug TEXT,
-                first_user_message TEXT, cwd TEXT, mode TEXT, reasoning_effort TEXT, model TEXT,
-                fast_mode INTEGER, parent_id TEXT, context_tokens INTEGER, history_len INTEGER,
-                text_bytes INTEGER, created_at INTEGER, updated_at INTEGER, source_revision INTEGER,
-                status TEXT NOT NULL, error_kind TEXT, error_summary TEXT, last_seen_scan INTEGER NOT NULL);",
-        ).unwrap();
-        legacy
-    }
-
-    #[test]
-    fn catalog_v1_message_migration_rolls_back_on_message_failure() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("catalog.db");
-        let legacy = legacy_catalog(&path);
-        legacy.execute_batch(
-            "INSERT INTO sessions (id, first_user_message, source_revision, status, last_seen_scan)
-             VALUES ('large', 'synthetic α', 4, 'available', 6);
-             CREATE TABLE session_messages (session_id TEXT PRIMARY KEY, source_id TEXT, body TEXT);
-             CREATE TRIGGER reject_migration BEFORE INSERT ON session_messages
-             BEGIN SELECT RAISE(ABORT, 'synthetic migration failure'); END;",
-        ).unwrap();
-        drop(legacy);
-        assert!(Catalog::open(&path).is_err());
-        let legacy = Connection::open(&path).unwrap();
-        let stored: (i32, String, i64) = legacy.query_row(
-            "SELECT schema_version, first_user_message, last_seen_scan FROM catalog_meta, sessions",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).unwrap();
-        assert_eq!(stored, (1, "synthetic α".into(), 6));
-        assert_eq!(
-            legacy
-                .query_row("SELECT count(*) FROM session_messages", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        legacy
-            .execute_batch("DROP TRIGGER reject_migration")
-            .unwrap();
-        drop(legacy);
-        let catalog = Catalog::open(&path).unwrap();
-        assert_eq!(
-            catalog.page(&CatalogQuery::default()).unwrap().sessions[0]
-                .first_user_message
-                .as_deref(),
-            Some("synthetic α")
-        );
-    }
-
-    #[test]
-    fn catalog_v1_message_migration_preserves_rows_and_scan_markers() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("catalog.db");
-        let legacy = legacy_catalog(&path);
-        let body = "synthetic α\n".repeat(32_768);
-        legacy.execute("INSERT INTO sessions (id, title, first_user_message, created_at, updated_at,
-            source_revision, status, last_seen_scan) VALUES ('large', 'old-title', ?1, 1, 2, 4, 'available', 6)", [&body]).unwrap();
-        drop(legacy);
-        assert!(CatalogReader::open_existing(&path).unwrap().is_none());
-        let mut catalog = Catalog::open(&path).unwrap();
-        let metadata = catalog.metadata().unwrap();
-        assert_eq!(metadata.next_scan_id, 7);
-        assert_eq!(metadata.completed_scan_id, 6);
-        assert_eq!(metadata.reconciled_at, Some(123));
-        let reader = CatalogReader::open_existing(&path).unwrap().unwrap();
-        let session = reader.session("large").unwrap().unwrap();
-        assert!(session.first_user_message.as_deref() == Some(body.as_str()));
-        assert_eq!(session.first_user_message_id, None);
-        assert_eq!(session.title.as_deref(), Some("old-title"));
-        assert_eq!(session.source_revision, 4);
-        assert_eq!(session.last_seen_scan, 6);
-        drop(reader);
-        assert!(catalog.remove("large").unwrap());
-        assert_eq!(
-            catalog
-                .conn
-                .query_row("SELECT count(*) FROM session_messages", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-
     #[test]
     fn catalog_message_and_scalar_publication_roll_back_together() {
         let root = tempfile::tempdir().unwrap();
@@ -1554,26 +1441,6 @@ mod tests {
         assert!(clear_catalog_session_pending(&sessions_root, &id, &second).unwrap());
         assert!(pending_catalog_session_ids(&sessions_root)
             .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn catalog_metadata_version_cannot_misclassify_current_layout_as_legacy() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("catalog.db");
-        let mut catalog = Catalog::open(&path).unwrap();
-        catalog.upsert_available(&row("synthetic", 1, 1)).unwrap();
-        catalog
-            .conn
-            .execute("UPDATE catalog_meta SET schema_version = 1", [])
-            .unwrap();
-        drop(catalog);
-        let catalog = CatalogReconciliation::open(&path).unwrap();
-        assert!(catalog.rebuilt());
-        assert!(catalog
-            .page(&CatalogQuery::default())
-            .unwrap()
-            .sessions
             .is_empty());
     }
 

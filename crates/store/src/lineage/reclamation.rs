@@ -45,8 +45,8 @@ const MARK_NODE: i64 = 2;
 const MARK_PAYLOAD: i64 = 3;
 const MARK_HISTORY_INDEX: i64 = 4;
 const RELEASE: i64 = 0;
-const MARK_FRONTIER: i64 = 8;
-const SWEEP: i64 = 9;
+const MARK_FRONTIER: i64 = 7;
+const SWEEP: i64 = 8;
 const COMPLETE: i64 = SWEEP + SWEEP_SPECS.len() as i64;
 
 struct ReclamationPass {
@@ -370,7 +370,7 @@ fn advance_reclamation_marks(
                 examined += 1;
             }
         }
-        3..=7 => {
+        3..=6 => {
             let (table, columns) = match phase {
                 3 => (
                     "lineage_branches",
@@ -382,10 +382,6 @@ fn advance_reclamation_marks(
                     "result_revision_id, session_id, fingerprint",
                 ),
                 6 => ("lineage_revision_state_roots", "root_id, NULL"),
-                7 => (
-                    "lineage_revision_state_projections",
-                    "projected_payload_id, NULL",
-                ),
                 _ => unreachable!(),
             };
             // Seek candidates before filtering ownership, including foreign
@@ -414,13 +410,7 @@ fn advance_reclamation_marks(
                 if owner != lineage.as_str() {
                     continue;
                 }
-                let kind = if phase <= 5 {
-                    MARK_REVISION
-                } else if phase == 6 {
-                    MARK_ROOT
-                } else {
-                    MARK_PAYLOAD
-                };
+                let kind = if phase <= 5 { MARK_REVISION } else { MARK_ROOT };
                 mark(tx, pass.epoch, kind, first.as_deref())?;
                 if phase == 3 {
                     mark(tx, pass.epoch, MARK_REVISION, second.as_deref())?;
@@ -594,7 +584,6 @@ const RECLAMATION_ROOTS: &[&str] = &[
     "lineage_retained_revisions",
     "lineage_session_receipt_results",
     "lineage_revision_state_roots",
-    "lineage_revision_state_projections",
     "request_object_refs",
 ];
 

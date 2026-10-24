@@ -523,7 +523,7 @@ pub(crate) fn put_payload(
     if matches!(kind, PayloadKind::History | PayloadKind::Transcript) {
         put_payload_nested_object_refs(conn, lineage, &expected.id, kind, bytes)?;
     }
-    if kind == PayloadKind::RevisionState && crate::schema::has_shared_storage(conn)? {
+    if kind == PayloadKind::RevisionState {
         register_revision_archive_roots(conn, lineage, &expected.id, bytes)?;
     }
     if kind == PayloadKind::Transcript {

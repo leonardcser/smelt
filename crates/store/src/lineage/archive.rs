@@ -958,28 +958,6 @@ fn compact_metadata_archive(
         .map(|(root, _)| root.id.0)
 }
 
-pub(super) fn verify_revision_projection(
-    conn: &Connection,
-    lineage: &LineageId,
-    original: &StoredRevisionState,
-    payload: &PayloadId,
-    projected: &SharedRevisionState,
-) -> Result<()> {
-    validate_shared_revision_archives(conn, lineage, payload, projected)?;
-    let matches = match original {
-        StoredRevisionState::Legacy(state) => {
-            hydrate_shared_revision_state(conn, lineage, payload, projected.clone())? == *state
-        }
-        StoredRevisionState::Shared(_) => false,
-    };
-    if !matches {
-        return Err(StoreError::Integrity(
-            "revision projection differs from its original state".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn store_revision_archives(
     conn: &Connection,
     lineage: &LineageId,
@@ -1076,7 +1054,7 @@ pub(super) fn register_revision_archive_roots(
     let (archives, message) = match format.format_version {
         SHARED_REVISION_STATE_VERSION => {
             let state: SharedRevisionState = serde_json::from_slice(bytes)?;
-            validate_shared_metadata(conn, &state)?;
+            validate_shared_metadata(&state)?;
             (state.archives, state.first_user_message_root)
         }
         _ => return Ok(()),
@@ -1095,9 +1073,8 @@ pub(super) fn register_revision_archive_roots(
     verify_archive_ownership(conn, lineage, payload, &archives, message.as_deref())
 }
 
-fn validate_shared_metadata(conn: &Connection, state: &SharedRevisionState) -> Result<()> {
-    if !crate::schema::has_shared_storage(conn)?
-        || state.format_version != SHARED_REVISION_STATE_VERSION
+fn validate_shared_metadata(state: &SharedRevisionState) -> Result<()> {
+    if state.format_version != SHARED_REVISION_STATE_VERSION
         || state.metadata.first_user_message.is_some()
         || state.metadata.checkpoint_json.is_some()
         || state.metadata.checkpoint_events_json.is_some()
@@ -1115,7 +1092,7 @@ pub(super) fn validate_shared_revision_archives(
     payload: &PayloadId,
     state: &SharedRevisionState,
 ) -> Result<()> {
-    validate_shared_metadata(conn, state)?;
+    validate_shared_metadata(state)?;
     verify_archive_ownership(
         conn,
         lineage,

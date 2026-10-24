@@ -218,22 +218,6 @@ CREATE TABLE lineage_retained_revisions (
         REFERENCES lineage_revisions(lineage_id, revision_id) ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE lineage_revision_state_projections (
-    lineage_id TEXT NOT NULL,
-    original_payload_id TEXT NOT NULL,
-    projected_payload_id TEXT NOT NULL,
-    original_format_version INTEGER NOT NULL CHECK (original_format_version = 1),
-    projection_id TEXT NOT NULL CHECK (
-        length(projection_id) = 64 AND projection_id NOT GLOB '*[^0-9a-f]*'
-    ),
-    PRIMARY KEY (lineage_id, original_payload_id),
-    CHECK (original_payload_id <> projected_payload_id),
-    FOREIGN KEY (lineage_id, original_payload_id)
-        REFERENCES lineage_payload_object_refs(lineage_id, payload_id) ON DELETE CASCADE,
-    FOREIGN KEY (lineage_id, projected_payload_id)
-        REFERENCES lineage_payload_object_refs(lineage_id, payload_id)
-) STRICT;
-
 CREATE TABLE "lineage_revision_state_roots" (
     lineage_id TEXT NOT NULL,
     state_payload_id TEXT NOT NULL,
@@ -606,8 +590,6 @@ CREATE INDEX lineage_request_attempts_branch_idx
 CREATE INDEX lineage_retained_kind_idx
     ON lineage_retained_revisions(lineage_id, retention_kind, retained_at);
 
-CREATE INDEX lineage_revision_state_projections_projected_idx
-    ON lineage_revision_state_projections(lineage_id, projected_payload_id);
 
 CREATE INDEX lineage_revision_state_roots_root_idx
     ON lineage_revision_state_roots(lineage_id, root_id);
@@ -965,42 +947,6 @@ BEGIN
         WHERE payload.lineage_id = NEW.lineage_id AND payload.payload_id = NEW.state_payload_id
           AND payload.payload_kind = 'revision_state'
     ) THEN RAISE(ABORT, 'revision state has the wrong payload kind') END;
-END;
-
-CREATE TRIGGER lineage_revision_state_projection_delete
-BEFORE DELETE ON lineage_revision_state_projections
-WHEN EXISTS (
-    SELECT 1 FROM lineage_payload_object_refs
-    WHERE lineage_id = OLD.lineage_id AND payload_id = OLD.original_payload_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'revision state projections belong to their original payload');
-END;
-
-CREATE TRIGGER lineage_revision_state_projection_insert
-BEFORE INSERT ON lineage_revision_state_projections
-BEGIN
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM lineage_payload_object_refs original
-        JOIN lineage_payload_object_refs projected
-          ON projected.lineage_id = original.lineage_id
-         AND projected.payload_id = NEW.projected_payload_id
-        WHERE original.lineage_id = NEW.lineage_id
-          AND original.payload_id = NEW.original_payload_id
-          AND original.payload_kind = 'revision_state'
-          AND projected.payload_kind = 'revision_state'
-    ) OR EXISTS (
-        SELECT 1 FROM lineage_revision_state_projections
-        WHERE lineage_id = NEW.lineage_id
-          AND (original_payload_id = NEW.projected_payload_id
-               OR projected_payload_id = NEW.original_payload_id)
-    ) THEN RAISE(ABORT, 'invalid revision state projection') END;
-END;
-
-CREATE TRIGGER lineage_revision_state_projection_update
-BEFORE UPDATE ON lineage_revision_state_projections
-BEGIN
-    SELECT RAISE(ABORT, 'revision state projections are immutable');
 END;
 
 CREATE TRIGGER lineage_revision_state_root_delete

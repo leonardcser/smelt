@@ -109,20 +109,17 @@ pub(crate) fn insert_revision(
     lineage: &LineageId,
     revision: &RevisionRecord,
 ) -> Result<bool> {
-    // COMPAT(lineage-schema-v4): historical fixtures publish before index migration.
-    if crate::schema::user_version(conn)? >= 6 {
-        let parent = revision
-            .parent_id
-            .as_ref()
-            .map(|id| load_revision(conn, lineage, id))
-            .transpose()?;
-        ensure_history_index(
-            conn,
-            lineage,
-            &revision.history_root,
-            parent.as_ref().map(|parent| &parent.history_root),
-        )?;
-    }
+    let parent = revision
+        .parent_id
+        .as_ref()
+        .map(|id| load_revision(conn, lineage, id))
+        .transpose()?;
+    ensure_history_index(
+        conn,
+        lineage,
+        &revision.history_root,
+        parent.as_ref().map(|parent| &parent.history_root),
+    )?;
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO lineage_revisions (
              lineage_id, revision_id, parent_revision_id, created_by_session_id,

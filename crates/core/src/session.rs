@@ -1375,7 +1375,7 @@ const IDLE_MAINTENANCE_DELAY: Duration = Duration::from_secs(30);
 const IDLE_MAINTENANCE_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(50);
 
 /// Background maintenance of the sessions no process is writing: removes
-/// abandoned lineages, then migrates, reclaims and compacts the rest. Dropping
+/// abandoned lineages, then reclaims and compacts the rest. Dropping
 /// it cancels the work between bounded steps.
 pub struct IdleMaintenance {
     cancel: Arc<AtomicBool>,
@@ -1423,7 +1423,7 @@ impl Drop for IdleMaintenance {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        // A migration step is not interruptible; an unfinished one rolls back.
+        // A bounded step is not interruptible; an unfinished one rolls back.
         let deadline = Instant::now() + IDLE_MAINTENANCE_SHUTDOWN_DEADLINE;
         while !thread.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));

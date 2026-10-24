@@ -14,13 +14,6 @@ fn setup() -> (Connection, LineageId) {
     (conn, lineage)
 }
 
-fn legacy_setup() -> (Connection, LineageId) {
-    let conn = crate::schema::tests::v3_connection();
-    let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
-    create_lineage(&conn, &lineage, 1).unwrap();
-    (conn, lineage)
-}
-
 fn history_bytes(text: impl Into<String>) -> Vec<u8> {
     serde_json::to_vec(&protocol::HistoryItem::user(protocol::Content::text(text))).unwrap()
 }
@@ -625,15 +618,8 @@ fn commit_session_result(
         command,
         ObjectCompression::none(),
     )?;
-    let result = retain_session_receipt_result(
-        &tx,
-        lineage,
-        branch,
-        &fingerprint,
-        receipt,
-        ObjectCompression::none(),
-    )
-    .map_err(store_failure)?;
+    let result = retain_session_receipt_result(&tx, lineage, branch, &fingerprint, receipt)
+        .map_err(store_failure)?;
     tx.commit()
         .map_err(StoreError::from)
         .map_err(store_failure)?;
@@ -687,7 +673,6 @@ fn receipt_result_guards_bind_exact_revision_and_detect_tampered_proof() {
         &branch,
         &fingerprint,
         result.receipt.clone(),
-        ObjectCompression::none(),
     ));
     let mut changed = command.clone();
     changed.expected = result.receipt.current;
@@ -898,15 +883,9 @@ fn receipt_result_deleted_turn_transition_releases_ownership_cycle() {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .unwrap();
-    let owned = retain_session_receipt_result(
-        &tx,
-        &lineage,
-        &branch,
-        &fingerprint,
-        transitioned.session,
-        ObjectCompression::none(),
-    )
-    .unwrap();
+    let owned =
+        retain_session_receipt_result(&tx, &lineage, &branch, &fingerprint, transitioned.session)
+            .unwrap();
     tx.commit().unwrap();
     let id = RevisionId::from_db(owned.revision_id).unwrap();
     let submitted_id = branch_revision_at_sequence(
@@ -1031,61 +1010,6 @@ fn receipt_result_hot_replay_avoids_archives_but_cold_audit_verifies_them() {
 }
 
 #[test]
-fn receipt_result_legacy_noop_owns_original_projected_revision() {
-    let (mut conn, lineage, branch, command, original) = legacy_projection_fixture(1);
-    let before = load_revision_state(&conn, &lineage, &original).unwrap();
-    let result = commit_session_result(&mut conn, &lineage, &branch, &command).unwrap();
-    assert_eq!(result.revision_id, original.id.as_str());
-    assert_eq!(result.receipt.current, command.expected);
-    assert_eq!(
-        load_revision_state(&conn, &lineage, &original).unwrap(),
-        before
-    );
-    verify_revision_projections(&conn, &lineage).unwrap();
-    verify_session_receipt_results(&conn, &lineage).unwrap();
-    let rows = archive_publication_counts(&conn);
-    assert_eq!(
-        commit_session_result(&mut conn, &lineage, &branch, &command).unwrap(),
-        result
-    );
-    assert_eq!(archive_publication_counts(&conn), rows);
-}
-
-#[test]
-fn receipt_result_publication_failures_roll_back_canonical_and_projection_rows() {
-    for role in ["value", "root", "owner", "projection", "receipt", "result"] {
-        let (mut conn, lineage, branch, command, original) = legacy_projection_fixture(1);
-        let before = archive_publication_counts(&conn);
-        let event = if role == "result" {
-            "AFTER INSERT ON lineage_session_receipt_results"
-        } else {
-            legacy_projection_publication_event(role)
-        };
-        conn.execute_batch(&format!("CREATE TEMP TRIGGER reject_result {event} BEGIN SELECT RAISE(ABORT, 'injected receipt result failure'); END;")).unwrap();
-        assert!(commit_session_result(&mut conn, &lineage, &branch, &command).is_err());
-        assert!(conn.is_autocommit());
-        assert_eq!(
-            archive_publication_counts(&conn),
-            before,
-            "partial rows at {role}"
-        );
-        assert_eq!(
-            load_branch_record(&conn, &lineage, &branch, false)
-                .unwrap()
-                .revision,
-            original
-        );
-        conn.execute_batch("DROP TRIGGER reject_result").unwrap();
-        assert_eq!(
-            commit_session_result(&mut conn, &lineage, &branch, &command)
-                .unwrap()
-                .revision_id,
-            original.id.as_str()
-        );
-    }
-}
-
-#[test]
 fn receipt_result_refuses_missing_legacy_outcomes_without_head_fallback() {
     let (mut conn, lineage) = setup();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -1144,55 +1068,19 @@ fn receipt_result_refuses_missing_legacy_outcomes_without_head_fallback() {
 }
 
 #[test]
-fn receipt_result_legacy_bootstrap_equivalence_publishes_verified_projection() {
-    let (mut conn, lineage) = legacy_setup();
-    let branch = branch_id('a');
-    let mut command = initial_session_commit(&branch);
-    let receipt = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &command,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let original = load_branch_record(&conn, &lineage, &branch, false)
-        .unwrap()
-        .revision;
-    let before = load_revision_state(&conn, &lineage, &original).unwrap();
-    crate::schema::initialize_lineage_schema(&mut conn).unwrap();
-    command.transcript_records = Some(crate::TranscriptRecordSuffix {
-        start: crate::TranscriptRecordIndex::ZERO,
-        records: vec![],
-    });
-    let result = commit_session_result(&mut conn, &lineage, &branch, &command).unwrap();
-    assert_eq!(result.receipt.current, receipt.current);
-    assert_eq!(result.revision_id, original.id.as_str());
-    assert_eq!(
-        load_revision_state(&conn, &lineage, &original).unwrap(),
-        before
-    );
-    verify_revision_projections(&conn, &lineage).unwrap();
-    verify_session_receipt_results(&conn, &lineage).unwrap();
-}
-
-#[test]
 fn receipt_result_publication_is_process_crash_atomic() {
     const ROLE: &str = "SMELT_RECEIPT_RESULT_CRASH_ROLE";
     const DB: &str = "SMELT_RECEIPT_RESULT_CRASH_DB";
-    const MODE: &str = "SMELT_RECEIPT_RESULT_CRASH_MODE";
     fn event(role: &str) -> &'static str {
         if role == "result" {
             "AFTER INSERT ON lineage_session_receipt_results"
         } else {
-            legacy_projection_publication_event(role)
+            archive_publication_event(role)
         }
     }
     let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
     let branch = branch_id('a');
-    if let (Ok(role), Ok(path), Ok(mode)) =
-        (std::env::var(ROLE), std::env::var(DB), std::env::var(MODE))
-    {
+    if let (Ok(role), Ok(path)) = (std::env::var(ROLE), std::env::var(DB)) {
         let mut conn = Connection::open(path).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;",
@@ -1216,114 +1104,80 @@ fn receipt_result_publication_is_process_crash_atomic() {
             .unwrap();
         }
         let snapshot = lineage_session_snapshot(&conn, &lineage, &branch).unwrap();
-        let command = if mode == "modern" {
-            archived_session_commit(&branch, snapshot.head)
-        } else {
-            SessionCommit {
-                session_id: branch.as_str().into(),
-                expected: snapshot.head,
-                identity: snapshot.identity,
-                metadata: snapshot.metadata,
-                history: crate::HistorySuffix {
-                    start: HistoryIndex::new(1),
-                    final_len: crate::HistoryLen::new(1),
-                    items: vec![],
-                },
-                side_tables: SideTableSuffixes {
-                    start: HistoryIndex::new(1),
-                    ..Default::default()
-                },
-                transcript_records: None,
-            }
-        };
+        let command = archived_session_commit(&branch, snapshot.head);
         let result = commit_session_result(&mut conn, &lineage, &branch, &command);
         panic!("receipt result crash boundary not reached: {result:?}");
     }
     let dir = tempfile::tempdir().unwrap();
-    for mode in ["legacy", "modern"] {
-        for role in [
-            "value",
-            "root",
-            "owner",
-            if mode == "legacy" {
-                "projection"
-            } else {
-                "revision"
-            },
-            "receipt",
-            "result",
-            "commit",
-        ] {
-            let (mut source, lineage, branch, command, original) = if mode == "legacy" {
-                legacy_projection_fixture(1)
-            } else {
-                let (mut conn, lineage) = setup();
-                conn.pragma_update(None, "foreign_keys", true).unwrap();
-                let branch = branch_id('a');
-                let first = apply_lineage_session_commit(
-                    &mut conn,
-                    &lineage,
-                    &branch,
-                    &initial_session_commit(&branch),
-                    ObjectCompression::none(),
-                )
-                .unwrap();
-                let original = load_branch_record(&conn, &lineage, &branch, false)
-                    .unwrap()
-                    .revision;
-                let command = archived_session_commit(&branch, first.current);
-                (conn, lineage, branch, command, original)
-            };
-            let before = archive_publication_counts(&source);
-            let snapshot = load_revision_state(&source, &lineage, &original).unwrap();
-            let path = dir.path().join(format!("result-{mode}-{role}.db"));
-            crate::diagnostics::backup_connection_to(&source, &path).unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .arg("--exact")
-                .arg("lineage::tests::receipt_result_publication_is_process_crash_atomic")
-                .arg("--nocapture")
-                .env(ROLE, role)
-                .env(DB, &path)
-                .env(MODE, mode)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert!(!status.success());
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                assert_eq!(
-                    status.signal(),
-                    Some(libc::SIGABRT),
-                    "wrong failure at {mode}/{role}"
-                );
-            }
-            let mut restarted = Connection::open(&path).unwrap();
-            restarted.pragma_update(None, "foreign_keys", true).unwrap();
-            assert_eq!(archive_publication_counts(&restarted), before);
+    for role in [
+        "value", "root", "owner", "revision", "receipt", "result", "commit",
+    ] {
+        let (mut source, lineage, branch, command, original) = {
+            let (mut conn, lineage) = setup();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            let branch = branch_id('a');
+            let first = apply_lineage_session_commit(
+                &mut conn,
+                &lineage,
+                &branch,
+                &initial_session_commit(&branch),
+                ObjectCompression::none(),
+            )
+            .unwrap();
+            let original = load_branch_record(&conn, &lineage, &branch, false)
+                .unwrap()
+                .revision;
+            let command = archived_session_commit(&branch, first.current);
+            (conn, lineage, branch, command, original)
+        };
+        let before = archive_publication_counts(&source);
+        let snapshot = load_revision_state(&source, &lineage, &original).unwrap();
+        let path = dir.path().join(format!("result-{role}.db"));
+        crate::diagnostics::backup_connection_to(&source, &path).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("lineage::tests::receipt_result_publication_is_process_crash_atomic")
+            .arg("--nocapture")
+            .env(ROLE, role)
+            .env(DB, &path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
             assert_eq!(
-                load_branch_record(&restarted, &lineage, &branch, false)
-                    .unwrap()
-                    .revision,
-                original
-            );
-            assert_eq!(
-                load_revision_state(&restarted, &lineage, &original).unwrap(),
-                snapshot
-            );
-            crate::schema::validate_lineage_schema(&restarted).unwrap();
-            let expected = commit_session_result(&mut source, &lineage, &branch, &command).unwrap();
-            assert_eq!(
-                commit_session_result(&mut restarted, &lineage, &branch, &command).unwrap(),
-                expected
-            );
-            verify_session_receipt_results(&restarted, &lineage).unwrap();
-            assert_eq!(
-                commit_session_result(&mut restarted, &lineage, &branch, &command).unwrap(),
-                expected
+                status.signal(),
+                Some(libc::SIGABRT),
+                "wrong failure at {role}"
             );
         }
+        let mut restarted = Connection::open(&path).unwrap();
+        restarted.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(archive_publication_counts(&restarted), before);
+        assert_eq!(
+            load_branch_record(&restarted, &lineage, &branch, false)
+                .unwrap()
+                .revision,
+            original
+        );
+        assert_eq!(
+            load_revision_state(&restarted, &lineage, &original).unwrap(),
+            snapshot
+        );
+        crate::schema::validate_lineage_schema(&restarted).unwrap();
+        let expected = commit_session_result(&mut source, &lineage, &branch, &command).unwrap();
+        assert_eq!(
+            commit_session_result(&mut restarted, &lineage, &branch, &command).unwrap(),
+            expected
+        );
+        verify_session_receipt_results(&restarted, &lineage).unwrap();
+        assert_eq!(
+            commit_session_result(&mut restarted, &lineage, &branch, &command).unwrap(),
+            expected
+        );
     }
 }
 
@@ -1334,7 +1188,6 @@ fn archive_publication_counts(conn: &Connection) -> Vec<i64> {
         "lineage_archive_coordinates",
         "lineage_checkpoint_summary_presence",
         "lineage_revision_state_roots",
-        "lineage_revision_state_projections",
         "lineage_sequence_nodes",
         "lineage_sequence_entries",
         "lineage_sequence_roots",
@@ -1884,10 +1737,7 @@ fn compact_envelope_reads_hydrate_one_payload_independently_of_archive_size() {
         .unwrap();
         let record = load_branch_record(&conn, &lineage, &branch, false).unwrap();
         let mut stats = OperationStats::default();
-        assert!(matches!(
-            load_revision_envelope(&conn, &lineage, &record.revision, &mut stats).unwrap(),
-            StoredRevisionState::Shared(_)
-        ));
+        load_revision_envelope(&conn, &lineage, &record.revision, &mut stats).unwrap();
         assert_eq!(stats.payloads_read, 1);
         assert_eq!(stats.nodes_read, 0);
         assert_eq!(stats.payloads_written, 0);
@@ -2186,122 +2036,9 @@ fn startup_exact_result_work_is_independent_of_retained_archive_size() {
 }
 
 #[test]
-fn legacy_noop_commits_preserve_revision_identity_before_compact_publication() {
-    let (mut conn, lineage) = legacy_setup();
-    crate::schema::validate_lineage_schema(&conn).unwrap();
-    let branch = branch_id('a');
-    let mut initial = initial_session_commit(&branch);
-    initial.metadata.checkpoint_events_json = Some(serde_json::json!([{
-        "kind": "auto", "summary": "legacy summary".repeat(8192),
-        "first_live_index": 0, "completed_at_history_len": 0, "created_at_ms": 1
-    }]));
-    initial
-        .side_tables
-        .metadata_snapshots
-        .push((HistoryIndex::ZERO, serde_json::json!({"retained": true})));
-    let first = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &initial,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let record = load_branch_record(&conn, &lineage, &branch, false).unwrap();
-    let original = hydrate_payload(
-        &conn,
-        &lineage,
-        &record.revision.state_payload_id,
-        PayloadKind::RevisionState,
-        &mut OperationStats::default(),
-    )
-    .unwrap();
-    crate::schema::initialize_lineage_schema(&mut conn).unwrap();
-    let mut noop = initial.clone();
-    noop.expected = first.current;
-    noop.history.start = HistoryIndex::new(1);
-    noop.history.items.clear();
-    noop.side_tables = SideTableSuffixes {
-        start: HistoryIndex::new(1),
-        ..SideTableSuffixes::default()
-    };
-    let receipt = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &noop,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    assert_eq!(receipt.current, first.current);
-    assert_eq!(
-        load_branch_record(&conn, &lineage, &branch, false)
-            .unwrap()
-            .revision
-            .id,
-        record.revision.id
-    );
-    assert_eq!(
-        hydrate_payload(
-            &conn,
-            &lineage,
-            &record.revision.state_payload_id,
-            PayloadKind::RevisionState,
-            &mut OperationStats::default()
-        )
-        .unwrap(),
-        original
-    );
-    let mut changed = noop.clone();
-    changed.metadata.updated_at = 2;
-    changed.metadata.title = Some("compact title".into());
-    let second = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &changed,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    assert_eq!(second.current.revision.get(), 2);
-    let current = load_branch_record(&conn, &lineage, &branch, false).unwrap();
-    assert!(matches!(
-        load_revision_envelope(
-            &conn,
-            &lineage,
-            &current.revision,
-            &mut OperationStats::default()
-        )
-        .unwrap(),
-        StoredRevisionState::Shared(_)
-    ));
-    assert_eq!(
-        lineage_session_snapshot(&conn, &lineage, &branch)
-            .unwrap()
-            .metadata,
-        changed.metadata
-    );
-    assert_eq!(
-        apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &noop,
-            ObjectCompression::none()
-        )
-        .unwrap(),
-        receipt
-    );
-}
-
-#[test]
-fn message_only_changes_are_not_noops_in_inline_or_shared_formats() {
-    for version in [3, crate::schema::LINEAGE_SCHEMA_VERSION] {
-        let (mut conn, lineage) = if version == 3 {
-            legacy_setup()
-        } else {
-            setup()
-        };
+fn message_only_changes_are_not_noops() {
+    {
+        let (mut conn, lineage) = setup();
         let branch = branch_id('a');
         let mut command = initial_session_commit(&branch);
         let first = apply_lineage_session_commit(
@@ -2328,7 +2065,7 @@ fn message_only_changes_are_not_noops_in_inline_or_shared_formats() {
             .unwrap();
             assert!(
                 changed.current.revision > command.expected.revision,
-                "first-message-only changes must persist in schema {version}"
+                "first-message-only changes must persist"
             );
             assert_eq!(
                 lineage_session_snapshot(&conn, &lineage, &branch)
@@ -2348,900 +2085,6 @@ fn message_only_changes_are_not_noops_in_inline_or_shared_formats() {
             assert_eq!(noop.current, command.expected);
         }
     }
-}
-
-fn legacy_projection_archive_commit(branch: &BranchId, expected: StoreHead) -> SessionCommit {
-    let mut command = archived_session_commit(branch, expected);
-    command.side_tables.turn_metas.push((
-        HistoryIndex::ZERO,
-        serde_json::json!({"turn": 1, "kind": "synthetic"}),
-    ));
-    command.side_tables.context_snapshots.push((
-        HistoryIndex::ZERO,
-        serde_json::json!({"tokens": 32, "unknown": ["preserved"]}),
-    ));
-    command
-}
-
-fn legacy_projection_source(
-    checkpoints: usize,
-) -> (
-    Connection,
-    LineageId,
-    BranchId,
-    SessionCommit,
-    RevisionRecord,
-) {
-    let (mut conn, lineage) = legacy_setup();
-    crate::schema::validate_lineage_schema(&conn).unwrap();
-    let branch = branch_id('a');
-    let first = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &initial_session_commit(&branch),
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let mut command = legacy_projection_archive_commit(&branch, first.current);
-    let checkpoint = command.metadata.checkpoint_json.clone().unwrap();
-    command.metadata.checkpoint_events_json = Some(serde_json::Value::Array(
-        (0..checkpoints)
-            .map(|index| {
-                let mut checkpoint = checkpoint.clone();
-                checkpoint["created_at_ms"] = serde_json::json!(index + 2);
-                checkpoint
-            })
-            .collect(),
-    ));
-    let receipt = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &command,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let original = load_branch_record(&conn, &lineage, &branch, false)
-        .unwrap()
-        .revision;
-    command.expected = receipt.current;
-    command.side_tables = SideTableSuffixes {
-        start: HistoryIndex::new(1),
-        ..SideTableSuffixes::default()
-    };
-    (conn, lineage, branch, command, original)
-}
-
-fn legacy_projection_fixture(
-    checkpoints: usize,
-) -> (
-    Connection,
-    LineageId,
-    BranchId,
-    SessionCommit,
-    RevisionRecord,
-) {
-    let (mut conn, lineage, branch, command, original) = legacy_projection_source(checkpoints);
-    crate::schema::initialize_lineage_schema(&mut conn).unwrap();
-    (conn, lineage, branch, command, original)
-}
-
-#[test]
-fn legacy_projection_reads_are_bounded_and_original_snapshots_remain_authoritative() {
-    for checkpoints in [1, 32, 128] {
-        let (mut conn, lineage, branch, command, original) = legacy_projection_fixture(checkpoints);
-        let before = load_revision_state(&conn, &lineage, &original).unwrap();
-        let source = load_payload_ref(&conn, &lineage, &original.state_payload_id).unwrap();
-        let bytes = hydrate_payload_ref(
-            &conn,
-            &source,
-            PayloadKind::RevisionState,
-            &mut OperationStats::default(),
-        )
-        .unwrap();
-        let noop = apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &command,
-            ObjectCompression::none(),
-        )
-        .unwrap();
-        assert_eq!(noop.current, command.expected);
-        assert_eq!(
-            load_branch_record(&conn, &lineage, &branch, false)
-                .unwrap()
-                .revision,
-            original
-        );
-        assert_eq!(
-            load_revision_state(&conn, &lineage, &original).unwrap(),
-            before
-        );
-        assert_eq!(
-            hydrate_payload_ref(
-                &conn,
-                &source,
-                PayloadKind::RevisionState,
-                &mut OperationStats::default()
-            )
-            .unwrap(),
-            bytes
-        );
-        let projected = conn.query_row(
-                "SELECT projected_payload_id FROM lineage_revision_state_projections WHERE original_payload_id = ?1",
-                [original.state_payload_id.as_str()], |row| row.get::<_, String>(0),
-            ).unwrap();
-        let projected = PayloadId::from_db(projected).unwrap();
-        assert!(
-            load_payload_ref(&conn, &lineage, &projected)
-                .unwrap()
-                .byte_count
-                < 2048
-        );
-        let rows = archive_publication_counts(&conn);
-        assert_eq!(
-            apply_lineage_session_commit(
-                &mut conn,
-                &lineage,
-                &branch,
-                &command,
-                ObjectCompression::none()
-            )
-            .unwrap(),
-            noop
-        );
-        assert_eq!(
-            archive_publication_counts(&conn),
-            rows,
-            "receipt replay cannot republish a projection"
-        );
-        let stored_bytes = conn
-            .query_row(
-                "SELECT bytes FROM objects WHERE hash = ?1",
-                [&source.object_hash],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .unwrap();
-        conn.execute(
-            "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
-            [&source.object_hash],
-        )
-        .unwrap();
-        let mut stats = OperationStats::default();
-        assert!(matches!(
-            load_revision_envelope(&conn, &lineage, &original, &mut stats).unwrap(),
-            StoredRevisionState::Shared(_)
-        ));
-        assert_eq!(stats.payloads_read, 1);
-        assert_eq!(stats.nodes_read, 0);
-        assert_eq!(stats.payloads_written, 0);
-        assert!(
-            load_revision_state(&conn, &lineage, &original).is_err(),
-            "full reads must verify original bytes"
-        );
-        assert!(
-            verify_revision_projections(&conn, &lineage).is_err(),
-            "cold audit must verify the derivation"
-        );
-        conn.execute(
-            "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
-            (&stored_bytes, &source.object_hash),
-        )
-        .unwrap();
-        verify_revision_projections(&conn, &lineage).unwrap();
-        assert_eq!(
-            load_revision_state(&conn, &lineage, &original).unwrap(),
-            before
-        );
-    }
-}
-
-#[test]
-fn legacy_projection_guards_content_addresses_and_publication_without_a_transaction() {
-    let (mut conn, lineage, branch, command, original) = legacy_projection_fixture(1);
-    assert!(load_revision_for_save(&conn, &lineage, &original, ObjectCompression::none()).is_err());
-    let before = archive_publication_counts(&conn);
-    assert_eq!(
-        conn.query_row(
-            "SELECT count(*) FROM lineage_revision_state_projections",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-    let noop = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &command,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    assert_eq!(noop.current, command.expected);
-    assert_ne!(archive_publication_counts(&conn), before);
-    for sql in [
-        "UPDATE lineage_revision_state_projections SET projected_payload_id = original_payload_id",
-        "DELETE FROM lineage_revision_state_projections",
-        "DELETE FROM lineage_payload_object_refs WHERE payload_id IN (SELECT projected_payload_id FROM lineage_revision_state_projections)",
-    ] {
-        assert!(conn.execute(sql, []).is_err(), "ownership guard did not reject {sql}");
-    }
-    let row = conn.query_row(
-        "SELECT projected_payload_id, projection_id FROM lineage_revision_state_projections WHERE original_payload_id = ?1",
-        [original.state_payload_id.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    ).unwrap();
-    let data = conn.query_row("SELECT payload_id FROM lineage_payload_object_refs WHERE payload_kind = 'data' LIMIT 1", [], |row| row.get::<_, String>(0)).unwrap();
-    for (source, target) in [
-        (row.0.as_str(), original.state_payload_id.as_str()),
-        (
-            original.state_payload_id.as_str(),
-            original.state_payload_id.as_str(),
-        ),
-        (data.as_str(), row.0.as_str()),
-        (original.state_payload_id.as_str(), data.as_str()),
-    ] {
-        assert!(conn.execute(
-            "INSERT INTO lineage_revision_state_projections (lineage_id, original_payload_id, projected_payload_id, original_format_version, projection_id) VALUES (?1, ?2, ?3, 1, ?4)",
-            (lineage.as_str(), source, target, &row.1),
-        ).is_err());
-    }
-    conn.execute_batch("DROP TRIGGER lineage_revision_state_projection_update;")
-        .unwrap();
-    conn.execute(
-        "UPDATE lineage_revision_state_projections SET projection_id = ?1",
-        ["0".repeat(64)],
-    )
-    .unwrap();
-    assert_integrity(load_revision_envelope(
-        &conn,
-        &lineage,
-        &original,
-        &mut OperationStats::default(),
-    ));
-    assert!(verify_revision_projections(&conn, &lineage).is_err());
-    assert!(load_revision_state(&conn, &lineage, &original).is_ok());
-    let backup = tempfile::tempdir().unwrap();
-    let path = backup.path().join("corrupt-projection.db");
-    crate::diagnostics::backup_connection_to(&conn, &path).unwrap();
-    let report = crate::verify_lineage_backup(&path, lineage.as_str()).unwrap();
-    assert!(!report.healthy);
-    assert!(report
-        .issues
-        .iter()
-        .any(|issue| issue.starts_with("revision projection:")));
-    conn.execute(
-        "UPDATE lineage_revision_state_projections SET projection_id = ?1",
-        [&row.1],
-    )
-    .unwrap();
-    let projected = PayloadId::from_db(row.0).unwrap();
-    let projected = load_payload_ref(&conn, &lineage, &projected).unwrap();
-    let stored_bytes = conn
-        .query_row(
-            "SELECT bytes FROM objects WHERE hash = ?1",
-            [&projected.object_hash],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .unwrap();
-    conn.execute(
-        "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
-        [&projected.object_hash],
-    )
-    .unwrap();
-    assert!(
-        load_revision_envelope(&conn, &lineage, &original, &mut OperationStats::default()).is_err()
-    );
-    assert!(load_revision_state(&conn, &lineage, &original).is_ok());
-    conn.execute(
-        "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
-        (&stored_bytes, &projected.object_hash),
-    )
-    .unwrap();
-    verify_revision_projections(&conn, &lineage).unwrap();
-}
-
-#[test]
-fn legacy_projection_cold_audit_verifies_source_format_and_all_derived_bodies() {
-    let (mut conn, lineage, branch, command, original) = legacy_projection_fixture(1);
-    apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &command,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let (projected, proof) = conn
-        .query_row(
-            "SELECT projected_payload_id, projection_id
-             FROM lineage_revision_state_projections WHERE original_payload_id = ?1",
-            [original.state_payload_id.as_str()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .unwrap();
-    conn.execute_batch("DROP TRIGGER lineage_revision_state_projection_update;")
-        .unwrap();
-    let mut encoder = CanonicalEncoder::new(b"smelt-lineage-revision-projection-v1\0");
-    encoder.str(lineage.as_str());
-    encoder.str(original.state_payload_id.as_str());
-    encoder.str(&projected);
-    encoder.u64(2);
-    encoder.u64(u64::from(SHARED_REVISION_STATE_VERSION));
-    conn.pragma_update(None, "ignore_check_constraints", true)
-        .unwrap();
-    conn.execute(
-        "UPDATE lineage_revision_state_projections SET original_format_version = 2, projection_id = ?1",
-        [encoder.hash()],
-    )
-    .unwrap();
-    assert_integrity(load_revision_envelope(
-        &conn,
-        &lineage,
-        &original,
-        &mut OperationStats::default(),
-    ));
-    assert_integrity(verify_revision_projections(&conn, &lineage));
-    conn.execute(
-        "UPDATE lineage_revision_state_projections SET original_format_version = 1, projection_id = ?1",
-        [&proof],
-    )
-    .unwrap();
-    conn.pragma_update(None, "ignore_check_constraints", false)
-        .unwrap();
-    let bodies = conn
-        .prepare(
-            "SELECT archive.role, object.hash, object.bytes
-         FROM lineage_revision_state_roots archive
-         JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
-           AND root.root_id = archive.root_id AND root.depth = 1
-         JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
-           AND entry.node_id = root.root_node_id
-           AND entry.entry_index = CASE archive.role WHEN 'first_user_message' THEN 0 ELSE 1 END
-         JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
-           AND payload.payload_id = entry.payload_id
-         JOIN objects object ON object.hash = payload.object_hash
-         WHERE archive.lineage_id = ?1 AND archive.state_payload_id = ?2
-         ORDER BY archive.role",
-        )
-        .unwrap()
-        .query_map((lineage.as_str(), &projected), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(bodies.len(), 6);
-    for (role, hash, stored_bytes) in bodies {
-        conn.execute(
-            "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
-            [&hash],
-        )
-        .unwrap();
-        let mut stats = OperationStats::default();
-        load_revision_envelope(&conn, &lineage, &original, &mut stats).unwrap();
-        assert_eq!(stats.payloads_read, 1);
-        assert_eq!(stats.nodes_read, 0);
-        assert!(
-            verify_revision_projections(&conn, &lineage).is_err(),
-            "unchecked derived body: {role}"
-        );
-        conn.execute(
-            "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
-            (&stored_bytes, &hash),
-        )
-        .unwrap();
-        verify_revision_projections(&conn, &lineage).unwrap();
-    }
-}
-
-#[test]
-fn legacy_projection_sharing_and_budget_one_gc_follow_all_original_owners() {
-    let (mut conn, lineage, a, command_a, original_a) = legacy_projection_source(1);
-    crate::schema::initialize_lineage_schema(&mut conn).unwrap();
-    let b = branch_id('b');
-    let first_b = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &b,
-        &initial_session_commit(&b),
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let mut command_b = legacy_projection_archive_commit(&b, first_b.current);
-    let previous_b = load_branch_record(&conn, &lineage, &b, false)
-        .unwrap()
-        .revision;
-    let state = load_revision_state(&conn, &lineage, &original_a).unwrap();
-    let alternate_bytes = serde_json::to_vec_pretty(&state).unwrap();
-    let (original_b, _) = commit_revision(
-        &mut conn,
-        &lineage,
-        &b,
-        &previous_b.id,
-        &previous_b.history_root,
-        &previous_b.transcript_root,
-        &alternate_bytes,
-        LineageOperation::Append,
-        2,
-    )
-    .unwrap();
-    assert_ne!(original_a.state_payload_id, original_b.state_payload_id);
-    command_b.expected = load_branch_record(&conn, &lineage, &b, false).unwrap().head;
-    command_b.side_tables = SideTableSuffixes {
-        start: HistoryIndex::new(1),
-        ..SideTableSuffixes::default()
-    };
-    for (branch, command) in [(&a, &command_a), (&b, &command_b)] {
-        assert_eq!(
-            apply_lineage_session_commit(
-                &mut conn,
-                &lineage,
-                branch,
-                command,
-                ObjectCompression::none()
-            )
-            .unwrap()
-            .current,
-            command.expected
-        );
-    }
-    let projections = conn.prepare("SELECT projected_payload_id FROM lineage_revision_state_projections ORDER BY original_payload_id").unwrap()
-        .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    assert_eq!(projections.len(), 2);
-    assert_eq!(
-        projections[0], projections[1],
-        "equivalent legacy encodings must share their projection"
-    );
-    let projected = PayloadId::from_db(projections[0].clone()).unwrap();
-    assert!(inspect_reachability(&conn, &lineage)
-        .unwrap()
-        .reachable_payloads
-        .contains(projected.as_str()));
-    delete_branch(&conn, &lineage, &a, 3).unwrap();
-    let mut complete = false;
-    for _ in 0..1000 {
-        let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
-        assert!(load_payload_ref(&conn, &lineage, &projected).is_ok());
-        if step.complete {
-            complete = true;
-            break;
-        }
-    }
-    assert!(complete);
-    assert!(load_payload_ref(&conn, &lineage, &original_a.state_payload_id).is_err());
-    assert_eq!(
-        conn.query_row(
-            "SELECT count(*) FROM lineage_revision_state_projections",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        1
-    );
-    verify_revision_projections(&conn, &lineage).unwrap();
-    let remaining = load_branch_record(&conn, &lineage, &b, false).unwrap();
-    let mut stats = OperationStats::default();
-    load_revision_envelope(&conn, &lineage, &remaining.revision, &mut stats).unwrap();
-    assert_eq!(stats.payloads_read, 1);
-    delete_branch(&conn, &lineage, &b, 4).unwrap();
-    let mut complete = false;
-    for _ in 0..1000 {
-        let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
-        if step.complete {
-            complete = true;
-            break;
-        }
-    }
-    assert!(complete);
-    assert!(load_payload_ref(&conn, &lineage, &projected).is_err());
-    assert_eq!(
-        conn.query_row(
-            "SELECT count(*) FROM lineage_revision_state_projections",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-}
-
-fn legacy_projection_publication_event(role: &str) -> &'static str {
-    match role {
-        "projection" => "AFTER INSERT ON lineage_revision_state_projections",
-        _ => archive_publication_event(role),
-    }
-}
-
-#[test]
-fn legacy_projection_publication_failures_roll_back_owners_proofs_and_receipts() {
-    for role in ["value", "root", "owner", "projection", "receipt"] {
-        let (mut conn, lineage, branch, command, original) = legacy_projection_fixture(1);
-        let before = archive_publication_counts(&conn);
-        let snapshot = load_revision_state(&conn, &lineage, &original).unwrap();
-        conn.execute_batch(&format!("CREATE TEMP TRIGGER reject_projection {} BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END;", legacy_projection_publication_event(role))).unwrap();
-        assert!(apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &command,
-            ObjectCompression::none()
-        )
-        .is_err());
-        assert_eq!(
-            archive_publication_counts(&conn),
-            before,
-            "partial rows at {role}"
-        );
-        assert_eq!(
-            load_revision_state(&conn, &lineage, &original).unwrap(),
-            snapshot
-        );
-        assert_eq!(
-            load_branch_record(&conn, &lineage, &branch, false)
-                .unwrap()
-                .revision,
-            original
-        );
-        conn.execute_batch("DROP TRIGGER reject_projection;")
-            .unwrap();
-        assert_eq!(
-            apply_lineage_session_commit(
-                &mut conn,
-                &lineage,
-                &branch,
-                &command,
-                ObjectCompression::none()
-            )
-            .unwrap()
-            .current,
-            command.expected
-        );
-        verify_revision_projections(&conn, &lineage).unwrap();
-    }
-}
-
-#[test]
-fn legacy_projection_publication_is_process_crash_atomic() {
-    const ROLE: &str = "SMELT_PROJECTION_CRASH_ROLE";
-    const DB: &str = "SMELT_PROJECTION_CRASH_DB";
-    let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
-    let branch = branch_id('a');
-    if let (Ok(role), Ok(path)) = (std::env::var(ROLE), std::env::var(DB)) {
-        let mut conn = Connection::open(path).unwrap();
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;",
-        )
-        .unwrap();
-        if role == "commit" {
-            conn.commit_hook(Some(|| -> bool { std::process::abort() }))
-                .unwrap();
-        } else {
-            conn.create_scalar_function(
-                "smelt_test_projection_crash",
-                0,
-                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                |_| -> rusqlite::Result<i64> { std::process::abort() },
-            )
-            .unwrap();
-            conn.execute_batch(&format!("CREATE TEMP TRIGGER crash_projection {} BEGIN SELECT smelt_test_projection_crash(); END;", legacy_projection_publication_event(&role))).unwrap();
-        }
-        let snapshot = lineage_session_snapshot(&conn, &lineage, &branch).unwrap();
-        let command = SessionCommit {
-            session_id: branch.as_str().into(),
-            expected: snapshot.head,
-            identity: snapshot.identity,
-            metadata: snapshot.metadata,
-            history: crate::session_commit::HistorySuffix {
-                start: HistoryIndex::new(1),
-                final_len: crate::session_commit::HistoryLen::new(1),
-                items: vec![],
-            },
-            side_tables: SideTableSuffixes {
-                start: HistoryIndex::new(1),
-                ..SideTableSuffixes::default()
-            },
-            transcript_records: None,
-        };
-        let result = apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &command,
-            ObjectCompression::none(),
-        );
-        panic!("projection crash boundary not reached: {result:?}");
-    }
-    let dir = tempfile::tempdir().unwrap();
-    for role in ["value", "root", "owner", "projection", "receipt", "commit"] {
-        let (conn, lineage, branch, command, original) = legacy_projection_fixture(1);
-        let before = archive_publication_counts(&conn);
-        let snapshot = load_revision_state(&conn, &lineage, &original).unwrap();
-        let path = dir.path().join(format!("projection-{role}.db"));
-        crate::diagnostics::backup_connection_to(&conn, &path).unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg("lineage::tests::legacy_projection_publication_is_process_crash_atomic")
-            .arg("--nocapture")
-            .env(ROLE, role)
-            .env(DB, &path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(!status.success());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            assert_eq!(
-                status.signal(),
-                Some(libc::SIGABRT),
-                "wrong failure at {role}"
-            );
-        }
-        let mut restarted = Connection::open(&path).unwrap();
-        restarted.pragma_update(None, "foreign_keys", true).unwrap();
-        assert_eq!(archive_publication_counts(&restarted), before);
-        assert_eq!(
-            load_revision_state(&restarted, &lineage, &original).unwrap(),
-            snapshot
-        );
-        assert_eq!(
-            load_branch_record(&restarted, &lineage, &branch, false)
-                .unwrap()
-                .revision,
-            original
-        );
-        let receipt = apply_lineage_session_commit(
-            &mut restarted,
-            &lineage,
-            &branch,
-            &command,
-            ObjectCompression::none(),
-        )
-        .unwrap();
-        assert_eq!(receipt.current, command.expected);
-        assert_eq!(
-            apply_lineage_session_commit(
-                &mut restarted,
-                &lineage,
-                &branch,
-                &command,
-                ObjectCompression::none()
-            )
-            .unwrap(),
-            receipt
-        );
-        verify_revision_projections(&restarted, &lineage).unwrap();
-        drop(restarted);
-        let reopened = Connection::open(&path).unwrap();
-        reopened.pragma_update(None, "query_only", true).unwrap();
-        let mut stats = OperationStats::default();
-        assert!(matches!(
-            load_revision_envelope(&reopened, &lineage, &original, &mut stats).unwrap(),
-            StoredRevisionState::Shared(_)
-        ));
-        assert_eq!(stats.payloads_read, 1);
-        assert_eq!(stats.nodes_read, 0);
-        assert_eq!(
-            load_revision_state(&reopened, &lineage, &original).unwrap(),
-            snapshot
-        );
-    }
-}
-
-#[test]
-fn legacy_shared_message_transition_preserves_noops_history_forks_and_receipts() {
-    let (mut conn, lineage) = legacy_setup();
-    let branch = branch_id('a');
-    let initial = initial_session_commit(&branch);
-    let first = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &initial,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let archived = archived_session_commit(&branch, first.current);
-    let second = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &archived,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let before = lineage_session_snapshot(&conn, &lineage, &branch).unwrap();
-    let revision = load_branch_record(&conn, &lineage, &branch, false)
-        .unwrap()
-        .revision;
-    let original = hydrate_payload(
-        &conn,
-        &lineage,
-        &revision.state_payload_id,
-        PayloadKind::RevisionState,
-        &mut OperationStats::default(),
-    )
-    .unwrap();
-    assert!(matches!(
-        load_revision_envelope(&conn, &lineage, &revision, &mut OperationStats::default()).unwrap(),
-        StoredRevisionState::Legacy(_)
-    ));
-    crate::schema::initialize_lineage_schema(&mut conn).unwrap();
-    let mut command = archived.clone();
-    command.expected = second.current;
-    command.side_tables = SideTableSuffixes {
-        start: HistoryIndex::new(1),
-        ..SideTableSuffixes::default()
-    };
-    let noop = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &command,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    assert_eq!(noop.current, second.current);
-    assert_eq!(
-        load_branch_record(&conn, &lineage, &branch, false)
-            .unwrap()
-            .revision
-            .id,
-        revision.id
-    );
-    assert_eq!(
-        hydrate_payload(
-            &conn,
-            &lineage,
-            &revision.state_payload_id,
-            PayloadKind::RevisionState,
-            &mut OperationStats::default()
-        )
-        .unwrap(),
-        original
-    );
-    command.metadata.title = Some("shared title".into());
-    command.metadata.updated_at = 3;
-    let shared = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &command,
-        ObjectCompression::none(),
-    )
-    .unwrap();
-    let record = load_branch_record(&conn, &lineage, &branch, false).unwrap();
-    let mut stats = OperationStats::default();
-    assert!(matches!(
-        load_revision_envelope(&conn, &lineage, &record.revision, &mut stats).unwrap(),
-        StoredRevisionState::Shared(_)
-    ));
-    assert_eq!(stats.payloads_read, 1);
-    assert_eq!(
-        stats.nodes_read, 0,
-        "normal envelopes must not hydrate message bodies"
-    );
-    let snapshot = lineage_session_snapshot(&conn, &lineage, &branch).unwrap();
-    assert_eq!(snapshot.metadata, command.metadata);
-    assert_eq!(snapshot.side_tables, before.side_tables);
-    assert_eq!(
-        load_revision_state(&conn, &lineage, &revision)
-            .unwrap()
-            .metadata
-            .first_user_message,
-        archived.metadata.first_user_message
-    );
-    command.expected = shared.current;
-    for (updated_at, message) in [(4, None), (5, Some(String::new()))] {
-        command.metadata.updated_at = updated_at;
-        command.metadata.first_user_message = message;
-        let changed = apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &command,
-            ObjectCompression::none(),
-        )
-        .unwrap();
-        assert!(changed.current.revision > command.expected.revision);
-        assert_eq!(
-            lineage_session_snapshot(&conn, &lineage, &branch)
-                .unwrap()
-                .metadata,
-            command.metadata
-        );
-        command.expected = changed.current;
-        let unchanged = apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &command,
-            ObjectCompression::none(),
-        )
-        .unwrap();
-        assert_eq!(unchanged.current, command.expected);
-    }
-    let mut original_noop = archived.clone();
-    original_noop.expected = second.current;
-    original_noop.side_tables = SideTableSuffixes {
-        start: HistoryIndex::new(1),
-        ..SideTableSuffixes::default()
-    };
-    assert_eq!(
-        apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &original_noop,
-            ObjectCompression::none()
-        )
-        .unwrap(),
-        noop
-    );
-    let fork = branch_id('b');
-    fork_branch(&mut conn, &lineage, &branch, &fork, Some(&revision.id), 6).unwrap();
-    let snapshot = lineage_session_snapshot(&conn, &lineage, &fork).unwrap();
-    assert_eq!(
-        snapshot.metadata.first_user_message,
-        archived.metadata.first_user_message
-    );
-    assert_eq!(snapshot.side_tables, before.side_tables);
-    let fork_command = SessionCommit {
-        session_id: fork.as_str().into(),
-        expected: snapshot.head,
-        identity: snapshot.identity,
-        metadata: snapshot.metadata,
-        history: crate::session_commit::HistorySuffix {
-            start: HistoryIndex::new(1),
-            final_len: crate::session_commit::HistoryLen::new(1),
-            items: vec![],
-        },
-        side_tables: SideTableSuffixes {
-            start: HistoryIndex::new(1),
-            ..SideTableSuffixes::default()
-        },
-        transcript_records: None,
-    };
-    assert_eq!(
-        apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &fork,
-            &fork_command,
-            ObjectCompression::none()
-        )
-        .unwrap()
-        .current,
-        fork_command.expected
-    );
-    assert_eq!(
-        load_branch_record(&conn, &lineage, &fork, false)
-            .unwrap()
-            .revision
-            .id,
-        revision.id
-    );
-    assert_eq!(
-        hydrate_payload(
-            &conn,
-            &lineage,
-            &revision.state_payload_id,
-            PayloadKind::RevisionState,
-            &mut OperationStats::default()
-        )
-        .unwrap(),
-        original
-    );
 }
 
 #[test]
@@ -3354,11 +2197,7 @@ fn receipt_revision_lookup_is_exact_and_missing_results_do_not_fall_back_to_head
             receipt.current.transcript_record_count.get()
         );
         let mut stats = OperationStats::default();
-        let StoredRevisionState::Shared(state) =
-            load_revision_envelope(conn, lineage, &revision, &mut stats).unwrap()
-        else {
-            panic!("expected a compact revision envelope");
-        };
+        let state = load_revision_envelope(conn, lineage, &revision, &mut stats).unwrap();
         assert_eq!(stats.payloads_read, 1);
         assert_eq!(stats.nodes_read, 0);
         serde_json::to_vec(&state).unwrap()
@@ -3499,224 +2338,6 @@ fn receipt_revision_lookup_is_exact_and_missing_results_do_not_fall_back_to_head
         serde_json::to_value(stored).unwrap()["save"],
         serde_json::to_value(&noop_receipt).unwrap()
     );
-}
-
-#[test]
-fn v3_upgrade_preserves_exact_session_objects_and_receipts() {
-    let mut conn = crate::schema::tests::v3_connection();
-    let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
-    create_lineage(&conn, &lineage, 1).unwrap();
-    let branch = branch_id('a');
-    let mut initial = initial_session_commit(&branch);
-    initial.history.items.extend([
-        protocol::HistoryItem::note(protocol::HistoryNote::named_context("shared", "value")),
-        protocol::HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
-            "normal", "plan", "mode",
-        )),
-    ]);
-    initial.history.final_len = crate::session_commit::HistoryLen::new(3);
-    let receipt = apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &initial,
-        ObjectCompression::None,
-    )
-    .unwrap();
-    let mut current = receipt.current;
-    for step in 0..10 {
-        let mut command = initial.clone();
-        command.expected = current;
-        command.metadata.updated_at = step + 2;
-        command.metadata.title = Some(format!("revision-{step}"));
-        let len = current.history_len.get();
-        command.history.start = HistoryIndex::new(len);
-        command.history.items = if step % 2 == 0 {
-            vec![protocol::HistoryItem::note(
-                protocol::HistoryNote::named_context("shared", ""),
-            )]
-        } else {
-            Vec::new()
-        };
-        command.history.final_len =
-            crate::session_commit::HistoryLen::new(len + command.history.items.len() as u64);
-        current = apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &command,
-            ObjectCompression::None,
-        )
-        .unwrap()
-        .current;
-    }
-    let snapshot = lineage_session_snapshot(&conn, &lineage, &branch).unwrap();
-    conn.pragma_update(None, "query_only", true).unwrap();
-    assert_eq!(
-        history_semantic_range(
-            &conn,
-            &lineage,
-            &snapshot.history_root,
-            HistorySemantic::Context("shared"),
-            0..u64::MAX,
-            true
-        )
-        .unwrap()
-        .0,
-        Some((7, "shared".into()))
-    );
-    assert_eq!(
-        history_semantic_range(
-            &conn,
-            &lineage,
-            &snapshot.history_root,
-            HistorySemantic::Mode,
-            0..2,
-            true
-        )
-        .unwrap()
-        .0,
-        None
-    );
-    assert_eq!(
-        history_semantic_range(
-            &conn,
-            &lineage,
-            &snapshot.history_root,
-            HistorySemantic::BaseMode,
-            2..3,
-            false
-        )
-        .unwrap()
-        .0,
-        Some((2, "normal".into()))
-    );
-    assert_eq!(crate::schema::user_version(&conn).unwrap(), 3);
-    conn.pragma_update(None, "query_only", false).unwrap();
-    let tables = [
-        "objects",
-        "lineage_revisions",
-        "lineage_sequence_roots",
-        "lineage_sequence_nodes",
-        "lineage_sequence_entries",
-        "lineage_payload_object_refs",
-        "lineage_branches",
-        "lineage_branch_revisions",
-        "lineage_session_receipts",
-        "lineage_commit_receipts",
-    ];
-    let rows = |conn: &Connection| {
-        tables.map(|table| {
-            let mut stmt = conn
-                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
-                .unwrap();
-            let columns = stmt.column_count();
-            stmt.query_map([], |row| {
-                (0..columns)
-                    .map(|index| row.get::<_, rusqlite::types::Value>(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-        })
-    };
-    let before = rows(&conn);
-    crate::schema::initialize_lineage_schema(&mut conn).unwrap();
-    assert_eq!(rows(&conn), before);
-    assert_eq!(
-        lineage_session_snapshot(&conn, &lineage, &branch).unwrap(),
-        snapshot
-    );
-    assert_eq!(
-        history_semantic_range(
-            &conn,
-            &lineage,
-            &snapshot.history_root,
-            HistorySemantic::Context("shared"),
-            0..u64::MAX,
-            true
-        )
-        .unwrap()
-        .0,
-        Some((7, "shared".into()))
-    );
-    assert_eq!(
-        history_semantic_range(
-            &conn,
-            &lineage,
-            &snapshot.history_root,
-            HistorySemantic::Mode,
-            0..u64::MAX,
-            true
-        )
-        .unwrap()
-        .0,
-        Some((2, "plan".into()))
-    );
-    assert_eq!(
-        history_semantic_range(
-            &conn,
-            &lineage,
-            &snapshot.history_root,
-            HistorySemantic::BaseMode,
-            0..u64::MAX,
-            false
-        )
-        .unwrap()
-        .0,
-        Some((2, "normal".into()))
-    );
-    assert_eq!(
-        apply_lineage_session_commit(
-            &mut conn,
-            &lineage,
-            &branch,
-            &initial,
-            ObjectCompression::None,
-        )
-        .unwrap(),
-        receipt
-    );
-    assert_eq!(rows(&conn), before);
-    crate::schema::validate_lineage_schema(&conn).unwrap();
-}
-
-#[test]
-fn corrupt_history_rolls_back_v3_migration() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    conn.pragma_update(None, "foreign_keys", true).unwrap();
-    conn.execute_batch(include_str!("../lineage_v3.sql"))
-        .unwrap();
-    conn.pragma_update(None, "user_version", 3).unwrap();
-    let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
-    create_lineage(&conn, &lineage, 1).unwrap();
-    let branch = branch_id('a');
-    let command = initial_session_commit(&branch);
-    apply_lineage_session_commit(
-        &mut conn,
-        &lineage,
-        &branch,
-        &command,
-        ObjectCompression::None,
-    )
-    .unwrap();
-    conn.execute("UPDATE objects SET codec = 'none', raw_size = 0, stored_size = 0, bytes = x'' WHERE hash IN (SELECT object_hash FROM lineage_payload_object_refs WHERE payload_kind = 'history')", []).unwrap();
-    assert!(matches!(
-        crate::schema::initialize_lineage_schema(&mut conn),
-        Err(StoreError::Integrity(_))
-    ));
-    assert_eq!(crate::schema::user_version(&conn).unwrap(), 3);
-    assert_eq!(
-        conn.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name = 'lineage_history_semantic_roots'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-    crate::schema::validate_lineage_schema(&conn).unwrap();
 }
 
 #[test]

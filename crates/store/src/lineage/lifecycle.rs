@@ -366,8 +366,8 @@ pub(crate) fn apply_lineage_session_commit_with_fingerprint<C: LineageSavepoint>
         compression,
     )
     .map_err(store_failure)?;
-    let prior_state =
-        load_revision_for_save(&tx, lineage, &prior, compression).map_err(store_failure)?;
+    let prior_state = load_revision_envelope(&tx, lineage, &prior, &mut OperationStats::default())
+        .map_err(store_failure)?;
     let state = prepare_revision_state(
         &tx,
         lineage,
@@ -500,7 +500,14 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
     }
     let prior_state = current
         .as_ref()
-        .map(|current| load_revision_for_save(&tx, lineage, &current.revision, compression))
+        .map(|current| {
+            load_revision_envelope(
+                &tx,
+                lineage,
+                &current.revision,
+                &mut OperationStats::default(),
+            )
+        })
         .transpose()
         .map_err(store_failure)?;
     let projected_base;
@@ -531,18 +538,12 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
                     &RevisionId::from_db(base.revision_id.clone()).map_err(store_failure)?,
                 )
                 .map_err(store_failure)?;
-                projected_base = load_revision_for_save(&tx, lineage, &revision, compression)
-                    .map_err(store_failure)?;
+                projected_base =
+                    load_revision_envelope(&tx, lineage, &revision, &mut OperationStats::default())
+                        .map_err(store_failure)?;
                 &projected_base
             };
-            match state {
-                StoredRevisionState::Shared(state) => Some(state),
-                _ => {
-                    return Err(SessionCommitFailure::Integrity {
-                        message: "compact archive base has no verified shared state".into(),
-                    })
-                }
-            }
+            Some(state)
         }
         _ => {
             return Err(SessionCommitFailure::InvalidCommand {
@@ -577,12 +578,9 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
         compression,
     )
     .map_err(store_failure)?;
-    let archives_unchanged = prior_state.as_ref().is_some_and(|prior| match prior {
-        StoredRevisionState::Shared(prior) => {
-            prior.archives == state.archives
-                && prior.first_user_message_root == state.first_user_message_root
-        }
-        _ => false,
+    let archives_unchanged = prior_state.as_ref().is_some_and(|prior| {
+        prior.archives == state.archives
+            && prior.first_user_message_root == state.first_user_message_root
     });
     let prepared = PreparedRevisionState {
         bytes: serde_json::to_vec(&state)
@@ -652,9 +650,8 @@ pub(crate) fn apply_compact_session_commit<C: LineageSavepoint>(
             base,
         },
     )?;
-    let result =
-        retain_session_receipt_result(&tx, lineage, branch, &fingerprint, receipt, compression)
-            .map_err(store_failure)?;
+    let result = retain_session_receipt_result(&tx, lineage, branch, &fingerprint, receipt)
+        .map_err(store_failure)?;
     tx.commit()
         .map_err(StoreError::from)
         .map_err(store_failure)?;
@@ -668,7 +665,7 @@ enum SessionSaveBase<'a> {
     Existing {
         current: &'a LineageBranchRecord,
         prior: &'a RevisionRecord,
-        prior_state: &'a StoredRevisionState,
+        prior_state: &'a SharedRevisionState,
         operation: LineageOperation,
     },
 }
@@ -1318,15 +1315,9 @@ pub(crate) fn apply_compact_submit_turn(
         session.receipt,
         &command.turn,
     )?;
-    let session = retain_session_receipt_result(
-        &tx,
-        lineage,
-        branch,
-        &fingerprint,
-        receipt.session,
-        compression,
-    )
-    .map_err(store_failure)?;
+    let session =
+        retain_session_receipt_result(&tx, lineage, branch, &fingerprint, receipt.session)
+            .map_err(store_failure)?;
     tx.commit()
         .map_err(StoreError::from)
         .map_err(store_failure)?;
@@ -1408,15 +1399,9 @@ pub(crate) fn apply_compact_turn_transition(
         session.receipt,
         transition,
     )?;
-    let session = retain_session_receipt_result(
-        &tx,
-        lineage,
-        branch,
-        &fingerprint,
-        receipt.session,
-        compression,
-    )
-    .map_err(store_failure)?;
+    let session =
+        retain_session_receipt_result(&tx, lineage, branch, &fingerprint, receipt.session)
+            .map_err(store_failure)?;
     tx.commit()
         .map_err(StoreError::from)
         .map_err(store_failure)?;
@@ -1557,14 +1542,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
             None,
             at_ms,
         )?;
-        retain_session_receipt_result(
-            &tx,
-            lineage,
-            branch,
-            &fingerprint,
-            save.clone(),
-            ObjectCompression::default(),
-        )?;
+        retain_session_receipt_result(&tx, lineage, branch, &fingerprint, save.clone())?;
         tx.execute(
             "INSERT INTO lineage_turn_transitions (
                  lineage_id, session_id, fingerprint, turn_id, from_state, to_state,

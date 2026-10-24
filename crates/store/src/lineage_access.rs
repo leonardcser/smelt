@@ -388,7 +388,6 @@ impl OwnedLineageWriter {
             &self.branch,
             &fingerprint,
             receipt,
-            compression,
         )
         .map_err(crate::session_command::commit_failure_from_store_error)?;
         transaction.commit().map_err(|error| {
@@ -1906,7 +1905,6 @@ fn load_catalog_session(
                 || result.receipt.lineage_id.as_deref() != Some(lineage.as_str())
                 || result.receipt.current != record.head
                 || result.revision_id != record.revision.id().as_str()
-                || !matches!(state, lineage::StoredRevisionState::Shared(_))
                 || first_user_message.is_some() != first_user_message_id.is_some()
             {
                 return Err(StoreError::Integrity(
@@ -3046,28 +3044,12 @@ mod tests {
         }
     }
 
-    fn install_legacy_fixture(writer: &mut OwnedLineageWriter) {
-        let source = crate::schema::tests::v3_connection();
-        lineage::create_lineage(&source, &writer.lineage, 1).unwrap();
-        rusqlite::backup::Backup::new(&source, &mut writer.conn)
-            .unwrap()
-            .run_to_completion(128, std::time::Duration::ZERO, None)
-            .unwrap();
-        crate::schema::validate_lineage_schema(&writer.conn).unwrap();
-    }
-
     #[test]
     fn catalog_projection_preserves_metadata_without_hydrating_compact_archives() {
-        for (version, checkpoints) in [3, crate::schema::LINEAGE_SCHEMA_VERSION]
-            .into_iter()
-            .flat_map(|version| [0, 32, 128].map(|count| (version, count)))
-        {
+        for checkpoints in [0, 32, 128] {
             let root = tempfile::tempdir().unwrap();
             let id = session_id('1');
             let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
-            if version == 3 {
-                install_legacy_fixture(&mut writer);
-            }
             let mut initial = initial_commit(&id);
             initial.metadata.first_user_message = Some("catalog first α".into());
             initial.metadata.slug = Some("catalog-title".into());
@@ -3117,22 +3099,8 @@ mod tests {
             .unwrap();
             assert_eq!(actual, expected);
             assert_eq!(reader.catalog_session().unwrap(), expected);
-            assert_eq!(
-                stats.payloads_read,
-                if version == crate::schema::LINEAGE_SCHEMA_VERSION {
-                    2
-                } else {
-                    1
-                }
-            );
-            assert_eq!(
-                stats.nodes_read,
-                if version == crate::schema::LINEAGE_SCHEMA_VERSION {
-                    1
-                } else {
-                    0
-                }
-            );
+            assert_eq!(stats.payloads_read, 2);
+            assert_eq!(stats.nodes_read, 1);
             assert_eq!(stats.payloads_written, 0);
             let record =
                 lineage::load_branch_record(&writer.conn, &writer.lineage, &writer.branch, false)
@@ -3146,74 +3114,75 @@ mod tests {
                 (writer.lineage_id(), record.revision.id().as_str()),
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             ).unwrap();
-            if version == crate::schema::LINEAGE_SCHEMA_VERSION {
-                let (hash, bytes) = writer.conn.query_row(
+            let (hash, bytes) = writer
+                .conn
+                .query_row(
                     "SELECT object.hash, object.bytes FROM lineage_revision_state_roots archive
-                     JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
-                       AND root.root_id = archive.root_id AND root.item_count = 1 AND root.depth = 1
-                     JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
-                       AND entry.node_id = root.root_node_id AND entry.entry_index = 0
-                     JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
-                       AND payload.payload_id = entry.payload_id
-                     JOIN objects object ON object.hash = payload.object_hash
-                     WHERE archive.lineage_id = ?1 AND archive.state_payload_id = ?2
-                       AND archive.role = 'first_user_message'",
+                 JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+                   AND root.root_id = archive.root_id AND root.item_count = 1 AND root.depth = 1
+                 JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+                   AND entry.node_id = root.root_node_id AND entry.entry_index = 0
+                 JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+                   AND payload.payload_id = entry.payload_id
+                 JOIN objects object ON object.hash = payload.object_hash
+                 WHERE archive.lineage_id = ?1 AND archive.state_payload_id = ?2
+                   AND archive.role = 'first_user_message'",
                     (writer.lineage_id(), state_id.as_str()),
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                ).unwrap();
-                writer
-                    .conn
-                    .execute(
-                        "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
-                        [&hash],
-                    )
-                    .unwrap();
-                assert!(
-                    reader.snapshot().is_err(),
-                    "active message bytes must be hash-verified"
-                );
-                assert!(reader.catalog_session().is_err());
-                assert!(writer.refresh_catalog().is_err());
-                assert_eq!(reader.store_head().unwrap(), receipt.current);
-                writer
-                    .conn
-                    .execute(
-                        "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
-                        (&bytes, &hash),
-                    )
-                    .unwrap();
-                assert_eq!(
-                    reader.snapshot().unwrap().metadata.first_user_message,
-                    initial.metadata.first_user_message
-                );
-                assert_eq!(reader.catalog_session().unwrap(), expected);
-            }
-            if version == crate::schema::LINEAGE_SCHEMA_VERSION {
-                assert!(state_bytes < 2048);
-                assert_eq!(writer.conn.execute(
-                    "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = (
-                         SELECT payload.object_hash FROM lineage_revision_state_roots archive
-                         JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
-                           AND root.root_id = archive.root_id AND root.item_count = 2 AND root.depth = 1
-                         JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
-                           AND entry.node_id = root.root_node_id AND entry.entry_index = ?3
-                         JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
-                           AND payload.payload_id = entry.payload_id
-                         WHERE archive.lineage_id = ?1 AND archive.state_payload_id = ?2
-                           AND archive.role = 'metadata_snapshots'
-                     )",
-                    (writer.lineage_id(), state_id.as_str(), 0),
-                ).unwrap(), 1);
-                assert!(reader.snapshot().is_err());
-                assert_eq!(reader.catalog_session().unwrap(), expected);
-                writer.refresh_catalog().unwrap();
-                let catalog = crate::CatalogReader::open_existing(
-                    crate::SessionStoreLayout::from_sessions_root(root.path()).catalog_path(),
                 )
-                .unwrap()
                 .unwrap();
-                assert_eq!(catalog.session(&id).unwrap().unwrap(), expected);
-            }
+            writer
+                .conn
+                .execute(
+                    "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
+                    [&hash],
+                )
+                .unwrap();
+            assert!(
+                reader.snapshot().is_err(),
+                "active message bytes must be hash-verified"
+            );
+            assert!(reader.catalog_session().is_err());
+            assert!(writer.refresh_catalog().is_err());
+            assert_eq!(reader.store_head().unwrap(), receipt.current);
+            writer
+                .conn
+                .execute(
+                    "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
+                    (&bytes, &hash),
+                )
+                .unwrap();
+            assert_eq!(
+                reader.snapshot().unwrap().metadata.first_user_message,
+                initial.metadata.first_user_message
+            );
+            assert_eq!(reader.catalog_session().unwrap(), expected);
+
+            assert!(state_bytes < 2048);
+            assert_eq!(writer.conn.execute(
+                "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = (
+                     SELECT payload.object_hash FROM lineage_revision_state_roots archive
+                     JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
+                       AND root.root_id = archive.root_id AND root.item_count = 2 AND root.depth = 1
+                     JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
+                       AND entry.node_id = root.root_node_id AND entry.entry_index = ?3
+                     JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
+                       AND payload.payload_id = entry.payload_id
+                     WHERE archive.lineage_id = ?1 AND archive.state_payload_id = ?2
+                       AND archive.role = 'metadata_snapshots'
+                 )",
+                (writer.lineage_id(), state_id.as_str(), 0),
+            ).unwrap(), 1);
+            assert!(reader.snapshot().is_err());
+            assert_eq!(reader.catalog_session().unwrap(), expected);
+            writer.refresh_catalog().unwrap();
+            let catalog = crate::CatalogReader::open_existing(
+                crate::SessionStoreLayout::from_sessions_root(root.path()).catalog_path(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(catalog.session(&id).unwrap().unwrap(), expected);
+
             writer
                 .conn
                 .execute(

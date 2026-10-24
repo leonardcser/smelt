@@ -171,20 +171,8 @@ pub(super) fn lineage_doctor_report(
             "foreign_key_check: table={table} rowid={rowid:?} parent={parent} constraint={constraint}"
         ));
     }
-    // COMPAT(lineage-schema-v6): v4 to v6 layouts can hold chunked objects.
-    if (4..crate::schema::LINEAGE_SCHEMA_VERSION).contains(&schema_version) {
-        let chunked: i64 = conn.query_row("SELECT count(*) FROM object_data_roots", [], |row| {
-            row.get(0)
-        })?;
-        if chunked > 0 {
-            issues.push(format!("{chunked} chunked objects are unsupported"));
-        }
-    }
     if let Err(error) = lineage::verify_archive_coordinates(conn, lineage) {
         issues.push(format!("archive coordinates: {error}"));
-    }
-    if let Err(error) = lineage::verify_revision_projections(conn, lineage) {
-        issues.push(format!("revision projection: {error}"));
     }
     if let Err(error) = lineage::verify_session_receipt_results(conn, lineage) {
         issues.push(format!("session receipt result: {error}"));
@@ -296,8 +284,8 @@ pub struct IdleMaintenance {
     pub pages_released: u64,
 }
 
-/// Brings every lineage no process is writing up to date: migrates its schema,
-/// completes a reclamation pass when content changed since the last completed
+/// Brings every lineage no process is writing up to date: completes a
+/// reclamation pass when content changed since the last completed
 /// pass, and returns excess free pages to the filesystem. Work runs in bounded
 /// transactions at half duty cycle under shared ownership, so opening a session
 /// is never blocked; a lineage is left to its owner as soon as another
@@ -393,9 +381,11 @@ fn idle_maintenance_due(path: &Path) -> Result<bool> {
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    if crate::schema::user_version(&conn)? != crate::schema::LINEAGE_SCHEMA_VERSION {
+        return Ok(false);
+    }
     Ok(
-        crate::schema::user_version(&conn)? < crate::schema::LINEAGE_SCHEMA_VERSION
-            || lineage::reclaimed_marker(&conn)? != Some(lineage::reclaimed_fingerprint(&conn)?)
+        lineage::reclaimed_marker(&conn)? != Some(lineage::reclaimed_fingerprint(&conn)?)
             || excess_free_pages(&conn)? > 0,
     )
 }
