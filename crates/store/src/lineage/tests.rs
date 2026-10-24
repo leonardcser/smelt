@@ -652,6 +652,33 @@ pub(crate) fn reclamation_step_limit(conn: &Connection, lineage: &LineageId) -> 
 }
 
 #[test]
+fn commit_expecting_a_revision_ahead_of_head_is_a_recoverable_stale_base() {
+    let (mut conn, lineage) = setup();
+    let branch = branch_id('a');
+    let first = commit_session_result(
+        &mut conn,
+        &lineage,
+        &branch,
+        &initial_session_commit(&branch),
+    )
+    .unwrap();
+    let head = first.receipt.current;
+    let mut command = archived_session_commit(&branch, head);
+    command.expected.revision = crate::session_commit::Revision::new(head.revision.get() + 1);
+
+    let failure = commit_session_result(&mut conn, &lineage, &branch, &command).unwrap_err();
+
+    assert!(failure.is_recoverable_stale_base());
+    assert_eq!(
+        failure,
+        SessionCommitFailure::StaleBase {
+            expected: command.expected,
+            current: head,
+        }
+    );
+}
+
+#[test]
 fn receipt_result_guards_bind_exact_revision_and_detect_tampered_proof() {
     let (mut conn, lineage) = setup();
     conn.pragma_update(None, "foreign_keys", true).unwrap();

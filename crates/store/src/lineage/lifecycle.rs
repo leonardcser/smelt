@@ -345,6 +345,12 @@ pub(crate) fn apply_lineage_session_commit_with_fingerprint<C: LineageSavepoint>
         });
     }
 
+    if command.expected.revision > current.head.revision {
+        return Err(SessionCommitFailure::StaleBase {
+            expected: command.expected,
+            current: current.head,
+        });
+    }
     let expected_revision =
         branch_revision_at_sequence(&tx, lineage, branch, command.expected.revision.get())
             .map_err(store_failure)?;
