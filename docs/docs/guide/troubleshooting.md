@@ -97,9 +97,8 @@ smelt session backup <SESSION> ./session-backup.db
 ```
 
 The selected session belongs to a canonical lineage shared by its forks. Close
-every smelt process using any branch in that lineage before `gc` or `vacuum`;
-those commands require exclusive ownership and fail instead of racing a live
-writer. See [Session maintenance](../reference/cli.md#session-maintenance).
+every smelt process using any branch in that lineage before `compact`; it
+requires exclusive ownership and fails instead of racing a live writer. See [Session maintenance](../reference/cli.md#session-maintenance).
 
 ## Headless tools are denied
 

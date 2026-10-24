@@ -9,8 +9,7 @@ smelt export requests [--output <PATH>] <SESSION>
 smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
 smelt session doctor [<SESSION>|--all] [--json]
 smelt session backup <SESSION> <OUTPUT>
-smelt session gc <SESSION>
-smelt session vacuum <SESSION>
+smelt session compact <SESSION>
 smelt status (--pid <PID> | --all) [--json]
 smelt status --pid <PID> --file
 smelt status --dir
@@ -54,8 +53,7 @@ access to the prompt, or session storage.
 | `smelt inspect`                  | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
 | `smelt session doctor`           | Check canonical lineage and derived-search health without changing data                              |
 | `smelt session backup`           | Create and verify a transactionally consistent lineage backup                                       |
-| `smelt session gc`               | Reclaim canonical rows, objects, and search segments unreachable from live branches                  |
-| `smelt session vacuum`           | Compact free pages in a session database                                                            |
+| `smelt session compact`          | Reclaim unreachable rows, objects, and search segments, then return free pages to the filesystem     |
 | `smelt status`                   | Read the public status of one or all running smelt processes                                        |
 | `smelt upgrade`                  | Check for and install the newest smelt build                                                        |
 | `smelt upgrade check`            | Check for updates without installing                                                                |
@@ -90,12 +88,11 @@ unambiguous prefix.
 | `session doctor --all` | Check every visible session; cannot be combined with a session id |
 | `session doctor ... --json` | Emit a JSON array suitable for automation |
 | `session backup <SESSION> <OUTPUT>` | Copy and verify a consistent snapshot of the session's complete lineage; write `<OUTPUT>.manifest.json`; overwrite neither output |
-| `session gc <SESSION>` | Reclaim unreachable revisions, sequence rows, objects, and derived-search segments in bounded transactions, then reclaim free pages |
-| `session vacuum <SESSION>` | Compact free database pages under exclusive ownership |
+| `session compact <SESSION>` | Reclaim unreachable revisions, sequence rows, objects, and derived-search segments in bounded transactions, then return free pages to the filesystem |
 
-`doctor` and `backup` can safely inspect a live session. `gc` and `vacuum` acquire
-exclusive lineage ownership and fail rather than race an active smelt process.
-Close every process using any branch in the selected lineage before running them.
+`doctor` and `backup` can safely inspect a live session. `compact` acquires
+exclusive lineage ownership and fails rather than race an active smelt process.
+Close every process using any branch in the selected lineage before running it.
 Backups and manifests are private files (mode `0600`) on Unix.
 
 `doctor` exits unsuccessfully if any selected session is unavailable or degraded,
@@ -165,10 +162,10 @@ already accepted or billed. Review the transcript and retry explicitly if
 needed; an explicit retry creates a new linked turn.
 
 `smelt session backup <SESSION> <OUTPUT>` creates a transactionally consistent
-SQLite backup and manifest without overwriting an existing destination. `gc`
-removes unreachable objects, and `vacuum` compacts free pages. Maintenance
-commands requiring mutation acquire exclusive session ownership and fail rather
-than racing an active writer.
+SQLite backup and manifest without overwriting an existing destination.
+`compact` removes unreachable data and returns free pages to the filesystem; it
+acquires exclusive session ownership and fails rather than racing an active
+writer.
 
 ## Connection
 

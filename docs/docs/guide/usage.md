@@ -201,7 +201,7 @@ smelt inspect --session <SESSION_ID>
 ```
 
 For database health checks, transactionally consistent backups, or storage
-maintenance, use `smelt session doctor|backup|gc|vacuum`. See the
+maintenance, use `smelt session doctor|backup|compact`. See the
 [CLI session-maintenance reference](../reference/cli.md#session-maintenance)
 before running mutating maintenance against a lineage.
 

@@ -11,7 +11,7 @@ fn smelt(state_home: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn session_storage_commands_doctor_backup_gc_and_vacuum() {
+fn session_storage_commands_doctor_backup_and_compact() {
     let state = tempfile::tempdir().unwrap();
     let guard = ProcessEnvironmentGuard::capture();
     guard.set_var("XDG_STATE_HOME", state.path());
@@ -61,7 +61,7 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
             .healthy
     );
 
-    let gc = smelt(state.path(), &["session", "gc", &session.id]);
+    let gc = smelt(state.path(), &["session", "compact", &session.id]);
     assert!(
         gc.status.success(),
         "{}",
@@ -70,12 +70,6 @@ fn session_storage_commands_doctor_backup_gc_and_vacuum() {
     let gc = String::from_utf8(gc.stdout).unwrap();
     assert!(gc.contains("deleted_canonical_rows:"), "{gc}");
     assert!(gc.contains("deleted_search_segments: 0"), "{gc}");
-    let vacuum = smelt(state.path(), &["session", "vacuum", &session.id]);
-    assert!(
-        vacuum.status.success(),
-        "{}",
-        String::from_utf8_lossy(&vacuum.stderr)
-    );
     let repeated_backup = smelt(
         state.path(),
         &["session", "backup", &session.id, backup.to_str().unwrap()],
@@ -178,7 +172,7 @@ fn session_maintenance_exact_id_does_not_require_catalog_publication() {
     let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report[0]["report"]["healthy"], true);
     assert_eq!(report[0]["recovery"]["catalog"]["state"], "missing");
-    let gc = smelt(state.path(), &["session", "gc", &session.id]);
+    let gc = smelt(state.path(), &["session", "compact", &session.id]);
     assert!(
         gc.status.success(),
         "{}",
@@ -194,12 +188,6 @@ fn session_maintenance_exact_id_does_not_require_catalog_publication() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let vacuum = smelt(state.path(), &["session", "vacuum", &session.id]);
-    assert!(
-        vacuum.status.success(),
-        "{}",
-        String::from_utf8_lossy(&vacuum.stderr)
-    );
     assert!(
         smelt_store::CatalogReader::open_existing(layout.catalog_path())
             .unwrap()
@@ -208,7 +196,7 @@ fn session_maintenance_exact_id_does_not_require_catalog_publication() {
 }
 
 #[test]
-fn session_gc_prunes_ready_search_and_reports_writer_contention() {
+fn session_compact_prunes_ready_search_and_reports_writer_contention() {
     let state = tempfile::tempdir().unwrap();
     let sessions_root = state.path().join("smelt/sessions");
     let mut session = smelt_core::session::Session::new(1, "/synthetic".into());
@@ -287,7 +275,7 @@ fn session_gc_prunes_ready_search_and_reports_writer_contention() {
     let path = reader.search_database_path();
     let search = rusqlite::Connection::open(&path).unwrap();
     search.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let busy = smelt(state.path(), &["session", "gc", &session.id]);
+    let busy = smelt(state.path(), &["session", "compact", &session.id]);
     assert!(
         !busy.status.success(),
         "contended CLI maintenance silently succeeded"
@@ -322,14 +310,14 @@ fn session_gc_prunes_ready_search_and_reports_writer_contention() {
     );
     search.execute_batch("ROLLBACK").unwrap();
     drop(search);
-    let gc = smelt(state.path(), &["session", "gc", &session.id]);
+    let gc = smelt(state.path(), &["session", "compact", &session.id]);
     assert!(
         gc.status.success(),
         "{}",
         String::from_utf8_lossy(&gc.stderr)
     );
     assert!(String::from_utf8_lossy(&gc.stdout).contains("deleted_search_segments: 1"));
-    let repeated = smelt(state.path(), &["session", "gc", &session.id]);
+    let repeated = smelt(state.path(), &["session", "compact", &session.id]);
     assert!(
         repeated.status.success(),
         "{}",
@@ -367,7 +355,7 @@ fn session_gc_prunes_ready_search_and_reports_writer_contention() {
 }
 
 #[test]
-fn session_gc_reclaims_abandoned_suffix_and_preserves_shared_fork() {
+fn session_compact_reclaims_abandoned_suffix_and_preserves_shared_fork() {
     let state = tempfile::tempdir().unwrap();
     let guard = ProcessEnvironmentGuard::capture();
     guard.set_var("XDG_STATE_HOME", state.path());
@@ -409,7 +397,7 @@ fn session_gc_reclaims_abandoned_suffix_and_preserves_shared_fork() {
     writer.refresh_catalog().unwrap();
     writer.release().unwrap();
 
-    let gc = smelt(state.path(), &["session", "gc", &session.id]);
+    let gc = smelt(state.path(), &["session", "compact", &session.id]);
     assert!(
         gc.status.success(),
         "{}",
@@ -431,7 +419,7 @@ fn session_gc_reclaims_abandoned_suffix_and_preserves_shared_fork() {
         );
     }
 
-    let repeated = smelt(state.path(), &["session", "gc", &target_id]);
+    let repeated = smelt(state.path(), &["session", "compact", &target_id]);
     assert!(
         repeated.status.success(),
         "{}",

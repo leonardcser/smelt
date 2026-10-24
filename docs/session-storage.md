@@ -286,11 +286,11 @@ Explicit cold maintenance runs through the same collector:
 
 ```sh
 smelt session doctor --json <session>
-smelt session gc <session>
+smelt session compact <session>
 smelt session doctor --json <session>
 ```
 
-`session gc` prunes cold search data, reclaims unreachable canonical rows and
+`session compact` prunes cold search data, reclaims unreachable canonical rows and
 objects, then vacuums and checkpoints the database. It reports deletion, page-recovery and WAL-truncation counters.
 Object-byte accounting, occupied SQLite pages, free pages and database/WAL file
 sizes are different measurements. Free pages alone do not prove file-space recovery.

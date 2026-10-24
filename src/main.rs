@@ -206,10 +206,8 @@ enum SessionCommand {
     Doctor(SessionDoctorArgs),
     /// Copy a transactionally consistent session database to a new file
     Backup(SessionBackupArgs),
-    /// Delete unreachable canonical rows and objects
-    Gc(SessionTargetArgs),
-    /// Compact free database pages under exclusive ownership
-    Vacuum(SessionTargetArgs),
+    /// Delete unreachable rows, objects and derived search data, then return free pages to the filesystem
+    Compact(SessionTargetArgs),
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -908,7 +906,7 @@ fn run_session_command(args: SessionArgs) {
             }
             result
         }
-        SessionCommand::Gc(args) => with_lineage_writer(&args.session, |writer| {
+        SessionCommand::Compact(args) => with_lineage_writer(&args.session, |writer| {
             let mut branch_heads_cleared = 0usize;
             let mut canonical_rows_deleted = 0usize;
             let mut objects_deleted = 0usize;
@@ -935,7 +933,7 @@ fn run_session_command(args: SessionArgs) {
             }
             let vacuum = writer
                 .vacuum()
-                .map_err(|err| format!("failed to vacuum reclaimed lineage pages: {err}"))?;
+                .map_err(|err| format!("failed to release free lineage pages: {err}"))?;
             println!("cleared_branch_heads: {branch_heads_cleared}");
             println!("deleted_canonical_rows: {canonical_rows_deleted}");
             println!("deleted_objects: {objects_deleted}");
@@ -946,12 +944,6 @@ fn run_session_command(args: SessionArgs) {
             println!("wal_truncated: {}", vacuum.wal_truncated);
             println!("transactions: {transactions}");
             Ok(())
-        }),
-        SessionCommand::Vacuum(args) => with_lineage_writer(&args.session, |writer| {
-            writer
-                .vacuum()
-                .map(|_| ())
-                .map_err(|err| format!("failed to vacuum lineage: {err}"))
         }),
     };
     if let Err(err) = result {
