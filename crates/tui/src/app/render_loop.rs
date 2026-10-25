@@ -753,11 +753,6 @@ impl TuiApp {
         self.render_normal_to(&mut stdout);
     }
 
-    pub(crate) fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W) {
-        self.publish_diff_signals();
-        self.render_normal_to(out);
-    }
-
     /// Drain one bounded batch from a continuously-ready engine output queue.
     /// `FrameBoundary` tells the caller to paint before processing more output.
     pub(crate) fn drain_ready_engine_outputs_for_frame_to<
@@ -816,7 +811,7 @@ impl TuiApp {
         if !self.scheduled_frame_is_due() {
             return false;
         }
-        self.render_frame_to(out);
+        self.render_normal_to(out);
         true
     }
 
@@ -827,7 +822,7 @@ impl TuiApp {
         if !self.frame_scheduler.has_pending() {
             return false;
         }
-        self.render_frame_to(out);
+        self.render_normal_to(out);
         true
     }
 
@@ -1016,6 +1011,9 @@ impl TuiApp {
             .begin_frame(self.core.clock.instant_now());
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.apply_pending_transcript_work();
+        // Published after queued work is applied: it can end the turn, and
+        // renderers must paint that state rather than the previous one.
+        self.publish_diff_signals();
         let streams = self
             .plugin_streams
             .iter()
@@ -1979,7 +1977,7 @@ mod tests {
         )
         .expect("install animation renderer probe");
 
-        app.render_frame_to(&mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         let projection_count = app
             .app
             .conversation
@@ -2205,11 +2203,10 @@ mod tests {
             )));
         app.render_silent();
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(2));
-        let top_before_signal = app.lua_int_global("prompt_top_renderer_calls").unwrap();
-        app.app.publish_diff_signals();
+        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(2));
         app.render_silent();
-        assert!(app.lua_int_global("prompt_top_renderer_calls").unwrap() > top_before_signal);
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(2));
+        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(2));
     }
 
     #[test]
@@ -2238,5 +2235,38 @@ mod tests {
 
         app.app.handle_resize(120, 40);
         assert_eq!(app.lua_int_global("retained_layout_calls"), Some(3));
+    }
+
+    #[test]
+    fn turn_completing_inside_a_frame_paints_the_finished_work_state() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(1);
+        app.render_to_frame();
+        assert!(app.render_to_frame().text().contains("working"));
+
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::TextDelta {
+                delta: "answer".into(),
+            });
+        app.app
+            .queue_engine_continuation(protocol::EngineEvent::TextDelta {
+                delta: " tail".into(),
+            });
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::TurnComplete {
+                turn_id: 1,
+                history: None,
+                meta: None,
+            });
+        assert!(app.agent_running());
+
+        let mut sink = std::io::sink();
+        app.app.render_normal_to(&mut sink);
+        assert!(!app.agent_running());
+        let state: String = app
+            .eval_lua(r#"return smelt.signal.get("work_state")"#)
+            .expect("work_state");
+        assert_eq!(state, "done");
+        assert!(!app.app.ui.flushed_snapshot().text().contains("working"));
     }
 }

@@ -3037,7 +3037,7 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
         "a blocked save must prevent session replacement"
     );
     for _ in 0..3 {
-        app.render_frame_to(&mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
     }
     assert!(
         app.session_document_has_unflushed_work(),

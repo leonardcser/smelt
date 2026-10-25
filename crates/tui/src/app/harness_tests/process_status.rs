@@ -140,11 +140,11 @@ fn spinner_redraw_restores_the_terminal_cursor_before_displaying_the_frame() {
         "#,
     ));
 
-    app.render_frame_to(&mut std::io::sink());
+    app.render_normal_to(&mut std::io::sink());
     assert!(app.run_lua(r#"_G.spinner_frame = "b""#));
 
     let mut output = Vec::new();
-    app.render_frame_to(&mut output);
+    app.render_normal_to(&mut output);
 
     const END_SYNCHRONIZED_UPDATE: &[u8] = b"\x1b[?2026l";
     let frame = output
