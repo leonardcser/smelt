@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Cursor;
 
 use brush_parser::ast::{
@@ -20,12 +21,45 @@ pub(super) fn parse(command: &str) -> Option<ast::Program> {
     {
         return None;
     }
+    let command = neutralize_blank_heredoc_tags(command);
     let mut parser = Parser::new(Cursor::new(command.as_bytes()), &ParserOptions::default());
     parser.parse_program().ok()
 }
 
+fn tokenize(command: &str) -> Option<Vec<Token>> {
+    tokenize_str(&neutralize_blank_heredoc_tags(command)).ok()
+}
+
+/// Replaces a heredoc tag's leading carriage return or form feed with a letter.
+/// The tokenizer trims such a tag to nothing and never finishes the heredoc,
+/// growing a buffer until allocation fails. The replacement has the same length,
+/// so token offsets still index the original text.
+fn neutralize_blank_heredoc_tags(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let blank_tags = (0..bytes.len().saturating_sub(2))
+        .filter_map(|index| {
+            let rest = bytes[index..].strip_prefix(b"<<")?;
+            let rest = rest.strip_prefix(b"-").unwrap_or(rest);
+            let blanks = rest
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            matches!(rest.get(blanks), Some(b'\r' | b'\x0c'))
+                .then(|| bytes.len() - rest.len() + blanks)
+        })
+        .collect::<Vec<_>>();
+    if blank_tags.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let mut neutralized = text.to_string();
+    for index in blank_tags {
+        neutralized.replace_range(index..=index, "x");
+    }
+    Cow::Owned(neutralized)
+}
+
 fn has_unrepresentable_io_number(command: &str) -> bool {
-    let Ok(tokens) = tokenize_str(command) else {
+    let Some(tokens) = tokenize(command) else {
         return false;
     };
     tokens.windows(2).any(|tokens| {
@@ -130,7 +164,11 @@ pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
     {
         return None;
     }
-    word::parse(word, &ParserOptions::default()).ok()
+    word::parse(
+        &neutralize_blank_heredoc_tags(word),
+        &ParserOptions::default(),
+    )
+    .ok()
 }
 
 pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
@@ -140,7 +178,11 @@ pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>>
     {
         return None;
     }
-    word::parse_heredoc(word, &ParserOptions::default()).ok()
+    word::parse_heredoc(
+        &neutralize_blank_heredoc_tags(word),
+        &ParserOptions::default(),
+    )
+    .ok()
 }
 
 pub(super) enum BraceExpansion {
@@ -629,7 +671,7 @@ fn collect_piece_commands(pieces: &[WordPieceWithSource], out: &mut Vec<String>)
 }
 
 fn tokenized_split(command: &str) -> Vec<(String, Option<String>)> {
-    let Ok(tokens) = tokenize_str(command) else {
+    let Some(tokens) = tokenize(command) else {
         let trimmed = trim_whitespace(command);
         return (!trimmed.is_empty())
             .then(|| (trimmed.to_string(), None))
@@ -805,7 +847,7 @@ fn is_shell_stream(path: &str) -> bool {
 }
 
 fn tokenized_has_output_redirection(command: &str) -> bool {
-    let Ok(tokens) = tokenize_str(command) else {
+    let Some(tokens) = tokenize(command) else {
         return false;
     };
     let mut tokens = tokens.iter().peekable();

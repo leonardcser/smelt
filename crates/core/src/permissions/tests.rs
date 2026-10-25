@@ -564,6 +564,22 @@ fn oversized_expansion_numbers_do_not_panic_permissions() {
 }
 
 #[test]
+fn blank_heredoc_tags_do_not_exhaust_memory_permissions() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in [
+        "<<\r\t",
+        "<<\r ",
+        "<<-\r\t",
+        "<<\x0c\t",
+        "echo hi <<\r\r\t",
+        "echo `<<\r\t`",
+    ] {
+        permissions.check_subcommand(normal(), "bash", command);
+        split_shell_commands(command);
+    }
+}
+
+#[test]
 fn split_shell_commands_input_fd_duplication_is_not_background() {
     assert_eq!(
         split_shell_commands("cat <&0 | head"),
