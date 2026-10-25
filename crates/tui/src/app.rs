@@ -2280,6 +2280,9 @@ impl TuiApp {
             .publish_if_changed("cwd_branch", self.workspace.branch().to_owned());
         self.core
             .signals
+            .publish_if_changed("branch", self.workspace.branch().to_owned());
+        self.core
+            .signals
             .publish_if_changed("cwd_worktree", self.workspace.worktree().to_owned());
         self.core.signals.publish_if_changed(
             "cwd_worktree_path",
