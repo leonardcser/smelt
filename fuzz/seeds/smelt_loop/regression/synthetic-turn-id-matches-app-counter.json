@@ -1,0 +1,20 @@
+{
+  "vim": false,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "macro_stream_turn",
+      "data": {
+        "turn_id": 255,
+        "text": "",
+        "thinking": "",
+        "chunks": 0,
+        "error": false
+      }
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    }
+  ]
+}

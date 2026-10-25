@@ -178,6 +178,11 @@ impl TestApp {
         self.app.prompt.queued_request_len()
     }
 
+    /// The id the app allocates to its next turn.
+    pub fn next_turn_id(&self) -> u64 {
+        self.app.conversation.next_turn_id()
+    }
+
     /// Whether the conversation is paused after an interrupted or failed turn.
     pub fn turn_is_paused(&self) -> bool {
         self.app.conversation.turn_pause().is_some()
