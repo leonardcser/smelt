@@ -117,7 +117,7 @@ impl Client {
         if let Some(client) = clients.get(&max_redirects) {
             return Ok(client.clone());
         }
-        let client = reqwest::Client::builder()
+        let client = smelt_provider::http_client_builder()
             .redirect(reqwest::redirect::Policy::limited(max_redirects))
             .build()
             .map_err(|err| Error::Client(err.to_string()))?;

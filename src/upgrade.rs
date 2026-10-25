@@ -63,10 +63,10 @@ struct CompareCommit {
 }
 
 pub async fn run_upgrade_command(args: UpgradeArgs) {
-    let client = reqwest::Client::builder()
+    let client = smelt_provider::http_client_builder()
         .user_agent(concat!("smelt-upgrade/", env!("CARGO_PKG_VERSION")))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+        .unwrap_or_else(|_| smelt_provider::http_client());
 
     let info = match check_for_update(&client, args.channel).await {
         Ok(info) => info,
@@ -729,7 +729,7 @@ mod tests {
 
     #[tokio::test]
     async fn stable_check_rejects_http_errors_and_malformed_json() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let (url, server) = serve_http_once("503 Service Unavailable", "text/plain", "offline");
         let error = check_stable_from_url(&client, &url, "0.5.0", "smelt 0.5.0".into())
             .await

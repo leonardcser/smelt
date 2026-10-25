@@ -574,7 +574,7 @@ impl HeadlessApp {
         let clock = Arc::clone(&self.core.clock);
         let context_discovery = async move {
             let target = target?;
-            let client = engine::HttpClient::builder()
+            let client = smelt_provider::http_client_builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .ok()?;

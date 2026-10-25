@@ -746,7 +746,7 @@ mod tests {
             now: fixed_now,
         };
 
-        let tokens = refresh_tokens(&reqwest::Client::new(), "github-refresh", &config)
+        let tokens = refresh_tokens(&crate::http_client(), "github-refresh", &config)
             .await
             .unwrap();
 

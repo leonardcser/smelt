@@ -251,7 +251,7 @@ impl PlatformRuntime {
 
     #[cfg(test)]
     pub(super) fn enable_context_window_refresh_for_harness(&mut self) {
-        self.install_http_client(engine::HttpClient::new());
+        self.install_http_client(smelt_provider::http_client());
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         self.context_window_tx = Some(sender);
         self.context_window_rx = Some(receiver);

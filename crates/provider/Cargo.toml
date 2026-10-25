@@ -25,6 +25,7 @@ sha2.workspace = true
 smelt-perf = { version = "0.2.0", path = "../perf" }
 atomic-write-file = "0.3.1"
 smelt-buffer = { version = "0.5.0-alpha.9", path = "../buffer" }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 
 [features]
 fuzz = []

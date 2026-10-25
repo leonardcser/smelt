@@ -688,7 +688,7 @@ mod tests {
     #[tokio::test]
     async fn send_authenticated_request_sends_get_with_auth_and_accept() {
         let (url, task) = spawn_one_response(r#"{"ok":true}"#).await;
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
 
         let resp = send_authenticated_request(&client, "GET", url, None, |req| {
             req.header("Authorization", "Bearer test-token")
@@ -710,7 +710,7 @@ mod tests {
     #[tokio::test]
     async fn send_authenticated_request_sends_post_body() {
         let (url, task) = spawn_one_response("done").await;
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
 
         let resp =
             send_authenticated_request(&client, "POST", url, Some(b"payload".to_vec()), |req| req)
@@ -730,7 +730,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_authenticated_request_rejects_unsupported_method_before_network() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let err = send_authenticated_request(
             &client,
             "DELETE",
