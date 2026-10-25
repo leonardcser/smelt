@@ -1178,6 +1178,7 @@ struct Snapshot {
     session_messages: usize,
     queued_messages: usize,
     queue_empty: bool,
+    turn_paused: bool,
     queued_next_starts: bool,
     follow_up_context_append: bool,
     working: tui::app::test_harness::WorkingSnapshot,
@@ -1211,6 +1212,7 @@ impl Snapshot {
             session_messages: app.session_message_count(),
             queued_messages: app.queued_message_count(),
             queue_empty: app.queue_is_empty(),
+            turn_paused: app.turn_is_paused(),
             queued_next_starts: app.next_queued_input_starts_turn(),
             follow_up_context_append: app.next_follow_up_appends_context_note(),
             working: app.working_state(),
@@ -1549,8 +1551,8 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             }
         }
         PostCheck::JobCompleted => {
-            // A queued input holds the completion back as the next turn input.
-            if !pre.agent_running && !pre.working.busy && pre.queue_empty {
+            // A queued input or a paused turn holds the completion back.
+            if !pre.agent_running && !pre.working.busy && pre.queue_empty && !pre.turn_paused {
                 assert_eq!(
                     post.transcript_blocks,
                     pre.transcript_blocks + 1,

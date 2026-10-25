@@ -1,0 +1,17 @@
+{
+  "vim": true,
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "cancel"
+    },
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "exited"
+      }
+    }
+  ]
+}

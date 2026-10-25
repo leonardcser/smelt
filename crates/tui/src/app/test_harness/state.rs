@@ -178,6 +178,11 @@ impl TestApp {
         self.app.prompt.queued_request_len()
     }
 
+    /// Whether the conversation is paused after an interrupted or failed turn.
+    pub fn turn_is_paused(&self) -> bool {
+        self.app.conversation.turn_pause().is_some()
+    }
+
     /// Whether no input of any stage waits behind the running work.
     pub fn queue_is_empty(&self) -> bool {
         self.app.prompt.queue_is_empty()
