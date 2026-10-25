@@ -16,12 +16,14 @@ fn install_crypto_provider() {
 }
 
 /// A `reqwest::Client` with default settings.
+#[allow(clippy::disallowed_methods)]
 pub fn client() -> reqwest::Client {
     install_crypto_provider();
     reqwest::Client::new()
 }
 
 /// A `reqwest::ClientBuilder` ready to build a TLS-capable client.
+#[allow(clippy::disallowed_methods)]
 pub fn client_builder() -> reqwest::ClientBuilder {
     install_crypto_provider();
     reqwest::Client::builder()
