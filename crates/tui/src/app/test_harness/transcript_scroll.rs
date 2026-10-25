@@ -1469,12 +1469,21 @@ fn sparse_preserve_frame_settled_stale_resolved_anchor(frame: &TranscriptScrollT
     else {
         return false;
     };
+    let (Some(first_visible), Some(last_visible)) = (
+        frame.first_visible_content_anchor,
+        frame.last_visible_content_anchor,
+    ) else {
+        return false;
+    };
+    // The scroll top is unchanged and still shows content, so the frame only
+    // re-resolved a stale anchor somewhere inside the viewport.
     matches!(
         frame.projection_target,
         TranscriptProjectionTargetTrace::StableRowDelta { row, delta: 0 }
             if row == frame.window_scroll_before
                 && row == frame.resolved_scroll_top
-                && after_row == row
+                && first_visible.virtual_row == row
+                && (row..=last_visible.virtual_row).contains(&after_row)
                 && before_row != row
     ) && !frame.placeholder_rows_visible
         && before == after
