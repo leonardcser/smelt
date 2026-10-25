@@ -1,0 +1,296 @@
+{
+  "vim": true,
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "exited"
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 104,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "engine_tool_finish",
+      "data": {
+        "call_id": 0,
+        "is_error": false,
+        "content": ""
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 58
+      }
+    },
+    {
+      "kind": "engine_tool_draft_delta",
+      "data": {
+        "call_id": "",
+        "tool_name": "",
+        "delta": ""
+      }
+    },
+    {
+      "kind": "engine_messages",
+      "data": {
+        "msg_count": 117
+      }
+    },
+    {
+      "kind": "engine_tool_draft_delta",
+      "data": {
+        "call_id": "",
+        "tool_name": "",
+        "delta": ""
+      }
+    },
+    {
+      "kind": "exec_done",
+      "data": 1986359903
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 16,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 122,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 0,
+        "row": 4,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 121,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 58,
+        "col": 104,
+        "row": 105,
+        "mods": 115
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 111
+      }
+    },
+    {
+      "kind": "engine_tool_draft_delta",
+      "data": {
+        "call_id": "",
+        "tool_name": "",
+        "delta": ""
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 95
+      }
+    },
+    {
+      "kind": "engine_messages",
+      "data": {
+        "msg_count": 101
+      }
+    },
+    {
+      "kind": "engine_messages",
+      "data": {
+        "msg_count": 0
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 104,
+        "row": 104,
+        "mods": 99
+      }
+    },
+    {
+      "kind": "exec_done",
+      "data": null
+    },
+    {
+      "kind": "engine_messages",
+      "data": {
+        "msg_count": 111
+      }
+    },
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "hhhhhhhhhhhhhhhhhhhhhhhh",
+        "exit_code": null,
+        "termination": "signaled"
+      }
+    },
+    {
+      "kind": "engine_tool_draft_delta",
+      "data": {
+        "call_id": "t_seen_hhhlhhhhhh\u0000\u0000\u0000\u0000R\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+        "tool_name": "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000:so",
+        "delta": ""
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 114
+      }
+    },
+    {
+      "kind": "exec_done",
+      "data": 0
+    }
+  ]
+}

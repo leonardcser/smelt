@@ -94,6 +94,9 @@ impl TestApp {
                 self.app.handle_app_event(event);
             }
             self.app.pump_lua();
+            if self.app.frame_scheduler.has_pending() {
+                self.app.render_normal_to(&mut std::io::sink());
+            }
             if !self.app.conversation.canonical_operations_are_pending()
                 && !self.app.turn_submission_is_pending()
             {
@@ -208,7 +211,18 @@ impl TestApp {
     /// replaces local history and drops any current context note; with a
     /// checkpoint, only notes before `first_live_index` survive the merge.
     pub fn next_follow_up_appends_context_note(&self) -> bool {
-        if !self.next_queued_input_starts_turn() && !self.has_pending_history_follow_up() {
+        self.follow_up_appends_context_note(self.has_pending_history_follow_up())
+    }
+
+    /// Like [`Self::next_follow_up_appends_context_note`] for a turn whose final
+    /// history drops the submitted item, so a note identical to it still starts
+    /// the follow-up.
+    pub fn next_follow_up_appends_context_note_unfiltered(&self) -> bool {
+        self.follow_up_appends_context_note(self.has_pending_history_follow_up_unfiltered())
+    }
+
+    fn follow_up_appends_context_note(&self, pending_follow_up: bool) -> bool {
+        if !self.next_queued_input_starts_turn() && !pending_follow_up {
             return false;
         }
         let context = self.app.current_context_note_text();
@@ -298,14 +312,38 @@ impl TestApp {
     /// the active turn finishes successfully. A note identical to the item the
     /// active turn submitted is already delivered by that turn's own history.
     pub fn has_pending_history_follow_up(&self) -> bool {
-        let submitted = self.app.conversation.active().and_then(|turn| {
-            let idx = turn.submitted_history_idx;
-            self.app
-                .session_history_range(idx..idx + 1)
-                .ok()?
-                .into_iter()
-                .next()
-        });
+        self.pending_follow_up_appends(true)
+    }
+
+    /// Like [`Self::has_pending_history_follow_up`], but counts a note identical
+    /// to the submitted item as well: the turn's final history can drop that
+    /// item, leaving the note undelivered.
+    pub fn has_pending_history_follow_up_unfiltered(&self) -> bool {
+        self.pending_follow_up_appends(false)
+    }
+
+    /// Session history index of the item the active turn submitted.
+    pub fn submitted_history_idx(&self) -> Option<usize> {
+        self.app
+            .conversation
+            .active()
+            .map(|turn| turn.submitted_history_idx)
+    }
+
+    fn pending_follow_up_appends(&self, skip_submitted: bool) -> bool {
+        let submitted = self
+            .app
+            .conversation
+            .active()
+            .filter(|_| skip_submitted)
+            .and_then(|turn| {
+                let idx = turn.submitted_history_idx;
+                self.app
+                    .session_history_range(idx..idx + 1)
+                    .ok()?
+                    .into_iter()
+                    .next()
+            });
         self.app
             .conversation
             .pending_history_appends()
