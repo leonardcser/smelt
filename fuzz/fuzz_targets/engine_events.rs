@@ -124,8 +124,31 @@ enum HistoryEntry {
 #[derive(Default)]
 struct Model {
     active_turn: Option<u64>,
+    submitted_history_idx: usize,
     history: Vec<HistoryItem>,
     sequence: u64,
+}
+
+impl Model {
+    fn begin_turn(&mut self, id: u64) {
+        self.active_turn = Some(id);
+        self.submitted_history_idx = self.history.len().saturating_sub(1);
+    }
+
+    /// A completed turn keeps the item it submitted verbatim when the incoming
+    /// history replaces it with a different one.
+    fn complete_history(&mut self, first: usize, items: &[HistoryItem]) {
+        let submitted = self.history.get(self.submitted_history_idx).cloned();
+        self.history.truncate(first);
+        self.history.extend(items.iter().cloned());
+        if let (Some(relative), Some(submitted)) =
+            (self.submitted_history_idx.checked_sub(first), submitted)
+        {
+            if let Some(slot) = self.history.get_mut(first + relative).filter(|_| relative < items.len()) {
+                *slot = submitted;
+            }
+        }
+    }
 }
 
 fuzz_target!(|input: Input| {
@@ -163,7 +186,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             if model.active_turn.is_none() {
                 let id = u64::from(id);
                 app.start_turn(id);
-                model.active_turn = Some(id);
+                model.begin_turn(id);
             }
         }
         Op::Ready => feed(app, EngineEvent::Ready),
@@ -554,8 +577,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             let history = items.map(|items| {
                 let first = usize::from(first) % (model.history.len() + 1);
                 let items = history_items(items);
-                model.history.truncate(first);
-                model.history.extend(items.clone());
+                model.complete_history(first, &items);
                 CanonicalHistoryDelta::new(first, items)
             });
             feed(
@@ -608,7 +630,7 @@ fn ensure_turn(app: &mut TestApp, model: &mut Model) {
     if model.active_turn.is_none() {
         let id = model.sequence;
         app.start_turn(id);
-        model.active_turn = Some(id);
+        model.begin_turn(id);
     }
 }
 
