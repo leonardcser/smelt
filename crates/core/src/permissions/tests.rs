@@ -538,6 +538,32 @@ fn deeply_nested_brace_expansion_does_not_hang_permissions() {
 }
 
 #[test]
+fn oversized_expansion_numbers_do_not_panic_permissions() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in [
+        "echo {1..99999999999999999999}",
+        "echo {1..2..99999999999999999999}",
+        "echo {-99999999999999999999..1}",
+        "echo ~+99999999999999999999",
+        "echo ~-99999999999999999999/x",
+        "echo ~99999999999999999999:",
+    ] {
+        permissions.check_subcommand(normal(), "bash", command);
+        assert_eq!(split_shell_commands(command), vec![command.to_string()]);
+    }
+    for command in [
+        "echo {1..99999999999999999999}; rm x",
+        "echo ~+99999999999999999999 && rm x",
+    ] {
+        assert_eq!(
+            permissions.check_subcommand(normal(), "bash", command),
+            Decision::Deny,
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn split_shell_commands_input_fd_duplication_is_not_background() {
     assert_eq!(
         split_shell_commands("cat <&0 | head"),
