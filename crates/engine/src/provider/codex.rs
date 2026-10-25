@@ -383,7 +383,7 @@ mod tests {
         let env = test_env(issuer, tmp.path().join("tokens.json"));
         save_tokens_to(&previous_tokens(), &env.token_store).unwrap();
 
-        let out = refresh_tokens_with_env(&reqwest::Client::new(), "prev-refresh", &env)
+        let out = refresh_tokens_with_env(&smelt_provider::http_client(), "prev-refresh", &env)
             .await
             .unwrap();
 
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn apply_headers_includes_bearer_and_optional_account_id() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let req = CodexTokens {
             access_token: "access-token".into(),
             refresh_token: "refresh-token".into(),

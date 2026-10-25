@@ -699,7 +699,7 @@ mod tests {
             smelt_provider::kimi_code::API_BASE.to_string(),
             "token".to_string(),
             "openai-compatible",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
 
@@ -713,14 +713,14 @@ mod tests {
             smelt_provider::kimi_code::API_BASE.to_string(),
             "token".to_string(),
             "kimi-code",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
         let openai = EngineProvider::new(
             "https://api.openai.com/v1".to_string(),
             "token".to_string(),
             "openai",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
 
@@ -818,7 +818,7 @@ mod tests {
             "https://api.cerebras.ai/v1/chat/completions".to_string(),
             "token".to_string(),
             "openai-compatible",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
 
@@ -1424,7 +1424,7 @@ mod tests {
     // ---- Provider basics ----
 
     fn http_client() -> Client {
-        Client::new()
+        smelt_provider::http_client()
     }
 
     #[test]
@@ -1560,7 +1560,7 @@ mod tests {
                 api_base.clone(),
                 String::new(),
                 provider_type,
-                Client::builder()
+                smelt_provider::http_client_builder()
                     .timeout(Duration::from_millis(50))
                     .build()
                     .unwrap(),
@@ -1584,7 +1584,7 @@ mod tests {
                 api_base.clone(),
                 String::new(),
                 provider_type,
-                Client::builder()
+                smelt_provider::http_client_builder()
                     .timeout(Duration::from_millis(50))
                     .build()
                     .unwrap(),

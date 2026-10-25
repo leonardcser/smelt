@@ -32,7 +32,7 @@ futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false }
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "rustls-no-provider"] }
 
 # Serde
 serde = { version = "1", features = ["derive"] }

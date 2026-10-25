@@ -1064,7 +1064,7 @@ mod tests {
         };
         let mut opts = ChatOptions::new(&cancel);
         opts.on_attempt = Some(&on_attempt);
-        let response = ProviderClient::new(reqwest::Client::new())
+        let response = ProviderClient::new(crate::http_client())
             .chat(
                 ChatRequest {
                     provider: ChatProvider::api_key(ProviderKind::OpenAiCompatible, "test-only"),
@@ -1118,7 +1118,7 @@ mod tests {
             }
             bodies
         });
-        let client = ProviderClient::new(reqwest::Client::new());
+        let client = ProviderClient::new(crate::http_client());
         let cancel = CancellationToken::new();
         let opts = ChatOptions::new(&cancel);
         let config = ModelConfig::default();
@@ -1223,7 +1223,7 @@ mod tests {
             on_delta: Some(&ignore_delta),
             on_attempt: opts.on_attempt,
         };
-        ProviderClient::new(reqwest::Client::new())
+        ProviderClient::new(crate::http_client())
             .chat(
                 ChatRequest {
                     provider: ChatProvider::api_key(ProviderKind::OpenAi, "key"),
@@ -1428,7 +1428,7 @@ mod tests {
             };
             let mut opts = ChatOptions::new(&cancel);
             opts.on_attempt = Some(&on_attempt);
-            ProviderClient::new(reqwest::Client::new())
+            ProviderClient::new(crate::http_client())
                 .chat(
                     ChatRequest {
                         provider: ChatProvider::codex(&tokens, None),
@@ -1499,7 +1499,7 @@ mod tests {
         let tokens = test_codex_tokens();
         let cancel = CancellationToken::new();
         let opts = ChatOptions::new(&cancel);
-        let response = ProviderClient::new(reqwest::Client::new())
+        let response = ProviderClient::new(crate::http_client())
             .chat(
                 ChatRequest {
                     provider: ChatProvider::codex(&tokens, Some("turn")),

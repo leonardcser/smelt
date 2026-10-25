@@ -1692,7 +1692,7 @@ async fn installing_the_runtime_http_client_starts_managed_refreshes() {
         Vec::new(),
     )]);
 
-    app.install_http_client(engine::HttpClient::new());
+    app.install_http_client(smelt_provider::http_client());
 
     assert_eq!(
         app.managed_model_status(engine::auth::AuthProvider::Codex),

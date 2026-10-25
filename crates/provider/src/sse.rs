@@ -236,7 +236,11 @@ mod tests {
                 .await
                 .unwrap();
         });
-        reqwest::get(format!("http://{addr}")).await.unwrap()
+        crate::http_client()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

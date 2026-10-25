@@ -1224,10 +1224,10 @@ async fn async_main() {
     // context-window fetch) so we only build one rustls config + parse webpki-roots
     // once. The engine builds its own client because it sets a custom user-agent
     // for provider request gating.
-    let startup_http_client = reqwest::Client::builder()
+    let startup_http_client = smelt_provider::http_client_builder()
         .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+        .unwrap_or_else(|_| smelt_provider::http_client());
 
     let startup::ResolvedStartup {
         runtime,

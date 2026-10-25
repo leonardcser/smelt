@@ -139,10 +139,10 @@ pub(crate) async fn engine_task(
 ) {
     // Some openai-compatible endpoints gate on User-Agent (e.g. api.kimi.com).
     // Per-request header() calls (Copilot, Codex) still override this.
-    let client = reqwest::Client::builder()
+    let client = smelt_provider::http_client_builder()
         .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+        .unwrap_or_else(|_| smelt_provider::http_client());
     if config.transport.is_none() {
         smelt_provider::catalog::spawn_fetch(
             client.clone(),
@@ -3763,7 +3763,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_history_preparation_retains_turn_commands_in_order() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
         let (event_tx, host_tx, _outputs) = crate::output_channel(crate::HostCallbacks::Enabled);
@@ -4092,7 +4092,7 @@ mod tests {
 
     #[test]
     fn current_turn_input_classifies_notes_and_preserves_commands() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, host_tx, _output_rx) = crate::output_channel(crate::HostCallbacks::Enabled);
@@ -4324,7 +4324,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequential_tool_wait_replays_ordered_context_updates_before_result() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, host_tx, _output_rx) = crate::output_channel(crate::HostCallbacks::Enabled);
@@ -4543,7 +4543,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             std::sync::Arc::new(crate::clock::RealClock),
         );
-        let provider = build_provider(&target, &reqwest::Client::new(), &config);
+        let provider = build_provider(&target, &smelt_provider::http_client(), &config);
 
         assert_eq!(provider.api_base(), "https://target.example/v1");
         assert_eq!(provider.api_key(), "target-key");

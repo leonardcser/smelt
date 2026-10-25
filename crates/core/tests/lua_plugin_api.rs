@@ -376,7 +376,7 @@ async fn lua_tool_schema_reaches_openai_compatible_request_with_array_required_f
     let cancel = CancellationToken::new();
     let options = ChatOptions::new(&cancel);
 
-    ProviderClient::new(reqwest::Client::new())
+    ProviderClient::new(smelt_provider::http_client())
         .chat(
             ChatRequest {
                 provider: ChatProvider::api_key(ProviderKind::OpenAiCompatible, "test-key"),

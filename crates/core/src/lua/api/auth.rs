@@ -83,7 +83,7 @@ fn spawn_authenticated_request(shared: &Arc<LuaShared>, task_id: u64, req: AuthR
     let cancel = crate::lua::current_task_cancel().unwrap_or_default();
     let sink = shared.resume_sink();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let payload = tokio::select! {
             biased;
             _ = cancel.cancelled() => serde_json::json!({ "__cancelled": true }),
@@ -104,7 +104,7 @@ fn spawn_managed_usage(
     let cancel = crate::lua::current_task_cancel().unwrap_or_default();
     let sink = shared.resume_sink();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let payload = tokio::select! {
             biased;
             _ = cancel.cancelled() => serde_json::json!({ "__cancelled": true }),

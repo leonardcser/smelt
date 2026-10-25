@@ -19,6 +19,7 @@ mod error;
 mod event;
 mod extract;
 mod format;
+mod http;
 pub mod kimi_code;
 mod kind;
 mod openai;
@@ -55,6 +56,7 @@ pub(crate) use format::apply_response_format;
 pub use format::ResponseFormat;
 #[cfg(feature = "test-support")]
 pub use format::{anthropic_supports_structured_output, apply_response_format};
+pub use http::{client as http_client, client_builder as http_client_builder};
 #[cfg(not(feature = "test-support"))]
 pub(crate) use kind::api_key_auth;
 #[cfg(feature = "test-support")]
