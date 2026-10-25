@@ -233,8 +233,12 @@ impl TestApp {
     /// `queued_inputs` is filled by pressing Enter on the prompt while a
     /// turn is active; the harness short-circuits that flow but honors
     /// the same `MAX_QUEUED_MESSAGES` cap so the fuzz observes the real
-    /// drop-on-overflow behavior instead of unbounded growth.
+    /// drop-on-overflow behavior instead of unbounded growth. Like the prompt,
+    /// it never queues an empty submission.
     pub fn push_queued_message(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
         self.app
             .prompt
             .try_queue_turn(crate::app::QueuedInput::request_from_text(
@@ -291,14 +295,26 @@ impl TestApp {
     }
 
     /// Whether an unconsumed deferred note will start a follow-up turn after
-    /// the active turn finishes successfully.
+    /// the active turn finishes successfully. A note identical to the item the
+    /// active turn submitted is already delivered by that turn's own history.
     pub fn has_pending_history_follow_up(&self) -> bool {
+        let submitted = self.app.conversation.active().and_then(|turn| {
+            let idx = turn.submitted_history_idx;
+            self.app
+                .session_history_range(idx..idx + 1)
+                .ok()?
+                .into_iter()
+                .next()
+        });
         self.app
             .conversation
             .pending_history_appends()
             .iter()
             .any(|append| {
                 append.delivery() == crate::app::PendingHistoryDelivery::FollowUpIfUnconsumed
+                    && !submitted
+                        .as_ref()
+                        .is_some_and(|item| append.matches_history_item(item))
             })
     }
 
