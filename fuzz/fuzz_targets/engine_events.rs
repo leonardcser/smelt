@@ -659,7 +659,7 @@ fn ask_round_trip(
     };
     feed(app, EngineEvent::EngineAskResponse { id, message, error });
     assert!(
-        app.pending_ask_id().is_none(),
+        !app.ask_is_pending(id),
         "engine ask callback survived its terminal response"
     );
 }

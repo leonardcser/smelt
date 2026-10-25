@@ -561,6 +561,15 @@ impl TestApp {
         true
     }
 
+    /// Whether the engine ask with this id still has a response callback.
+    pub fn ask_is_pending(&self, id: u64) -> bool {
+        let shared = self.app.lua.shared().core_arc();
+        shared
+            .ask_callbacks
+            .lock()
+            .is_ok_and(|callbacks| callbacks.contains_key(&id))
+    }
+
     /// Smallest pending `smelt.engine.ask` callback id, if any.
     /// Stories that drive `/btw` or other ask flows use this to
     /// pair their synthesised `EngineAskResponse` to the right id.
