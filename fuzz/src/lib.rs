@@ -1181,12 +1181,15 @@ struct Snapshot {
     turn_paused: bool,
     queued_next_starts: bool,
     follow_up_context_append: bool,
+    follow_up_context_append_unfiltered: bool,
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
     checkpoint_first_live_index: Option<usize>,
     pending_history_appends: usize,
     pending_history_follow_up: bool,
+    pending_history_follow_up_unfiltered: bool,
+    submitted_history_idx: Option<usize>,
     pending_lua_reload: bool,
     transcript_blocks: usize,
     pending_confirms: usize,
@@ -1215,12 +1218,15 @@ impl Snapshot {
             turn_paused: app.turn_is_paused(),
             queued_next_starts: app.next_queued_input_starts_turn(),
             follow_up_context_append: app.next_follow_up_appends_context_note(),
+            follow_up_context_append_unfiltered: app.next_follow_up_appends_context_note_unfiltered(),
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
             checkpoint_first_live_index: app.checkpoint_first_live_index(),
             pending_history_appends: app.pending_history_append_count(),
             pending_history_follow_up: app.has_pending_history_follow_up(),
+            pending_history_follow_up_unfiltered: app.has_pending_history_follow_up_unfiltered(),
+            submitted_history_idx: app.submitted_history_idx(),
             pending_lua_reload: app.pending_lua_reload(),
             transcript_blocks: app.transcript_block_count(),
             pending_confirms: app.pending_confirm_count(),
@@ -1240,9 +1246,31 @@ fn expected_model_history_len(pre: &Snapshot, msg_count: usize) -> usize {
     pre.checkpoint_first_live_index.unwrap_or(0) + msg_count
 }
 
-fn completed_turn_starts_queued_followup(pre: &Snapshot, targeted_active: bool) -> bool {
+/// Whether the turn's final history drops the item the active turn submitted.
+fn submitted_item_dropped(pre: &Snapshot, msg_count: usize) -> bool {
+    let first_index = pre.checkpoint_first_live_index.unwrap_or(0);
+    pre.submitted_history_idx
+        .is_some_and(|idx| idx >= first_index && idx - first_index >= msg_count)
+}
+
+/// Whether a deferred note still needs to start a follow-up once the turn's
+/// final history is merged. A note identical to the submitted item is delivered
+/// by that item unless the incoming history replaces the item away.
+fn pending_follow_up_after_merge(pre: &Snapshot, msg_count: usize) -> bool {
+    if submitted_item_dropped(pre, msg_count) {
+        pre.pending_history_follow_up_unfiltered
+    } else {
+        pre.pending_history_follow_up
+    }
+}
+
+fn completed_turn_starts_queued_followup(
+    pre: &Snapshot,
+    msg_count: usize,
+    targeted_active: bool,
+) -> bool {
     targeted_active
-        && (pre.queued_next_starts || pre.pending_history_follow_up)
+        && (pre.queued_next_starts || pending_follow_up_after_merge(pre, msg_count))
         && !pre.working.busy
 }
 
@@ -1251,8 +1279,13 @@ fn expected_completed_history_len(
     msg_count: usize,
     targeted_active: bool,
 ) -> usize {
-    let queued_followup = completed_turn_starts_queued_followup(pre, targeted_active);
-    let queued_context_append = usize::from(queued_followup && pre.follow_up_context_append);
+    let queued_followup = completed_turn_starts_queued_followup(pre, msg_count, targeted_active);
+    let context_append = if submitted_item_dropped(pre, msg_count) {
+        pre.follow_up_context_append_unfiltered
+    } else {
+        pre.follow_up_context_append
+    };
+    let queued_context_append = usize::from(queued_followup && context_append);
     let queued_request_append = usize::from(queued_followup);
     expected_model_history_len(pre, msg_count) + queued_context_append + queued_request_append
 }
@@ -1472,7 +1505,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 let expected = expected_completed_history_len(pre, msg_count, targeted_active);
                 let pending_appends = if targeted_active {
                     pre.pending_history_appends
-                        .saturating_sub(usize::from(pre.pending_history_follow_up))
+                        .saturating_sub(usize::from(pending_follow_up_after_merge(pre, msg_count)))
                 } else {
                     0
                 };
@@ -1508,7 +1541,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     );
                 }
             }
-            if targeted_active && !completed_turn_starts_queued_followup(pre, targeted_active) {
+            if targeted_active && !completed_turn_starts_queued_followup(pre, msg_count, targeted_active) {
                 assert!(
                     !post.agent_running,
                     "TurnComplete against active turn did not end it",
