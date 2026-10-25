@@ -1194,7 +1194,7 @@ impl DocumentViewExecutor {
             return None;
         }
         let total_rows = document.snapshot().total_rows;
-        state.materialized.total_rows = total_rows;
+        state.materialized.adopt_document_total(total_rows);
         if total_rows == 0 || viewport_rows == 0 {
             return None;
         }
@@ -1447,7 +1447,7 @@ impl DocumentViewExecutor {
             return (Status::Ignored, None);
         }
         let total_rows = document.snapshot().total_rows;
-        state.materialized.total_rows = total_rows;
+        state.materialized.adopt_document_total(total_rows);
         if viewport.rect.height == 0 || total_rows == 0 {
             return (Status::Consumed, None);
         }
