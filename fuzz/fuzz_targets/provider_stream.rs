@@ -238,11 +238,7 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                     _ => {}
                 }
             }
-            summary.ok &= tools.values().all(|(id, name, args)| {
-                !id.is_empty()
-                    && !name.is_empty()
-                    && serde_json::from_str::<serde_json::Value>(args).is_ok()
-            });
+            summary.ok &= tool_batch_is_valid(tools.values());
         }
         1 => {
             let mut active_tools = std::collections::HashSet::new();
@@ -302,18 +298,7 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                     _ => {}
                 }
             }
-            // The provider rejects the whole batch when any call lacks an id or
-            // name, repeats an id, or has arguments that are not a JSON object.
-            let mut ids = std::collections::HashSet::new();
-            summary.ok &= tools.values().all(|(id, name, args)| {
-                !id.is_empty()
-                    && !name.is_empty()
-                    && ids.insert(*id)
-                    && matches!(
-                        serde_json::from_str::<serde_json::Value>(args),
-                        Ok(serde_json::Value::Object(_))
-                    )
-            });
+            summary.ok &= tool_batch_is_valid(tools.values());
         }
     }
     if !summary.ok {
@@ -321,6 +306,21 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
         summary.reasoning_len = 0;
     }
     summary
+}
+
+/// The provider rejects the whole batch when any call lacks an id or name,
+/// repeats an id, or has arguments that are not a JSON object.
+fn tool_batch_is_valid<'a>(tools: impl Iterator<Item = &'a (&'a str, &'a str, String)>) -> bool {
+    let mut ids = std::collections::HashSet::new();
+    tools.into_iter().all(|(id, name, args)| {
+        !id.is_empty()
+            && !name.is_empty()
+            && ids.insert(*id)
+            && matches!(
+                serde_json::from_str::<serde_json::Value>(args),
+                Ok(serde_json::Value::Object(_))
+            )
+    })
 }
 
 fn assert_controlled_summary(actual: &FuzzProviderSummary, expected: ExpectedSummary) {
