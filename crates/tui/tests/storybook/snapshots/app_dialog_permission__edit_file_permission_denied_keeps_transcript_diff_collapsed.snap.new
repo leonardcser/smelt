@@ -1,0 +1,35 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 668
+expression: frame.text()
+---
+* edit_file src/main.rs                                                14:37:03
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+─ interrupted ──────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                               1:1 100%

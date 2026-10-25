@@ -6,6 +6,7 @@ dim: 80 28
   0   0   1 fg=AnsiValue(208)
   0   1  10 attrs=dim
   0  69  10 attrs=dim
+  1   2  24 attrs=dim
  11   0  80 fg=AnsiValue(208)
  12   1   9 fg=AnsiValue(208)
  13   0  80 fg=AnsiValue(244)

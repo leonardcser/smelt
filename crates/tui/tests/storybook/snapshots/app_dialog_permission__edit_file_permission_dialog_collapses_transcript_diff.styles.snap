@@ -1,0 +1,49 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.styles_text()
+---
+dim: 80 30
+  0   0   1 fg=AnsiValue(208)
+  0   1  10 attrs=dim
+  0  69  10 attrs=dim
+  1   2  22 attrs=dim
+ 14   0  80 fg=AnsiValue(208)
+ 15   1   9 fg=AnsiValue(208)
+ 16   0  80 fg=AnsiValue(244)
+ 17   0   3 fg=AnsiValue(244)
+ 17   5   2 fg=Rgb { r: 102, g: 217, b: 239 }
+ 17   7   1 fg=Rgb { r: 248, g: 248, b: 242 }
+ 17   8   4 fg=Rgb { r: 166, g: 226, b: 46 }
+ 17  12   4 fg=Rgb { r: 248, g: 248, b: 242 }
+ 18   0   3 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
+ 18   3   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
+ 18   5  13 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
+ 18  18   8 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 60, g: 20, b: 20 }
+ 18  26   5 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 110, g: 35, b: 35 }
+ 18  31   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 60, g: 20, b: 20 }
+ 18  32   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
+ 18  34  45 bg=Rgb { r: 60, g: 20, b: 20 }
+ 19   0   3 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
+ 19   3   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
+ 19   5  13 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 19  18   8 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 19  26   5 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 35, g: 95, b: 35 }
+ 19  31   1 fg=Rgb { r: 230, g: 219, b: 116 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 19  32   2 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 19  34  45 bg=Rgb { r: 20, g: 50, b: 20 }
+ 20   0   3 fg=AnsiValue(244)
+ 20   5   1 fg=Rgb { r: 248, g: 248, b: 242 }
+ 21   0  80 fg=AnsiValue(244)
+ 22   1   6 attrs=dim
+ 23   0   1 bg=AnsiValue(237)
+ 23   1   1 fg=Black bg=White
+ 23   2   3 bg=AnsiValue(237) attrs=dim
+ 23   5  10 fg=AnsiValue(208) bg=AnsiValue(237)
+ 23  15  65 bg=AnsiValue(237)
+ 24   1   4 attrs=dim
+ 25   1   4 attrs=dim
+ 26   1   4 attrs=dim
+ 28   2  26 attrs=dim
+ 29   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
+ 29  10  64 bg=AnsiValue(233)
+ 29  74   6 fg=AnsiValue(244) bg=AnsiValue(233)
