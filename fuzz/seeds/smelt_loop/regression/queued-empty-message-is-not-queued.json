@@ -1,0 +1,34 @@
+{
+  "vim": false,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "oom"
+      }
+    },
+    {
+      "kind": "push_queued_message",
+      "data": ""
+    },
+    {
+      "kind": "push_queued_message",
+      "data": "\u0000h"
+    },
+    {
+      "kind": "reload_lua"
+    },
+    {
+      "kind": "reload_lua"
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 0
+      }
+    }
+  ]
+}
