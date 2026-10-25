@@ -1214,12 +1214,16 @@ fn viewport_anchor_preserved(frame: &TranscriptScrollTraceFrame) -> bool {
 fn no_input_scroll_top_change_preserved_content(frames: &[TranscriptScrollTraceFrame]) -> bool {
     !frames.is_empty()
         && frames.iter().all(|frame| {
-            matches!(
-                frame.scroll_intent,
+            if frame.placeholder_rows_visible {
+                return false;
+            }
+            match frame.scroll_intent {
                 TranscriptScrollIntent::PreserveViewport
-                    | TranscriptScrollIntent::ResizeReflow { .. }
-            ) && viewport_anchor_preserved(frame)
-                && !frame.placeholder_rows_visible
+                | TranscriptScrollIntent::ResizeReflow { .. } => viewport_anchor_preserved(frame),
+                // A no-input render submits no input, so any other intent is
+                // one an earlier unsettled render left pending.
+                _ => true,
+            }
         })
 }
 
