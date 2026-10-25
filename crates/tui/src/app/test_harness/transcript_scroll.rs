@@ -63,6 +63,7 @@ pub(super) struct TranscriptScrollProbeState {
     last_user_delta_anchor: Option<UserDeltaAnchor>,
     pending_wheel_movement: Option<PendingWheelMovement>,
     pending_search_match_check: bool,
+    selection_clearing_command: bool,
     fixture: Option<SparseTranscriptFixture>,
 }
 
@@ -711,6 +712,8 @@ impl TestApp {
         self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         self.app.transcript_win_mut().set_vim_enabled(true);
         self.app.transcript_win_mut().set_vim_mode(VimMode::Normal);
+        self.transcript_scroll_probe.selection_clearing_command =
+            self.app.transcript_win().selection_active();
         match command {
             TranscriptScrollProbeCommand::MoveDown => self.press(KeyCode::Down),
             TranscriptScrollProbeCommand::MoveUp => self.press(KeyCode::Up),
@@ -1067,6 +1070,7 @@ fn assert_transcript_scroll_probe_frames(
     state: &mut TranscriptScrollProbeState,
     frames: &[TranscriptScrollTraceFrame],
 ) {
+    let selection_clearing_command = std::mem::take(&mut state.selection_clearing_command);
     for frame in frames {
         assert!(
             !frame.placeholder_rows_visible,
@@ -1091,6 +1095,11 @@ fn assert_transcript_scroll_probe_frames(
                     "local transcript movement lost its visible content anchor: {frame:?}"
                 );
                 assert_record_ranges_overlap(state, frame);
+                // A motion key first clears the selection, which scrolls the
+                // cursor into view before the motion applies.
+                if selection_clearing_command && frame.input_event_or_tick == "document_command" {
+                    continue;
+                }
                 assert_user_delta_from_frame_start(*rows, frame);
                 assert_user_delta_direction(state, *rows, frame);
             }
