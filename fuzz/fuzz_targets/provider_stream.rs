@@ -276,7 +276,8 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
             summary.ok &= !tool_without_item_id;
         }
         _ => {
-            let mut active_tools = std::collections::HashSet::new();
+            let mut tools: std::collections::HashMap<u8, (&str, &str, String)> =
+                std::collections::HashMap::new();
             for event in events {
                 match event {
                     Event::AnthropicText(text) if !text.is_empty() => {
@@ -287,18 +288,32 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                         summary.reasoning_len += text.len();
                         summary.thinking_deltas += 1;
                     }
-                    Event::AnthropicToolStart { idx, .. } => {
-                        active_tools.insert(*idx);
+                    // A repeated start for an index replaces the earlier call.
+                    Event::AnthropicToolStart { idx, id, name } => {
+                        tools.insert(*idx, (id.as_str(), name.as_str(), String::new()));
                     }
-                    Event::AnthropicToolArgs { idx, args }
-                        if !args.is_empty() && active_tools.contains(idx) =>
-                    {
-                        summary.tool_arg_deltas += 1;
+                    Event::AnthropicToolArgs { idx, args } if !args.is_empty() => {
+                        if let Some(tool) = tools.get_mut(idx) {
+                            tool.2.push_str(args);
+                            summary.tool_arg_deltas += 1;
+                        }
                     }
                     Event::AnthropicDone => summary.ok = true,
                     _ => {}
                 }
             }
+            // The provider rejects the whole batch when any call lacks an id or
+            // name, repeats an id, or has arguments that are not a JSON object.
+            let mut ids = std::collections::HashSet::new();
+            summary.ok &= tools.values().all(|(id, name, args)| {
+                !id.is_empty()
+                    && !name.is_empty()
+                    && ids.insert(*id)
+                    && matches!(
+                        serde_json::from_str::<serde_json::Value>(args),
+                        Ok(serde_json::Value::Object(_))
+                    )
+            });
         }
     }
     if !summary.ok {
