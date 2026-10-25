@@ -2200,7 +2200,7 @@ fn apply_macro_tool_round_trip(
     is_error: bool,
 ) {
     if !app.agent_running() {
-        app.start_turn(u64::from(call_id));
+        app.start_turn(app.next_turn_id());
     }
     apply(
         app,
@@ -2236,14 +2236,13 @@ fn apply_macro_tool_round_trip(
 
 fn apply_macro_stream_turn(
     app: &mut TestApp,
-    turn_id: u8,
     text: String,
     thinking: String,
     chunks: u8,
     error: bool,
 ) {
     if !app.agent_running() {
-        app.start_turn(u64::from(turn_id));
+        app.start_turn(app.next_turn_id());
     }
     let text = smelt_buffer::text::slice(&text, 0..256).to_string();
     let thinking = smelt_buffer::text::slice(&thinking, 0..256).to_string();
@@ -2296,7 +2295,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
             app.install_prompt_placeholder(text, accept, dismiss);
         }
         FuzzOp::ClearPlaceholder => app.clear_prompt_placeholder(),
-        FuzzOp::StartTurn(id) => app.start_turn(u64::from(id)),
+        FuzzOp::StartTurn(_) => app.start_turn(app.next_turn_id()),
         FuzzOp::TogglePaneFocus => app.toggle_pane_focus(),
         FuzzOp::OpenOverlay { variant } => app.open_synthetic_overlay(variant),
         FuzzOp::ReloadLua => {
@@ -2427,12 +2426,12 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
             is_error,
         } => apply_macro_tool_round_trip(app, call_id, tool_name, args, output, is_error),
         FuzzOp::MacroStreamTurn {
-            turn_id,
             text,
             thinking,
             chunks,
             error,
-        } => apply_macro_stream_turn(app, turn_id, text, thinking, chunks, error),
+            ..
+        } => apply_macro_stream_turn(app, text, thinking, chunks, error),
         FuzzOp::ProbePromptCursorAfterTurn { variant } => {
             app.probe_prompt_cursor_after_turn(variant);
         }
