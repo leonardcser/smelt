@@ -495,6 +495,10 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             assert_eq!(app.pending_confirm_count(), 1);
             assert!(app.resolve_first_confirm(approve, None));
             assert_eq!(app.pending_confirm_count(), 0);
+            if !approve {
+                // Denying without a message stops the agent and ends the turn.
+                model.active_turn = None;
+            }
             let decisions: Vec<_> = app
                 .actions_since(action_index)
                 .iter()
