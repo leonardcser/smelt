@@ -225,6 +225,10 @@ impl TranscriptHydrationQueue {
         })
     }
 
+    pub(super) fn awaits_record(&self, result: &TranscriptHydrationWorkerResult) -> bool {
+        self.record.as_ref() == result.record.as_ref()
+    }
+
     pub(super) fn complete(&mut self, result: &TranscriptHydrationWorkerResult) {
         if result.revision != self.revision {
             return;
@@ -240,6 +244,13 @@ impl TranscriptHydrationQueue {
 
     pub(super) fn is_empty(&self) -> bool {
         self.record.is_none() && self.blocks.is_empty()
+    }
+
+    pub(super) fn cancel_record(&mut self) {
+        if self.record.take().is_some() {
+            self.record_semantic = false;
+            self.bump_revision();
+        }
     }
 
     pub(super) fn record_is_pending(&self) -> bool {

@@ -1079,6 +1079,7 @@ impl TranscriptDocument {
             return false;
         }
         let _perf = smelt_perf::perf::begin("transcript:hydration:install_result");
+        let record_current = self.pending_hydration.awaits_record(&result);
         self.pending_hydration.complete(&result);
         for (block_id, _, _) in &result.hydrated_blocks {
             self.hydration.failed_blocks.remove(block_id);
@@ -1092,7 +1093,7 @@ impl TranscriptDocument {
         }
         let extent_changed = total_count_before != self.records.total_count();
         let mut projection_changed = false;
-        if let Some(record) = result.record.as_ref() {
+        if let Some(record) = result.record.as_ref().filter(|_| record_current) {
             self.hydration.record_failed = !result.record_complete;
             if !result.record_complete {
                 smelt_perf::perf::record_value("transcript:record_window:hydration_failures", 1);
@@ -2021,6 +2022,7 @@ impl TranscriptDocument {
             }
             (
                 Some(PendingTranscriptProjection {
+                    intent: superseded,
                     restore: mut pending_restore,
                     local_scroll_top: pending_local_scroll_top,
                     active_record_range_before,
@@ -2028,6 +2030,13 @@ impl TranscriptDocument {
                 }),
                 intent @ TranscriptScrollIntent::UserDelta { rows },
             ) => {
+                if matches!(
+                    superseded,
+                    TranscriptScrollIntent::ScrollbarFraction { .. }
+                        | TranscriptScrollIntent::ApproximateRowSeek(_)
+                ) {
+                    self.pending_hydration.cancel_record();
+                }
                 pending_restore.merge(next_restore);
                 next_restore = pending_restore;
                 let local_scroll_top = local_scroll_top.or_else(|| {
