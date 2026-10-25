@@ -23,6 +23,11 @@ const ESC_TIMEOUT: Duration = Duration::from_millis(40);
 const KITTY_PROBE: &[u8] = b"\x1b_Gi=16777214,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\";
 #[cfg(unix)]
 const CELL_PIXEL_QUERY: &[u8] = b"\x1b[16t";
+/// Primary device attributes request. Terminals answer queries in order, so a
+/// reply to this one arriving before the kitty reply proves the terminal does
+/// not implement the kitty graphics protocol.
+#[cfg(unix)]
+const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
 
 pub(crate) struct TerminalInput {
     rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
@@ -73,10 +78,7 @@ impl TerminalInput {
         &mut self,
         write: impl FnOnce(&[u8]) -> io::Result<bool>,
     ) -> bool {
-        if !matches!(
-            write(&smelt_term::kitty_control_sequence(KITTY_PROBE)),
-            Ok(true)
-        ) {
+        if !matches!(write(&kitty_probe_query()), Ok(true)) {
             return false;
         }
         matches!(
@@ -113,6 +115,18 @@ impl Drop for TerminalInput {
     fn drop(&mut self) {
         drop(self.shutdown.take());
     }
+}
+
+/// The kitty graphics query, followed by the device attributes fence when the
+/// terminal is reached directly. tmux answers device attributes itself, which
+/// says nothing about the outer terminal, so it keeps the timeout alone.
+#[cfg(unix)]
+fn kitty_probe_query() -> Vec<u8> {
+    let mut query = smelt_term::kitty_control_sequence(KITTY_PROBE);
+    if std::env::var_os("TMUX").is_none() {
+        query.extend_from_slice(DEVICE_ATTRIBUTES_QUERY);
+    }
+    query
 }
 
 #[cfg(unix)]
@@ -481,6 +495,10 @@ impl Parser {
                     self.buf.drain(..consumed);
                     self.cell_geometry = Some((width, height));
                 }
+                ParseResult::DeviceAttributes { consumed } => {
+                    self.buf.drain(..consumed);
+                    self.probe_response.get_or_insert(false);
+                }
                 ParseResult::Invalid { consumed } => {
                     if self.buf.starts_with(b"\x1b_") && self.buf.len() > 256 {
                         self.drop_string_tail = true;
@@ -508,6 +526,9 @@ enum ParseResult {
     CellGeometry {
         width: u32,
         height: u32,
+        consumed: usize,
+    },
+    DeviceAttributes {
         consumed: usize,
     },
     Invalid {
@@ -570,9 +591,9 @@ fn parse_escape(buf: &[u8]) -> ParseResult {
             }
             ParseResult::NeedMore => ParseResult::NeedMore,
             ParseResult::Invalid { consumed } => invalid(consumed + 1),
-            ParseResult::Probe { consumed, .. } | ParseResult::CellGeometry { consumed, .. } => {
-                invalid(consumed + 1)
-            }
+            ParseResult::Probe { consumed, .. }
+            | ParseResult::CellGeometry { consumed, .. }
+            | ParseResult::DeviceAttributes { consumed } => invalid(consumed + 1),
         },
     }
 }
@@ -651,6 +672,7 @@ fn parse_csi(buf: &[u8]) -> ParseResult {
         b'M' => parse_rxvt_mouse(params, consumed),
         b'u' => parse_csi_u(params, consumed),
         b't' => parse_cell_geometry(params, consumed),
+        b'c' if params.starts_with(b"?") => ParseResult::DeviceAttributes { consumed },
         _ => invalid(consumed),
     }
 }
@@ -1154,13 +1176,56 @@ mod tests {
             .build()
             .unwrap();
         let supported = rt.block_on(input.probe_kitty(|query| {
-            assert_eq!(query, smelt_term::kitty_control_sequence(KITTY_PROBE));
+            assert!(query.starts_with(&smelt_term::kitty_control_sequence(KITTY_PROBE)));
             writer.write_all(b"z\x1b_Gi=16777214;OK\x1b\\")?;
             Ok(true)
         }));
         assert!(supported);
         assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
         assert!(input.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_backed_kitty_probe_fence_reports_unsupported_without_waiting() {
+        let (mut input, mut writer, _) = pipe_terminal_input();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let supported = rt.block_on(input.probe_kitty(|query| {
+            assert!(query.starts_with(&smelt_term::kitty_control_sequence(KITTY_PROBE)));
+            writer.write_all(b"\x1b[?62;4c")?;
+            Ok(true)
+        }));
+        assert!(!supported);
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_backed_kitty_probe_fence_after_reply_keeps_support() {
+        let (mut input, mut writer, _) = pipe_terminal_input();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let supported = rt.block_on(input.probe_kitty(|_| {
+            writer.write_all(b"\x1b_Gi=16777214;OK\x1b\\\x1b[?62;4c")?;
+            Ok(true)
+        }));
+        assert!(supported);
+    }
+
+    #[test]
+    fn device_attributes_reply_is_consumed_without_typing_into_prompt() {
+        let mut p = Parser::new();
+        assert_eq!(keys_text(&p.advance(b"a\x1b[?62;4;22cb")), "ab");
+        assert_eq!(p.probe_response, Some(false));
+        p.probe_response = Some(true);
+        assert!(p.advance(b"\x1b[?62c").is_empty());
+        assert_eq!(p.probe_response, Some(true));
     }
 
     #[test]
