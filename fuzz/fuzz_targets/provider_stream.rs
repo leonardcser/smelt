@@ -246,8 +246,12 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
         }
         1 => {
             let mut active_tools = std::collections::HashSet::new();
+            let mut tool_without_item_id = false;
             for event in events {
                 match event {
+                    Event::OpenAiToolStart { item, .. } if item.is_empty() => {
+                        tool_without_item_id = true;
+                    }
                     Event::OpenAiText(text) if !text.is_empty() => {
                         summary.content_len += text.len();
                         summary.text_deltas += 1;
@@ -268,6 +272,8 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                     _ => {}
                 }
             }
+            // A tool call the provider cannot identify invalidates the whole stream.
+            summary.ok &= !tool_without_item_id;
         }
         _ => {
             let mut active_tools = std::collections::HashSet::new();
@@ -430,8 +436,9 @@ fuzz_target!(|input: Input| {
     let complete: Vec<_> = complete_events.iter().map(event_json).collect();
     let complete_expected = expected_stream_summary(wire, &complete_events);
     let complete_summary = fuzz_parse_provider_stream(wire, &complete);
+    let complete_ok = complete_expected.ok;
     assert_controlled_summary(&complete_summary, complete_expected);
-    if wire % 3 != 0 {
+    if wire % 3 != 0 && complete_ok {
         assert!(
             complete_summary.ok,
             "terminal provider event did not complete lifecycle"
