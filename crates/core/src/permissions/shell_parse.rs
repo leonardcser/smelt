@@ -11,9 +11,13 @@ use smelt_buffer::text::{byte_of_char, slice, trim_whitespace};
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
 const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
 const MAX_BRACE_EXPANSION_DEPTH: usize = 16;
+const MIN_OVERFLOWING_DIGITS: usize = 19;
 
 pub(super) fn parse(command: &str) -> Option<ast::Program> {
-    if has_unrepresentable_io_number(command) || has_deep_arithmetic_parentheses(command) {
+    if has_unrepresentable_io_number(command)
+        || has_deep_arithmetic_parentheses(command)
+        || has_unrepresentable_expansion_number(command)
+    {
         return None;
     }
     let mut parser = Parser::new(Cursor::new(command.as_bytes()), &ParserOptions::default());
@@ -34,6 +38,33 @@ fn has_unrepresentable_io_number(command: &str) -> bool {
             && number.chars().all(|ch| ch.is_ascii_digit())
             && number.parse::<ast::IoFd>().is_err()
     })
+}
+
+/// Whether a brace sequence bound or tilde stack index is too large for the
+/// parser's integer type, which makes the parser panic instead of failing.
+fn has_unrepresentable_expansion_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        let digits = slice(text, start..index);
+        if digits.len() < MIN_OVERFLOWING_DIGITS || digits.parse::<i64>().is_ok() {
+            continue;
+        }
+        let before = slice(text, 0..start);
+        let before = before.strip_suffix(['+', '-']).unwrap_or(before);
+        if before.ends_with(['{', '~']) || before.ends_with("..") {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_deep_arithmetic_parentheses(command: &str) -> bool {
@@ -93,14 +124,20 @@ fn has_deep_brace_expansion(word: &str) -> bool {
 }
 
 pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
-    if has_deep_arithmetic_parentheses(word) || has_deep_brace_expansion(word) {
+    if has_deep_arithmetic_parentheses(word)
+        || has_deep_brace_expansion(word)
+        || has_unrepresentable_expansion_number(word)
+    {
         return None;
     }
     word::parse(word, &ParserOptions::default()).ok()
 }
 
 pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
-    if has_deep_arithmetic_parentheses(word) || has_deep_brace_expansion(word) {
+    if has_deep_arithmetic_parentheses(word)
+        || has_deep_brace_expansion(word)
+        || has_unrepresentable_expansion_number(word)
+    {
         return None;
     }
     word::parse_heredoc(word, &ParserOptions::default()).ok()
@@ -113,7 +150,7 @@ pub(super) enum BraceExpansion {
 }
 
 pub(super) fn brace_expansion(word: &str, limit: usize) -> BraceExpansion {
-    if has_deep_brace_expansion(word) {
+    if has_deep_brace_expansion(word) || has_unrepresentable_expansion_number(word) {
         return BraceExpansion::Unresolved;
     }
     let parts = match word::parse_brace_expansions(word, &ParserOptions::default()) {
