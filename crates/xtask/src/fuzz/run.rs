@@ -20,6 +20,8 @@ use std::path::Path;
 use std::time::Duration;
 
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Replaying a grown corpus of slow, structured inputs takes minutes.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(1800);
 const FAIL_FAST: [&str; 3] = ["-ignore_crashes=0", "-ignore_ooms=0", "-ignore_timeouts=0"];
 
 #[derive(clap::Args)]
@@ -116,7 +118,7 @@ fn preflight(
     command.arg(corpus).arg("-runs=0").args(FAIL_FAST);
     project
         .runner
-        .run(command, Some(MAINTENANCE_TIMEOUT), OutputMode::Inherit)?
+        .run(command, Some(PREFLIGHT_TIMEOUT), OutputMode::Inherit)?
         .success(&format!(
             "{target} corpus preflight; inspect {}",
             data.artifacts(target).display()
