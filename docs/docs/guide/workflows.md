@@ -21,8 +21,8 @@ Use as many `@` references as you like. Attaching the same file twice won't send
 it twice.
 
 Paste with `Cmd+V` (or your terminal's paste). Images are attached inline, which
-is handy for screenshots of UI bugs or design mock-ups, and multi-line text is
-collapsed into a single attachment.
+is handy for screenshots of UI bugs or design mock-ups. Pasted text lands in the
+prompt as ordinary text you can scroll through and edit before sending.
 
 For rules the agent should always follow in a project, put them in an
 [`AGENTS.md`](../customize/agent.md#instructions-agentsmd).
@@ -86,11 +86,18 @@ You don't have to wait for a response to finish. Keep typing:
 - `Esc` pulls queued messages back into the prompt so you can edit them.
 - `Esc Esc` cancels active work or, when idle, rewinds to an earlier turn
   (`/rewind` does the same).
+- `Enter` on an empty prompt after an interrupt continues the turn where it
+  stopped. When idle, it continues from the last response.
 
 In vim visual mode, these act on the selection only. Messages queued during
 compaction run after it finishes.
 
 <figure class="term" data-replay="../../assets/replays/queue.json" aria-label="Queueing two messages while the agent works, then promoting the queue" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+Interrupt with `Esc Esc` when the agent heads the wrong way, then press `Enter` on
+the empty prompt to let it carry on:
+
+<figure class="term" data-replay="../../assets/replays/continue.json" aria-label="Interrupting a turn, then pressing Enter on an empty prompt to continue it" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 Selecting a line in visual mode and pressing `Enter` sends just that line:
 
@@ -168,16 +175,27 @@ smelt --resume              # open the session picker
 smelt --resume <SESSION_ID> # resume a specific session
 ```
 
-Inside smelt, `/resume` does the same. Use `/diff` afterwards to review what the
-last session changed.
+Inside smelt, `/resume` does the same:
 
-<figure class="term" data-replay="../../assets/replays/resume.json" aria-label="Resuming a session and reviewing its changes with /diff" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+<figure class="term" data-replay="../../assets/replays/resume.json" aria-label="Picking an earlier session with /resume" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+Use `/diff` to review what the session changed in the working tree:
+
+<figure class="term" data-replay="../../assets/replays/diff.json" aria-label="Reviewing the working tree changes with /diff" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+### Rewind to an earlier turn
+
+When a conversation takes a wrong turn, press `Esc Esc` while idle (or run
+`/rewind`). The picker lists your messages; pick one and the conversation rolls
+back to just before it, with that message back in the prompt to edit and send
+again.
+
+<figure class="term" data-replay="../../assets/replays/rewind.json" aria-label="Pressing Esc Esc, picking an earlier turn and getting its message back in the prompt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 Other session tools:
 
 - `/fork` branches the conversation into a new session, so you can try a different
   approach without losing the first.
-- `/rewind` (or `Esc Esc` when idle) rolls back to an earlier turn.
 - `/session` shows the id, paths, worktree, model, context usage, costs and
   compactions. Press `c` to copy the id or `y` to copy everything.
 - `smelt --ephemeral` starts a throwaway session that is deleted on exit and
@@ -205,14 +223,6 @@ Use `/compact` only for manual control, such as choosing what the summary keeps:
 Press `Esc Esc` to cancel it. Tune the automatic behavior with the `auto_compact`,
 `compact_threshold` and `compact_keep_recent_groups`
 [settings](../customize/settings.md).
-
-To make a session faster or cheaper:
-
-- **Reasoning effort:** `Ctrl+T` cycles `off` to `max`. Lower is faster and
-  cheaper; higher suits hard problems.
-- **Fast mode:** `/fast` requests accelerated inference when the model supports it.
-- **Helper model:** run titles and compaction on a cheaper
-  [helper model](../customize/providers.md#helper-models).
 
 ## Work on many tasks in parallel
 
@@ -256,10 +266,25 @@ a full tool call in the agent's context.
 
 ## Type faster
 
-The prompt grows with your input and the whole layout reflows when the terminal is
-resized:
+### Long prompts
 
-<figure class="term" data-replay="../../assets/replays/layout.json" aria-label="A multiline prompt, a help dialog and the window being resized" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+Paste a stack trace, a diff or a spec and the prompt grows to fit, then scrolls
+inside its own box. Move around it like any editor: the mouse wheel, `PgUp` and
+`PgDn`, `Alt+<` and `Alt+>` for the start and end. Drag with the mouse to select
+text, which copies it as you release.
+
+<figure class="term" data-replay="../../assets/replays/paste.json" aria-label="Pasting a long test log into the prompt, scrolling through it and selecting lines" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+### Resize the prompt and dialogs
+
+Drag the prompt's top bar up for more room or down for less. Double-click it to
+go back to sizing itself. Dialogs docked above the prompt resize the same way.
+When a `write_file` confirm only shows the top of a long file, drag the dialog's
+top bar up to read the rest before you approve.
+
+<figure class="term" data-replay="../../assets/replays/resize.json" aria-label="Dragging the top bar of the prompt, then of a write_file confirm to see the whole file" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+### Shortcuts
 
 - `Ctrl+J` or `Shift+Enter` inserts a newline.
 - `Ctrl+R` fuzzy-searches your input history.

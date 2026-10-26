@@ -99,6 +99,33 @@ const themes = (scheme: "dark" | "light", list: string[]): Scene => ({
 /** The plugins shown on the homepage and in the plugin gallery, from `plugins/`. */
 const plugin = (name: string) => readFileSync(new URL(`../plugins/${name}.lua`, import.meta.url), "utf8");
 
+/** A failing `cargo test` run, long enough to overflow the prompt when pasted. */
+const testLog = `running 4 tests
+test empty_cart_is_free ... ok
+test no_discount_keeps_price ... ok
+test discount_applies_to_total ... FAILED
+test full_discount_is_free ... FAILED
+
+failures:
+
+---- discount_applies_to_total stdout ----
+thread 'discount_applies_to_total' panicked at tests/cart.rs:22:5:
+assertion \`left == right\` failed
+  left: 0
+ right: 4500
+note: run with \`RUST_BACKTRACE=1\` environment variable to display a backtrace
+
+---- full_discount_is_free stdout ----
+thread 'full_discount_is_free' panicked at src/pricing.rs:3:5:
+attempt to subtract with overflow
+
+failures:
+    discount_applies_to_total
+    full_discount_is_free
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored
+`;
+
 export const scenes: Record<string, Scene> = {
   /** The agent calls a tool a plugin gave it. */
   tool: {
@@ -238,7 +265,7 @@ export const scenes: Record<string, Scene> = {
     ],
   },
 
-  /** Leave a session, come back with /resume, then review what changed with /diff. */
+  /** Leave a session and come back to it with /resume. */
   resume: {
     realtime: true,
     steps: [
@@ -265,7 +292,23 @@ export const scenes: Record<string, Scene> = {
       { pause: 3500 },
       { press: ["Down"], gap: 2500 },
       { key: "Enter" },
-      { pause: 2500 },
+      { pause: 3000 },
+    ],
+  },
+
+  /** Review what the agent changed with /diff. */
+  diff: {
+    realtime: true,
+    from: /─ done/,
+    steps: [
+      { speed: 4 },
+      { pause: 1200 },
+      { type: "add a doc comment to Cart::total explaining how discounts are applied" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /─ done/ },
+      { speed: 1 },
+      { pause: 1500 },
       { type: "/diff" },
       { pause: 400 },
       { key: "Enter" },
@@ -277,36 +320,73 @@ export const scenes: Record<string, Scene> = {
     ],
   },
 
-  /** Vim editing in the prompt, with the key presses on screen. */
+  /** Interrupt a turn, then press Enter on the empty prompt to carry on. */
+  continue: {
+    realtime: true,
+    rows: 24,
+    steps: [
+      { speed: 4 },
+      { pause: 1200 },
+      { type: "walk through every test in this project and explain what it checks" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /^\* \w/m },
+      { speed: 1 },
+      { pause: 2500 },
+      { press: ["Escape", "Escape"], gap: 180 },
+      { pause: 3000 },
+      { key: "Enter" },
+      { until: /─ done/ },
+      { pause: 2000 },
+    ],
+  },
+
+  /** Vim across the prompt and a long transcript: type, jump up to the transcript, yank a word, paste it into the prompt, edit. */
   vim: {
     vim: true,
-    rows: 9,
-    from: /keep the public api unchanged/,
+    mock: true,
+    cols: 110,
+    rows: 24,
+    from: /─ done/,
     steps: [
       { pause: 1200 },
-      { type: "fix the rounding bug in apply_discount" },
-      { press: ["C-j"] },
-      { type: "add a test for a 100 percent discount" },
-      { press: ["C-j"] },
-      { type: "keep the public api unchanged" },
+      { type: "give me a quick tour of this project" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /─ done/ },
+      { pause: 1500 },
+      { type: "which function applies the" },
       { pause: 700 },
       { press: ["Escape"], gap: 700 },
-      { press: ["g", "g", "0", "w", "w", "w"], gap: 520 },
-      { press: ["c", "i", "w"], gap: 420 },
-      { type: "overflow" },
-      { press: ["Escape"], gap: 700 },
-      { press: ["$", "b", "v", "i", "w", "y"], gap: 520 },
-      { pause: 600 },
-      { press: ["j", "0", "f", "1", "d", "w"], gap: 520 },
-      { pause: 600 },
-      { press: ["u"], gap: 700 },
-      { press: ["V", "j", "j"], gap: 520 },
-      { pause: 700 },
-      { press: ["Escape", "G", "A"], gap: 520 },
-      { type: " and update the docs" },
+      // Jump into the transcript, up to the top, down a paragraph at a time, then search for the word.
+      { press: ["C-w", "k"], gap: 250 },
+      { pause: 800 },
+      { press: ["g", "g"], gap: 450 },
       { pause: 900 },
+      { press: ["}", "}"], gap: 800 },
+      { pause: 600 },
+      { press: ["/"], gap: 400 },
+      { type: "apply_discount" },
+      { pause: 500 },
+      { key: "Enter" },
+      { pause: 1000 },
+      { press: ["n"], gap: 1000 },
+      { press: ["v", "e"], gap: 700 },
+      { pause: 600 },
+      { press: ["y"], gap: 450 },
+      { pause: 1000 },
+      // Back to the prompt: paste the word at the end, then change the first one.
+      { press: ["C-c"], gap: 800 },
+      { press: ["A"], gap: 450 },
+      { type: " " },
+      { press: ["Escape", "p"], gap: 600 },
+      { pause: 900 },
+      { press: ["0", "c", "w"], gap: 450 },
+      { type: "what" },
+      { press: ["Escape", "$", "a"], gap: 450 },
+      { type: "?" },
       { press: ["Escape"], gap: 700 },
-      { pause: 1200 },
+      { pause: 1500 },
     ],
   },
 
@@ -354,8 +434,10 @@ export const scenes: Record<string, Scene> = {
     ],
   },
 
-  /** A multi-line prompt, then the window and a dialog reflowing as the terminal is resized. */
-  layout: {
+  /** Drag the prompt's top bar to resize it, then the top bar of a write_file confirm to read the whole file. */
+  resize: {
+    mock: true,
+    rows: 36,
     steps: [
       { pause: 1200 },
       { type: "refactor the pricing module:" },
@@ -363,21 +445,48 @@ export const scenes: Record<string, Scene> = {
       { type: "- move the discount rules into their own file" },
       { press: ["C-j"] },
       { type: "- add tests for rounding at the edges" },
-      { press: ["C-j"] },
-      { type: "- keep the public api unchanged" },
       { pause: 1200 },
-      { resize: { cols: 72, rows: 30 }, over: 1600 },
-      { pause: 1400 },
-      { resize: { cols: 110, rows: 30 }, over: 1600 },
+      { drag: { grab: /─+ codex\//, dy: -6, over: 1200 } },
       { pause: 1000 },
-      { press: ["F1"], gap: 1200 },
-      { pause: 1000 },
-      { resize: { cols: 80, rows: 20 }, over: 1600 },
-      { pause: 1400 },
-      { resize: { cols: 110, rows: 30 }, over: 1600 },
-      { pause: 1000 },
-      { press: ["Escape"], gap: 800 },
+      { drag: { grab: /─+ codex\//, dy: 5, over: 1000 } },
+      { pause: 1200 },
+      { press: ["C-c"], gap: 600 },
+      { type: "move the discount rules into src/discount.rs" },
+      { pause: 300 },
+      { key: "Enter" },
+      { pause: 3000 },
+      { drag: { grab: /^─+$/, dy: -16, over: 1600 } },
+      { pause: 2500 },
+    ],
+  },
+
+  /** Roll the conversation back to an earlier turn with Esc Esc. */
+  rewind: {
+    mock: true,
+    rows: 30,
+    steps: [
+      { pause: 1200 },
+      { type: "explain how apply_discount works" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /─ done/ },
       { pause: 800 },
+      { type: "how should it handle the rounding?" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /─ done/ },
+      { pause: 800 },
+      { type: "now update the docs" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /─ done/ },
+      { pause: 1200 },
+      { press: ["Escape", "Escape"], gap: 180 },
+      { pause: 1800 },
+      { press: ["Up", "Up"], gap: 1100 },
+      { pause: 1000 },
+      { key: "Enter" },
+      { pause: 3000 },
     ],
   },
 

@@ -9,7 +9,7 @@ player, frame by frame, in headless Chromium.
 | Output | Source | Provider |
 | ------ | ------ | -------- |
 | `replays/{prompt,approval,goal}.json` (one frame each) | `stills` in `src/scenes.ts` | Scripted mock (deterministic, offline) |
-| `replays/<scene>.json`, plus `assets/demo.gif` for `demo` | same-named entries in `scenes` | Live `codex/gpt-6-luna` (`vim`, `layout` and `plugin` send no prompt) |
+| `replays/<scene>.json`, plus `assets/demo.gif` for `demo` | same-named entries in `scenes` | Live `codex/gpt-6-luna` (`paste` and `plugin` send no prompt; `resize`, `vim` and the theme scenes use the scripted mock) |
 
 ## Run
 
@@ -45,6 +45,8 @@ Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain.
 - Unless a scene is `realtime`, stretches with no typing nearby (boot, model thinking, tool runs) are sped up 3x
   and the last screen is held for 2 s; see `IDLE_SPEEDUP` in `src/main.ts`.
 - `vim: true` enables vim mode.
+- Besides keys, a scene can `paste` text (bracketed paste), `drag` a screen line with the left button
+  held (the prompt's top bar, a dialog's top bar, or text to select) and turn the mouse `wheel`.
 - Every scene overlays the commands it presses as keycaps in the wallpaper below the terminal
   (`keys: false` turns it off). Text typed into the prompt and anything pressed in vim's insert
   mode is left out. The home page hides the overlay, except for the vim replay, which keeps it in

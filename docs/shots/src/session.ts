@@ -13,6 +13,12 @@ export type Step =
   | { key: string }
   | { press: string[]; gap?: number }
   | { resize: { cols: number; rows: number }; over?: number }
+  /** Paste text through the terminal's bracketed paste, as Cmd+V would. */
+  | { paste: string }
+  /** Hold the left button on the last screen line matching `grab` (at `col`) and drag it `dy` rows (negative is up). */
+  | { drag: { grab: RegExp; dy: number; col?: number; over?: number } }
+  /** Turn the mouse wheel `lines` notches (negative is up) over the last screen line matching `at`. */
+  | { wheel: { at: RegExp; lines: number; gap?: number } }
   | { pause: number }
   /** From here on, play the recording this many times faster (1 is real time). */
   | { speed: number }
@@ -147,7 +153,7 @@ function keyDelay(base: number, ch: string, prev = "") {
 }
 
 const keyNames: Record<string, string> = {
-  Enter: "⏎", Escape: "esc", Tab: "⇥", BSpace: "⌫", Space: "␣", Up: "↑", Down: "↓", Left: "←", Right: "→",
+  Enter: "⏎", Escape: "esc", Tab: "⇥", PageUp: "PgUp", PageDown: "PgDn", BSpace: "⌫", Space: "␣", Up: "↑", Down: "↓", Left: "←", Right: "→",
 };
 
 /** tmux key name or literal character to its overlay label (`C-r` becomes `⌃R`). */
@@ -158,6 +164,9 @@ function keyLabel(key: string) {
 }
 
 const tmux = (...args: (string | number)[]) => $`tmux ${args.map(String)}`.quiet();
+
+/** An SGR mouse report for the 0-based cell, which smelt reads as it would from the terminal. */
+const mouse = (code: number, col: number, row: number, release = false) => `\x1b[<${code};${col + 1};${row + 1}${release ? "m" : "M"}`;
 
 // Strip the volatile bits (clock, build identity) so captures are reproducible.
 const clean = (s: string) =>
@@ -307,6 +316,31 @@ export async function run(
           await tmux("send-keys", "-t", tmuxName, ...(k.length === 1 ? ["-l"] : []), k);
           log(keyLabel(k));
           await Bun.sleep((step.gap ?? 420) * (0.8 + rand() * 0.5));
+        }
+      } else if ("paste" in step) {
+        await tmux("set-buffer", "-b", "shots-paste", "--", step.paste);
+        await tmux("paste-buffer", "-p", "-d", "-b", "shots-paste", "-t", tmuxName);
+        await Bun.sleep(300);
+      } else if ("drag" in step) {
+        const row = (await screen()).split("\n").findLastIndex((l) => step.drag.grab.test(plain(l)));
+        if (row < 0) throw new Error(`nothing to grab for ${step.drag.grab}\n${await screen()}`);
+        const col = step.drag.col ?? 4;
+        const send = (code: number, y: number, release = false) => tmux("send-keys", "-t", tmuxName, "-l", mouse(code, col, y, release));
+        log("drag");
+        await send(0, row);
+        const n = Math.max(1, Math.abs(step.drag.dy));
+        for (let i = 1; i <= n; i++) {
+          await Bun.sleep((step.drag.over ?? 900) / n);
+          await send(32, row + Math.round((step.drag.dy * i) / n));
+        }
+        await send(0, row + step.drag.dy, true);
+      } else if ("wheel" in step) {
+        const row = (await screen()).split("\n").findLastIndex((l) => step.wheel.at.test(plain(l)));
+        if (row < 0) throw new Error(`nothing to scroll for ${step.wheel.at}\n${await screen()}`);
+        log("scroll");
+        for (let i = 0; i < Math.abs(step.wheel.lines); i++) {
+          await tmux("send-keys", "-t", tmuxName, "-l", mouse(step.wheel.lines < 0 ? 64 : 65, 8, row));
+          await Bun.sleep(step.wheel.gap ?? 120);
         }
       } else if ("resize" in step) {
         // Drag the window edge: step the size so the UI reflows frame by frame.
