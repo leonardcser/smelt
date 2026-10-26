@@ -68,6 +68,7 @@ pub enum DocumentCommand {
     PanColumns(isize),
     OpenAction,
     ClearSelection,
+    ReselectVisual,
 }
 
 impl DocumentCommand {
@@ -219,6 +220,17 @@ pub struct DocumentViewState {
     /// cell under the block (true for mouse drags and Visual mode, false for
     /// VisualLine and bare single clicks that never became a drag).
     pub selection_includes_cursor_cell: bool,
+    /// Last Visual selection, restored by `gv`.
+    pub(crate) last_visual: Option<RowVisual>,
+}
+
+/// A row-document Visual selection as `gv` restores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowVisual {
+    anchor: DocPosition,
+    cursor: DocPosition,
+    mode: VimMode,
+    includes_cursor_cell: bool,
 }
 
 impl Window {
@@ -716,8 +728,32 @@ impl Window {
     }
 
     pub fn handle_viewer_key(&mut self, key: KeyEvent) -> DocumentKeyResult {
+        self.remember_visual();
         let text = self.text_state_mut();
         vim::handle_viewer_key(key, &mut text.vim_mode, &mut text.vim_state)
+    }
+
+    /// Save the Visual selection in progress so `gv` can restore it once the
+    /// key being handled leaves Visual mode.
+    fn remember_visual(&mut self) {
+        let mode = self.vim_mode();
+        if !matches!(mode, VimMode::Visual | VimMode::VisualLine) {
+            return;
+        }
+        if self.document_view_state_ref().active {
+            let state = self.document_view_state_mut();
+            if let Some(anchor) = state.selection_anchor {
+                state.last_visual = Some(RowVisual {
+                    anchor,
+                    cursor: state.cursor,
+                    mode,
+                    includes_cursor_cell: state.selection_includes_cursor_cell,
+                });
+            }
+        } else {
+            let cpos = self.cpos();
+            self.text_state_mut().vim_state.remember_visual(mode, cpos);
+        }
     }
 
     pub fn handle_document_view_mouse(
@@ -1000,6 +1036,19 @@ impl Window {
             DocumentCommand::StartVisualLine => {
                 self.begin_visual(VimMode::VisualLine, self.cpos());
             }
+            DocumentCommand::ReselectVisual => {
+                let source = buf.text();
+                let mut cpos = self.cpos();
+                let text = self.text_state_mut();
+                if text
+                    .vim_state
+                    .reselect_visual(&mut text.vim_mode, &mut cpos, &source)
+                {
+                    self.set_cpos(cpos);
+                    self.set_curswant(None);
+                    self.resync(buf, viewport_rows);
+                }
+            }
             DocumentCommand::YankSelection => {
                 copy =
                     vim::visual_range(self.vim_state(), &buf.text(), self.cpos(), VimMode::Visual)
@@ -1267,6 +1316,25 @@ impl DocumentViewExecutor {
                     byte_col: 0,
                 });
                 state.selection_includes_cursor_cell = false;
+            }
+            DocumentCommand::ReselectVisual => {
+                if let Some(last) = state.last_visual {
+                    *vim_mode = last.mode;
+                    state.selection_anchor = Some(DocPosition {
+                        row: last.anchor.row.min(total_rows.saturating_sub(1)),
+                        byte_col: last.anchor.byte_col,
+                    });
+                    state.selection_includes_cursor_cell = last.includes_cursor_cell;
+                    next = clamp_to_row_text(
+                        document,
+                        DocPosition {
+                            row: last.cursor.row.min(total_rows.saturating_sub(1)),
+                            byte_col: last.cursor.byte_col,
+                        },
+                        *vim_mode,
+                    );
+                    sets_preferred_cell = true;
+                }
             }
             DocumentCommand::YankSelection => {
                 if let Some(anchor) = state.selection_anchor {

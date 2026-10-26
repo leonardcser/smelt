@@ -1049,3 +1049,48 @@ fn vim_gj_and_gk_follow_wrapped_prompt_rows() {
     app.type_text("gkgk");
     assert_eq!(app.prompt_cpos(), 0);
 }
+
+#[test]
+fn prompt_gv_reselects_the_last_visual_selection() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("alpha beta gamma");
+    app.press(KeyCode::Esc);
+    app.type_text("0viw");
+    app.press(KeyCode::Esc);
+    app.type_text("$gvy");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+    assert_eq!(app.prompt_cpos(), 0);
+}
+
+#[test]
+fn transcript_gv_reselects_the_last_visual_selection() {
+    let mut app = row_document_transcript_app(100, true);
+    app.type_text("gg");
+    app.render_silent();
+    let lines = transcript_buffer_lines(&app, 400);
+    let row = lines
+        .iter()
+        .position(|line| line.contains("row 003 alpha beta"))
+        .expect("row 003");
+    move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
+
+    app.type_text("0wwviw");
+    app.press(KeyCode::Esc);
+    app.type_text("jgvy");
+    app.render_silent();
+
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+}
+
+#[test]
+fn viewer_gv_reselects_the_last_visual_selection() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.open_readonly_overlay_fixture(vec!["alpha beta gamma".into()], None);
+    app.render_silent();
+
+    app.type_text("wviw");
+    app.press(KeyCode::Esc);
+    app.type_text("$gvy");
+
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "beta");
+}

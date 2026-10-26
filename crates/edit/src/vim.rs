@@ -343,6 +343,14 @@ enum RepeatCommand {
 
 // ── Vim state ───────────────────────────────────────────────────────────────
 
+/// A visual selection as `gv` restores it.
+#[derive(Clone, Copy, Debug)]
+struct LastVisual {
+    anchor: usize,
+    cursor: usize,
+    mode: VimMode,
+}
+
 /// Per-Window vim state: persistent slots (`visual_anchor`, `last_find`) and
 /// in-flight key-sequence accumulators (`sub`, `count1`, `count2`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -351,6 +359,8 @@ pub struct VimWindowState {
     pub(crate) visual_anchor: usize,
     /// Last `f`/`t`/`F`/`T` target for `;`/`,` replay.
     pub(crate) last_find: Option<(FindKind, char)>,
+    /// Last visual selection for `gv`.
+    last_visual: Option<LastVisual>,
     /// Last mutating Normal-mode command for `.` repeat.
     last_change: Option<RepeatCommand>,
     /// Guard used while replaying `.` so the repeated command does not replace itself.
@@ -521,6 +531,30 @@ impl VimWindowState {
     pub fn set_mode(&mut self, mode_ref: &mut VimMode, mode: VimMode) {
         *mode_ref = mode;
         self.reset_pending();
+    }
+
+    /// Remember the selection in progress so `gv` can restore it after the
+    /// mode is left. Call before handling each key in Visual modes.
+    pub fn remember_visual(&mut self, mode: VimMode, cursor: usize) {
+        if matches!(mode, VimMode::Visual | VimMode::VisualLine) {
+            self.last_visual = Some(LastVisual {
+                anchor: self.visual_anchor,
+                cursor,
+                mode,
+            });
+        }
+    }
+
+    /// `gv`: re-enter the last visual selection, clamped to `buf`. Returns
+    /// false when there is none.
+    pub fn reselect_visual(&mut self, mode_ref: &mut VimMode, cpos: &mut usize, buf: &str) -> bool {
+        let Some(last) = self.last_visual else {
+            return false;
+        };
+        self.begin_visual(mode_ref, last.mode, last.anchor);
+        self.clamp_visual_anchor(buf);
+        *cpos = smelt_buffer::text::snap_grapheme(buf, last.cursor.min(buf.len()));
+        true
     }
 
     /// Anchor a visual selection at `cpos` and enter the given visual mode.
@@ -736,6 +770,7 @@ pub fn handle_viewer_key(
             state.sub = SubState::Ready;
             let cmd = match key.code {
                 KeyCode::Char('f') => Some(DocumentCommand::OpenAction),
+                KeyCode::Char('v') => Some(DocumentCommand::ReselectVisual),
                 KeyCode::Char(c @ ('j' | 'k')) => {
                     let rows = state.take_count() as isize;
                     Some(DocumentCommand::MoveRows(if c == 'j' {
@@ -1555,6 +1590,7 @@ fn move_cursor(ctx: &mut VimContext<'_>, motion: Motion) {
 // ── Visual mode ──────────────────────────────────────────────────────
 
 fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
+    ctx.vim_state.remember_visual(*ctx.mode, *ctx.cpos);
     if let SubState::WaitingVisualTextObj(inner) = ctx.vim_state.sub {
         ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
@@ -2023,6 +2059,11 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     if let KeyCode::Char(c @ ('j' | 'k')) = key.code {
         let rows = ctx.vim_state.take_count() as isize;
         return Action::DisplayRows(if c == 'j' { rows } else { -rows });
+    }
+    if key.code == KeyCode::Char('v') {
+        ctx.vim_state
+            .reselect_visual(ctx.mode, ctx.cpos, ctx.buf.as_str());
+        return Action::Consumed;
     }
     if let Some(motion) = motion_after_g(key) {
         move_cursor(ctx, motion);
