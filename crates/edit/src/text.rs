@@ -161,10 +161,10 @@ pub fn line_end(buf: &str, cpos: usize) -> usize {
     cpos + buf[cpos..].find('\n').unwrap_or(buf.len() - cpos)
 }
 
+/// Paragraphs are separated by empty lines only, as in vim; a line holding
+/// whitespace belongs to the paragraph.
 fn is_blank_line(buf: &str, pos: usize) -> bool {
-    buf[line_start(buf, pos)..line_end(buf, pos)]
-        .chars()
-        .all(char::is_whitespace)
+    line_start(buf, pos) == line_end(buf, pos)
 }
 
 fn next_line_start(buf: &str, pos: usize) -> Option<usize> {
@@ -442,8 +442,8 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_forward_treats_whitespace_only_lines_as_blank() {
-        assert_eq!(paragraph_forward_pos("one\n  \ntwo", 0), 4);
+    fn paragraph_forward_keeps_whitespace_only_lines_in_the_paragraph() {
+        assert_eq!(paragraph_forward_pos("one\n  \ntwo\n\nthree", 0), 11);
     }
 
     #[test]

@@ -704,25 +704,19 @@ fn vim_yy_yank_flash_expires_after_tick() {
     );
 }
 
-fn type_keys(app: &mut TestApp, keys: &str) {
-    for c in keys.chars() {
-        app.type_char(c);
-    }
-}
-
 #[test]
 fn vim_paragraph_motions_move_the_prompt_cursor_between_blank_lines() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.type_text("one\ntwo\n\nthree");
     app.press(KeyCode::Esc);
 
-    type_keys(&mut app, "{");
+    app.type_text("{");
     assert_eq!(app.prompt_cpos(), 8);
-    type_keys(&mut app, "{");
+    app.type_text("{");
     assert_eq!(app.prompt_cpos(), 0);
-    type_keys(&mut app, "}");
+    app.type_text("}");
     assert_eq!(app.prompt_cpos(), 8);
-    type_keys(&mut app, "}");
+    app.type_text("}");
     assert_eq!(app.prompt_cpos(), "one\ntwo\n\nthree".len() - 1);
 }
 
@@ -731,7 +725,7 @@ fn vim_delete_to_paragraph_end_takes_whole_lines() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.type_text("one\ntwo\n\nthree");
     app.press(KeyCode::Esc);
-    type_keys(&mut app, "{{d}");
+    app.type_text("{{d}");
     assert_eq!(app.state().prompt_text, "\nthree");
 }
 
@@ -741,8 +735,8 @@ fn vim_yiw_in_viewer_flashes_and_keeps_the_cursor_at_the_word_start() {
     let leaf = app.open_readonly_overlay_fixture(vec!["alpha beta gamma".into()], None);
     app.render_silent();
 
-    type_keys(&mut app, "wl");
-    type_keys(&mut app, "yiw");
+    app.type_text("wl");
+    app.type_text("yiw");
 
     assert_eq!(app.core_probe().clipboard.kill_ring.current(), "beta");
     let win = app.ui_probe().win(leaf).expect("overlay window");
@@ -753,7 +747,7 @@ fn vim_yiw_in_viewer_flashes_and_keeps_the_cursor_at_the_word_start() {
 #[test]
 fn transcript_yiw_flashes_and_keeps_the_cursor_at_the_word_start() {
     let mut app = row_document_transcript_app(100, true);
-    type_keys(&mut app, "gg");
+    app.type_text("gg");
     app.render_silent();
     let lines = transcript_buffer_lines(&app, 400);
     let row = lines
@@ -763,8 +757,8 @@ fn transcript_yiw_flashes_and_keeps_the_cursor_at_the_word_start() {
     let word_start = lines[row].find("alpha").unwrap();
     move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
 
-    type_keys(&mut app, "0wwl");
-    type_keys(&mut app, "yiw");
+    app.type_text("0wwl");
+    app.type_text("yiw");
     app.render_silent();
 
     assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
@@ -792,11 +786,11 @@ fn transcript_paragraph_motions_land_on_blank_rows() {
     app.render_silent();
     app.focus_transcript();
     app.configure_transcript_vim(true, VimMode::Normal);
-    type_keys(&mut app, "gg");
+    app.type_text("gg");
     app.render_silent();
     let lines = transcript_buffer_lines(&app, 400);
 
-    type_keys(&mut app, "}");
+    app.type_text("}");
     let first = app.transcript_window().row_cursor.unwrap().row as usize;
     assert!(
         lines[first].trim().is_empty(),
@@ -804,11 +798,11 @@ fn transcript_paragraph_motions_land_on_blank_rows() {
     );
     assert!(first > 0);
 
-    type_keys(&mut app, "}");
+    app.type_text("}");
     let second = app.transcript_window().row_cursor.unwrap().row as usize;
     assert!(second > first && lines[second].trim().is_empty());
 
-    type_keys(&mut app, "{");
+    app.type_text("{");
     assert_eq!(
         app.transcript_window().row_cursor.unwrap().row as usize,
         first
@@ -834,7 +828,7 @@ fn transcript_cursor_stays_visible_on_the_timestamp_row_at_the_top() {
     app.focus_transcript();
     app.configure_transcript_vim(true, VimMode::Normal);
 
-    type_keys(&mut app, "gg");
+    app.type_text("gg");
     let frame = app.render_to_frame();
     let cursor_rows: Vec<usize> = frame
         .styles_text()
