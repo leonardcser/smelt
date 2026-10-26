@@ -4504,9 +4504,9 @@ fn lua_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
     };
     let mut out: Vec<PathBuf> = entries
         .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("lua"))
+        .filter(|p| p.is_file())
         .collect();
     out.sort();
     out
@@ -4687,6 +4687,30 @@ mod tests {
             "smelt.dialogs.confirm"
         );
         assert_eq!(path_to_module("modes.lua"), "smelt.modes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lua_files_in_follows_symlinked_files_and_skips_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let real = outside.path().join("linked.lua");
+        std::fs::write(&real, "").unwrap();
+        std::fs::write(tmp.path().join("plain.lua"), "").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "").unwrap();
+        std::fs::create_dir(tmp.path().join("dir.lua")).unwrap();
+        std::os::unix::fs::symlink(&real, tmp.path().join("linked.lua")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("gone.lua"),
+            tmp.path().join("dangling.lua"),
+        )
+        .unwrap();
+
+        let names: Vec<_> = lua_files_in(tmp.path())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["linked.lua", "plain.lua"]);
     }
 
     #[test]
