@@ -2,11 +2,14 @@
 //!
 //! One background fetch populates an in-memory map; consumers (`pricing`,
 //! provider context-window lookup) read through it. Filesystem-cached
-//! with a 1h TTL so cold starts after the first run are instant.
+//! with a 1h TTL so cold starts after the first run are instant. The catalog
+//! is several megabytes, so a request never waits on it for more than
+//! `FIRST_REQUEST_WAIT`; the download carries on in the background.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -68,22 +71,28 @@ pub struct ModelEntry {
 const MODELS_API_URL: &str = "https://models.dev/api.json";
 const CACHE_KEY: &str = "models_dev";
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
-/// Bound on the catalog request. Request construction waits for the catalog,
-/// so an unreachable network must not hold the first request for the OS
-/// connect timeout.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Bound on the whole catalog download. It runs in the background, so this
+/// only has to outlast a slow link for the multi-megabyte body.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the first request waits for the catalog before it goes ahead
+/// without it, so a slow or unreachable network cannot hold it up.
+const FIRST_REQUEST_WAIT: Duration = Duration::from_secs(3);
 /// How long to skip the network after a failed fetch, so every request does
-/// not pay the fetch timeout again while offline.
+/// not start another download while offline.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 static CATALOG: OnceLock<HashMap<(String, String), ModelEntry>> = OnceLock::new();
 static LAST_FAILURE: Mutex<Option<Instant>> = Mutex::new(None);
+static FETCHING: AtomicBool = AtomicBool::new(false);
+static WAITED: AtomicBool = AtomicBool::new(false);
 
 fn recently_failed(failed_at: Option<Instant>, now: Instant) -> bool {
     failed_at.is_some_and(|at| now.duration_since(at) < RETRY_AFTER)
 }
 
-async fn populate(client: &reqwest::Client, cache_dir: Option<&Path>) {
+/// Start the one background load (disk cache, else network) unless the
+/// catalog is loaded, a load is running, or the last one failed recently.
+fn start_fetch(client: &reqwest::Client, cache_dir: Option<&Path>) {
     if CATALOG.get().is_some() {
         return;
     }
@@ -91,29 +100,41 @@ async fn populate(client: &reqwest::Client, cache_dir: Option<&Path>) {
     if recently_failed(failed_at, Instant::now()) {
         return;
     }
-    let map = load_or_fetch(client, cache_dir).await;
-    if map.is_empty() {
-        *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-    } else {
-        let _ = CATALOG.set(map);
-    }
-}
-
-/// Fetch the catalog in the background. Only the first call populates;
-/// subsequent calls are a no-op.
-pub fn spawn_fetch(client: reqwest::Client, cache_dir: Option<PathBuf>) {
-    if CATALOG.get().is_some() {
+    if FETCHING.swap(true, Ordering::AcqRel) {
         return;
     }
-    tokio::spawn(async move { populate(&client, cache_dir.as_deref()).await });
+    let client = client.clone();
+    let cache_dir = cache_dir.map(Path::to_path_buf);
+    tokio::spawn(async move {
+        let map = load_or_fetch(&client, cache_dir.as_deref()).await;
+        if map.is_empty() {
+            *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        } else {
+            let _ = CATALOG.set(map);
+        }
+        FETCHING.store(false, Ordering::Release);
+    });
 }
 
-/// Ensure the catalog is available before a caller needs a synchronous lookup.
-/// This keeps startup non-blocking while letting request construction wait for
-/// model limits when the cache is cold. After a failed fetch it returns
-/// immediately until `RETRY_AFTER` has passed.
+/// Fetch the catalog in the background. Only the first call starts a load;
+/// subsequent calls are a no-op while it runs or once it has loaded.
+pub fn spawn_fetch(client: reqwest::Client, cache_dir: Option<PathBuf>) {
+    start_fetch(&client, cache_dir.as_deref());
+}
+
+/// Give the catalog a moment to load before a caller needs a synchronous
+/// lookup. Only the first call waits, and for at most `FIRST_REQUEST_WAIT`;
+/// the load continues in the background either way, so later requests find the
+/// catalog without waiting once it arrives.
 pub async fn ensure_loaded(client: &reqwest::Client, cache_dir: Option<&Path>) {
-    populate(client, cache_dir).await;
+    start_fetch(client, cache_dir);
+    if WAITED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let deadline = Instant::now() + FIRST_REQUEST_WAIT;
+    while CATALOG.get().is_none() && FETCHING.load(Ordering::Acquire) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Look up `(provider_type, api_base, model)` in the catalog. Returns `None`
