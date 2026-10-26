@@ -5352,3 +5352,50 @@ fn store_compile_rules_handles_empty_rules() {
     assert!(compiled.tools.is_empty());
     assert!(compiled.dirs.is_empty());
 }
+
+#[test]
+fn unterminated_heredoc_does_not_hide_following_commands() {
+    for (command, following) in [
+        ("echo hi <<x; rm x", "rm x"),
+        ("echo hi <<x && rm x", "rm x"),
+        ("echo hi <<x | rm x", "rm x"),
+        ("cat <<'a b'; echo a", "echo a"),
+        ("cat <<-\"x\"; echo a", "echo a"),
+        ("cat <<\\x; echo a", "echo a"),
+        ("cat <<a <<b; echo c", "echo c"),
+    ] {
+        let segments = split_shell_commands(command);
+        assert!(
+            segments.iter().any(|segment| segment == following),
+            "{command}: {segments:?}"
+        );
+    }
+}
+
+#[test]
+fn unterminated_heredoc_body_is_not_a_command() {
+    assert_eq!(
+        split_shell_commands("echo hi <<x\nrm x"),
+        vec!["echo hi <<x\nrm x"]
+    );
+}
+
+#[test]
+fn unterminated_heredoc_permissions_check_following_commands() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in [
+        "echo hi <<x; rm x",
+        "echo hi <<x && rm x",
+        "echo hi <<x | rm x",
+    ] {
+        assert_eq!(
+            permissions.check_subcommand(normal(), "bash", command),
+            Decision::Deny,
+            "{command}"
+        );
+    }
+    assert_eq!(
+        permissions.check_subcommand(normal(), "bash", "echo hi <<x\nrm x"),
+        Decision::Allow
+    );
+}

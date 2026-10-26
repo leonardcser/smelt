@@ -15,15 +15,80 @@ const MAX_BRACE_EXPANSION_DEPTH: usize = 16;
 const MIN_OVERFLOWING_DIGITS: usize = 19;
 
 pub(super) fn parse(command: &str) -> Option<ast::Program> {
+    let command = neutralize_blank_heredoc_tags(command);
+    parse_guarded(&command).or_else(|| parse_guarded(&terminate_heredocs(&command)?))
+}
+
+fn parse_guarded(command: &str) -> Option<ast::Program> {
     if has_unrepresentable_io_number(command)
         || has_deep_arithmetic_parentheses(command)
         || has_unrepresentable_expansion_number(command)
     {
         return None;
     }
-    let command = neutralize_blank_heredoc_tags(command);
     let mut parser = Parser::new(Cursor::new(command.as_bytes()), &ParserOptions::default());
     parser.parse_program().ok()
+}
+
+/// Appends a terminator line for every heredoc tag so a heredoc that runs to the
+/// end of the input still parses. The shell runs the commands around such a
+/// heredoc, so they must stay visible. The appended lines lie past the original
+/// text, so spans over them are clipped when segments are sliced from it.
+fn terminate_heredocs(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut terminators = String::new();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if !bytes[index..].starts_with(b"<<") {
+            index += 1;
+            continue;
+        }
+        index += 2;
+        if bytes.get(index) == Some(&b'<') {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index) == Some(&b'-') {
+            index += 1;
+        }
+        while matches!(bytes.get(index), Some(b' ' | b'\t')) {
+            index += 1;
+        }
+        let (tag, end) = heredoc_tag(text, index);
+        index = end;
+        if !tag.is_empty() {
+            terminators.push('\n');
+            terminators.push_str(&tag);
+        }
+    }
+    (!terminators.is_empty()).then(|| format!("{text}{terminators}"))
+}
+
+/// Reads the delimiter word starting at `start` with its quoting removed, and
+/// returns it with the offset just past the word.
+fn heredoc_tag(text: &str, start: usize) -> (String, usize) {
+    let mut tag = String::new();
+    let mut chars = text[start..].char_indices();
+    let mut quote = None;
+    let mut end = text.len();
+    while let Some((offset, ch)) = chars.next() {
+        match (quote, ch) {
+            (Some(open), ch) if ch == open => quote = None,
+            (Some(_), ch) => tag.push(ch),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '\\') => {
+                if let Some((_, escaped)) = chars.next() {
+                    tag.push(escaped);
+                }
+            }
+            (None, ch) if ch.is_whitespace() || ";&|()<>".contains(ch) => {
+                end = start + offset;
+                break;
+            }
+            (None, ch) => tag.push(ch),
+        }
+    }
+    (tag, end)
 }
 
 fn tokenize(command: &str) -> Option<Vec<Token>> {
