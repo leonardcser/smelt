@@ -1610,6 +1610,46 @@ impl TuiApp {
         self.dispatch_viewer_buffer_key(win_id, k)
     }
 
+    /// Walk the jump list of the viewer window `win_id` as `Ctrl-O`, `Ctrl-I`
+    /// or `''` would. Returns whether the cursor moved.
+    pub(crate) fn jump_viewer(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        jump: crate::smelt_edit::JumpMove,
+    ) -> bool {
+        use crate::smelt_edit::DocumentCommand;
+
+        let Some((buf_id, viewport_rows, _)) = self.viewer_key_context(win_id) else {
+            return false;
+        };
+        let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+        let (Some(win), Some(buf)) = (win, buf) else {
+            return false;
+        };
+        let Some(command) = win.resolve_viewer_jump(buf, DocumentCommand::Jump(jump)) else {
+            return false;
+        };
+        self.execute_viewer_command(win_id, buf_id, command, viewport_rows);
+        true
+    }
+
+    /// Leave the cursor of the viewer window `win_id` in its jump list, before
+    /// a host-driven move such as a reveal.
+    pub(crate) fn record_viewer_jump(&mut self, win_id: crate::smelt_edit::WinId) {
+        let Some(win) = self.ui.win(win_id) else {
+            return;
+        };
+        let Some(buf) = self.ui.buf(win.buf) else {
+            return;
+        };
+        let Some(from) = win.viewer_doc_cursor(buf) else {
+            return;
+        };
+        if let Some(win) = self.ui.win_mut(win_id) {
+            win.record_jump(from);
+        }
+    }
+
     /// Move the focused transcript cursor as the vim block motion `[`/`]` plus
     /// kind key would. Returns whether the transcript took the motion.
     pub(crate) fn move_transcript_block(

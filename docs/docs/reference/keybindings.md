@@ -208,6 +208,8 @@ search in either direction, and `/nohl` clears the highlights.
 With vim enabled, `G`, `gg`, `{` `}`, the block motions and searches are jumps:
 `Ctrl+O` goes back to where the last one started, `Ctrl+I` or `Tab` forward again
 (both take counts), and `''` or ``` `` ``` toggles between the last two positions.
+Plugins walk the same list with `win:jump{ older = n }`, `{ newer = n }` or
+`{ previous = true }`.
 
 With vim enabled the transcript supports `h` `j` `k` `l`, `w` `b` `e`, `0` `^`
 `$`, `gg` `G` and `{` `}` with counts, `v` / `V` visual selection, and `y` with a

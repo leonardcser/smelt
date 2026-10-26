@@ -7662,6 +7662,57 @@ fn jump_list_returns_from_searches() {
     assert_eq!(transcript_row_cursor_row(&app), matches[0]);
 }
 
+fn lua_jump(app: &mut TestApp, opts: &str) -> bool {
+    let moved = app
+        .eval_lua::<bool>(&format!("return smelt.win.TRANSCRIPT:jump({opts})"))
+        .expect("win:jump");
+    app.render_silent();
+    moved
+}
+
+#[test]
+fn lua_walks_the_jump_list() {
+    let (mut app, _) = jump_app();
+    block_nav(&mut app, "G");
+    let end = transcript_row_cursor_row(&app);
+    assert!(lua_jump(&mut app, "{ older = 1 }"));
+    assert_eq!(transcript_row_cursor_row(&app), 0);
+    assert!(lua_jump(&mut app, "{ newer = 1 }"));
+    assert_eq!(transcript_row_cursor_row(&app), end);
+    assert!(!lua_jump(&mut app, "{ newer = 1 }"));
+    assert!(lua_jump(&mut app, "{ older = 1 }"));
+    assert!(lua_jump(&mut app, "{ previous = true }"));
+    assert_eq!(transcript_row_cursor_row(&app), end);
+}
+
+#[test]
+fn lua_reveal_leaves_a_jump_only_when_asked() {
+    let (mut app, _) = jump_app();
+    app.run_lua("smelt.win.TRANSCRIPT:reveal(20)");
+    app.render_silent();
+    assert_eq!(transcript_row_cursor_row(&app), 20);
+    app.run_lua("smelt.win.TRANSCRIPT:reveal(40, { jump = true })");
+    app.render_silent();
+    assert_eq!(transcript_row_cursor_row(&app), 40);
+    assert!(lua_jump(&mut app, "{ older = 1 }"));
+    assert_eq!(transcript_row_cursor_row(&app), 20);
+}
+
+#[test]
+fn lua_jump_rejects_ambiguous_options() {
+    let (mut app, _) = jump_app();
+    for opts in [
+        "{}",
+        "{ older = 1, newer = 1 }",
+        "{ older = 1, previous = true }",
+    ] {
+        let result = app.eval_lua::<bool>(&format!(
+            "return pcall(smelt.win.TRANSCRIPT.jump, smelt.win.TRANSCRIPT, {opts})"
+        ));
+        assert_eq!(result, Ok(false), "{opts}");
+    }
+}
+
 #[test]
 fn quote_quote_toggles_between_the_last_two_positions() {
     let (mut app, _) = jump_app();

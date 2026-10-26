@@ -1142,6 +1142,18 @@ impl UiLuaHost<'_> {
         );
     }
 
+    pub(crate) fn jump_window(
+        &mut self,
+        window: crate::smelt_edit::WinId,
+        jump: crate::smelt_edit::JumpMove,
+    ) -> bool {
+        self.app.jump_viewer(window, jump)
+    }
+
+    pub(crate) fn record_window_jump(&mut self, window: crate::smelt_edit::WinId) {
+        self.app.record_viewer_jump(window);
+    }
+
     pub(crate) fn set_window_keymap(
         &mut self,
         window: crate::smelt_edit::WinId,
