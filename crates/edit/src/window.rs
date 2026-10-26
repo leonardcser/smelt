@@ -3902,6 +3902,9 @@ fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: usize) -> usize {
         .filter(|c| cell_range_contains_selectable(&spans, *c, *c + 1))
         .map(|c| c.saturating_add(1))
         .next_back();
+    // An all-chrome row parks the cursor at its right edge, which is one cell
+    // past the row. `Window::render` keeps the caret visible when that edge is
+    // the viewport's edge.
     match last_selectable_edge {
         Some(edge) if col > edge => edge,
         None => line_width,
