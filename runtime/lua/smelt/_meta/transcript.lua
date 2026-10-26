@@ -8,6 +8,11 @@
 ---@class smelt.transcript
 local transcript = {}
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Bind the block-motion key `key`, a single character, to transcript blocks with any of `roles`. With vim, `[` followed by the key jumps to the previous such block and `]` followed by it to the next, with a count. An empty `roles` removes the binding.
+---@type fun(key: string, roles: smelt.transcript.Role[]): nil
+transcript.block_kind = nil
+
 --- Add or replace named middleware around the root renderer. Later extensions
 --- run first. The callback receives `(next, block, ctx)` and may return its own
 --- layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
@@ -77,6 +82,11 @@ transcript.loaded_blocks_expensive = nil
 --- Return the currently materialized transcript display text as a single newline-joined string. In sparse sessions, the no-callback form can return an empty string while background hydration is pending. Pass `callback` to receive the active loaded-window text once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty string. Prefer `rows(start, count)` for bounded display reads.
 ---@type fun(callback: fun(value: string)?): string
 transcript.loaded_text_expensive = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. Past the last block it goes to the transcript edge. Returns false when the transcript is not focused, so a keymap handler can fall through.
+---@type fun(kind: string, opts: smelt.transcript.MoveBlockOpts?): boolean
+transcript.move_block = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.

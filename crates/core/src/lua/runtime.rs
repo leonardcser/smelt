@@ -2681,6 +2681,16 @@ impl LuaRuntime {
         (key != 0).then_some(key)
     }
 
+    /// Transcript block roles bound to the block-motion key `kind`.
+    pub fn transcript_block_roles(&self, kind: char) -> Option<Vec<&'static str>> {
+        self.shared
+            .transcript_block_kinds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&kind)
+            .cloned()
+    }
+
     pub fn transcript_group_specs(&self) -> Vec<TranscriptGroupSpec> {
         self.shared
             .transcript_groups

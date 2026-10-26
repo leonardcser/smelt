@@ -1617,6 +1617,27 @@ impl TuiApp {
         self.dispatch_viewer_buffer_key(win_id, k)
     }
 
+    /// Move the focused transcript cursor as the vim block motion `[`/`]` plus
+    /// kind key would. Returns whether the transcript took the motion.
+    pub(crate) fn move_transcript_block(&mut self, motion: crate::smelt_edit::BlockMotion) -> bool {
+        use crate::smelt_edit::DocumentCommand;
+
+        let win_id = crate::app::TRANSCRIPT_WIN;
+        if self.app_focus != crate::app::AppFocus::Content {
+            return false;
+        }
+        let Some((buf_id, viewport_rows, _)) = self.viewer_key_context(win_id) else {
+            return false;
+        };
+        self.execute_viewer_command(
+            win_id,
+            buf_id,
+            DocumentCommand::BlockMove(motion),
+            viewport_rows,
+        );
+        true
+    }
+
     fn execute_viewer_command(
         &mut self,
         win_id: crate::smelt_edit::WinId,

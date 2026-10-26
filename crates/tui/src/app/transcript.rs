@@ -9,8 +9,9 @@ use crate::app::transcript_scroll_trace::{
 use crate::app::TuiApp;
 use crate::content::transcript_buf::TranscriptRowAnchor;
 use crate::smelt_edit::{
-    add_signed_row, Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition,
-    DocRange, DocumentCommand, RowIndex, TextRange, Theme, VerticalScroll,
+    add_signed_row, BlockBoundary, Buffer, DisplayDocument, DisplayRow, DisplayRows,
+    DisplaySnapshot, DocPosition, DocRange, DocumentCommand, RowIndex, TextRange, Theme,
+    VerticalScroll,
 };
 use smelt_core::content::file_icons::FileIconOptions;
 use smelt_core::content::highlight::InlineOptions;
@@ -3523,11 +3524,10 @@ impl TranscriptDocument {
     fn navigation_block_from_anchor(
         &self,
         anchor: TranscriptSemanticAnchor,
-        role: Option<&str>,
+        role: &str,
         direction: TranscriptNavigationDirection,
     ) -> Option<TranscriptNavigationBlock> {
         let _perf = smelt_perf::perf::begin("transcript:navigation:block_from_anchor");
-        let role = role.unwrap_or("user");
         if direction == TranscriptNavigationDirection::Previous {
             if let Some(block) = self.containing_navigation_block(anchor, role) {
                 return Some(block);
@@ -3583,36 +3583,49 @@ impl TranscriptDocument {
         None
     }
 
-    pub(crate) fn previous_navigation_block_from(
+    /// Nearest actionable block matching any of `roles` in `direction`. A block
+    /// containing the anchor below its first row counts as the previous one.
+    pub(crate) fn navigation_block(
         &self,
         anchor: TranscriptSemanticAnchor,
-        role: Option<&str>,
+        roles: &[&str],
+        direction: TranscriptNavigationDirection,
     ) -> Option<TranscriptNavigationBlock> {
-        self.navigation_block_from_anchor(anchor, role, TranscriptNavigationDirection::Previous)
-    }
-
-    pub(crate) fn next_navigation_block_from(
-        &self,
-        anchor: TranscriptSemanticAnchor,
-        role: Option<&str>,
-    ) -> Option<TranscriptNavigationBlock> {
-        self.navigation_block_from_anchor(anchor, role, TranscriptNavigationDirection::Next)
+        let candidates = roles
+            .iter()
+            .filter_map(|role| self.navigation_block_from_anchor(anchor, role, direction));
+        match direction {
+            TranscriptNavigationDirection::Previous => {
+                candidates.max_by_key(|block| block.record_index)
+            }
+            TranscriptNavigationDirection::Next => {
+                candidates.min_by_key(|block| block.record_index)
+            }
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn previous_navigation_block(
         &self,
-        role: Option<&str>,
+        roles: &[&str],
     ) -> Option<TranscriptNavigationBlock> {
-        self.previous_navigation_block_from(self.current_navigation_anchor()?, role)
+        self.navigation_block(
+            self.current_navigation_anchor()?,
+            roles,
+            TranscriptNavigationDirection::Previous,
+        )
     }
 
     #[cfg(test)]
     pub(crate) fn next_navigation_block(
         &self,
-        role: Option<&str>,
+        roles: &[&str],
     ) -> Option<TranscriptNavigationBlock> {
-        self.next_navigation_block_from(self.current_navigation_anchor()?, role)
+        self.navigation_block(
+            self.current_navigation_anchor()?,
+            roles,
+            TranscriptNavigationDirection::Next,
+        )
     }
 
     fn record_block_target_row(
@@ -3639,6 +3652,19 @@ impl TranscriptDocument {
             self.history().order.get(record_index).copied()?
         };
 
+        let (target_row, row_anchor) = self.block_target_row(lua, width, block_id, row_offset)?;
+        Some((block_id, target_row, row_anchor))
+    }
+
+    /// Transcript row `row_offset` rows into `block_id`, measuring only that
+    /// block. `None` when the block is not part of the loaded projection.
+    fn block_target_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        block_id: BlockId,
+        row_offset: RowIndex,
+    ) -> Option<(RowIndex, TranscriptRowAnchor)> {
         let global_row_offset = self.row_offset(width);
         if !self.pin_operation_blocks(&[block_id]) {
             return None;
@@ -3653,10 +3679,40 @@ impl TranscriptDocument {
         self.unpin_operation_blocks(&[block_id]);
         let (row_anchor, local_target_row) = target?;
         Some((
-            block_id,
             global_row_offset.saturating_add(local_target_row),
             row_anchor,
         ))
+    }
+
+    /// Where a block motion from display row `from` lands among blocks with any
+    /// of `roles`. A block holds the row from its first row on, so the previous
+    /// block from a row inside a block is that block's own start.
+    pub(crate) fn block_boundary(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        from: RowIndex,
+        roles: &[&str],
+        direction: TranscriptNavigationDirection,
+    ) -> BlockBoundary {
+        let row_offset = self.row_offset(width);
+        let Some(anchor) = self.content_anchor_at_row_with_offset(
+            lua,
+            width,
+            from,
+            row_offset,
+            TranscriptAnchorBias::Top,
+        ) else {
+            return BlockBoundary::Unsupported;
+        };
+        let Some(block) = self.navigation_block(anchor.into(), roles, direction) else {
+            return BlockBoundary::End;
+        };
+        let row = match self.block_target_row(lua, width, block.block_id, 0) {
+            Some((row, _)) => row,
+            None => self.rows_before_record(width, block.record_index),
+        };
+        BlockBoundary::At(row)
     }
 
     pub(crate) fn record_block_reveal_position(
@@ -9640,7 +9696,7 @@ mod document_tests {
         assert!(!active_history_contains(&document, "user 50"));
 
         let previous = document
-            .previous_navigation_block(Some("user"))
+            .previous_navigation_block(&["user"])
             .expect("previous user block outside the active window");
 
         assert_eq!(previous.record_index, 50);
@@ -9649,7 +9705,7 @@ mod document_tests {
         assert_eq!(previous.first_line, "user 50");
 
         let next = document
-            .next_navigation_block(Some("user"))
+            .next_navigation_block(&["user"])
             .expect("next user block in the active window");
 
         assert_eq!(next.record_index, 80);
@@ -10280,7 +10336,7 @@ pub(crate) struct TranscriptBlockSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TranscriptNavigationDirection {
+pub(crate) enum TranscriptNavigationDirection {
     Previous,
     Next,
 }

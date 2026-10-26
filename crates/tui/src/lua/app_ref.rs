@@ -398,8 +398,8 @@ impl ConversationLuaHost<'_> {
         session_id: &str,
         navigation_generation: u64,
         anchor: crate::app::transcript::TranscriptSemanticAnchor,
-        role: Option<&str>,
-        previous: bool,
+        roles: &[&str],
+        direction: crate::app::transcript::TranscriptNavigationDirection,
     ) -> Option<crate::app::transcript::TranscriptNavigationBlock> {
         if self.app.conversation.session().id != session_id
             || self
@@ -412,17 +412,10 @@ impl ConversationLuaHost<'_> {
         {
             return None;
         }
-        if previous {
-            self.app
-                .conversation
-                .transcript()
-                .previous_navigation_block_from(anchor, role)
-        } else {
-            self.app
-                .conversation
-                .transcript()
-                .next_navigation_block_from(anchor, role)
-        }
+        self.app
+            .conversation
+            .transcript()
+            .navigation_block(anchor, roles, direction)
     }
 
     pub(crate) fn stream_arrival_time(&self) -> std::time::Instant {
@@ -1407,6 +1400,10 @@ impl UiLuaHost<'_> {
 
     pub(crate) fn clear_search(&mut self) {
         self.app.clear_search();
+    }
+
+    pub(crate) fn move_transcript_block(&mut self, motion: crate::smelt_edit::BlockMotion) -> bool {
+        self.app.move_transcript_block(motion)
     }
 }
 

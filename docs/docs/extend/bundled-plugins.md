@@ -25,6 +25,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | Plugin | Summary |
 | --- | --- |
 | `smelt.plugins.banner` | Empty-state logo decoration + shutdown logo/resume-hint banner. |
+| `smelt.plugins.block_nav` | Transcript block navigation. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.diff` | /diff: continuous, virtualized Git diff viewer. |

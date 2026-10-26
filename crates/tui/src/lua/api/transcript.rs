@@ -1,6 +1,7 @@
 //! `smelt.transcript` bindings for committed view observation, semantic
 //! navigation, and rendered transcript inspection.
 
+use crate::app::transcript::TranscriptNavigationDirection;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
 use smelt_core::content::stream_parser::StreamParser;
@@ -150,14 +151,19 @@ impl LuaTranscriptView {
     ) -> Option<LuaTranscriptTarget> {
         let anchor = self.view.state.anchor?;
         let session_id = self.view.state.session_id.clone();
-        let role = role.map(LuaTranscriptRole::as_str);
+        let role = role.unwrap_or(LuaTranscriptRole::User).as_str();
+        let direction = if previous {
+            TranscriptNavigationDirection::Previous
+        } else {
+            TranscriptNavigationDirection::Next
+        };
         crate::lua::try_with_conversation_host(|host| {
             host.transcript_navigation_block(
                 &session_id,
                 self.view.state.navigation_generation,
                 anchor,
-                role,
-                previous,
+                &[role],
+                direction,
             )
             .map(|block| LuaTranscriptTarget::from_block(session_id, block))
         })
@@ -215,6 +221,16 @@ impl mlua::UserData for LuaTranscriptView {
             },
         );
     }
+}
+
+/// Options for `smelt.transcript.move_block`.
+#[derive(Debug, Default, LuaOpts)]
+#[lua(name = "smelt.transcript.MoveBlockOpts")]
+pub struct LuaTranscriptMoveBlockOpts {
+    /// Move to a following block instead of a preceding one. Defaults to false.
+    pub forward: Option<bool>,
+    /// How many blocks to move. Defaults to 1.
+    pub count: Option<crate::smelt_edit::RowIndex>,
 }
 
 /// Rendering options for `smelt.transcript.stream`.
@@ -467,6 +483,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let _ = LuaTranscriptStreamOpts::lua_type();
     let navigation_opts_type = LuaTranscriptNavigationOpts::lua_type();
     let _ = LuaTranscriptRevealOpts::lua_type();
+    let _ = LuaTranscriptMoveBlockOpts::lua_type();
     let role_type = LuaTranscriptRole::lua_type();
     record_class(LuaClassDecl {
         name: "smelt.transcript.Stream",
@@ -705,6 +722,50 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 ),
             })
             .unwrap_or(false))
+        },
+    )?;
+    m.fn_(
+        "block_kind",
+        "Bind the block-motion key `key`, a single character, to transcript blocks with any of `roles`. With vim, `[` followed by the key jumps to the previous such block and `]` followed by it to the next, with a count. An empty `roles` removes the binding.",
+        &["key", "roles"],
+        |lua, (key, roles): (String, Vec<LuaTranscriptRole>)| -> LuaResult<()> {
+            let mut chars = key.chars();
+            let (Some(key), None) = (chars.next(), chars.next()) else {
+                return Err(mlua::Error::runtime(
+                    "smelt.transcript.block_kind: `key` must be a single character",
+                ));
+            };
+            let shared = super::win::current_shared(lua)?;
+            let mut kinds = shared
+                .transcript_block_kinds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if roles.is_empty() {
+                kinds.remove(&key);
+            } else {
+                kinds.insert(key, roles.into_iter().map(LuaTranscriptRole::as_str).collect());
+            }
+            Ok(())
+        },
+    )?;
+    m.live_only_fn(
+        "move_block",
+        "Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. Past the last block it goes to the transcript edge. Returns false when the transcript is not focused, so a keymap handler can fall through.",
+        &["kind", "opts"],
+        |_, (kind, opts): (String, Option<LuaTranscriptMoveBlockOpts>)| -> LuaResult<bool> {
+            let mut chars = kind.chars();
+            let (Some(kind), None) = (chars.next(), chars.next()) else {
+                return Err(mlua::Error::runtime(
+                    "smelt.transcript.move_block: `kind` must be a single character",
+                ));
+            };
+            let opts = opts.unwrap_or_default();
+            let motion = crate::smelt_edit::BlockMotion {
+                kind,
+                forward: opts.forward.unwrap_or(false),
+                count: opts.count.unwrap_or(1),
+            };
+            Ok(crate::lua::with_ui_host(|host| host.move_transcript_block(motion)))
         },
     )?;
     m.fn_(

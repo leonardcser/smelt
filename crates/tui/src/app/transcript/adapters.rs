@@ -50,6 +50,19 @@ impl DisplayDocument for TranscriptDisplayDocument<'_> {
                 .copy_exact_loaded_range(self.lua, self.width, self.theme, range)
         })
     }
+
+    fn block_boundary(&mut self, from: RowIndex, kind: char, forward: bool) -> BlockBoundary {
+        let Some(roles) = self.lua.transcript_block_roles(kind) else {
+            return BlockBoundary::Unsupported;
+        };
+        let direction = if forward {
+            TranscriptNavigationDirection::Next
+        } else {
+            TranscriptNavigationDirection::Previous
+        };
+        self.document
+            .block_boundary(self.lua, self.width, from, &roles, direction)
+    }
 }
 
 pub(crate) struct ResumePreviewCache {

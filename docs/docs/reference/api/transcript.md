@@ -11,6 +11,18 @@ description: "Transcript display policy and rendered transcript inspection. Lua 
 
 Transcript display policy and rendered transcript inspection. Host-tier renderer hooks are layered with UiHost read APIs when a TUI is active.
 
+## `smelt.transcript.block_kind`
+
+```lua
+fun(key: string, roles: smelt.transcript.Role[]): nil
+```
+
+Types: [`smelt.transcript.Role`](types.md#smelttranscriptrole)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Bind the block-motion key `key`, a single character, to transcript blocks with any of `roles`. With vim, `[` followed by the key jumps to the previous such block and `]` followed by it to the next, with a count. An empty `roles` removes the binding.
+
 ## `smelt.transcript.extend_renderer`
 
 ```lua
@@ -155,6 +167,18 @@ fun(callback: fun(value: string)?): string
 **Availability:** Terminal UI only; raises in headless mode.
 
 Return the currently materialized transcript display text as a single newline-joined string. In sparse sessions, the no-callback form can return an empty string while background hydration is pending. Pass `callback` to receive the active loaded-window text once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty string. Prefer `rows(start, count)` for bounded display reads.
+
+## `smelt.transcript.move_block`
+
+```lua
+fun(kind: string, opts: smelt.transcript.MoveBlockOpts?): boolean
+```
+
+Types: [`smelt.transcript.MoveBlockOpts`](types.md#smelttranscriptmoveblockopts)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. Past the last block it goes to the transcript edge. Returns false when the transcript is not focused, so a keymap handler can fall through.
 
 ## `smelt.transcript.node_at_row`
 

@@ -195,6 +195,13 @@ focus to the prompt. `Enter` toggles folds; vim-style `za` / `zo` / `zc` / `zR`
 / `zM` also work. `Ctrl+click` opens transcript links, email addresses, and file
 paths; in vim mode, use `gf`.
 
+`[` / `]` plus a kind jump to the previous / next block: `[[` any block, `[u` user
+message, `[a` assistant message, `[t` tool call. They take counts and compose with
+operators and visual mode (`3]u`, `y]u`); past the last block they go to the
+transcript edge. `Alt+Up` / `Alt+Down` (blocks) and `Alt+Shift+Up` /
+`Alt+Shift+Down` (user messages) work without vim mode. Add kinds with
+`smelt.transcript.block_kind`.
+
 `/` searches the transcript forward and `?` backward; `n` and `N` repeat the last
 search in either direction, and `/nohl` clears the highlights.
 

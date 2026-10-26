@@ -982,6 +982,12 @@
 ---@field selector smelt.transcript.GroupSelector Declarative block matcher.
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
 
+--- Options for `smelt.transcript.move_block`.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.transcript.MoveBlockOpts
+---@field forward? boolean Move to a following block instead of a preceding one. Defaults to false.
+---@field count? integer How many blocks to move. Defaults to 1.
+
 --- Filters accepted by semantic previous/next block navigation.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.transcript.NavigationOpts

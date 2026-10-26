@@ -1444,6 +1444,17 @@ transcript renderer owns presentation for the resulting semantic group node.
 | `selector` | [smelt.transcript.GroupSelector](types.md#smelttranscriptgroupselector) | yes | Declarative block matcher. |
 | `bucket` | `string\|string[]` |  | Stable field names used to split adjacent matching runs. |
 
+### `smelt.transcript.MoveBlockOpts`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Options for `smelt.transcript.move_block`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `forward` | `boolean` |  | Move to a following block instead of a preceding one. Defaults to false. |
+| `count` | `integer` |  | How many blocks to move. Defaults to 1. |
+
 ### `smelt.transcript.NavigationOpts`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.

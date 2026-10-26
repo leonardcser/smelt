@@ -4583,7 +4583,7 @@ fn previous_user_record_index(app: &TestApp) -> usize {
     let target = app
         .conversation_probe()
         .transcript()
-        .previous_navigation_block(Some("user"))
+        .previous_navigation_block(&["user"])
         .expect("previous user target");
     parse_record_index(&target.first_line).unwrap_or_else(|| {
         panic!(
@@ -5272,14 +5272,16 @@ fn reveal_user_block_via_lua(app: &mut TestApp, direction: &str) -> RevealedUser
         .expect("committed transcript view");
     let anchor = view.state.anchor.expect("committed navigation anchor");
     let expected = match direction {
-        "previous" => app
-            .conversation_probe()
-            .transcript()
-            .previous_navigation_block_from(anchor, Some("user")),
-        "next" => app
-            .conversation_probe()
-            .transcript()
-            .next_navigation_block_from(anchor, Some("user")),
+        "previous" => app.conversation_probe().transcript().navigation_block(
+            anchor,
+            &["user"],
+            crate::app::transcript::TranscriptNavigationDirection::Previous,
+        ),
+        "next" => app.conversation_probe().transcript().navigation_block(
+            anchor,
+            &["user"],
+            crate::app::transcript::TranscriptNavigationDirection::Next,
+        ),
         other => panic!("unsupported transcript reveal direction {other}"),
     }
     .expect("semantic user navigation target");
@@ -7511,4 +7513,170 @@ fn transcript_jump_to_bottom_preserves_cursor_screen_row() {
         Some(screen_row_before),
         "cursor should stay on the same screen row after jumping to bottom"
     );
+}
+
+fn block_nav_app(vim: bool) -> TestApp {
+    let mut app = TestApp::builder().with_vim(vim).build();
+    app.set_terminal_size(80, 16);
+    for turn in ["first", "second"] {
+        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            text: format!("{turn} question"),
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: None,
+        });
+        for i in 0..30 {
+            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                content: format!("{turn} answer {i}").into(),
+            });
+        }
+    }
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.render_silent();
+    app
+}
+
+/// The first line of text at or below the cursor row: where the cursor's
+/// block, or the blank padding that opens it, reads.
+fn transcript_cursor_line(app: &TestApp) -> String {
+    let rows = app
+        .transcript_window()
+        .viewport
+        .map_or(0, |viewport| viewport.rect.height);
+    let row = app
+        .transcript_cursor_screen_row(rows)
+        .expect("cursor on screen");
+    transcript_viewport_lines(app)
+        .into_iter()
+        .skip(usize::from(row))
+        .map(|line| line.trim().to_string())
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+}
+
+/// Type `keys` into the transcript, one frame per key, and return the line
+/// under the cursor.
+fn block_nav(app: &mut TestApp, keys: &str) -> String {
+    for key in keys.chars() {
+        app.type_char(key);
+        app.render_silent();
+    }
+    transcript_cursor_line(app)
+}
+
+#[test]
+fn block_motions_walk_user_messages() {
+    let mut app = block_nav_app(true);
+    block_nav(&mut app, "G");
+    assert_eq!(block_nav(&mut app, "[u"), "second question");
+    assert_eq!(block_nav(&mut app, "[u"), "first question");
+    assert_eq!(block_nav(&mut app, "]u"), "second question");
+}
+
+#[test]
+fn block_motions_take_counts() {
+    let mut app = block_nav_app(true);
+    block_nav(&mut app, "G");
+    assert_eq!(block_nav(&mut app, "2[u"), "first question");
+    assert_eq!(block_nav(&mut app, "3]]"), "first answer 2");
+}
+
+#[test]
+fn block_motions_step_over_every_block() {
+    let mut app = block_nav_app(true);
+    assert_eq!(block_nav(&mut app, "gg]]"), "first answer 0");
+    assert_eq!(block_nav(&mut app, "]]"), "first answer 1");
+    assert_eq!(block_nav(&mut app, "[["), "first answer 0");
+    assert_eq!(block_nav(&mut app, "[["), "first question");
+}
+
+#[test]
+fn block_motions_go_to_the_edges_past_the_last_block() {
+    let mut app = block_nav_app(true);
+    block_nav(&mut app, "G");
+    assert_eq!(block_nav(&mut app, "]u"), "second answer 29");
+    assert_eq!(block_nav(&mut app, "gg[u"), "first question");
+}
+
+#[test]
+fn block_motions_ignore_unbound_kinds() {
+    let mut app = block_nav_app(true);
+    block_nav(&mut app, "G");
+    let before = transcript_cursor_line(&app);
+    assert_eq!(block_nav(&mut app, "[x"), before);
+}
+
+#[test]
+fn block_motions_compose_with_yank() {
+    let mut app = block_nav_app(true);
+    block_nav(&mut app, "ggy]u");
+    let copied = app.core_probe().clipboard.kill_ring.current().to_string();
+    assert!(copied.contains("first question"), "{copied:?}");
+    assert!(!copied.contains("second question"), "{copied:?}");
+}
+
+#[test]
+fn block_motions_extend_visual_selections() {
+    let mut app = block_nav_app(true);
+    block_nav(&mut app, "ggv");
+    assert_eq!(block_nav(&mut app, "]u"), "second question");
+    assert_eq!(app.transcript_window().vim_mode, VimMode::Visual);
+}
+
+#[test]
+fn block_alt_arrows_work_without_vim() {
+    let mut app = block_nav_app(false);
+    app.configure_transcript_vim(false, VimMode::Normal);
+    app.press_mod(KeyCode::Char('>'), KeyModifiers::ALT);
+    app.render_silent();
+    for expected in ["second question", "first question"] {
+        app.press_mod(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SHIFT);
+        app.render_silent();
+        assert_eq!(transcript_cursor_line(&app), expected);
+    }
+    app.press_mod(KeyCode::Down, KeyModifiers::ALT);
+    app.render_silent();
+    assert_eq!(transcript_cursor_line(&app), "first answer 0");
+}
+
+#[test]
+fn block_chords_fall_through_when_the_prompt_is_focused() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.type_text("a[[b");
+    assert_eq!(app.prompt_source(), "a[[b");
+}
+
+#[test]
+fn resumed_sparse_block_motions_land_on_user_records() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(340, 78, 18);
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.render_silent();
+    block_nav(&mut app, "G");
+
+    let mut expected = previous_heterogeneous_user_before(340);
+    for _ in 0..6 {
+        let reads_before = app
+            .conversation_probe()
+            .transcript()
+            .extent_store_read_count_for_harness();
+        let line = block_nav(&mut app, "[u");
+        let reads = app
+            .conversation_probe()
+            .transcript()
+            .extent_store_read_count_for_harness()
+            - reads_before;
+        assert!(
+            reads <= 16,
+            "block motion read {reads} extents from the store"
+        );
+        assert!(
+            line.contains(&format!("record-{expected:04}")),
+            "expected user record {expected}, cursor line {line:?}, viewport {:?}",
+            transcript_viewport_lines(&app)
+        );
+        expected = previous_heterogeneous_user_before(expected);
+    }
 }
