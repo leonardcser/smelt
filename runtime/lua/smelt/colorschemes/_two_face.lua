@@ -80,7 +80,7 @@ local function build(p)
     Comment             = fg(color(p.muted), { italic = true }),
     Visual              = bg(select),
     Search              = { fg = color(bg0), bg = color(accent), bold = true },
-    YankFlash           = bg(mix(p.warn, bg0, p.light and 0.45 or 0.62)),
+    YankFlash           = bg(mix(select.rgb, p.light and { 0, 0, 0 } or { 255, 255, 255 }, 0.12)),
     CursorLine          = bg(surface),
     ErrorMsg            = fg(color(p.error), { bold = true }),
     WarningMsg          = fg(color(p.warn), { bold = true }),
