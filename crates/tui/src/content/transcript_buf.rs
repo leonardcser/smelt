@@ -3463,9 +3463,13 @@ impl TranscriptProjection {
         }
 
         let row = plan.scroll_top;
-        if let Some(out) =
-            self.reuse_visible_projection_for_row(buf, plan.key, row, plan.viewport_rows)
-        {
+        if let Some(out) = self.reuse_visible_projection_for_row(
+            buf,
+            plan.key,
+            row,
+            plan.viewport_rows,
+            plan.total_rows,
+        ) {
             return out;
         }
 
@@ -3484,6 +3488,7 @@ impl TranscriptProjection {
         key: ProjectKey,
         row: RowIndex,
         viewport_rows: u16,
+        planned_total_rows: RowIndex,
     ) -> Option<MaterializedRows> {
         let prev = self.last_project_key()?;
         if prev.generation != key.generation
@@ -3498,6 +3503,10 @@ impl TranscriptProjection {
         }
 
         if !self.target_has_projection(prev, buf) {
+            return None;
+        }
+
+        if self.visible.total_rows != planned_total_rows {
             return None;
         }
 
