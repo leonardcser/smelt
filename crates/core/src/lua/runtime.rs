@@ -1641,9 +1641,9 @@ impl LuaRuntime {
         let Ok(map) = self.shared.keymaps.lock() else {
             return false;
         };
-        let mode_char = query_mode_char(current_mode);
+        let mode_char = dispatch_mode_char(current_mode);
         for (m, chord) in map.keys() {
-            if keymap_mode_matches(m, mode_char)
+            if (m.is_empty() || mode_char == Some(m.as_str()))
                 && chord.len() > sequence.len()
                 && crate::keymap::chord_sequence_starts_with(chord, sequence)
             {

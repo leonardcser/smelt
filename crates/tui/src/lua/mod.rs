@@ -4153,6 +4153,9 @@ mod tests {
         assert!(!rt.chord_has_longer("g", Some("Insert")));
         // Global-mode chord surfaces in every mode.
         assert!(rt.chord_has_longer("<Esc>", Some("Insert")));
+        // Without vim only global-mode chords can fire, so only they pend.
+        assert!(!rt.chord_has_longer("g", None));
+        assert!(rt.chord_has_longer("<Esc>", None));
     }
 
     #[test]
