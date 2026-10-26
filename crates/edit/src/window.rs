@@ -581,7 +581,10 @@ impl WindowSurface {
     }
 
     pub fn supports_search(self) -> bool {
-        matches!(self.kind, WindowSurfaceKind::ReadonlyText)
+        matches!(
+            self.kind,
+            WindowSurfaceKind::ReadonlyText | WindowSurfaceKind::EditableText
+        )
     }
 
     pub fn is_readonly_text(self) -> bool {
@@ -1236,6 +1239,17 @@ impl Window {
 
     pub fn supports_search(&self) -> bool {
         self.surface.supports_search()
+    }
+
+    /// Whether unmodified printable keys are commands (`:`, `/`, `n`) rather
+    /// than typed text: always on a read-only window without vim, and outside
+    /// insert mode when vim is on.
+    pub fn plain_keys_are_commands(&self) -> bool {
+        if self.vim_enabled() {
+            self.vim_mode() != VimMode::Insert
+        } else {
+            self.surface.is_readonly_text()
+        }
     }
 
     pub fn supports_wheel_scroll(&self) -> bool {

@@ -558,6 +558,13 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_search_key_for_target(&mut self, target: WinId, k: KeyEvent) -> bool {
+        if !self
+            .ui
+            .win(target)
+            .is_some_and(Window::plain_keys_are_commands)
+        {
+            return false;
+        }
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _)
                 if self
@@ -873,10 +880,11 @@ impl TuiApp {
         let focused = self.ui.focus();
         let content =
             (self.app_focus == crate::app::AppFocus::Content).then_some(crate::app::TRANSCRIPT_WIN);
-        [focused, content]
-            .into_iter()
-            .flatten()
-            .find(|&win| self.ui.win(win).is_some_and(|w| w.supports_search()))
+        [focused, content].into_iter().flatten().find(|&win| {
+            self.ui
+                .win(win)
+                .is_some_and(|w| w.supports_search() && w.plain_keys_are_commands())
+        })
     }
 
     /// Finds the next literal, display-row-local match. Queries containing `\n`

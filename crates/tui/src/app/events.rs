@@ -664,14 +664,10 @@ impl TuiApp {
             if self.prompt_vim_pending_input_owns_key(k) {
                 return Some(self.dispatch_prompt_event_to_input(Event::Key(k), running));
             }
-            if matches!(self.app_focus, crate::app::AppFocus::Content)
-                && self.handle_focused_search_key(k)
-            {
+            if self.handle_focused_search_key(k) {
                 return Some(EventOutcome::Noop);
             }
-            if matches!(self.app_focus, crate::app::AppFocus::Content)
-                && self.handle_search_open_before_window_dispatch(k)
-            {
+            if self.handle_search_open_before_window_dispatch(k) {
                 return Some(EventOutcome::Noop);
             }
             if let Some(outcome) = self.dispatch_window_lua_keymap(k) {
@@ -691,14 +687,11 @@ impl TuiApp {
             ..
         }) = ev
         {
-            let in_insert = match self.app_focus {
-                crate::app::AppFocus::Prompt => {
-                    !self.prompt.vim_enabled(self.prompt_win())
-                        || self.prompt_win().vim_mode() == crate::smelt_edit::VimMode::Insert
-                }
-                crate::app::AppFocus::Content => false,
+            let focused = match self.app_focus {
+                crate::app::AppFocus::Prompt => self.prompt_win(),
+                crate::app::AppFocus::Content => self.transcript_win(),
             };
-            if !in_insert {
+            if focused.plain_keys_are_commands() {
                 self.open_cmdline();
                 return Some(EventOutcome::Noop);
             }

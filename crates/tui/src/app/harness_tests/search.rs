@@ -1190,3 +1190,95 @@ fn viewer_search_ignores_non_selectable_spans() {
         "selectable match should paint"
     );
 }
+
+fn vim_prompt_app(text: &str) -> TestApp {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 16);
+    app.type_text(text);
+    app.press(KeyCode::Esc);
+    app.type_text("gg");
+    app.render_silent();
+    app
+}
+
+#[test]
+fn prompt_search_in_vim_normal_mode_jumps_and_repeats() {
+    let mut app = vim_prompt_app("alpha one\nbeta\nalpha two\nalpha three");
+
+    app.type_char('/');
+    assert!(app.state().cmdline_open);
+    app.type_text("alpha");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.prompt_cpos(), 0);
+    assert_eq!(
+        app.overlays_probe().search_session().unwrap().target,
+        crate::app::PROMPT_WIN
+    );
+
+    app.type_char('n');
+    assert_eq!(app.prompt_cpos(), "alpha one\nbeta\n".len());
+    app.type_char('n');
+    assert_eq!(app.prompt_cpos(), "alpha one\nbeta\nalpha two\n".len());
+    app.type_char('N');
+    assert_eq!(app.prompt_cpos(), "alpha one\nbeta\n".len());
+
+    app.render_silent();
+    assert!(
+        !app.ui_probe()
+            .win(crate::app::PROMPT_WIN)
+            .unwrap()
+            .range_layer(crate::smelt_edit::RangeLayer::Search)
+            .is_empty(),
+        "prompt matches are painted"
+    );
+
+    app.press(KeyCode::Esc);
+    app.render_silent();
+    assert!(app.overlays_probe().search_session().is_none());
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn prompt_backward_search_finds_the_previous_match() {
+    let mut app = vim_prompt_app("alpha one\nbeta\nalpha two");
+    app.type_char('G');
+
+    app.type_char('?');
+    app.type_text("alpha");
+    app.press(KeyCode::Enter);
+    assert_eq!(app.prompt_cpos(), "alpha one\nbeta\n".len());
+}
+
+#[test]
+fn prompt_slash_and_n_are_text_in_insert_mode() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("a/n?N");
+    assert_eq!(app.state().prompt_text, "a/n?N");
+    assert!(!app.state().cmdline_open);
+}
+
+#[test]
+fn prompt_slash_is_text_without_vim() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.type_text("a/b");
+    assert_eq!(app.state().prompt_text, "a/b");
+    assert!(!app.state().cmdline_open);
+}
+
+#[test]
+fn prompt_search_follows_edits_before_repeating() {
+    let mut app = vim_prompt_app("alpha one\nbeta\nalpha two");
+    app.type_char('/');
+    app.type_text("alpha");
+    app.press(KeyCode::Enter);
+    app.type_char('n');
+    let second = "alpha one\nbeta\n".len();
+    assert_eq!(app.prompt_cpos(), second);
+
+    // Delete the line holding the current match, then repeat from the new text.
+    app.type_text("dd");
+    app.type_text("gg");
+    app.render_silent();
+    app.type_char('N');
+    assert_eq!(app.prompt_cpos(), 0);
+}
