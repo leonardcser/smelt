@@ -162,6 +162,7 @@
   --term-line: rgba(232, 223, 214, 0.12);
 }
 .md-typeset figure.term {
+  position: relative;
   display: block;
   box-sizing: content-box;
   width: auto;
@@ -174,6 +175,7 @@
 .md-typeset figure.term:not(.home *) {
   margin: 1rem 0;
   padding: clamp(0.75rem, 4vw, 2.5rem);
+  padding-bottom: clamp(2.25rem, 4vw, 2.5rem);
   background: #3a0f1e url("../assets/wallpaper.jpg") center / cover no-repeat;
 }
 [data-md-color-scheme="default"] .md-typeset figure.term:not(.home *) {
@@ -195,14 +197,31 @@
   background: var(--term-bg);
   color: var(--term-fg);
 }
-/* Keys pressed in a replay, as keycaps in the top-right corner. */
+/* Keys pressed in a replay, as keycaps centered in the wallpaper below the window. The home
+   page has no wallpaper, so only a figure that asks for it (data-keys="corner") shows them,
+   in the top-right corner of the window. */
 .term__keys {
   position: absolute;
-  top: 0.6rem;
-  right: 0.6rem;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: clamp(2.25rem, 4vw, 2.5rem);
   display: flex;
+  align-items: center;
+  justify-content: center;
   gap: 0.25rem;
   pointer-events: none;
+}
+.home .term__keys {
+  display: none;
+}
+.home figure.term[data-keys="corner"] .term__keys {
+  top: 0.6rem;
+  right: 0.6rem;
+  bottom: auto;
+  left: auto;
+  height: auto;
+  display: flex;
 }
 .md-typeset .term__keys kbd {
   min-width: 1.4rem;

@@ -18,6 +18,7 @@ export async function renderReplay(name: string, cell = 9): Promise<{ pngs: Buff
   @font-face{font-family:"JetBrains Mono";font-weight:700;src:url(/__fonts/JetBrainsMono-Bold.woff2)}
   :root{--md-code-font-family:"JetBrains Mono"}
   body{margin:0}
+  .term__keys{display:none}
   .md-typeset figure.term{width:${replay.cols * cell}px}
 </style>
 <div class="md-typeset"><figure class="term" data-replay="/assets/replays/${name}.json"><pre class="term__screen"></pre></figure></div>

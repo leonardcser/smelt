@@ -85,11 +85,12 @@ function timeline(rec: Recording, scene: Scene): Moment[] {
       ? frames.findLastIndex((f) => f.at <= sent.at)
       : frames.findIndex((f) => f.at > (keylog[0]?.at ?? 0) - LEAD_MS) - 1;
   frames.splice(0, Math.max(first, 0));
-  // Text typed in vim's insert mode is plain typing, so only commands show; Esc leaves insert mode.
+  // Text typed into the prompt, and anything pressed in vim's insert mode, is plain typing, so only
+  // commands show; Esc leaves insert mode.
   const inserting = (at: number) => /INSERT/.test(plain(rec.frames.findLast((f) => f.at <= at)?.ansi ?? ""));
-  const shown = keylog.filter((k) => k.label === "esc" || !inserting(k.at));
+  const shown = keylog.filter((k) => !k.typed && (k.label === "esc" || !inserting(k.at)));
   const keysAt = (t: number) =>
-    scene.keys ? shown.filter((k) => k.at <= t && k.at > t - KEY_LINGER_MS).slice(-KEY_MAX).map((k) => k.label) : [];
+    scene.keys !== false ? shown.filter((k) => k.at <= t && k.at > t - KEY_LINGER_MS).slice(-KEY_MAX).map((k) => k.label) : [];
   const idleAt = (t: number) => !keylog.some((k) => k.at > t - IDLE_BEFORE_MS && k.at < t + IDLE_AFTER_MS);
   const moments: Moment[] = [];
   for (const [i, f] of frames.entries()) {

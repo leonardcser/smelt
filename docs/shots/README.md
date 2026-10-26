@@ -44,8 +44,11 @@ Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain.
 - Recordings are cached in `.cache/frames/`, so `--cached` only re-renders.
 - Unless a scene is `realtime`, stretches with no typing nearby (boot, model thinking, tool runs) are sped up 3x
   and the last screen is held for 2 s; see `IDLE_SPEEDUP` in `src/main.ts`.
-- `vim: true` enables vim mode. Only `vim` shows the keypress overlay (`keys: true`), in the
-  terminal's top-right corner, and it leaves out what is typed in insert mode.
+- `vim: true` enables vim mode.
+- Every scene overlays the commands it presses as keycaps in the wallpaper below the terminal
+  (`keys: false` turns it off). Text typed into the prompt and anything pressed in vim's insert
+  mode is left out. The home page hides the overlay, except for the vim replay, which keeps it in
+  the window's top-right corner (`data-keys="corner"`), and the README GIF has none.
 - `kitty: true` (the `math` scene) attaches a client to the tmux session that answers smelt's
   Kitty graphics probes through passthrough and keeps the images smelt sends. The replay stores
   them under `img`, and `replay.js` draws them over their Unicode placeholder cells.

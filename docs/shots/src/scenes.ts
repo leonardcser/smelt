@@ -29,7 +29,7 @@ export type Scene = {
   /** Terminal size, 110x30 unless set. */
   cols?: number;
   rows?: number;
-  /** Overlay pressed keys, like a key-capture app. */
+  /** Overlay pressed commands under the terminal, like a key-capture app. On unless set to false. */
   keys?: boolean;
   /** Vi keybindings in the prompt. */
   vim?: boolean;
@@ -279,7 +279,6 @@ export const scenes: Record<string, Scene> = {
 
   /** Vim editing in the prompt, with the key presses on screen. */
   vim: {
-    keys: true,
     vim: true,
     rows: 9,
     from: /keep the public api unchanged/,

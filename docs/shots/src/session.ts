@@ -27,8 +27,8 @@ export type Frame = { at: number; ansi: string; cols: number; rows: number };
 /** A change of playback speed, set by a `speed` step. */
 export type SpeedMark = { at: number; speed: number };
 
-/** One keystroke, labeled the way a key-capture overlay would show it. */
-export type KeyEvent = { at: number; label: string };
+/** One keystroke, labeled the way a key-capture overlay would show it; `typed` marks prompt text, not a command. */
+export type KeyEvent = { at: number; label: string; typed?: boolean };
 
 export type Capture = { name: string; rows: number; ansi: string };
 
@@ -268,7 +268,7 @@ export async function run(
   const keylog: KeyEvent[] = [];
   const marks: SpeedMark[] = [];
   const t0 = Date.now();
-  const log = (label: string) => keylog.push({ at: Date.now() - t0, label });
+  const log = (label: string, typed = false) => keylog.push({ at: Date.now() - t0, label, ...(typed ? { typed } : {}) });
   let recording = opts.recordEvery > 0;
   const recorder = (async () => {
     while (recording) {
@@ -292,7 +292,7 @@ export async function run(
         if (opts.typeDelay) {
           for (const [i, ch] of [...step.type].entries()) {
             await tmux("send-keys", "-t", tmuxName, "-l", ch);
-            log(ch === " " ? "␣" : ch);
+            log(ch === " " ? "␣" : ch, true);
             await Bun.sleep(keyDelay(opts.typeDelay, ch, step.type[i - 1]));
           }
         } else {

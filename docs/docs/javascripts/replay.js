@@ -291,11 +291,11 @@
     this.window.className = "term__window";
     this.screen.replaceWith(this.window);
     this.window.appendChild(this.screen);
-    // Keys pressed in the frame, shown like a key-capture app.
+    // Keys pressed in the frame, shown like a key-capture app below the window.
     this.keys = document.createElement("div");
     this.keys.className = "term__keys";
     this.keys.setAttribute("aria-hidden", "true");
-    this.window.appendChild(this.keys);
+    this.el.appendChild(this.keys);
     this.frames = null;
     this.index = 0;
     this.timer = null;
