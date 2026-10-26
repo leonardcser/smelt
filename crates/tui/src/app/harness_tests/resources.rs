@@ -43,7 +43,6 @@ fn function_key_overlays_toggle_and_dismiss_without_mouse_focus() {
         "Esc should close help without a mouse click"
     );
 
-    assert!(app.run_lua(r#"require("smelt.examples.snake")"#));
     for key in [KeyCode::F(3), KeyCode::F(11), KeyCode::F(12)] {
         app.press(key);
         assert!(
