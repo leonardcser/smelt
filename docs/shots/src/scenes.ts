@@ -282,6 +282,7 @@ export const scenes: Record<string, Scene> = {
     keys: true,
     vim: true,
     rows: 9,
+    from: /keep the public api unchanged/,
     steps: [
       { pause: 1200 },
       { type: "fix the rounding bug in apply_discount" },
