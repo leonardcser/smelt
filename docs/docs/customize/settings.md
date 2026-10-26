@@ -17,7 +17,8 @@ smelt.settings.show_tps = true
 Use `--set KEY=VALUE` for a one-off override on a single launch. Booleans are
 `true` or `false`, numbers are parsed as numbers, and strings are checked against
 the allowed values. Unknown keys and wrong types raise an error. Saved changes
-apply automatically; see [Reloading](index.md#reloading).
+apply automatically; see [Reloading](index.md#reloading). For setups that
+combine several settings, such as a quiet interface, see [Recipes](recipes.md).
 
 ## All settings
 

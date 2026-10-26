@@ -5,23 +5,10 @@ description: "Register OpenAI-compatible, Ollama, ChatGPT, GitHub Copilot and ot
 
 # Providers and models
 
-Register providers in `init.lua` so you can run plain `smelt` with no flags. For
-a first-time setup see [Getting started](../guide/getting-started.md).
-
-```lua
-smelt.provider.register("ollama", {
-  type = "openai-compatible",
-  api_base = "http://localhost:11434/v1",
-  models = { "qwen3.6:27b" },
-})
-
-smelt.provider.register("openai", {
-  type = "openai",
-  api_base = "https://api.openai.com/v1",
-  api_key_env = "OPENAI_API_KEY",
-  models = { "gpt-5.5" },
-})
-```
+Register providers in `init.lua` with `smelt.provider.register(name, fields)` so
+you can run plain `smelt` with no flags. For copy-paste setups see
+[Recipes](recipes.md#use-a-local-model); for a first-time setup see
+[Getting started](../guide/getting-started.md).
 
 | Field         | Description |
 | ------------- | ----------- |

@@ -85,7 +85,8 @@ smelt.settings.file_icons = true
 
 Icons are colored like nvim-web-devicons; set `smelt.settings.file_icon_colors = false`
 for plain icons. Without a Nerd Font the icons show as empty boxes, which is why
-this is off by default.
+this is off by default. To combine icons with vim keys, see
+[Recipes](recipes.md#use-vim-keys-and-file-icons).
 
 ## Keymaps
 

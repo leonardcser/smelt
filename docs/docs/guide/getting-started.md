@@ -156,25 +156,9 @@ A few keys to know:
 ## Save your config
 
 Once you have a setup you like, write it to `~/.config/smelt/init.lua`
-(`%APPDATA%\smelt\init.lua` on Windows) and run plain `smelt` from then on:
-
-```lua
-smelt.provider.register("ollama", {
-  type = "openai-compatible",
-  api_base = "http://localhost:11434/v1",
-  models = { "qwen3.6:27b" },
-})
-
-smelt.provider.register("openai", {
-  type = "openai",
-  api_base = "https://api.openai.com/v1",
-  api_key_env = "OPENAI_API_KEY",
-  models = { "gpt-5.5" },
-})
-
-smelt.settings.vim = true
-smelt.settings.file_icons = true -- needs a Nerd Font
-```
+(`%APPDATA%\smelt\init.lua` on Windows) and run plain `smelt` from then on.
+[Recipes](../customize/recipes.md) has the lines to paste for a local model, an
+API key, vim keys and more.
 
 Switch models at any time with `/model`. Config changes reload automatically.
 
@@ -187,5 +171,6 @@ Switch models at any time with `/model`. Config changes reload automatically.
 ## Next
 
 - [Common workflows](workflows.md): modes, approvals, steering, sessions, goals
+- [Recipes](../customize/recipes.md): copy-paste configs for a local model, vim keys, permissions
 - [Customize](../customize/index.md): providers, settings, themes, commands
 - [Troubleshooting](troubleshooting.md): startup, terminal and config problems

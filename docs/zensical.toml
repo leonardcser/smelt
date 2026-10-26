@@ -19,6 +19,7 @@ nav = [
   ]},
   { "Customize" = [
     "customize/index.md",
+    { "Recipes" = "customize/recipes.md" },
     { "Providers and models" = "customize/providers.md" },
     { "Settings" = "customize/settings.md" },
     { "Themes and keymaps" = "customize/appearance.md" },

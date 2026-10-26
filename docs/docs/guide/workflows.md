@@ -57,16 +57,8 @@ approval scope, and [Tools](../reference/tools.md) for what the agent can call.
 Pick how much to trust the agent:
 
 - **Narrow:** add allow rules for specific commands, so only those stop asking.
-
-  ```lua
-  smelt.permissions.extend({
-    default = {
-      patterns = {
-        bash = { allow = { "git status *", "git diff *", "git log *" } },
-      },
-    },
-  })
-  ```
+  [Recipes](../customize/recipes.md#let-the-agent-work-on-its-own) has a ready
+  set.
 
 - **Broad:** switch to **Yolo** mode (`Shift+Tab` or `--mode yolo`).
 - **Unattended:** run [headless](headless.md) in scripts and CI, where nothing can
