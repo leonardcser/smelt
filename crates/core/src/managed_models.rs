@@ -431,7 +431,7 @@ impl ManagedModels {
                 AuthProvider::Codex => crate::config::ProviderConfig {
                     name: Some(provider_type.clone()),
                     provider_type: Some(provider_type.clone()),
-                    api_base: Some(smelt_provider::codex::CODEX_API_ENDPOINT.into()),
+                    api_base: Some(smelt_provider::codex::CODEX_API_BASE.into()),
                     api_key_env: None,
                     models: Vec::new(),
                 },
