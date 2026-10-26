@@ -22,8 +22,8 @@ use std::time::Duration;
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Floor for replaying a small corpus of slow, structured inputs.
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(1800);
-/// Per-input allowance that lets the replay limit grow with the corpus.
-const PREFLIGHT_PER_INPUT: Duration = Duration::from_secs(2);
+/// Per-input allowance that lets a replay limit grow with the corpus.
+const REPLAY_PER_INPUT: Duration = Duration::from_secs(2);
 const FAIL_FAST: [&str; 3] = ["-ignore_crashes=0", "-ignore_ooms=0", "-ignore_timeouts=0"];
 
 #[derive(clap::Args)]
@@ -108,9 +108,9 @@ pub fn run(project: &Project, options: Options) -> Result<()> {
     Ok(())
 }
 
-fn preflight_timeout(inputs: usize) -> Duration {
+fn replay_timeout(floor: Duration, inputs: usize) -> Duration {
     let inputs = u32::try_from(inputs).unwrap_or(u32::MAX);
-    PREFLIGHT_TIMEOUT.max(PREFLIGHT_PER_INPUT.saturating_mul(inputs))
+    floor.max(REPLAY_PER_INPUT.saturating_mul(inputs))
 }
 
 fn preflight(
@@ -121,7 +121,7 @@ fn preflight(
     corpus: &Path,
 ) -> Result<()> {
     println!("xtask fuzz: preflight corpus {target}");
-    let timeout = preflight_timeout(input_files(corpus)?.len());
+    let timeout = replay_timeout(PREFLIGHT_TIMEOUT, input_files(corpus)?.len());
     let mut command = project.target_command(target, sanitizer, data)?;
     command.arg(corpus).arg("-runs=0").args(FAIL_FAST);
     project
@@ -171,7 +171,11 @@ fn minimize_corpus(
         ));
     project
         .runner
-        .run(command, Some(MAINTENANCE_TIMEOUT), OutputMode::Inherit)?
+        .run(
+            command,
+            Some(replay_timeout(MAINTENANCE_TIMEOUT, originals.len())),
+            OutputMode::Inherit,
+        )?
         .success("minimize corpus")?;
     let selected = input_files(&minimized)?;
     if selected.is_empty() {
@@ -213,13 +217,18 @@ mod tests {
     }
 
     #[test]
-    fn preflight_timeout_grows_with_the_corpus() {
-        assert_eq!(preflight_timeout(0), PREFLIGHT_TIMEOUT);
-        assert_eq!(preflight_timeout(100), PREFLIGHT_TIMEOUT);
-        assert_eq!(preflight_timeout(7684), Duration::from_secs(15368));
+    fn replay_timeout_grows_with_the_corpus() {
+        for floor in [MAINTENANCE_TIMEOUT, PREFLIGHT_TIMEOUT] {
+            assert_eq!(replay_timeout(floor, 0), floor);
+            assert_eq!(replay_timeout(floor, 100), floor);
+        }
         assert_eq!(
-            preflight_timeout(usize::MAX),
-            PREFLIGHT_PER_INPUT.saturating_mul(u32::MAX)
+            replay_timeout(MAINTENANCE_TIMEOUT, 7684),
+            Duration::from_secs(15368)
+        );
+        assert_eq!(
+            replay_timeout(PREFLIGHT_TIMEOUT, usize::MAX),
+            REPLAY_PER_INPUT.saturating_mul(u32::MAX)
         );
     }
 
