@@ -334,9 +334,10 @@ pub(crate) fn move_right_normal(buf: &str, cpos: usize) -> usize {
     next_grapheme_boundary(buf, cpos)
 }
 
-/// Move right inclusive (for operator motions on `l`).
+/// Move right inclusive (for operator motions on `l`): onto the line's end,
+/// never across it.
 pub(crate) fn move_right_inclusive(buf: &str, cpos: usize) -> usize {
-    next_grapheme_boundary(buf, cpos).min(buf.len())
+    next_grapheme_boundary(buf, cpos).min(line_end(buf, cpos))
 }
 
 pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
@@ -371,18 +372,9 @@ pub(crate) fn first_non_blank_at(buf: &str, from: usize) -> usize {
     pos
 }
 
-/// Full current line range including trailing newline (for dd).
-pub(crate) fn current_line_range(buf: &str, cpos: usize) -> (usize, usize) {
-    let start = line_start(buf, cpos);
-    let end = line_end(buf, cpos);
-    (start, end)
-}
-
-/// Content range of the current line, no newline (for S/cc).
+/// Content range of the current line, no newline.
 pub(crate) fn current_line_content_range(buf: &str, cpos: usize) -> (usize, usize) {
-    let start = line_start(buf, cpos);
-    let end = line_end(buf, cpos);
-    (start, end)
+    (line_start(buf, cpos), line_end(buf, cpos))
 }
 
 pub(crate) fn goto_line(buf: &str, line_idx: usize) -> usize {
@@ -564,17 +556,6 @@ pub(crate) fn advance_chars(buf: &str, pos: usize, n: usize) -> usize {
     p
 }
 
-pub(crate) fn retreat_chars(buf: &str, pos: usize, n: usize) -> usize {
-    let mut p = pos;
-    for _ in 0..n {
-        if p == 0 {
-            break;
-        }
-        p = prev_grapheme_boundary(buf, p);
-    }
-    p
-}
-
 /// Clamp cursor to valid normal-mode position.
 /// If the buffer ends with `'\n'`, `buf.len()` is valid (cursor on the empty trailing line).
 pub(crate) fn clamp_normal(buf: &str, cpos: &mut usize) {
@@ -684,11 +665,13 @@ mod tests {
     }
 
     #[test]
-    fn move_right_inclusive_can_cross_newline_into_next_line() {
-        // The operator-mode variant (used as the motion target for `l`/`dl`).
-        // From end of "ab" (byte 2 = '\n'), it advances to byte 3 (start of "cd").
+    fn move_right_inclusive_stops_at_the_line_end() {
+        // The operator-mode variant (used as the motion target for `l`/`dl`)
+        // reaches the line end so the last character is included, never the
+        // next line.
         assert_eq!(move_right_inclusive("ab\ncd", 1), 2);
-        assert_eq!(move_right_inclusive("ab\ncd", 2), 3);
+        assert_eq!(move_right_inclusive("ab\ncd", 2), 2);
+        assert_eq!(move_right_inclusive("ab\n\ncd", 3), 3);
     }
 
     // ── line_end_normal / first_non_blank ─────────────────────────────────
@@ -721,32 +704,6 @@ mod tests {
     fn first_non_blank_returns_eol_when_line_is_all_whitespace() {
         // The function walks while pos < eol; if no non-blank found, returns eol.
         assert_eq!(first_non_blank("   ", 0), 3);
-    }
-
-    // ── current_line_range / current_line_content_range ───────────────────
-
-    #[test]
-    fn current_line_range_returns_content_range_for_first_line() {
-        // "abc\ndef": line 0 spans bytes 0..3 (not including '\n' at byte 3).
-        assert_eq!(current_line_range("abc\ndef", 0), (0, 3));
-        // Cursor anywhere on the line - same answer.
-        assert_eq!(current_line_range("abc\ndef", 2), (0, 3));
-    }
-
-    #[test]
-    fn current_line_range_and_content_range_are_currently_identical() {
-        // Sibling functions with different doc comments but identical bodies.
-        // Pinning the current behaviour; documented intent ("with newline" /
-        // "without newline") disagrees - see audit notes.
-        let buf = "alpha\nbeta\ngamma";
-        assert_eq!(
-            current_line_range(buf, 0),
-            current_line_content_range(buf, 0)
-        );
-        assert_eq!(
-            current_line_range(buf, 7),
-            current_line_content_range(buf, 7)
-        );
     }
 
     // ── goto_line ─────────────────────────────────────────────────────────
@@ -989,20 +946,13 @@ mod tests {
         assert_eq!(find_matching_bracket("(unmatched", 0), None);
     }
 
-    // ── advance_chars / retreat_chars ─────────────────────────────────────
+    // ── advance_chars ─────────────────────────────────────
 
     #[test]
     fn advance_chars_walks_n_char_boundaries_clamping_at_end() {
         assert_eq!(advance_chars("abcd", 0, 2), 2);
         assert_eq!(advance_chars("abcd", 0, 10), 4); // clamped to len
         assert_eq!(advance_chars("a漢b", 0, 2), 4); // wide char counts as one step
-    }
-
-    #[test]
-    fn retreat_chars_walks_n_char_boundaries_clamping_at_zero() {
-        assert_eq!(retreat_chars("abcd", 4, 2), 2);
-        assert_eq!(retreat_chars("abcd", 4, 99), 0);
-        assert_eq!(retreat_chars("a漢b", 5, 2), 1); // back across a wide char
     }
 
     // ── clamp_normal ──────────────────────────────────────────────────────

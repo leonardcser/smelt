@@ -1,10 +1,13 @@
 use super::jumplist::JumpMove;
 use super::motions::{
-    advance_chars, clamp_normal, current_line_content_range, current_line_range, first_non_blank,
-    first_non_blank_at, line_end_normal, move_down, move_down_col, move_left, move_right_normal,
-    move_up, move_up_col, operator_span, resolve, retreat_chars, FindKind, Motion, Span, Use,
+    advance_chars, clamp_normal, current_line_content_range, first_non_blank, first_non_blank_at,
+    line_end_normal, move_down, move_down_col, move_left, move_right_normal, move_up, move_up_col,
+    operator_span, resolve, FindKind, Motion, Span, Use,
 };
-use super::text::{line_end, line_start, next_grapheme_boundary, prev_grapheme_boundary};
+use super::text::{
+    byte_to_cell, cell_to_byte, line_end, line_start, next_grapheme_boundary,
+    prev_grapheme_boundary,
+};
 use super::text_objects::{
     surrounding_delimiters, text_object, text_object_for_spec, TextObjectKind, TextObjectSpec,
 };
@@ -381,6 +384,9 @@ enum RepeatCommand {
     },
     Linewise {
         op: Op,
+        count: usize,
+    },
+    JoinWithoutSpaces {
         count: usize,
     },
     TextObject {
@@ -1219,6 +1225,12 @@ fn repeat_last_change(ctx: &mut VimContext<'_>) -> Action {
             ctx.vim_state.count1 = Some(n);
             execute_linewise_op(op, ctx)
         }
+        RepeatCommand::JoinWithoutSpaces { count } => {
+            let n = ctx.vim_state.repeat_count(count);
+            join_lines(ctx, n, false);
+            ctx.vim_state.reset_pending();
+            Action::Consumed
+        }
         RepeatCommand::TextObject {
             op,
             inner,
@@ -1277,100 +1289,20 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         // ── Operator shortcuts ──────────────────────────────────────
-        'D' => {
-            ctx.save_undo();
-            let end = line_end(ctx.buf.as_str(), *ctx.cpos);
-            ctx.yank_range(*ctx.cpos, end, false);
-            ctx.delete_range(*ctx.cpos, end);
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 'D',
-                count: 1,
-            });
-            ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
-        'C' => {
-            ctx.save_undo();
-            let end = line_end(ctx.buf.as_str(), *ctx.cpos);
-            ctx.yank_range(*ctx.cpos, end, false);
-            ctx.delete_range(*ctx.cpos, end);
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 'C',
-                count: 1,
-            });
-            enter_insert_mode(ctx);
-            Action::Consumed
-        }
-        'Y' => {
-            let (start, end) = current_line_range(ctx.buf.as_str(), *ctx.cpos);
-            ctx.yank_range(start, end, true);
-            ctx.clipboard.kill_ring.mark_yanked(ctx.now);
-            ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
+        'D' => shortcut_operator(ctx, c, Op::Delete, '$'),
+        'C' => shortcut_operator(ctx, c, Op::Change, '$'),
+        'Y' => shortcut_operator(ctx, c, Op::Yank, '$'),
 
         // ── Direct edits ────────────────────────────────────────────
-        'x' => {
-            let n = ctx.vim_state.take_count();
-            if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                ctx.save_undo();
-                let end = advance_chars(ctx.buf.as_str(), *ctx.cpos, n);
-                ctx.yank_range(*ctx.cpos, end, false);
-                ctx.delete_range(*ctx.cpos, end);
-                clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            }
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 'x',
-                count: n,
-            });
-            ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
-        'X' => {
-            let n = ctx.vim_state.take_count();
-            if *ctx.cpos > 0 {
-                ctx.save_undo();
-                let start = retreat_chars(ctx.buf.as_str(), *ctx.cpos, n);
-                ctx.yank_range(start, *ctx.cpos, false);
-                ctx.delete_range(start, *ctx.cpos);
-                *ctx.cpos = start;
-                clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            }
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 'X',
-                count: n,
-            });
-            ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
-        's' => {
-            let n = ctx.vim_state.take_count();
-            ctx.save_undo();
-            if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                let end = advance_chars(ctx.buf.as_str(), *ctx.cpos, n);
-                ctx.yank_range(*ctx.cpos, end, false);
-                ctx.delete_range(*ctx.cpos, end);
-            }
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 's',
-                count: n,
-            });
-            enter_insert_mode(ctx);
-            Action::Consumed
-        }
+        'x' => shortcut_operator(ctx, c, Op::Delete, 'l'),
+        'X' => shortcut_operator(ctx, c, Op::Delete, 'h'),
+        's' => shortcut_operator(ctx, c, Op::Change, 'l'),
         'S' => {
-            ctx.save_undo();
-            let (start, end) = current_line_content_range(ctx.buf.as_str(), *ctx.cpos);
-            ctx.yank_range(start, end, false);
-            ctx.delete_range(start, end);
-            *ctx.cpos = start;
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 'S',
-                count: 1,
-            });
-            enter_insert_mode(ctx);
-            Action::Consumed
+            let count = ctx.vim_state.count1.unwrap_or(1);
+            let action = execute_linewise_op(Op::Change, ctx);
+            ctx.vim_state
+                .record_change(RepeatCommand::Direct { command: c, count });
+            action
         }
         'r' => {
             ctx.vim_state.sub = SubState::WaitingR;
@@ -1378,13 +1310,14 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
         '~' => {
             let n = ctx.vim_state.take_count();
-            if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                ctx.save_undo();
-                let start = *ctx.cpos;
-                let end = advance_chars(ctx.buf.as_str(), start, n);
+            let start = *ctx.cpos;
+            let eol = line_end(ctx.buf.as_str(), start);
+            if start < eol {
+                let end = advance_chars(ctx.buf.as_str(), start, n).min(eol);
                 let toggled = Op::Toggle
                     .recase(smelt_buffer::text::slice(ctx.buf.as_str(), start..end))
                     .unwrap_or_default();
+                ctx.save_undo();
                 ctx.replace_range(start, end, &toggled);
                 *ctx.cpos = start + toggled.len();
                 clamp_normal(ctx.buf.as_str(), ctx.cpos);
@@ -1398,58 +1331,11 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         // ── Paste ───────────────────────────────────────────────────
-        'p' => {
-            ctx.sync_paste_from_clipboard();
-            if !ctx.register().is_empty() {
-                ctx.save_undo();
-                if ctx.register_linewise() {
-                    let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
-                    let text = ctx.register().to_string();
-                    let insert = format!("\n{}", text);
-                    let p = ctx.insert_str(eol, &insert);
-                    *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), p + 1);
-                } else {
-                    let after = advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(ctx.buf.len());
-                    let text = ctx.register().to_string();
-                    let p = ctx.insert_str(after, &text);
-                    let paste_end = p + text.len();
-                    *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), paste_end).max(p);
-                    clamp_normal(ctx.buf.as_str(), ctx.cpos);
-                }
-            }
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 'p',
-                count: 1,
-            });
-            Action::Consumed
-        }
-        'P' => {
-            ctx.sync_paste_from_clipboard();
-            if !ctx.register().is_empty() {
-                ctx.save_undo();
-                if ctx.register_linewise() {
-                    let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
-                    let text = ctx.register().to_string();
-                    let insert = format!("{}\n", text);
-                    let p = ctx.insert_str(sol, &insert);
-                    *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), p);
-                } else {
-                    let text = ctx.register().to_string();
-                    let p = ctx.insert_str(*ctx.cpos, &text);
-                    let plen = text.len();
-                    if plen > 0 {
-                        let paste_end = p + plen;
-                        *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), paste_end).max(p);
-                        clamp_normal(ctx.buf.as_str(), ctx.cpos);
-                    } else {
-                        *ctx.cpos = p;
-                    }
-                }
-            }
-            ctx.vim_state.record_change(RepeatCommand::Direct {
-                command: 'P',
-                count: 1,
-            });
+        'p' | 'P' => {
+            let count = ctx.vim_state.take_count();
+            paste(ctx, c == 'p', count);
+            ctx.vim_state
+                .record_change(RepeatCommand::Direct { command: c, count });
             Action::Consumed
         }
 
@@ -1604,28 +1490,13 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         'J' => {
-            let count = ctx.vim_state.take_count().max(2);
-            let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
-            if eol < ctx.buf.len() {
-                ctx.save_undo();
-                let mut join_pos = *ctx.cpos;
-                for _ in 1..count {
-                    let after = &ctx.buf.as_str()[join_pos..];
-                    if let Some(nl) = after.find('\n') {
-                        let abs = join_pos + nl;
-                        let end = first_non_blank_at(ctx.buf.as_str(), abs + 1);
-                        ctx.replace_range(abs, end, " ");
-                        join_pos = abs;
-                    } else {
-                        break;
-                    }
-                }
-                *ctx.cpos = join_pos;
-            }
+            let count = ctx.vim_state.take_count();
+            join_lines(ctx, count, true);
             ctx.vim_state.record_change(RepeatCommand::Direct {
                 command: 'J',
                 count,
             });
+            ctx.vim_state.reset_pending();
             Action::Consumed
         }
 
@@ -1648,6 +1519,99 @@ fn move_cursor(ctx: &mut VimContext<'_>, motion: Motion) {
         *ctx.cpos = pos;
         clamp_normal(ctx.buf.as_str(), ctx.cpos);
     }
+}
+
+/// `p` (after the cursor, or after its line for a linewise register) and `P`
+/// (before), repeated `count` times.
+fn paste(ctx: &mut VimContext<'_>, after: bool, count: usize) {
+    ctx.sync_paste_from_clipboard();
+    let linewise = ctx.register_linewise();
+    let text = ctx.register().to_string();
+    if text.is_empty() && !linewise {
+        return;
+    }
+    ctx.save_undo();
+    if linewise {
+        let lines = vec![text.as_str(); count].join("\n");
+        let first_line = if after {
+            let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
+            ctx.insert_str(eol, &format!("\n{lines}")) + 1
+        } else {
+            let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
+            ctx.insert_str(sol, &format!("{lines}\n"))
+        };
+        *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), first_line);
+        return;
+    }
+    let text = text.repeat(count);
+    let at = if after {
+        advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(ctx.buf.len())
+    } else {
+        *ctx.cpos
+    };
+    let start = ctx.insert_str(at, &text);
+    let paste_end = start + text.len();
+    *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), paste_end).max(start);
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+/// `J` and `gJ`: join `count` lines (at least two) onto the cursor's line.
+/// `J` also drops the next line's indent and puts one space between the
+/// lines, unless the first ends in blank, the next is empty, or the next
+/// starts with `)`. A count past the last line joins what is there.
+fn join_lines(ctx: &mut VimContext<'_>, count: usize, spaces: bool) {
+    let count = count.max(2);
+    let mut eol = line_end(ctx.buf.as_str(), *ctx.cpos);
+    if eol >= ctx.buf.len() {
+        return;
+    }
+    ctx.save_undo();
+    let mut join_at = eol;
+    for _ in 1..count {
+        eol = line_end(ctx.buf.as_str(), join_at);
+        if eol >= ctx.buf.len() {
+            break;
+        }
+        let next = eol + 1;
+        let text_start = if spaces {
+            first_non_blank_at(ctx.buf.as_str(), next)
+        } else {
+            next
+        };
+        let next_text = &ctx.buf.as_str()[text_start..line_end(ctx.buf.as_str(), next)];
+        let separator = if spaces
+            && !next_text.is_empty()
+            && !next_text.starts_with(')')
+            && !ctx.buf.as_str()[..eol].ends_with([' ', '\t'])
+        {
+            " "
+        } else {
+            ""
+        };
+        ctx.replace_range(eol, text_start, separator);
+        join_at = eol;
+    }
+    *ctx.cpos = join_at;
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+/// `D`, `C`, `Y`, `x`, `X` and `s`: an operator over a fixed motion, which
+/// takes the typed count and repeats with `.` like the operator it stands for.
+fn shortcut_operator(ctx: &mut VimContext<'_>, command: char, op: Op, motion: char) -> Action {
+    let count = ctx.vim_state.count1.unwrap_or(1);
+    let action = execute_op_motion(
+        KeyEvent::new(KeyCode::Char(motion), KeyModifiers::empty()),
+        op,
+        ctx,
+    );
+    if op != Op::Yank {
+        ctx.vim_state
+            .record_change(RepeatCommand::Direct { command, count });
+    }
+    if !matches!(*ctx.mode, VimMode::Insert) {
+        ctx.vim_state.reset_pending();
+    }
+    action
 }
 
 // ── Visual mode ──────────────────────────────────────────────────────
@@ -2005,27 +1969,30 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         _ => None,
     };
     if let Some(c) = replacement_char.filter(|c| *c != ATTACHMENT_MARKER) {
-        if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-            let n = ctx.vim_state.take_count();
+        let n = ctx.vim_state.take_count();
+        let start = *ctx.cpos;
+        let eol = line_end(ctx.buf.as_str(), start);
+        let end = advance_chars(ctx.buf.as_str(), start, n);
+        // The count must fit on the line, or nothing is replaced.
+        if start < eol && end <= eol {
             ctx.vim_state.record_change(RepeatCommand::Replace {
                 count: n,
                 replacement: c,
             });
             ctx.save_undo();
-
-            let start = *ctx.cpos;
-            let mut end = start;
-            let mut replacement = String::new();
-            for _ in 0..n {
-                if end >= ctx.buf.len() {
-                    break;
-                }
-                end = next_grapheme_boundary(ctx.buf.as_str(), end);
-                replacement.push(c);
-            }
+            // `r<CR>` replaces all the characters with a single line break.
+            let replacement = if c == '\n' {
+                "\n".to_string()
+            } else {
+                c.to_string().repeat(n)
+            };
             ctx.replace_range(start, end, &replacement);
-            let replacement_end = start + replacement.len();
-            *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), replacement_end).max(start);
+            if c == '\n' {
+                *ctx.cpos = start + 1;
+            } else {
+                *ctx.cpos =
+                    prev_grapheme_boundary(ctx.buf.as_str(), start + replacement.len()).max(start);
+            }
             clamp_normal(ctx.buf.as_str(), ctx.cpos);
         }
     }
@@ -2090,6 +2057,14 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     if key.code == KeyCode::Char('v') {
         ctx.vim_state
             .reselect_visual(ctx.mode, ctx.cpos, ctx.buf.as_str());
+        return Action::Consumed;
+    }
+    if key.code == KeyCode::Char('J') && *ctx.mode == VimMode::Normal {
+        let count = ctx.vim_state.take_count();
+        join_lines(ctx, count, false);
+        ctx.vim_state
+            .record_change(RepeatCommand::JoinWithoutSpaces { count });
+        ctx.vim_state.reset_pending();
         return Action::Consumed;
     }
     if let KeyCode::Char(c) = key.code {
@@ -2469,49 +2444,29 @@ fn recase_selection(op: Op, ctx: &mut VimContext<'_>) -> Action {
 
 /// Apply linewise operator over [start..end] (line boundaries).
 fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize) -> Action {
-    let mut s = start;
-    let mut e = end;
-    let mut has_trailing_nl = false;
-    if e < ctx.buf.len() && ctx.buf.as_bytes()[e] == b'\n' {
-        e += 1;
-        has_trailing_nl = true;
-    } else if e < ctx.buf.len() {
-        e = line_end(ctx.buf.as_str(), e);
-        if e < ctx.buf.len() {
-            e += 1;
-            has_trailing_nl = true;
-        }
-    }
-    // No trailing newline at buffer end: include the preceding newline instead.
-    if !has_trailing_nl && e >= ctx.buf.len() && s > 0 {
-        s -= 1;
-    }
-
     match op {
         Op::Delete => {
             ctx.save_undo();
-            ctx.yank_range(s, e, true);
-            ctx.delete_range(s, e);
-            *ctx.cpos = s.min(ctx.buf.len());
-            if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), *ctx.cpos);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
+            ctx.yank_range(start, end, true);
+            let column = cursor_cell(ctx);
+            let removed = linewise_delete_range(ctx.buf.as_str(), start..end);
+            ctx.delete_range(removed.start, removed.end);
+            place_on_line(ctx, removed.start, column);
         }
         Op::Change => {
             ctx.save_undo();
-            let content_start = first_non_blank_at(ctx.buf.as_str(), s);
-            let content_end = line_end(ctx.buf.as_str(), e.saturating_sub(1).max(s));
-            ctx.yank_range(content_start, content_end, true);
-            ctx.delete_range(content_start, content_end);
+            ctx.yank_range(start, end, true);
+            // The first line keeps its indent.
+            let content_start = first_non_blank_at(ctx.buf.as_str(), start);
+            ctx.delete_range(content_start, end);
             *ctx.cpos = content_start;
             enter_insert_mode(ctx);
             return Action::Consumed;
         }
         Op::Yank => {
             // Linewise yank does not reposition the cursor (vim default).
-            // Use the original line-content range (no trailing newline) so
-            // linewise paste can consistently prepend/append its own newline.
+            // The register holds the line contents without a trailing newline
+            // so a linewise paste can prepend or append its own.
             ctx.yank_range(start, end, true);
             ctx.clipboard.kill_ring.mark_yanked(ctx.now);
         }
@@ -2523,6 +2478,22 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         }
     }
     Action::Consumed
+}
+
+/// The display column of the cursor within its line.
+fn cursor_cell(ctx: &VimContext<'_>) -> usize {
+    let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
+    byte_to_cell(&ctx.buf.as_str()[sol..*ctx.cpos], *ctx.cpos - sol)
+}
+
+/// Put the cursor on the line holding `pos` at display column `cell`, or on
+/// its last character when the line is shorter.
+fn place_on_line(ctx: &mut VimContext<'_>, pos: usize, cell: usize) {
+    let pos = pos.min(ctx.buf.len());
+    let sol = line_start(ctx.buf.as_str(), pos);
+    let eol = line_end(ctx.buf.as_str(), pos);
+    *ctx.cpos = sol + cell_to_byte(&ctx.buf.as_str()[sol..eol], cell);
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }
 
 // ── Mode transitions ────────────────────────────────────────────────
@@ -4030,6 +4001,95 @@ mod tests {
         let mut h = TestHarness::new("İx");
         keys(&mut h, "gul");
         assert_eq!(h.buf, "ix");
+    }
+
+    #[test]
+    fn dd_then_p_moves_a_line_without_an_extra_blank_line() {
+        let mut h = TestHarness::new("a\nb\nc");
+        keys(&mut h, "ddp");
+        assert_eq!(h.buf, "b\na\nc");
+        assert_eq!(h.cpos, 2);
+
+        let mut h = TestHarness::new("a\nb\nc");
+        h.cpos = 4;
+        keys(&mut h, "ddP");
+        assert_eq!(h.buf, "a\nc\nb");
+    }
+
+    #[test]
+    fn linewise_paste_of_an_empty_line_adds_an_empty_line() {
+        let mut h = TestHarness::new("a\n\nc");
+        h.cpos = 2;
+        keys(&mut h, "yyp");
+        assert_eq!(h.buf, "a\n\n\nc");
+    }
+
+    #[test]
+    fn counted_paste_repeats_the_register() {
+        let mut h = TestHarness::new("ab");
+        keys(&mut h, "x3p");
+        assert_eq!(h.buf, "baaa");
+    }
+
+    #[test]
+    fn x_stops_at_the_line_end_and_does_nothing_on_an_empty_line() {
+        let mut h = TestHarness::new("ab\n\ncd");
+        h.cpos = 3;
+        keys(&mut h, "x");
+        assert_eq!(h.buf, "ab\n\ncd");
+        h.cpos = 0;
+        keys(&mut h, "5x");
+        assert_eq!(h.buf, "\n\ncd");
+        keys(&mut h, "X");
+        assert_eq!(h.buf, "\n\ncd");
+    }
+
+    #[test]
+    fn capital_y_yanks_to_the_end_of_the_line() {
+        let mut h = TestHarness::new("one two\nthree");
+        h.cpos = 4;
+        keys(&mut h, "Y");
+        assert_eq!(h.clipboard.kill_ring.current(), "two");
+        assert!(!h.clipboard.kill_ring.is_linewise());
+    }
+
+    #[test]
+    fn tilde_and_r_stay_on_their_line() {
+        let mut h = TestHarness::new("ab\ncd");
+        h.cpos = 1;
+        keys(&mut h, "5~");
+        assert_eq!(h.buf, "aB\ncd");
+
+        let mut h = TestHarness::new("ab\ncd");
+        h.cpos = 1;
+        keys(&mut h, "3rx");
+        assert_eq!(h.buf, "ab\ncd", "a count past the line replaces nothing");
+        keys(&mut h, "rx");
+        assert_eq!(h.buf, "ax\ncd");
+    }
+
+    #[test]
+    fn join_follows_vims_spacing_rules() {
+        let mut h = TestHarness::new("a\n  b\n)c\n\nd");
+        keys(&mut h, "4J");
+        assert_eq!(h.buf, "a b)c\nd");
+        let mut h = TestHarness::new("a \nb");
+        keys(&mut h, "J");
+        assert_eq!(h.buf, "a b");
+        let mut h = TestHarness::new("a\n  b\nc");
+        keys(&mut h, "gJ");
+        assert_eq!(h.buf, "a  b\nc");
+        assert_eq!(h.cpos, 1);
+    }
+
+    #[test]
+    fn cc_keeps_the_indent_and_the_surrounding_lines() {
+        let mut h = TestHarness::new("a\n  bb\nc");
+        h.cpos = 4;
+        keys(&mut h, "cc");
+        assert_eq!(h.buf, "a\n  \nc");
+        assert_eq!(h.clipboard.kill_ring.current(), "  bb");
+        assert!(h.clipboard.kill_ring.is_linewise());
     }
 
     #[test]

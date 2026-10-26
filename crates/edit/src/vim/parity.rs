@@ -10,7 +10,8 @@
 //! `<BS>`, `<Tab>`, `<lt>` and `<C-x>`. `line` is 1-based and `col` a 0-based
 //! byte column.
 //!
-//! Result line: `text<TAB>line<TAB>col<TAB>register<TAB>mode`.
+//! Result line: `text<TAB>line<TAB>col<TAB>register<TAB>mode<TAB>regtype`, where
+//! `regtype` is `V` for a linewise register, `v` for a charwise one.
 
 use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -166,13 +167,18 @@ fn run_case(line: &str) -> String {
     let before = &session.buf[..session.cpos.min(session.buf.len())];
     let out_row = before.matches('\n').count() + 1;
     let out_col = before.len() - before.rfind('\n').map_or(0, |i| i + 1);
+    // A linewise register holds its lines without a final newline; vim's
+    // holds the newline, and keeps an empty line.
+    let linewise = session.clipboard.kill_ring.is_linewise();
     let mut register = session.clipboard.kill_ring.current().to_string();
-    if session.clipboard.kill_ring.is_linewise() {
-        if register.ends_with('\n') {
-            register.pop();
-        }
+    if linewise {
         register.push('\n');
     }
+    let regtype = match (register.is_empty(), linewise) {
+        (true, _) => "",
+        (false, true) => "V",
+        (false, false) => "v",
+    };
     let mode = match session.mode {
         VimMode::Insert => "i",
         VimMode::Normal => "n",
@@ -180,7 +186,7 @@ fn run_case(line: &str) -> String {
         VimMode::VisualLine => "V",
     };
     format!(
-        "{}\t{out_row}\t{out_col}\t{}\t{mode}",
+        "{}\t{out_row}\t{out_col}\t{}\t{mode}\t{regtype}",
         escape(&session.buf),
         escape(&register)
     )
