@@ -44,6 +44,9 @@ pub struct KillRing {
     /// Last text pushed to the system clipboard. Paste sites compare against
     /// `clipboard.read()` to detect external clipboard updates.
     last_clipboard_write: Option<String>,
+    /// Text typed during the last insert session (vim's `".` register), which
+    /// `.` types again.
+    last_insert: Option<String>,
 }
 
 impl Default for KillRing {
@@ -64,7 +67,17 @@ impl KillRing {
             yank_tick: 0,
             last_yank_at: None,
             last_clipboard_write: None,
+            last_insert: None,
         }
+    }
+
+    /// The text typed during the last insert session, when it was plain typing.
+    pub fn last_insert(&self) -> Option<&str> {
+        self.last_insert.as_deref()
+    }
+
+    pub fn set_last_insert(&mut self, text: Option<String>) {
+        self.last_insert = text;
     }
 
     /// Push a new kill, rotating the previous current into history.

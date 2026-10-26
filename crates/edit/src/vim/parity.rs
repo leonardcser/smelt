@@ -209,3 +209,56 @@ fn dump_parity_cases() {
         .join("\n");
     std::fs::write(out, results).expect("write results");
 }
+
+/// Outcomes checked against neovim, kept as plain tests so they run in CI
+/// without it. Each case is `(text, keys, resulting text)` from the first line.
+#[cfg(test)]
+mod pinned {
+    use super::*;
+
+    fn text_after(text: &str, keys: &str) -> String {
+        let line = format!("{}\t{keys}\t1\t0", escape(text));
+        let result = run_case(&line);
+        unescape(result.split('\t').next().unwrap_or_default())
+    }
+
+    #[test]
+    fn insert_counts_and_dot_repeat_replay_the_typed_text() {
+        for (text, keys, expected) in [
+            ("a", "3ix<Esc>", "xxxa"),
+            ("a", "3ox<Esc>", "a\nx\nx\nx"),
+            ("a", "2Ax<Esc>", "axx"),
+            ("a b", "ix<Esc>.", "xxa b"),
+            ("one two three", "cwab<Esc>", "ab two three"),
+            ("one two three", "cwab<Esc>w.", "ab ab three"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
+    }
+
+    #[test]
+    fn gi_resumes_insert_where_it_last_stopped() {
+        assert_eq!(text_after("abc def", "ix<Esc>wgiy<Esc>"), "xyabc def");
+    }
+
+    #[test]
+    fn open_line_keeps_indent_and_esc_strips_unused_indent() {
+        assert_eq!(text_after("  ab", "o<Esc>"), "  ab\n");
+        assert_eq!(text_after("  ab", "Ox<Esc>"), "  x\n  ab");
+    }
+
+    #[test]
+    fn counted_dd_fails_when_lines_run_out() {
+        assert_eq!(text_after("a\nb", "j2dd"), "a\nb");
+    }
+
+    #[test]
+    fn join_onto_an_empty_current_line_adds_no_space() {
+        assert_eq!(text_after("\nb", "J"), "b");
+    }
+
+    #[test]
+    fn replace_with_newline_keeps_the_indent() {
+        assert_eq!(text_after("  ab  cd", "4lr<CR>"), "  ab\n  cd");
+    }
+}

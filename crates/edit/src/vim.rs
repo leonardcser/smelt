@@ -406,6 +406,19 @@ enum RepeatCommand {
 
 // ── Vim state ───────────────────────────────────────────────────────────────
 
+/// An insert session being recorded so `.` and a count can type it again.
+#[derive(Clone, Copy, Debug)]
+struct InsertSession {
+    /// Where typing started, and the buffer length then.
+    start: usize,
+    len: usize,
+    /// How many times the typed text goes in; more than one repeats it.
+    count: usize,
+    /// Typed text repeats on new lines (`3ofoo`), after an indent of this size.
+    opens_line: bool,
+    auto_indent: usize,
+}
+
 /// A visual selection as `gv` restores it.
 #[derive(Clone, Copy, Debug)]
 struct LastVisual {
@@ -424,6 +437,18 @@ pub struct VimWindowState {
     pub(crate) last_find: Option<(FindKind, char)>,
     /// Last visual selection for `gv`.
     last_visual: Option<LastVisual>,
+    /// The insert session in progress, started by the command that entered it.
+    insert: Option<InsertSession>,
+    /// Count typed before `i`, `a`, `o`... which repeats what gets typed.
+    insert_count: usize,
+    /// Indent the command that entered Insert mode put on the line for the
+    /// user, which stays only if they type something.
+    auto_indent: usize,
+    /// The command that entered Insert mode opened a new line (`o`, `O`), so a
+    /// count types the text again on further lines.
+    opens_line: bool,
+    /// Where the last insert session ended, for `gi`.
+    last_insert_end: Option<usize>,
     /// Last mutating Normal-mode command for `.` repeat.
     last_change: Option<RepeatCommand>,
     /// Guard used while replaying `.` so the repeated command does not replace itself.
@@ -1255,6 +1280,15 @@ fn repeat_last_change(ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
     };
+    if *ctx.mode == VimMode::Insert {
+        // The repeated change ended in Insert mode: type what was typed last
+        // time, then leave as the user would.
+        if let Some(text) = ctx.clipboard.kill_ring.last_insert().map(str::to_owned) {
+            let start = ctx.insert_str(*ctx.cpos, &text);
+            *ctx.cpos = start + text.len();
+        }
+        enter_normal(ctx);
+    }
     ctx.vim_state.replaying_change = was_replaying;
     action
 }
@@ -1360,49 +1394,23 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         // ── Enter insert mode ───────────────────────────────────────
-        'i' => {
-            ctx.vim_state.take_count();
+        'i' | 'I' | 'a' | 'A' | 'o' | 'O' => {
+            let count = ctx.vim_state.take_count();
             ctx.save_undo();
-            enter_insert_mode(ctx);
-            Action::Consumed
-        }
-        'I' => {
-            ctx.vim_state.take_count();
-            ctx.save_undo();
-            *ctx.cpos = first_non_blank(ctx.buf.as_str(), *ctx.cpos);
-            enter_insert_mode(ctx);
-            Action::Consumed
-        }
-        'a' => {
-            ctx.vim_state.take_count();
-            ctx.save_undo();
-            if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                *ctx.cpos = advance_chars(ctx.buf.as_str(), *ctx.cpos, 1);
+            match c {
+                'I' => *ctx.cpos = first_non_blank(ctx.buf.as_str(), *ctx.cpos),
+                'a' if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() => {
+                    *ctx.cpos = advance_chars(ctx.buf.as_str(), *ctx.cpos, 1)
+                        .min(line_end(ctx.buf.as_str(), *ctx.cpos));
+                }
+                'A' => *ctx.cpos = line_end(ctx.buf.as_str(), *ctx.cpos),
+                'o' | 'O' => open_line(ctx, c == 'o'),
+                _ => {}
             }
+            ctx.vim_state.insert_count = count;
             enter_insert_mode(ctx);
-            Action::Consumed
-        }
-        'A' => {
-            ctx.vim_state.take_count();
-            ctx.save_undo();
-            *ctx.cpos = line_end(ctx.buf.as_str(), *ctx.cpos);
-            enter_insert_mode(ctx);
-            Action::Consumed
-        }
-        'o' => {
-            ctx.save_undo();
-            let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
-            let p = ctx.buf.insert(eol, '\n');
-            *ctx.cpos = p + 1;
-            enter_insert_mode(ctx);
-            Action::Consumed
-        }
-        'O' => {
-            ctx.save_undo();
-            let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
-            let p = ctx.buf.insert(sol, '\n');
-            *ctx.cpos = p;
-            enter_insert_mode(ctx);
+            ctx.vim_state
+                .record_change(RepeatCommand::Direct { command: c, count });
             Action::Consumed
         }
 
@@ -1521,6 +1529,25 @@ fn move_cursor(ctx: &mut VimContext<'_>, motion: Motion) {
     }
 }
 
+/// `o` / `O`: open an empty line below or above the cursor's, carrying over
+/// the cursor line's indent, and put the cursor on it.
+fn open_line(ctx: &mut VimContext<'_>, below: bool) {
+    let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
+    let indent_end = first_non_blank_at(ctx.buf.as_str(), sol);
+    let indent = ctx.buf.as_str()[sol..indent_end].to_string();
+    if below {
+        let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
+        let at = ctx.buf.insert(eol, '\n');
+        let start = ctx.insert_str(at + 1, &indent);
+        *ctx.cpos = start + indent.len();
+    } else {
+        let start = ctx.insert_str(sol, &format!("{indent}\n"));
+        *ctx.cpos = start + indent.len();
+    }
+    ctx.vim_state.auto_indent = indent.len();
+    ctx.vim_state.opens_line = true;
+}
+
 /// `p` (after the cursor, or after its line for a linewise register) and `P`
 /// (before), repeated `count` times.
 fn paste(ctx: &mut VimContext<'_>, after: bool, count: usize) {
@@ -1579,10 +1606,12 @@ fn join_lines(ctx: &mut VimContext<'_>, count: usize, spaces: bool) {
             next
         };
         let next_text = &ctx.buf.as_str()[text_start..line_end(ctx.buf.as_str(), next)];
+        let current = &ctx.buf.as_str()[line_start(ctx.buf.as_str(), eol)..eol];
         let separator = if spaces
             && !next_text.is_empty()
             && !next_text.starts_with(')')
-            && !ctx.buf.as_str()[..eol].ends_with([' ', '\t'])
+            && !current.is_empty()
+            && !current.ends_with([' ', '\t'])
         {
             " "
         } else {
@@ -1980,16 +2009,18 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                 replacement: c,
             });
             ctx.save_undo();
-            // `r<CR>` replaces all the characters with a single line break.
-            let replacement = if c == '\n' {
-                "\n".to_string()
-            } else {
-                c.to_string().repeat(n)
-            };
-            ctx.replace_range(start, end, &replacement);
             if c == '\n' {
-                *ctx.cpos = start + 1;
+                // `r<CR>` replaces all the characters with one line break. The
+                // new line keeps the indent and drops the blanks it starts with.
+                let sol = line_start(ctx.buf.as_str(), start);
+                let indent_end = first_non_blank_at(ctx.buf.as_str(), sol).min(start);
+                let indent = ctx.buf.as_str()[sol..indent_end].to_string();
+                let rest = first_non_blank_at(ctx.buf.as_str(), end);
+                ctx.replace_range(start, rest, &format!("\n{indent}"));
+                *ctx.cpos = start + 1 + indent.len();
             } else {
+                let replacement = c.to_string().repeat(n);
+                ctx.replace_range(start, end, &replacement);
                 *ctx.cpos =
                     prev_grapheme_boundary(ctx.buf.as_str(), start + replacement.len()).max(start);
             }
@@ -2057,6 +2088,20 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     if key.code == KeyCode::Char('v') {
         ctx.vim_state
             .reselect_visual(ctx.mode, ctx.cpos, ctx.buf.as_str());
+        return Action::Consumed;
+    }
+    if matches!(key.code, KeyCode::Char('i' | 'I')) && *ctx.mode == VimMode::Normal {
+        let count = ctx.vim_state.take_count();
+        ctx.save_undo();
+        *ctx.cpos = if key.code == KeyCode::Char('I') {
+            line_start(ctx.buf.as_str(), *ctx.cpos)
+        } else {
+            ctx.vim_state
+                .last_insert_end
+                .map_or(*ctx.cpos, |end| end.min(ctx.buf.len()))
+        };
+        ctx.vim_state.insert_count = count;
+        enter_insert_mode(ctx);
         return Action::Consumed;
     }
     if key.code == KeyCode::Char('J') && *ctx.mode == VimMode::Normal {
@@ -2362,6 +2407,10 @@ fn execute_linewise_op(op: Op, ctx: &mut VimContext<'_>) -> Action {
     let n = ctx.vim_state.effective_count();
     ctx.vim_state.reset_counts();
     ctx.vim_state.sub = SubState::Ready;
+    // A count reaches down from the cursor's line, so it cannot start on the last one.
+    if n > 1 && line_end(ctx.buf.as_str(), *ctx.cpos) >= ctx.buf.len() {
+        return Action::Consumed;
+    }
 
     let start = line_start(ctx.buf.as_str(), *ctx.cpos);
     let mut end_pos = *ctx.cpos;
@@ -2460,6 +2509,7 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             let content_start = first_non_blank_at(ctx.buf.as_str(), start);
             ctx.delete_range(content_start, end);
             *ctx.cpos = content_start;
+            ctx.vim_state.auto_indent = content_start - start;
             enter_insert_mode(ctx);
             return Action::Consumed;
         }
@@ -2501,6 +2551,14 @@ fn place_on_line(ctx: &mut VimContext<'_>, pos: usize, cell: usize) {
 fn enter_insert_mode(ctx: &mut VimContext<'_>) {
     *ctx.mode = VimMode::Insert;
     ctx.vim_state.sub = SubState::Ready;
+    let count = std::mem::replace(&mut ctx.vim_state.insert_count, 1);
+    ctx.vim_state.insert = Some(InsertSession {
+        start: *ctx.cpos,
+        len: ctx.buf.len(),
+        count,
+        opens_line: std::mem::take(&mut ctx.vim_state.opens_line),
+        auto_indent: std::mem::take(&mut ctx.vim_state.auto_indent),
+    });
 }
 
 fn exit_visual(ctx: &mut VimContext<'_>) {
@@ -2508,16 +2566,64 @@ fn exit_visual(ctx: &mut VimContext<'_>) {
     ctx.vim_state.reset_pending();
 }
 
+/// Leave Insert mode for Normal: finish the insert session, then step the
+/// cursor back onto the last typed character.
 fn enter_normal(ctx: &mut VimContext<'_>) {
+    finish_insert_session(ctx);
     *ctx.mode = VimMode::Normal;
     ctx.vim_state.sub = SubState::Ready;
     ctx.vim_state.reset_counts();
+    ctx.vim_state.last_insert_end = Some(*ctx.cpos);
     // Leaving insert mode moves cursor left one, unless at start of line.
     let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
     if *ctx.cpos > sol {
         *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), *ctx.cpos);
     }
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+/// Work out what the user typed in the insert session that is ending, if it
+/// was plain typing at the cursor. Remember it for `.`, type it again for a
+/// count, and drop an auto indent they did not use.
+fn finish_insert_session(ctx: &mut VimContext<'_>) {
+    let Some(session) = ctx.vim_state.insert.take() else {
+        return;
+    };
+    let len = ctx.buf.len();
+    let typed = (*ctx.cpos >= session.start
+        && len >= session.len
+        && len - session.len == *ctx.cpos - session.start)
+        .then(|| smelt_buffer::text::slice(ctx.buf.as_str(), session.start..*ctx.cpos).to_string());
+    ctx.clipboard.kill_ring.set_last_insert(typed.clone());
+    let Some(typed) = typed else {
+        return;
+    };
+    if typed.is_empty() && session.auto_indent > 0 {
+        let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
+        let eol = line_end(ctx.buf.as_str(), *ctx.cpos);
+        let line = &ctx.buf.as_str()[sol..eol];
+        if line.len() == session.auto_indent && line.chars().all(|c| c == ' ' || c == '\t') {
+            ctx.delete_range(sol, eol);
+            *ctx.cpos = sol;
+        }
+        return;
+    }
+    if session.count > 1 && !typed.is_empty() {
+        let again = if session.opens_line {
+            let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
+            let indent = ctx.buf.as_str()[sol..]
+                .chars()
+                .take(session.auto_indent)
+                .collect::<String>();
+            format!("\n{indent}{typed}")
+        } else {
+            typed
+        };
+        let repeated = again.repeat(session.count - 1);
+        let at = *ctx.cpos;
+        let start = ctx.insert_str(at, &repeated);
+        *ctx.cpos = start + repeated.len();
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
