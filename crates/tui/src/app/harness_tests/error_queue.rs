@@ -1,8 +1,23 @@
 use super::*;
 
+/// Records the latest `turn_end` payload in the Lua global `turn_end`.
+fn record_turn_end(app: &mut TestApp) {
+    assert!(app.run_lua(r#"smelt.events.on("turn_end", function(ev) _G.turn_end = ev end)"#));
+}
+
+fn recorded_turn_end(app: &mut TestApp) -> mlua::Table {
+    app.drain_signals_pending();
+    app.lua_probe()
+        .lua
+        .globals()
+        .get("turn_end")
+        .expect("turn_end should be published")
+}
+
 #[test]
 fn turn_error_preserves_request_queue() {
     let mut app = TestApp::builder().build();
+    record_turn_end(&mut app);
     app.start_turn(1);
     app.steer("steer during error");
 
@@ -26,10 +41,9 @@ fn turn_error_preserves_request_queue() {
 
     // Plugins observe the turn_end event; it must signal interruption on error.
     assert!(
-        app.core_probe()
-            .signals
-            .get::<smelt_core::signals::TurnEnd>("turn_end")
-            .is_some_and(|end| end.cancelled),
+        recorded_turn_end(&mut app)
+            .get::<bool>("cancelled")
+            .unwrap(),
         "turn_end event should be cancelled on error"
     );
 }
@@ -217,6 +231,7 @@ fn public_status_turn_error_needs_attention() {
 #[test]
 fn resumable_turn_error_publishes_continuation_token() {
     let mut app = TestApp::builder().build();
+    record_turn_end(&mut app);
     app.start_turn(1);
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
@@ -225,20 +240,29 @@ fn resumable_turn_error_publishes_continuation_token() {
         retry_at_ms: Some(123_000),
     }));
 
-    let turn_end = app
-        .core_probe()
-        .signals
-        .get::<smelt_core::signals::TurnEnd>("turn_end")
-        .expect("turn_end should be published");
-    assert!(turn_end.cancelled);
-    assert_eq!(turn_end.error_kind.as_deref(), Some("quota"));
-    assert_eq!(turn_end.retry_at_ms, Some(123_000));
-    assert!(turn_end.continuation_token.is_some());
+    let turn_end = recorded_turn_end(&mut app);
+    assert!(turn_end.get::<bool>("cancelled").unwrap());
+    assert_eq!(
+        turn_end
+            .get::<Option<String>>("error_kind")
+            .unwrap()
+            .as_deref(),
+        Some("quota")
+    );
+    assert_eq!(
+        turn_end.get::<Option<i64>>("retry_at_ms").unwrap(),
+        Some(123_000)
+    );
+    assert!(turn_end
+        .get::<Option<u64>>("continuation_token")
+        .unwrap()
+        .is_some());
 }
 
 #[test]
 fn non_quota_retry_metadata_does_not_publish_continuation_token() {
     let mut app = TestApp::builder().build();
+    record_turn_end(&mut app);
     app.start_turn(1);
 
     app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
@@ -247,15 +271,23 @@ fn non_quota_retry_metadata_does_not_publish_continuation_token() {
         retry_at_ms: Some(123_000),
     }));
 
-    let turn_end = app
-        .core_probe()
-        .signals
-        .get::<smelt_core::signals::TurnEnd>("turn_end")
-        .expect("turn_end should be published");
-    assert!(turn_end.cancelled);
-    assert_eq!(turn_end.error_kind.as_deref(), Some("network"));
-    assert_eq!(turn_end.retry_at_ms, Some(123_000));
-    assert!(turn_end.continuation_token.is_none());
+    let turn_end = recorded_turn_end(&mut app);
+    assert!(turn_end.get::<bool>("cancelled").unwrap());
+    assert_eq!(
+        turn_end
+            .get::<Option<String>>("error_kind")
+            .unwrap()
+            .as_deref(),
+        Some("network")
+    );
+    assert_eq!(
+        turn_end.get::<Option<i64>>("retry_at_ms").unwrap(),
+        Some(123_000)
+    );
+    assert!(turn_end
+        .get::<Option<u64>>("continuation_token")
+        .unwrap()
+        .is_none());
 }
 
 fn run_due_timers(app: &mut TestApp, ms: u64) -> Vec<protocol::UiCommand> {

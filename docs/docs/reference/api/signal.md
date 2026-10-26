@@ -6,7 +6,7 @@
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.
+Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every signal matching a glob pattern, events included. Occurrences such as `turn_start` are events, not signals: use `smelt.events.on` for them. Passing an event name to `smelt.signal.get`, `set`, `subscribe` or `new` raises an error, and so does using `set` or `subscribe` on a name that was never declared.
 
 ## `smelt.signal.get`
 
@@ -26,7 +26,7 @@ fun(pattern: string, handler: fun(arg1: string, arg2: any, arg3: any)): smelt.Re
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob subscription.
+Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax); `previous` is `nil` for events. Returns a `Reg` whose `:remove()` drops the glob subscription.
 
 ## `smelt.signal.new`
 

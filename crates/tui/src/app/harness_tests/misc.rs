@@ -1477,30 +1477,53 @@ fn custom_events_declare_and_emit_through_events_api() {
 }
 
 #[test]
-fn events_emit_does_not_replace_signal_value() {
+fn events_deliver_payload_to_handlers() {
     let mut app = TestApp::builder().build();
 
     assert!(app.run_lua(
         r#"
         smelt.events.new("plugin:tick")
-        _G.before_tick = smelt.signal.get("plugin:tick")
         smelt.events.on("plugin:tick", function(payload)
             _G.tick_payload = payload.value
         end)
         smelt.events.emit("plugin:tick", { value = 7 })
-        _G.after_tick = smelt.signal.get("plugin:tick")
         "#
     ));
     app.drain_signals_pending();
 
     let globals = app.lua_probe().lua.globals();
-    assert!(globals
-        .get::<mlua::Value>("before_tick")
-        .is_ok_and(|v| v.is_nil()));
-    assert!(globals
-        .get::<mlua::Value>("after_tick")
-        .is_ok_and(|v| v.is_nil()));
     assert_eq!(globals.get::<i64>("tick_payload").ok(), Some(7));
+}
+
+#[test]
+fn signal_and_events_apis_reject_misuse() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        smelt.events.new("plugin:tick")
+        smelt.signal.new("plugin:level", 1)
+
+        local function rejects(fn, needle)
+            local ok, err = pcall(fn)
+            assert(not ok, "expected an error mentioning " .. needle)
+            assert(tostring(err):find(needle, 1, true), tostring(err))
+        end
+
+        rejects(function() smelt.signal.get("plugin:tick") end, "is an event")
+        rejects(function() smelt.signal.set("turn_start", 1) end, "is an event")
+        rejects(function() smelt.signal.subscribe("turn_end", function() end) end, "is an event")
+        rejects(function() smelt.signal.new("plugin:tick", 0) end, "is an event")
+        rejects(function() smelt.signal.set("plugin:typo", 1) end, "is not declared")
+        rejects(function() smelt.signal.subscribe("plugin:typo", function() end) end, "is not declared")
+
+        rejects(function() smelt.events.on("plugin:level", function() end) end, "is a state signal")
+        rejects(function() smelt.events.emit("agent_mode", "plan") end, "is a state signal")
+        rejects(function() smelt.events.new("model") end, "is a state signal")
+
+        assert(smelt.signal.get("plugin:level") == 1)
+        "#
+    ));
 }
 
 #[test]

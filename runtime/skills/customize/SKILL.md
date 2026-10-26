@@ -569,7 +569,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.defaults` - Startup fallbacks for new sessions.
 - `smelt.diff` - Compact unified-patch indexing, metadata and expandable context folds.
 - `smelt.document` - Indexed read-only documents shared by native data providers and Lua-created windows.
-- `smelt.events` - Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`.
+- `smelt.events` - Occurrence-oriented subscriptions for events such as `turn_start`, `tool_start`, and `turn_complete`.
 - `smelt.files` - Workspace file search.
 - `smelt.frontend` - Query which frontend is active (TUI vs headless).
 - `smelt.fs` - Sync filesystem primitives.

@@ -437,10 +437,14 @@ path.
 
 `smelt.events.on(name, handler)` subscribes to runtime events: agent turns,
 session load, tool start/end, and so on. Events carry only future occurrences,
-so handlers receive the payload without a previous value.
-`smelt.signal.subscribe(name, handler)` subscribes to durable runtime state such
-as mode changes. Both return a `Reg` whose `:remove()` drops the subscription.
-The full lists are the `smelt.events.Name` and `smelt.signal.Name` aliases in
+so they have no current value and handlers receive the payload without a
+previous value. `smelt.signal.subscribe(name, handler)` subscribes to durable
+runtime state such as mode changes; the handler receives the new and previous
+values and `smelt.signal.get(name)` reads the current one. Both return a `Reg`
+whose `:remove()` drops the subscription. A name is either an event or a
+signal, never both: passing an event name to `smelt.signal` or a signal name to
+`smelt.events` raises an error. The full lists are the `smelt.events.Name` and
+`smelt.signal.Name` aliases in
 [`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
 common ones:
 
@@ -468,7 +472,9 @@ end)
 
 You can declare your own durable signals with
 `smelt.signal.new("my_plugin:state", initial)` and broadcast updates with
-`smelt.signal.set("my_plugin:state", value)`. For occurrence-shaped plugin
+`smelt.signal.set("my_plugin:state", value)`. `set` and `subscribe` raise an
+error for a name that was never declared, so a typo is not silently ignored.
+For occurrence-shaped plugin
 hooks, use `smelt.events.on("my_plugin:event", handler)` and
 `smelt.events.emit("my_plugin:event", payload)`.
 

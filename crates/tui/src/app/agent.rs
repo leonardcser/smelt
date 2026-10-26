@@ -962,7 +962,7 @@ impl TuiApp {
             let submitted = smelt_buffer::text::trim_whitespace(&submitted);
             self.publish_turn_input((!submitted.is_empty()).then(|| submitted.to_owned()));
         }
-        self.core.signals.set_dyn(
+        self.core.signals.emit_dyn(
             "turn_start",
             std::rc::Rc::new(smelt_core::signals::EventStub),
         );
@@ -1976,7 +1976,7 @@ impl TuiApp {
             self.conversation.clear_continuation();
             None
         };
-        self.core.signals.set_dyn(
+        self.core.signals.emit_dyn(
             "turn_end",
             std::rc::Rc::new(smelt_core::signals::TurnEnd {
                 cancelled: interrupted,
@@ -2536,7 +2536,7 @@ impl TuiApp {
     ) {
         if let Some(handle_id) = handle_id {
             self.core.confirms.take(handle_id);
-            self.core.signals.set_dyn(
+            self.core.signals.emit_dyn(
                 "confirm_resolved",
                 std::rc::Rc::new(smelt_core::signals::ConfirmResolved {
                     handle_id,

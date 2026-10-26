@@ -3574,7 +3574,7 @@ impl TuiApp {
         }
         self.warn_if_api_base_normalized();
 
-        self.core.signals.set_dyn(
+        self.core.signals.emit_dyn(
             "session_started",
             std::rc::Rc::new(self.conversation.session().id.clone()),
         );

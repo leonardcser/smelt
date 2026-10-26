@@ -1,6 +1,7 @@
-//! `smelt.events` - occurrence-oriented subscriptions over event-shaped
-//! signals. Use this when the current value is not meaningful and plugin code
-//! only cares that something happened.
+//! `smelt.events` - occurrence-oriented subscriptions over event signals. Use
+//! this when there is no current value and plugin code only cares that
+//! something happened. State signals belong to `smelt.signal` and are rejected
+//! here.
 
 use crate::lua::doc::{record_alias, Tier};
 use crate::lua::lua_type::{LuaAliasDecl, LuaCallback, LuaType, LuaTypeTuple};
@@ -8,6 +9,7 @@ use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
 use crate::lua::LuaHandle;
 use crate::lua::LuaShared;
+use crate::signals::SignalKind;
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -19,7 +21,7 @@ impl LuaType for LuaEventName {
     fn lua_type() -> String {
         record_alias(LuaAliasDecl {
             name: "smelt.events.Name",
-            doc: "Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.",
+            doc: "Name of an event. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.",
             classification: crate::lua::doc::ApiClassification::Supported,
             variants: crate::signals::builtin_event_names(),
             open: true,
@@ -50,7 +52,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "events",
-        "Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`. Use `smelt.signal` when the current value matters; use `smelt.events.on` when only future occurrences matter.",
+        "Occurrence-oriented subscriptions for events such as `turn_start`, `tool_start`, and `turn_complete`. Events have no current value and handlers receive only the payload. Use `smelt.signal` for state whose current value matters. Passing a state signal name to `smelt.events` raises an error.",
         Tier::Host,
     )?;
 
@@ -58,13 +60,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared = Arc::clone(shared);
         m.fn_(
             "new",
-            "Declare an event named `event`. Existing signals are left unchanged. `smelt.events.on` and `smelt.events.emit` also declare custom events automatically, so this is only needed when a plugin wants to document its event surface explicitly.",
+            "Declare an event named `event`. An existing event is left unchanged. `smelt.events.on` and `smelt.events.emit` also declare custom events automatically, so this is only needed when a plugin wants to document its event surface explicitly.",
             &["event"],
             move |_, event: LuaEventName| -> LuaResult<()> {
+                super::signal::require_kind(&event.0, SignalKind::Event)?;
                 let generation = shared.generation_id();
                 crate::host::try_with_core(|core| {
                     core.signals.declare_if_missing_for_generation(
                         event.0,
+                        SignalKind::Event,
                         crate::signals::EventStub,
                         generation,
                     );
@@ -81,6 +85,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Publish `payload` for the event named `event`. Custom events are declared automatically on first emit.",
             &["event", "payload"],
             move |lua, (event, payload): (LuaEventName, mlua::Value)| -> LuaResult<()> {
+                super::signal::require_kind(&event.0, SignalKind::Event)?;
                 let key = lua.create_registry_value(payload)?;
                 let generation = shared.generation_id();
                 crate::host::try_with_core(|core| {
@@ -89,6 +94,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                     core.signals.declare_if_missing_for_generation(
                         event.0.clone(),
+                        SignalKind::Event,
                         crate::signals::EventStub,
                         generation,
                     );
@@ -109,6 +115,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             move |lua,
                   (event, handler): (LuaEventName, LuaCallback<mlua::Value, ()>)|
                   -> LuaResult<LuaReg> {
+                super::signal::require_kind(&event.0, SignalKind::Event)?;
                 let handler = handler.into_inner();
                 let wrapper = lua.create_function(move |_, args: mlua::MultiValue| {
                     let payload = args.into_iter().next().unwrap_or(mlua::Value::Nil);

@@ -6,7 +6,7 @@
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
 
-Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`. Use `smelt.signal` when the current value matters; use `smelt.events.on` when only future occurrences matter.
+Occurrence-oriented subscriptions for events such as `turn_start`, `tool_start`, and `turn_complete`. Events have no current value and handlers receive only the payload. Use `smelt.signal` for state whose current value matters. Passing a state signal name to `smelt.events` raises an error.
 
 ## `smelt.events.emit`
 
@@ -26,7 +26,7 @@ fun(event: smelt.events.Name): nil
 
 Types: [`smelt.events.Name`](types.md#smelteventsname)
 
-Declare an event named `event`. Existing signals are left unchanged. `smelt.events.on` and `smelt.events.emit` also declare custom events automatically, so this is only needed when a plugin wants to document its event surface explicitly.
+Declare an event named `event`. An existing event is left unchanged. `smelt.events.on` and `smelt.events.emit` also declare custom events automatically, so this is only needed when a plugin wants to document its event surface explicitly.
 
 ## `smelt.events.on`
 

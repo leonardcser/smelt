@@ -1183,7 +1183,7 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
 
---- Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
+--- Name of an event. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.events.Name string|"block_done"|"cmd_post"|"cmd_pre"|"confirm_resolved"|"history"|"input_submit"|"session_ended"|"session_started"|"shutdown"|"stream_delta"|"stream_phase"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"
 
@@ -1198,9 +1198,9 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.permissions.Decision "allow"|"ask"|"deny"
 
---- Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
+--- Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"spinner_frame"|"task_label"|"tokens_used"|"tps"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
