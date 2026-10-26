@@ -188,23 +188,6 @@ export const scenes: Record<string, Scene> = {
     ],
   },
 
-  /** A forged status word that types in white-hot, takes hammer blows and quenches to steam while the agent works. */
-  spinner: {
-    fromSubmit: true,
-    realtime: true,
-    cols: 64,
-    rows: 14,
-    files: { "plugins/spinner.lua": plugin("spinner") },
-    steps: [
-      { pause: 1200 },
-      { type: "run the tests and fix whatever fails" },
-      { pause: 400 },
-      { key: "Enter" },
-      { until: /─ ● done/ },
-      { pause: 2500 },
-    ],
-  },
-
   /** A glitching status word that decodes in, flickers and corrupts into the next while the agent works. */
   glitch: {
     fromSubmit: true,

@@ -392,58 +392,6 @@ fn working_word_rests_in_gray_and_a_sweep_flares_it() {
 }
 
 #[test]
-fn gallery_spinner_plugin_forges_the_word_and_defers_when_done() {
-    let mut app = TestApp::builder().build();
-    app.set_terminal_size(64, 10);
-    app.start_turn(1);
-    assert!(app.run_lua(include_str!(
-        "../../../../../docs/shots/plugins/spinner.lua"
-    )));
-
-    let at = |app: &mut TestApp, now_ms: u32| {
-        assert!(app.run_lua(&format!(
-            "smelt.time.now_ms = function() return {now_ms} end
-             smelt.prompt_bar.top.invalidate()"
-        )));
-        app.render_to_frame()
-            .text()
-            .lines()
-            .find(|line| line.starts_with('─'))
-            .expect("prompt bar row")
-            .to_owned()
-    };
-
-    // The word types in from nothing, one letter at a time.
-    let first = at(&mut app, 0);
-    assert!(!first.contains('w'), "{first}");
-    let typing = at(&mut app, 150);
-    assert!(
-        typing.contains("wor") && !typing.contains("working"),
-        "{typing}"
-    );
-    let typed = at(&mut app, 600);
-    assert!(typed.contains("working…"), "{typed}");
-
-    // It holds through the hammer sweeps.
-    for t in (1000..4000).step_by(250) {
-        let row = at(&mut app, t);
-        assert!(row.contains("working…"), "{row}");
-    }
-
-    // It is quenched into steam, then decodes back in.
-    let quenched = at(&mut app, 5150);
-    assert!(!quenched.contains("working"), "{quenched}");
-    let again = at(&mut app, 8200);
-    assert!(again.contains("working…"), "{again}");
-
-    // Done hands the indicator back to the built-in.
-    assert!(app.finish_turn());
-    at(&mut app, 9000);
-    let done = at(&mut app, 11000);
-    assert!(done.starts_with("─ ● done"), "{done}");
-}
-
-#[test]
 fn gallery_glitch_plugin_glitches_words_in_and_out_and_decodes_done() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(64, 10);
