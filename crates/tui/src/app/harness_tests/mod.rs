@@ -383,7 +383,7 @@ fn pin_transcript_viewport_to_line_containing(app: &mut TestApp, needle: &str) {
 }
 
 fn move_transcript_cursor_to_row(app: &mut TestApp, row: crate::smelt_edit::RowIndex) {
-    execute_transcript_viewer_command(app, crate::smelt_edit::DocumentCommand::GotoRow(row));
+    execute_transcript_viewer_command(app, crate::smelt_edit::DocumentCommand::goto_row(row));
     app.render_silent();
 }
 

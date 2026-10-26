@@ -17,10 +17,11 @@ use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
 use std::sync::Arc;
 
+mod document_motion;
 mod document_view;
 pub use document_view::{
-    resolve_document_command, BlockMotion, DocumentCommand, DocumentCopy, DocumentKeyResult,
-    DocumentMotion, DocumentTextObject, DocumentViewExecutor, DocumentViewState, RowYankFlash,
+    BlockMotion, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
+    DocumentViewExecutor, DocumentViewState, RowYankFlash, ScrollTo,
 };
 
 /// Per-frame paint context for `Window::render`.
@@ -3113,6 +3114,9 @@ impl Window {
             }
             action
         };
+        if let Action::DisplayRows(delta) = action {
+            self.move_display_rows(buf, delta);
+        }
         if self.vim_enabled() && self.vim_mode() == VimMode::Insert {
             self.set_vim_mode(VimMode::Normal);
         }
@@ -3142,7 +3146,7 @@ impl Window {
         match action {
             // `zz` recenters the cursor row; horizontal still tracks the cursor.
             Action::CenterScroll => {
-                self.recenter_on_cursor(buf, total_rows, viewport_rows);
+                self.scroll_cursor_row_to(buf, total_rows, viewport_rows, ScrollTo::Center);
                 self.keep_cursor_visible(buf, total_rows, 0, viewport_cols);
             }
             // `zh`/`zl` pan the horizontal viewport without moving the cursor -
@@ -3157,14 +3161,48 @@ impl Window {
         Status::Consumed
     }
 
-    /// Vim `zz`: scroll so the cursor row sits at the vertical middle of the
-    /// viewport, clamped to the available scroll range.
-    fn recenter_on_cursor(&mut self, buf: &Buffer, total_rows: RowIndex, viewport_rows: u16) {
+    /// Vim `gj` / `gk`: move the cursor `delta` display rows, following soft
+    /// wraps and keeping its display column.
+    pub fn move_display_rows(&mut self, buf: &Buffer, delta: isize) {
+        let width = self.viewport.map(|v| v.content_width).unwrap_or(80);
+        self.ensure_layout(buf, width);
+        let total = self.visual_row_total(buf);
+        if total == 0 {
+            return;
+        }
+        let (row, col) = self.cursor_visual(buf, self.cpos());
+        let want = self.curswant().unwrap_or(col as usize);
+        let target = (row as isize)
+            .saturating_add(delta)
+            .clamp(0, total as isize - 1);
+        self.set_curswant(Some(want));
+        let mut cpos = self.cpos_at_visual(buf, target as usize, want);
+        if self.vim_mode() == VimMode::Normal {
+            let text = buf.text();
+            super::motions::clamp_normal(&text, &mut cpos);
+        }
+        self.set_cpos(cpos);
+    }
+
+    /// Vim `zt` / `zz` / `zb`: scroll so the cursor row sits at the top, the
+    /// vertical middle or the bottom of the viewport, clamped to the available
+    /// scroll range.
+    fn scroll_cursor_row_to(
+        &mut self,
+        buf: &Buffer,
+        total_rows: RowIndex,
+        viewport_rows: u16,
+        at: ScrollTo,
+    ) {
         if viewport_rows == 0 {
             return;
         }
-        let half = viewport_rows as RowIndex / 2;
-        let want = self.absolute_cursor_row().saturating_sub(half);
+        let above = match at {
+            ScrollTo::Top => 0,
+            ScrollTo::Center => viewport_rows as RowIndex / 2,
+            ScrollTo::Bottom => viewport_rows as RowIndex - 1,
+        };
+        let want = self.absolute_cursor_row().saturating_sub(above);
         let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
         self.set_scroll(want.min(max_scroll), buf);
         self.update_tail_state(buf, viewport_rows);
@@ -4038,6 +4076,16 @@ fn merge_span_style(base: Style, span: &crate::SpanStyle) -> Style {
 mod tests {
     use super::BufId;
     use super::*;
+    use crate::motions::{Motion, WordTo};
+    use crate::text::CharClass;
+
+    fn word_cmd(to: WordTo, count: usize) -> DocumentCommand {
+        DocumentCommand::Move {
+            motion: Motion::Word(to, CharClass::Word),
+            count: Some(count),
+        }
+    }
+
     use crate::grid::Grid;
     use crate::BufCreateOpts;
     use crate::Theme;
@@ -4977,7 +5025,7 @@ mod tests {
         });
         w.set_resolved_scroll(100);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(150), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(150), 10, now);
 
         assert_eq!(w.row_cursor().unwrap().row, 150);
         assert_eq!(w.scroll_top(), 141);
@@ -5005,9 +5053,9 @@ mod tests {
             materialized_rows: 20,
         });
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(45), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(45), 10, now);
         w.execute_document_view_command(&buf, DocumentCommand::StartVisual, 10, now);
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(55), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(55), 10, now);
         let range = w
             .execute_document_view_command(&buf, DocumentCommand::YankSelection, 10, now)
             .unwrap();
@@ -5040,7 +5088,7 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(12), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(12), 10, now);
         w.execute_document_view_command(
             &buf,
             DocumentCommand::TextObject(DocumentTextObject::new(true, 'p').unwrap()),
@@ -5090,7 +5138,7 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(12), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(12), 10, now);
         w.execute_document_view_command(
             &buf,
             DocumentCommand::TextObject(DocumentTextObject::new(false, 'p').unwrap()),
@@ -5140,14 +5188,14 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(12), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(12), 10, now);
         w.execute_document_view_command(
             &buf,
             DocumentCommand::TextObject(DocumentTextObject::new(true, 'p').unwrap()),
             10,
             now,
         );
-        w.execute_document_view_command(&buf, DocumentCommand::MoveCursorCol(1), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::moving(Motion::Right), 10, now);
         assert_eq!(w.vim_mode(), VimMode::VisualLine);
         assert_eq!(
             w.document_view_state_ref().cursor,
@@ -5170,7 +5218,7 @@ mod tests {
             }
         );
 
-        w.execute_document_view_command(&buf, DocumentCommand::WordForward(1), 10, now);
+        w.execute_document_view_command(&buf, word_cmd(WordTo::Next, 1), 10, now);
         assert_eq!(
             w.document_view_state_ref().cursor,
             DocPosition {
@@ -5205,9 +5253,9 @@ mod tests {
         });
         w.set_vim_mode(VimMode::VisualLine);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(45), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(45), 10, now);
         w.execute_document_view_command(&buf, DocumentCommand::StartVisualLine, 10, now);
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(47), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(47), 10, now);
         let range = w
             .execute_document_view_command(&buf, DocumentCommand::YankSelectionLinewise, 10, now)
             .unwrap();
@@ -5239,8 +5287,8 @@ mod tests {
         });
         let now = Instant::now();
 
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(10), 5, now);
-        w.execute_document_view_command(&buf, DocumentCommand::LineEnd, 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(10), 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::moving(Motion::LineEnd), 5, now);
 
         assert_eq!(w.row_cursor().unwrap().byte_col, 2);
     }
@@ -5256,12 +5304,12 @@ mod tests {
             materialized_rows: 1,
         });
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(10), 5, now);
-        w.execute_document_view_command(&buf, DocumentCommand::WordForward(2), 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(10), 5, now);
+        w.execute_document_view_command(&buf, word_cmd(WordTo::Next, 2), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha beta ".len());
-        w.execute_document_view_command(&buf, DocumentCommand::WordBackward(1), 5, now);
+        w.execute_document_view_command(&buf, word_cmd(WordTo::Prev, 1), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha ".len());
-        w.execute_document_view_command(&buf, DocumentCommand::WordEnd(1), 5, now);
+        w.execute_document_view_command(&buf, word_cmd(WordTo::End, 1), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha beta".len() - 1);
     }
 
@@ -5699,7 +5747,7 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(94), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 94);
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
 
@@ -5723,7 +5771,7 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(94), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 94);
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
 
@@ -5747,7 +5795,7 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::goto_row(94), viewport, now);
 
         w.execute_document_view_command(&buf, DocumentCommand::ScrollRows(20), viewport, now);
 
@@ -6606,7 +6654,9 @@ mod tests {
             });
             assert_eq!(
                 cmd,
-                crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveCursorCol(1))
+                crate::DocumentKeyResult::Command(crate::DocumentCommand::moving(
+                    crate::Motion::Right
+                ))
             );
             w.execute_document_view_command(&buf, command(cmd), 10, now);
         }
@@ -6625,7 +6675,7 @@ mod tests {
         });
         assert_eq!(
             cmd,
-            crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveCursorCol(1))
+            crate::DocumentKeyResult::Command(crate::DocumentCommand::moving(crate::Motion::Right))
         );
         w.execute_document_view_command(&buf, command(cmd), 10, now);
         assert_eq!(

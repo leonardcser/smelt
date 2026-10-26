@@ -1,5 +1,7 @@
+use super::document_motion::{clamp_to_row_text, resolve_rows, RowEnv};
 use super::*;
-use crate::row::{BlockBoundary, DisplayDocument, DisplayRow, DisplayRows, RowBreak, TextRange};
+use crate::motions::{operator_span, resolve, Motion, Reach, Span, Use};
+use crate::row::{DisplayDocument, DisplayRow, DisplayRows, RowBreak, TextRange};
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
 use std::ops::Range;
 use std::time::Instant;
@@ -21,87 +23,95 @@ impl DocumentTextObject {
     }
 }
 
-/// A cursor motion an operator such as `y` can span.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DocumentMotion {
-    WordForward(RowIndex),
-    WordBackward(RowIndex),
-    WordEnd(RowIndex),
-    ParagraphForward(RowIndex),
-    ParagraphBackward(RowIndex),
-    LineStart,
-    LineEnd,
-    Cols(isize),
-    Rows(isize),
-    BufferStart,
-    BufferEnd,
-    Block(BlockMotion),
-}
-
-impl DocumentMotion {
-    fn command(self) -> DocumentCommand {
-        match self {
-            Self::WordForward(n) => DocumentCommand::WordForward(n),
-            Self::WordBackward(n) => DocumentCommand::WordBackward(n),
-            Self::WordEnd(n) => DocumentCommand::WordEnd(n),
-            Self::ParagraphForward(n) => DocumentCommand::ParagraphForward(n),
-            Self::ParagraphBackward(n) => DocumentCommand::ParagraphBackward(n),
-            Self::LineStart => DocumentCommand::LineStart,
-            Self::LineEnd => DocumentCommand::LineEnd,
-            Self::Cols(n) => DocumentCommand::MoveCursorCol(n),
-            Self::Rows(n) => DocumentCommand::MoveRows(n),
-            Self::BufferStart => DocumentCommand::BufferStart,
-            Self::BufferEnd => DocumentCommand::BufferEnd,
-            Self::Block(motion) => DocumentCommand::BlockMove(motion),
-        }
-    }
-
-    /// Whether the character under the far end of the motion is included.
-    fn inclusive(self) -> bool {
-        matches!(self, Self::WordEnd(_) | Self::LineEnd)
-    }
-}
-
-/// A move to the `count`th previous or next block of the kind a document binds
-/// to `kind` (vim `[u`, `]u`).
+/// A move to the previous or next block of the kind a document binds to
+/// `kind` (vim `[u`, `]u`); the command's count says how many blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockMotion {
     pub kind: char,
     pub forward: bool,
-    pub count: RowIndex,
+}
+
+/// Where `zt`, `zz` and `zb` put the cursor row in the viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollTo {
+    Top,
+    Center,
+    Bottom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentCommand {
+    /// Move the cursor by a signed number of rows, keeping its column.
     MoveRows(isize),
     PageRows(isize),
     HalfPageRows(isize),
     ScrollRows(isize),
-    BufferStart,
-    BufferEnd,
-    GotoRow(RowIndex),
     GotoPosition(DocPosition),
-    LineStart,
-    LineEnd,
-    WordForward(RowIndex),
-    WordBackward(RowIndex),
-    WordEnd(RowIndex),
-    ParagraphForward(RowIndex),
-    ParagraphBackward(RowIndex),
-    BlockMove(BlockMotion),
+    Move {
+        motion: Motion,
+        count: Option<usize>,
+    },
     StartVisual,
     StartVisualLine,
     YankSelection,
     YankSelectionLinewise,
     YankLines(RowIndex),
-    YankMotion(DocumentMotion),
+    YankMotion {
+        motion: Motion,
+        count: Option<usize>,
+    },
     YankTextObject(DocumentTextObject),
     TextObject(DocumentTextObject),
-    CenterScroll,
+    ScrollCursor(ScrollTo),
     PanColumns(isize),
-    MoveCursorCol(isize),
     OpenAction,
     ClearSelection,
+}
+
+impl DocumentCommand {
+    /// Move the cursor with `motion` once.
+    pub fn moving(motion: Motion) -> Self {
+        Self::Move {
+            motion,
+            count: None,
+        }
+    }
+
+    /// Move the cursor to the zero-based display row `row`.
+    pub fn goto_row(row: RowIndex) -> Self {
+        Self::Move {
+            motion: Motion::BufferStart,
+            count: Some(row as usize + 1),
+        }
+    }
+
+    /// `G` without a count, which a following transcript tail relies on.
+    pub fn goes_to_buffer_end(self) -> bool {
+        matches!(
+            self,
+            Self::Move {
+                motion: Motion::BufferEnd,
+                count: None
+            }
+        )
+    }
+
+    /// `gg` or `1gg`, which a transcript reveals from its first record.
+    pub fn goes_to_buffer_start(self) -> bool {
+        matches!(
+            self,
+            Self::Move {
+                motion: Motion::BufferStart,
+                count: None | Some(1)
+            }
+        )
+    }
+
+    /// A motion that takes the cursor somewhere far, which the jump list
+    /// remembers the start of.
+    pub fn is_jump(self) -> bool {
+        matches!(self, Self::Move { motion, .. } if motion.is_jump())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,207 +127,10 @@ pub enum DocumentCopy {
     Rows(DocRange),
 }
 
-pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
+pub(super) fn document_row_string<D: DisplayDocument + ?Sized>(
     doc: &mut D,
-    command: DocumentCommand,
-    cursor: DocPosition,
-    vim_mode: VimMode,
-) -> Option<DocumentCommand> {
-    #[derive(Clone, Copy)]
-    enum WordKind {
-        Forward,
-        Backward,
-        End,
-    }
-
-    let total_rows = doc.snapshot().total_rows;
-    if total_rows == 0 {
-        return None;
-    }
-    let mut pos = cursor;
-    pos.row = pos.row.min(total_rows.saturating_sub(1));
-
-    if let DocumentCommand::MoveCursorCol(delta) = command {
-        let line = document_row_string(doc, pos.row)?;
-        pos.byte_col = text::snap_grapheme(&line, pos.byte_col.min(line.len()));
-        if delta < 0 {
-            for _ in 0..delta.unsigned_abs() {
-                pos.byte_col = text::prev_grapheme_boundary(&line, pos.byte_col);
-            }
-        } else {
-            for _ in 0..delta as usize {
-                pos.byte_col = text::next_grapheme_boundary(&line, pos.byte_col);
-            }
-            if !matches!(vim_mode, VimMode::Visual | VimMode::VisualLine)
-                && pos.byte_col > 0
-                && pos.byte_col >= line.len()
-            {
-                pos.byte_col = text::prev_grapheme_boundary(&line, line.len());
-            }
-        }
-        return Some(DocumentCommand::GotoPosition(pos));
-    }
-
-    if let DocumentCommand::LineEnd = command {
-        let line = document_row_string(doc, pos.row)?;
-        pos.byte_col = if matches!(vim_mode, VimMode::Normal) && !line.is_empty() {
-            text::prev_grapheme_boundary(&line, line.len())
-        } else {
-            line.len()
-        };
-        return Some(DocumentCommand::GotoPosition(pos));
-    }
-
-    if let DocumentCommand::ParagraphForward(count) | DocumentCommand::ParagraphBackward(count) =
-        command
-    {
-        let forward = matches!(command, DocumentCommand::ParagraphForward(_));
-        for _ in 0..count.max(1) {
-            pos = paragraph_position(doc, total_rows, pos, forward, vim_mode)?;
-        }
-        return Some(DocumentCommand::GotoPosition(pos));
-    }
-
-    if let DocumentCommand::BlockMove(motion) = command {
-        return Some(DocumentCommand::GotoPosition(block_position(
-            doc, total_rows, pos, motion,
-        )));
-    }
-
-    let (kind, count) = match command {
-        DocumentCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
-        DocumentCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
-        DocumentCommand::WordEnd(count) => (WordKind::End, count.max(1)),
-        _ => return Some(command),
-    };
-
-    for _ in 0..count {
-        match kind {
-            WordKind::Forward => {
-                let line = document_row_string(doc, pos.row)?;
-                let col = text::word_forward_pos(&line, pos.byte_col, text::CharClass::Word);
-                if col < line.len() || pos.row.saturating_add(1) >= total_rows {
-                    pos.byte_col = col;
-                } else {
-                    pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
-                    pos.byte_col = 0;
-                }
-            }
-            WordKind::Backward => {
-                let line = document_row_string(doc, pos.row)?;
-                let col = text::word_backward_pos(&line, pos.byte_col, text::CharClass::Word);
-                if col > 0 || pos.row == 0 {
-                    pos.byte_col = col;
-                } else {
-                    pos.row = pos.row.saturating_sub(1);
-                    pos.byte_col = document_row_string(doc, pos.row)?.len();
-                }
-            }
-            WordKind::End => {
-                let line = document_row_string(doc, pos.row)?;
-                let col = text::word_end_pos(&line, pos.byte_col, text::CharClass::Word);
-                if col > pos.byte_col || pos.row.saturating_add(1) >= total_rows {
-                    pos.byte_col = col;
-                } else {
-                    pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
-                    pos.byte_col = 0;
-                }
-            }
-        }
-    }
-
-    Some(DocumentCommand::GotoPosition(pos))
-}
-
-fn document_row_is_blank<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<bool> {
-    Some(document_row_string(doc, row)?.trim().is_empty())
-}
-
-/// The start of the next (`}`) or previous (`{`) blank row past the paragraph at
-/// `pos`, or the end or start of the document when there is none.
-fn paragraph_position<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    total_rows: RowIndex,
-    pos: DocPosition,
-    forward: bool,
-    vim_mode: VimMode,
-) -> Option<DocPosition> {
-    let last = total_rows.saturating_sub(1);
-    let mut row = pos.row.min(last);
-    for want_blank in [true, false] {
-        while document_row_is_blank(doc, row)? == want_blank {
-            if forward && row == last {
-                let line = document_row_string(doc, row)?;
-                let byte_col = if matches!(vim_mode, VimMode::Normal) && !line.is_empty() {
-                    text::prev_grapheme_boundary(&line, line.len())
-                } else {
-                    line.len()
-                };
-                return Some(DocPosition { row, byte_col });
-            }
-            if !forward && row == 0 {
-                return Some(DocPosition::default());
-            }
-            row = if forward { row + 1 } else { row - 1 };
-        }
-    }
-    Some(DocPosition { row, byte_col: 0 })
-}
-
-/// How many rows a block may open with before its text, such as the padding
-/// around a user message.
-const BLOCK_LEADING_BLANK_ROWS: RowIndex = 4;
-
-/// The first row with text in the block starting at `start`.
-fn block_home_row<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    total_rows: RowIndex,
-    start: RowIndex,
-) -> RowIndex {
-    let last = start
-        .saturating_add(BLOCK_LEADING_BLANK_ROWS)
-        .min(total_rows.saturating_sub(1));
-    (start..=last)
-        .find(|&row| document_row_is_blank(doc, row) == Some(false))
-        .unwrap_or(start)
-}
-
-/// Where `motion` lands from `from`, on the first row with text of the block.
-/// Past the last block in its direction the cursor goes to the document edge,
-/// like vim's section motions; a document that does not know the kind leaves
-/// the cursor where it is.
-fn block_position<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    total_rows: RowIndex,
-    from: DocPosition,
-    motion: BlockMotion,
-) -> DocPosition {
-    let mut row = from.row;
-    for _ in 0..motion.count.max(1) {
-        let mut boundary = doc.block_boundary(row, motion.kind, motion.forward);
-        if let BlockBoundary::At(start) = boundary {
-            // `row` already rests in the block starting at `start`: step to the one before.
-            if !motion.forward && start < row && block_home_row(doc, total_rows, start) >= row {
-                boundary = doc.block_boundary(start, motion.kind, false);
-            }
-        }
-        match boundary {
-            BlockBoundary::Unsupported => return from,
-            BlockBoundary::At(start) => row = block_home_row(doc, total_rows, start),
-            BlockBoundary::End => {
-                row = if motion.forward {
-                    total_rows.saturating_sub(1)
-                } else {
-                    0
-                };
-                break;
-            }
-        }
-    }
-    DocPosition { row, byte_col: 0 }
-}
-
-fn document_row_string<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<String> {
+    row: RowIndex,
+) -> Option<String> {
     doc.materialize(row..row.saturating_add(1))
         .rows
         .into_iter()
@@ -1099,92 +912,35 @@ impl Window {
             DocumentCommand::ScrollRows(delta) => {
                 self.pan_by_lines(buf, delta, viewport_rows);
             }
-            DocumentCommand::BufferStart => {
-                self.set_cpos(0);
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::BufferEnd => {
-                self.set_cpos(buf.text().len());
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::GotoRow(row) => {
-                self.set_cpos(self.cpos_at_visual(buf, row_to_usize(row), 0));
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
             DocumentCommand::GotoPosition(pos) => {
                 self.set_cpos(buf.byte_at_display_byte_pos(row_to_usize(pos.row), pos.byte_col));
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            DocumentCommand::LineStart => {
-                let text = buf.text();
-                self.set_cpos(text::line_start(&text, self.cpos()));
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::LineEnd => {
-                let text = buf.text();
-                let cpos = if matches!(self.vim_mode(), VimMode::Normal) {
-                    crate::motions::line_end_normal(&text, self.cpos())
-                } else {
-                    text::line_end(&text, self.cpos())
-                };
-                self.set_cpos(cpos);
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::WordForward(count) => {
-                let text = buf.text();
-                let mut cpos = self.cpos();
-                for _ in 0..count.max(1) {
-                    cpos = text::word_forward_pos(&text, cpos, text::CharClass::Word);
+            DocumentCommand::Move { motion, count } => match motion {
+                Motion::Down | Motion::Up => {
+                    let rows = count.unwrap_or(1) as isize;
+                    let rows = if motion == Motion::Down { rows } else { -rows };
+                    self.move_cursor_by_lines(buf, rows, viewport_rows);
                 }
-                self.set_cpos(cpos);
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::WordBackward(count) => {
-                let text = buf.text();
-                let mut cpos = self.cpos();
-                for _ in 0..count.max(1) {
-                    cpos = text::word_backward_pos(&text, cpos, text::CharClass::Word);
-                }
-                self.set_cpos(cpos);
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::WordEnd(count) => {
-                let text = buf.text();
-                let mut cpos = self.cpos();
-                for _ in 0..count.max(1) {
-                    cpos = text::word_end_pos(&text, cpos, text::CharClass::Word);
-                }
-                self.set_cpos(cpos);
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::ParagraphForward(count)
-            | DocumentCommand::ParagraphBackward(count) => {
-                let text = buf.text();
-                let forward = matches!(command, DocumentCommand::ParagraphForward(_));
-                let mut cpos = self.cpos();
-                for _ in 0..count.max(1) {
-                    cpos = if forward {
-                        text::paragraph_forward_pos(&text, cpos)
-                    } else {
-                        text::paragraph_backward_pos(&text, cpos)
+                _ => {
+                    let text = buf.text();
+                    let target = match motion {
+                        Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom => {
+                            Some(self.screen_row_cpos(buf, &text, motion, count, viewport_rows))
+                        }
+                        _ => resolve(&text, self.cpos(), motion, count, Use::Move).map(|(p, _)| p),
                     };
+                    if let Some(mut cpos) = target {
+                        if matches!(self.vim_mode(), VimMode::Normal) {
+                            crate::motions::clamp_normal(&text, &mut cpos);
+                        }
+                        self.set_cpos(cpos);
+                        self.set_curswant(None);
+                        self.resync(buf, viewport_rows);
+                    }
                 }
-                if matches!(self.vim_mode(), VimMode::Normal) {
-                    crate::motions::clamp_normal(&text, &mut cpos);
-                }
-                self.set_cpos(cpos);
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
+            },
             DocumentCommand::YankTextObject(object) => {
                 let source = buf.text();
                 if let Some((start, end)) =
@@ -1196,9 +952,11 @@ impl Window {
                     self.resync(buf, viewport_rows);
                 }
             }
-            DocumentCommand::YankMotion(motion) => {
+            DocumentCommand::YankMotion { motion, count } => {
                 let source = buf.text();
-                if let Some((range, cursor)) = buffer_motion_range(&source, self.cpos(), motion) {
+                if let Some((range, cursor)) =
+                    buffer_operator_range(&source, self.cpos(), motion, count)
+                {
                     copy = Some(range);
                     self.set_cpos(cursor);
                     self.set_curswant(None);
@@ -1255,37 +1013,15 @@ impl Window {
                     self.resync(buf, viewport_rows);
                 }
             }
-            DocumentCommand::CenterScroll => {
+            DocumentCommand::ScrollCursor(at) => {
                 let total_rows = self.scroll_row_total(buf);
-                self.recenter_on_cursor(buf, total_rows, viewport_rows);
+                self.scroll_cursor_row_to(buf, total_rows, viewport_rows, at);
             }
             DocumentCommand::PanColumns(delta) => {
                 let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
                 self.pan_by_columns(delta, viewport_cols);
             }
-            DocumentCommand::MoveCursorCol(delta) => {
-                let text = buf.text();
-                let mut cpos = self.cpos();
-                if delta < 0 {
-                    for _ in 0..(-delta) {
-                        cpos = text::prev_grapheme_boundary(&text, cpos);
-                    }
-                } else {
-                    for _ in 0..delta {
-                        cpos = text::next_grapheme_boundary(&text, cpos);
-                    }
-                    if matches!(self.vim_mode(), VimMode::Normal) && cpos > 0 {
-                        let line_end = text::line_end(&text, self.cpos());
-                        if cpos >= line_end {
-                            cpos = text::prev_grapheme_boundary(&text, line_end);
-                        }
-                    }
-                }
-                self.set_cpos(cpos);
-                self.set_curswant(None);
-                self.resync(buf, viewport_rows);
-            }
-            DocumentCommand::OpenAction | DocumentCommand::BlockMove(_) => {}
+            DocumentCommand::OpenAction => {}
             DocumentCommand::ClearSelection => {
                 self.clear_selection_anchor();
                 self.text_state_mut().drag_endpoint = None;
@@ -1296,6 +1032,33 @@ impl Window {
         }
         self.update_tail_state(buf, viewport_rows);
         copy
+    }
+
+    /// The cursor position `H`, `M` or `L` picks in a buffer-backed viewer: the
+    /// first non-blank of the chosen visible row.
+    fn screen_row_cpos(
+        &self,
+        buf: &Buffer,
+        text: &str,
+        motion: Motion,
+        count: Option<usize>,
+        viewport_rows: u16,
+    ) -> usize {
+        let total = self.visual_row_total(buf);
+        let top = self.scroll_top;
+        let visible = total
+            .saturating_sub(top)
+            .min(viewport_rows as RowIndex)
+            .max(1);
+        let n = count.unwrap_or(1).max(1) as RowIndex;
+        let offset = match motion {
+            Motion::ScreenTop => (n - 1).min(visible - 1),
+            Motion::ScreenMiddle => (visible - 1) / 2,
+            _ => (visible - 1).saturating_sub(n - 1),
+        };
+        let row = top.saturating_add(offset).min(total.saturating_sub(1));
+        let cpos = self.cpos_at_visual(buf, row_to_usize(row), 0);
+        crate::motions::first_non_blank(text, cpos)
     }
 
     fn viewer_line_range(&self, buf: &Buffer, count: RowIndex) -> Option<Range<usize>> {
@@ -1361,7 +1124,7 @@ impl Window {
                 self.set_scroll(scroll_top, buf);
                 self.update_tail_state(buf, viewport_rows);
             }
-            DocumentCommand::CenterScroll => self.pin_scroll(scroll_top),
+            DocumentCommand::ScrollCursor(_) => self.pin_scroll(scroll_top),
             DocumentCommand::PanColumns(_) => {}
             _ => {
                 self.scroll_top = scroll_top;
@@ -1401,9 +1164,15 @@ impl DocumentViewExecutor {
             row: state.cursor.row.min(total_rows.saturating_sub(1)),
             byte_col: state.cursor.byte_col,
         };
-        let command =
-            resolve_document_command(document, command, current, *vim_mode).unwrap_or(command);
+        let env = |usage| RowEnv {
+            total_rows,
+            vim_mode: *vim_mode,
+            usage,
+            scroll_top: *scroll_top,
+            viewport_rows,
+        };
         let mut next = current;
+        let mut sets_preferred_cell = false;
         let mut copy = None;
         match command {
             DocumentCommand::MoveRows(delta) => {
@@ -1436,26 +1205,27 @@ impl DocumentViewExecutor {
                     .min(total_rows.saturating_sub(1));
                 move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
             }
-            DocumentCommand::BufferStart => {
-                next.row = 0;
-                next.byte_col = 0;
-                state.preferred_cell_col = None;
-            }
-            DocumentCommand::BufferEnd => {
-                next.row = total_rows.saturating_sub(1);
-            }
-            DocumentCommand::GotoRow(row) => {
-                move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
-            }
             DocumentCommand::GotoPosition(pos) => {
                 next.row = pos.row.min(total_rows.saturating_sub(1));
                 next.byte_col = pos.byte_col;
-                state.preferred_cell_col = None;
+                sets_preferred_cell = true;
             }
-            DocumentCommand::LineStart => {
-                next.byte_col = 0;
-                state.preferred_cell_col = None;
-            }
+            DocumentCommand::Move { motion, count } => match motion {
+                Motion::Down | Motion::Up => {
+                    let rows = count.unwrap_or(1) as isize;
+                    let rows = if motion == Motion::Down { rows } else { -rows };
+                    let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
+                    move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
+                }
+                _ => {
+                    if let Some((pos, _)) =
+                        resolve_rows(document, current, motion, count, env(Use::Move))
+                    {
+                        next = clamp_to_row_text(document, pos, *vim_mode);
+                        sets_preferred_cell = true;
+                    }
+                }
+            },
             DocumentCommand::StartVisual => {
                 state.selection_anchor = Some(current);
                 state.selection_includes_cursor_cell = true;
@@ -1525,10 +1295,15 @@ impl DocumentViewExecutor {
                     until: now + YANK_FLASH_DURATION,
                 });
             }
-            DocumentCommand::YankMotion(motion) => {
-                if let Some((range, cursor)) =
-                    yank_motion_range(document, current, total_rows, motion)
-                {
+            DocumentCommand::YankMotion { motion, count } => {
+                if let Some((range, cursor)) = operator_range(
+                    document,
+                    current,
+                    total_rows,
+                    motion,
+                    count,
+                    env(Use::Operator),
+                ) {
                     copy = Some(range);
                     state.yank_flash = Some(RowYankFlash {
                         range,
@@ -1585,23 +1360,19 @@ impl DocumentViewExecutor {
                     state.preferred_cell_col = None;
                 }
             }
-            DocumentCommand::CenterScroll => {
-                let half = viewport_rows as RowIndex / 2;
+            DocumentCommand::ScrollCursor(at) => {
+                let above = match at {
+                    ScrollTo::Top => 0,
+                    ScrollTo::Center => viewport_rows as RowIndex / 2,
+                    ScrollTo::Bottom => (viewport_rows as RowIndex).saturating_sub(1),
+                };
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
-                *scroll_top = current.row.saturating_sub(half).min(max_scroll);
+                *scroll_top = current.row.saturating_sub(above).min(max_scroll);
             }
             DocumentCommand::PanColumns(delta) => {
                 *scroll_left =
                     pan_document_columns(document, *state, *scroll_left, delta, viewport_cols);
             }
-            DocumentCommand::LineEnd
-            | DocumentCommand::MoveCursorCol(_)
-            | DocumentCommand::WordForward(_)
-            | DocumentCommand::WordEnd(_)
-            | DocumentCommand::WordBackward(_)
-            | DocumentCommand::ParagraphForward(_)
-            | DocumentCommand::ParagraphBackward(_)
-            | DocumentCommand::BlockMove(_) => {}
             DocumentCommand::OpenAction => {}
             DocumentCommand::ClearSelection => {
                 state.selection_anchor = None;
@@ -1624,19 +1395,7 @@ impl DocumentViewExecutor {
                 }
             }
         }
-        if matches!(
-            command,
-            DocumentCommand::BufferStart
-                | DocumentCommand::BufferEnd
-                | DocumentCommand::GotoPosition(_)
-                | DocumentCommand::LineStart
-                | DocumentCommand::LineEnd
-                | DocumentCommand::WordForward(_)
-                | DocumentCommand::WordBackward(_)
-                | DocumentCommand::WordEnd(_)
-                | DocumentCommand::ParagraphForward(_)
-                | DocumentCommand::ParagraphBackward(_)
-        ) {
+        if sets_preferred_cell {
             if let Some(cell) = document_position_cell(document, next) {
                 state.preferred_cell_col = Some(cell);
             }
@@ -1645,7 +1404,7 @@ impl DocumentViewExecutor {
         if !matches!(
             command,
             DocumentCommand::ScrollRows(_)
-                | DocumentCommand::CenterScroll
+                | DocumentCommand::ScrollCursor(_)
                 | DocumentCommand::PanColumns(_)
         ) {
             *scroll_top = scroll_to_show(*scroll_top, next.row, viewport_rows);
@@ -1977,7 +1736,7 @@ fn move_document_cursor_to_row_preserving_cell<D: DisplayDocument + ?Sized>(
     state.preferred_cell_col = Some(cell);
 }
 
-fn document_position_cell<D: DisplayDocument + ?Sized>(
+pub(super) fn document_position_cell<D: DisplayDocument + ?Sized>(
     document: &mut D,
     position: DocPosition,
 ) -> Option<usize> {
@@ -1990,7 +1749,7 @@ fn document_position_cell<D: DisplayDocument + ?Sized>(
     Some(text::byte_to_cell(&row.text, byte_col))
 }
 
-fn document_byte_col_at_cell<D: DisplayDocument + ?Sized>(
+pub(super) fn document_byte_col_at_cell<D: DisplayDocument + ?Sized>(
     document: &mut D,
     row: RowIndex,
     cell: usize,
@@ -2005,13 +1764,14 @@ fn document_byte_col_at_cell<D: DisplayDocument + ?Sized>(
 
 /// The rows or text span `motion` covers from `current`, and where the cursor
 /// lands afterwards (the start of the span, as in vim).
-fn yank_motion_range<D: DisplayDocument + ?Sized>(
+fn operator_range<D: DisplayDocument + ?Sized>(
     document: &mut D,
     current: DocPosition,
     total_rows: RowIndex,
-    motion: DocumentMotion,
+    motion: Motion,
+    count: Option<usize>,
+    env: RowEnv,
 ) -> Option<(DocRange, DocPosition)> {
-    let last_row = total_rows.saturating_sub(1);
     let rows = |a: RowIndex, b: RowIndex| DocRange {
         start: DocPosition {
             row: a.min(b),
@@ -2030,42 +1790,19 @@ fn yank_motion_range<D: DisplayDocument + ?Sized>(
         }
     };
 
-    let target =
-        match resolve_document_command(document, motion.command(), current, VimMode::Normal)? {
-            DocumentCommand::MoveRows(delta) => {
-                let row = add_signed_row(current.row, delta).min(last_row);
-                return Some((
-                    rows(current.row, row),
-                    keep_column(document, current.row.min(row)),
-                ));
-            }
-            DocumentCommand::BufferStart => {
-                return Some((rows(0, current.row), keep_column(document, 0)));
-            }
-            DocumentCommand::BufferEnd => {
-                return Some((rows(current.row, last_row), current));
-            }
-            DocumentCommand::LineStart => DocPosition {
-                row: current.row,
-                byte_col: 0,
-            },
-            DocumentCommand::GotoPosition(target) => target,
-            _ => return None,
-        };
-
+    let (target, reach) = resolve_rows(document, current, motion, count, env)?;
+    if reach == Reach::Linewise {
+        return Some((
+            rows(current.row, target.row),
+            keep_column(document, current.row.min(target.row)),
+        ));
+    }
     let (start, mut end) = if (target.row, target.byte_col) < (current.row, current.byte_col) {
         (target, current)
     } else {
         (current, target)
     };
-    if matches!(motion, DocumentMotion::WordForward(_)) && end.row > start.row {
-        // A word motion off the last word of a row stops at the row's end.
-        end = DocPosition {
-            row: start.row,
-            byte_col: document_row_string(document, start.row)?.len(),
-        };
-    }
-    if motion.inclusive() {
+    if reach == Reach::Inclusive {
         end = advance_document_position_if_on_char(document, end, true);
     } else if end.byte_col == 0 && end.row > start.row {
         // An exclusive motion that ends in column 0 stops at the end of the
@@ -2086,79 +1823,20 @@ fn yank_motion_range<D: DisplayDocument + ?Sized>(
 
 /// The byte span `motion` covers from `cpos` in plain buffer text, and where the
 /// cursor lands afterwards.
-fn buffer_motion_range(
+fn buffer_operator_range(
     source: &str,
     cpos: usize,
-    motion: DocumentMotion,
+    motion: Motion,
+    count: Option<usize>,
 ) -> Option<(Range<usize>, usize)> {
-    let lines = |a: usize, b: usize| {
-        let start = text::line_start(source, a.min(b));
-        let end = text::line_end(source, a.max(b));
-        start..(end + 1).min(source.len())
-    };
-    let target = match motion {
-        DocumentMotion::WordForward(n) => {
-            let eol = text::line_end(source, cpos);
-            let mut p = cpos;
-            for _ in 0..n.max(1) {
-                p = text::word_forward_pos(source, p, text::CharClass::Word);
-            }
-            p.min(eol.max(cpos))
-        }
-        DocumentMotion::WordBackward(n) => {
-            let mut p = cpos;
-            for _ in 0..n.max(1) {
-                p = text::word_backward_pos(source, p, text::CharClass::Word);
-            }
-            p
-        }
-        DocumentMotion::WordEnd(n) => {
-            let mut p = cpos;
-            for _ in 0..n.max(1) {
-                p = text::word_end_pos(source, p, text::CharClass::Word);
-            }
-            text::next_grapheme_boundary(source, p)
-        }
-        DocumentMotion::ParagraphForward(n) | DocumentMotion::ParagraphBackward(n) => {
-            let forward = matches!(motion, DocumentMotion::ParagraphForward(_));
-            let mut p = cpos;
-            for _ in 0..n.max(1) {
-                p = if forward {
-                    text::paragraph_forward_pos(source, p)
-                } else {
-                    text::paragraph_backward_pos(source, p)
-                };
-            }
-            p
-        }
-        DocumentMotion::LineStart => text::line_start(source, cpos),
-        DocumentMotion::LineEnd => text::line_end(source, cpos),
-        DocumentMotion::Cols(n) => {
-            let mut p = cpos;
-            for _ in 0..n.unsigned_abs() {
-                p = if n < 0 {
-                    text::prev_grapheme_boundary(source, p)
-                } else {
-                    text::next_grapheme_boundary(source, p)
-                };
-            }
-            p
-        }
-        DocumentMotion::Rows(n) => {
-            let (target, _) = text::vertical_move(source, cpos, n, None);
-            return Some((
-                lines(cpos, target),
-                text::line_start(source, cpos.min(target)),
-            ));
-        }
-        DocumentMotion::Block(_) => return None,
-        DocumentMotion::BufferStart => return Some((lines(0, cpos), 0)),
-        DocumentMotion::BufferEnd => {
-            return Some((lines(cpos, source.len()), text::line_start(source, cpos)));
-        }
-    };
-    let (start, end) = (cpos.min(target), cpos.max(target));
-    (start < end).then_some((start..end, start))
+    let (target, reach) = resolve(source, cpos, motion, count, Use::Operator)?;
+    match operator_span(source, cpos, target, reach)? {
+        Span::Chars(start, end) => Some((start..end, start)),
+        Span::Lines(start, end) => Some((
+            start..(end + 1).min(source.len()),
+            text::line_start(source, cpos.min(target)),
+        )),
+    }
 }
 
 fn order_document_range_including_cursor_cell<D: DisplayDocument + ?Sized>(
@@ -2352,8 +2030,17 @@ fn advance_doc_position_if_on_char(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::row::{DisplayAction, RowBreak, StaticRowsDocument};
+    use crate::motions::WordTo;
+    use crate::row::{BlockBoundary, DisplayAction, RowBreak, StaticRowsDocument};
+    use crate::text::CharClass;
     use smelt_buffer::buffer::SpanAction;
+
+    fn word_cmd(to: WordTo, count: usize) -> DocumentCommand {
+        DocumentCommand::Move {
+            motion: Motion::Word(to, CharClass::Word),
+            count: Some(count),
+        }
+    }
 
     fn state_for_rows(total_rows: RowIndex) -> DocumentViewState {
         DocumentViewState {
@@ -2411,31 +2098,30 @@ mod tests {
         }
     }
 
+    fn block_env(doc: &mut impl DisplayDocument) -> RowEnv {
+        RowEnv {
+            total_rows: doc.snapshot().total_rows,
+            vim_mode: VimMode::Normal,
+            usage: Use::Move,
+            scroll_top: 0,
+            viewport_rows: 10,
+        }
+    }
+
     fn block_move(
         doc: &mut BlockRows,
         from: RowIndex,
         kind: char,
         forward: bool,
-        count: RowIndex,
+        count: usize,
     ) -> RowIndex {
         let cursor = DocPosition {
             row: from,
             byte_col: 3,
         };
-        let motion = BlockMotion {
-            kind,
-            forward,
-            count,
-        };
-        match resolve_document_command(
-            doc,
-            DocumentCommand::BlockMove(motion),
-            cursor,
-            VimMode::Normal,
-        ) {
-            Some(DocumentCommand::GotoPosition(pos)) => pos.row,
-            other => panic!("block move resolved to {other:?}"),
-        }
+        let env = block_env(doc);
+        let motion = Motion::Block(BlockMotion { kind, forward });
+        resolve_rows(doc, cursor, motion, Some(count), env).map_or(from, |(pos, _)| pos.row)
     }
 
     const BLOCK_TEXT: [&str; 9] = ["one", "", "", "two", "x", "three", "y", "z", ""];
@@ -2464,26 +2150,18 @@ mod tests {
     }
 
     #[test]
-    fn block_move_is_a_no_op_for_documents_without_blocks() {
+    fn block_move_has_nowhere_to_go_in_documents_without_blocks() {
         let mut doc = StaticRowsDocument::from_text_rows(vec!["a".into(), "b".into()]);
         let cursor = DocPosition {
             row: 1,
             byte_col: 1,
         };
-        let motion = BlockMotion {
+        let env = block_env(&mut doc);
+        let motion = Motion::Block(BlockMotion {
             kind: 'u',
             forward: false,
-            count: 1,
-        };
-        assert_eq!(
-            resolve_document_command(
-                &mut doc,
-                DocumentCommand::BlockMove(motion),
-                cursor,
-                VimMode::Normal
-            ),
-            Some(DocumentCommand::GotoPosition(cursor))
-        );
+        });
+        assert_eq!(resolve_rows(&mut doc, cursor, motion, None, env), None);
     }
 
     fn execute(
@@ -2702,7 +2380,12 @@ mod tests {
         assert_eq!(state.cursor, end);
         execute(&mut doc, &mut state, DocumentCommand::MoveRows(-1), 4);
         assert_eq!(state.cursor, start);
-        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(1), 4);
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::moving(Motion::Right),
+            4,
+        );
         assert_eq!(state.cursor, end);
         execute(&mut doc, &mut state, DocumentCommand::MoveRows(1), 4);
         assert_eq!(state.cursor.row, 3);
@@ -2797,7 +2480,7 @@ mod tests {
         ]);
         let mut state = state_for_rows(4);
 
-        execute(&mut doc, &mut state, DocumentCommand::WordForward(1), 2);
+        execute(&mut doc, &mut state, word_cmd(WordTo::Next, 1), 2);
         assert_eq!(state.cursor.byte_col, "alpha ".len());
 
         execute(&mut doc, &mut state, DocumentCommand::MoveRows(1), 2);
@@ -2807,7 +2490,12 @@ mod tests {
         execute(&mut doc, &mut state, DocumentCommand::PageRows(1), 2);
         assert_eq!(state.cursor.row, 3);
 
-        execute(&mut doc, &mut state, DocumentCommand::BufferStart, 2);
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::moving(Motion::BufferStart),
+            2,
+        );
         assert_eq!(
             state.cursor,
             DocPosition {
@@ -2816,7 +2504,12 @@ mod tests {
             }
         );
 
-        execute(&mut doc, &mut state, DocumentCommand::BufferEnd, 2);
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::moving(Motion::BufferEnd),
+            2,
+        );
         assert_eq!(state.cursor.row, 3);
     }
 
@@ -2847,9 +2540,19 @@ mod tests {
         };
         let mut state = state_for_rows(1);
         state.cursor = start;
-        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(1), 1);
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::moving(Motion::Right),
+            1,
+        );
         assert_eq!(state.cursor, end);
-        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(-1), 1);
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::moving(Motion::Left),
+            1,
+        );
         assert_eq!(state.cursor, start);
         assert_eq!(
             atomic_object_bounds(
@@ -2914,7 +2617,12 @@ mod tests {
         );
         let mut state = state_for_rows(1);
         state.cursor.byte_col = 2;
-        execute(&mut doc, &mut state, DocumentCommand::MoveCursorCol(1), 1);
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::moving(Motion::Right),
+            1,
+        );
         assert_eq!(state.cursor.byte_col, 4);
         let (_, selection) = DocumentViewExecutor::handle_mouse(
             &mut state,
@@ -2977,7 +2685,7 @@ mod tests {
             3,
         );
         execute(&mut doc, &mut state, DocumentCommand::StartVisualLine, 3);
-        execute(&mut doc, &mut state, DocumentCommand::GotoRow(2), 3);
+        execute(&mut doc, &mut state, DocumentCommand::goto_row(2), 3);
         let range = execute(
             &mut doc,
             &mut state,

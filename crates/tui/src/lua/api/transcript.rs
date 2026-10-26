@@ -763,9 +763,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let motion = crate::smelt_edit::BlockMotion {
                 kind,
                 forward: opts.forward.unwrap_or(false),
-                count: opts.count.unwrap_or(1),
             };
-            Ok(crate::lua::with_ui_host(|host| host.move_transcript_block(motion)))
+            let count = opts.count.unwrap_or(1) as usize;
+            Ok(crate::lua::with_ui_host(|host| {
+                host.move_transcript_block(motion, count)
+            }))
         },
     )?;
     m.fn_(

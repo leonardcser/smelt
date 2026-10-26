@@ -1402,8 +1402,12 @@ impl UiLuaHost<'_> {
         self.app.clear_search();
     }
 
-    pub(crate) fn move_transcript_block(&mut self, motion: crate::smelt_edit::BlockMotion) -> bool {
-        self.app.move_transcript_block(motion)
+    pub(crate) fn move_transcript_block(
+        &mut self,
+        motion: crate::smelt_edit::BlockMotion,
+        count: usize,
+    ) -> bool {
+        self.app.move_transcript_block(motion, count)
     }
 }
 

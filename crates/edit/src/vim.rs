@@ -1,18 +1,14 @@
 use super::motions::{
-    advance_chars, clamp_normal, current_line_content_range, current_line_range, find_char,
-    find_matching_bracket, first_non_blank, first_non_blank_at, goto_line, line_end_normal,
-    move_down, move_down_col, move_left, move_right_inclusive, move_right_normal, move_up,
-    move_up_col, repeat_find, retreat_chars, word_end_pos, FindKind,
+    advance_chars, clamp_normal, current_line_content_range, current_line_range, first_non_blank,
+    first_non_blank_at, line_end_normal, move_down, move_down_col, move_left, move_right_normal,
+    move_up, move_up_col, operator_span, resolve, retreat_chars, FindKind, Motion, Span, Use,
 };
-use super::text::{
-    char_class, line_end, line_start, next_grapheme_boundary, paragraph_backward_pos,
-    paragraph_forward_pos, prev_grapheme_boundary, word_backward_pos, word_forward_pos, CharClass,
-};
+use super::text::{line_end, line_start, next_grapheme_boundary, prev_grapheme_boundary};
 use super::text_objects::{
     surrounding_delimiters, text_object, text_object_for_spec, TextObjectKind, TextObjectSpec,
 };
 use super::window::{
-    BlockMotion, DocumentCommand, DocumentKeyResult, DocumentMotion, DocumentTextObject,
+    BlockMotion, DocumentCommand, DocumentKeyResult, DocumentTextObject, ScrollTo,
 };
 use super::{Clipboard, UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -53,6 +49,8 @@ pub enum Action {
     HistoryPrev,
     /// Navigate history down.
     HistoryNext,
+    /// Move the cursor by `delta` display rows, following soft wraps (`gj`, `gk`).
+    DisplayRows(isize),
     /// Center the input viewport on the cursor (zz).
     CenterScroll,
     /// Pan the viewport horizontally by `delta` cells (vim `zh`/`zl`).
@@ -204,6 +202,17 @@ impl Op {
             Op::Change => 'c',
             Op::Yank => 'y',
         }
+    }
+}
+
+/// The find motion a key starts, waiting for the character to find.
+fn find_kind(c: char) -> Option<FindKind> {
+    match c {
+        'f' => Some(FindKind::Forward),
+        'F' => Some(FindKind::Backward),
+        't' => Some(FindKind::ForwardTill),
+        'T' => Some(FindKind::BackwardTill),
+        _ => None,
     }
 }
 
@@ -405,6 +414,17 @@ impl VimWindowState {
         n
     }
 
+    /// Pop the typed count (`count1 × count2`), or `None` when none was typed,
+    /// clearing both.
+    fn take_typed_count(&mut self) -> Option<usize> {
+        let typed = match (self.count1, self.count2) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(1) * b.unwrap_or(1)),
+        };
+        self.reset_counts();
+        typed
+    }
+
     /// Pop count1 × count2 (each default 1) and clear both.
     fn effective_count(&mut self) -> usize {
         let c1 = self.count1.unwrap_or(1);
@@ -578,58 +598,88 @@ pub fn handle_viewer_key(
         return DocumentKeyResult::Passthrough;
     }
 
+    let command = |state: &mut VimWindowState, cmd: Option<DocumentCommand>| {
+        state.reset_counts();
+        cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command)
+    };
     match state.sub {
         SubState::WaitingOp(Op::Yank) => {
             if let KeyCode::Char(c @ ('[' | ']')) = key.code {
                 state.sub = SubState::WaitingBracket(Some(Op::Yank), c == ']');
                 return DocumentKeyResult::Consumed;
             }
-            let count = state.effective_count() as crate::RowIndex;
-            let cols = count as isize;
             state.sub = SubState::Ready;
-            let motion = |m| Some(DocumentCommand::YankMotion(m));
+            let yank = |motion, state: &mut VimWindowState| {
+                Some(DocumentCommand::YankMotion {
+                    motion,
+                    count: state.take_typed_count(),
+                })
+            };
             let cmd = match key.code {
-                KeyCode::Char('y') => Some(DocumentCommand::YankLines(count)),
-                KeyCode::Char('i') | KeyCode::Char('a') => {
-                    state.sub = SubState::WaitingTextObj(Op::Yank, key.code == KeyCode::Char('i'));
+                KeyCode::Char('y') => Some(DocumentCommand::YankLines(
+                    state.effective_count() as crate::RowIndex
+                )),
+                KeyCode::Char(c @ ('i' | 'a')) => {
+                    state.sub = SubState::WaitingTextObj(Op::Yank, c == 'i');
                     return DocumentKeyResult::Consumed;
                 }
                 KeyCode::Char('g') => {
                     state.sub = SubState::WaitingOpG(Op::Yank);
                     return DocumentKeyResult::Consumed;
                 }
-                KeyCode::Char('w') => motion(DocumentMotion::WordForward(count)),
-                KeyCode::Char('b') => motion(DocumentMotion::WordBackward(count)),
-                KeyCode::Char('e') => motion(DocumentMotion::WordEnd(count)),
-                KeyCode::Char('}') => motion(DocumentMotion::ParagraphForward(count)),
-                KeyCode::Char('{') => motion(DocumentMotion::ParagraphBackward(count)),
-                KeyCode::Char('0') => motion(DocumentMotion::LineStart),
-                KeyCode::Char('^' | '_') => motion(DocumentMotion::LineStart),
-                KeyCode::Char('$') => motion(DocumentMotion::LineEnd),
-                KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
-                    motion(DocumentMotion::Cols(-cols))
+                KeyCode::Char(c) if find_kind(c).is_some() => {
+                    state.sub = SubState::WaitingOpFind(Op::Yank, find_kind(c).unwrap());
+                    return DocumentKeyResult::Consumed;
                 }
-                KeyCode::Char('l') | KeyCode::Right => motion(DocumentMotion::Cols(cols)),
-                KeyCode::Char('j') | KeyCode::Down => motion(DocumentMotion::Rows(cols)),
-                KeyCode::Char('k') | KeyCode::Up => motion(DocumentMotion::Rows(-cols)),
-                KeyCode::Char('G') => motion(DocumentMotion::BufferEnd),
-                _ => None,
+                KeyCode::Char(c @ (';' | ',')) => Motion::repeat_find(state.last_find, c == ',')
+                    .and_then(|motion| yank(motion, state)),
+                code => Motion::from_key(code).and_then(|motion| yank(motion, state)),
             };
-            state.count1 = None;
-            state.count2 = None;
-            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+            return command(state, cmd);
         }
         SubState::WaitingOpG(Op::Yank) => {
             state.sub = SubState::Ready;
+            let cmd = motion_after_g(key).map(|motion| DocumentCommand::YankMotion {
+                motion,
+                count: state.take_typed_count(),
+            });
+            return command(state, cmd);
+        }
+        SubState::WaitingOpFind(Op::Yank, kind) => {
+            state.sub = SubState::Ready;
             let cmd = match key.code {
-                KeyCode::Char('g') => {
-                    Some(DocumentCommand::YankMotion(DocumentMotion::BufferStart))
+                KeyCode::Char(ch) => {
+                    state.last_find = Some((kind, ch));
+                    Some(DocumentCommand::YankMotion {
+                        motion: Motion::Find {
+                            kind,
+                            ch,
+                            repeat: false,
+                        },
+                        count: state.take_typed_count(),
+                    })
                 }
                 _ => None,
             };
-            state.count1 = None;
-            state.count2 = None;
-            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+            return command(state, cmd);
+        }
+        SubState::WaitingFind(kind) => {
+            state.sub = SubState::Ready;
+            let cmd = match key.code {
+                KeyCode::Char(ch) => {
+                    state.last_find = Some((kind, ch));
+                    Some(DocumentCommand::Move {
+                        motion: Motion::Find {
+                            kind,
+                            ch,
+                            repeat: false,
+                        },
+                        count: state.take_typed_count(),
+                    })
+                }
+                _ => None,
+            };
+            return command(state, cmd);
         }
         SubState::WaitingTextObj(Op::Yank, inner) => {
             state.sub = SubState::Ready;
@@ -639,9 +689,7 @@ pub fn handle_viewer_key(
                 }
                 _ => None,
             };
-            state.count1 = None;
-            state.count2 = None;
-            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+            return command(state, cmd);
         }
         SubState::WaitingVisualTextObj(inner) => {
             state.sub = SubState::Ready;
@@ -651,59 +699,54 @@ pub fn handle_viewer_key(
                 }
                 _ => None,
             };
-            state.count1 = None;
-            state.count2 = None;
-            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+            return command(state, cmd);
         }
         SubState::WaitingBracket(op, forward) => {
             state.sub = SubState::Ready;
-            let count = state.effective_count() as crate::RowIndex;
             let cmd = match key.code {
                 KeyCode::Char(kind) => {
-                    let motion = BlockMotion {
-                        kind,
-                        forward,
-                        count,
-                    };
+                    let motion = Motion::Block(BlockMotion { kind, forward });
+                    let count = state.take_typed_count();
                     // The viewer's only operator is yank.
                     Some(match op {
-                        None => DocumentCommand::BlockMove(motion),
-                        Some(_) => DocumentCommand::YankMotion(DocumentMotion::Block(motion)),
+                        None => DocumentCommand::Move { motion, count },
+                        Some(_) => DocumentCommand::YankMotion { motion, count },
                     })
                 }
                 _ => None,
             };
-            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+            return command(state, cmd);
         }
         SubState::WaitingG => {
             state.sub = SubState::Ready;
             let cmd = match key.code {
-                KeyCode::Char('g') => {
-                    let row = state
-                        .count1
-                        .take()
-                        .map(|n| n.saturating_sub(1))
-                        .unwrap_or(0);
-                    Some(DocumentCommand::GotoRow(row as crate::RowIndex))
-                }
                 KeyCode::Char('f') => Some(DocumentCommand::OpenAction),
-                _ => None,
+                KeyCode::Char(c @ ('j' | 'k')) => {
+                    let rows = state.take_count() as isize;
+                    Some(DocumentCommand::MoveRows(if c == 'j' {
+                        rows
+                    } else {
+                        -rows
+                    }))
+                }
+                _ => motion_after_g(key).map(|motion| DocumentCommand::Move {
+                    motion,
+                    count: state.take_typed_count(),
+                }),
             };
-            state.count1 = None;
-            state.count2 = None;
-            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+            return command(state, cmd);
         }
         SubState::WaitingZ => {
             state.sub = SubState::Ready;
             let cmd = match key.code {
-                KeyCode::Char('z') => Some(DocumentCommand::CenterScroll),
+                KeyCode::Char('z') => Some(DocumentCommand::ScrollCursor(ScrollTo::Center)),
+                KeyCode::Char('t') => Some(DocumentCommand::ScrollCursor(ScrollTo::Top)),
+                KeyCode::Char('b') => Some(DocumentCommand::ScrollCursor(ScrollTo::Bottom)),
                 KeyCode::Char('h') => Some(DocumentCommand::PanColumns(-1)),
                 KeyCode::Char('l') => Some(DocumentCommand::PanColumns(1)),
                 _ => None,
             };
-            state.count1 = None;
-            state.count2 = None;
-            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+            return command(state, cmd);
         }
         _ => {}
     }
@@ -720,7 +763,7 @@ pub fn handle_viewer_key(
         };
     }
 
-    let count = |state: &mut VimWindowState| state.take_count() as isize;
+    let rows = |state: &mut VimWindowState| state.take_count() as isize;
     match key.code {
         KeyCode::Char(c @ '1'..='9') => {
             let digit = c.to_digit(10).unwrap() as usize;
@@ -741,47 +784,23 @@ pub fn handle_viewer_key(
             state.sub = SubState::WaitingBracket(None, c == ']');
             DocumentKeyResult::Consumed
         }
-        KeyCode::Char('G') => {
-            if let Some(n) = state.count1.take() {
-                DocumentKeyResult::Command(DocumentCommand::GotoRow(
-                    n.saturating_sub(1) as crate::RowIndex
-                ))
-            } else {
-                DocumentKeyResult::Command(DocumentCommand::BufferEnd)
-            }
+        KeyCode::Char(c) if find_kind(c).is_some() => {
+            state.sub = SubState::WaitingFind(find_kind(c).unwrap());
+            DocumentKeyResult::Consumed
+        }
+        KeyCode::Char(c @ (';' | ',')) => {
+            let motion = Motion::repeat_find(state.last_find, c == ',');
+            let count = state.take_typed_count();
+            motion.map_or(DocumentKeyResult::Consumed, |motion| {
+                DocumentKeyResult::Command(DocumentCommand::Move { motion, count })
+            })
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            DocumentKeyResult::Command(DocumentCommand::MoveRows(count(state)))
+            DocumentKeyResult::Command(DocumentCommand::MoveRows(rows(state)))
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            DocumentKeyResult::Command(DocumentCommand::MoveRows(-count(state)))
+            DocumentKeyResult::Command(DocumentCommand::MoveRows(-rows(state)))
         }
-        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
-            let c = -count(state);
-            DocumentKeyResult::Command(DocumentCommand::MoveCursorCol(c))
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            let c = count(state);
-            DocumentKeyResult::Command(DocumentCommand::MoveCursorCol(c))
-        }
-        KeyCode::Char('}') => DocumentKeyResult::Command(DocumentCommand::ParagraphForward(
-            state.take_count() as crate::RowIndex,
-        )),
-        KeyCode::Char('{') => DocumentKeyResult::Command(DocumentCommand::ParagraphBackward(
-            state.take_count() as crate::RowIndex,
-        )),
-        KeyCode::Char('0') => DocumentKeyResult::Command(DocumentCommand::LineStart),
-        KeyCode::Char('$') => DocumentKeyResult::Command(DocumentCommand::LineEnd),
-        KeyCode::Char('^' | '_') => DocumentKeyResult::Command(DocumentCommand::LineStart),
-        KeyCode::Char('w') => DocumentKeyResult::Command(DocumentCommand::WordForward(
-            state.take_count() as crate::RowIndex,
-        )),
-        KeyCode::Char('b') => DocumentKeyResult::Command(DocumentCommand::WordBackward(
-            state.take_count() as crate::RowIndex,
-        )),
-        KeyCode::Char('e') => DocumentKeyResult::Command(DocumentCommand::WordEnd(
-            state.take_count() as crate::RowIndex,
-        )),
         KeyCode::Char('v') => {
             state.set_mode(mode, VimMode::Visual);
             DocumentKeyResult::Command(DocumentCommand::StartVisual)
@@ -820,6 +839,13 @@ pub fn handle_viewer_key(
         KeyCode::Char('z') => {
             state.sub = SubState::WaitingZ;
             DocumentKeyResult::Consumed
+        }
+        code if Motion::from_key(code).is_some() => {
+            let motion = Motion::from_key(code).unwrap();
+            DocumentKeyResult::Command(DocumentCommand::Move {
+                motion,
+                count: state.take_typed_count(),
+            })
         }
         _ if !state.is_idle() => {
             // An invalid counted motion cancels the sequence, not the viewer.
@@ -1382,22 +1408,6 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.vim_state.sub = SubState::WaitingFind(FindKind::BackwardTill);
             Action::Consumed
         }
-        ';' => {
-            if let Some((kind, ch)) = ctx.vim_state.last_find {
-                let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind, ch, n);
-            }
-            ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
-        ',' => {
-            if let Some((kind, ch)) = ctx.vim_state.last_find {
-                let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind.reversed(), ch, n);
-            }
-            ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
 
         // ── Wait-for-second-char ────────────────────────────────────
         'g' => {
@@ -1410,20 +1420,6 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         // ── Motions ─────────────────────────────────────────────────
-        'h' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
-            }
-            Action::Consumed
-        }
-        'l' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = move_right_normal(ctx.buf.as_str(), *ctx.cpos);
-            }
-            Action::Consumed
-        }
         'j' => {
             let n = ctx.vim_state.take_count();
             if ctx.buf.contains('\n') {
@@ -1470,104 +1466,11 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 Action::Consumed
             }
         }
-        'w' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
+        ';' | ',' => {
+            if let Some(motion) = Motion::repeat_find(ctx.vim_state.last_find, c == ',') {
+                move_cursor(ctx, motion);
             }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        'W' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        'b' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
-            }
-            Action::Consumed
-        }
-        'B' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
-            }
-            Action::Consumed
-        }
-        'e' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        'E' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        '0' => {
-            *ctx.cpos = line_start(ctx.buf.as_str(), *ctx.cpos);
-            *ctx.curswant = None;
             ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
-        '^' | '_' => {
-            *ctx.cpos = first_non_blank(ctx.buf.as_str(), *ctx.cpos);
-            ctx.vim_state.reset_pending();
-            Action::Consumed
-        }
-        '$' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 1..n {
-                *ctx.cpos = move_down(ctx.buf.as_str(), *ctx.cpos);
-            }
-            *ctx.cpos = line_end_normal(ctx.buf.as_str(), *ctx.cpos);
-            Action::Consumed
-        }
-        'G' => {
-            let had_count = ctx.vim_state.count1.is_some();
-            let n = ctx.vim_state.take_count();
-            *ctx.cpos = if had_count {
-                goto_line(ctx.buf.as_str(), n.saturating_sub(1))
-            } else {
-                ctx.buf.len()
-            };
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-
-        '{' | '}' => {
-            let n = ctx.vim_state.take_count();
-            let step = if c == '}' {
-                paragraph_forward_pos
-            } else {
-                paragraph_backward_pos
-            };
-            for _ in 0..n {
-                *ctx.cpos = step(ctx.buf.as_str(), *ctx.cpos);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            *ctx.curswant = None;
-            Action::Consumed
-        }
-
-        // ── Match bracket ────────────────────────────────────────────
-        '%' => {
-            ctx.vim_state.reset_counts();
-            if let Some(p) = find_matching_bracket(ctx.buf.as_str(), *ctx.cpos) {
-                *ctx.cpos = p;
-            }
             Action::Consumed
         }
 
@@ -1598,9 +1501,23 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         _ => {
+            if let Some(motion) = Motion::from_char(c) {
+                move_cursor(ctx, motion);
+            }
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
+    }
+}
+
+/// Move the cursor with `motion` in normal or visual mode, consuming the typed
+/// count. A motion that cannot move leaves the cursor in place.
+fn move_cursor(ctx: &mut VimContext<'_>, motion: Motion) {
+    let count = ctx.vim_state.take_typed_count();
+    *ctx.curswant = None;
+    if let Some((pos, _)) = resolve(ctx.buf.as_str(), *ctx.cpos, motion, count, Use::Move) {
+        *ctx.cpos = pos;
+        clamp_normal(ctx.buf.as_str(), ctx.cpos);
     }
 }
 
@@ -1898,20 +1815,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
 
         // ── Motions (move cursor, anchor stays) ────────────────────
-        'h' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
-            }
-            Action::Consumed
-        }
-        'l' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = move_right_normal(ctx.buf.as_str(), *ctx.cpos);
-            }
-            Action::Consumed
-        }
+        // ── Motions (move cursor, anchor stays) ────────────────────
         'j' => {
             let n = ctx.vim_state.take_count();
             for _ in 0..n {
@@ -1930,96 +1834,6 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 *ctx.curswant = Some(col);
             }
             clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        'w' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        'W' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_forward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        'b' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
-            }
-            Action::Consumed
-        }
-        'B' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_backward_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
-            }
-            Action::Consumed
-        }
-        'e' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::Word);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        'E' => {
-            let n = ctx.vim_state.take_count();
-            for _ in 0..n {
-                *ctx.cpos = word_end_pos(ctx.buf.as_str(), *ctx.cpos, CharClass::WORD);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        '0' => {
-            *ctx.cpos = line_start(ctx.buf.as_str(), *ctx.cpos);
-            Action::Consumed
-        }
-        '^' | '_' => {
-            *ctx.cpos = first_non_blank(ctx.buf.as_str(), *ctx.cpos);
-            Action::Consumed
-        }
-        '$' => {
-            *ctx.cpos = line_end_normal(ctx.buf.as_str(), *ctx.cpos);
-            Action::Consumed
-        }
-        'G' => {
-            let had_count = ctx.vim_state.count1.is_some();
-            let n = ctx.vim_state.take_count();
-            *ctx.cpos = if had_count {
-                goto_line(ctx.buf.as_str(), n.saturating_sub(1))
-            } else {
-                ctx.buf.len()
-            };
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            Action::Consumed
-        }
-        '{' | '}' => {
-            let n = ctx.vim_state.take_count();
-            let step = if c == '}' {
-                paragraph_forward_pos
-            } else {
-                paragraph_backward_pos
-            };
-            for _ in 0..n {
-                *ctx.cpos = step(ctx.buf.as_str(), *ctx.cpos);
-            }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            *ctx.curswant = None;
-            Action::Consumed
-        }
-        '%' => {
-            ctx.vim_state.reset_counts();
-            if let Some(p) = find_matching_bracket(ctx.buf.as_str(), *ctx.cpos) {
-                *ctx.cpos = p;
-            }
             Action::Consumed
         }
         'g' => {
@@ -2042,17 +1856,9 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             ctx.vim_state.sub = SubState::WaitingFind(FindKind::BackwardTill);
             Action::Consumed
         }
-        ';' => {
-            if let Some((kind, ch)) = ctx.vim_state.last_find {
-                let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind, ch, n);
-            }
-            Action::Consumed
-        }
-        ',' => {
-            if let Some((kind, ch)) = ctx.vim_state.last_find {
-                let n = ctx.vim_state.take_count();
-                *ctx.cpos = repeat_find(ctx.buf.as_str(), *ctx.cpos, kind.reversed(), ch, n);
+        ';' | ',' => {
+            if let Some(motion) = Motion::repeat_find(ctx.vim_state.last_find, c == ',') {
+                move_cursor(ctx, motion);
             }
             Action::Consumed
         }
@@ -2086,7 +1892,12 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
 
-        _ => Action::Consumed,
+        _ => {
+            if let Some(motion) = Motion::from_char(c) {
+                move_cursor(ctx, motion);
+            }
+            Action::Consumed
+        }
     }
 }
 
@@ -2131,15 +1942,15 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
 fn handle_waiting_find(key: KeyEvent, kind: FindKind, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char(ch) = key.code {
-        let n = ctx.vim_state.take_count();
         ctx.vim_state.last_find = Some((kind, ch));
-        let mut pos = *ctx.cpos;
-        for _ in 0..n {
-            if let Some(p) = find_char(ctx.buf.as_str(), pos, kind, ch) {
-                pos = p;
-            }
-        }
-        *ctx.cpos = pos;
+        move_cursor(
+            ctx,
+            Motion::Find {
+                kind,
+                ch,
+                repeat: false,
+            },
+        );
     }
     ctx.vim_state.reset_pending();
     Action::Consumed
@@ -2154,38 +1965,22 @@ fn handle_waiting_op_find(
     ctx.vim_state.sub = SubState::Ready;
     if let KeyCode::Char(ch) = key.code {
         let count = ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
-        let n = ctx.vim_state.effective_count();
         ctx.vim_state.last_find = Some((kind, ch));
-        let origin = *ctx.cpos;
-        let raw_kind = match kind {
-            FindKind::ForwardTill => FindKind::Forward,
-            FindKind::BackwardTill => FindKind::Backward,
-            other => other,
+        let motion = Motion::Find {
+            kind,
+            ch,
+            repeat: false,
         };
-        let mut pos = origin;
-        for _ in 0..n {
-            if let Some(p) = find_char(ctx.buf.as_str(), pos, raw_kind, ch) {
-                pos = p;
+        if let Some(span) = op_span(ctx, op, motion) {
+            if op != Op::Yank {
+                ctx.vim_state.record_change(RepeatCommand::OpFind {
+                    op,
+                    kind,
+                    target: ch,
+                    count,
+                });
             }
-        }
-        if pos != origin {
-            let (start, end) = match kind {
-                FindKind::Forward => (*ctx.cpos, advance_chars(ctx.buf.as_str(), pos, 1)),
-                FindKind::ForwardTill => (*ctx.cpos, pos),
-                FindKind::Backward => (pos, *ctx.cpos),
-                FindKind::BackwardTill => (advance_chars(ctx.buf.as_str(), pos, 1), *ctx.cpos),
-            };
-            if start < end {
-                if op != Op::Yank {
-                    ctx.vim_state.record_change(RepeatCommand::OpFind {
-                        op,
-                        kind,
-                        target: ch,
-                        count,
-                    });
-                }
-                return apply_charwise_op(op, ctx, start, end);
-            }
+            return apply_span(op, ctx, span);
         }
     }
     ctx.vim_state.reset_pending();
@@ -2194,45 +1989,31 @@ fn handle_waiting_op_find(
 
 fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
-    let action = match key.code {
-        KeyCode::Char('g') => {
-            if let Some(n) = ctx.vim_state.count1.take() {
-                *ctx.cpos = goto_line(ctx.buf.as_str(), n.saturating_sub(1));
-            } else {
-                *ctx.cpos = 0;
-            }
-            Action::Consumed
-        }
-        _ => Action::Consumed,
-    };
-    ctx.vim_state.count1 = None;
-    ctx.vim_state.count2 = None;
-    action
+    if let KeyCode::Char(c @ ('j' | 'k')) = key.code {
+        let rows = ctx.vim_state.take_count() as isize;
+        return Action::DisplayRows(if c == 'j' { rows } else { -rows });
+    }
+    if let Some(motion) = motion_after_g(key) {
+        move_cursor(ctx, motion);
+    }
+    ctx.vim_state.reset_pending();
+    Action::Consumed
 }
 
 fn handle_waiting_op_g(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
-    if let KeyCode::Char('g') = key.code {
-        let target = if let Some(n) = ctx.vim_state.count1.take() {
-            goto_line(ctx.buf.as_str(), n.saturating_sub(1))
-        } else {
-            0
-        };
-        let origin = *ctx.cpos;
-        if target != origin {
-            let (s, e) = if target < origin {
-                (target, origin)
-            } else {
-                (origin, target)
-            };
-            let ls = line_start(ctx.buf.as_str(), s);
-            let le = line_end(ctx.buf.as_str(), e);
-            ctx.vim_state.reset_pending();
-            return apply_linewise_op(op, ctx, ls, le);
-        }
+    if let Some(span) = motion_after_g(key).and_then(|motion| op_span(ctx, op, motion)) {
+        return apply_span(op, ctx, span);
     }
     ctx.vim_state.reset_pending();
     Action::Consumed
+}
+
+fn motion_after_g(key: KeyEvent) -> Option<Motion> {
+    match key.code {
+        KeyCode::Char(c) => Motion::from_g(c),
+        _ => None,
+    }
 }
 
 fn handle_waiting_textobj(key: KeyEvent, op: Op, inner: bool, ctx: &mut VimContext<'_>) -> Action {
@@ -2418,195 +2199,60 @@ enum MotionRange {
     None,
 }
 
-fn ordered_range(a: usize, b: usize) -> Option<(usize, usize)> {
-    let (start, end) = if b < a { (b, a) } else { (a, b) };
-    (start < end).then_some((start, end))
+fn resolve_motion_range(key: KeyEvent, ctx: &mut VimContext<'_>, op: Option<Op>) -> MotionRange {
+    if let (KeyCode::Char(c), Some(op)) = (key.code, op) {
+        let find = match c {
+            'f' => Some(FindKind::Forward),
+            'F' => Some(FindKind::Backward),
+            't' => Some(FindKind::ForwardTill),
+            'T' => Some(FindKind::BackwardTill),
+            _ => None,
+        };
+        if let Some(kind) = find {
+            return MotionRange::Pending(SubState::WaitingOpFind(op, kind));
+        }
+        if c == 'g' {
+            return MotionRange::Pending(SubState::WaitingOpG(op));
+        }
+    }
+    let motion = match key.code {
+        KeyCode::Char(c @ (';' | ',')) => Motion::repeat_find(ctx.vim_state.last_find, c == ','),
+        code => Motion::from_key(code),
+    };
+    let usage = if op == Some(Op::Change) {
+        Use::Change
+    } else {
+        Use::Operator
+    };
+    match motion.and_then(|motion| motion_span(ctx, usage, motion)) {
+        Some(Span::Chars(start, end)) => MotionRange::Charwise(start, end),
+        Some(Span::Lines(start, end)) => MotionRange::Linewise(start, end),
+        None => MotionRange::None,
+    }
 }
 
-fn resolve_motion_range(key: KeyEvent, ctx: &mut VimContext<'_>, op: Option<Op>) -> MotionRange {
-    let n = ctx.vim_state.effective_count();
-    let origin = *ctx.cpos;
-    let target = match key.code {
-        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = move_left(ctx.buf.as_str(), p);
-            }
-            p
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = move_right_inclusive(ctx.buf.as_str(), p);
-            }
-            p
-        }
-        KeyCode::Char('j') => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = move_down(ctx.buf.as_str(), p);
-            }
-            let (start, end) = if p < origin { (p, origin) } else { (origin, p) };
-            return MotionRange::Linewise(
-                line_start(ctx.buf.as_str(), start),
-                line_end(ctx.buf.as_str(), end),
-            );
-        }
-        KeyCode::Char('k') => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = move_up(ctx.buf.as_str(), p);
-            }
-            let (start, end) = if p < origin { (p, origin) } else { (origin, p) };
-            return MotionRange::Linewise(
-                line_start(ctx.buf.as_str(), start),
-                line_end(ctx.buf.as_str(), end),
-            );
-        }
-        KeyCode::Char('w') => {
-            let mut p = origin;
-            let use_end = op == Some(Op::Change)
-                && p < ctx.buf.len()
-                && char_class(
-                    ctx.buf.as_str()[p..].chars().next().unwrap(),
-                    CharClass::Word,
-                ) != 0;
-            for _ in 0..n {
-                if use_end {
-                    p = word_end_pos(ctx.buf.as_str(), p, CharClass::Word);
-                    p = advance_chars(ctx.buf.as_str(), p, 1);
-                } else {
-                    p = word_forward_pos(ctx.buf.as_str(), p, CharClass::Word);
-                }
-            }
-            p
-        }
-        KeyCode::Char('W') => {
-            let mut p = origin;
-            let use_end = op == Some(Op::Change)
-                && p < ctx.buf.len()
-                && char_class(
-                    ctx.buf.as_str()[p..].chars().next().unwrap(),
-                    CharClass::WORD,
-                ) != 0;
-            for _ in 0..n {
-                if use_end {
-                    p = word_end_pos(ctx.buf.as_str(), p, CharClass::WORD);
-                    p = advance_chars(ctx.buf.as_str(), p, 1);
-                } else {
-                    p = word_forward_pos(ctx.buf.as_str(), p, CharClass::WORD);
-                }
-            }
-            p
-        }
-        KeyCode::Char('b') => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = word_backward_pos(ctx.buf.as_str(), p, CharClass::Word);
-            }
-            p
-        }
-        KeyCode::Char('B') => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = word_backward_pos(ctx.buf.as_str(), p, CharClass::WORD);
-            }
-            p
-        }
-        KeyCode::Char('e') => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = word_end_pos(ctx.buf.as_str(), p, CharClass::Word);
-            }
-            advance_chars(ctx.buf.as_str(), p, 1)
-        }
-        KeyCode::Char('E') => {
-            let mut p = origin;
-            for _ in 0..n {
-                p = word_end_pos(ctx.buf.as_str(), p, CharClass::WORD);
-            }
-            advance_chars(ctx.buf.as_str(), p, 1)
-        }
-        KeyCode::Char(c @ ('{' | '}')) => {
-            let step = if c == '}' {
-                paragraph_forward_pos
-            } else {
-                paragraph_backward_pos
-            };
-            let mut p = origin;
-            for _ in 0..n {
-                p = step(ctx.buf.as_str(), p);
-            }
-            let (lo, hi) = if p < origin { (p, origin) } else { (origin, p) };
-            // An exclusive motion ending in column 0 stops at the end of the
-            // previous line, and becomes linewise when it starts at or before
-            // the first non-blank of its line.
-            if hi > lo && line_start(ctx.buf.as_str(), hi) == hi {
-                let before = hi - 1;
-                if lo <= first_non_blank(ctx.buf.as_str(), lo) {
-                    return MotionRange::Linewise(lo, before);
-                }
-                return ordered_range(lo, before)
-                    .map(|(start, end)| MotionRange::Charwise(start, end))
-                    .unwrap_or(MotionRange::None);
-            }
-            p
-        }
-        KeyCode::Char('0') | KeyCode::Home => line_start(ctx.buf.as_str(), origin),
-        KeyCode::Char('^' | '_') => first_non_blank(ctx.buf.as_str(), origin),
-        KeyCode::Char('$') | KeyCode::End => line_end(ctx.buf.as_str(), origin),
-        KeyCode::Char('%') => {
-            let Some(t) = find_matching_bracket(ctx.buf.as_str(), origin) else {
-                return MotionRange::None;
-            };
-            let lo = origin.min(t);
-            let hi = advance_chars(ctx.buf.as_str(), origin.max(t), 1);
-            return ordered_range(lo, hi)
-                .map(|(start, end)| MotionRange::Charwise(start, end))
-                .unwrap_or(MotionRange::None);
-        }
-        KeyCode::Char('G') => {
-            let (start, end) = if ctx.buf.len() < origin {
-                (ctx.buf.len(), origin)
-            } else {
-                (origin, ctx.buf.len())
-            };
-            return MotionRange::Linewise(
-                line_start(ctx.buf.as_str(), start),
-                line_end(ctx.buf.as_str(), end),
-            );
-        }
-        KeyCode::Char('g') => {
-            return op
-                .map(|op| MotionRange::Pending(SubState::WaitingOpG(op)))
-                .unwrap_or(MotionRange::None);
-        }
-        KeyCode::Char('f') => {
-            return op
-                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::Forward)))
-                .unwrap_or(MotionRange::None);
-        }
-        KeyCode::Char('F') => {
-            return op
-                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::Backward)))
-                .unwrap_or(MotionRange::None);
-        }
-        KeyCode::Char('t') => {
-            return op
-                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::ForwardTill)))
-                .unwrap_or(MotionRange::None);
-        }
-        KeyCode::Char('T') => {
-            return op
-                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::BackwardTill)))
-                .unwrap_or(MotionRange::None);
-        }
-        _ => return MotionRange::None,
-    };
+/// The span `motion` covers from the cursor, consuming the typed count.
+fn motion_span(ctx: &mut VimContext<'_>, usage: Use, motion: Motion) -> Option<Span> {
+    let count = ctx.vim_state.take_typed_count();
+    let from = *ctx.cpos;
+    let (pos, reach) = resolve(ctx.buf.as_str(), from, motion, count, usage)?;
+    operator_span(ctx.buf.as_str(), from, pos, reach)
+}
 
-    ordered_range(origin, target)
-        .map(|(start, end)| MotionRange::Charwise(start, end))
-        .unwrap_or(MotionRange::None)
+fn op_span(ctx: &mut VimContext<'_>, op: Op, motion: Motion) -> Option<Span> {
+    let usage = if op == Op::Change {
+        Use::Change
+    } else {
+        Use::Operator
+    };
+    motion_span(ctx, usage, motion)
+}
+
+fn apply_span(op: Op, ctx: &mut VimContext<'_>, span: Span) -> Action {
+    match span {
+        Span::Chars(start, end) => apply_charwise_op(op, ctx, start, end),
+        Span::Lines(start, end) => apply_linewise_op(op, ctx, start, end),
+    }
 }
 
 /// Operator-pending motion dispatch.
@@ -2931,12 +2577,11 @@ mod tests {
         (result, state)
     }
 
-    fn block_move(kind: char, forward: bool, count: crate::RowIndex) -> DocumentCommand {
-        DocumentCommand::BlockMove(BlockMotion {
-            kind,
-            forward,
+    fn block_move(kind: char, forward: bool, count: Option<usize>) -> DocumentCommand {
+        DocumentCommand::Move {
+            motion: Motion::Block(BlockMotion { kind, forward }),
             count,
-        })
+        }
     }
 
     #[test]
@@ -2947,11 +2592,11 @@ mod tests {
 
         assert_eq!(
             viewer_keys("[u").0,
-            DocumentKeyResult::Command(block_move('u', false, 1))
+            DocumentKeyResult::Command(block_move('u', false, None))
         );
         assert_eq!(
             viewer_keys("]]").0,
-            DocumentKeyResult::Command(block_move(']', true, 1))
+            DocumentKeyResult::Command(block_move(']', true, None))
         );
     }
 
@@ -2959,12 +2604,12 @@ mod tests {
     fn document_view_block_motions_take_counts() {
         assert_eq!(
             viewer_keys("3]u").0,
-            DocumentKeyResult::Command(block_move('u', true, 3))
+            DocumentKeyResult::Command(block_move('u', true, Some(3)))
         );
         let (result, state) = viewer_keys("2[t");
         assert_eq!(
             result,
-            DocumentKeyResult::Command(block_move('t', false, 2))
+            DocumentKeyResult::Command(block_move('t', false, Some(2)))
         );
         assert!(state.is_idle());
     }
@@ -2976,23 +2621,23 @@ mod tests {
         assert_eq!(state.pending_input().as_deref(), Some("y]"));
         assert_eq!(
             viewer_keys("y]u").0,
-            DocumentKeyResult::Command(DocumentCommand::YankMotion(DocumentMotion::Block(
-                BlockMotion {
+            DocumentKeyResult::Command(DocumentCommand::YankMotion {
+                motion: Motion::Block(BlockMotion {
                     kind: 'u',
                     forward: true,
-                    count: 1,
-                }
-            )))
+                }),
+                count: None,
+            })
         );
         assert_eq!(
             viewer_keys("2y[[").0,
-            DocumentKeyResult::Command(DocumentCommand::YankMotion(DocumentMotion::Block(
-                BlockMotion {
+            DocumentKeyResult::Command(DocumentCommand::YankMotion {
+                motion: Motion::Block(BlockMotion {
                     kind: '[',
                     forward: false,
-                    count: 2,
-                }
-            )))
+                }),
+                count: Some(2),
+            })
         );
     }
 

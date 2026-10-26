@@ -66,6 +66,7 @@ pub use callback::{
 use callback::{Callbacks, KeymapScope};
 pub use event::{Event, Status};
 pub use modal::{ModalId, ModalOwner};
+pub use motions::{FindKind, Motion, WordTo};
 pub use overlay::{
     BodyDrag, ChromeAction, ChromeOwner, Decoration, DecorationId, DragConfig, HitTarget, Overlay,
     OverlayId, ResizeConfig, ResizeEdges,
@@ -78,12 +79,12 @@ pub use row::{
 };
 pub use vim::VimMode;
 pub use window::{
-    clamp_scroll, materialized_row_range, resolve_document_command, scroll_to_show, BlockMotion,
-    CursorScreenRowSelection, CursorShape, DocumentCommand, DocumentCopy, DocumentKeyResult,
-    DocumentMotion, DocumentTextObject, DocumentViewExecutor, DocumentViewScreenRowRestore,
-    DocumentViewState, DrawContext, EventCtx, MouseCtx, RowHighlight, RowHighlightMode,
-    RowHighlightRows, RowHighlightWidth, RowYankFlash, ScrollbarState, SplitConfig, VerticalScroll,
-    ViewportMetrics, Window, WindowSurface, WindowViewport,
+    clamp_scroll, materialized_row_range, scroll_to_show, BlockMotion, CursorScreenRowSelection,
+    CursorShape, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
+    DocumentViewExecutor, DocumentViewScreenRowRestore, DocumentViewState, DrawContext, EventCtx,
+    MouseCtx, RowHighlight, RowHighlightMode, RowHighlightRows, RowHighlightWidth, RowYankFlash,
+    ScrollTo, ScrollbarState, SplitConfig, VerticalScroll, ViewportMetrics, Window, WindowSurface,
+    WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.

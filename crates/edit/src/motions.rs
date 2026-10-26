@@ -1,13 +1,293 @@
-//! Pure cursor-motion primitives over `&str` byte positions.
+//! Cursor motions: the `Motion` vocabulary every vim surface shares (prompt,
+//! viewers, transcript) and the primitives that resolve it over `&str` byte
+//! positions.
 
 use super::text::{
     byte_to_cell, cell_to_byte, line_end, line_start, next_grapheme_boundary,
-    prev_grapheme_boundary, snap_grapheme, CharClass,
+    paragraph_backward_pos, paragraph_forward_pos, prev_grapheme_boundary, snap_grapheme,
+    word_backward_pos, word_end_backward_pos, word_forward_pos, CharClass,
 };
+use crate::window::BlockMotion;
+
+/// Which neighbouring word a word motion lands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordTo {
+    /// Start of the next word (`w`, `W`).
+    Next,
+    /// Start of the current or previous word (`b`, `B`).
+    Prev,
+    /// End of the current or next word (`e`, `E`).
+    End,
+    /// End of the previous word (`ge`, `gE`).
+    PrevEnd,
+}
+
+/// A cursor motion. It carries no count: callers pass the count they parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Motion {
+    Left,
+    Right,
+    Down,
+    Up,
+    Word(WordTo, CharClass),
+    LineStart,
+    FirstNonBlank,
+    LineEnd,
+    BufferStart,
+    BufferEnd,
+    Paragraph {
+        forward: bool,
+    },
+    MatchBracket,
+    /// `f`, `F`, `t`, `T`; `repeat` is `;` / `,`, which steps past a till target
+    /// instead of sticking to it.
+    Find {
+        kind: FindKind,
+        ch: char,
+        repeat: bool,
+    },
+    /// `[x` / `]x`: the previous or next block of a kind a document knows.
+    Block(BlockMotion),
+    /// `H`, `M`, `L`: rows of the visible screen.
+    ScreenTop,
+    ScreenMiddle,
+    ScreenBottom,
+}
+
+/// What a motion is resolved for: moving the cursor, or spanning text for an
+/// operator. Operators change how a few motions behave (`cw`, `dw` on a line's
+/// last word, `dl` on its last character).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Use {
+    Move,
+    Operator,
+    /// The `c` operator, whose `w` stops at the end of the word.
+    Change,
+}
+
+/// How far a motion reaches, which decides the span an operator takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Up to, not including, the target.
+    Exclusive,
+    /// Through the target character.
+    Inclusive,
+    /// Every line from the cursor's to the target's.
+    Linewise,
+}
+
+impl Motion {
+    /// The motion a key triggers on its own.
+    pub fn from_char(c: char) -> Option<Self> {
+        let word = |to| Some(Self::Word(to, CharClass::Word));
+        let big_word = |to| Some(Self::Word(to, CharClass::WORD));
+        match c {
+            'h' => Some(Self::Left),
+            'l' => Some(Self::Right),
+            'j' => Some(Self::Down),
+            'k' => Some(Self::Up),
+            'w' => word(WordTo::Next),
+            'b' => word(WordTo::Prev),
+            'e' => word(WordTo::End),
+            'W' => big_word(WordTo::Next),
+            'B' => big_word(WordTo::Prev),
+            'E' => big_word(WordTo::End),
+            '0' => Some(Self::LineStart),
+            '^' | '_' => Some(Self::FirstNonBlank),
+            '$' => Some(Self::LineEnd),
+            'G' => Some(Self::BufferEnd),
+            '}' => Some(Self::Paragraph { forward: true }),
+            '{' => Some(Self::Paragraph { forward: false }),
+            '%' => Some(Self::MatchBracket),
+            'H' => Some(Self::ScreenTop),
+            'M' => Some(Self::ScreenMiddle),
+            'L' => Some(Self::ScreenBottom),
+            _ => None,
+        }
+    }
+
+    /// The motion `g` followed by `c` triggers.
+    pub fn from_g(c: char) -> Option<Self> {
+        match c {
+            'g' => Some(Self::BufferStart),
+            'e' => Some(Self::Word(WordTo::PrevEnd, CharClass::Word)),
+            'E' => Some(Self::Word(WordTo::PrevEnd, CharClass::WORD)),
+            _ => None,
+        }
+    }
+
+    /// The motion a key press triggers on its own, including arrow keys.
+    pub fn from_key(code: crossterm::event::KeyCode) -> Option<Self> {
+        use crossterm::event::KeyCode;
+        match code {
+            KeyCode::Char(c) => Self::from_char(c),
+            KeyCode::Left | KeyCode::Backspace => Some(Self::Left),
+            KeyCode::Right => Some(Self::Right),
+            KeyCode::Up => Some(Self::Up),
+            KeyCode::Down => Some(Self::Down),
+            KeyCode::Home => Some(Self::LineStart),
+            KeyCode::End => Some(Self::LineEnd),
+            _ => None,
+        }
+    }
+
+    /// `;` (or `,` when `reverse`): the last find motion, repeated.
+    pub fn repeat_find(last: Option<(FindKind, char)>, reverse: bool) -> Option<Self> {
+        let (kind, ch) = last?;
+        Some(Self::Find {
+            kind: if reverse { kind.reversed() } else { kind },
+            ch,
+            repeat: true,
+        })
+    }
+
+    /// Motions that take the cursor somewhere far; the jump list remembers
+    /// where they started.
+    pub fn is_jump(self) -> bool {
+        matches!(
+            self,
+            Self::BufferStart
+                | Self::BufferEnd
+                | Self::Paragraph { .. }
+                | Self::MatchBracket
+                | Self::Block(_)
+                | Self::ScreenTop
+                | Self::ScreenMiddle
+                | Self::ScreenBottom
+        )
+    }
+}
+
+/// Where `motion` takes the cursor from `from` in `buf`, and how far it
+/// reaches; `None` when it cannot move (no such character, no bracket pair, or
+/// the motion needs a screen).
+pub(crate) fn resolve(
+    buf: &str,
+    from: usize,
+    motion: Motion,
+    count: Option<usize>,
+    usage: Use,
+) -> Option<(usize, Reach)> {
+    let n = count.unwrap_or(1).max(1);
+    let repeat = |step: fn(&str, usize) -> usize| (0..n).fold(from, |p, _| step(buf, p));
+    Some(match motion {
+        Motion::Left => (repeat(move_left), Reach::Exclusive),
+        Motion::Right if usage != Use::Move => (repeat(move_right_inclusive), Reach::Exclusive),
+        Motion::Right => (repeat(move_right_normal), Reach::Exclusive),
+        Motion::Down => (repeat(move_down), Reach::Linewise),
+        Motion::Up => (repeat(move_up), Reach::Linewise),
+        Motion::Word(to, class) => word(buf, from, to, class, n, usage),
+        Motion::LineStart => (line_start(buf, from), Reach::Exclusive),
+        Motion::FirstNonBlank => (first_non_blank(buf, from), Reach::Exclusive),
+        Motion::LineEnd => {
+            let line = (1..n).fold(from, |p, _| move_down(buf, p));
+            (line_end(buf, line), Reach::Exclusive)
+        }
+        Motion::BufferStart => (
+            count.map_or(0, |c| goto_line(buf, c.saturating_sub(1))),
+            Reach::Linewise,
+        ),
+        Motion::BufferEnd => (
+            count.map_or(buf.len(), |c| goto_line(buf, c.saturating_sub(1))),
+            Reach::Linewise,
+        ),
+        Motion::Paragraph { forward: true } => (repeat(paragraph_forward_pos), Reach::Exclusive),
+        Motion::Paragraph { forward: false } => (repeat(paragraph_backward_pos), Reach::Exclusive),
+        Motion::MatchBracket => (find_matching_bracket(buf, from)?, Reach::Inclusive),
+        Motion::Find { kind, ch, repeat } => {
+            let mut pos = from;
+            for _ in 0..n {
+                pos = find_step(buf, pos, kind, ch, repeat)?;
+            }
+            (pos, find_reach(kind))
+        }
+        Motion::Block(_) | Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom => {
+            return None
+        }
+    })
+}
+
+fn word(
+    buf: &str,
+    from: usize,
+    to: WordTo,
+    class: CharClass,
+    n: usize,
+    usage: Use,
+) -> (usize, Reach) {
+    let steps = |step: &dyn Fn(usize) -> usize| (0..n).fold(from, |p, _| step(p));
+    match to {
+        WordTo::Next => {
+            let on_word = buf[from..]
+                .chars()
+                .next()
+                .is_some_and(|ch| super::text::char_class(ch, class) != 0);
+            if usage == Use::Change && on_word {
+                // `cw` on a word changes it like `ce` does, keeping the spacing.
+                let pos = steps(&|p| advance_chars(buf, word_end_pos(buf, p, class), 1));
+                return (pos, Reach::Exclusive);
+            }
+            let mut pos = from;
+            for step in 0..n {
+                let next = word_forward_pos(buf, pos, class);
+                // An operator over a line's last word stops at the line's end.
+                pos = if usage != Use::Move
+                    && step + 1 == n
+                    && line_start(buf, next) != line_start(buf, pos)
+                {
+                    line_end(buf, pos)
+                } else {
+                    next
+                };
+            }
+            (pos, Reach::Exclusive)
+        }
+        WordTo::Prev => (
+            steps(&|p| word_backward_pos(buf, p, class)),
+            Reach::Exclusive,
+        ),
+        WordTo::End => (steps(&|p| word_end_pos(buf, p, class)), Reach::Inclusive),
+        WordTo::PrevEnd => (
+            steps(&|p| word_end_backward_pos(buf, p, class)),
+            Reach::Inclusive,
+        ),
+    }
+}
+
+/// The text span an operator takes for a motion from `from` that landed on
+/// `pos`: a character range, or the range of the lines it covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Span {
+    Chars(usize, usize),
+    Lines(usize, usize),
+}
+
+pub(crate) fn operator_span(buf: &str, from: usize, pos: usize, reach: Reach) -> Option<Span> {
+    let (lo, hi) = if pos < from { (pos, from) } else { (from, pos) };
+    match reach {
+        Reach::Linewise => Some(Span::Lines(line_start(buf, lo), line_end(buf, hi))),
+        Reach::Inclusive => {
+            let end = advance_chars(buf, hi, 1);
+            (lo < end).then_some(Span::Chars(lo, end))
+        }
+        Reach::Exclusive if hi > lo && line_start(buf, hi) == hi => {
+            // An exclusive motion ending in column 0 stops at the end of the
+            // previous line, and becomes linewise when it starts at or before
+            // the first non-blank of its line.
+            let before = hi - 1;
+            if lo <= first_non_blank(buf, lo) {
+                Some(Span::Lines(line_start(buf, lo), before))
+            } else {
+                (lo < before).then_some(Span::Chars(lo, before))
+            }
+        }
+        Reach::Exclusive => (lo < hi).then_some(Span::Chars(lo, hi)),
+    }
+}
 
 /// Direction + variant for `f`/`F`/`t`/`T`-style find-char motions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FindKind {
+pub enum FindKind {
     Forward,
     ForwardTill,
     Backward,
@@ -192,19 +472,29 @@ pub(crate) fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Opt
     }
 }
 
-/// Repeat a find-char motion `n` times; adjusts for till variants so `;`/`,` don't get stuck.
-pub(crate) fn repeat_find(buf: &str, mut pos: usize, kind: FindKind, ch: char, n: usize) -> usize {
-    for _ in 0..n {
-        let search_pos = match kind {
-            FindKind::ForwardTill => next_grapheme_boundary(buf, pos),
-            FindKind::BackwardTill => prev_grapheme_boundary(buf, pos),
-            _ => pos,
-        };
-        if let Some(p) = find_char(buf, search_pos, kind, ch) {
-            pos = p;
-        }
+/// One step of a find-char motion on the line holding `pos`. A repeat (`;`,
+/// `,`) of a till search starts past its last target so it does not get stuck.
+pub(crate) fn find_step(
+    buf: &str,
+    pos: usize,
+    kind: FindKind,
+    ch: char,
+    repeat: bool,
+) -> Option<usize> {
+    let search_pos = match kind {
+        FindKind::ForwardTill if repeat => next_grapheme_boundary(buf, pos),
+        FindKind::BackwardTill if repeat => prev_grapheme_boundary(buf, pos),
+        _ => pos,
+    };
+    find_char(buf, search_pos, kind, ch)
+}
+
+/// Forward finds include their target character, backward finds stop short of it.
+pub(crate) fn find_reach(kind: FindKind) -> Reach {
+    match kind {
+        FindKind::Forward | FindKind::ForwardTill => Reach::Inclusive,
+        FindKind::Backward | FindKind::BackwardTill => Reach::Exclusive,
     }
-    pos
 }
 
 // ── Match bracket ───────────────────────────────────────────────────────────
@@ -573,7 +863,94 @@ mod tests {
     #[test]
     fn repeat_find_advances_past_previous_match_to_find_the_next() {
         // From byte 2 (a 'c'), `;` (Forward 'c') should land on byte 6 (next 'c').
-        assert_eq!(repeat_find("abc abc", 2, FindKind::Forward, 'c', 1), 6);
+        let find = Motion::Find {
+            kind: FindKind::Forward,
+            ch: 'c',
+            repeat: true,
+        };
+        assert_eq!(
+            resolve("abc abc", 2, find, None, Use::Move),
+            Some((6, Reach::Inclusive))
+        );
+    }
+
+    #[test]
+    fn repeating_a_till_find_steps_past_its_last_target() {
+        let find = Motion::Find {
+            kind: FindKind::ForwardTill,
+            ch: 'c',
+            repeat: true,
+        };
+        // `tc` stopped at byte 1; `;` goes on to the next `c`, stopping at byte 5.
+        assert_eq!(
+            resolve("abc abc", 1, find, None, Use::Move),
+            Some((5, Reach::Inclusive))
+        );
+    }
+
+    #[test]
+    fn a_find_that_matches_nothing_does_not_move() {
+        let find = Motion::Find {
+            kind: FindKind::Forward,
+            ch: 'z',
+            repeat: false,
+        };
+        assert_eq!(resolve("abc", 0, find, None, Use::Move), None);
+        assert_eq!(resolve("abc abc", 0, find, Some(2), Use::Move), None);
+    }
+
+    #[test]
+    fn word_end_backward_lands_on_the_last_char_of_the_previous_word() {
+        let ge = |pos| word_end_backward_pos("foo bar  baz", pos, CharClass::Word);
+        assert_eq!(ge(9), 6, "from the start of baz");
+        assert_eq!(ge(5), 2, "from inside bar");
+        assert_eq!(ge(4), 2, "from the start of bar");
+        assert_eq!(ge(2), 0, "no earlier word stays at the start");
+    }
+
+    #[test]
+    fn dw_on_the_last_word_of_a_line_stops_at_the_line_end() {
+        let w = Motion::Word(WordTo::Next, CharClass::Word);
+        assert_eq!(
+            resolve("foo bar\nbaz", 4, w, None, Use::Operator),
+            Some((7, Reach::Exclusive))
+        );
+        assert_eq!(
+            resolve("foo bar\nbaz", 4, w, None, Use::Move),
+            Some((8, Reach::Exclusive))
+        );
+    }
+
+    #[test]
+    fn cw_on_a_word_changes_to_its_end_and_keeps_the_spacing() {
+        let w = Motion::Word(WordTo::Next, CharClass::Word);
+        assert_eq!(
+            resolve("foo bar", 0, w, None, Use::Change),
+            Some((3, Reach::Exclusive))
+        );
+    }
+
+    #[test]
+    fn operator_spans_follow_vim_rules_for_exclusive_motions_ending_in_column_zero() {
+        let buf = "ab cd\nef\n\ngh";
+        // From the start of the line, the span takes whole lines.
+        assert_eq!(
+            operator_span(buf, 0, 9, Reach::Exclusive),
+            Some(Span::Lines(0, 8))
+        );
+        // From mid-line it stops at the end of the previous line.
+        assert_eq!(
+            operator_span(buf, 3, 9, Reach::Exclusive),
+            Some(Span::Chars(3, 8))
+        );
+        assert_eq!(
+            operator_span(buf, 3, 4, Reach::Inclusive),
+            Some(Span::Chars(3, 5))
+        );
+        assert_eq!(
+            operator_span(buf, 3, 9, Reach::Linewise),
+            Some(Span::Lines(0, 9))
+        );
     }
 
     // ── find_matching_bracket ─────────────────────────────────────────────

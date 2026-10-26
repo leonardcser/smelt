@@ -1612,8 +1612,12 @@ impl TuiApp {
 
     /// Move the focused transcript cursor as the vim block motion `[`/`]` plus
     /// kind key would. Returns whether the transcript took the motion.
-    pub(crate) fn move_transcript_block(&mut self, motion: crate::smelt_edit::BlockMotion) -> bool {
-        use crate::smelt_edit::DocumentCommand;
+    pub(crate) fn move_transcript_block(
+        &mut self,
+        motion: crate::smelt_edit::BlockMotion,
+        count: usize,
+    ) -> bool {
+        use crate::smelt_edit::{DocumentCommand, Motion};
 
         let win_id = crate::app::TRANSCRIPT_WIN;
         if self.app_focus != crate::app::AppFocus::Content {
@@ -1625,7 +1629,10 @@ impl TuiApp {
         self.execute_viewer_command(
             win_id,
             buf_id,
-            DocumentCommand::BlockMove(motion),
+            DocumentCommand::Move {
+                motion: Motion::Block(motion),
+                count: Some(count),
+            },
             viewport_rows,
         );
         true
@@ -1812,6 +1819,12 @@ impl TuiApp {
                     | KeyAction::SelectWordForward
                     | KeyAction::SelectWordBackward
             );
+            use crate::smelt_edit::text::CharClass;
+            use crate::smelt_edit::{Motion, WordTo};
+            let move_command = |motion| crate::smelt_edit::DocumentCommand::Move {
+                motion,
+                count: None,
+            };
             let command = match action {
                 KeyAction::MoveUp | KeyAction::SelectUp => {
                     Some(crate::smelt_edit::DocumentCommand::MoveRows(-1))
@@ -1820,10 +1833,10 @@ impl TuiApp {
                     Some(crate::smelt_edit::DocumentCommand::MoveRows(1))
                 }
                 KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
-                    Some(crate::smelt_edit::DocumentCommand::WordForward(1))
+                    Some(move_command(Motion::Word(WordTo::Next, CharClass::Word)))
                 }
                 KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
-                    Some(crate::smelt_edit::DocumentCommand::WordBackward(1))
+                    Some(move_command(Motion::Word(WordTo::Prev, CharClass::Word)))
                 }
                 KeyAction::PageUp => Some(crate::smelt_edit::DocumentCommand::PageRows(-1)),
                 KeyAction::PageDown => Some(crate::smelt_edit::DocumentCommand::PageRows(1)),
@@ -1837,15 +1850,13 @@ impl TuiApp {
                 KeyAction::ScrollLineDown => {
                     Some(crate::smelt_edit::DocumentCommand::ScrollRows(1))
                 }
-                KeyAction::MoveStartOfBuffer => {
-                    Some(crate::smelt_edit::DocumentCommand::BufferStart)
-                }
-                KeyAction::MoveEndOfBuffer => Some(crate::smelt_edit::DocumentCommand::BufferEnd),
+                KeyAction::MoveStartOfBuffer => Some(move_command(Motion::BufferStart)),
+                KeyAction::MoveEndOfBuffer => Some(move_command(Motion::BufferEnd)),
                 KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
-                    Some(crate::smelt_edit::DocumentCommand::LineStart)
+                    Some(move_command(Motion::LineStart))
                 }
                 KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                    Some(crate::smelt_edit::DocumentCommand::LineEnd)
+                    Some(move_command(Motion::LineEnd))
                 }
                 KeyAction::CopySelection => Some(crate::smelt_edit::DocumentCommand::YankSelection),
                 _ => None,

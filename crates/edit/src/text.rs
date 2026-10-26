@@ -7,7 +7,7 @@ pub use smelt_buffer::text::{
 };
 pub use smelt_buffer::wrap::wrap_line;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CharClass {
     /// vim "word" boundaries: alphanumeric+underscore vs punctuation vs whitespace.
     Word,
@@ -149,6 +149,30 @@ pub fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
         i += 1;
     }
     next + graphemes[i].0
+}
+
+/// End of the previous word (vim `ge`): the last character of the closest word
+/// that ends before `cpos`.
+pub fn word_end_backward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
+    let cpos = snap_grapheme(buf, cpos);
+    let graphemes: Vec<(usize, &str)> =
+        smelt_buffer::cell_width::grapheme_indices(&buf[..cpos]).collect();
+    let mut i = graphemes.len();
+    let under = buf[cpos..]
+        .chars()
+        .next()
+        .map_or(0, |ch| char_class(ch, mode));
+    while i > 0 && under != 0 && grapheme_class(graphemes[i - 1].1, mode) == under {
+        i -= 1;
+    }
+    while i > 0 && grapheme_class(graphemes[i - 1].1, mode) == 0 {
+        i -= 1;
+    }
+    if i == 0 {
+        0
+    } else {
+        graphemes[i - 1].0
+    }
 }
 
 pub fn line_start(buf: &str, cpos: usize) -> usize {

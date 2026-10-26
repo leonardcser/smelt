@@ -602,7 +602,7 @@ impl TuiApp {
             );
         }
         let defer_transcript_tail = win == crate::app::TRANSCRIPT_WIN
-            && matches!(command, DocumentCommand::BufferEnd)
+            && command.goes_to_buffer_end()
             && !selection_active_before
             && state.active
             && viewport_rows > 0;
@@ -731,12 +731,9 @@ impl TuiApp {
                 let rows = signed_row_delta(command_scroll_before, scroll_top);
                 let intent = if defer_local_transcript_scroll {
                     TranscriptScrollIntent::UserDelta { rows }
-                } else if matches!(command, DocumentCommand::BufferEnd) {
+                } else if command.goes_to_buffer_end() {
                     self.transcript_anchor_or_approximate_row_seek(viewport_cols, scroll_top)
-                } else if matches!(
-                    command,
-                    DocumentCommand::BufferStart | DocumentCommand::GotoRow(0)
-                ) {
+                } else if command.goes_to_buffer_start() {
                     if let Some(reveal) = self.conversation.transcript_record_block_reveal_position(
                         &self.lua,
                         viewport_cols.max(1),
@@ -817,7 +814,7 @@ impl TuiApp {
                         win_ref.set_scroll(scroll_top, buf_ref);
                         win_ref.update_tail_state(buf_ref, viewport_rows);
                     }
-                    DocumentCommand::CenterScroll => win_ref.pin_scroll(scroll_top),
+                    DocumentCommand::ScrollCursor(_) => win_ref.pin_scroll(scroll_top),
                     DocumentCommand::PanColumns(_) => {}
                     _ => {
                         win_ref.set_resolved_scroll(scroll_top);
