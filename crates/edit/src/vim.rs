@@ -11,7 +11,9 @@ use super::text::{
 use super::text_objects::{
     surrounding_delimiters, text_object, text_object_for_spec, TextObjectKind, TextObjectSpec,
 };
-use super::window::{DocumentCommand, DocumentKeyResult, DocumentMotion, DocumentTextObject};
+use super::window::{
+    BlockMotion, DocumentCommand, DocumentKeyResult, DocumentMotion, DocumentTextObject,
+};
 use super::{Clipboard, UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use smelt_buffer::attached::AttachedTextMut;
@@ -221,6 +223,9 @@ pub(crate) enum SubState {
     WaitingOp(Op),
     WaitingG,
     WaitingZ,
+    /// `[` or `]` pressed (`forward` for `]`), optionally after an operator,
+    /// waiting for the key of the block kind to move to.
+    WaitingBracket(Option<Op>, bool),
     /// Operator pending + `g` pressed, waiting for `g` to complete `gg` motion.
     WaitingOpG(Op),
     WaitingR,
@@ -449,6 +454,12 @@ impl VimWindowState {
             SubState::WaitingOp(op) => push_op(&mut out, op),
             SubState::WaitingG => out.push('g'),
             SubState::WaitingZ => out.push('z'),
+            SubState::WaitingBracket(op, forward) => {
+                if let Some(op) = op {
+                    push_op(&mut out, op);
+                }
+                out.push(if forward { ']' } else { '[' });
+            }
             SubState::WaitingOpG(op) => {
                 push_op(&mut out, op);
                 out.push('g');
@@ -569,8 +580,12 @@ pub fn handle_viewer_key(
 
     match state.sub {
         SubState::WaitingOp(Op::Yank) => {
+            if let KeyCode::Char(c @ ('[' | ']')) = key.code {
+                state.sub = SubState::WaitingBracket(Some(Op::Yank), c == ']');
+                return DocumentKeyResult::Consumed;
+            }
             let count = state.effective_count() as crate::RowIndex;
-            let cols = state.effective_count() as isize;
+            let cols = count as isize;
             state.sub = SubState::Ready;
             let motion = |m| Some(DocumentCommand::YankMotion(m));
             let cmd = match key.code {
@@ -640,6 +655,26 @@ pub fn handle_viewer_key(
             state.count2 = None;
             return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
         }
+        SubState::WaitingBracket(op, forward) => {
+            state.sub = SubState::Ready;
+            let count = state.effective_count() as crate::RowIndex;
+            let cmd = match key.code {
+                KeyCode::Char(kind) => {
+                    let motion = BlockMotion {
+                        kind,
+                        forward,
+                        count,
+                    };
+                    // The viewer's only operator is yank.
+                    Some(match op {
+                        None => DocumentCommand::BlockMove(motion),
+                        Some(_) => DocumentCommand::YankMotion(DocumentMotion::Block(motion)),
+                    })
+                }
+                _ => None,
+            };
+            return cmd.map_or(DocumentKeyResult::Consumed, DocumentKeyResult::Command);
+        }
         SubState::WaitingG => {
             state.sub = SubState::Ready;
             let cmd = match key.code {
@@ -700,6 +735,10 @@ pub fn handle_viewer_key(
         }
         KeyCode::Char('g') => {
             state.sub = SubState::WaitingG;
+            DocumentKeyResult::Consumed
+        }
+        KeyCode::Char(c @ ('[' | ']')) => {
+            state.sub = SubState::WaitingBracket(None, c == ']');
             DocumentKeyResult::Consumed
         }
         KeyCode::Char('G') => {
@@ -946,7 +985,8 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             }
             return result;
         }
-        SubState::WaitingVisualTextObj(_) | SubState::Ready => {}
+        // Only viewers wait for a block kind.
+        SubState::WaitingBracket(..) | SubState::WaitingVisualTextObj(_) | SubState::Ready => {}
     }
 
     if let KeyCode::Char(c) = key.code {
@@ -2751,6 +2791,8 @@ mod tests {
         let cases = [
             (SubState::WaitingG, "g"),
             (SubState::WaitingZ, "z"),
+            (SubState::WaitingBracket(None, false), "["),
+            (SubState::WaitingBracket(Some(Op::Yank), true), "y]"),
             (SubState::WaitingR, "r"),
             (SubState::WaitingFind(FindKind::Backward), "F"),
             (SubState::WaitingTextObj(Op::Change, true), "ci"),
@@ -2877,6 +2919,94 @@ mod tests {
                 DocumentTextObject::new(true, 'p').unwrap()
             ))
         );
+    }
+
+    fn viewer_keys(keys: &str) -> (DocumentKeyResult, VimWindowState) {
+        let mut mode = VimMode::Normal;
+        let mut state = VimWindowState::default();
+        let mut result = DocumentKeyResult::Consumed;
+        for c in keys.chars() {
+            result = handle_viewer_key(key(c), &mut mode, &mut state);
+        }
+        (result, state)
+    }
+
+    fn block_move(kind: char, forward: bool, count: crate::RowIndex) -> DocumentCommand {
+        DocumentCommand::BlockMove(BlockMotion {
+            kind,
+            forward,
+            count,
+        })
+    }
+
+    #[test]
+    fn document_view_brackets_wait_for_a_block_kind() {
+        let (result, state) = viewer_keys("]");
+        assert_eq!(result, DocumentKeyResult::Consumed);
+        assert_eq!(state.pending_input().as_deref(), Some("]"));
+
+        assert_eq!(
+            viewer_keys("[u").0,
+            DocumentKeyResult::Command(block_move('u', false, 1))
+        );
+        assert_eq!(
+            viewer_keys("]]").0,
+            DocumentKeyResult::Command(block_move(']', true, 1))
+        );
+    }
+
+    #[test]
+    fn document_view_block_motions_take_counts() {
+        assert_eq!(
+            viewer_keys("3]u").0,
+            DocumentKeyResult::Command(block_move('u', true, 3))
+        );
+        let (result, state) = viewer_keys("2[t");
+        assert_eq!(
+            result,
+            DocumentKeyResult::Command(block_move('t', false, 2))
+        );
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn document_view_yank_takes_a_block_motion() {
+        let (result, state) = viewer_keys("y]");
+        assert_eq!(result, DocumentKeyResult::Consumed);
+        assert_eq!(state.pending_input().as_deref(), Some("y]"));
+        assert_eq!(
+            viewer_keys("y]u").0,
+            DocumentKeyResult::Command(DocumentCommand::YankMotion(DocumentMotion::Block(
+                BlockMotion {
+                    kind: 'u',
+                    forward: true,
+                    count: 1,
+                }
+            )))
+        );
+        assert_eq!(
+            viewer_keys("2y[[").0,
+            DocumentKeyResult::Command(DocumentCommand::YankMotion(DocumentMotion::Block(
+                BlockMotion {
+                    kind: '[',
+                    forward: false,
+                    count: 2,
+                }
+            )))
+        );
+    }
+
+    #[test]
+    fn document_view_block_prefix_is_cancelled_by_a_non_character_key() {
+        let mut mode = VimMode::Normal;
+        let mut state = VimWindowState::default();
+        handle_viewer_key(key(']'), &mut mode, &mut state);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(
+            handle_viewer_key(esc, &mut mode, &mut state),
+            DocumentKeyResult::Consumed
+        );
+        assert!(state.is_idle());
     }
 
     #[test]

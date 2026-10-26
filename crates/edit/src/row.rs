@@ -137,6 +137,17 @@ pub struct DisplaySnapshot {
     pub total_rows: RowIndex,
 }
 
+/// Where a block motion from a row lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockBoundary {
+    /// The document has no blocks of that kind, or cannot place the origin.
+    Unsupported,
+    /// No further block lies in that direction.
+    End,
+    /// First row of the nearest block.
+    At(RowIndex),
+}
+
 pub trait DisplayDocument {
     fn snapshot(&mut self) -> DisplaySnapshot;
     fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows;
@@ -162,6 +173,13 @@ pub trait DisplayDocument {
     ) -> Option<DocRange> {
         let total_rows = self.snapshot().total_rows;
         search_document_next(self, query, origin, forward, total_rows, chunk_rows)
+    }
+
+    /// Nearest block of `kind` before or after the row `from`. A block that
+    /// `from` sits inside, below its first row, counts as the previous one.
+    /// `kind` is the key the document binds to a kind of block, such as `u`.
+    fn block_boundary(&mut self, _from: RowIndex, _kind: char, _forward: bool) -> BlockBoundary {
+        BlockBoundary::Unsupported
     }
 
     fn action_at(&mut self, pos: DocPosition) -> Option<SpanAction> {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::row::{DisplayDocument, DisplayRow, DisplayRows, RowBreak, TextRange};
+use crate::row::{BlockBoundary, DisplayDocument, DisplayRow, DisplayRows, RowBreak, TextRange};
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
 use std::ops::Range;
 use std::time::Instant;
@@ -35,6 +35,7 @@ pub enum DocumentMotion {
     Rows(isize),
     BufferStart,
     BufferEnd,
+    Block(BlockMotion),
 }
 
 impl DocumentMotion {
@@ -51,6 +52,7 @@ impl DocumentMotion {
             Self::Rows(n) => DocumentCommand::MoveRows(n),
             Self::BufferStart => DocumentCommand::BufferStart,
             Self::BufferEnd => DocumentCommand::BufferEnd,
+            Self::Block(motion) => DocumentCommand::BlockMove(motion),
         }
     }
 
@@ -58,6 +60,15 @@ impl DocumentMotion {
     fn inclusive(self) -> bool {
         matches!(self, Self::WordEnd(_) | Self::LineEnd)
     }
+}
+
+/// A move to the `count`th previous or next block of the kind a document binds
+/// to `kind` (vim `[u`, `]u`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockMotion {
+    pub kind: char,
+    pub forward: bool,
+    pub count: RowIndex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +88,7 @@ pub enum DocumentCommand {
     WordEnd(RowIndex),
     ParagraphForward(RowIndex),
     ParagraphBackward(RowIndex),
+    BlockMove(BlockMotion),
     StartVisual,
     StartVisualLine,
     YankSelection,
@@ -166,6 +178,12 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
         return Some(DocumentCommand::GotoPosition(pos));
     }
 
+    if let DocumentCommand::BlockMove(motion) = command {
+        return Some(DocumentCommand::GotoPosition(block_position(
+            doc, total_rows, pos, motion,
+        )));
+    }
+
     let (kind, count) = match command {
         DocumentCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
         DocumentCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
@@ -244,6 +262,59 @@ fn paragraph_position<D: DisplayDocument + ?Sized>(
         }
     }
     Some(DocPosition { row, byte_col: 0 })
+}
+
+/// How many rows a block may open with before its text, such as the padding
+/// around a user message.
+const BLOCK_LEADING_BLANK_ROWS: RowIndex = 4;
+
+/// The first row with text in the block starting at `start`.
+fn block_home_row<D: DisplayDocument + ?Sized>(
+    doc: &mut D,
+    total_rows: RowIndex,
+    start: RowIndex,
+) -> RowIndex {
+    let last = start
+        .saturating_add(BLOCK_LEADING_BLANK_ROWS)
+        .min(total_rows.saturating_sub(1));
+    (start..=last)
+        .find(|&row| document_row_is_blank(doc, row) == Some(false))
+        .unwrap_or(start)
+}
+
+/// Where `motion` lands from `from`, on the first row with text of the block.
+/// Past the last block in its direction the cursor goes to the document edge,
+/// like vim's section motions; a document that does not know the kind leaves
+/// the cursor where it is.
+fn block_position<D: DisplayDocument + ?Sized>(
+    doc: &mut D,
+    total_rows: RowIndex,
+    from: DocPosition,
+    motion: BlockMotion,
+) -> DocPosition {
+    let mut row = from.row;
+    for _ in 0..motion.count.max(1) {
+        let mut boundary = doc.block_boundary(row, motion.kind, motion.forward);
+        if let BlockBoundary::At(start) = boundary {
+            // `row` already rests in the block starting at `start`: step to the one before.
+            if !motion.forward && start < row && block_home_row(doc, total_rows, start) >= row {
+                boundary = doc.block_boundary(start, motion.kind, false);
+            }
+        }
+        match boundary {
+            BlockBoundary::Unsupported => return from,
+            BlockBoundary::At(start) => row = block_home_row(doc, total_rows, start),
+            BlockBoundary::End => {
+                row = if motion.forward {
+                    total_rows.saturating_sub(1)
+                } else {
+                    0
+                };
+                break;
+            }
+        }
+    }
+    DocPosition { row, byte_col: 0 }
 }
 
 fn document_row_string<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<String> {
@@ -1214,7 +1285,7 @@ impl Window {
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            DocumentCommand::OpenAction => {}
+            DocumentCommand::OpenAction | DocumentCommand::BlockMove(_) => {}
             DocumentCommand::ClearSelection => {
                 self.clear_selection_anchor();
                 self.text_state_mut().drag_endpoint = None;
@@ -1529,7 +1600,8 @@ impl DocumentViewExecutor {
             | DocumentCommand::WordEnd(_)
             | DocumentCommand::WordBackward(_)
             | DocumentCommand::ParagraphForward(_)
-            | DocumentCommand::ParagraphBackward(_) => {}
+            | DocumentCommand::ParagraphBackward(_)
+            | DocumentCommand::BlockMove(_) => {}
             DocumentCommand::OpenAction => {}
             DocumentCommand::ClearSelection => {
                 state.selection_anchor = None;
@@ -2079,6 +2151,7 @@ fn buffer_motion_range(
                 text::line_start(source, cpos.min(target)),
             ));
         }
+        DocumentMotion::Block(_) => return None,
         DocumentMotion::BufferStart => return Some((lines(0, cpos), 0)),
         DocumentMotion::BufferEnd => {
             return Some((lines(cpos, source.len()), text::line_start(source, cpos)));
@@ -2293,6 +2366,124 @@ mod tests {
             },
             ..DocumentViewState::default()
         }
+    }
+
+    /// Rows of text whose blocks start at `starts`; only the kind `u` is bound.
+    struct BlockRows {
+        rows: StaticRowsDocument,
+        starts: Vec<RowIndex>,
+    }
+
+    impl BlockRows {
+        fn new(rows: &[&str], starts: &[RowIndex]) -> Self {
+            Self {
+                rows: StaticRowsDocument::from_text_rows(
+                    rows.iter().map(|r| r.to_string()).collect(),
+                ),
+                starts: starts.to_vec(),
+            }
+        }
+    }
+
+    impl DisplayDocument for BlockRows {
+        fn snapshot(&mut self) -> crate::DisplaySnapshot {
+            self.rows.snapshot()
+        }
+
+        fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+            self.rows.materialize(range)
+        }
+
+        fn copy_range(&mut self, range: TextRange) -> Option<crate::CopyOutput> {
+            self.rows.copy_range(range)
+        }
+
+        fn block_boundary(&mut self, from: RowIndex, kind: char, forward: bool) -> BlockBoundary {
+            if kind != 'u' {
+                return BlockBoundary::Unsupported;
+            }
+            let start = if forward {
+                self.starts.iter().find(|&&start| start > from)
+            } else {
+                self.starts.iter().rev().find(|&&start| start < from)
+            };
+            start.map_or(BlockBoundary::End, |&start| BlockBoundary::At(start))
+        }
+    }
+
+    fn block_move(
+        doc: &mut BlockRows,
+        from: RowIndex,
+        kind: char,
+        forward: bool,
+        count: RowIndex,
+    ) -> RowIndex {
+        let cursor = DocPosition {
+            row: from,
+            byte_col: 3,
+        };
+        let motion = BlockMotion {
+            kind,
+            forward,
+            count,
+        };
+        match resolve_document_command(
+            doc,
+            DocumentCommand::BlockMove(motion),
+            cursor,
+            VimMode::Normal,
+        ) {
+            Some(DocumentCommand::GotoPosition(pos)) => pos.row,
+            other => panic!("block move resolved to {other:?}"),
+        }
+    }
+
+    const BLOCK_TEXT: [&str; 9] = ["one", "", "", "two", "x", "three", "y", "z", ""];
+
+    #[test]
+    fn block_move_steps_by_count_between_block_starts() {
+        let mut doc = BlockRows::new(&BLOCK_TEXT, &[0, 3, 5]);
+        assert_eq!(block_move(&mut doc, 0, 'u', true, 1), 3);
+        assert_eq!(block_move(&mut doc, 0, 'u', true, 2), 5);
+        assert_eq!(block_move(&mut doc, 8, 'u', false, 2), 3);
+    }
+
+    #[test]
+    fn block_move_goes_to_the_edge_past_the_last_block() {
+        let mut doc = BlockRows::new(&BLOCK_TEXT, &[0, 3, 5]);
+        assert_eq!(block_move(&mut doc, 5, 'u', true, 1), 8);
+        assert_eq!(block_move(&mut doc, 0, 'u', true, 9), 8);
+        assert_eq!(block_move(&mut doc, 0, 'u', false, 1), 0);
+        assert_eq!(block_move(&mut doc, 4, 'u', false, 9), 0);
+    }
+
+    #[test]
+    fn block_move_leaves_the_cursor_for_unbound_kinds() {
+        let mut doc = BlockRows::new(&BLOCK_TEXT, &[0, 3, 5]);
+        assert_eq!(block_move(&mut doc, 4, 'q', true, 1), 4);
+    }
+
+    #[test]
+    fn block_move_is_a_no_op_for_documents_without_blocks() {
+        let mut doc = StaticRowsDocument::from_text_rows(vec!["a".into(), "b".into()]);
+        let cursor = DocPosition {
+            row: 1,
+            byte_col: 1,
+        };
+        let motion = BlockMotion {
+            kind: 'u',
+            forward: false,
+            count: 1,
+        };
+        assert_eq!(
+            resolve_document_command(
+                &mut doc,
+                DocumentCommand::BlockMove(motion),
+                cursor,
+                VimMode::Normal
+            ),
+            Some(DocumentCommand::GotoPosition(cursor))
+        );
     }
 
     fn execute(

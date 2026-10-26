@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 mod document_view;
 pub use document_view::{
-    resolve_document_command, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentMotion,
-    DocumentTextObject, DocumentViewExecutor, DocumentViewState, RowYankFlash,
+    resolve_document_command, BlockMotion, DocumentCommand, DocumentCopy, DocumentKeyResult,
+    DocumentMotion, DocumentTextObject, DocumentViewExecutor, DocumentViewState, RowYankFlash,
 };
 
 /// Per-frame paint context for `Window::render`.
