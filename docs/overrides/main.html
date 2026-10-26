@@ -50,3 +50,13 @@
   {% endif %}
   <script type="application/ld+json">{{ ld | tojson }}</script>
 {% endblock %}
+
+{#- Instant navigation swaps the page container but keeps the header, so every
+    page carries the section links in both places and the stylesheet shows the
+    header copy only on the homepage. The header copy has no active item. -#}
+{% block header %}
+  {% set bar %}{% include "partials/header.html" %}{% endset %}
+  {% set tabs %}{% include "partials/tabs.html" %}{% endset %}
+  {% set tabs = tabs | replace(' data-md-component="tabs"', "") | replace(" md-tabs__item--active", "") %}
+  {{ bar | replace('<div class="md-header__title"', tabs ~ '<div class="md-header__title"') }}
+{% endblock %}

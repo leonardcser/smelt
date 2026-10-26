@@ -80,6 +80,66 @@
   font-size: 0;
 }
 
+/* The homepage shows the section links in the header row instead of below it
+   (overrides/main.html renders both copies), minus the Home link. The drawer stays the narrow-screen
+   navigation. */
+.md-header__inner .md-tabs {
+  display: none;
+}
+body:has(.home) .md-container > .md-tabs {
+  display: none;
+}
+body:has(.home) .md-header {
+  box-shadow: 0 -0.05rem 0 inset var(--md-default-fg-color--lightest);
+}
+body:has(.home) .md-header__inner.md-grid {
+  max-width: 61rem !important;
+  margin: 0 auto !important;
+  padding: 0 0.4rem !important;
+}
+body:has(.home) .md-header__source {
+  width: max-content;
+  max-width: none;
+  margin-right: -0.15rem;
+}
+body:has(.home) .md-header__source .md-source__repository {
+  max-width: none;
+}
+@media screen and (min-width: 76.25em) {
+  body:has(.home) .md-header__title {
+    display: none;
+  }
+  body:has(.home) .md-header__inner .md-tabs {
+    display: block;
+    flex-grow: 1;
+    width: auto;
+    min-width: 0;
+    overflow: visible;
+    background: none;
+    box-shadow: none;
+    margin: 0;
+  }
+  body:has(.home) .md-header__inner .md-tabs .md-grid {
+    max-width: none;
+    margin: 0;
+  }
+  body:has(.home) .md-header__inner .md-tabs__list {
+    margin: 0;
+    align-items: center;
+  }
+  body:has(.home) .md-header__inner .md-tabs__item {
+    display: flex;
+    align-items: center;
+    border-bottom: 0;
+  }
+  body:has(.home) .md-header__inner .md-tabs__item:first-child {
+    display: none;
+  }
+  body:has(.home) .md-header__inner .md-tabs__link {
+    margin-top: 0;
+  }
+}
+
 /* Benchmark profiles over time (javascripts/profile.js): smelt in the
    primary color, the other agents as recessive context. */
 .md-typeset .profiles {
