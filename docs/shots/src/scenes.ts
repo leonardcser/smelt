@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { Step } from "./session";
+import type { Scheme, Step } from "./session";
 
 /** Still screens embedded in the docs: a one-frame replay per `shot`. */
 export const stills: Step[] = [
@@ -33,12 +33,18 @@ export type Scene = {
   keys?: boolean;
   /** Vi keybindings in the prompt. */
   vim?: boolean;
+  /** Answer with the scripted mock provider instead of the live model, so a scene can be recorded twice identically. */
+  mock?: boolean;
+  /** Record on a light terminal; the player shows it as is in the light scheme instead of flipping a dark one. */
+  scheme?: Scheme;
   /** Record through a Kitty graphics terminal, so math renders as images. */
   kitty?: boolean;
   /** Play in real time. Otherwise stretches with no typing nearby are sped up. */
   realtime?: boolean;
   /** Open on the first prompt, fully typed, just before it is sent. */
   fromSubmit?: boolean;
+  /** Open on the first screen matching this, skipping everything before it. */
+  from?: RegExp;
   /** Extra files for the config dir, keyed by path under `~/.config/smelt/`. */
   files?: Record<string, string>;
   steps: Step[];
@@ -56,6 +62,39 @@ end, { desc = "greet someone" })
 
 return M
 `;
+
+/** For the theme replays: once the answer is in, steps through bundled themes, naming each. */
+const themeCycle = (themes: string[]) => `local themes = { "${themes.join('", "')}" }
+smelt.events.on("turn_end", function()
+  local i = 0
+  local timer
+  timer = smelt.timer.every(1800, function()
+    i = i + 1
+    if i > #themes then return timer:remove() end
+    smelt.theme.use(themes[i])
+    smelt.notify.info(smelt.theme.info(themes[i]).name)
+  end)
+end)
+`;
+
+/** A short answer with a heading, code and a list, recolored by a run of themes. */
+const themes = (scheme: "dark" | "light", list: string[]): Scene => ({
+  mock: true,
+  scheme,
+  from: /─ done/,
+  realtime: true,
+  cols: 80,
+  rows: 24,
+  files: { "plugins/theme_cycle.lua": themeCycle(list) },
+  steps: [
+    { pause: 1200 },
+    { type: "how should apply_discount handle the rounding?" },
+    { pause: 400 },
+    { key: "Enter" },
+    { until: /─ done/ },
+    { pause: 1800 * list.length + 1500 },
+  ],
+});
 
 /** The plugins shown on the homepage and in the plugin gallery, from `plugins/`. */
 const plugin = (name: string) => readFileSync(new URL(`../plugins/${name}.lua`, import.meta.url), "utf8");
@@ -94,6 +133,12 @@ export const scenes: Record<string, Scene> = {
       { pause: 2500 },
     ],
   },
+
+  /** Bundled dark themes, played in the dark scheme. */
+  "themes-dark": themes("dark", ["catppuccin-mocha", "dracula", "gruvbox-dark", "nord", "solarized-dark", "one-half-dark"]),
+
+  /** Bundled light themes, played in the light scheme. */
+  "themes-light": themes("light", ["catppuccin-latte", "gruvbox-light", "solarized-light", "one-half-light", "github", "coldark-cold"]),
 
   /** A lualine-style statusline: mode, working directory, branch and changed-file counts. */
   lualine: {
@@ -141,6 +186,7 @@ export const scenes: Record<string, Scene> = {
   snake: {
     fromSubmit: true,
     realtime: true,
+    rows: 24,
     steps: [
       { pause: 1200 },
       { type: "which edge cases does apply_discount miss?" },
@@ -235,7 +281,7 @@ export const scenes: Record<string, Scene> = {
   vim: {
     keys: true,
     vim: true,
-    rows: 12,
+    rows: 9,
     steps: [
       { pause: 1200 },
       { type: "fix the rounding bug in apply_discount" },

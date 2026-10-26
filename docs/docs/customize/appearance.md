@@ -2,17 +2,35 @@
 
 ## Themes
 
-Use `/theme <name>` to preview a bundled theme for the session and `/color` to
-change the session's slug color. For a persistent change, put Lua in `init.lua`.
+Over thirty themes ship with smelt, and each one recolors the interface and the
+syntax highlighting together. Your terminal keeps its own background.
 
-Tweak individual highlight groups once the UI is ready:
+<figure class="term" data-scheme="dark" data-replay="../../assets/replays/themes-dark.json" aria-label="An answer recolored by one bundled dark theme after another" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+<figure class="term" data-scheme="light" data-replay="../../assets/replays/themes-light.json" aria-label="An answer recolored by one bundled light theme after another" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+Use `/theme <name>` to preview a bundled theme for the session and `/color` to
+change the session's slug color. To keep a theme, set it in `init.lua`:
 
 ```lua
 smelt.lifecycle.on_ready(function()
-  smelt.theme.set("SmeltAccent", { fg = { ansi = 208 }, bold = true })
-  smelt.theme.set("Comment", { fg = { ansi = 244 } })
+  smelt.theme.use("catppuccin-mocha")
 end)
 ```
+
+`/theme` lists every bundled name, marked ☾ for dark and ☀ for light.
+
+### Your own colors
+
+To change the accent color, add this to `init.lua`:
+
+```lua
+smelt.lifecycle.on_ready(function()
+  smelt.theme.set("SmeltAccent", { fg = { ansi = 208 } })
+end)
+```
+
+Any other highlight group works the same way, for example `Comment`. Colors are
+`{ ansi = N }` or `{ rgb = { R, G, B } }`.
 
 Or write a full colorscheme at
 `~/.config/smelt/lua/smelt/colorschemes/mytheme.lua`:

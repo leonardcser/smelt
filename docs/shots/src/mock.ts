@@ -48,7 +48,7 @@ type Message = { role: string; content?: unknown };
 
 const asText = (content: unknown) => (typeof content === "string" ? content : JSON.stringify(content ?? ""));
 
-/** Scripted answers for the static screenshots: a plain question, an approval, and a goal. */
+/** Scripted answers for the stills (a plain question, an approval, a goal) and the theme replays. */
 function reply(messages: Message[]): Chunk[] {
   const lastUser = messages.findLastIndex((m) => m.role === "user");
   const user = asText(messages[lastUser]?.content);
@@ -56,6 +56,11 @@ function reply(messages: Message[]): Chunk[] {
 
   if (/title/i.test(system) && messages.length <= 3) return text("Fix failing cart tests");
   if (/run the tests/i.test(user)) return bash("I'll run the test suite first.", "cargo test", "Run the test suite");
+  if (/rounding/i.test(user)) {
+    return text(
+      "## The fix\n\n`apply_discount` divides by `10` instead of `100`, so a 10% discount takes off the whole price:\n\n```rust\npub fn apply_discount(price_cents: u32, percent: u32) -> u32 {\n    let percent = percent.min(100); // never more than the price\n    price_cents - price_cents * percent / 100\n}\n```\n\n- **Clamp** the percentage so a discount above 100% cannot underflow\n- **Divide by 100**, which makes `discount_applies_to_total` pass\n- Run `cargo test` to confirm\n",
+    );
+  }
   if (/goal/i.test(user)) {
     return text("Starting on the migration. First I'll list every package that still uses the old config format.");
   }

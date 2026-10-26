@@ -5,7 +5,7 @@ import path from "node:path";
 import { encodeGif } from "./gif";
 import { renderReplay } from "./render";
 import { scenes, stills, type Scene } from "./scenes";
-import { run, type Frame, type KeyEvent, type KittyImage, type RunOptions, type SpeedMark } from "./session";
+import { run, type Frame, type KeyEvent, type KittyImage, type RunOptions, type Scheme, type SpeedMark } from "./session";
 
 const repo = path.resolve(import.meta.dir, "../../..");
 const replaysDir = path.join(repo, "docs/docs/assets/replays");
@@ -64,7 +64,7 @@ const plain = (ansi: string) => ansi.replace(/\x1b\[[0-9;:]*m/g, "");
 const framesFile = (name: string) => path.join(import.meta.dir, `../.cache/frames/${name}.json`);
 
 async function record(scene: Scene): Promise<Recording> {
-  const opts: RunOptions = { ...base, cols: scene.cols ?? cols, rows: scene.rows ?? 30, typeDelay: 55, live: true, vim: scene.vim ?? false, files: scene.files, tps: true, recordEvery: 100, kitty: scene.kitty };
+  const opts: RunOptions = { ...base, scheme: scene.scheme ?? "dark", cols: scene.cols ?? cols, rows: scene.rows ?? 30, typeDelay: 55, live: !scene.mock, wordDelay: 25, vim: scene.vim ?? false, files: scene.files, tps: true, recordEvery: 100, kitty: scene.kitty };
   const { frames, keylog, marks, images } = await run(scene.steps, opts);
   return { frames, keylog, marks, images };
 }
@@ -76,11 +76,14 @@ function timeline(rec: Recording, scene: Scene): Moment[] {
   // Smelt takes a moment to draw; skip the blank screen before it appears.
   const firstDrawn = frames.findIndex((f) => plain(f.ansi).trim() !== "");
   frames.splice(0, Math.max(firstDrawn, 0));
-  // Open just before the first keystroke, past smelt's boot, or on the typed prompt as it is sent.
+  // Open just before the first keystroke, past smelt's boot, on the typed prompt as it is sent,
+  // or on the first screen a scene asks for.
   const sent = scene.fromSubmit ? keylog.find((k) => k.label === "⏎") : undefined;
-  const first = sent
-    ? frames.findLastIndex((f) => f.at <= sent.at)
-    : frames.findIndex((f) => f.at > (keylog[0]?.at ?? 0) - LEAD_MS) - 1;
+  const first = scene.from
+    ? frames.findIndex((f) => scene.from!.test(plain(f.ansi)))
+    : sent
+      ? frames.findLastIndex((f) => f.at <= sent.at)
+      : frames.findIndex((f) => f.at > (keylog[0]?.at ?? 0) - LEAD_MS) - 1;
   frames.splice(0, Math.max(first, 0));
   // Text typed in vim's insert mode is plain typing, so only commands show; Esc leaves insert mode.
   const inserting = (at: number) => /INSERT/.test(plain(rec.frames.findLast((f) => f.at <= at)?.ansi ?? ""));
@@ -107,9 +110,9 @@ function timeline(rec: Recording, scene: Scene): Moment[] {
  * The site plays these in the browser as real text (see docs/docs/javascripts/replay.js).
  * Each frame lists its screen lines, with `null` for a line unchanged since the previous frame,
  * and `k`, the keys to overlay, when the scene shows them. `img` holds the Kitty graphics images
- * the screens place, by id.
+ * the screens place, by id. `scheme: "light"` marks a recording made on a light terminal.
  */
-async function writeReplay(name: string, size: { cols: number; rows: number }, moments: Moment[], images: Record<number, KittyImage> = {}) {
+async function writeReplay(name: string, size: { cols: number; rows: number; scheme?: Scheme }, moments: Moment[], images: Record<number, KittyImage> = {}) {
   const file = path.join(replaysDir, `${name}.json`);
   let prev: string[] = [];
   const frames = moments.map((m) => {
@@ -139,7 +142,7 @@ async function makeScene(name: string, scene: Scene) {
     await Bun.write(framesFile(name), JSON.stringify(rec));
   }
   const moments = timeline(rec, scene);
-  await writeReplay(name, { cols: scene.cols ?? cols, rows: scene.rows ?? 30 }, moments, rec.images);
+  await writeReplay(name, { cols: scene.cols ?? cols, rows: scene.rows ?? 30, ...(scene.scheme === "light" ? { scheme: scene.scheme } : {}) }, moments, rec.images);
   if (scene.readme) {
     const { pngs, ms } = await renderReplay(name);
     const file = path.join(repo, "assets/demo.gif");

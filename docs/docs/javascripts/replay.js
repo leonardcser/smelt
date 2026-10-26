@@ -50,14 +50,15 @@
     return [f(0), f(8), f(4)];
   }
 
-  function xterm256(n, light) {
-    if (light) return rgb(flip(xtermRgb(n)));
-    return n < 16 ? BASE16[n] : rgb(xtermRgb(n));
+  function xterm256(n, light, flipped) {
+    if (flipped) return rgb(flip(xtermRgb(n)));
+    return n < 16 ? (light ? LIGHT16 : BASE16)[n] : rgb(xtermRgb(n));
   }
 
   // Applies one SGR sequence to the pen. Recordings use only reset, bold, dim,
   // italic, and default, 256-color or truecolor foreground and background.
-  function sgr(pen, params, light) {
+  // `flipped` mirrors the lightness of a dark recording shown in the light scheme.
+  function sgr(pen, params, light, flipped) {
     var base = light ? LIGHT16 : BASE16;
     var p = params === "" ? [0] : params.split(";").map(Number);
     for (var i = 0; i < p.length; i++) {
@@ -76,10 +77,10 @@
       else if (c >= 100 && c <= 107) pen.bg = base[c - 92];
       else if (c === 38 || c === 48) {
         var color;
-        if (p[i + 1] === 5) (color = xterm256(p[i + 2], light)), (i += 2);
+        if (p[i + 1] === 5) (color = xterm256(p[i + 2], light, flipped)), (i += 2);
         else if (p[i + 1] === 2) {
           var tc = [p[i + 2], p[i + 3], p[i + 4]];
-          color = rgb(light ? flip(tc) : tc);
+          color = rgb(flipped ? flip(tc) : tc);
           i += 4;
         }
         if (c === 38) pen.fg = color;
@@ -154,11 +155,11 @@
   var MARKS = [
     0x305, 0x30d, 0x30e, 0x310, 0x312, 0x33d, 0x33e, 0x33f, 0x346, 0x34a, 0x34b, 0x34c, 0x350, 0x351, 0x352, 0x357,
   ];
-  function imageBackground(image, row, col, light) {
+  function imageBackground(image, row, col, flipped) {
     return (
       "background:url(" + image.url + ") calc(" + -col + " * var(--cell)) calc(" + -row + " * var(--row)) / " +
       "calc(" + image.cols + " * var(--cell)) calc(" + image.rows + " * var(--row)) no-repeat;" +
-      (light ? "filter:invert(1) hue-rotate(180deg);" : "")
+      (flipped ? "filter:invert(1) hue-rotate(180deg);" : "")
     );
   }
 
@@ -172,7 +173,7 @@
     return css;
   }
 
-  function renderLine(line, light, images) {
+  function renderLine(line, light, flipped, images) {
     var row = document.createElement("div");
     var pen = { fg: null, bg: null, bold: false, dim: false, italic: false };
     var run = "";
@@ -206,7 +207,7 @@
     function flushPlace() {
       if (!place) return;
       var image = images && images[place.id];
-      var css = image ? imageBackground(image, place.row, place.col, light) : "";
+      var css = image ? imageBackground(image, place.row, place.col, flipped) : "";
       span("", place.cells, css);
       place = null;
     }
@@ -218,7 +219,7 @@
         var prevBg = pen.bg;
         var id = parts[i].match(/^38;2;(\d+);(\d+);(\d+)$/);
         pen.image = id ? (+id[1] << 16) | (+id[2] << 8) | +id[3] : pen.image;
-        sgr(pen, parts[i], light);
+        sgr(pen, parts[i], light, flipped);
         if (pen.bg !== prevBg) bgCells = 0;
         continue;
       }
@@ -313,6 +314,7 @@
         self.cols = data.cols;
         self.rows = data.rows;
         self.frames = data.frames;
+        self.scheme = data.scheme;
         self.images = {};
         Object.keys(data.img || {}).forEach(function (id) {
           var image = data.img[id];
@@ -380,9 +382,11 @@
   Replay.prototype.show = function (n, jump) {
     var rows = this.screen.children;
     var light = getComputedStyle(this.el).getPropertyValue("--term-scheme").trim() === "light";
+    // A recording made on a light terminal already has light colors.
+    var flipped = light && this.scheme !== "light";
     var images = this.images;
     var render = function (line) {
-      return renderLine(line, light, images);
+      return renderLine(line, light, flipped, images);
     };
     if (jump) {
       var lines = [];

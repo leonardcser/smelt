@@ -66,7 +66,7 @@
   }
   .home .hero-subtitle,
   .home .cell h2,
-  .home .cell .plugin h3,
+  .home .cell .feature h3,
   .home .cell p:not(.legend) {
     font-family: var(--md-text-font-family), sans-serif;
   }
@@ -311,28 +311,34 @@
     font-family: var(--md-code-font-family), monospace;
     font-size: 0.7rem;
   }
-  /* A plugin's code beside what it does; stacked, the result comes first. */
-  .home .plugin + .plugin {
-    margin-top: 2rem;
-  }
-  .home .plugin__body {
+  /* Smaller features side by side; a wide one takes a row of its own. Each
+     terminal sits at the bottom of its card so neighbours line up. */
+  .home .features {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 1rem;
-    align-items: center;
+    gap: 2.5rem 1.5rem;
+  }
+  .home .feature {
+    display: flex;
+    flex-direction: column;
+  }
+  .home .feature .term {
+    margin-top: auto;
+  }
+  .home .feature--wide {
+    grid-column: 1 / -1;
   }
   @media (max-width: 52em) {
-    .home .plugin__body {
+    .home .features {
       grid-template-columns: minmax(0, 1fr);
     }
-    .home .plugin__body .term {
-      order: -1;
-    }
+  }
+  @media (max-width: 52em) {
     .home .code pre {
       font-size: 0.58rem;
     }
   }
-  .home .cell .plugin h3 {
+  .home .cell .feature h3 {
     margin: 0 0 0.6rem;
     font-size: 0.8rem;
     font-weight: 600;
@@ -532,67 +538,63 @@
     <div class="cell">
       <h2>Plugins in a few lines of Lua</h2>
       <p>Drop a file in <code>~/.config/smelt/plugins/</code> and it loads, no restart.</p>
-      <div class="plugin">
-        <h3>Give the agent a tool</h3>
-        <div class="plugin__body">
-          <figure class="code">
-            <pre><span class="c">-- ~/.config/smelt/plugins/crates.lua</span>
-<span class="f">smelt.tools.register</span>({
-  name = <span class="s">&quot;crate_info&quot;</span>,
-  description = <span class="s">&quot;Latest version and downloads of a crate on crates.io.&quot;</span>,
-  parameters = {
-    type = <span class="s">&quot;object&quot;</span>,
-    properties = { name = { type = <span class="s">&quot;string&quot;</span> } },
-    required = { <span class="s">&quot;name&quot;</span> },
-  },
-  execute = <span class="k">function</span>(args)
-    <span class="k">local</span> url = <span class="s">&quot;https://crates.io/api/v1/crates/&quot;</span> .. args.name
-    <span class="k">local</span> headers = { [<span class="s">&quot;user-agent&quot;</span>] = <span class="s">&quot;smelt&quot;</span> }
-    <span class="k">local</span> res, err = <span class="f">smelt.http.get</span>(url, { headers = headers })
-    <span class="k">if</span> <span class="k">not</span> res <span class="k">or</span> res.status ~= <span class="n">200</span> <span class="k">then</span>
-      <span class="k">return</span> { content = err <span class="k">or</span> <span class="s">&quot;crate not found&quot;</span>, is_error = <span class="k">true</span> }
-    <span class="k">end</span>
-    <span class="k">local</span> c = <span class="f">smelt.json.decode</span>(res.body).crate
-    <span class="k">return</span> (<span class="s">&quot;%s %s, %d downloads: %s&quot;</span>):format(
-      c.name, c.max_stable_version, c.downloads, c.description)
-  <span class="k">end</span>,
-})</pre>
-          </figure>
-          <figure class="term" data-replay="assets/replays/tool.json" aria-label="The agent calling the crate_info tool a plugin gave it">
+      <div class="features">
+        <div class="feature">
+          <h3>Changes sidebar</h3>
+          <p>Every file the agent changed, with line counts, beside the conversation.</p>
+          <figure class="term" data-replay="assets/replays/changes.json" aria-label="A sidebar listing the files the agent changed, beside the conversation">
             <pre class="term__screen" aria-hidden="true"></pre>
           </figure>
         </div>
-      </div>
-      <div class="plugin">
-        <h3>Or go further</h3>
-        <p>Snake is a plugin too: plain Lua on the same plugin API you have, with no special access. Type <code>/snake</code> to play while the agent works.</p>
-        <figure class="term" data-replay="assets/replays/snake.json" aria-label="Playing snake in a floating window while the agent works">
-          <pre class="term__screen" aria-hidden="true"></pre>
-        </figure>
+        <div class="feature">
+          <h3>Snake</h3>
+          <p>Built in, in plain Lua like yours. Type <code>/snake</code> while the agent works.</p>
+          <figure class="term" data-replay="assets/replays/snake.json" aria-label="Playing snake in a floating window while the agent works">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+        <div class="feature feature--wide">
+          <h3>Statusline</h3>
+          <p>Mode, directory, branch and changed files, in the style of lualine.</p>
+          <figure class="term" data-replay="assets/replays/lualine.json" aria-label="A lualine-style statusline with the mode, working directory, branch and changed-file counts">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
       </div>
       <a class="more" href="extend/">Write a plugin →</a>
       <a class="more" href="extend/gallery/">More plugins →</a>
     </div>
     <div class="cell">
-      <h2>LaTeX in the terminal</h2>
-      <p>
-        Equations in answers render as real typeset images on terminals with the
-        Kitty graphics protocol, and as Unicode text everywhere else.
-      </p>
-      <figure class="term" data-replay="assets/replays/math.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images">
-        <pre class="term__screen" aria-hidden="true"></pre>
-      </figure>
-    </div>
-    <div class="cell">
-      <h2>Vim in the prompt</h2>
-      <p>
-        Insert, normal and visual modes in the prompt and the transcript, with
-        motions, text objects, yank and undo. One line turns it on:
-        <code>smelt.settings.vim = true</code>
-      </p>
-      <figure class="term" data-replay="assets/replays/vim.json" aria-label="Editing a multi-line prompt with vim motions">
-        <pre class="term__screen" aria-hidden="true"></pre>
-      </figure>
+      <div class="features">
+        <div class="feature">
+          <h2>Themes</h2>
+          <p>Over thirty bundled themes, or build your own and change any color you like.</p>
+          <figure class="term" data-scheme="dark" data-replay="assets/replays/themes-dark.json" aria-label="An answer recolored by one bundled dark theme after another">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+          <figure class="term" data-scheme="light" data-replay="assets/replays/themes-light.json" aria-label="An answer recolored by one bundled light theme after another">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+        <div class="feature">
+          <h2>LaTeX in the terminal</h2>
+          <p>Equations render as typeset images, with a Unicode fallback in any terminal.</p>
+          <figure class="term" data-replay="assets/replays/math.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+        <div class="feature feature--wide">
+          <h2>Vim in the prompt</h2>
+          <p>
+            Insert, normal and visual modes in the prompt and the transcript, with
+            motions, text objects, yank and undo. One line turns it on:
+            <code>smelt.settings.vim = true</code>
+          </p>
+          <figure class="term" data-replay="assets/replays/vim.json" aria-label="Editing a multi-line prompt with vim motions">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+      </div>
     </div>
     <div class="cell">
       <h2>Light on your machine</h2>
