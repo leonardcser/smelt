@@ -205,6 +205,10 @@ transcript edge. `Alt+Up` / `Alt+Down` (blocks) and `Alt+Shift+Up` /
 `/` searches the transcript forward and `?` backward; `n` and `N` repeat the last
 search in either direction, and `/nohl` clears the highlights.
 
+With vim enabled, `G`, `gg`, `{` `}`, the block motions and searches are jumps:
+`Ctrl+O` goes back to where the last one started, `Ctrl+I` or `Tab` forward again
+(both take counts), and `''` or ``` `` ``` toggles between the last two positions.
+
 With vim enabled the transcript supports `h` `j` `k` `l`, `w` `b` `e`, `0` `^`
 `$`, `gg` `G` and `{` `}` with counts, `v` / `V` visual selection, and `y` with a
 motion, a text object or `yy`; the yanked text flashes and the cursor stays at the

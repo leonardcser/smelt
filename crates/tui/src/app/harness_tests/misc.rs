@@ -7575,6 +7575,102 @@ fn block_motions_walk_user_messages() {
     assert_eq!(block_nav(&mut app, "]u"), "second question");
 }
 
+fn press_and_render(app: &mut TestApp, code: KeyCode, mods: KeyModifiers) -> String {
+    app.press_mod(code, mods);
+    app.render_silent();
+    transcript_cursor_line(app)
+}
+
+fn ctrl_o(app: &mut TestApp) -> String {
+    press_and_render(app, KeyCode::Char('o'), KeyModifiers::CONTROL)
+}
+
+fn ctrl_i(app: &mut TestApp) -> String {
+    press_and_render(app, KeyCode::Tab, KeyModifiers::NONE)
+}
+
+/// A vim transcript parked on its first row, and the cursor row it started
+/// from, the first jump-list entry.
+fn jump_app() -> (TestApp, RowIndex) {
+    let mut app = block_nav_app(true);
+    let start = transcript_row_cursor_row(&app);
+    block_nav(&mut app, "gg");
+    (app, start)
+}
+
+#[test]
+fn jump_list_returns_after_buffer_jumps() {
+    let (mut app, _) = jump_app();
+    block_nav(&mut app, "G");
+    assert_eq!(ctrl_o(&mut app), "first question");
+    assert_eq!(ctrl_i(&mut app), "second answer 29");
+    assert_eq!(block_nav(&mut app, "gg"), "first question");
+    assert_eq!(ctrl_o(&mut app), "second answer 29");
+}
+
+#[test]
+fn jump_list_walks_block_motions_one_by_one() {
+    let (mut app, start) = jump_app();
+    block_nav(&mut app, "]u");
+    block_nav(&mut app, "G");
+    block_nav(&mut app, "[u");
+    assert_eq!(ctrl_o(&mut app), "second answer 29");
+    assert_eq!(ctrl_o(&mut app), "first question");
+    ctrl_o(&mut app);
+    assert_eq!(transcript_row_cursor_row(&app), start);
+    ctrl_o(&mut app);
+    assert_eq!(transcript_row_cursor_row(&app), start);
+    assert_eq!(ctrl_i(&mut app), "first question");
+}
+
+#[test]
+fn jump_list_ignores_plain_motions() {
+    let (mut app, start) = jump_app();
+    block_nav(&mut app, "jjjjjjj");
+    ctrl_o(&mut app);
+    assert_eq!(transcript_row_cursor_row(&app), start);
+}
+
+#[test]
+fn jump_list_takes_counts_with_ctrl_o() {
+    let (mut app, _) = jump_app();
+    block_nav(&mut app, "]u");
+    block_nav(&mut app, "G");
+    block_nav(&mut app, "2");
+    assert_eq!(ctrl_o(&mut app), "first question");
+}
+
+#[test]
+fn jump_list_returns_from_searches() {
+    let mut app = row_document_transcript_app(20, true);
+    app.type_text("gg");
+    app.type_char('/');
+    app.type_text("alpha");
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let mut matches = vec![transcript_row_cursor_row(&app)];
+    for _ in 0..2 {
+        app.type_char('n');
+        app.render_silent();
+        matches.push(transcript_row_cursor_row(&app));
+    }
+    assert!(matches[0] < matches[1] && matches[1] < matches[2]);
+
+    ctrl_o(&mut app);
+    assert_eq!(transcript_row_cursor_row(&app), matches[1]);
+    ctrl_o(&mut app);
+    assert_eq!(transcript_row_cursor_row(&app), matches[0]);
+}
+
+#[test]
+fn quote_quote_toggles_between_the_last_two_positions() {
+    let (mut app, _) = jump_app();
+    block_nav(&mut app, "G");
+    assert_eq!(block_nav(&mut app, "''"), "first question");
+    assert_eq!(block_nav(&mut app, "''"), "second answer 29");
+    assert_eq!(block_nav(&mut app, "``"), "first question");
+}
+
 #[test]
 fn block_motions_take_counts() {
     let mut app = block_nav_app(true);

@@ -517,6 +517,7 @@ impl TuiApp {
             self.cancel_live_search(true);
             return;
         }
+        self.record_search_jump(target, true);
         let search = self.overlays.search_state_mut();
         let Some(live) = search.live.as_mut() else {
             self.submit_search(target, direction, query);
@@ -731,8 +732,10 @@ impl TuiApp {
         } else {
             session.direction
         };
+        let transcript_backend = matches!(session.backend, SearchBackend::Transcript(_));
+        self.record_search_jump(target, false);
 
-        if matches!(session.backend, SearchBackend::Transcript(_)) {
+        if transcript_backend {
             let mut session = self
                 .overlays
                 .take_search_session()
@@ -874,6 +877,24 @@ impl TuiApp {
         self.overlays
             .refresh_full_search(matches, current, buf_tick);
         FullSearchRefresh::Changed(range)
+    }
+
+    /// Leaves the position a search starts from in the window's jump list.
+    /// While a live search previews matches the cursor has already moved, so
+    /// `preview_origin` reads the position the search began at instead.
+    fn record_search_jump(&mut self, target: WinId, preview_origin: bool) {
+        let origin = if preview_origin {
+            self.overlays
+                .search_state()
+                .live
+                .as_ref()
+                .map(|live| live.original.origin)
+        } else {
+            self.search_origin(target)
+        };
+        if let (Some(origin), Some(win)) = (origin, self.ui.win_mut(target)) {
+            win.record_jump(origin);
+        }
     }
 
     fn search_target(&self) -> Option<WinId> {

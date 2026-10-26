@@ -1670,6 +1670,16 @@ impl TuiApp {
             return Status::Consumed;
         }
 
+        let command = {
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            let (Some(win), Some(buf)) = (win, buf) else {
+                return Status::Ignored;
+            };
+            match win.resolve_viewer_jump(buf, command) {
+                Some(command) => command,
+                None => return Status::Consumed,
+            }
+        };
         let now = self.core.clock.instant_now();
         let copied = if self.win_uses_document_view(win_id) {
             self.execute_document_view_command_for_win(win_id, command, viewport_rows, now)
