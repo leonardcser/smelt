@@ -12,7 +12,6 @@
 | `Ctrl+R`                        | Fuzzy search input history                                |
 | `Ctrl+S`                        | Stash / unstash input                                     |
 | `Ctrl+C`                        | Clear input (undoable) / cancel agent / quit              |
-| `Ctrl+L`                        | Redraw screen                                             |
 | `Ctrl+G`                        | Move a foreground bash tool call to the background        |
 | `Ctrl+T`                        | Cycle reasoning effort                                    |
 | `Shift+Tab`                     | Cycle mode (normal → plan → apply → yolo)                 |
@@ -132,15 +131,18 @@ smelt has four agent modes: `normal`, `plan`, `apply`, and `yolo`. Each has its
 own permission defaults. The active mode is shown in the status bar. Cycle with
 `Shift+Tab`. Bindings can be scoped to a specific mode through the Lua API
 (`smelt.keymap.set`); see the
-[Customization guide](../guide/customization.md#keymaps).
+[Themes and keymaps](../customize/appearance.md#keymaps).
 
 ## Vim Mode
 
 Set `smelt.settings.vim = true` in config to enable vim mode. If you already live in
 Vim, this keeps your muscle memory intact: navigate the transcript, edit the
 prompt, and select text with the same chords you use in your editor. Supports
-insert, normal, and visual modes. In normal mode, several emacs-style keys take
-on their vim meanings:
+insert, normal, and visual modes.
+
+<figure class="term" data-replay="../../assets/replays/vim.json" aria-label="Editing a prompt with vim motions, visual mode and undo" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+In normal mode, several emacs-style keys take on their vim meanings:
 
 | Key      | Vim normal           | Insert / non-vim      |
 | -------- | -------------------- | --------------------- |
@@ -177,6 +179,9 @@ chords are silently dropped on the read-only transcript buffer. `Ctrl+C` returns
 focus to the prompt. `Enter` toggles folds; vim-style `za` / `zo` / `zc` / `zR`
 / `zM` also work. `Ctrl+click` opens transcript links, email addresses, and file
 paths; in vim mode, use `gf`.
+
+`/` searches the transcript forward and `?` backward; `n` and `N` repeat the last
+search in either direction, and `/nohl` clears the highlights.
 
 With vim enabled the full vim engine runs on the transcript (motions, `y` to
 yank, `v` / `V` visual selection, `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` /
@@ -248,11 +253,11 @@ Bindings that start with `Esc` are treated as a chord: press `Esc`, then the
 next key within the chord window to complete it. The built-in `Esc Esc` cancels
 active work or rewinds the last turn when idle. Define your own chords (any
 length) with `smelt.keymap.set`; see the
-[Customization guide](../guide/customization.md#keymaps).
+[Themes and keymaps](../customize/appearance.md#keymaps).
 
 ## Custom Keybindings
 
 Bind any chord from Lua with `smelt.keymap.set(mode, chord, handler)`. Modes are
 `"n"`, `"i"`, `"v"`, or `""` (every mode). Examples ship with the distribution.
-See `docs/lua-examples/mode_keybinds.lua` and
-`runtime/lua/smelt/plugins/esc_chord.lua` for working patterns.
+See [`mode_keybinds.lua`](https://github.com/leonardcser/smelt/blob/main/docs/lua-examples/mode_keybinds.lua) and
+[`esc_chord.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/plugins/esc_chord.lua) for working patterns.

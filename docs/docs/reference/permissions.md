@@ -1,7 +1,7 @@
-# Permissions Reference
+# Permissions
 
 The permission system controls what the agent can do without asking. Each
-[mode](../guide/usage.md#modes) has its own rules, and the prompt that appears
+[mode](../guide/workflows.md#review-before-it-changes-anything) has its own rules, and the prompt that appears
 when a tool is gated offers several scopes for approving the call.
 
 ## How Rules Work
@@ -27,96 +27,12 @@ Patterns are globs. For pattern rules, the most specific (longest) matching
 pattern wins; on a tie, **ask** beats **allow**. Anything not matched falls back
 to tool, effect, and mode defaults.
 
-## Default Tool Permissions
+## Defaults
 
-| Tool                  | Normal | Plan               | Apply | Yolo  |
-| --------------------- | ------ | ------------------ | ----- | ----- |
-| `read_file`           | Allow  | Allow              | Allow | Allow |
-| `glob`                | Allow  | Allow              | Allow | Allow |
-| `grep`                | Allow  | Allow              | Allow | Allow |
-| `ask_user_question`   | Allow  | Allow              | Allow | Allow |
-| `edit_file`           | Ask    | Deny               | Allow | Allow |
-| `write_file`          | Ask    | Deny               | Allow | Allow |
-| `edit_notebook`       | Ask    | Deny               | Ask   | Allow |
-| `bash`                | Ask    | Allow / Ask / Deny | Ask   | Allow |
-| `web_fetch`           | Ask    | Ask                | Ask   | Allow |
-| `web_search`          | Ask    | Ask                | Ask   | Allow |
-| `read_process_output` | Allow  | Allow              | Allow | Allow |
-| `enter_worktree`      | Ask    | Ask                | Ask   | Allow |
-| `switch_cwd`          | Ask    | Deny               | Ask   | Allow |
-| `stop_process`        | Ask    | Deny               | Ask   | Allow |
-| `load_skill`          | Ask    | Allow              | Ask   | Allow |
-| `get_goal`            | Ask    | Ask                | Ask   | Allow |
-| `create_goal`         | Ask    | Ask                | Ask   | Allow |
-| `update_goal_progress` | Ask   | Ask                | Ask   | Allow |
-| `update_goal`         | Ask    | Ask                | Ask   | Allow |
-| `clear_goal`          | Ask    | Ask                | Ask   | Allow |
-| `present_plan`        | N/A    | Allow              | N/A   | N/A   |
-| `smelt_reload`        | Ask    | Deny               | Ask   | Allow |
-
-The optional LSP plugin registers read-effect semantic tools with Allow in
-Normal, Plan, and Apply. `rename_symbol` has write effect, so its defaults are
-Allow in Normal, Deny in Plan, Ask in Apply, and Allow in Yolo.
-
-Plan mode is built in. It ships with a read-only default policy and adds the
-`present_plan` tool. Read-only tools stay allowed, `enter_worktree` and unknown
-or networked tools require confirmation, and write/process/config effects are
-denied without prompting. `switch_cwd` is therefore denied even though the
-more constrained `enter_worktree` has an explicit Ask rule. Your config can
-extend these defaults.
-
-## Default Bash Patterns
-
-Read-only commands with no side effects are allowed by default. Commands that
-can modify files, install packages, or affect system state require approval.
-
-| Pattern       | Normal | Apply | Yolo  |
-| ------------- | ------ | ----- | ----- |
-| `ls *`        | Allow  | Allow | Allow |
-| `find *`      | Allow  | Allow | Allow |
-| `tree *`      | Allow  | Allow | Allow |
-| `cat *`       | Allow  | Allow | Allow |
-| `head *`      | Allow  | Allow | Allow |
-| `tail *`      | Allow  | Allow | Allow |
-| `less *`      | Allow  | Allow | Allow |
-| `grep *`      | Allow  | Allow | Allow |
-| `sort *`      | Allow  | Allow | Allow |
-| `uniq *`      | Allow  | Allow | Allow |
-| `wc *`        | Allow  | Allow | Allow |
-| `diff *`      | Allow  | Allow | Allow |
-| `tr *`        | Allow  | Allow | Allow |
-| `cut *`       | Allow  | Allow | Allow |
-| `jq *`        | Allow  | Allow | Allow |
-| `echo *`      | Allow  | Allow | Allow |
-| `pwd *`       | Allow  | Allow | Allow |
-| `which *`     | Allow  | Allow | Allow |
-| `dirname *`   | Allow  | Allow | Allow |
-| `basename *`  | Allow  | Allow | Allow |
-| `realpath *`  | Allow  | Allow | Allow |
-| `stat *`      | Allow  | Allow | Allow |
-| `file *`      | Allow  | Allow | Allow |
-| `test *`      | Allow  | Allow | Allow |
-| `du *`        | Allow  | Allow | Allow |
-| `df *`        | Allow  | Allow | Allow |
-| `date *`      | Allow  | Allow | Allow |
-| `whoami *`    | Allow  | Allow | Allow |
-| `sha256sum *` | Allow  | Allow | Allow |
-| `md5sum *`    | Allow  | Allow | Allow |
-| `xxd *`       | Allow  | Allow | Allow |
-| `hexdump *`   | Allow  | Allow | Allow |
-| `strings *`   | Allow  | Allow | Allow |
-| _other_       | Ask    | Ask   | Allow |
-
-Compound commands split on shell operators (`&&`, `||`, `;`, `|`) are evaluated
-per subcommand; the worst decision wins, and a single deny blocks the whole
-command. `cd` is always allowed.
-
-!!! note
-
-    In modes whose metadata enables `ask_on_output_redirection` (Normal and Plan by default),
-    otherwise-allowed bash commands that contain output redirection (`>`, `>>`, `&>`)
-    are escalated to Ask. Plan mode's read-only policy then denies redirections that
-    write to real files.
+Each mode has built-in defaults for every tool and for common shell commands.
+Reading is always allowed; editing asks in Normal, is denied in Plan, and is
+allowed in Apply and Yolo. The full tables are in
+[Permission defaults](permission-defaults.md).
 
 ## Configuring Permissions
 
@@ -198,33 +114,31 @@ Approval options can apply at one of three scopes:
 | Scope          | Lifetime                              | Storage                                                   |
 | -------------- | ------------------------------------- | --------------------------------------------------------- |
 | **Session**    | Until `/clear`, `/new`, or exit       | Memory                                                    |
-| **Workspace**  | Every current and future session in this exact CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](configuration.md#storage-paths) |
+| **Workspace**  | Every current and future session in this exact CWD | `workspaces/<encoded-cwd>/permissions.json` in the [state directory](storage.md) |
 | **Repository** | Every current and future Git worktree | `repository-permissions.json` under the Git common-directory state entry |
 
-Workspace rules do not leak into sibling worktrees. Repository rules are loaded
-alongside the exact CWD's rules in every worktree. Both stay narrow: approving a
-command pattern only approves matching calls, and approving an outside directory
-only approves access under that directory.
+Workspace rules do not apply to sibling worktrees; repository rules apply to all
+of them. Approvals stay narrow: approving a command pattern only approves matching
+calls, and approving an outside directory only approves access under it.
 
-Running smelt sessions refresh persisted approvals when they evaluate a tool call.
-A workspace or repository approval added or removed in one session therefore takes
-effect for the next matching tool call in every other running session with that
-scope. Repository approvals propagate across sibling Git worktrees. The two stores
-are loaded independently: if one is malformed or unreadable, that scope fails closed
-without discarding valid approvals from the other scope or from the current session.
+Approvals take effect in other running smelt sessions for their next matching call,
+so removing one in `/permissions` revokes it everywhere. If a stored approval file
+is unreadable, that scope is treated as empty (calls ask again) and your other
+approvals are unaffected.
 
 ## Managing Saved Approvals
 
-Use `/permissions` to view and remove session, workspace, and repository approvals.
-Each entry is labeled with its scope. Deletions are persisted immediately and
-transactionally, so an older open dialog cannot overwrite approvals added by
-another smelt session.
+Use `/permissions` to view and remove session, workspace and repository
+approvals. Each entry shows its scope. Deletions are saved immediately and never
+overwrite approvals another session added.
 
-The Lua API applies the same protection to full replacements. `smelt.permissions.list()`
-returns a revision for each persisted scope. `smelt.permissions.sync()` requires the
-matching revision, rejects stale snapshots, and accepts at most one persisted scope
-per call. This prevents concurrent grants from being lost and prevents a failed
-second write from leaving an implicit cross-scope update half applied.
+- `j` / `k` to navigate
+- `dd` or `Backspace` to delete the highlighted entry
+- `Esc` to close
+
+From Lua, `smelt.permissions.list()` returns a revision per saved scope and
+`smelt.permissions.sync()` replaces one scope at a time, rejecting a stale
+revision so concurrent grants are not lost:
 
 ```lua
 local permissions = smelt.permissions.list()
@@ -236,13 +150,8 @@ smelt.permissions.sync({
 })
 ```
 
-Omit `session`, `path_grants`, `workspace`, or `repository` to leave that part of
-the permission state unchanged. Pass an empty array explicitly when you intend to
-clear session entries or path grants.
-
-- `j`/`k` to navigate
-- `dd` or `Backspace` to delete the highlighted entry
-- `Esc` to close
+Omit `session`, `path_grants`, `workspace` or `repository` to leave that part
+unchanged; pass an empty array to clear it.
 
 ## Workspace Restriction
 
@@ -267,8 +176,8 @@ startup smelt loads the directory if the hash still matches. Editing any trusted
 file invalidates the hash and requires re-running `/trust`.
 
 Trust state is stored in `trust.json` in the
-[state directory](configuration.md#storage-paths), keyed by canonical project
-path. See [`smelt.trust`](api/trust.md) for the Lua API.
+[state directory](storage.md). See
+[`smelt.trust`](api/trust.md) for the Lua API.
 
 ## Secret Redaction
 
@@ -287,7 +196,7 @@ smelt.settings.redact_secrets = true
 
 In `--headless`, there is no interactive prompt: calls that would be **Ask** are
 denied. To run autonomously, combine headless with `--mode yolo`. See the
-[Headless Mode guide](../advanced/headless.md#permissions).
+[Headless Mode](../guide/headless.md#permissions).
 
 ## Isolation
 

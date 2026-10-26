@@ -23,9 +23,8 @@ show sanitized refresh state without credential values.
 
 ## Config changes do not load
 
-Run `/reload` or press `F5`, then open `/messages`. Reload is transactional: one
-syntax or runtime error leaves the previous complete configuration active rather
-than partially applying the new files.
+Run `/reload` or press `F5`, then open `/messages`. If any file has an error, the
+previous working configuration stays active.
 
 Project-local `.smelt/` content also requires trust. Run `/trust` after reviewing
 it. Any edit changes its content hash and requires trust again. Automatic reload
@@ -33,9 +32,9 @@ watches Lua config by default, but prompt inputs such as `AGENTS.md`, `SKILL.md`
 and a `--system-prompt` file require manual `/reload`.
 
 For plugin development, verify the
-[load order and early-phase restrictions](customization.md#config-files). Do not
+[load order and early-phase restrictions](../customize/index.md#load-order). Do not
 edit the mirrored `builtins/` tree in the
-[data directory](../reference/configuration.md#storage-paths); an upgrade
+[data directory](../reference/storage.md); an upgrade
 replaces it.
 
 ## Modified Enter or Command keys do not work
@@ -79,7 +78,7 @@ startup state, timeouts, and captured stderr.
 
 Language servers start lazily. Results can be temporarily incomplete while a
 server indexes a large workspace. See the
-[LSP plugin setup](plugins.md#agent-semantic-code-tools-lsp).
+[LSP plugin setup](../extend/tools-and-agent.md#language-server-tools).
 
 ## A saved session looks damaged
 
@@ -106,4 +105,4 @@ Headless mode cannot show a confirmation dialog, so every permission decision
 that resolves to Ask is denied. Use an appropriate mode or explicit permission
 rules for controlled automation. Interactive-only tools such as
 `ask_user_question`, `enter_worktree`, and `switch_cwd` are omitted entirely.
-See [Headless permissions](../advanced/headless.md#permissions).
+See [Headless permissions](headless.md#permissions).

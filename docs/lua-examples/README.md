@@ -26,4 +26,4 @@ your own `init.lua`) to try them out. Copy `plugin.lua` to
 The full Lua API is generated from the Rust source and lives in the
 [Lua API reference](../docs/reference/api/index.md). For workflow guidance (IDE
 completion, Host vs UiHost, regenerating stubs), see the
-[Plugin Authoring guide](../docs/guide/plugins.md).
+[Extend smelt guide](../docs/extend/index.md).

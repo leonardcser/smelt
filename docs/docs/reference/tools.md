@@ -1,8 +1,8 @@
-# Tools Reference
+# Tools
 
 Built-in tools the agent can call. Each call is gated by the
 [permissions](permissions.md) system before it runs. Tools are implemented in
-Lua and are pluggable; see the [plugins guide](../guide/plugins.md) for how to
+Lua and are pluggable; see the [plugins guide](../extend/tools-and-agent.md) for how to
 add or override tools.
 
 ## File I/O
@@ -104,7 +104,7 @@ modes.
 | `-B`             | Lines of context before each match (`content` mode only)            |
 | `-C` / `context` | Lines of context before and after each match (`content` mode only)  |
 | `multiline`      | `.` matches newlines and patterns may span lines                    |
-| `head_limit`     | Limit output to first N lines (0 = unlimited)                       |
+| `head_limit`     | Limit output to first N lines (default 250, 0 = unlimited)          |
 | `offset`         | Skip first N lines before applying `head_limit`                     |
 | `timeout_ms`     | Timeout in milliseconds (default: 30000)                            |
 
@@ -204,7 +204,7 @@ The default base is `main`, then `master`, then `HEAD`; the configured
 
 Managed worktree agents do not push, open pull requests, merge, or remove the
 worktree unless you explicitly ask. See
-[Managed worktrees](../guide/usage.md#managed-worktrees).
+[Managed worktrees](../guide/workflows.md#work-on-many-tasks-in-parallel).
 
 ### `smelt_reload`
 
@@ -282,7 +282,7 @@ by injecting only the knowledge relevant to the current task.
 ### `load_skill`
 
 Loads a skill by name to give the agent specialized instructions and knowledge
-for a task. See [Skills](configuration.md#skills) in the configuration reference
+for a task. See [Skills](../customize/agent.md#skills)
 for how to create and organize skills.
 
 | Parameter | Description                          |
@@ -355,3 +355,9 @@ the full saved `plan.md` path, then presented again with `plan_path`.
 | `slug`      | Kebab-case filename slug; required for a new artifact                        |
 | `plan`      | Markdown plan body; required for a new artifact                              |
 | `plan_path` | Full path to an existing saved `plan.md` to present after editing/refinement |
+
+## Optional plugins
+
+The bundled `smelt.plugins.lsp` plugin adds language-server tools for code
+navigation (outline, definitions, references, diagnostics, rename). Enable it
+from `init.lua`; see [Bundled plugins](../extend/bundled-plugins.md).

@@ -1,4 +1,4 @@
-# CLI Reference
+# CLI
 
 ```
 smelt [OPTIONS] [MESSAGE]
@@ -32,15 +32,10 @@ Use either a positional message or `--prompt-file <PATH>`, not both:
 smelt --prompt-file prompt.txt
 ```
 
-Files must contain UTF-8 text and are read once without trimming whitespace.
-Relative paths resolve from the launch directory, even with worktree or resume
-options. Read failures exit 1 without creating a worktree. Stdin is not read;
-`-` is a literal file path.
-
-File input avoids argument size limits and process cleanup matches against task
-text. The path remains visible in the command line, so use a neutral filename
-such as `prompt.txt`. This changes transport only, not tool permissions, provider
-access to the prompt, or session storage.
+The file must be UTF-8 and is read once, as is. Relative paths resolve from the
+directory you launched in. Stdin is not read; `-` is a literal filename. File input
+avoids argument size limits, but the path is still visible in the process list, so
+use a neutral filename.
 
 ## Subcommands
 
@@ -76,11 +71,8 @@ access to the prompt, or session storage.
 
 ### Session maintenance
 
-Canonical session state is stored in one `lineage.db` per lineage under the
-sessions root. Forked sessions share immutable sequence nodes and objects in that
-database. The session-list catalog and per-lineage `search.db` projections are
-derived and are never authoritative. All commands accept a full session id or an
-unambiguous prefix.
+A session and its forks share one database. All commands accept a full session id
+or an unambiguous prefix.
 
 | Command | Behavior |
 | ------- | -------- |
@@ -90,13 +82,15 @@ unambiguous prefix.
 | `session backup <SESSION> <OUTPUT>` | Copy and verify a consistent snapshot of the session's complete lineage; write `<OUTPUT>.manifest.json`; overwrite neither output |
 | `session compact <SESSION>` | Reclaim unreachable revisions, sequence rows, objects, and derived-search segments in bounded transactions, then return free pages to the filesystem |
 
-`doctor` and `backup` can safely inspect a live session. `compact` acquires
-exclusive lineage ownership and fails rather than race an active smelt process.
-Close every process using any branch in the selected lineage before running it.
-Backups and manifests are private files (mode `0600`) on Unix.
+`doctor` and `backup` are safe on a live session. `compact` needs exclusive access:
+close every smelt process using any branch of that session first, or it fails.
+`doctor` exits non-zero if any selected session is unavailable or degraded, so
+`smelt session doctor --all --json` works as a health check.
 
-`doctor` exits unsuccessfully if any selected session is unavailable or degraded,
-which makes `smelt session doctor --all --json` suitable for a health check.
+After a crash, turns that were in flight are marked `interrupted` on the next
+writable start. smelt never resends them automatically, because the provider may
+already have accepted and billed the request. Review the transcript and retry if
+you want to.
 
 ### Public runtime status
 
@@ -128,11 +122,9 @@ JSON records contain:
 | `boot_id`, `process_start_time_ticks` | Optional process-identity guards, available on Linux |
 | `updated_at_ms`, `expires_at_ms` | Unix timestamps for the latest heartbeat and expiry |
 
-Status is refreshed after a state change and at least every 5 seconds, with a
-15-second expiry. Readers reject expired files, dead processes, and mismatched
-process identities; `--all` removes stale files where possible. Files are mode
-`0600` on Unix and live under `$XDG_RUNTIME_DIR/smelt/status`, falling back to
-the platform temporary directory when `XDG_RUNTIME_DIR` is unset.
+Status is refreshed on every state change and at least every 5 seconds; stale or
+dead-process records are ignored. Files live under `$XDG_RUNTIME_DIR/smelt/status`
+(the temporary directory if unset), readable only by you on Unix.
 
 `smelt upgrade` options:
 
@@ -142,30 +134,6 @@ the platform temporary directory when `XDG_RUNTIME_DIR` is unset.
 | `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main --package smelt-agent` |
 
 `smelt upgrade check` accepts the same `--channel` flag and never installs.
-
-### Session recovery and maintenance
-
-`smelt session doctor <SESSION>` checks canonical schema, integrity, references,
-indexes, and storage sizes without modifying the session. It also reports:
-
-- canonical revision and any `ready` or `running` turns;
-- catalog state and source-revision lag.
-
-Use `--json` for machine-readable output or `--all` to inspect every visible
-session. Missing, stale, or unavailable catalog data is reported but does not
-make a canonically healthy session fail the command.
-
-A writable restart deterministically changes every durable `ready` or `running`
-turn to `interrupted`. smelt does not automatically resend such a provider
-request because providers cannot guarantee that an uncertain request was not
-already accepted or billed. Review the transcript and retry explicitly if
-needed; an explicit retry creates a new linked turn.
-
-`smelt session backup <SESSION> <OUTPUT>` creates a transactionally consistent
-SQLite backup and manifest without overwriting an existing destination.
-`compact` removes unreachable data and returns free pages to the filesystem; it
-acquires exclusive session ownership and fails rather than racing an active
-writer.
 
 ## Connection
 
@@ -177,9 +145,10 @@ writer.
 | `--api-key-env <VAR>` | Env var holding the API key                                                                                                                              |
 | `--type <TYPE>`       | Provider type: `openai-compatible`, `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot`, `kimi-code` (auto-detected from URL when omitted) |
 
-Auto-detection:
+With `--api-base`, the type is detected from the URL host (providers registered
+in Lua default to `openai-compatible` unless they set `type`):
 
-| URL contains          | Detected type       |
+| API host              | Detected type       |
 | --------------------- | ------------------- |
 | `api.kimi.com/coding` | `kimi-code`         |
 | `api.anthropic.com`   | `anthropic`         |
@@ -197,18 +166,15 @@ Auto-detection:
 | `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)                                                  |
 | `--reasoning-effort <LEVEL>` | Starting reasoning. Known labels: `off`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; provider-defined labels are accepted |
 | `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated known or provider-defined labels)                    |
+| `--fast`                     | Request accelerated inference when the model supports it (see `fast_mode`) |
 | `--no-tool-calling`          | Disable tools (chat-only)                                                                        |
 | `--system-prompt <PROMPT>`   | Override the system prompt (string or file path)                                                 |
 | `--no-system-prompt`         | Disable system prompt and AGENTS.md                                                              |
-| `--set <KEY=VALUE>`          | Override a config setting (repeatable; see [Settings](configuration.md#settings) for valid keys) |
+| `--set <KEY=VALUE>`          | Override a config setting (repeatable; see [Settings](../customize/settings.md) for valid keys) |
 
-Reasoning effort controls how deeply the model thinks before responding.
-Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible,
-and anthropic-compatible providers that support `reasoning_effort`. Label-based
-provider APIs receive known and provider-defined labels unchanged. Budget-based
-APIs map extended or custom labels to the configured maximum thinking budget.
-Models that don't support thinking ignore this setting. Managed model metadata
-can restrict the accepted levels; an unsupported explicit level is rejected.
+Models that don't support reasoning ignore the effort setting. If a model
+advertises its supported levels, an unsupported level is rejected. See
+[Providers and models](../customize/providers.md#mode-and-reasoning).
 
 ## Sampling
 
@@ -231,18 +197,17 @@ creates an unused worktree before startup. Explicit names are normalized to a
 lowercase filesystem-safe form and deduplicated. Unless configured otherwise,
 worktrees live under `<repo>/.worktrees/`; the default base is `main`, then
 `master`, then `HEAD`. Set `smelt.settings.worktree_root` to choose another root.
-See [Managed worktrees](../guide/usage.md#managed-worktrees).
+See [Managed worktrees](../guide/workflows.md#work-on-many-tasks-in-parallel).
 
-Headless sessions are one-shot and never persisted, so `--resume` has no effect
-with `--headless`. `--ephemeral` is for interactive sessions and conflicts with
-`--headless`.
+Headless runs are one-shot and never saved, so `--resume` has no effect with
+`--headless`, and `--ephemeral` conflicts with it.
 
 ## Runtime
 
 | Flag                  | Description                                                                   |
 | --------------------- | ----------------------------------------------------------------------------- |
 | `--version` / `-v`    | Print the smelt build identity (same as `/version`)                           |
-| `--headless`          | No TUI; requires a message or `--prompt-file`. See [Headless](../advanced/headless.md). |
+| `--headless`          | No TUI; requires a message or `--prompt-file`. See [Headless](../guide/headless.md). |
 | `--format <FORMAT>`   | Headless output format: `text` (default) or `json` (JSONL events)             |
 | `--verbose`           | Show tool output in headless mode                                             |
 | `--color <WHEN>`      | Color output: `auto` (default), `always`, `never`                             |
@@ -257,4 +222,4 @@ and unsupported flag combinations are rejected by the CLI parser with status
 `2`. A headless model turn that fails after dispatch returns `3`, and an
 interrupted headless turn returns `130`. Headless shell escapes propagate the
 child command's status. See the
-[Headless guide](../advanced/headless.md#exit-codes).
+[Headless guide](../guide/headless.md#exit-codes).

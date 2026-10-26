@@ -439,6 +439,16 @@ fn render_stub(
     s
 }
 
+const ADVANCED_NOTE: &str =
+    "Low-level building block for plugins that need full control. It may change more freely than the rest of the API.";
+
+fn availability(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Host => "Everywhere, including headless mode.",
+        Tier::UiHost => "Terminal UI only; raises in headless mode.",
+    }
+}
+
 fn render_markdown(
     module: &str,
     fns: &[&LuaFnMeta],
@@ -455,19 +465,13 @@ Do not edit by hand. -->\n\n",
     );
     let mixed_tiers = has_mixed_tiers(fns);
     if mixed_tiers {
-        s.push_str("**Tier:** `Mixed` - Contains both Host and UiHost functions; each function below lists its exact tier.\n\n");
+        s.push_str("**Availability:** Some functions need the terminal UI; each function below says which.\n\n");
     } else {
-        s.push_str(&format!(
-            "**Tier:** `{}` - {}\n\n",
-            tier.label(),
-            tier.description()
-        ));
+        s.push_str(&format!("**Availability:** {}\n\n", availability(tier)));
     }
-    s.push_str(&format!(
-        "**Classification:** `{}` - {}\n\n",
-        module_classification.label(),
-        module_classification.description()
-    ));
+    if module_classification == ApiClassification::Advanced {
+        s.push_str(&format!("**Advanced:** {}\n\n", ADVANCED_NOTE));
+    }
     if !mod_doc.is_empty() {
         s.push_str(mod_doc);
         s.push_str("\n\n");
@@ -488,18 +492,12 @@ Do not edit by hand. -->\n\n",
             s.push_str("\n\n");
         }
         if mixed_tiers {
-            s.push_str(&format!(
-                "**Tier:** `{}` - {}\n\n",
-                f.tier.label(),
-                f.tier.description()
-            ));
+            s.push_str(&format!("**Availability:** {}\n\n", availability(f.tier)));
         }
-        if f.classification != module_classification {
-            s.push_str(&format!(
-                "**Classification:** `{}` - {}\n\n",
-                f.classification.label(),
-                f.classification.description()
-            ));
+        if f.classification == ApiClassification::Advanced
+            && module_classification != ApiClassification::Advanced
+        {
+            s.push_str(&format!("**Advanced:** {}\n\n", ADVANCED_NOTE));
         }
         s.push_str(f.doc);
         s.push_str("\n\n");
@@ -533,64 +531,53 @@ bundled Lua signatures come from LuaCATS annotations beside the implementation.\
         n_aliases,
     ));
 
-    s.push_str("`Supported` identifies the primary alpha plugin facade. `Advanced` identifies lower-level composition primitives that may evolve more freely. These labels guide API design and documentation; the alpha surface is not compatibility-frozen. Internal runtime machinery is excluded from this reference and IDE completion.\n\n");
+    s.push_str("Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).\n\n");
 
     s.push_str("## IDE completion\n\n");
     s.push_str(
-        "Stubs land in `runtime/lua/smelt/_meta/` (one file per namespace, plus \
-`_types.lua` for shared records and aliases). Point lua-language-server at that \
-directory - see [`runtime/.luarc.json`](https://github.com/leonardcser/smelt/blob/main/runtime/.luarc.json) \
-for a working config.\n\n",
+        "smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in its data directory. \
+Point lua-language-server at it for completions and diagnostics; see [Editor setup](../../extend/index.md#editor-setup).\n\n",
     );
 
-    let mut by_tier: BTreeMap<&'static str, Vec<&str>> = BTreeMap::new();
-    for &module in all_modules {
-        let fns = by_mod.get(module).map(Vec::as_slice).unwrap_or_default();
-        let label = if has_mixed_tiers(fns) {
-            "Mixed"
-        } else {
-            mod_docs
-                .get(module)
-                .and_then(|(_, t, _)| *t)
-                .or_else(|| fns.first().map(|f| f.tier))
-                .unwrap_or(Tier::Host)
-                .label()
-        };
-        by_tier.entry(label).or_default().push(module);
-    }
-    for label in ["Host", "UiHost", "Mixed"] {
-        let Some(rows) = by_tier.get(label) else {
-            continue;
-        };
-        s.push_str(&format!("## {label} namespaces\n\n"));
-        let description = match label {
-            "Host" => Tier::Host.description(),
-            "UiHost" => Tier::UiHost.description(),
-            _ => "Contains both Host and UiHost functions; per-function pages list the exact tier.",
-        };
-        s.push_str(description);
-        s.push_str("\n\n");
-        for &module in rows {
+    for (group, modules) in api_groups(all_modules) {
+        s.push_str(&format!("## {group}\n\n"));
+        for module in modules {
             let fns = by_mod.get(module).map(Vec::as_slice).unwrap_or_default();
             let stem = module_file_stem(module);
-            let module_classification = mod_docs
+            let (doc, declared_tier, module_classification) = mod_docs
                 .get(module)
-                .map(|(_, _, classification)| *classification)
-                .unwrap_or(ApiClassification::Supported);
+                .copied()
+                .unwrap_or(("", None, ApiClassification::Supported));
+            let ui_note = if has_mixed_tiers(fns) {
+                " (some UI only)"
+            } else if declared_tier
+                .or_else(|| fns.first().map(|f| f.tier))
+                .unwrap_or(Tier::Host)
+                == Tier::UiHost
+            {
+                " (UI only)"
+            } else {
+                ""
+            };
             let advanced_count = fns
                 .iter()
                 .filter(|f| f.classification == ApiClassification::Advanced)
                 .count();
-            let classification_suffix = if module_classification == ApiClassification::Advanced {
-                " - Advanced namespace".to_string()
+            let advanced_note = if module_classification == ApiClassification::Advanced {
+                " Advanced.".to_string()
             } else if advanced_count > 0 {
-                format!(" - {advanced_count} advanced function(s)")
+                format!(" {advanced_count} advanced function(s).")
             } else {
                 String::new()
             };
+            let summary = first_sentence(doc);
+            let summary = if summary.is_empty() {
+                format!("{} function(s).", fns.len())
+            } else {
+                summary
+            };
             s.push_str(&format!(
-                "- [`{module}`]({stem}.md) - {} function(s){classification_suffix}\n",
-                fns.len()
+                "- [`{module}`]({stem}.md){ui_note}: {summary}{advanced_note}\n"
             ));
         }
         s.push('\n');
@@ -761,15 +748,180 @@ const PUBLIC_SETTINGS_END: &str = "<!-- SETTINGS_REFERENCE_END -->";
 const PUBLIC_PLUGINS_BEGIN: &str = "<!-- BUNDLED_PLUGINS_BEGIN -->";
 const PUBLIC_PLUGINS_END: &str = "<!-- BUNDLED_PLUGINS_END -->";
 
+/// Sidebar and index grouping for Lua API namespaces. A namespace missing here
+/// is listed under [`API_FALLBACK_GROUP`] so new modules always appear.
+const API_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Core",
+        &[
+            "smelt",
+            "smelt.builtins",
+            "smelt.cli",
+            "smelt.cmd",
+            "smelt.config",
+            "smelt.defaults",
+            "smelt.events",
+            "smelt.keymap",
+            "smelt.lifecycle",
+            "smelt.reg",
+            "smelt.remember",
+            "smelt.settings",
+            "smelt.signal",
+            "smelt.state",
+            "smelt.task",
+            "smelt.tick",
+            "smelt.timer",
+            "smelt.work",
+        ],
+    ),
+    (
+        "Agent and session",
+        &[
+            "smelt.agent",
+            "smelt.auth",
+            "smelt.engine",
+            "smelt.history",
+            "smelt.lsp",
+            "smelt.mcp",
+            "smelt.messages",
+            "smelt.mode",
+            "smelt.model",
+            "smelt.permissions",
+            "smelt.provider",
+            "smelt.reasoning",
+            "smelt.session",
+            "smelt.session.messages",
+            "smelt.session.slug",
+            "smelt.session.title",
+            "smelt.skills",
+            "smelt.tips",
+            "smelt.tools",
+            "smelt.trust",
+        ],
+    ),
+    (
+        "User interface",
+        &[
+            "smelt.banner",
+            "smelt.buf",
+            "smelt.clipboard",
+            "smelt.confirm",
+            "smelt.dialog",
+            "smelt.headerline",
+            "smelt.input",
+            "smelt.layout",
+            "smelt.notify",
+            "smelt.overlay",
+            "smelt.paint",
+            "smelt.picker",
+            "smelt.prompt",
+            "smelt.spinner",
+            "smelt.statusline",
+            "smelt.terminal",
+            "smelt.theme",
+            "smelt.ui",
+            "smelt.ui.layout",
+            "smelt.vim",
+            "smelt.win",
+        ],
+    ),
+    (
+        "Transcript and documents",
+        &[
+            "smelt.diff",
+            "smelt.document",
+            "smelt.render",
+            "smelt.transcript",
+            "smelt.transcript.defaults",
+            "smelt.transcript.groups",
+        ],
+    ),
+    (
+        "Files and system",
+        &[
+            "smelt.files",
+            "smelt.fs",
+            "smelt.fs.file_state",
+            "smelt.git",
+            "smelt.grep",
+            "smelt.http",
+            "smelt.http.cache",
+            "smelt.notebook",
+            "smelt.os",
+            "smelt.path",
+            "smelt.process",
+            "smelt.search",
+            "smelt.shell",
+        ],
+    ),
+    (
+        "Utilities",
+        &[
+            "smelt.build",
+            "smelt.frontend",
+            "smelt.fuzzy",
+            "smelt.html",
+            "smelt.image",
+            "smelt.inspect",
+            "smelt.json",
+            "smelt.list",
+            "smelt.log",
+            "smelt.metrics",
+            "smelt.metrics.perf",
+            "smelt.parse",
+            "smelt.perf",
+            "smelt.text",
+            "smelt.time",
+        ],
+    ),
+];
+const API_FALLBACK_GROUP: &str = "Other";
+
+/// Partition `all_modules` into [`API_GROUPS`] order, each group sorted by name.
+fn api_groups<'a>(all_modules: &BTreeSet<&'a str>) -> Vec<(&'static str, Vec<&'a str>)> {
+    let mut groups: Vec<(&'static str, Vec<&'a str>)> = API_GROUPS
+        .iter()
+        .map(|(name, members)| {
+            let modules = all_modules
+                .iter()
+                .copied()
+                .filter(|module| members.contains(module))
+                .collect();
+            (*name, modules)
+        })
+        .collect();
+    let other: Vec<&str> = all_modules
+        .iter()
+        .copied()
+        .filter(|module| {
+            !API_GROUPS
+                .iter()
+                .any(|(_, members)| members.contains(module))
+        })
+        .collect();
+    for module in &other {
+        eprintln!(
+            "warning: `{module}` is not in API_GROUPS; listing it under {API_FALLBACK_GROUP}"
+        );
+    }
+    groups.push((API_FALLBACK_GROUP, other));
+    groups.retain(|(_, modules)| !modules.is_empty());
+    groups
+}
+
 fn render_zensical_nav(all_modules: &BTreeSet<&str>) -> String {
     let mut block = String::new();
     block.push_str(NAV_BEGIN);
     block.push('\n');
-    for module in all_modules {
-        let stem = module_file_stem(module);
-        block.push_str(&format!(
-            "    {{ \"`{module}`\" = \"reference/api/{stem}.md\" }},\n"
-        ));
+    for (group, modules) in api_groups(all_modules) {
+        block.push_str(&format!("    {{ \"{group}\" = [\n"));
+        for module in modules {
+            let stem = module_file_stem(module);
+            block.push_str(&format!(
+                "      {{ \"`{module}`\" = \"reference/api/{stem}.md\" }},\n"
+            ));
+        }
+        block.push_str("    ]},\n");
     }
     block.push_str("    { \"Types\" = \"reference/api/types.md\" },\n");
     block.push_str("    ");
@@ -858,13 +1010,13 @@ fn sync_customize_skill(
 /// from the same canonical sources as the built-in `customize` skill.
 fn sync_public_docs(root: &Path) -> std::io::Result<(&'static str, &'static str)> {
     let settings = sync_generated_region(
-        &root.join("docs/docs/reference/configuration.md"),
+        &root.join("docs/docs/customize/settings.md"),
         PUBLIC_SETTINGS_BEGIN,
         PUBLIC_SETTINGS_END,
         &render_skill_settings(),
     )?;
     let plugins = sync_generated_region(
-        &root.join("docs/docs/guide/plugins.md"),
+        &root.join("docs/docs/extend/bundled-plugins.md"),
         PUBLIC_PLUGINS_BEGIN,
         PUBLIC_PLUGINS_END,
         &render_skill_plugins(root),
@@ -1772,12 +1924,13 @@ mod tests {
 
         let index = render_index(&all_modules, &by_mod, &mod_docs, 0, 0);
         assert!(index.contains("**Coverage:** 1 namespace(s), 0 function(s)"));
-        assert!(index.contains("[`smelt.build`](build.md) - 0 function(s)"));
+        assert!(index.contains("[`smelt.build`](build.md): Build metadata exposed to plugins."));
 
         let capability_map = render_skill_capability_map(&all_modules, &by_mod, &mod_docs);
         assert!(capability_map.contains("- `smelt.build` - Build metadata exposed to plugins."));
 
         let nav = render_zensical_nav(&all_modules);
+        assert!(nav.contains("{ \"Utilities\" = ["));
         assert!(nav.contains("{ \"`smelt.build`\" = \"reference/api/build.md\" }"));
     }
 

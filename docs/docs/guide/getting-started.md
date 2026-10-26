@@ -1,6 +1,20 @@
-# Getting Started
+# Getting started
+
+<figure class="term" data-replay="../../assets/replays/demo.json" aria-label="smelt finding a failing test, fixing it and rerunning the tests" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 ## Install
+
+=== "Install Script"
+
+    On Linux or macOS, install the latest release into `~/.local/bin`:
+
+    ```bash
+    curl -fsSL https://leonardcser.github.io/smelt/install.sh | sh
+    ```
+
+    The script verifies the archive against the release `SHA256SUMS`. Set
+    `SMELT_VERSION=v0.6.0` to pin a release or `SMELT_INSTALL_DIR` to install
+    somewhere else.
 
 === "Prebuilt Binaries"
 
@@ -113,13 +127,31 @@ These need `--model` and an environment variable or config file:
 
     Any OpenAI-compatible server works (Ollama, vLLM, SGLang, llama.cpp).
 
+## Your first prompt
+
+Type a request and press `Enter`. Point the agent at files with `@`, as in
+`explain how @src/pricing.rs applies a discount`:
+
+<figure class="term" data-replay="../../assets/replays/prompt.json" aria-label="A smelt session answering a prompt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+The agent reads freely but asks before it edits files or runs commands. A dialog
+shows what it wants to do. Choose **allow once**, allow for the **session** or
+**workspace**, or **deny** (`Esc`).
+
+<figure class="term" data-replay="../../assets/replays/approval.json" aria-label="The approval dialog for a shell command" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+A few keys to know:
+
+- `Shift+Tab` cycles the mode (Normal, Plan, Apply, Yolo). The status bar shows
+  the current one.
+- Keep typing while it works: `Enter` queues a message, `Ctrl+Enter` steers.
+- `Esc Esc` cancels, or rewinds when idle. `/` opens the command picker and `F1`
+  shows help.
+
 ## Save your config
 
-Once you have a setup you like, write it to `~/.config/smelt/init.lua` (or
-`%APPDATA%\smelt\init.lua` on Windows) and run `smelt` from then on with no
-flags. Keeping config in a file means your
-providers, keymaps, and custom commands are version-controlled and portable
-across machines. You do not need to remember a long CLI invocation every time.
+Once you have a setup you like, write it to `~/.config/smelt/init.lua`
+(`%APPDATA%\smelt\init.lua` on Windows) and run plain `smelt` from then on:
 
 ```lua
 smelt.provider.register("ollama", {
@@ -136,20 +168,19 @@ smelt.provider.register("openai", {
 })
 
 smelt.settings.vim = true
+smelt.settings.file_icons = true -- needs a Nerd Font
 ```
 
-Switch models at runtime with `/model`. Saved Lua config reloads automatically
-by default without losing the session; press `F5` to reload manually.
+Switch models at any time with `/model`. Config changes reload automatically.
 
-`init.lua` is real Lua, not a schema: keymaps, slash commands, MCP servers,
-permission rules, statusline segments, and custom tools all live here.
+!!! tip "Just ask the agent"
+
+    You rarely need to edit config by hand. Ask: "switch to the ollama
+    provider", "make the accent color orange" or "add a /standup command". The
+    built-in `customize` skill edits your `init.lua` and reloads it.
 
 ## Next
 
-- [Usage](usage.md): modes, tools, sessions, daily workflow
-- [Customization](customization.md): themes, keymaps, slash commands, MCP
-- [Plugin Authoring](plugins.md): the Lua API in depth
-- [Troubleshooting](troubleshooting.md): startup, terminal, config, LSP, and session recovery
-- [Configuration Reference](../reference/configuration.md): every setting and
-  provider field
-- [CLI Reference](../reference/cli.md): every flag
+- [Common workflows](workflows.md): modes, approvals, steering, sessions, goals
+- [Customize](../customize/index.md): providers, settings, themes, commands
+- [Troubleshooting](troubleshooting.md): startup, terminal and config problems
