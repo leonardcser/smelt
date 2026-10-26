@@ -161,7 +161,7 @@ const tmux = (...args: (string | number)[]) => $`tmux ${args.map(String)}`.quiet
 
 // Strip the volatile bits (clock, build identity) so captures are reproducible.
 const clean = (s: string) =>
-  s.replace(/\d{2}:\d{2}:\d{2}/g, "        ").replace(/v\d+\.\d+\.\d+[-\w.+]*/g, "");
+  s.replace(/\d{2}:\d{2}:\d{2}/g, "        ").replace(/v\d+\.\d+\.\d+[-\w.+]*/g, (v) => " ".repeat(v.length));
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;:]*m/g, "");
 
