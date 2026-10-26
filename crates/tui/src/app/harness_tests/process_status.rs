@@ -444,7 +444,7 @@ fn gallery_spinner_plugin_forges_the_word_and_defers_when_done() {
 }
 
 #[test]
-fn gallery_glitch_plugin_glitches_words_in_and_out_and_defers_when_done() {
+fn gallery_glitch_plugin_glitches_words_in_and_out_and_decodes_done() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(64, 10);
     app.start_turn(1);
@@ -485,11 +485,16 @@ fn gallery_glitch_plugin_glitches_words_in_and_out_and_defers_when_done() {
     let next = frames(&mut app, 3300, 4700);
     assert!(next.iter().any(|row| row.contains("linking")), "{next:?}");
 
-    // Done hands the indicator back to the built-in.
+    // Done decodes "done" in from noise one last time, then holds it still,
+    // with no dot.
     assert!(app.finish_turn());
-    at(&mut app, 6000);
-    let done = at(&mut app, 8000);
-    assert!(done.starts_with("─ ● done"), "{done}");
+    let settling = at(&mut app, 4700);
+    assert!(!settling.contains("done"), "{settling}");
+    for t in [6000, 8000] {
+        let done = at(&mut app, t);
+        assert!(done.starts_with("─ done"), "{done}");
+        assert!(!done.contains('●'), "{done}");
+    }
 }
 
 #[test]

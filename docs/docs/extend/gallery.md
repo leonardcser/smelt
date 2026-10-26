@@ -53,7 +53,8 @@ built-in `indicator` takes over again through `builtin("indicator")`.
 
 A different take on the same source: status words decode in from noise, hold with
 the odd flicker and a pink and cyan tear, then corrupt away and give way to the
-next word.
+next word. When the turn is done, "done" decodes in one last time and holds, with
+no dot.
 
 <figure class="term" data-replay="../../assets/replays/glitch.json" aria-label="A status word that glitches: it decodes in from noise, flickers, then corrupts into the next word" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 

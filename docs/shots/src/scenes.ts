@@ -217,7 +217,7 @@ export const scenes: Record<string, Scene> = {
       { type: "run the tests and fix whatever fails" },
       { pause: 400 },
       { key: "Enter" },
-      { until: /─ ● done/ },
+      { until: /─ done/ },
       { pause: 2500 },
     ],
   },

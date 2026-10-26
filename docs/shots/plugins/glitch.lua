@@ -3,7 +3,9 @@ local fallback = smelt.prompt_bar.top.builtin("indicator")
 
 -- A glitching status word: each word decodes in from noise, holds with the odd
 -- flicker, then corrupts away into the next one. It stays white, with a pink and
--- cyan fringe on the noise.
+-- cyan fringe on the noise. When the turn is done the word "done" decodes in one
+-- last time and holds still, with no dot.
+local DONE = "done"
 local WORDS = { "parsing", "linking", "patching", "resolving", "compiling" }
 local WIDTH = 9
 local CYCLE_MS = 2600
@@ -51,29 +53,25 @@ local function static(colors, a, b)
   return { level, level, level }
 end
 
-smelt.prompt_bar.top.add("indicator", function()
-  if not working() then return fallback() end
-  local colors = palette()
-  local now = smelt.time.now_ms()
-  local round = math.floor(now / CYCLE_MS)
-  local word = WORDS[round % #WORDS + 1]
-  local phase = now % CYCLE_MS
-  local frame = math.floor(now / FRAME_MS)
+-- One frame of `word`: each letter is noise until it decodes in. While `live`,
+-- the word also flickers, tears, and corrupts away at the end of the cycle.
+local function render(colors, word, width, phase, round, live)
+  local frame = math.floor(smelt.time.now_ms() / FRAME_MS)
 
   -- Now and then the whole word tears into a magenta and cyan split.
-  local torn = phase > DECODE_MS and noise(frame, round + 3) > 0.96
+  local torn = live and phase > DECODE_MS and noise(frame, round + 3) > 0.96
   -- A single letter flickers while the word holds.
-  local flicker = phase > DECODE_MS and noise(frame, round + 7) > 0.9
+  local flicker = live and phase > DECODE_MS and noise(frame, round + 7) > 0.9
     and math.floor(noise(frame, round + 11) * #word) + 1
 
   local runs = {}
-  for i = 1, WIDTH do
+  for i = 1, width do
     local letter = word:sub(i, i)
     local color = colors.text
     local garbled = false
     if phase < DECODE_MS * 0.9 * (i / #word) then
       garbled = true
-    elseif phase > CYCLE_MS - CORRUPT_MS then
+    elseif live and phase > CYCLE_MS - CORRUPT_MS then
       garbled = noise(i, round) < (phase - (CYCLE_MS - CORRUPT_MS)) / CORRUPT_MS
     elseif flicker == i then
       garbled = true
@@ -88,6 +86,32 @@ smelt.prompt_bar.top.add("indicator", function()
     end
     runs[#runs + 1] = { text = letter, style = { fg = color, bold = true } }
   end
-
   return { { runs = runs, priority = 1 } }
+end
+
+-- Nothing else repaints a finished turn, so a timer drives the decode.
+local done_at, decoding
+smelt.signal.subscribe("work_state", function(state)
+  if state ~= "done" then
+    done_at = nil
+    return
+  end
+  done_at = smelt.time.now_ms()
+  if decoding then decoding:remove() end
+  decoding = smelt.timer.every(FRAME_MS, function() smelt.prompt_bar.top.invalidate() end)
+  smelt.timer.set(DECODE_MS + FRAME_MS, function()
+    decoding:remove()
+    decoding = nil
+  end)
+end)
+
+smelt.prompt_bar.top.add("indicator", function()
+  if smelt.signal.get("work_state") == "done" and not smelt.signal.get("auto_continue_status") then
+    local phase = done_at and smelt.time.now_ms() - done_at or DECODE_MS
+    return render(palette(), DONE, #DONE, phase, 0, false)
+  end
+  if not working() then return fallback() end
+  local now = smelt.time.now_ms()
+  local round = math.floor(now / CYCLE_MS)
+  return render(palette(), WORDS[round % #WORDS + 1], WIDTH, now % CYCLE_MS, round, true)
 end)
