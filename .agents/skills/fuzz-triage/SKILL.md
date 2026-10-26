@@ -1,6 +1,6 @@
 ---
 name: fuzz-triage
-description: Use when the user asks to start, continue, run, or triage Smelt fuzzing. Drives the full fuzz suite continuously: status, minimization, coverage-guided fork allocation, background runs, crash triage, fixes, regression seeds, commits, and relaunch.
+description: 'Use when the user asks to start, continue, run, or triage Smelt fuzzing. Drives the full fuzz suite continuously: status, minimization, coverage-guided fork allocation, background runs, crash triage, fixes, regression seeds, commits, and relaunch.'
 ---
 
 # Smelt fuzz triage loop
