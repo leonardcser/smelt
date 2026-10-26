@@ -1006,3 +1006,46 @@ fn transcript_zt_and_zb_place_the_cursor_row_at_the_viewport_edges() {
         row - height / 2
     );
 }
+
+#[test]
+fn vim_word_end_backward_moves_the_prompt_cursor_and_takes_operators() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("alpha beta  gamma");
+    app.press(KeyCode::Esc);
+
+    app.type_text("ge");
+    assert_eq!(app.prompt_cpos(), "alpha beta  ".len() - 3);
+    app.type_text("ge");
+    assert_eq!(app.prompt_cpos(), "alph".len());
+    app.type_text("ge");
+    assert_eq!(app.prompt_cpos(), 0);
+    app.type_text("$gE");
+    assert_eq!(app.prompt_cpos(), "alpha beta".len() - 1);
+
+    app.type_text("$dge");
+    assert_eq!(app.state().prompt_text, "alpha bet");
+}
+
+#[test]
+fn vim_gj_and_gk_follow_wrapped_prompt_rows() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(20, 12);
+    let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh";
+    app.type_text(text);
+    app.press(KeyCode::Esc);
+    app.render_silent();
+    app.type_text("0");
+
+    app.type_text("gj");
+    let first = app.prompt_cpos();
+    assert!(
+        first > 0 && first < text.len(),
+        "gj lands on the next row: {first}"
+    );
+    app.type_text("gj");
+    assert!(app.prompt_cpos() > first);
+    app.type_text("gk");
+    assert_eq!(app.prompt_cpos(), first);
+    app.type_text("gkgk");
+    assert_eq!(app.prompt_cpos(), 0);
+}
