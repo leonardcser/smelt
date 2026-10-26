@@ -4,7 +4,7 @@ use crate::app::transcript::{
 };
 use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
-use crate::smelt_edit::{DocPosition, RowIndex};
+use crate::smelt_edit::{DocPosition, RowIndex, SearchPattern};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -362,7 +362,7 @@ impl TranscriptSearchIndex {
                 }
             }
         }
-        let grams = unique_trigrams(query);
+        let grams = unique_trigrams(SearchPattern::parse(query).needle);
         if grams.is_empty() {
             if preferred_blocks.is_none() && out.is_empty() {
                 out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
@@ -535,10 +535,11 @@ impl TuiApp {
             Some(text) if text.generation == history.generation() && text.start == start => text,
             _ => DirtyTranscriptText::build(history, start),
         };
+        let needle = SearchPattern::parse(query).needle;
         let out: Vec<u64> = text
             .blocks
             .iter()
-            .filter(|(_, indexed)| indexed.contains(query))
+            .filter(|(_, indexed)| indexed.contains(needle))
             .map(|(id, _)| id.get())
             .collect();
         smelt_perf::perf::record_value(
@@ -577,6 +578,7 @@ impl TuiApp {
             u64::from(self.conversation.request_search_projection()),
         );
         let dirty_blocks = self.dirty_transcript_candidate_blocks(query);
+        let needle = SearchPattern::parse(query).needle;
         let width = self.transcript_width() as u16;
         let origin_block = self
             .conversation
@@ -595,12 +597,12 @@ impl TuiApp {
         let records_persisted = self.conversation.transcript_records_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db
-                .search_candidate_page(query, origin_block, store_direction, limit, &|| false)
+                .search_candidate_page(needle, origin_block, store_direction, limit, &|| false)
                 .ok()?;
             if origin_block.is_some() && page.len() < limit {
                 let wrapped = db
                     .search_candidate_page(
-                        query,
+                        needle,
                         None,
                         store_direction,
                         limit - page.len(),

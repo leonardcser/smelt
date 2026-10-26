@@ -200,7 +200,8 @@ fn transcript_search_range_matches_buffer(
     let Some(line) = buf.get_line(crate::smelt_edit::row_to_usize(local_row)) else {
         return false;
     };
-    smelt_buffer::text::slice(line, range.start.byte_col..range.end.byte_col) == query
+    smelt_buffer::text::slice(line, range.start.byte_col..range.end.byte_col)
+        == crate::smelt_edit::SearchPattern::parse(query).needle
 }
 
 fn sync_retained_transcript_window(

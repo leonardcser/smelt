@@ -1301,6 +1301,15 @@ fn prompt_star_and_hash_search_the_word_under_the_cursor() {
 }
 
 #[test]
+fn prompt_star_matches_whole_words_only() {
+    let mut app = vim_prompt_app("foo\nfoobar\nbarfoo\nfoo");
+    app.type_char('*');
+    assert_eq!(app.prompt_cpos(), "foo\nfoobar\nbarfoo\n".len());
+    app.type_char('#');
+    assert_eq!(app.prompt_cpos(), 0);
+}
+
+#[test]
 fn prompt_star_uses_the_next_word_when_the_cursor_is_on_a_gap() {
     let mut app = vim_prompt_app("-- foo --\nfoo");
     app.type_char('*');
@@ -1327,4 +1336,38 @@ fn transcript_star_jumps_to_the_next_row_with_the_word() {
     app.type_text("#");
     app.render_silent();
     assert_eq!(app.transcript_window().row_cursor.unwrap().row, first);
+}
+
+#[test]
+fn transcript_star_skips_rows_where_the_word_is_part_of_a_longer_word() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 16);
+    for text in ["first alpha", "alphabet soup", "tail alpha"] {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: text.into(),
+        });
+    }
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.type_text("gg");
+    app.render_silent();
+    let lines = transcript_buffer_lines(&app, 400);
+    let first = lines
+        .iter()
+        .position(|l| l.contains("first alpha"))
+        .unwrap();
+    let tail = lines.iter().position(|l| l.contains("tail alpha")).unwrap();
+    let alphabet = lines.iter().position(|l| l.contains("alphabet")).unwrap();
+    app.type_text("w*");
+    app.render_silent();
+    let row = app.transcript_window().row_cursor.unwrap().row as usize;
+    assert_eq!(row, tail);
+    assert_ne!(row, alphabet);
+    app.type_text("#");
+    app.render_silent();
+    assert_eq!(
+        app.transcript_window().row_cursor.unwrap().row as usize,
+        first
+    );
 }

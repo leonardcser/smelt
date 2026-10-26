@@ -207,7 +207,9 @@ transcript edge. `Alt+Up` / `Alt+Down` (blocks) and `Alt+Shift+Up` /
 `smelt.transcript.block_kind`.
 
 `/` searches the transcript forward and `?` backward; `n` and `N` repeat the last
-search in either direction, and `/nohl` clears the highlights.
+search in either direction, and `/nohl` clears the highlights. Searches are
+literal text; wrap a word in `\<` and `\>` (what `*` and `#` search for) to match it
+only as a whole word.
 
 With vim enabled, `G`, `gg`, `{` `}`, the block motions and searches are jumps:
 `Ctrl+O` goes back to where the last one started, `Ctrl+I` or `Tab` forward again

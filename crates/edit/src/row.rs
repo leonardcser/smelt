@@ -302,16 +302,68 @@ fn search_backward_range<D: DisplayDocument + ?Sized>(
     None
 }
 
+/// A search query. Vim's `\<word\>` form, which `*` and `#` search for, only
+/// matches `word` when no word character touches the marked end; either marker
+/// may be used alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchPattern<'a> {
+    pub needle: &'a str,
+    word_start: bool,
+    word_end: bool,
+}
+
+impl<'a> SearchPattern<'a> {
+    pub fn parse(query: &'a str) -> Self {
+        let (query, word_start) = match query.strip_prefix("\\<") {
+            Some(rest) => (rest, true),
+            None => (query, false),
+        };
+        let (needle, word_end) = match query.strip_suffix("\\>") {
+            Some(rest) => (rest, true),
+            None => (query, false),
+        };
+        Self {
+            needle,
+            word_start,
+            word_end,
+        }
+    }
+
+    /// The query that finds `word` as a whole word.
+    pub fn whole_word(word: &str) -> String {
+        format!("\\<{word}\\>")
+    }
+
+    /// Byte offsets in `text` where the pattern matches. An empty needle never matches.
+    pub fn find_in(self, text: &'a str) -> impl Iterator<Item = usize> + 'a {
+        let needle = self.needle;
+        text.match_indices(needle)
+            .map(|(start, _)| start)
+            .filter(move |&start| {
+                !needle.is_empty()
+                    && (!self.word_start || !is_word_char(text[..start].chars().next_back()))
+                    && (!self.word_end
+                        || !is_word_char(text[start + needle.len()..].chars().next()))
+            })
+    }
+}
+
+fn is_word_char(c: Option<char>) -> bool {
+    c.is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
 fn first_forward_match(
     rows: &[DisplayRow],
     start: RowIndex,
     query: &str,
     min_pos: Option<DocPosition>,
 ) -> Option<DocRange> {
+    let pattern = SearchPattern::parse(query);
     for (offset, row) in rows.iter().enumerate() {
         let row_index = start.saturating_add(offset as RowIndex);
-        for (byte_col, _) in row.text.match_indices(query) {
-            let Some(range) = complete_row_match(row, row_index, byte_col, byte_col + query.len())
+        for byte_col in pattern.find_in(&row.text) {
+            let Some(range) =
+                complete_row_match(row, row_index, byte_col, byte_col + pattern.needle.len())
             else {
                 continue;
             };
@@ -333,11 +385,13 @@ fn first_backward_match(
     query: &str,
     max_pos: Option<DocPosition>,
 ) -> Option<DocRange> {
+    let pattern = SearchPattern::parse(query);
     for (offset, row) in rows.iter().enumerate().rev() {
         let row_index = start.saturating_add(offset as RowIndex);
-        let matches = row.text.match_indices(query).collect::<Vec<_>>();
-        for (byte_col, _) in matches.into_iter().rev() {
-            let Some(range) = complete_row_match(row, row_index, byte_col, byte_col + query.len())
+        let matches = pattern.find_in(&row.text).collect::<Vec<_>>();
+        for byte_col in matches.into_iter().rev() {
+            let Some(range) =
+                complete_row_match(row, row_index, byte_col, byte_col + pattern.needle.len())
             else {
                 continue;
             };
@@ -412,16 +466,15 @@ pub fn display_row_matches<'a>(
     query: &'a str,
 ) -> impl Iterator<Item = DocRange> + 'a {
     let mut previous = None;
-    row.text
-        .match_indices(query)
-        .filter_map(move |(byte_col, _)| {
-            let range = complete_row_match(row, row_index, byte_col, byte_col + query.len())?;
-            if previous == Some(range) {
-                return None;
-            }
-            previous = Some(range);
-            Some(range)
-        })
+    let pattern = SearchPattern::parse(query);
+    pattern.find_in(&row.text).filter_map(move |byte_col| {
+        let range = complete_row_match(row, row_index, byte_col, byte_col + pattern.needle.len())?;
+        if previous == Some(range) {
+            return None;
+        }
+        previous = Some(range);
+        Some(range)
+    })
 }
 
 pub fn doc_range_for_match(row: RowIndex, byte_col: usize, end_col: usize) -> DocRange {
@@ -841,6 +894,30 @@ pub fn row_to_usize(row: RowIndex) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn search_pattern_whole_word_skips_matches_touching_word_characters() {
+        let pattern_text = SearchPattern::whole_word("foo");
+        let pattern = SearchPattern::parse(&pattern_text);
+        assert_eq!(pattern.needle, "foo");
+        let hits = pattern
+            .find_in("foo foobar barfoo _foo foo.")
+            .collect::<Vec<_>>();
+        assert_eq!(hits, vec![0, 23]);
+    }
+
+    #[test]
+    fn search_pattern_markers_work_alone_and_plain_queries_stay_literal() {
+        let hits = |query: &str, text: &str| {
+            SearchPattern::parse(query)
+                .find_in(text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hits("\\<foo", "foo xfoo foobar"), vec![0, 9]);
+        assert_eq!(hits("foo\\>", "foo xfoo foobar"), vec![0, 5]);
+        assert_eq!(hits("foo", "foo xfoo foobar"), vec![0, 5, 9]);
+        assert!(hits("\\<\\>", "foo").is_empty());
+    }
+
     use super::*;
 
     #[test]

@@ -646,8 +646,8 @@ impl TuiApp {
         self.submit_search_from(target, direction, query, None);
     }
 
-    /// Vim `*` / `#`: search for the word under the cursor, or the next one on
-    /// its row, and move to its next (`*`) or previous (`#`) occurrence.
+    /// Vim `*` / `#`: search for the word under the cursor as a whole word, or
+    /// the next one on its row, and move to its next (`*`) or previous (`#`) occurrence.
     fn search_word_under_cursor(&mut self, target: WinId, direction: SearchDirection) -> bool {
         let Some(cursor) = self.search_origin(target) else {
             return false;
@@ -686,7 +686,8 @@ impl TuiApp {
                 byte_col: start,
             }),
         };
-        self.submit_search_from(target, direction, line[start..end].to_string(), Some(from));
+        let query = crate::smelt_edit::SearchPattern::whole_word(&line[start..end]);
+        self.submit_search_from(target, direction, query, Some(from));
         true
     }
 
