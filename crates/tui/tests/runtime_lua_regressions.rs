@@ -1238,20 +1238,23 @@ fn ps_details_meta_values_are_label_value_rows() {
     assert!(!PS_LUA.contains("styled_lines ="));
 }
 
-#[test]
-fn banner_press_resumes_existing_animation_instead_of_reseeding() {
-    // The test inspects a Lua closure upvalue via the standard debug library.
-    // It runs only trusted in-repo Lua fixtures in an isolated VM.
-    let lua = unsafe { mlua::Lua::unsafe_new() };
-    install_explicit_api_fixtures(&lua);
+fn load_banner_plugin(lua: &mlua::Lua, ready_ctx: &str) {
+    install_explicit_api_fixtures(lua);
     lua.load(
         r#"
         paint_handlers = {}
+        timers = {}
         smelt = {
           notify = __smelt_notify_stub(nil, nil),
           reg = { new = function(fn) return { remove = fn } end },
           build = { display = "test" },
-          timer = { set = function() return { remove = function() end } end },
+          timer = {
+            set = function(ms, fn)
+              local timer = { ms = ms, fn = fn, removed = false }
+              timers[#timers + 1] = timer
+              return { remove = function() timer.removed = true end }
+            end,
+          },
           paint = {
             register = function()
               return {
@@ -1293,11 +1296,12 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
           events = { on = function() end },
           signal = __smelt_signal_stub({}, {}),
           lifecycle = {
-            on_ready = function(fn) fn() end,
+            on_ready = function(fn) fn(READY_CTX) end,
             on_shutdown = function() end,
           },
         }
-        "#,
+        "#
+        .replace("READY_CTX", ready_ctx),
     )
     .exec()
     .expect("install fake smelt api");
@@ -1315,6 +1319,14 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
     lua.load(BANNER_PLUGIN_LUA)
         .exec()
         .expect("load banner plugin");
+}
+
+#[test]
+fn banner_press_resumes_existing_animation_instead_of_reseeding() {
+    // The test inspects a Lua closure upvalue via the standard debug library.
+    // It runs only trusted in-repo Lua fixtures in an isolated VM.
+    let lua = unsafe { mlua::Lua::unsafe_new() };
+    load_banner_plugin(&lua, "nil");
     let (first_tick, second_tick): (i64, i64) = lua
         .load(
             r#"
@@ -1340,6 +1352,171 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
 
     assert_eq!(first_tick, 1);
     assert_eq!(second_tick, 2);
+}
+
+#[test]
+fn banner_ignites_on_launch_from_a_visible_first_frame_into_the_resting_fire() {
+    let lua = unsafe { mlua::Lua::unsafe_new() };
+    load_banner_plugin(&lua, r#"{ kind = "launch" }"#);
+    let (first_ink, first_upper_ink, final_ink, frames, matches_logo): (i64, i64, i64, i64, bool) =
+        lua.load(
+            r#"
+            local function state_for(fn)
+              for i = 1, 20 do
+                local name, value = debug.getupvalue(fn, i)
+                if name == "state" then return value end
+              end
+              error("state upvalue not found")
+            end
+            local state = state_for(paint_handlers.press)
+            local fire = require("smelt.banner").FIRE_PIXELS
+            local top_pad = #state.fire_pixels - #fire
+            local function ink(rows, last)
+              local n = 0
+              for y = 1, last or #rows do
+                n = n + #rows[y]:gsub("%.", "")
+              end
+              return n
+            end
+            local base = #state.fire_pixels - 2
+            local first_ink = ink(state.fire_pixels)
+            local first_upper_ink = ink(state.fire_pixels, base - 1)
+            local frames = 1
+            while state.sim do
+              local timer = table.remove(timers)
+              assert(timer and not timer.removed, "animation timer missing")
+              timer.fn()
+              frames = frames + 1
+              assert(not state.held, "fire must not read as a held press")
+            end
+            local matches_logo = true
+            for y, row in ipairs(state.fire_pixels) do
+              local want = fire[y - top_pad] or string.rep(".", #row)
+              if row ~= want then matches_logo = false end
+            end
+            return first_ink, first_upper_ink, ink(state.fire_pixels), frames, matches_logo
+            "#,
+        )
+        .eval()
+        .expect("drive launch ignition");
+
+    assert!(first_ink > 0, "the first frame already shows the spark");
+    assert_eq!(
+        first_upper_ink, 0,
+        "the spark starts at the base of the flame"
+    );
+    assert!(first_ink < final_ink);
+    assert!(
+        (8..=16).contains(&frames),
+        "ignition should be brief: {frames}"
+    );
+    assert!(matches_logo);
+}
+
+#[test]
+fn banner_does_not_burn_on_reload() {
+    let lua = unsafe { mlua::Lua::unsafe_new() };
+    load_banner_plugin(&lua, r#"{ kind = "reload" }"#);
+    let timer_count: i64 = lua.load("return #timers").eval().expect("count timers");
+
+    assert_eq!(timer_count, 0);
+}
+
+#[test]
+fn banner_press_while_igniting_takes_over_with_a_held_fire() {
+    let lua = unsafe { mlua::Lua::unsafe_new() };
+    load_banner_plugin(&lua, r#"{ kind = "launch" }"#);
+    let (igniting, held, ignite_cleared): (bool, bool, bool) = lua
+        .load(
+            r#"
+            local function state_for(fn)
+              for i = 1, 20 do
+                local name, value = debug.getupvalue(fn, i)
+                if name == "state" then return value end
+              end
+              error("state upvalue not found")
+            end
+            local state = state_for(paint_handlers.press)
+            local igniting = state.sim.ignite == 1
+            paint_handlers.press()
+            return igniting, state.held, state.sim.ignite == nil
+            "#,
+        )
+        .eval()
+        .expect("press while igniting");
+
+    assert!(igniting);
+    assert!(held);
+    assert!(ignite_cleared);
+}
+
+#[test]
+fn banner_ignition_frames_are_faster_than_a_held_press() {
+    let lua = unsafe { mlua::Lua::unsafe_new() };
+    load_banner_plugin(&lua, r#"{ kind = "launch" }"#);
+    let (ignite_ms, press_ms): (i64, i64) = lua
+        .load(
+            r#"
+            local ignite_ms = timers[#timers].ms
+            paint_handlers.press()
+            return ignite_ms, timers[#timers].ms
+            "#,
+        )
+        .eval()
+        .expect("read frame delays");
+
+    assert!(ignite_ms < press_ms);
+}
+
+#[test]
+fn banner_ignition_calms_into_the_logo_without_a_final_pop() {
+    let lua = unsafe { mlua::Lua::unsafe_new() };
+    load_banner_plugin(&lua, r#"{ kind = "launch" }"#);
+    let (peak_change, last_change, first_delay, last_delay): (i64, i64, i64, i64) = lua
+        .load(
+            r#"
+            local function state_for(fn)
+              for i = 1, 20 do
+                local name, value = debug.getupvalue(fn, i)
+                if name == "state" then return value end
+              end
+              error("state upvalue not found")
+            end
+            local state = state_for(paint_handlers.press)
+            local function diff(a, b)
+              local n = 0
+              for y = 1, #a do
+                for x = 1, #a[y] do
+                  if a[y]:byte(x) ~= b[y]:byte(x) then n = n + 1 end
+                end
+              end
+              return n
+            end
+            local first_delay, last_delay = timers[#timers].ms, 0
+            local prev = state.fire_pixels
+            local peak, last = 0, 0
+            while state.sim do
+              last_delay = timers[#timers].ms
+              table.remove(timers).fn()
+              last = diff(prev, state.fire_pixels)
+              peak = math.max(peak, last)
+              prev = state.fire_pixels
+            end
+            return peak, last, first_delay, last_delay
+            "#,
+        )
+        .eval()
+        .expect("measure ignition smoothness");
+
+    assert!(
+        last_change * 2 < peak_change,
+        "the last step should be far smaller than the biggest: {last_change} vs {peak_change}"
+    );
+    assert!(last_change <= 10, "no sharp snap at the end: {last_change}");
+    assert!(
+        last_delay > first_delay,
+        "frames should slow as the fire settles"
+    );
 }
 
 #[test]

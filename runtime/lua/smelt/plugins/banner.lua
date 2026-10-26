@@ -1,7 +1,8 @@
 -- Empty-state logo decoration + shutdown logo/resume-hint banner.
 --
 -- The splash is a non-focusable transcript decoration centered inside the
--- transcript on zero-message sessions; it tears down on the first turn. On clean shutdown
+-- transcript on zero-message sessions; it tears down on the first turn. The fire
+-- ignites at launch, and burns whenever the logo is pressed. On clean shutdown
 -- the same logo + dimmed version + resume hint print to the scrollback.
 --
 -- The version label is a real buffer so users can select / copy it. Art
@@ -27,6 +28,13 @@ local SIM_TOP_PAD = FIRE_HEADROOM * 2
 local SIM_RAMP_TICKS = 10
 local SIM_COOLDOWN_TICKS = 8
 local SIM_DELAY_MS = 52
+local IGNITE_START_DELAY_MS = 40
+local IGNITE_END_DELAY_MS = 70
+local IGNITE_TICKS = 11
+local IGNITE_SETTLED = 0.85
+local IGNITE_SETTLED_DIFF = 6
+local IGNITE_FREE_TICKS = 2
+local IGNITE_SPREAD_PER_TICK = 0.08
 
 local HEAT = { R = 0.28, O = 0.48, o = 0.66, Y = 0.9 }
 
@@ -207,6 +215,88 @@ local function step_cooldown(sim)
 	return heat_to_pixels(sim, 0, false), false
 end
 
+local function cold_sim()
+	local heat = {}
+	for y = 1, fire_height() do
+		heat[y] = {}
+		for x = 1, fire_width() do
+			heat[y][x] = 0
+		end
+	end
+	return { tick = 0, cooldown = 0, ignite = 0, heat = heat, canonical = canonical_heat() }
+end
+
+local function smoothstep(t)
+	t = math.max(0, math.min(1, t))
+	return t * t * (3 - 2 * t)
+end
+
+-- One tick of the ignition: a spark at the center of the base catches and
+-- spreads outward along it while heat rises from the base with random drift
+-- and loss, so ragged flames lick upward. The shown heat is blended from the
+-- sim toward the logo's fire by a weight that rises smoothly, so the noise dies
+-- away as the flame calms and the last frame is the logo itself. Frames also
+-- slow down as it settles, and the ignition ends as soon as the picture stops
+-- changing much. Returns the pixel rows and whether this was the last frame.
+local function fire_rows(sim, settle)
+	local rows = {}
+	for y = 1, fire_height() do
+		local out = {}
+		for x = 1, fire_width() do
+			out[x] = char_for_heat(sim.heat[y][x] * (1 - settle) + sim.canonical[y][x] * settle)
+		end
+		rows[y] = table.concat(out)
+	end
+	return rows
+end
+
+local function rows_diff(a, b)
+	local n = 0
+	for y = 1, #a do
+		for x = 1, #a[y] do
+			if a[y]:byte(x) ~= b[y]:byte(x) then
+				n = n + 1
+			end
+		end
+	end
+	return n
+end
+
+local function step_ignite(sim)
+	sim.ignite = sim.ignite + 1
+	local width, height = fire_width(), fire_height()
+	local base = SIM_TOP_PAD + #banner.FIRE_PIXELS - 1
+	local center = (width + 1) / 2
+	local reach = sim.ignite * width * IGNITE_SPREAD_PER_TICK
+	local prev = sim.heat
+	local heat = {}
+	for y = 1, height do
+		heat[y] = {}
+		for x = 1, width do
+			local v = 0
+			if y < base then
+				local src = math.max(1, math.min(width, x + math.random(-1, 1)))
+				v = math.max(0, prev[y + 1][src] - (0.04 + 0.2 * math.random()))
+			elseif y == base then
+				local ramp = math.min(1, math.max(0, (reach - math.abs(x - center)) / 3))
+				v = math.min(1, sim.canonical[y][x] * ramp * (0.85 + 0.3 * math.random()))
+			end
+			heat[y][x] = v
+		end
+	end
+	sim.heat = heat
+	local settle = smoothstep((sim.ignite - IGNITE_FREE_TICKS) / (IGNITE_TICKS - IGNITE_FREE_TICKS))
+	sim.delay_ms = math.floor(IGNITE_START_DELAY_MS + (IGNITE_END_DELAY_MS - IGNITE_START_DELAY_MS) * settle + 0.5)
+	local rows = fire_rows(sim, settle)
+	local done = sim.ignite >= IGNITE_TICKS
+		or (settle >= IGNITE_SETTLED and sim.shown ~= nil and rows_diff(rows, sim.shown) <= IGNITE_SETTLED_DIFF)
+	sim.shown = rows
+	if done and settle < 1 then
+		rows = fire_rows(sim, 1)
+	end
+	return rows, done
+end
+
 local function cancel_animation()
 	if state.timer then
 		state.timer:remove()
@@ -254,6 +344,13 @@ local function tick_animation()
 	if state.held then
 		local envelope = math.min(1, state.sim.tick / SIM_RAMP_TICKS)
 		state.fire_pixels = step_sim(state.sim, envelope)
+	elseif state.sim.ignite then
+		local pixels, done = step_ignite(state.sim)
+		state.fire_pixels = pixels
+		if done then
+			state.sim = nil
+			return
+		end
 	else
 		local pixels, done = step_cooldown(state.sim)
 		state.fire_pixels = done and nil or pixels
@@ -262,7 +359,7 @@ local function tick_animation()
 			return
 		end
 	end
-	state.timer = smelt.timer.set(SIM_DELAY_MS, tick_animation)
+	state.timer = smelt.timer.set(state.sim.delay_ms or SIM_DELAY_MS, tick_animation)
 end
 
 local function on_press()
@@ -273,6 +370,8 @@ local function on_press()
 	state.held = true
 	if state.sim then
 		state.sim.cooldown = 0
+		state.sim.ignite = nil
+		state.sim.delay_ms = nil
 	else
 		state.sim = seeded_sim()
 	end
@@ -283,6 +382,16 @@ end
 
 local function on_release()
 	state.held = false
+end
+
+-- Open with the fire already catching: the first frame is the spark, so the
+-- animation starts the moment the splash appears. A press while it burns takes
+-- over like any other press.
+local function start_ignite()
+	state.held = false
+	state.sim = cold_sim()
+	state.fire_pixels = step_ignite(state.sim)
+	state.timer = smelt.timer.set(state.sim.delay_ms, tick_animation)
 end
 
 -- Build the buffer that sits under the logo. Holds the version line plus
@@ -406,7 +515,7 @@ smelt.events.on("session_started", refresh)
 smelt.events.on("input_submit", teardown)
 smelt.events.on("turn_start", teardown)
 smelt.events.on("history", refresh)
-smelt.lifecycle.on_ready(function()
+smelt.lifecycle.on_ready(function(ctx)
 	-- The decoration is transcript-owned, so any transcript resize can make it fit
 	-- or stop fitting without needing screen-position bookkeeping.
 	local t = smelt.win.transcript()
@@ -414,6 +523,9 @@ smelt.lifecycle.on_ready(function()
 		t:on("resized", refresh)
 	end
 	refresh()
+	if ctx and ctx.kind == "launch" and state.decoration then
+		start_ignite()
+	end
 end)
 
 smelt.lifecycle.on_shutdown(function(ctx)
