@@ -9,7 +9,7 @@ expression: frame.text()
   » first line second line third line
   › check: 日 本 語  and café then run the tests a…
   ◌ Stashed (ctrl+s to unstash)
-─ ✿ working… ─────────────────────────────────────
+─ ● … ────────────────────────────────────────────
  next draft
  second draft line
 ──────────────────────────────────────────────────

@@ -69,7 +69,6 @@ struct LiveTurn {
     /// other phases.
     retry_deadline: Option<Instant>,
     tps_samples: Vec<f64>,
-    last_spinner_frame: usize,
 }
 
 impl LiveTurn {
@@ -121,7 +120,6 @@ impl WorkingState {
                     timer: PausedTimer::new(now),
                     retry_deadline,
                     tps_samples: Vec::new(),
-                    last_spinner_frame: usize::MAX,
                 });
                 self.last = None;
             }
@@ -149,7 +147,6 @@ impl WorkingState {
                     timer: PausedTimer::with_elapsed(now, elapsed),
                     retry_deadline,
                     tps_samples: Vec::new(),
-                    last_spinner_frame: usize::MAX,
                 });
                 self.last = None;
             }
@@ -321,16 +318,6 @@ impl WorkingState {
             live.timer.pause(now);
         } else {
             live.timer.resume(now);
-        }
-    }
-
-    pub fn last_spinner_frame(&self) -> Option<usize> {
-        self.live.as_ref().map(|l| l.last_spinner_frame)
-    }
-
-    pub fn set_last_spinner_frame(&mut self, frame: usize) {
-        if let Some(live) = self.live.as_mut() {
-            live.last_spinner_frame = frame;
         }
     }
 
@@ -660,23 +647,6 @@ mod tests {
         clock.advance(Duration::from_millis(200));
         // After resume, elapsed = 100ms pre-pause + 200ms post-resume.
         assert_eq!(s.elapsed(), Some(Duration::from_millis(300)));
-    }
-
-    #[test]
-    fn last_spinner_frame_round_trips_while_live() {
-        let (_clock, mut s) = fixture();
-        assert!(s.last_spinner_frame().is_none());
-        s.begin(TurnPhase::Working);
-        assert_eq!(s.last_spinner_frame(), Some(usize::MAX));
-        s.set_last_spinner_frame(7);
-        assert_eq!(s.last_spinner_frame(), Some(7));
-    }
-
-    #[test]
-    fn set_last_spinner_frame_without_live_is_noop() {
-        let (_clock, mut s) = fixture();
-        s.set_last_spinner_frame(5);
-        assert!(s.last_spinner_frame().is_none());
     }
 
     #[test]

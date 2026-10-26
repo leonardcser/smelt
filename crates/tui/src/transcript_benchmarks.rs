@@ -6344,18 +6344,10 @@ fn canonical_turn_completion_benchmark() {
             );
         }
         let before = app.render_to_frame();
-        let spinner_frames: String = app
-            .lua_probe()
-            .lua
-            .load("return table.concat(smelt.spinner.SPINNER_FRAMES)")
-            .eval()
-            .unwrap();
         assert!(app.working_state().animating);
         assert!(
-            spinner_frames
-                .chars()
-                .any(|glyph| before.text().contains(glyph)),
-            "active prompt must show its spinner"
+            before.text().contains('●'),
+            "active prompt must show its working dot"
         );
 
         let release = (delay_ms > 0).then(|| {
@@ -6380,10 +6372,8 @@ fn canonical_turn_completion_benchmark() {
                 let after = app.render_to_frame();
                 if fixture.is_none() {
                     assert!(
-                        !spinner_frames
-                            .chars()
-                            .any(|glyph| after.text().contains(glyph)),
-                        "completed prompt must remove its spinner"
+                        after.text().contains("done"),
+                        "completed prompt must settle to done"
                     );
                 }
             });

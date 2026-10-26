@@ -1,6 +1,6 @@
 ---
-title: "Plugin UI: overlays, dialogs and statusline"
-description: "Build overlays, dialogs, pickers, resizable splits and statusline segments for the terminal UI of a smelt Lua plugin."
+title: "Plugin UI: overlays, dialogs and bars"
+description: "Build overlays, dialogs, pickers, resizable splits, statusline segments and prompt bar items for the terminal UI of a smelt Lua plugin."
 ---
 
 # UI
@@ -201,23 +201,65 @@ paint:on("drag",    function(ev) ... end)
 paint:on("release", function(ev) ... end)
 ```
 
-## Statusline segments
+## Statusline and prompt bars
 
-Append segments to the statusline. The handler runs on each refresh and returns
-a list of segments.
+The statusline and the two rules around the prompt are bars. A bar holds named
+sources: functions that run on every repaint and return a list of items. smelt
+lays the items out by priority and drops the least important ones when the line
+is narrow.
+
+| Bar | Where | Built-in sources |
+| --- | ----- | ---------------- |
+| `smelt.statusline` | The bottom row | `core` |
+| `smelt.prompt_bar.top` | The rule above the prompt | `pause`, `indicator`, `elapsed`, `retry` on the left; `model`, `tokens`, `cost` on the right |
+| `smelt.prompt_bar.bottom` | The rule below the prompt | None |
 
 ```lua
-local statusline = require("smelt.statusline")
+smelt.statusline.add("clock", function()
+  return { text = os.date("%H:%M"), align_right = true, priority = 2 }
+end)
 
-statusline.add("clock", function()
-  return { {
-    text = os.date(" %H:%M "),
-    style = { fg = { ansi = 245 } },
-    priority = 2,
-    align_right = true,
-  } }
+smelt.prompt_bar.bottom.add("hint", function()
+  return { text = "ctrl+s stash", style = { fg = "Comment" }, align_right = true }
 end)
 ```
 
-`statusline.remove(name)` removes it. Built-in segments keep rendering alongside
-yours.
+A source returns one item or a list of them. Each item is a table:
+
+| Field | Meaning |
+| ----- | ------- |
+| `text` | What to show. Items with empty text are skipped |
+| `runs` | A list of `{ text, style }` pieces instead of `text`, for coloring each character; the pieces drop together |
+| `style` | `fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`; colors are theme group names or `{ r, g, b }` |
+| `priority` | Higher drops first when the line is narrow; `0` (the default) never drops |
+| `align_right` | Pack against the right edge |
+| `separated` | Put a `·` between this item and the previous separated one |
+| `truncatable`, `truncate` | Shrink the text with `…` before dropping it, from the end or the `"middle"` |
+| `selectable` | Include the text in drag-copy (default `true`) |
+
+Neighbouring items get one space between them. The prompt bars draw the rule
+and its edges themselves, so a source only returns what sits on it.
+
+Adding a name that already exists replaces that source where it stood, so
+`add("model", fn)` swaps the model display and keeps its place. `remove(name)`
+drops a source, and `add` returns a `Reg` that removes the one it added.
+`builtin(name)` returns a built-in source, so a replacement can fall back to it
+for the cases it does not draw:
+
+```lua
+local fallback = smelt.prompt_bar.top.builtin("indicator")
+
+smelt.prompt_bar.top.add("indicator", function()
+  if smelt.signal.get("work_state") ~= "working" then return fallback() end
+  return { text = "thinking", style = { fg = "SmeltAccent" }, priority = 1 }
+end)
+
+smelt.prompt_bar.top.remove("cost")
+```
+
+The bar above the prompt repaints on every frame while the agent works, so a
+source can animate from `smelt.time.now_ms()`. After the turn
+ends nothing animates, so a source that keeps moving, like the built-in
+`indicator` cooling its dot, repaints with a short `smelt.timer`. A source that
+depends on state of its own calls `invalidate()` on its bar when that state
+changes. A failing source is reported on stderr and skipped.

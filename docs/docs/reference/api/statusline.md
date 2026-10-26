@@ -14,17 +14,27 @@ The statusline at the bottom of the screen. Register named sources with `smelt.s
 ## `smelt.statusline.add`
 
 ```lua
-fun(name: string, handler: fun(): smelt.statusline.Item[]?): smelt.Reg
+fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
 ```
 
-Types: [`smelt.statusline.Item`](types.md#smeltstatuslineitem), [`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.bar.Item`](types.md#smeltbaritem), [`smelt.Reg`](types.md#smeltreg)
 
-── source registry ─────────────────────────────────────────────────
 Add a named source of statusline items. `handler` runs on every repaint and
-returns a list of items; errors are reported on stderr and skip the source.
-Adding a name that already exists replaces that source in place, keeping its
-position. Returns a `Reg` that removes this source, unless a later `add` with
-the same name has replaced it.
+returns a list of items (see `smelt.bar.Item`); errors are reported on
+stderr and skip the source. Adding a name that already exists replaces that
+source in place, keeping its position. Returns a `Reg` that removes this
+source, unless a later `add` with the same name has replaced it.
+
+## `smelt.statusline.builtin`
+
+```lua
+fun(name: string): (fun(): smelt.bar.Item[]?)?
+```
+
+Types: [`smelt.bar.Item`](types.md#smeltbaritem)
+
+The built-in `core` source, so a replacement can wrap it instead of
+dropping it.
 
 ## `smelt.statusline.invalidate`
 

@@ -3733,16 +3733,9 @@ mod checkpoint_tests {
         let mut app = large_saved_session_app(128);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
-        // The harness freezes animation for snapshots. Use the production spinner
-        // against the virtual wall clock for this frame-progress assertion.
-        app.run_lua_result(
-            r#"
-            smelt.time.now_ms = function() return _G.animation_now or 0 end
-            package.loaded["smelt.spinner"] = nil
-            smelt.spinner = require("smelt.spinner")
-        "#,
-        )
-        .unwrap();
+        // The harness freezes animation for snapshots. Animate against the virtual
+        // wall clock for this frame-progress assertion.
+        app.animate_with_virtual_clock();
         let mut releases = Vec::new();
         for _ in 0..2 {
             let (started, start) = std::sync::mpsc::channel();
@@ -3763,31 +3756,24 @@ mod checkpoint_tests {
         app.press(crossterm::event::KeyCode::Enter);
         app.drive_lua_tasks();
         assert!(app.app.pending_rewind.is_some());
-        let mut glyphs = std::collections::HashSet::new();
+        let mut dots = std::collections::HashSet::new();
+        let mut last_frame = String::new();
         for _ in 0..8 {
             let frame_started = std::time::Instant::now();
-            app.feed_one(crate::event_source::SourceEvent::Tick(150));
-            app.app
-                .lua
-                .lua()
-                .globals()
-                .set(
-                    "animation_now",
-                    engine::clock::unix_time_ms(app.app.core.clock.as_ref()),
-                )
-                .unwrap();
-            app.app.publish_diff_signals();
-            let frame = app.render_unsettled_silent().text();
-            let glyph: String = app.eval_lua("return smelt.spinner.glyph()").unwrap();
-            assert!(frame.contains("preparing rewind"), "{frame}");
-            assert!(frame.contains(&glyph), "{frame}");
-            glyphs.insert(glyph);
+            let rendered = app.advance_animation(150);
+            let frame = rendered.text();
+            let dot = app
+                .working_dot_style(&rendered)
+                .expect("styled working dot");
+            assert!(frame.contains('●'), "{frame}");
+            dots.insert(dot);
             assert!(frame_started.elapsed() < Duration::from_millis(250));
+            last_frame = frame;
         }
-        assert_eq!(
-            glyphs.len(),
-            4,
-            "all spinner frames must paint while preparation waits"
+        assert!(last_frame.contains("preparing rewind"), "{last_frame}");
+        assert!(
+            dots.len() >= 4,
+            "the coal must keep breathing while preparation waits"
         );
         for (key, title) in [(3, "debug"), (12, "performance")] {
             let started = std::time::Instant::now();

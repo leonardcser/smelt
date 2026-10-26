@@ -122,13 +122,23 @@ impl LuaRuntime {
             ApiClassification::Supported,
         );
         record_module_doc(
-            "smelt.spinner",
-            "Shared spinner glyph and traveling-wave grayscale color for plugin animations. Frames derive from wall-clock time, so every animation in every process stays in lockstep. UiHost-only.",
+            "smelt.statusline",
+            "The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority. `add` returns a `Reg` that removes the source. UiHost-only.",
             ApiClassification::Supported,
         );
         record_module_doc(
-            "smelt.statusline",
-            "The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority. `add` returns a `Reg` that removes the source. UiHost-only.",
+            "smelt.bar",
+            "The item shape shared by smelt's bars: the statusline and the rules above and below the prompt. A bar is a set of named sources; each repaint calls every source and lays the returned items out by priority. The fields are documented under `smelt.bar.Item` in Types.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.prompt_bar.top",
+            "The rule above the prompt, which holds the working indicator, model, tokens and cost. Register named sources with `smelt.prompt_bar.top.add(name, handler)`, or replace a built-in one by reusing its name. `add` returns a `Reg` that removes the source. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.prompt_bar.bottom",
+            "The rule below the prompt, empty by default. Register named sources with `smelt.prompt_bar.bottom.add(name, handler)`. `add` returns a `Reg` that removes the source. UiHost-only.",
             ApiClassification::Supported,
         );
         record_module_doc(
@@ -299,33 +309,8 @@ pub(super) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
         Color::Magenta => Some(13),
         Color::Cyan => Some(14),
         Color::White => Some(15),
-        Color::Rgb { r, g, b } => Some(rgb_to_ansi256(r, g, b)),
+        Color::Rgb { r, g, b } => Some(smelt_core::style::rgb_to_ansi256(r, g, b)),
     }
-}
-
-/// Nearest ANSI 256-color index for an sRGB triple. Uses the canonical
-/// xterm 6×6×6 cube (0/95/135/175/215/255) plus the 24-step greyscale
-/// ramp.
-pub(super) fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
-    if r == g && g == b {
-        if r < 8 {
-            return 16;
-        }
-        if r > 248 {
-            return 231;
-        }
-        return 232 + ((r - 8) / 10);
-    }
-    fn band(c: u8) -> u8 {
-        let levels = [0u8, 95, 135, 175, 215, 255];
-        levels
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, v)| (c as i32 - **v as i32).abs())
-            .map(|(i, _)| i as u8)
-            .unwrap_or(0)
-    }
-    16 + 36 * band(r) + 6 * band(g) + band(b)
 }
 
 #[cfg(test)]
@@ -339,18 +324,5 @@ mod tests {
         assert_eq!(color_to_ansi(Color::White), Some(15));
         assert_eq!(color_to_ansi(Color::Reset), None);
         assert_eq!(color_to_ansi(Color::AnsiValue(208)), Some(208));
-    }
-
-    #[test]
-    fn rgb_to_ansi256_greyscale_ramp() {
-        // Mid-grey snaps into the 232-255 ramp.
-        let v = rgb_to_ansi256(128, 128, 128);
-        assert!((232..=255).contains(&v), "got {v}");
-    }
-
-    #[test]
-    fn rgb_to_ansi256_pure_red_hits_cube_corner() {
-        // 255,0,0 sits at the (5,0,0) corner of the 6×6×6 cube: 16+36*5 = 196.
-        assert_eq!(rgb_to_ansi256(255, 0, 0), 196);
     }
 }

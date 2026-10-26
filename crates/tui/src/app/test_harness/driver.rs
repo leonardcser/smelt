@@ -132,6 +132,53 @@ impl TestApp {
         self.app.ui.flushed_snapshot()
     }
 
+    /// Run Lua animations against the virtual wall clock. The harness
+    /// otherwise freezes `smelt.time.now_ms` at 0 for snapshot determinism.
+    pub fn animate_with_virtual_clock(&mut self) {
+        self.run_lua_result("smelt.time.now_ms = function() return _G.animation_now or 0 end")
+            .unwrap();
+    }
+
+    /// Advance the virtual clock by `ms`, publish it to Lua animations and
+    /// render one frame without waiting for transcript hydration.
+    pub fn advance_animation(&mut self, ms: u64) -> crate::smelt_edit::SnapshotFrame {
+        self.feed_one(SourceEvent::Tick(ms));
+        self.app
+            .lua
+            .lua()
+            .globals()
+            .set(
+                "animation_now",
+                engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
+            )
+            .unwrap();
+        self.app.publish_diff_signals();
+        self.render_unsettled_silent()
+    }
+
+    /// Style of the working indicator's dot: the cell after the prompt bar's
+    /// left edge on the first rule row of `frame`.
+    pub fn working_dot_style(&self, frame: &crate::smelt_edit::SnapshotFrame) -> Option<String> {
+        self.bar_cell_style(frame, 2)
+    }
+
+    /// Style of the cell at `col` on the first rule row of `frame`.
+    pub fn bar_cell_style(
+        &self,
+        frame: &crate::smelt_edit::SnapshotFrame,
+        col: usize,
+    ) -> Option<String> {
+        let text = frame.text();
+        let row = text.lines().position(|line| line.starts_with('─'))?;
+        frame.styles_text().lines().skip(1).find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let y: usize = parts.next()?.parse().ok()?;
+            let x: usize = parts.next()?.parse().ok()?;
+            let len: usize = parts.next()?.parse().ok()?;
+            (y == row && x <= col && col < x + len).then(|| parts.collect::<Vec<_>>().join(" "))
+        })
+    }
+
     fn settle_transcript_hydration(&mut self, out: &mut impl std::io::Write) {
         const HYDRATION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
         const HYDRATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);

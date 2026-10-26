@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * outline crates/core/src/lsp.rs, function containing "request", depth 2               14:37:03
   2 symbols
@@ -84,7 +84,7 @@ expression: text
 
 
 
-─ ✿ working… ───────────────────────────────────────────────────────────────────────────────────
+─ ● … ──────────────────────────────────────────────────────────────────────────────────────────
 
 ────────────────────────────────────────────────────────────────────────────────────────────────
  ○ normal                                                                               1:1 100%

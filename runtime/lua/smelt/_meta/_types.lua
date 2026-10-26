@@ -14,6 +14,32 @@
 ---@class smelt.Reg
 ---@field remove fun(): boolean Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone.
 
+--- One piece of bar content. Items are laid out left to right, with
+--- `align_right` items packed against the right edge. Give an item either
+--- `text`, or `runs` to color its characters individually. Neighbouring items
+--- get one space between them, and none between two items that both carry a
+--- background. When the bar is too narrow, whole items drop from the highest
+--- `priority` down, and truncatable items of the highest remaining priority
+--- shrink first. An item whose text is empty is skipped.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.bar.Item
+---@field text? string Text to show. Ignored when `runs` is set.
+---@field runs? smelt.bar.Run[] Consecutive styled pieces of one item; they drop together and are never truncated.
+---@field style? smelt.buf.MarkOpts Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
+---@field priority? integer Drop order when space runs out; higher values drop first, and 0 is never dropped. Defaults to 0.
+---@field separated? boolean Draw a `·` between this item and the previous separated item on the same side.
+---@field truncatable? boolean Allow shrinking this item before dropping it.
+---@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
+---@field align_right? boolean Pack against the right edge instead of the left.
+---@field selectable? boolean Include the text in drag-copy. Defaults to true.
+
+--- A styled piece of a `runs` item.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.bar.Run
+---@field text string Text to show.
+---@field style? smelt.buf.MarkOpts Highlight applied to the text.
+---@field selectable? boolean Include the text in drag-copy. Defaults to the item's setting.
+
 --- Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.buf.Buf
@@ -741,21 +767,6 @@
 ---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
 ---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
 
---- One piece of statusline content. Items are laid out left to right, with
---- `align_right` items packed against the right edge. When the line is too
---- narrow, whole items drop from the highest `priority` down, and truncatable
---- items of the highest remaining priority shrink first.
---- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.statusline.Item
----@field text string Text to show.
----@field style? smelt.buf.MarkOpts Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
----@field priority? integer Drop order when space runs out; higher values drop first. Defaults to 0.
----@field separated? boolean Draw a separator between this item and the previous separated item on the same side.
----@field truncatable? boolean Allow shrinking this item before dropping it.
----@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
----@field align_right? boolean Pack against the right edge instead of the left.
----@field selectable? boolean Include the text in drag-copy. Defaults to true.
-
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.theme.ColorDecl
@@ -1200,7 +1211,7 @@
 
 --- Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"spinner_frame"|"task_label"|"tokens_used"|"tps"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"task_label"|"tokens_used"|"tps"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

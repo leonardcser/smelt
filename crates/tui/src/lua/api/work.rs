@@ -1,7 +1,6 @@
-//! `smelt.work` - push background work-state tokens. Distinct from
-//! `smelt.spinner`, which is just the shared animation primitive: this
-//! module is the engine/state-machine surface. Tokens here drive the
-//! reactive `work_*` signals and the prompt top-bar indicator. UiHost-only.
+//! `smelt.work` - push background work-state tokens. This module is the
+//! engine/state-machine surface: tokens here drive the reactive `work_*`
+//! signals and the prompt top-bar indicator. UiHost-only.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;

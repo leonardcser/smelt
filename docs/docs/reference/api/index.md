@@ -9,7 +9,7 @@ description: "Reference for every namespace of the smelt Lua API: commands, keym
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 93 namespace(s), 450 function(s), 111 class(es), 13 alias(es).
+**Coverage:** 95 namespace(s), 458 function(s), 112 class(es), 13 alias(es).
 
 Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).
 
@@ -64,6 +64,7 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 ## User interface
 
 - [`smelt.banner`](banner.md): Startup banner extension point.
+- [`smelt.bar`](bar.md): The item shape shared by smelt's bars: the statusline and the rules above and below the prompt.
 - [`smelt.buf`](buf.md) (UI only): Buffer handle constructor. Advanced.
 - [`smelt.clipboard`](clipboard.md): Read and write the system clipboard.
 - [`smelt.confirm`](confirm.md) (UI only): Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution. 1 advanced function(s).
@@ -76,7 +77,8 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.paint`](paint.md) (UI only): Register Lua callbacks against custom paint regions. Advanced.
 - [`smelt.picker`](picker.md) (UI only): Picker facade. 1 advanced function(s).
 - [`smelt.prompt`](prompt.md) (some UI only): The main editable input surface: win handle, text get/set, and cursor control.
-- [`smelt.spinner`](spinner.md): Shared spinner glyph and traveling-wave grayscale color for plugin animations.
+- [`smelt.prompt_bar.bottom`](prompt_bar_bottom.md) (UI only): The rule below the prompt, empty by default.
+- [`smelt.prompt_bar.top`](prompt_bar_top.md) (UI only): The rule above the prompt, which holds the working indicator, model, tokens and cost.
 - [`smelt.statusline`](statusline.md) (UI only): The statusline at the bottom of the screen.
 - [`smelt.terminal`](terminal.md) (UI only): Terminal integration helpers.
 - [`smelt.theme`](theme.md) (some UI only): List bundled colorschemes, or apply, read, and override the active one.

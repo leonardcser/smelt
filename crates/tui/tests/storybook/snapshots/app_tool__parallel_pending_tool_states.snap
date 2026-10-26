@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * explore ×2                                           14:37:03
   read_file a.rs
@@ -10,7 +10,7 @@ expression: text
 
 
 
-─ ✿ working… ───────────────────────────────────────────────────
+─ ● … ──────────────────────────────────────────────────────────
 
 ────────────────────────────────────────────────────────────────
  ○ normal                                               1:1 100%

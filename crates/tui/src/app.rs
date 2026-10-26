@@ -2232,7 +2232,7 @@ impl TuiApp {
     }
 
     /// Publish prompt, mode, keymap, transcript navigation, time, notification,
-    /// spinner, and work-state signals whenever their values change.
+    /// and work-state signals whenever their values change.
     pub(crate) fn publish_diff_signals(&mut self) {
         let keymap_pending = self.keymap_pending_cell_value();
         self.core
@@ -2261,14 +2261,6 @@ impl TuiApp {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         self.core.signals.publish_if_changed("now", now_secs);
-        let frame = self
-            .working
-            .elapsed()
-            .filter(|_| self.working.is_animating())
-            .map(|e| smelt_core::content::spinner_frame_index(e) as u8)
-            .unwrap_or(0);
-        self.core.signals.publish_if_changed("spinner_frame", frame);
-
         let tps = self.working.display_tps().unwrap_or(0.0);
         self.core.signals.publish_if_changed("tps", tps);
 

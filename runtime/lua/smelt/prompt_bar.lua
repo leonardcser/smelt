@@ -3,13 +3,18 @@
 -- Default `M.aux_win` owns the stable one-row gap between transcript and
 -- prompt chrome. It renders either the discovery tip or a blank row;
 -- notification overlays use the same row with higher z. `M.top_win` renders
--- queued messages, a stash marker, and a horizontal-rule bar with a
--- left-aligned working indicator (traveling wave) and a right-aligned
--- model/tokens/cost group. `M.bottom_win` renders a separator-only bar row.
+-- queued messages, a stash marker, and a horizontal-rule bar. `M.bottom_win`
+-- renders a horizontal-rule bar.
 --
--- Plugins can replace any window's renderer via
--- `prompt_bar.aux_win:set_renderer(fn)`, `top_win:set_renderer(fn)` /
--- `bottom_win:set_renderer(fn)`, or replace the windows entirely from a
+-- The rule row of the top and bottom windows is a bar (`smelt._bar`, rule
+-- layout): a registry of named sources whose items sit in the rule, left items
+-- from the left edge and right items from the right edge. The built-in sources
+-- (`pause`, `indicator`, `elapsed`, `retry` on the left; `model`, `tokens`,
+-- `cost` on the right) are registered below. Plugins add, replace or remove
+-- sources with `smelt.prompt_bar.top.add` / `.remove` and the matching
+-- `smelt.prompt_bar.bottom` functions. To change more than the rule, replace a
+-- window's renderer with `aux_win:set_renderer(fn)`, `top_win:set_renderer(fn)`
+-- or `bottom_win:set_renderer(fn)`, or replace the windows entirely from a
 -- custom `smelt.ui.layout.set` composer.
 
 local bar = require("smelt._bar")
@@ -25,10 +30,7 @@ local INDICATOR_PRIORITY = 1
 local LABEL_PRIORITY = 2
 local SECONDARY_PRIORITY = 3
 local OPTIONAL_PRIORITY = 4
-local DEFAULT_BAR_STYLE = { fg = "SmeltSeparator" }
 local COMMENT_DIM_STYLE = { fg = "Comment", dim = true }
-local NORMAL_BOLD_STYLE = { fg = "Normal", bold = true }
-local indicator_cache = { spans = {}, pool = {}, count = 0 }
 local renderer_subscriptions = {}
 
 local function invalidate_on(win, names)
@@ -172,153 +174,363 @@ local function tip_row(width)
   return { text = text, highlights = highlights }
 end
 
--- ── working indicator (top bar left spans) ───────────────────────────
+-- ── bars ────────────────────────────────────────────────────────────
+
+local function resize_style(position)
+  if not smelt.signal.get("prompt_resize_active") then return nil end
+  local chrome = smelt.signal.get("prompt_resize_chrome") or ""
+  if chrome == position or chrome == "both" then
+    return { hl_group = "SmeltResizeHandle" }
+  end
+  return nil
+end
+
+local top_bar = bar.new({
+  name = "smelt.prompt_bar.top",
+  layout = "rule",
+  bar_style = function() return resize_style("top") end,
+})
+local bottom_bar = bar.new({
+  name = "smelt.prompt_bar.bottom",
+  layout = "rule",
+  bar_style = function() return resize_style("bottom") end,
+})
+
+M.top = {}
+M.bottom = {}
+smelt.prompt_bar = M
+
+local builtin = {}
+
+--- The built-in source registered under `name` (`pause`, `indicator`,
+--- `elapsed`, `retry`, `model`, `tokens` or `cost`), or nil. A replacement
+--- source can call it to keep the default for the cases it does not draw.
+---@tier ui_host
+---@type fun(name: string): (fun(): smelt.bar.Item[]?)?
+function smelt.prompt_bar.top.builtin(name)
+  return builtin[name]
+end
+
+-- Repaint after plugin-owned state changes that are not represented by a
+-- built-in signal. Adding, replacing, and removing sources invalidates
+-- automatically.
+---@tier ui_host
+---@type fun()
+function smelt.prompt_bar.top.invalidate()
+  bar.invalidate(top_bar)
+end
+
+--- Add a named source of items to the rule of the bar above the prompt.
+--- `handler` runs on every repaint and returns a list of items (see
+--- `smelt.bar.Item`); errors are reported on stderr and skip the source. The
+--- built-in sources are `pause`, `indicator`, `elapsed`, `retry`, `model`,
+--- `tokens` and `cost`; adding one of those names replaces it in place, keeping
+--- its position. Returns a `Reg` that removes this source, unless a later `add`
+--- with the same name has replaced it.
+---@tier ui_host
+---@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+function smelt.prompt_bar.top.add(name, handler)
+  return bar.add(top_bar, name, handler)
+end
+
+--- Remove every source named `name` from the bar above the prompt.
+---@tier ui_host
+---@type fun(name: string)
+function smelt.prompt_bar.top.remove(name)
+  bar.remove(top_bar, name)
+end
+
+-- Repaint after plugin-owned state changes that are not represented by a
+-- built-in signal. Adding, replacing, and removing sources invalidates
+-- automatically.
+---@tier ui_host
+---@type fun()
+function smelt.prompt_bar.bottom.invalidate()
+  bar.invalidate(bottom_bar)
+end
+
+--- Add a named source of items to the rule of the bar below the prompt. It has
+--- no built-in sources, so the rule stays plain until a plugin adds one. Same
+--- contract as `smelt.prompt_bar.top.add`.
+---@tier ui_host
+---@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+function smelt.prompt_bar.bottom.add(name, handler)
+  return bar.add(bottom_bar, name, handler)
+end
+
+--- Remove every source named `name` from the bar below the prompt.
+---@tier ui_host
+---@type fun(name: string)
+function smelt.prompt_bar.bottom.remove(name)
+  bar.remove(bottom_bar, name)
+end
+
+-- ── built-in sources: working indicator (left) ───────────────────────
 --
--- Reads work_* signals published by the engine. Returns a list of bar
--- spans suitable for `_bar.compose`. Each character of the indicator's
--- "glyph + label" gets its own span so the traveling wave can paint a
--- per-cell gradient.
+-- Read the work_* signals published by the engine. While the agent works the
+-- glyph and label share one traveling wave, one cell per character.
 
-local function indicator_span(text, style, priority, selectable)
-  local index = indicator_cache.count + 1
-  indicator_cache.count = index
-  local span = indicator_cache.pool[index]
-  if not span then
-    span = {}
-    indicator_cache.pool[index] = span
-  end
-  span.text = text
-  span.style = style
-  span.priority = priority
-  span.selectable = selectable
-  indicator_cache.spans[index] = span
-  return span
-end
-
-local function finish_indicator()
-  for index = indicator_cache.count + 1, #indicator_cache.spans do
-    indicator_cache.spans[index] = nil
-  end
-  return indicator_cache.spans
-end
-
-local function indicator_spans(opts)
-  local bar_style = (opts and opts.bar_style) or DEFAULT_BAR_STYLE
-  local pause_status = smelt.signal.get("auto_continue_status")
-  if pause_status then
-    local reason = pause_status.kind == "quota" and "quota exceeded"
-      or pause_status.kind == "rate_limited" and "rate limited" or "interrupted"
-    local action = "paused"
-    if pause_status.phase == "waiting_for_idle" then
-      action = "resuming when idle"
-    elseif pause_status.phase == "scheduled" then
-      local at = math.floor(pause_status.next_attempt_at_ms / 1000)
-      local today = smelt.time.format(math.floor(smelt.time.now_ms() / 1000), "%Y-%m-%d")
-      local format = smelt.time.format(at, "%Y-%m-%d") == today and "%H:%M" or "%b %d %H:%M"
-      local time = smelt.time.format(at, format)
-      if time then action = "resuming at " .. time end
-    end
-    return {
-      { text = "─", style = bar_style, priority = INDICATOR_PRIORITY, selectable = false },
-      { text = " " .. reason, style = COMMENT_DIM_STYLE, priority = INDICATOR_PRIORITY },
-      { text = " ·", style = bar_style, priority = LABEL_PRIORITY, selectable = false },
-      { text = " " .. action, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY },
-    }
-  end
+-- The live work state, or nil when idle or while the auto-continue pause
+-- message owns the left side.
+local function work_state()
+  if smelt.signal.get("auto_continue_status") then return nil end
   local state = smelt.signal.get("work_state")
   if not state or state == "idle" then return nil end
+  return state
+end
 
-  indicator_cache.count = 0
+builtin.pause = function()
+  local pause = smelt.signal.get("auto_continue_status")
+  if not pause then return nil end
+  local reason = pause.kind == "quota" and "quota exceeded"
+    or pause.kind == "rate_limited" and "rate limited" or "interrupted"
+  local action = "paused"
+  if pause.phase == "waiting_for_idle" then
+    action = "resuming when idle"
+  elseif pause.phase == "scheduled" then
+    local at = math.floor(pause.next_attempt_at_ms / 1000)
+    local today = smelt.time.format(math.floor(smelt.time.now_ms() / 1000), "%Y-%m-%d")
+    local format = smelt.time.format(at, "%Y-%m-%d") == today and "%H:%M" or "%b %d %H:%M"
+    local time = smelt.time.format(at, format)
+    if time then action = "resuming at " .. time end
+  end
+  return {
+    { text = reason, style = COMMENT_DIM_STYLE, priority = INDICATOR_PRIORITY, separated = true },
+    { text = action, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY, separated = true },
+  }
+end
+
+-- One coal says what the turn is doing. It catches when the turn starts or
+-- resumes and then breathes. It heats with tool calls: each call bumps it, it
+-- keeps warming for as long as a call is pending, and it cools back to a dull
+-- red once nothing is running. While a failed request waits to retry it is
+-- banked low and warms as the wait runs down. A dialog that pauses the turn
+-- leaves it still and dim in its color. A finished turn cools it to gray over a
+-- second, and an interrupted one, which you asked for, goes gray at once. The
+-- label types in white-hot whenever it changes, rests in gray, and a hammer
+-- sweep runs along it on repeat.
+local COAL = "\u{25CF}"
+local MIN_HEAT = 0.05
+local CALL_BUMP = 0.15
+local RISE_SECS = 8
+local HEAT_FADE_MS = 8000
+local HOT_STOPS = { { 120, 30, 20 }, { 230, 90, 20 }, { 255, 190, 60 }, { 255, 245, 220 } }
+local COLD_STOPS = { { 150, 60, 40 }, { 190, 80, 20 }, { 170, 100, 10 }, { 110, 60, 10 } }
+local BREATH_MS = 1600
+local IGNITE_MS = 450
+local COOL_MS = 1000
+local TYPE_MS = 45
+local FIRST_SWEEP_MS = 1600
+local SWEEP_MS = 2200
+local SWEEP_STEP_MS = 110
+local FLARE_COOL_MS = 650
+local PAUSED_LEVEL = 0.4
+
+local function mix(a, b, t)
+  t = math.max(0, math.min(t, 1))
+  return {
+    math.floor(a[1] + (b[1] - a[1]) * t),
+    math.floor(a[2] + (b[2] - a[2]) * t),
+    math.floor(a[3] + (b[3] - a[3]) * t),
+  }
+end
+
+local function ground() return smelt.theme.is_light() and { 252, 251, 249 } or { 23, 23, 28 } end
+-- The gray a finished coal settles to. The cool-down ends on exactly this color.
+local function ash() return smelt.theme.is_light() and { 168, 164, 158 } or { 96, 96, 108 } end
+
+-- How hot the coal burns, from 0 to 1. A bump from each tool call is folded in
+-- when the call starts or ends, and heat then rises while a call is pending and
+-- decays when none is.
+local heat_level, heat_at, pending_calls = MIN_HEAT, 0, 0
+
+local function warmth(now)
+  if pending_calls > 0 then
+    return math.min(heat_level + (now - heat_at) / 1000 / RISE_SECS, 1)
+  end
+  return MIN_HEAT + (heat_level - MIN_HEAT) * math.exp(-(now - heat_at) / HEAT_FADE_MS)
+end
+
+local function settle(now)
+  heat_level, heat_at = warmth(now), now
+end
+
+smelt.events.on("turn_start", function()
+  heat_level, heat_at, pending_calls = MIN_HEAT, smelt.time.now_ms(), 0
+end)
+
+smelt.events.on("tool_start", function()
+  local now = smelt.time.now_ms()
+  settle(now)
+  heat_level = math.min(heat_level + CALL_BUMP, 1)
+  pending_calls = pending_calls + 1
+end)
+
+smelt.events.on("tool_end", function()
+  settle(smelt.time.now_ms())
+  pending_calls = math.max(pending_calls - 1, 0)
+end)
+
+local function heat()
+  local stops = smelt.theme.is_light() and COLD_STOPS or HOT_STOPS
+  local at = warmth(smelt.time.now_ms()) * (#stops - 1)
+  local i = math.min(math.floor(at) + 1, #stops - 1)
+  return mix(stops[i], stops[i + 1], at - (i - 1))
+end
+
+local function coal_item(color)
+  return {
+    runs = { { text = COAL, style = { fg = color, bold = true } } },
+    priority = INDICATOR_PRIORITY,
+    selectable = false,
+  }
+end
+
+local function breath(now)
+  return 0.45 + 0.55 * (0.5 + 0.5 * math.sin(now / BREATH_MS * 2 * math.pi))
+end
+
+-- The coal catches when the turn starts or resumes, then breathes.
+local started
+local function working_coal(now)
+  started = started or now
+  local p = math.min((now - started) / IGNITE_MS, 1)
+  return coal_item(mix(ground(), heat(), 0.1 + (breath(now) - 0.1) * p))
+end
+
+-- A failed request waits out a backoff before the next attempt: the coal is
+-- banked low and warms as the wait runs down.
+local backoff
+local function banked_coal()
+  local remaining = smelt.signal.get("work_retry_remaining_ms") or 0
+  backoff = math.max(backoff or 0, remaining)
+  local progress = backoff > 0 and 1 - remaining / backoff or 0
+  return coal_item(mix(ground(), heat(), 0.15 + 0.45 * progress))
+end
+
+-- A finished turn cools to gray; the timer repaints it, since nothing else
+-- animates once the turn is over.
+local done_at, cooling
+smelt.signal.subscribe("work_state", function(state)
+  if state == "done" or state == "interrupted" or state == "idle" then
+    settle(smelt.time.now_ms())
+    pending_calls = 0
+  end
+  if state ~= "done" then
+    done_at = nil
+    return
+  end
+  done_at = smelt.time.now_ms()
+  if cooling then cooling:remove() end
+  cooling = smelt.timer.every(50, function() bar.invalidate(top_bar) end)
+  smelt.timer.set(COOL_MS + 100, function()
+    cooling:remove()
+    cooling = nil
+  end)
+end)
+
+-- How far letter `i` is flared toward white, from 0 (resting gray) to 1: it
+-- lands white-hot as it types, and a sweep runs along the word on repeat.
+local function flare(i, age)
+  local flared = math.exp(-math.max(age - (i - 1) * TYPE_MS, 0) / FLARE_COOL_MS)
+  local reach = age - FIRST_SWEEP_MS - (i - 1) * SWEEP_STEP_MS
+  if reach >= 0 then
+    flared = math.max(flared, math.exp(-(reach % SWEEP_MS) / FLARE_COOL_MS))
+  end
+  return flared
+end
+
+local shown, shown_since
+local function typed_label(label, now)
+  if label ~= shown then shown, shown_since = label, now end
+  local light = smelt.theme.is_light()
+  local rest = light and 120 or 150
+  local rest_color = { rest, rest, rest }
+  local flash = light and { 40, 12, 0 } or { 255, 252, 240 }
+  local age = now - shown_since
+  local typed = math.min(#label, math.floor(age / TYPE_MS))
+  local runs = {}
+  for i = 1, #label + 1 do
+    if i <= typed or i == #label + 1 then
+      local landed = i <= typed or age >= #label * TYPE_MS
+      runs[#runs + 1] = {
+        text = i <= #label and label:sub(i, i) or "\u{2026}",
+        style = { fg = mix(rest_color, flash, landed and flare(i, age) or 0), bold = true },
+      }
+    end
+  end
+  return { runs = runs, priority = LABEL_PRIORITY }
+end
+
+builtin.indicator = function()
+  local state = work_state()
+  if not state then return nil end
+
   local label = smelt.signal.get("work_label") or ""
-  local elapsed_ms = smelt.signal.get("work_elapsed_ms") or 0
-  local retry_attempt = smelt.signal.get("work_retry_attempt") or 0
-  local retry_remaining_ms = smelt.signal.get("work_retry_remaining_ms") or 0
-
   if label == "" then
     if state == "done" then label = "done"
     elseif state == "interrupted" then label = "interrupted"
     elseif state == "paused" then label = "paused"
+    elseif state == "retrying" or state == "working" or state == "busy" then label = "working"
     end
   end
+  local now = smelt.time.now_ms()
 
-  local active = state == "working" or state == "retrying" or state == "busy"
-  if active and label ~= "" then label = label .. "\u{2026}" end
+  if state == "working" or state == "busy" or state == "retrying" then
+    local mark
+    if state == "retrying" then
+      started = nil
+      mark = banked_coal()
+    else
+      backoff = nil
+      mark = working_coal(now)
+    end
+    return { mark, typed_label(label, now) }
+  end
 
-  local glyph
-  if active or state == "paused" then
-    glyph = smelt.spinner.glyph()
+  started, backoff, shown = nil, nil, nil
+  local mark
+  if state == "paused" then
+    mark = coal_item(mix(ground(), heat(), PAUSED_LEVEL))
+  elseif state == "done" then
+    local cool = done_at and math.min((now - done_at) / COOL_MS, 1) or 1
+    mark = coal_item(mix(heat(), ash(), cool))
   else
-    glyph = ""
+    mark = coal_item(ash())
   end
-
-  local wave_x = 0
-  local wave_t, wave_low, wave_high
-  if active then wave_t, wave_low, wave_high = smelt.spinner.wave_state() end
-  local function add_wave_text(text, priority, selectable_start)
-    for _, codepoint in utf8.codes(text) do
-      local span = indicator_cache.pool[indicator_cache.count + 1]
-      local style = span and span.wave_style
-      if not style then
-        style = { fg = { 0, 0, 0 }, bold = true }
-        if not span then span = {} end
-        span.wave_style = style
-        indicator_cache.pool[indicator_cache.count + 1] = span
-      end
-      local level = smelt.spinner.wave_level_at(wave_x, wave_t, wave_low, wave_high)
-      style.fg[1], style.fg[2], style.fg[3] = level, level, level
-      indicator_span(
-        utf8.char(codepoint),
-        style,
-        priority,
-        selectable_start and wave_x >= selectable_start)
-      wave_x = wave_x + 1
-    end
+  local items = { mark }
+  if label ~= "" then
+    items[#items + 1] = { text = label, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY }
   end
-
-  -- Leading `─` so the indicator sits one cell in from the edge. It drops with
-  -- the compact spinner so narrow bars fall back to a clean rule instead of an
-  -- orphan edge cell.
-  indicator_span("\u{2500}", bar_style, INDICATOR_PRIORITY, false)
-
-  if active then
-    if glyph ~= "" then add_wave_text(" " .. glyph, INDICATOR_PRIORITY, nil) end
-    if label ~= "" then add_wave_text(" " .. label, LABEL_PRIORITY, 3) end
-  else
-    local style = NORMAL_BOLD_STYLE
-    if state == "paused" or state == "done" or state == "interrupted" then
-      style = COMMENT_DIM_STYLE
-    end
-    if glyph ~= "" then
-      indicator_span(" " .. glyph, style, INDICATOR_PRIORITY, false)
-    end
-    if label ~= "" then
-      indicator_span(" " .. label, style, LABEL_PRIORITY, nil)
-    end
-  end
-
-  -- Duration suppressed for `interrupted` (label alone reads cleaner).
-  local secs = math.floor(elapsed_ms / 1000)
-  if state ~= "interrupted" and secs > 0 then
-    indicator_span(
-      " " .. smelt.text.format_duration(secs),
-      COMMENT_DIM_STYLE,
-      SECONDARY_PRIORITY,
-      nil)
-  end
-
-  if retry_attempt > 0 then
-    local retry_secs = math.max(1, math.ceil(retry_remaining_ms / 1000))
-    indicator_span(
-      string.format(" (retrying in %ds #%d)", retry_secs, retry_attempt),
-      COMMENT_DIM_STYLE,
-      OPTIONAL_PRIORITY,
-      nil)
-  end
-
-  return finish_indicator()
+  return items
 end
 
--- ── right-side spans (model + reasoning + tokens + cost) ─────────────
+-- Duration suppressed for `interrupted` (label alone reads cleaner).
+builtin.elapsed = function()
+  local state = work_state()
+  if not state or state == "interrupted" then return nil end
+  local secs = math.floor((smelt.signal.get("work_elapsed_ms") or 0) / 1000)
+  if secs <= 0 then return nil end
+  return {
+    text = smelt.text.format_duration(secs),
+    style = COMMENT_DIM_STYLE,
+    priority = SECONDARY_PRIORITY,
+  }
+end
+
+builtin.retry = function()
+  if not work_state() then return nil end
+  local attempt = smelt.signal.get("work_retry_attempt") or 0
+  if attempt <= 0 then return nil end
+  local remaining_ms = smelt.signal.get("work_retry_remaining_ms") or 0
+  return {
+    text = string.format("(retrying in %ds #%d)", math.max(1, math.ceil(remaining_ms / 1000)), attempt),
+    style = COMMENT_DIM_STYLE,
+    priority = OPTIONAL_PRIORITY,
+  }
+end
+
+-- ── built-in sources: model, tokens and cost (right) ─────────────────
 
 local function reasoning_color_group(effort)
   if effort == "low" then return "SmeltReasonLow"
@@ -330,97 +542,84 @@ local function reasoning_color_group(effort)
   end
 end
 
-local function right_spans(opts)
-  local bar_style = (opts and opts.bar_style) or DEFAULT_BAR_STYLE
-  local spans = {}
-  local status = smelt.session.status and smelt.session.status() or {}
-  local model = status.model or smelt.model.current()
-  if model and model ~= "" then
-    local fast_active = status.fast and status.fast.active
-    if fast_active then
-      spans[#spans + 1] = {
-        text = " >>",
-        style = { fg = "Comment", bold = true },
-        priority = SECONDARY_PRIORITY,
-      }
-    end
-    spans[#spans + 1] = {
-      text = " " .. model,
-      style = { fg = "Comment" },
-      priority = SECONDARY_PRIORITY,
-    }
-    local reasoning = status.reasoning or {}
-    local effort = reasoning.effort or smelt.reasoning.current()
-    if effort and effort ~= "off" then
-      spans[#spans + 1] = {
-        text = " " .. effort .. (reasoning.marker or ""),
-        style = { fg = reasoning_color_group(effort) },
-        priority = SECONDARY_PRIORITY,
-      }
-    end
-  end
-
-  if smelt.settings.show_tokens then
-    local context = status.context or {}
-    local ctx = context.tokens
-    if ctx == nil then
-      ctx = smelt.session.context_tokens()
-    end
-    if ctx then
-      if #spans > 0 then
-        spans[#spans + 1] = {
-          text = " ·",
-          style = bar_style,
-          priority = SECONDARY_PRIORITY,
-          selectable = false,
-        }
-      end
-      local window = context.window or smelt.session.context_window()
-      local stale_mark = context.marker or ""
-      local tok_text
-      if window and window > 0 then
-        local pct = math.floor(ctx / window * 100)
-        tok_text = string.format(" %s%s (%d%%)", smelt.text.format_tokens(ctx), stale_mark, pct)
-      else
-        tok_text = " " .. smelt.text.format_tokens(ctx) .. stale_mark
-      end
-      spans[#spans + 1] = {
-        text = tok_text,
-        style = { fg = "Comment" },
-        priority = TOKEN_PRIORITY,
-      }
-    end
-  end
-
-  if smelt.settings.show_cost then
-    local cost = smelt.session.cost()
-    if cost and cost > 0 then
-      if #spans > 0 then
-        spans[#spans + 1] = {
-          text = " ·",
-          style = bar_style,
-          priority = OPTIONAL_PRIORITY,
-          selectable = false,
-        }
-      end
-      spans[#spans + 1] = {
-        text = " " .. smelt.text.format_cost(cost),
-        style = { fg = "Comment" },
-        priority = OPTIONAL_PRIORITY,
-      }
-    end
-  end
-
-  return spans
+local function session_status()
+  return smelt.session.status and smelt.session.status() or {}
 end
 
-local function resize_bar_opts(position)
-  if not smelt.signal.get("prompt_resize_active") then return nil end
-  local chrome = smelt.signal.get("prompt_resize_chrome") or ""
-  if chrome == position or chrome == "both" then
-    return { bar_style = { hl_group = "SmeltResizeHandle" } }
+builtin.model = function()
+  local status = session_status()
+  local model = status.model or smelt.model.current()
+  if not model or model == "" then return nil end
+  local items = {}
+  if status.fast and status.fast.active then
+    items[#items + 1] = {
+      text = ">>",
+      style = { fg = "Comment", bold = true },
+      priority = SECONDARY_PRIORITY,
+      align_right = true,
+    }
   end
-  return nil
+  items[#items + 1] = {
+    text = model,
+    style = { fg = "Comment" },
+    priority = SECONDARY_PRIORITY,
+    align_right = true,
+    separated = true,
+  }
+  local reasoning = status.reasoning or {}
+  local effort = reasoning.effort or smelt.reasoning.current()
+  if effort and effort ~= "off" then
+    items[#items + 1] = {
+      text = effort .. (reasoning.marker or ""),
+      style = { fg = reasoning_color_group(effort) },
+      priority = SECONDARY_PRIORITY,
+      align_right = true,
+    }
+  end
+  return items
+end
+
+builtin.tokens = function()
+  if not smelt.settings.show_tokens then return nil end
+  local context = session_status().context or {}
+  local ctx = context.tokens
+  if ctx == nil then
+    ctx = smelt.session.context_tokens()
+  end
+  if not ctx then return nil end
+  local window = context.window or smelt.session.context_window()
+  local stale_mark = context.marker or ""
+  local text
+  if window and window > 0 then
+    local pct = math.floor(ctx / window * 100)
+    text = string.format("%s%s (%d%%)", smelt.text.format_tokens(ctx), stale_mark, pct)
+  else
+    text = smelt.text.format_tokens(ctx) .. stale_mark
+  end
+  return {
+    text = text,
+    style = { fg = "Comment" },
+    priority = TOKEN_PRIORITY,
+    align_right = true,
+    separated = true,
+  }
+end
+
+builtin.cost = function()
+  if not smelt.settings.show_cost then return nil end
+  local cost = smelt.session.cost()
+  if not cost or cost <= 0 then return nil end
+  return {
+    text = smelt.text.format_cost(cost),
+    style = { fg = "Comment" },
+    priority = OPTIONAL_PRIORITY,
+    align_right = true,
+    separated = true,
+  }
+end
+
+for _, name in ipairs({ "pause", "indicator", "elapsed", "retry", "model", "tokens", "cost" }) do
+  bar.add(top_bar, name, builtin[name])
 end
 
 -- ── renderers ───────────────────────────────────────────────────────
@@ -462,8 +661,7 @@ local function render_top(win)
   if show_stash then
     rows[#rows + 1] = stash_row(width)
   end
-  local bar_opts = resize_bar_opts("top")
-  rows[#rows + 1] = bar.compose(width, indicator_spans(bar_opts), right_spans(bar_opts), bar_opts)
+  rows[#rows + 1] = bar.row(top_bar, width)
   bar.write_rows(buf, rows, TOP_NS)
 end
 
@@ -482,7 +680,7 @@ local function render_bottom(win)
   local buf = win:buf()
   if not buf then return end
   local width = win:content_width() or 80
-  bar.write_rows(buf, { bar.compose(width, nil, nil, resize_bar_opts("bottom")) }, BOT_NS)
+  bar.write_rows(buf, { bar.row(bottom_bar, width) }, BOT_NS)
 end
 
 -- ── window allocation ───────────────────────────────────────────────
@@ -505,6 +703,9 @@ M.bottom_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.bottom" })
   surface = "inert",
   region = "prompt_below",
 })
+
+top_bar.win = M.top_win
+bottom_bar.win = M.bottom_win
 
 if M.aux_win then
   M.aux_win:set_renderer(render_aux)

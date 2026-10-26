@@ -2,10 +2,10 @@
 --
 -- This module owns:
 --   * the statusline window (`M.win`)
---   * a registry of named source callbacks (`smelt.statusline.add` / `remove`)
---   * a retained renderer that calls each source after semantic invalidation,
---     flattens the returned segments, composes via `_bar.compose_status`, and
---     writes to the window's buffer.
+--   * a bar (`smelt._bar`, strip layout) holding the named source callbacks
+--     registered with `smelt.statusline.add` / `remove`
+--   * a retained renderer that asks the bar for one row after semantic
+--     invalidation and writes it to the window's buffer.
 --
 -- The built-in `core` source reads engine state from signals plus
 -- `smelt.session.status()` for values that carry pending/stale markers
@@ -15,26 +15,18 @@
 
 local bar = require("smelt._bar")
 
-local M = {}
-smelt.statusline = M
-
 local NS = smelt.ns("smelt.statusline")
-local sources = {} -- ordered { name, handler } pairs
 local renderer_subscriptions = {}
 
---- One piece of statusline content. Items are laid out left to right, with
---- `align_right` items packed against the right edge. When the line is too
---- narrow, whole items drop from the highest `priority` down, and truncatable
---- items of the highest remaining priority shrink first.
----@class smelt.statusline.Item
----@field text string Text to show.
----@field style? smelt.buf.MarkOpts Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
----@field priority? integer Drop order when space runs out; higher values drop first. Defaults to 0.
----@field separated? boolean Draw a separator between this item and the previous separated item on the same side.
----@field truncatable? boolean Allow shrinking this item before dropping it.
----@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
----@field align_right? boolean Pack against the right edge instead of the left.
----@field selectable? boolean Include the text in drag-copy. Defaults to true.
+local line = bar.new({
+  name = "smelt.statusline",
+  layout = "strip",
+  bg_group = "SmeltStatusBg",
+  sep_group = "SmeltSeparator",
+})
+
+local M = {}
+smelt.statusline = M
 
 -- Repaint after plugin-owned state changes that are not represented by a
 -- built-in signal. Adding, replacing, and removing sources invalidates
@@ -42,55 +34,25 @@ local renderer_subscriptions = {}
 ---@tier ui_host
 ---@type fun()
 function smelt.statusline.invalidate()
-  if M.win then M.win:invalidate_renderer() end
+  bar.invalidate(line)
 end
 
--- ── source registry ─────────────────────────────────────────────────
-
 --- Add a named source of statusline items. `handler` runs on every repaint and
---- returns a list of items; errors are reported on stderr and skip the source.
---- Adding a name that already exists replaces that source in place, keeping its
---- position. Returns a `Reg` that removes this source, unless a later `add` with
---- the same name has replaced it.
+--- returns a list of items (see `smelt.bar.Item`); errors are reported on
+--- stderr and skip the source. Adding a name that already exists replaces that
+--- source in place, keeping its position. Returns a `Reg` that removes this
+--- source, unless a later `add` with the same name has replaced it.
 ---@tier ui_host
----@type fun(name: string, handler: fun(): smelt.statusline.Item[]?): smelt.Reg
+---@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
 function smelt.statusline.add(name, handler)
-  if type(name) ~= "string" or name == "" then
-    error("smelt.statusline.add: name must be a non-empty string", 2)
-  end
-  if type(handler) ~= "function" then
-    error("smelt.statusline.add: handler must be a function", 2)
-  end
-  local entry = { name = name, handler = handler }
-  local replaced = false
-  for i, src in ipairs(sources) do
-    if src.name == name then
-      sources[i] = entry
-      replaced = true
-      break
-    end
-  end
-  if not replaced then sources[#sources + 1] = entry end
-  M.invalidate()
-  return smelt.reg.new(function()
-    for i, src in ipairs(sources) do
-      if src == entry then
-        table.remove(sources, i)
-        M.invalidate()
-        return
-      end
-    end
-  end)
+  return bar.add(line, name, handler)
 end
 
 --- Remove every source named `name`.
 ---@tier ui_host
 ---@type fun(name: string)
 function smelt.statusline.remove(name)
-  for i = #sources, 1, -1 do
-    if sources[i].name == name then table.remove(sources, i) end
-  end
-  M.invalidate()
+  bar.remove(line, name)
 end
 
 -- ── default `core` source ───────────────────────────────────────────
@@ -237,36 +199,23 @@ local function core_compose()
   return items
 end
 
+--- The built-in `core` source, so a replacement can wrap it instead of
+--- dropping it.
+---@tier ui_host
+---@type fun(name: string): (fun(): smelt.bar.Item[]?)?
+function smelt.statusline.builtin(name)
+  if name == "core" then return core_compose end
+  return nil
+end
+
 smelt.statusline.add("core", core_compose)
 
 -- ── renderer ────────────────────────────────────────────────────────
 
-local function flatten()
-  local items = {}
-  for _, src in ipairs(sources) do
-    local ok, result = pcall(src.handler)
-    if ok and type(result) == "table" then
-      for _, it in ipairs(result) do
-        items[#items + 1] = it
-      end
-    elseif not ok then
-      io.stderr:write("smelt.statusline source `" .. src.name .. "`: " .. tostring(result) .. "\n")
-    end
-  end
-  return items
-end
-
 local function render(win)
   local buf = win:buf()
   if not buf then return end
-  local width = win:content_width() or 80
-  local items = flatten()
-  local row = bar.compose_status(items, {
-    width = width,
-    bg_group = "SmeltStatusBg",
-    sep_group = "SmeltSeparator",
-  })
-  bar.write_rows(buf, { row }, NS)
+  bar.write_rows(buf, { bar.row(line, win:content_width() or 80) }, NS)
 end
 
 -- ── window allocation ───────────────────────────────────────────────
@@ -278,6 +227,7 @@ M.win = smelt.win.new(smelt.buf.new({ name = "smelt.statusline" }), {
   region = "status",
 })
 
+line.win = M.win
 if M.win then
   M.win:set_renderer(render)
   if type(smelt.signal.subscribe) == "function" then

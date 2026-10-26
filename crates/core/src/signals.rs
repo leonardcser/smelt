@@ -621,7 +621,6 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("settings_auto_continue"),
     state("settings_terminal_title"),
     event("shutdown"),
-    state("spinner_frame"),
     event("stream_delta"),
     event("stream_phase"),
     state("task_label"),
@@ -932,7 +931,6 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("history_epoch", 0u64);
     signals.declare("input_epoch", 0u64);
     signals.declare("now", 0u64);
-    signals.declare("spinner_frame", 0u8);
     signals.declare("tps", 0.0f64);
     signals.declare("task_label", String::new());
     signals.declare("running_procs", 0u32);
@@ -1405,14 +1403,10 @@ mod tests {
             );
         }
 
-        // `now` initialises at 0 (epoch); `spinner_frame` at 0; both
-        // project as Lua integers via the u64 / u8 projectors.
+        // `now` initialises at 0 (epoch) and projects as a Lua integer via
+        // the u64 projector.
         assert!(matches!(
             signals.get_lua("now", &lua),
-            mlua::Value::Integer(0)
-        ));
-        assert!(matches!(
-            signals.get_lua("spinner_frame", &lua),
             mlua::Value::Integer(0)
         ));
 

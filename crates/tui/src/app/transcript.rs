@@ -10784,21 +10784,6 @@ impl TuiApp {
         self.conversation.clear_stream_tools();
     }
 
-    /// Advance spinner animation. Returns `true` if the frame changed.
-    pub(crate) fn update_spinner(&mut self) -> bool {
-        let mut changed = false;
-        if let (Some(elapsed), Some(prev_frame)) =
-            (self.working.elapsed(), self.working.last_spinner_frame())
-        {
-            let frame = smelt_core::content::spinner_frame_index(elapsed);
-            if frame != prev_frame {
-                self.working.set_last_spinner_frame(frame);
-                changed = true;
-            }
-        }
-        changed
-    }
-
     /// Per-line selection ranges (line, col_start, col_end) in display-cell units.
     /// No-op when no vim visual or selection anchor is active.
     #[cfg(any(test, feature = "harness"))]

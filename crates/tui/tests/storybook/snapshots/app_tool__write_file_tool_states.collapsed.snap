@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * write_file src/greet.rs
   wrote 3 lines
@@ -20,7 +20,7 @@ expression: text
 
 
 
-─ ✿ working… ─────────────────────────────────────────────────────────────────
+─ ● … ────────────────────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────────────────────
  ○ normal                                                             1:1 100%

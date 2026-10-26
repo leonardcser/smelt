@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash cargo test -p smelt-tui app::drafts
 
@@ -18,7 +18,7 @@ expression: text
 
 
 
-─ ✿ working… ───────────────────────────────────────────────────────────
+─ ● … ──────────────────────────────────────────────────────────────────
 
 ────────────────────────────────────────────────────────────────────────
  ○ normal                                                       1:1 100%

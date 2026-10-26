@@ -904,6 +904,15 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           __wins = {},
           ns = function(name) return name end,
           settings = { show_tokens = true, show_cost = true },
+          time = {
+            now_ms = function() return 0 end,
+            format = function(stamp, fmt) return os.date(fmt, stamp) end,
+          },
+          theme = { is_light = function() return false end },
+          timer = {
+            every = function() return { remove = function() end } end,
+            set = function() return { remove = function() end } end,
+          },
           model = { current = function() return "model" end },
           reasoning = { current = function() return "off" end },
           signal = {
@@ -918,6 +927,7 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
                 if name == "notification_visible" then return false end
                 return nil
             end,
+            subscribe = function() end,
           },
           text = {
             width = function(text)
@@ -942,12 +952,8 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
             format_cost = function(value) return string.format("$%.2f", value) end,
             format_duration = function(value) return tostring(value) .. "s" end,
           },
-          spinner = {
-            glyph = function() return "*" end,
-            wave_state = function() return 0, 1, 3 end,
-            wave_level_at = function() return 2 end,
-            wave_color_at = function() return { 1, 2, 3 } end,
-          },
+          reg = { new = function(fn) return { remove = fn } end },
+          events = { on = function() end },
           prompt = {
             queued_rows = function() return {} end,
             queued = function() return {} end,
@@ -987,6 +993,7 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
               function w:content_width() return 60 end
               function w:rect() return { height = 1 } end
               function w:set_renderer(fn) self.renderer = fn end
+              function w:invalidate_renderer() end
               smelt.__wins[w._opts.name] = w
               return w
             end,
@@ -1095,7 +1102,7 @@ fn prompt_bar_renders_fast_mode_marker_before_model() {
             local line = buf._lines[1] or ""
             for _, mark in ipairs(buf._marks) do
               local marked = string.sub(buf._lines[mark.row] or "", mark.start_col + 1, mark.end_col)
-              if marked == " >>" then return marked, mark.fg, mark.bold, line end
+              if marked == ">>" then return marked, mark.fg, mark.bold, line end
             end
             return "", nil, nil, line
             "#,
@@ -1103,11 +1110,139 @@ fn prompt_bar_renders_fast_mode_marker_before_model() {
         .eval()
         .expect("render fast mode prompt bar");
 
-    assert_eq!(text, " >>");
+    assert_eq!(text, ">>");
     assert_eq!(color.as_deref(), Some("Comment"));
     assert_eq!(bold, Some(true));
     assert!(line.contains(">> model"), "{line}");
     assert!(!line.contains(">>model"), "{line}");
+}
+
+#[test]
+fn prompt_bar_top_source_replaces_a_builtin_in_place() {
+    let lua = prompt_bar_lua_fixture();
+    let (before, after): (String, String) = lua
+        .load(
+            r#"
+            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            top:renderer()
+            local before = top:buf()._lines[1]
+
+            smelt.prompt_bar.top.add("model", function()
+              return { text = "custom", align_right = true, separated = true, priority = 3 }
+            end)
+            top:renderer()
+            return before, top:buf()._lines[1]
+            "#,
+        )
+        .eval()
+        .expect("replace the model source");
+
+    assert!(before.contains("model · 1200 (12%) · $0.23"), "{before}");
+    // The replacement keeps the model's slot ahead of tokens and cost.
+    assert!(after.contains("custom · 1200 (12%) · $0.23"), "{after}");
+    assert!(!after.contains("model"), "{after}");
+}
+
+#[test]
+fn prompt_bar_top_source_removal_drops_only_that_source() {
+    let lua = prompt_bar_lua_fixture();
+    let line: String = lua
+        .load(
+            r#"
+            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            smelt.prompt_bar.top.remove("cost")
+            smelt.prompt_bar.top.remove("indicator")
+            top:renderer()
+            return top:buf()._lines[1]
+            "#,
+        )
+        .eval()
+        .expect("remove sources");
+
+    assert!(line.contains("model · 1200 (12%)"), "{line}");
+    assert!(!line.contains("$0.23"), "{line}");
+    assert!(!line.contains("run"), "{line}");
+}
+
+#[test]
+fn prompt_bar_bottom_renders_plugin_sources_into_the_rule() {
+    let lua = prompt_bar_lua_fixture();
+    let (plain, line): (String, String) = lua
+        .load(
+            r#"
+            local bottom = assert(smelt.__wins["smelt.prompt_bar.bottom"])
+            bottom:renderer()
+            local plain = bottom:buf()._lines[1]
+
+            local reg = smelt.prompt_bar.bottom.add("hint", function()
+              return {
+                { text = "left note", priority = 1 },
+                { text = "right note", align_right = true, priority = 2 },
+              }
+            end)
+            bottom:renderer()
+            local line = bottom:buf()._lines[1]
+            reg:remove()
+            bottom:renderer()
+            local restored = bottom:buf()._lines[1]
+            assert(restored == plain, restored)
+            return plain, line
+            "#,
+        )
+        .eval()
+        .expect("bottom bar source");
+
+    assert_eq!(plain, "─".repeat(60));
+    assert_eq!(line, format!("─ left note {} right note ─", "─".repeat(35)));
+}
+
+#[test]
+fn prompt_bar_builtin_sources_are_reachable_by_name() {
+    let lua = prompt_bar_lua_fixture();
+    let (indicator, missing, wrapped): (bool, bool, String) = lua
+        .load(
+            r#"
+            local indicator = smelt.prompt_bar.top.builtin("indicator")
+            smelt.prompt_bar.top.add("indicator", function()
+              local items = indicator()
+              table.insert(items, { text = "wrapped", priority = 1 })
+              return items
+            end)
+            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            top:renderer()
+            return type(indicator) == "function",
+              smelt.prompt_bar.top.builtin("nope") == nil,
+              top:buf()._lines[1]
+            "#,
+        )
+        .eval()
+        .expect("wrap the indicator");
+
+    assert!(indicator);
+    assert!(missing);
+    assert!(wrapped.contains("● … wrapped"), "{wrapped}");
+}
+
+#[test]
+fn prompt_bar_skips_failing_sources_and_accepts_a_single_item() {
+    let lua = prompt_bar_lua_fixture();
+    let line: String = lua
+        .load(
+            r#"
+            smelt.prompt_bar.top.add("broken", function() error("boom") end)
+            smelt.prompt_bar.top.add("single", function()
+              return { text = "solo", align_right = true, priority = 3 }
+            end)
+            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            top:renderer()
+            return top:buf()._lines[1]
+            "#,
+        )
+        .eval()
+        .expect("render with a failing source");
+
+    assert!(line.contains("solo"), "{line}");
+    assert!(line.contains("model"), "{line}");
 }
 
 #[test]
@@ -1140,18 +1275,18 @@ fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
             end
 
             top:renderer()
-            local inactive_dots = count_marks(top:buf(), function(_, text) return text == " ·" end)
+            local inactive_dots = count_marks(top:buf(), function(_, text) return text == " · " end)
             local inactive_bar_dots = count_marks(top:buf(), function(mark, text)
-              return text == " ·" and mark.fg == "SmeltSeparator" and mark.hl_group == nil
+              return text == " · " and mark.fg == "SmeltSeparator" and mark.hl_group == nil
             end)
 
             smelt.__resize = true
             smelt.__resize_chrome = "top"
             top:renderer()
             bottom:renderer()
-            local active_dots = count_marks(top:buf(), function(_, text) return text == " ·" end)
+            local active_dots = count_marks(top:buf(), function(_, text) return text == " · " end)
             local active_resize_dots = count_marks(top:buf(), function(mark, text)
-              return text == " ·" and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil
+              return text == " · " and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil
             end)
             local active_dashes = count_marks(top:buf(), function(mark, text)
               return text:find("─", 1, true) ~= nil and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil

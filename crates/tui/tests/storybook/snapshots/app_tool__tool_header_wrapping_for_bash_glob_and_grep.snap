@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash cargo test -p smelt-tui content::display_ren  14:37:03
        derers::layout_ir::tests::runs_continuation_
@@ -16,7 +16,7 @@ expression: text
 
 
 
-─ ✿ working… ─────────────────────────────────────────────────
+─ ● … ────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────
  ○ normal                                             1:1 100%

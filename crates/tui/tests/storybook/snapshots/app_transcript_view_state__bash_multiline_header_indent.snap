@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash set -euo pipefail                                                     14:37:03
        rm -rf /tmp/smelt-fuzzy-check
@@ -16,7 +16,7 @@ expression: text
 
 
 
-─ ✿ working… ─────────────────────────────────────────────────────────────────────────
+─ ● … ────────────────────────────────────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────────────────────────────────────────
  ○ normal                                                                     1:1 100%

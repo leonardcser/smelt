@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * edit_file src/lib.rs                                                     14:37:03
   read_file must be called before edit_file
@@ -16,7 +16,7 @@ expression: text
 
 
 
-─ ✿ working… ───────────────────────────────────────────────────────────────────────
+─ ● … ──────────────────────────────────────────────────────────────────────────────
 
 ────────────────────────────────────────────────────────────────────────────────────
  ○ normal                                                                   1:1 100%

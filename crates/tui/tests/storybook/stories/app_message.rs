@@ -177,7 +177,7 @@ app_story!(reasoning_summary_titles_update_thinking_block, |ctx| {
         "latest summary title should be inside a thinking block: {frame}"
     );
     assert!(
-        frame.lines().any(|line| line.contains("─ ✿ working… ")),
+        frame.lines().any(|line| line.contains("─ ● ")),
         "prompt title changed: {frame}"
     );
     assert!(

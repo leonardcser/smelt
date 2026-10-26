@@ -563,6 +563,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.agent` - Agent-facing prompt customization for Lua plugins.
 - `smelt.auth` - Authenticated provider helpers.
 - `smelt.banner` - Startup banner extension point.
+- `smelt.bar` - The item shape shared by smelt's bars: the statusline and the rules above and below the prompt.
 - `smelt.build` - Compile-time build identity and version metadata for plugins.
 - `smelt.builtins` - Opt out of bundled `smelt.<dotted>` modules.
 - `smelt.cli` - Declare and read CLI flags from Lua.
@@ -604,7 +605,6 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.shell` - Shell command splitting and interactive/background-operator validators.
 - `smelt.signal` - Named reactive values.
 - `smelt.skills` - List and load skill content from the SkillLoader populated at startup.
-- `smelt.spinner` - Shared spinner glyph and traveling-wave grayscale color for plugin animations.
 - `smelt.state` - Per-plugin state.
 - `smelt.task` - Yield-then-resume coroutine bridge: alloc and resume external tasks.
 - `smelt.text` - Terminal-cell measurement and pure text formatting.
@@ -631,6 +631,8 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.overlay` - Overlay handle constructor.
 - `smelt.paint` - Register Lua callbacks against custom paint regions.
 - `smelt.picker` - Picker facade.
+- `smelt.prompt_bar.bottom` - The rule below the prompt, empty by default.
+- `smelt.prompt_bar.top` - The rule above the prompt, which holds the working indicator, model, tokens and cost.
 - `smelt.render` - Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`.
 - `smelt.search` - Search controls for the active UI session.
 - `smelt.session` - Current session metadata, turn list, message snapshots, rewind, and persisted session management.

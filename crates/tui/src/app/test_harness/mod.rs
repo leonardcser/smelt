@@ -546,17 +546,15 @@ impl TestAppBuilder {
             while rx.try_recv().is_ok() {}
         }
 
-        // Pin spinner glyph and wall-clock time for snapshot determinism.
-        // The production `smelt.spinner.glyph()` and `wave_color_at()` use
-        // wall-clock time, so parallel or sequential test runs land on
-        // different frames / colors. Freezing both makes storybook
-        // snapshots stable.
+        // Pin wall-clock time for snapshot determinism. Working-indicator
+        // animations derive from `smelt.time.now_ms()`, so parallel or
+        // sequential test runs would otherwise land on different frames and
+        // colors. Freezing it makes storybook snapshots stable.
         let lua = app.lua.lua().clone();
         let _ = crate::lua::scope_app(&mut app, || {
             lua.load(
                 r#"
                 smelt.time.now_ms = function() return 0 end
-                smelt.spinner.glyph = function() return '✿' end
                 "#,
             )
             .exec()

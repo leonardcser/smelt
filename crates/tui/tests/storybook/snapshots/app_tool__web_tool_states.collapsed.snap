@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * web_fetch https://example.com/release                            14:37:03
 
@@ -16,7 +16,7 @@ expression: text
 
 
 
-─ ✿ working… ───────────────────────────────────────────────────────────────
+─ ● … ──────────────────────────────────────────────────────────────────────
 
 ────────────────────────────────────────────────────────────────────────────
  ○ normal                                                           1:1 100%

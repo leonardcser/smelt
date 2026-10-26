@@ -90,6 +90,7 @@ nav = [
     ]},
     { "User interface" = [
       { "`smelt.banner`" = "reference/api/banner.md" },
+      { "`smelt.bar`" = "reference/api/bar.md" },
       { "`smelt.buf`" = "reference/api/buf.md" },
       { "`smelt.clipboard`" = "reference/api/clipboard.md" },
       { "`smelt.confirm`" = "reference/api/confirm.md" },
@@ -102,7 +103,8 @@ nav = [
       { "`smelt.paint`" = "reference/api/paint.md" },
       { "`smelt.picker`" = "reference/api/picker.md" },
       { "`smelt.prompt`" = "reference/api/prompt.md" },
-      { "`smelt.spinner`" = "reference/api/spinner.md" },
+      { "`smelt.prompt_bar.bottom`" = "reference/api/prompt_bar_bottom.md" },
+      { "`smelt.prompt_bar.top`" = "reference/api/prompt_bar_top.md" },
       { "`smelt.statusline`" = "reference/api/statusline.md" },
       { "`smelt.terminal`" = "reference/api/terminal.md" },
       { "`smelt.theme`" = "reference/api/theme.md" },

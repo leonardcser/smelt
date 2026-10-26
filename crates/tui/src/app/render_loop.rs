@@ -1051,7 +1051,6 @@ impl TuiApp {
         if !self.transcript_work.is_empty() && !self.transcript_work.front_waits_for_hydration() {
             self.request_continuation_render();
         }
-        self.update_spinner();
         // Signal subscribers drive retained window and layout invalidation. Drain
         // them before querying dirty state so each frame observes one coherent
         // semantic update rather than repainting a frame late.
@@ -2244,7 +2243,7 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
         app.render_to_frame();
-        assert!(app.render_to_frame().text().contains("working"));
+        assert!(app.render_to_frame().text().contains('\u{25CF}'));
 
         app.app
             .dispatch_engine_event(protocol::EngineEvent::TextDelta {
@@ -2269,6 +2268,6 @@ mod tests {
             .eval_lua(r#"return smelt.signal.get("work_state")"#)
             .expect("work_state");
         assert_eq!(state, "done");
-        assert!(!app.app.ui.flushed_snapshot().text().contains("working"));
+        assert!(app.app.ui.flushed_snapshot().text().contains("done"));
     }
 }

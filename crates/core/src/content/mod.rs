@@ -66,14 +66,6 @@ impl BoxContext {
     }
 }
 
-pub(crate) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
-/// Frame duration shared by all spinners; read by every animated call site to stay in lockstep.
-pub const SPINNER_FRAME_MS: u64 = 150;
-
-pub fn spinner_frame_index(elapsed: std::time::Duration) -> usize {
-    ((elapsed.as_millis() / SPINNER_FRAME_MS as u128) as usize) % SPINNER_FRAMES.len()
-}
-
 /// Fallback column budget when no explicit width is provided.
 pub(crate) fn default_width() -> usize {
     80

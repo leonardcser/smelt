@@ -526,35 +526,23 @@ fn file_expansion_accepts_input_before_reading_and_keeps_the_ui_responsive() {
         .session_history()
         .iter()
         .all(|item| !matches!(item, HistoryItem::User { .. })));
-    app.run_lua_result(
-        r#"
-        smelt.time.now_ms = function() return _G.animation_now or 0 end
-        package.loaded["smelt.spinner"] = nil
-        smelt.spinner = require("smelt.spinner")
-    "#,
-    )
-    .unwrap();
-    let mut glyphs = std::collections::HashSet::new();
+    app.animate_with_virtual_clock();
+    let mut dots = std::collections::HashSet::new();
     for _ in 0..8 {
         let started = std::time::Instant::now();
-        app.feed_one(SourceEvent::Tick(150));
-        app.app
-            .lua
-            .lua()
-            .globals()
-            .set(
-                "animation_now",
-                engine::clock::unix_time_ms(app.app.core.clock.as_ref()),
-            )
-            .unwrap();
-        app.app.publish_diff_signals();
-        let frame = app.render_unsettled_silent().text();
-        let glyph: String = app.eval_lua("return smelt.spinner.glyph()").unwrap();
-        assert!(frame.contains(&glyph), "{frame}");
-        glyphs.insert(glyph);
+        let rendered = app.advance_animation(150);
+        let frame = rendered.text();
+        let dot = app
+            .working_dot_style(&rendered)
+            .expect("styled working dot");
+        assert!(frame.contains('●'), "{frame}");
+        dots.insert(dot);
         assert!(started.elapsed() < Duration::from_millis(250));
     }
-    assert_eq!(glyphs.len(), 4);
+    assert!(
+        dots.len() >= 4,
+        "the coal must keep breathing while the UI waits"
+    );
     app.type_text("new draft");
     for key in [3, 12] {
         let started = std::time::Instant::now();

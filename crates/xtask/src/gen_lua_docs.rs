@@ -821,6 +821,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
         "User interface",
         &[
             "smelt.banner",
+            "smelt.bar",
             "smelt.buf",
             "smelt.clipboard",
             "smelt.confirm",
@@ -833,7 +834,8 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "smelt.paint",
             "smelt.picker",
             "smelt.prompt",
-            "smelt.spinner",
+            "smelt.prompt_bar.bottom",
+            "smelt.prompt_bar.top",
             "smelt.statusline",
             "smelt.terminal",
             "smelt.theme",

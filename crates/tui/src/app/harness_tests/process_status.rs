@@ -62,7 +62,7 @@ fn statusline_can_truncate_items_in_the_middle() {
         .eval_lua(
             r#"
             local bar = require("smelt._bar")
-            local row = bar.compose_status({
+            local row = bar.layout_strip({
               {
                 text = "smelt/.worktrees/test",
                 style = { fg = "Comment" },
@@ -70,7 +70,7 @@ fn statusline_can_truncate_items_in_the_middle() {
                 truncatable = true,
                 truncate = "middle",
               },
-            }, { width = 14, bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
+            }, 14, { bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
             return row.text
             "#,
         )
@@ -86,13 +86,13 @@ fn statusline_spacing_respects_text_and_block_items() {
         .eval_lua(
             r#"
             local bar = require("smelt._bar")
-            local row = bar.compose_status({
+            local row = bar.layout_strip({
               { text = "repo", style = { fg = "Comment" } },
               { text = "tok/s", style = { fg = "Comment" } },
               { text = " INSERT ", style = { hl_group = "SmeltVimInsert" } },
               { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
               { text = "procs", style = { fg = "SmeltProcess" }, separated = true },
-            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
+            }, 80, { bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
             return row.text
             "#,
         )
@@ -111,12 +111,12 @@ fn statusline_separates_first_inline_indicator_after_pills() {
         .eval_lua(
             r#"
             local bar = require("smelt._bar")
-            local row = bar.compose_status({
+            local row = bar.layout_strip({
               { text = " INSERT ", style = { hl_group = "SmeltVimInsert" } },
               { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
               { text = "14 procs", style = { fg = "SmeltProcess" }, separated = true },
               { text = "permission pending", style = { fg = "SmeltAccent" }, separated = true },
-            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
+            }, 80, { bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
             return row.text
             "#,
         )
@@ -135,13 +135,13 @@ fn spinner_redraw_restores_the_terminal_cursor_before_displaying_the_frame() {
     app.start_turn(1);
     assert!(app.run_lua(
         r#"
-        _G.spinner_frame = "a"
-        smelt.spinner.glyph = function() return _G.spinner_frame end
+        _G.animation_now = 0
+        smelt.time.now_ms = function() return _G.animation_now end
         "#,
     ));
 
     app.render_normal_to(&mut std::io::sink());
-    assert!(app.run_lua(r#"_G.spinner_frame = "b""#));
+    assert!(app.run_lua("_G.animation_now = 800"));
 
     let mut output = Vec::new();
     app.render_normal_to(&mut output);
@@ -155,6 +155,341 @@ fn spinner_redraw_restores_the_terminal_cursor_before_displaying_the_frame() {
         Some(&b'H'),
         "frame must restore the hidden terminal cursor after painting the spinner: {output:?}"
     );
+}
+
+#[test]
+fn working_indicator_follows_the_turn_lifecycle() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(64, 10);
+    app.start_turn(1);
+
+    let bar_row = |frame: String| {
+        frame
+            .lines()
+            .find(|line| line.starts_with('─'))
+            .expect("prompt bar row")
+            .to_owned()
+    };
+    let at = |app: &mut TestApp, now_ms: u32| {
+        assert!(app.run_lua(&format!(
+            "smelt.time.now_ms = function() return {now_ms} end
+             smelt.prompt_bar.top.invalidate()"
+        )));
+        bar_row(app.render_to_frame().text())
+    };
+
+    // The turn starts with the coal catching while the word types in.
+    let first = at(&mut app, 0);
+    assert!(first.starts_with("─ ●"), "{first}");
+    assert!(first.contains("…"), "{first}");
+    assert!(!first.contains("working"), "{first}");
+
+    let typing = at(&mut app, 180);
+    assert!(typing.contains("work…"), "{typing}");
+    assert!(!typing.contains("working"), "{typing}");
+
+    let typed = at(&mut app, 600);
+    assert!(typed.starts_with("─ ●"), "{typed}");
+    assert!(typed.contains("working…"), "{typed}");
+
+    // The word is steady: streaming and tool activity do not change it.
+    assert!(app.run_lua(
+        r#"
+        smelt.events.emit("stream_delta", { kind = "text", bytes = 2, text = "hi" })
+        smelt.events.emit("tool_start", { tool = "bash", args = {} })
+        "#,
+    ));
+    let busy = at(&mut app, 2500);
+    assert!(busy.starts_with("─ ●"), "{busy}");
+    assert!(busy.contains("working…"), "{busy}");
+
+    // A failed request waits out a backoff: the coal stays banked under the retry label.
+    assert!(app.run_lua("smelt.signal._get = smelt.signal.get"));
+    let force = |app: &mut TestApp, state: &str, label: &str, remaining_ms: u32| {
+        assert!(app.run_lua(&format!(
+            r#"
+            local values = {{
+              work_state = "{state}",
+              work_label = "{label}",
+              work_retry_remaining_ms = {remaining_ms},
+            }}
+            smelt.signal.get = function(name)
+              if values[name] ~= nil then return values[name] end
+              return smelt.signal._get(name)
+            end
+            "#
+        )));
+    };
+    force(&mut app, "retrying", "retrying", 4000);
+    at(&mut app, 2600);
+    let waiting = at(&mut app, 3000);
+    assert!(waiting.starts_with("─ ●"), "{waiting}");
+    assert!(waiting.contains("retrying…"), "{waiting}");
+    force(&mut app, "retrying", "retrying", 1000);
+    let nearly = at(&mut app, 3800);
+    assert!(nearly.starts_with("─ ●"), "{nearly}");
+    assert!(nearly.contains("retrying…"), "{nearly}");
+
+    // A dialog pauses the turn: a still coal and the dim paused label.
+    force(&mut app, "paused", "paused", 0);
+    let paused = at(&mut app, 4500);
+    assert!(paused.starts_with("─ ● paused "), "{paused}");
+    assert!(!paused.contains("…"), "{paused}");
+    assert_eq!(paused, at(&mut app, 5100));
+
+    // Done cools the coal to gray, and it stays.
+    assert!(app.run_lua("smelt.signal.get = smelt.signal._get"));
+    assert!(app.finish_turn());
+    let cooling = at(&mut app, 6000);
+    assert!(cooling.starts_with("─ ●"), "{cooling}");
+    assert!(cooling.contains("done"), "{cooling}");
+    // The fade lands on the very color the finished dot keeps: no faint attribute
+    // that would make it jump darker once the fade ends.
+    let dot_style = |app: &mut TestApp, now_ms: u32| {
+        assert!(app.run_lua(&format!(
+            "smelt.time.now_ms = function() return {now_ms} end
+             smelt.prompt_bar.top.invalidate()"
+        )));
+        let frame = app.render_to_frame();
+        let text = frame.text();
+        let row = text.lines().position(|line| line.starts_with('─')).unwrap();
+        frame
+            .styles_text()
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let mut parts = line.split_whitespace();
+                let (y, x, len): (usize, usize, usize) = (
+                    parts.next()?.parse().ok()?,
+                    parts.next()?.parse().ok()?,
+                    parts.next()?.parse().ok()?,
+                );
+                (y == row && x <= 2 && 2 < x + len).then(|| parts.collect::<Vec<_>>().join(" "))
+            })
+            .expect("styled dot")
+    };
+    let landing = dot_style(&mut app, 6990);
+    let settled = dot_style(&mut app, 9000);
+    assert!(!settled.contains("dim"), "{settled}");
+    let channels = |style: &str| -> Vec<i32> {
+        style
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|n| n.parse().ok())
+            .collect()
+    };
+    for (end, rest) in channels(&landing).iter().zip(channels(&settled)) {
+        assert!(
+            (end - rest).abs() <= 2,
+            "fade ends at {landing}, dot settles at {settled}"
+        );
+    }
+    let done = at(&mut app, 8000);
+    assert!(done.starts_with("─ ● done"), "{done}");
+    assert!(!done.contains("working"), "{done}");
+}
+
+/// The green channel of a style string such as `fg=Rgb { r: 1, g: 2, b: 3 } attrs=bold`.
+fn green(style: &str) -> i32 {
+    style
+        .split("g: ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no green channel in {style}"))
+}
+
+#[test]
+fn working_coal_heats_while_a_tool_call_is_pending_and_cools_after() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(64, 10);
+    app.start_turn(1);
+
+    // Sampling at multiples of the 1600 ms breath keeps the breathing phase fixed.
+    let coal_at = |app: &mut TestApp, now_ms: u32, emit: &str| {
+        assert!(app.run_lua(&format!(
+            "smelt.time.now_ms = function() return {now_ms} end
+             {emit}
+             smelt.prompt_bar.top.invalidate()"
+        )));
+        let frame = app.render_to_frame();
+        green(&app.working_dot_style(&frame).expect("styled coal"))
+    };
+
+    coal_at(&mut app, 0, "");
+    let idle = coal_at(&mut app, 1600, "");
+    let still_idle = coal_at(&mut app, 4800, "");
+    assert_eq!(
+        idle, still_idle,
+        "an idle turn leaves the coal at its minimum"
+    );
+
+    coal_at(
+        &mut app,
+        4900,
+        "smelt.events.emit('tool_start', { tool = 'bash', args = {} })",
+    );
+    let early = coal_at(&mut app, 8000, "");
+    assert!(
+        early > idle,
+        "a tool call warms the coal: {early} vs {idle}"
+    );
+    let long = coal_at(&mut app, 12800, "");
+    assert!(
+        long > early,
+        "a pending call keeps warming it: {long} vs {early}"
+    );
+
+    coal_at(
+        &mut app,
+        12900,
+        "smelt.events.emit('tool_end', { tool = 'bash', is_error = false, elapsed_ms = 8000 })",
+    );
+    let cooling = coal_at(&mut app, 17600, "");
+    let cooled = coal_at(&mut app, 60800, "");
+    assert!(
+        cooling < long,
+        "heat falls once the call ends: {cooling} vs {long}"
+    );
+    assert!(
+        cooled <= idle + 1,
+        "and settles back to the minimum: {cooled} vs {idle}"
+    );
+}
+
+#[test]
+fn working_word_rests_in_gray_and_a_sweep_flares_it() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(64, 10);
+    app.start_turn(1);
+
+    let first_letter = |app: &mut TestApp, now_ms: u32| {
+        assert!(app.run_lua(&format!(
+            "smelt.time.now_ms = function() return {now_ms} end
+             smelt.prompt_bar.top.invalidate()"
+        )));
+        let frame = app.render_to_frame();
+        green(&app.bar_cell_style(&frame, 4).expect("styled letter"))
+    };
+
+    first_letter(&mut app, 0);
+    let landing = first_letter(&mut app, 50);
+    let resting = first_letter(&mut app, 3700);
+    let swept = first_letter(&mut app, 1650);
+    let next_sweep = first_letter(&mut app, 3850);
+    assert!(landing > 240, "a letter lands white-hot: {landing}");
+    assert!(
+        (150..=156).contains(&resting),
+        "and rests at the built-in gray: {resting}"
+    );
+    assert!(
+        swept > resting + 50,
+        "the sweep flares it: {swept} vs {resting}"
+    );
+    assert!(
+        next_sweep > resting + 50,
+        "and it sweeps again: {next_sweep} vs {resting}"
+    );
+}
+
+#[test]
+fn gallery_spinner_plugin_forges_the_word_and_defers_when_done() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(64, 10);
+    app.start_turn(1);
+    assert!(app.run_lua(include_str!(
+        "../../../../../docs/shots/plugins/spinner.lua"
+    )));
+
+    let at = |app: &mut TestApp, now_ms: u32| {
+        assert!(app.run_lua(&format!(
+            "smelt.time.now_ms = function() return {now_ms} end
+             smelt.prompt_bar.top.invalidate()"
+        )));
+        app.render_to_frame()
+            .text()
+            .lines()
+            .find(|line| line.starts_with('─'))
+            .expect("prompt bar row")
+            .to_owned()
+    };
+
+    // The word types in from nothing, one letter at a time.
+    let first = at(&mut app, 0);
+    assert!(!first.contains('w'), "{first}");
+    let typing = at(&mut app, 150);
+    assert!(
+        typing.contains("wor") && !typing.contains("working"),
+        "{typing}"
+    );
+    let typed = at(&mut app, 600);
+    assert!(typed.contains("working…"), "{typed}");
+
+    // It holds through the hammer sweeps.
+    for t in (1000..4000).step_by(250) {
+        let row = at(&mut app, t);
+        assert!(row.contains("working…"), "{row}");
+    }
+
+    // It is quenched into steam, then decodes back in.
+    let quenched = at(&mut app, 5150);
+    assert!(!quenched.contains("working"), "{quenched}");
+    let again = at(&mut app, 8200);
+    assert!(again.contains("working…"), "{again}");
+
+    // Done hands the indicator back to the built-in.
+    assert!(app.finish_turn());
+    at(&mut app, 9000);
+    let done = at(&mut app, 11000);
+    assert!(done.starts_with("─ ● done"), "{done}");
+}
+
+#[test]
+fn gallery_glitch_plugin_glitches_words_in_and_out_and_defers_when_done() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(64, 10);
+    app.start_turn(1);
+    assert!(app.run_lua(include_str!("../../../../../docs/shots/plugins/glitch.lua")));
+
+    let at = |app: &mut TestApp, now_ms: u32| {
+        assert!(app.run_lua(&format!(
+            "smelt.time.now_ms = function() return {now_ms} end
+             smelt.prompt_bar.top.invalidate()"
+        )));
+        app.render_to_frame()
+            .text()
+            .lines()
+            .find(|line| line.starts_with('─'))
+            .expect("prompt bar row")
+            .to_owned()
+    };
+    let frames = |app: &mut TestApp, from: u32, to: u32| {
+        (from..to)
+            .step_by(70)
+            .map(|t| at(app, t))
+            .collect::<Vec<_>>()
+    };
+
+    // A word starts as noise and decodes from the left.
+    let first = at(&mut app, 0);
+    assert!(!first.contains('▌') && !first.contains('▐'), "{first}");
+    assert!(!first.contains("parsing"), "{first}");
+
+    // It holds, with the odd frame glitched.
+    let hold = frames(&mut app, 700, 2100);
+    assert!(hold.iter().any(|row| row.contains("parsing")), "{hold:?}");
+    assert!(hold.iter().any(|row| !row.contains("parsing")), "{hold:?}");
+
+    // It corrupts away, and the next word decodes in.
+    let corrupting = at(&mut app, 2560);
+    assert!(!corrupting.contains("parsing"), "{corrupting}");
+    let next = frames(&mut app, 3300, 4700);
+    assert!(next.iter().any(|row| row.contains("linking")), "{next:?}");
+
+    // Done hands the indicator back to the built-in.
+    assert!(app.finish_turn());
+    at(&mut app, 6000);
+    let done = at(&mut app, 8000);
+    assert!(done.starts_with("─ ● done"), "{done}");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * bash ls -la /tmp/foo                                                 14:37:03
 
@@ -12,7 +12,7 @@ expression: text
 
 
 
-─ ✿ working… ───────────────────────────────────────────────────────────────────
+─ ● … ──────────────────────────────────────────────────────────────────────────
  Continue drafting this response
 ────────────────────────────────────────────────────────────────────────────────
  ○ normal  permission pending                                          1:32 100%
