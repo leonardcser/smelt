@@ -281,7 +281,7 @@ pub(crate) fn operator_span(buf: &str, from: usize, pos: usize, reach: Reach) ->
                 (lo < before).then_some(Span::Chars(lo, before))
             }
         }
-        Reach::Exclusive => (lo < hi).then_some(Span::Chars(lo, hi)),
+        Reach::Exclusive => Some(Span::Chars(lo, hi)),
     }
 }
 

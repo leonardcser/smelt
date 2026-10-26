@@ -16,16 +16,41 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use smelt_buffer::attached::AttachedTextMut;
 use smelt_buffer::attachment::ATTACHMENT_MARKER;
 
-fn toggle_case(text: &str) -> String {
-    let mut toggled = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if ch.is_uppercase() {
-            toggled.extend(ch.to_lowercase());
-        } else {
-            toggled.extend(ch.to_uppercase());
-        }
+/// Upper-case `c` to a single char, as vim does: `ß` becomes `ẞ`, and chars
+/// whose full mapping is longer than one char stay as they are.
+fn upper_char(c: char) -> char {
+    if c == 'ß' {
+        return 'ẞ';
     }
-    toggled
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) => single,
+        _ => c,
+    }
+}
+
+/// Lower-case `c` to a single char, as vim does: `İ` becomes `i`, the digraph
+/// title-case letters stay, and chars whose full mapping is longer than one
+/// char stay as they are.
+fn lower_char(c: char) -> char {
+    match c {
+        'İ' => return 'i',
+        'ǅ' | 'ǈ' | 'ǋ' | 'ǲ' => return c,
+        _ => {}
+    }
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(single), None) => single,
+        _ => c,
+    }
+}
+
+fn toggle_char(c: char) -> char {
+    if c.is_uppercase() {
+        lower_char(c)
+    } else {
+        upper_char(c)
+    }
 }
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -194,14 +219,46 @@ pub(crate) enum Op {
     Delete,
     Change,
     Yank,
+    Upper,
+    Lower,
+    Toggle,
 }
 
 impl Op {
-    fn char(self) -> char {
+    /// The keys that start the operator.
+    fn label(self) -> &'static str {
         match self {
-            Op::Delete => 'd',
-            Op::Change => 'c',
-            Op::Yank => 'y',
+            Op::Delete => "d",
+            Op::Change => "c",
+            Op::Yank => "y",
+            Op::Upper => "gU",
+            Op::Lower => "gu",
+            Op::Toggle => "g~",
+        }
+    }
+
+    /// The key that repeats the operator to act on whole lines (`dd`, `gUU`).
+    fn char(self) -> char {
+        self.label().chars().last().unwrap_or_default()
+    }
+
+    /// Operators that rewrite the case of the text they span.
+    fn case_op(c: char) -> Option<Op> {
+        match c {
+            'U' => Some(Op::Upper),
+            'u' => Some(Op::Lower),
+            '~' => Some(Op::Toggle),
+            _ => None,
+        }
+    }
+
+    /// `text` with this operator's case applied, or `None` for other operators.
+    fn recase(self, text: &str) -> Option<String> {
+        match self {
+            Op::Upper => Some(text.chars().map(upper_char).collect()),
+            Op::Lower => Some(text.chars().map(lower_char).collect()),
+            Op::Toggle => Some(text.chars().map(toggle_char).collect()),
+            Op::Delete | Op::Change | Op::Yank => None,
         }
     }
 }
@@ -477,7 +534,7 @@ impl VimWindowState {
         }
 
         let push_op = |out: &mut String, op: Op| {
-            out.push(op.char());
+            out.push_str(op.label());
             if let Some(count) = self.count2 {
                 out.push_str(&count.to_string());
             }
@@ -1042,12 +1099,16 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                     return action;
                 }
                 if c == 's' {
-                    ctx.vim_state.sub = match op {
-                        Op::Yank => SubState::WaitingSurroundMotion,
-                        Op::Delete => SubState::WaitingDeleteSurround,
-                        Op::Change => SubState::WaitingChangeSurroundTarget,
+                    let surround = match op {
+                        Op::Yank => Some(SubState::WaitingSurroundMotion),
+                        Op::Delete => Some(SubState::WaitingDeleteSurround),
+                        Op::Change => Some(SubState::WaitingChangeSurroundTarget),
+                        Op::Upper | Op::Lower | Op::Toggle => None,
                     };
-                    return Action::Consumed;
+                    if let Some(sub) = surround {
+                        ctx.vim_state.sub = sub;
+                        return Action::Consumed;
+                    }
                 }
                 if c == 'i' || c == 'a' {
                     ctx.vim_state.sub = SubState::WaitingTextObj(op, c == 'i');
@@ -1321,7 +1382,9 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 ctx.save_undo();
                 let start = *ctx.cpos;
                 let end = advance_chars(ctx.buf.as_str(), start, n);
-                let toggled = toggle_case(smelt_buffer::text::slice(ctx.buf.as_str(), start..end));
+                let toggled = Op::Toggle
+                    .recase(smelt_buffer::text::slice(ctx.buf.as_str(), start..end))
+                    .unwrap_or_default();
                 ctx.replace_range(start, end, &toggled);
                 *ctx.cpos = start + toggled.len();
                 clamp_normal(ctx.buf.as_str(), ctx.cpos);
@@ -1787,46 +1850,10 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
 
-        // ── Case toggling on selection ─────────────────────────────
-        '~' => {
-            if let Some((start, end)) =
-                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-            {
-                ctx.save_undo();
-                let toggled = toggle_case(smelt_buffer::text::slice(ctx.buf.as_str(), start..end));
-                ctx.replace_range(start, end, &toggled);
-                *ctx.cpos = start;
-                clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
-        'U' => {
-            if let Some((start, end)) =
-                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-            {
-                ctx.save_undo();
-                let upper = ctx.buf.as_str()[start..end].to_uppercase();
-                ctx.replace_range(start, end, &upper);
-                *ctx.cpos = start;
-                clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
-        'u' => {
-            if let Some((start, end)) =
-                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-            {
-                ctx.save_undo();
-                let lower = ctx.buf.as_str()[start..end].to_lowercase();
-                ctx.replace_range(start, end, &lower);
-                *ctx.cpos = start;
-                clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
+        // ── Case change on selection ───────────────────────────────
+        '~' => recase_selection(Op::Toggle, ctx),
+        'U' => recase_selection(Op::Upper, ctx),
+        'u' => recase_selection(Op::Lower, ctx),
 
         // ── Join lines ─────────────────────────────────────────────
         'J' => {
@@ -2065,6 +2092,15 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             .reselect_visual(ctx.mode, ctx.cpos, ctx.buf.as_str());
         return Action::Consumed;
     }
+    if let KeyCode::Char(c) = key.code {
+        if let Some(op) = Op::case_op(c) {
+            if *ctx.mode == VimMode::Normal {
+                ctx.vim_state.sub = SubState::WaitingOp(op);
+                return Action::Consumed;
+            }
+            return recase_selection(op, ctx);
+        }
+    }
     if let Some(motion) = motion_after_g(key) {
         move_cursor(ctx, motion);
     }
@@ -2074,6 +2110,13 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
 
 fn handle_waiting_op_g(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
+    if op.recase("").is_some() && key.code == KeyCode::Char(op.char()) {
+        let count = ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
+        let action = execute_linewise_op(op, ctx);
+        ctx.vim_state
+            .record_change(RepeatCommand::Linewise { op, count });
+        return action;
+    }
     if let Some(span) = motion_after_g(key).and_then(|motion| op_span(ctx, op, motion)) {
         return apply_span(op, ctx, span);
     }
@@ -2354,11 +2397,18 @@ fn execute_linewise_op(op: Op, ctx: &mut VimContext<'_>) -> Action {
         }
     }
     let end = line_end(ctx.buf.as_str(), end_pos);
+    if op.recase("").is_some() && n == 1 {
+        *ctx.cpos = start;
+    }
     apply_linewise_op(op, ctx, start, end)
 }
 
 /// Apply a charwise operator over the byte range [start..end).
 fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize) -> Action {
+    // An empty span deletes and yanks nothing, but `c` still starts inserting.
+    if start == end && matches!(op, Op::Delete | Op::Yank) {
+        return Action::Consumed;
+    }
     match op {
         Op::Delete => {
             ctx.save_undo();
@@ -2381,7 +2431,39 @@ fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             ctx.clipboard.kill_ring.mark_yanked(ctx.now);
             *ctx.cpos = start;
         }
+        Op::Upper | Op::Lower | Op::Toggle => {
+            // Vim treats an empty exclusive span as the char under it.
+            let end = if start == end && !ctx.buf.as_str()[start..].starts_with('\n') {
+                next_grapheme_boundary(ctx.buf.as_str(), start)
+            } else {
+                end
+            };
+            recase_range(op, ctx, start, end, start);
+        }
     }
+    Action::Consumed
+}
+
+/// Rewrite the case of `start..end` with a case operator as one undo step and
+/// leave the cursor at `cursor`, which is also where undo puts it back.
+fn recase_range(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize, cursor: usize) {
+    let Some(text) = op.recase(smelt_buffer::text::slice(ctx.buf.as_str(), start..end)) else {
+        return;
+    };
+    *ctx.cpos = cursor;
+    ctx.save_undo();
+    ctx.replace_range(start, end, &text);
+    *ctx.cpos = smelt_buffer::text::snap_grapheme(ctx.buf.as_str(), cursor);
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+/// Visual `U`, `u`, `~` (and `gU`, `gu`, `g~`): recase the selection and leave Visual mode.
+fn recase_selection(op: Op, ctx: &mut VimContext<'_>) -> Action {
+    if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+    {
+        recase_range(op, ctx, start, end, start);
+    }
+    exit_visual(ctx);
     Action::Consumed
 }
 
@@ -2433,6 +2515,12 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             ctx.yank_range(start, end, true);
             ctx.clipboard.kill_ring.mark_yanked(ctx.now);
         }
+        Op::Upper | Op::Lower | Op::Toggle => {
+            // The cursor keeps its column and moves to the first line.
+            let column = *ctx.cpos - line_start(ctx.buf.as_str(), *ctx.cpos);
+            let cursor = (start + column).min(line_end(ctx.buf.as_str(), start));
+            recase_range(op, ctx, start, end, cursor);
+        }
     }
     Action::Consumed
 }
@@ -2462,6 +2550,9 @@ fn enter_normal(ctx: &mut VimContext<'_>) {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod parity;
 
 #[cfg(test)]
 mod tests {
@@ -3363,8 +3454,8 @@ mod tests {
         let mut counted = TestHarness::new("ßx");
         counted.handle(key('2'));
         counted.handle(key('~'));
-        assert_eq!(counted.buf, "SSX");
-        assert_eq!(counted.cpos, 2);
+        assert_eq!(counted.buf, "ẞX");
+        assert_eq!(counted.cpos, "ẞ".len());
     }
 
     #[test]
@@ -3688,7 +3779,7 @@ mod tests {
         let mut expanded = TestHarness::new("ßx");
         expanded.handle(key('v'));
         expanded.handle(key('~'));
-        assert_eq!(expanded.buf, "SSx");
+        assert_eq!(expanded.buf, "ẞx");
 
         let mut decomposed = TestHarness::new("e\u{301}x");
         decomposed.handle(key('v'));
@@ -3859,6 +3950,88 @@ mod tests {
         assert_eq!(h.buf, "hello world");
     }
 
+    fn keys(h: &mut TestHarness, keys: &str) {
+        for c in keys.chars() {
+            h.handle(key(c));
+        }
+    }
+
+    #[test]
+    fn case_operators_take_motions_and_text_objects() {
+        for (text, cpos, input, expected, cursor) in [
+            ("hello world", 8, "gUiw", "hello WORLD", 6),
+            ("hello world", 3, "gU$", "helLO WORLD", 3),
+            ("hello world", 3, "gUw", "helLO world", 3),
+            ("HELLO WORLD", 0, "guw", "hello WORLD", 0),
+            ("Hello", 0, "g~l", "hello", 0),
+            ("a b c", 0, "gU2w", "A B c", 0),
+        ] {
+            let mut h = TestHarness::new(text);
+            h.cpos = cpos;
+            keys(&mut h, input);
+            assert_eq!(h.buf, expected, "{input}");
+            assert_eq!(h.cpos, cursor, "{input}");
+        }
+    }
+
+    #[test]
+    fn case_operators_double_to_act_on_lines() {
+        let mut h = TestHarness::new("one two\nthree four\nfive");
+        h.cpos = 12;
+        keys(&mut h, "gUU");
+        assert_eq!(h.buf, "one two\nTHREE FOUR\nfive");
+        assert_eq!(h.cpos, 8, "gUU lands on the first column");
+
+        let mut h = TestHarness::new("one two\nthree four\nfive");
+        h.cpos = 12;
+        keys(&mut h, "2g~~");
+        assert_eq!(h.buf, "one two\nTHREE FOUR\nFIVE");
+        assert_eq!(h.cpos, 12, "a counted doubling keeps the column");
+
+        let mut h = TestHarness::new("one two\nthree four");
+        keys(&mut h, "gugU");
+        keys(&mut h, "gUgU");
+        assert_eq!(h.buf, "ONE TWO\nthree four");
+    }
+
+    #[test]
+    fn case_operator_over_an_empty_exclusive_span_changes_the_char_under_it() {
+        let mut h = TestHarness::new("one");
+        keys(&mut h, "gU0");
+        assert_eq!(h.buf, "One");
+    }
+
+    #[test]
+    fn case_operators_repeat_with_dot_and_undo_to_the_range_start() {
+        let mut h = TestHarness::new("one two three");
+        h.cpos = 5;
+        keys(&mut h, "gUiww.");
+        assert_eq!(h.buf, "one TWO THREE");
+        keys(&mut h, "u");
+        assert_eq!(h.buf, "one TWO three");
+        keys(&mut h, "u");
+        assert_eq!(h.buf, "one two three");
+        assert_eq!(h.cpos, 4, "undo puts the cursor back at the range start");
+    }
+
+    #[test]
+    fn visual_gu_and_gu_upper_recase_the_selection() {
+        let mut h = TestHarness::new("hello world");
+        keys(&mut h, "vegU");
+        assert_eq!(h.buf, "HELLO world");
+        assert_eq!(h.mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn case_mapping_stays_one_char_per_char() {
+        let mut h = TestHarness::new("ßx");
+        keys(&mut h, "gUl");
+        assert_eq!(h.buf, "ẞx");
+        let mut h = TestHarness::new("İx");
+        keys(&mut h, "gul");
+        assert_eq!(h.buf, "ix");
+    }
+
     #[test]
     fn visual_case_mapping_keeps_cursor_on_a_grapheme_boundary() {
         let mut h = TestHarness::new("İx");
@@ -3866,7 +4039,7 @@ mod tests {
         h.handle(key('l'));
         h.handle(key('u'));
 
-        assert_eq!(h.buf, "i\u{307}x");
+        assert_eq!(h.buf, "ix");
         assert_eq!(h.cpos, 0);
     }
 
