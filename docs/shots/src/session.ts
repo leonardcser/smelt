@@ -375,7 +375,7 @@ export async function run(
           }
         }
       } else if ("until" in step) {
-        // A match already on screen (the last turn's `─ done`) only counts once this turn has started.
+        // A match already on screen (the last turn's `─ ● done`) only counts once this turn has started.
         let started = !step.until.test(plain(await screen()));
         for (let i = 0; i < 1200; i++) {
           const text = plain(await screen());

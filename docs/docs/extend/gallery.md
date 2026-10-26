@@ -1,6 +1,6 @@
 ---
 title: "Plugin gallery"
-description: "Small smelt Lua plugins to copy: a crates.io lookup tool, a lualine-style statusline, a changes sidebar and a snake game."
+description: "Small smelt Lua plugins to copy: a crates.io lookup tool, a lualine-style statusline, two custom spinners, a changes sidebar and a snake game."
 ---
 
 # Plugin gallery
@@ -29,6 +29,36 @@ Font icons.
 
 ```lua
 --8<-- "lualine.lua"
+```
+
+## Spinner
+
+The working indicator in the rule above the prompt is a source named
+`indicator`. The built-in one is a coal that heats with tool calls, beside a gray
+word that a hammer sweep runs along. Replacing the source draws anything you
+like. Here the word working… is forged: it types in white-hot at the start of a
+turn and cools to a glow, hammer blows sweep along it, then it is quenched into
+steam and decodes back in from embers.
+Each frame is a pure function of `smelt.time.now_ms()`, so it repaints the same
+however often the bar redraws. When the turn is done, interrupted or paused, the
+built-in `indicator` takes over again through `builtin("indicator")`.
+
+<figure class="term" data-replay="../../assets/replays/spinner.json" aria-label="The word working typed in white-hot, struck by hammer blows and quenched to steam" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+```lua
+--8<-- "spinner.lua"
+```
+
+### Glitch
+
+A different take on the same source: status words decode in from noise, hold with
+the odd flicker and a pink and cyan tear, then corrupt away and give way to the
+next word.
+
+<figure class="term" data-replay="../../assets/replays/glitch.json" aria-label="A status word that glitches: it decodes in from noise, flickers, then corrupts into the next word" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+```lua
+--8<-- "glitch.lua"
 ```
 
 ## Changes sidebar
