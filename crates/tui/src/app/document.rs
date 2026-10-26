@@ -757,7 +757,9 @@ impl TuiApp {
                 } else {
                     self.transcript_anchor_or_approximate_row_seek(viewport_cols, scroll_top)
                 };
-                let restore = if defer_local_transcript_scroll {
+                let restore = if defer_local_transcript_scroll
+                    || matches!(command, DocumentCommand::ScrollCursor(_))
+                {
                     TranscriptProjectionRestore {
                         cursor_screen_row: Some(screen_row_or_edge(
                             state.cursor.row,

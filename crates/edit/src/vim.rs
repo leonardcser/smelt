@@ -2617,6 +2617,21 @@ mod tests {
     }
 
     #[test]
+    fn document_view_z_commands_scroll_the_cursor_row() {
+        for (keys, at) in [
+            ("zt", ScrollTo::Top),
+            ("zz", ScrollTo::Center),
+            ("zb", ScrollTo::Bottom),
+        ] {
+            assert_eq!(
+                viewer_keys(keys).0,
+                DocumentKeyResult::Command(DocumentCommand::ScrollCursor(at)),
+                "{keys}"
+            );
+        }
+    }
+
+    #[test]
     fn document_view_brackets_wait_for_a_block_kind() {
         let (result, state) = viewer_keys("]");
         assert_eq!(result, DocumentKeyResult::Consumed);

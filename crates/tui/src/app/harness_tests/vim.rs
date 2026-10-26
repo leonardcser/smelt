@@ -838,3 +838,171 @@ fn transcript_cursor_stays_visible_on_the_timestamp_row_at_the_top() {
         .collect();
     assert_eq!(cursor_rows, vec![0], "gg draws the cursor on the top row");
 }
+
+fn transcript_cursor(app: &TestApp) -> (usize, usize) {
+    let cursor = app.transcript_window().row_cursor.unwrap();
+    (cursor.row as usize, cursor.byte_col)
+}
+
+fn transcript_row_of(app: &TestApp, needle: &str) -> usize {
+    transcript_buffer_lines(app, 400)
+        .iter()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no transcript row contains {needle:?}"))
+}
+
+fn transcript_at(rows: usize, needle: &str) -> (TestApp, usize) {
+    let mut app = row_document_transcript_app(rows, true);
+    app.type_text("gg");
+    app.render_silent();
+    let row = transcript_row_of(&app, needle);
+    move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
+    (app, row)
+}
+
+#[test]
+fn transcript_big_word_motions_and_word_end_backward() {
+    let (mut app, row) = transcript_at(100, "row 003 alpha beta");
+    app.type_text("0");
+    app.type_text("2W");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 ".len()));
+    app.type_text("ge");
+    assert_eq!(transcript_cursor(&app), (row, "row 00".len()));
+    app.type_text("gE");
+    assert_eq!(transcript_cursor(&app), (row, "ro".len()));
+    app.type_text("E");
+    assert_eq!(transcript_cursor(&app), (row, "row 00".len()));
+    app.type_text("$B");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 alpha ".len()));
+}
+
+#[test]
+fn transcript_ge_continues_onto_the_previous_row() {
+    let (mut app, row) = transcript_at(100, "row 003 alpha beta");
+    app.type_text("0ge");
+    let (prev_row, col) = transcript_cursor(&app);
+    assert!(prev_row < row, "ge skips the blank rows between blocks");
+    assert!(transcript_buffer_lines(&app, 400)[prev_row].contains("row 002 alpha beta"));
+    assert_eq!(col, "row 002 alpha bet".len());
+}
+
+#[test]
+fn transcript_find_motions_repeat_with_semicolon_and_comma() {
+    let (mut app, row) = transcript_at(100, "row 003 alpha beta");
+    app.type_text("0fa");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 ".len()));
+    app.type_text(";");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 alph".len()));
+    app.type_text(",");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 ".len()));
+    app.type_text("0tb");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 alpha ".len() - 1));
+    app.type_text("$Fl");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 a".len()));
+    app.type_text("$Tl");
+    assert_eq!(transcript_cursor(&app), (row, "row 003 al".len()));
+}
+
+#[test]
+fn transcript_yank_to_a_found_character() {
+    let (mut app, row) = transcript_at(100, "row 003 alpha beta");
+    app.type_text("0yfa");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "row 003 a");
+    assert_eq!(transcript_cursor(&app), (row, 0));
+    app.type_text("yta");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "row 003 ");
+    app.type_text("$yFl");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "lpha bet");
+}
+
+#[test]
+fn transcript_percent_jumps_between_brackets_across_rows() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 16);
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: "call(one, [two])\nfn open {\n    body\n}\n".into(),
+    });
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.type_text("gg");
+    app.render_silent();
+    let call = transcript_row_of(&app, "call(one");
+    move_transcript_cursor_to_row(&mut app, call as crate::smelt_edit::RowIndex);
+
+    app.type_text("0%");
+    assert_eq!(transcript_cursor(&app), (call, "call(one, [two]".len()));
+    app.type_text("%");
+    assert_eq!(transcript_cursor(&app), (call, "call".len()));
+
+    app.type_text("0f(y%");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "(one, [two])"
+    );
+
+    let open = transcript_row_of(&app, "fn open");
+    move_transcript_cursor_to_row(&mut app, open as crate::smelt_edit::RowIndex);
+    app.type_text("$%");
+    let close = transcript_row_of(&app, "}");
+    assert_eq!(transcript_cursor(&app).0, close);
+}
+
+#[test]
+fn transcript_screen_motions_pick_visible_rows() {
+    let mut app = row_document_transcript_app(100, true);
+    move_transcript_cursor_to_row(&mut app, 60);
+    app.type_text("zt");
+    app.render_silent();
+    let top = app.transcript_window().scroll_top() as usize;
+    let height = app.transcript_window().viewport.unwrap().rect.height as usize;
+
+    app.type_text("L");
+    assert_eq!(transcript_cursor(&app).0, top + height - 1);
+    app.type_text("H");
+    assert_eq!(transcript_cursor(&app).0, top);
+    app.type_text("M");
+    assert_eq!(transcript_cursor(&app).0, top + (height - 1) / 2);
+    app.type_text("2L");
+    assert_eq!(transcript_cursor(&app).0, top + height - 2);
+    app.type_text("3H");
+    assert_eq!(transcript_cursor(&app).0, top + 2);
+}
+
+#[test]
+fn transcript_zt_and_zb_place_the_cursor_row_at_the_viewport_edges() {
+    let mut app = row_document_transcript_app(100, true);
+    let row = 60;
+    move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
+    app.type_text("zt");
+    app.render_silent();
+    assert_eq!(app.transcript_window().scroll_top() as usize, row);
+    let height = app.transcript_window().viewport.unwrap().rect.height as usize;
+    app.type_text("zb");
+    app.render_silent();
+    assert_eq!(
+        app.transcript_window().scroll_top() as usize,
+        row + 1 - height
+    );
+    eprintln!(
+        "DBG before zz cursor {:?} scroll {}",
+        transcript_cursor(&app),
+        app.transcript_window().scroll_top()
+    );
+    app.type_text("zz");
+    eprintln!(
+        "DBG after zz cursor {:?} scroll {}",
+        transcript_cursor(&app),
+        app.transcript_window().scroll_top()
+    );
+    app.render_silent();
+    eprintln!(
+        "DBG rendered zz cursor {:?} scroll {}",
+        transcript_cursor(&app),
+        app.transcript_window().scroll_top()
+    );
+    assert_eq!(
+        app.transcript_window().scroll_top() as usize,
+        row - height / 2
+    );
+}

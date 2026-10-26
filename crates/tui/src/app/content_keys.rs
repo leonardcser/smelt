@@ -9,6 +9,11 @@ use std::time::Duration;
 
 const TRANSCRIPT_FOLD_CHORD_WINDOW: Duration = Duration::from_millis(750);
 
+/// Keys that complete a `z` fold chord.
+fn is_fold_key(code: KeyCode) -> bool {
+    matches!(code, KeyCode::Char('a' | 'o' | 'c' | 'R' | 'M'))
+}
+
 impl TuiApp {
     fn transcript_cursor_row(&self) -> Option<crate::smelt_edit::RowIndex> {
         let win = self.transcript_win();
@@ -32,11 +37,15 @@ impl TuiApp {
             return None;
         }
         let now = self.core.clock.instant_now();
-        let pending = self
-            .timers
-            .pending_transcript_fold_chord
-            .take()
+        let started = self.timers.pending_transcript_fold_chord.take();
+        let pending = started
             .is_some_and(|started| now.duration_since(started) < TRANSCRIPT_FOLD_CHORD_WINDOW);
+        if started.is_some() && !(pending && is_fold_key(k.code)) {
+            // The `z` starts a vim command (`zt`, `zz`, `zb`, ...), not a fold chord.
+            let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+            self.dispatch_window_viewer_key(self.well_known.transcript, z);
+            return None;
+        }
         if pending {
             let action = match k.code {
                 KeyCode::Char('a') => Some(FoldAction::Toggle),
