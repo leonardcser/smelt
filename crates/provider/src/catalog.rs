@@ -68,6 +68,10 @@ pub struct ModelEntry {
 const MODELS_API_URL: &str = "https://models.dev/api.json";
 const CACHE_KEY: &str = "models_dev";
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+/// Bound on the catalog request. Request construction waits for the catalog,
+/// so an unreachable network must not hold the first request for the OS
+/// connect timeout.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 
 static CATALOG: OnceLock<HashMap<(String, String), ModelEntry>> = OnceLock::new();
 
@@ -143,12 +147,21 @@ async fn load_or_fetch(
     client: &reqwest::Client,
     cache_dir: Option<&Path>,
 ) -> HashMap<(String, String), ModelEntry> {
+    load_or_fetch_from(client, MODELS_API_URL, FETCH_TIMEOUT, cache_dir).await
+}
+
+async fn load_or_fetch_from(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    cache_dir: Option<&Path>,
+) -> HashMap<(String, String), ModelEntry> {
     if let Some(json) = cache_get(cache_dir, CACHE_KEY) {
         if let Some(map) = parse(&json) {
             return map;
         }
     }
-    let json = match client.get(MODELS_API_URL).send().await {
+    let json = match client.get(url).timeout(timeout).send().await {
         Ok(resp) => match resp.text().await {
             Ok(t) => t,
             Err(_) => return HashMap::new(),
@@ -399,6 +412,24 @@ pub(crate) fn fuzz_parse_len(json: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fetch_gives_up_on_an_unresponsive_host() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
+        let started = std::time::Instant::now();
+
+        let map = load_or_fetch_from(
+            &crate::http::client(),
+            &url,
+            Duration::from_millis(100),
+            None,
+        )
+        .await;
+
+        assert!(map.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn catalog_key_maps_openai_aliases_to_openai() {
