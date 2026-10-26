@@ -404,10 +404,8 @@ export const scenes: Record<string, Scene> = {
       { pause: 500 },
       { key: "Enter" },
       { pause: 1000 },
-      { press: ["n"], gap: 1000 },
-      { press: ["v", "e"], gap: 700 },
-      { pause: 600 },
-      { press: ["y"], gap: 450 },
+      { pause: 700 },
+      { press: ["y", "i", "w"], gap: 450 },
       { pause: 1000 },
       // Back to the prompt: paste the word at the end, then change the first one.
       { press: ["C-c"], gap: 800 },

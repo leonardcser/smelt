@@ -703,3 +703,144 @@ fn vim_yy_yank_flash_expires_after_tick() {
         "flash should expire after Tick past the window"
     );
 }
+
+fn type_keys(app: &mut TestApp, keys: &str) {
+    for c in keys.chars() {
+        app.type_char(c);
+    }
+}
+
+#[test]
+fn vim_paragraph_motions_move_the_prompt_cursor_between_blank_lines() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("one\ntwo\n\nthree");
+    app.press(KeyCode::Esc);
+
+    type_keys(&mut app, "{");
+    assert_eq!(app.prompt_cpos(), 8);
+    type_keys(&mut app, "{");
+    assert_eq!(app.prompt_cpos(), 0);
+    type_keys(&mut app, "}");
+    assert_eq!(app.prompt_cpos(), 8);
+    type_keys(&mut app, "}");
+    assert_eq!(app.prompt_cpos(), "one\ntwo\n\nthree".len() - 1);
+}
+
+#[test]
+fn vim_delete_to_paragraph_end_takes_whole_lines() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("one\ntwo\n\nthree");
+    app.press(KeyCode::Esc);
+    type_keys(&mut app, "{{d}");
+    assert_eq!(app.state().prompt_text, "\nthree");
+}
+
+#[test]
+fn vim_yiw_in_viewer_flashes_and_keeps_the_cursor_at_the_word_start() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    let leaf = app.open_readonly_overlay_fixture(vec!["alpha beta gamma".into()], None);
+    app.render_silent();
+
+    type_keys(&mut app, "wl");
+    type_keys(&mut app, "yiw");
+
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "beta");
+    let win = app.ui_probe().win(leaf).expect("overlay window");
+    assert_eq!(win.cpos(), 6, "yiw leaves the cursor at the word start");
+    assert!(win.byte_yank_flash_until().is_some());
+}
+
+#[test]
+fn transcript_yiw_flashes_and_keeps_the_cursor_at_the_word_start() {
+    let mut app = row_document_transcript_app(100, true);
+    type_keys(&mut app, "gg");
+    app.render_silent();
+    let lines = transcript_buffer_lines(&app, 400);
+    let row = lines
+        .iter()
+        .position(|line| line.contains("row 003 alpha beta"))
+        .expect("row 003");
+    let word_start = lines[row].find("alpha").unwrap();
+    move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
+
+    type_keys(&mut app, "0wwl");
+    type_keys(&mut app, "yiw");
+    app.render_silent();
+
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "alpha");
+    let cursor = app.transcript_window().row_cursor.unwrap();
+    assert_eq!(cursor.row as usize, row);
+    assert_eq!(cursor.byte_col, word_start);
+    let flash = app
+        .transcript_window()
+        .document_view
+        .yank_flash
+        .expect("yank flash");
+    assert_eq!(flash.range.start.byte_col, word_start);
+    assert_eq!(flash.range.end.byte_col, word_start + "alpha".len());
+}
+
+#[test]
+fn transcript_paragraph_motions_land_on_blank_rows() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 16);
+    for i in 0..40 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("para {i} one\nstill {i}\n\npara {i} two").into(),
+        });
+    }
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    type_keys(&mut app, "gg");
+    app.render_silent();
+    let lines = transcript_buffer_lines(&app, 400);
+
+    type_keys(&mut app, "}");
+    let first = app.transcript_window().row_cursor.unwrap().row as usize;
+    assert!(
+        lines[first].trim().is_empty(),
+        "closing brace lands on a blank row"
+    );
+    assert!(first > 0);
+
+    type_keys(&mut app, "}");
+    let second = app.transcript_window().row_cursor.unwrap().row as usize;
+    assert!(second > first && lines[second].trim().is_empty());
+
+    type_keys(&mut app, "{");
+    assert_eq!(
+        app.transcript_window().row_cursor.unwrap().row as usize,
+        first
+    );
+}
+
+#[test]
+fn transcript_cursor_stays_visible_on_the_timestamp_row_at_the_top() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(100, 24);
+    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        text: "give me a tour".into(),
+        image_labels: Vec::new(),
+        command: false,
+        sent_at_ms: Some(1_700_000_000_000),
+    });
+    for i in 0..6 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("para {i} one\n\npara {i} two line").into(),
+        });
+    }
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+
+    type_keys(&mut app, "gg");
+    let frame = app.render_to_frame();
+    let cursor_rows: Vec<usize> = frame
+        .styles_text()
+        .lines()
+        .filter(|line| line.contains("bg=White"))
+        .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+        .collect();
+    assert_eq!(cursor_rows, vec![0], "gg draws the cursor on the top row");
+}

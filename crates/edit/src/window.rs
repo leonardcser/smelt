@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 mod document_view;
 pub use document_view::{
-    resolve_document_command, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
-    DocumentViewExecutor, DocumentViewState, RowYankFlash,
+    resolve_document_command, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentMotion,
+    DocumentTextObject, DocumentViewExecutor, DocumentViewState, RowYankFlash,
 };
 
 /// Per-frame paint context for `Window::render`.
@@ -3778,7 +3778,12 @@ impl Window {
                 // `col` is in source-row cells; shift into viewport coords. Off
                 // either side of the horizontal viewport drops the caret paint.
                 if col >= self.scroll_left && screen_row < height {
-                    let dst_col = col - self.scroll_left;
+                    let mut dst_col = col - self.scroll_left;
+                    // A caret parked one cell past a row that fills the viewport
+                    // sits on that row's last cell instead of vanishing.
+                    if dst_col == content_width {
+                        dst_col = dst_col.saturating_sub(1);
+                    }
                     if dst_col < content_width {
                         let mut cursor_col = content_offset + dst_col;
                         if let Some((_, range)) = atomic_cells

@@ -21,6 +21,45 @@ impl DocumentTextObject {
     }
 }
 
+/// A cursor motion an operator such as `y` can span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentMotion {
+    WordForward(RowIndex),
+    WordBackward(RowIndex),
+    WordEnd(RowIndex),
+    ParagraphForward(RowIndex),
+    ParagraphBackward(RowIndex),
+    LineStart,
+    LineEnd,
+    Cols(isize),
+    Rows(isize),
+    BufferStart,
+    BufferEnd,
+}
+
+impl DocumentMotion {
+    fn command(self) -> DocumentCommand {
+        match self {
+            Self::WordForward(n) => DocumentCommand::WordForward(n),
+            Self::WordBackward(n) => DocumentCommand::WordBackward(n),
+            Self::WordEnd(n) => DocumentCommand::WordEnd(n),
+            Self::ParagraphForward(n) => DocumentCommand::ParagraphForward(n),
+            Self::ParagraphBackward(n) => DocumentCommand::ParagraphBackward(n),
+            Self::LineStart => DocumentCommand::LineStart,
+            Self::LineEnd => DocumentCommand::LineEnd,
+            Self::Cols(n) => DocumentCommand::MoveCursorCol(n),
+            Self::Rows(n) => DocumentCommand::MoveRows(n),
+            Self::BufferStart => DocumentCommand::BufferStart,
+            Self::BufferEnd => DocumentCommand::BufferEnd,
+        }
+    }
+
+    /// Whether the character under the far end of the motion is included.
+    fn inclusive(self) -> bool {
+        matches!(self, Self::WordEnd(_) | Self::LineEnd)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentCommand {
     MoveRows(isize),
@@ -36,11 +75,15 @@ pub enum DocumentCommand {
     WordForward(RowIndex),
     WordBackward(RowIndex),
     WordEnd(RowIndex),
+    ParagraphForward(RowIndex),
+    ParagraphBackward(RowIndex),
     StartVisual,
     StartVisualLine,
     YankSelection,
     YankSelectionLinewise,
     YankLines(RowIndex),
+    YankMotion(DocumentMotion),
+    YankTextObject(DocumentTextObject),
     TextObject(DocumentTextObject),
     CenterScroll,
     PanColumns(isize),
@@ -113,6 +156,16 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
         return Some(DocumentCommand::GotoPosition(pos));
     }
 
+    if let DocumentCommand::ParagraphForward(count) | DocumentCommand::ParagraphBackward(count) =
+        command
+    {
+        let forward = matches!(command, DocumentCommand::ParagraphForward(_));
+        for _ in 0..count.max(1) {
+            pos = paragraph_position(doc, total_rows, pos, forward, vim_mode)?;
+        }
+        return Some(DocumentCommand::GotoPosition(pos));
+    }
+
     let (kind, count) = match command {
         DocumentCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
         DocumentCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
@@ -156,6 +209,41 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
     }
 
     Some(DocumentCommand::GotoPosition(pos))
+}
+
+fn document_row_is_blank<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<bool> {
+    Some(document_row_string(doc, row)?.trim().is_empty())
+}
+
+/// The start of the next (`}`) or previous (`{`) blank row past the paragraph at
+/// `pos`, or the end or start of the document when there is none.
+fn paragraph_position<D: DisplayDocument + ?Sized>(
+    doc: &mut D,
+    total_rows: RowIndex,
+    pos: DocPosition,
+    forward: bool,
+    vim_mode: VimMode,
+) -> Option<DocPosition> {
+    let last = total_rows.saturating_sub(1);
+    let mut row = pos.row.min(last);
+    for want_blank in [true, false] {
+        while document_row_is_blank(doc, row)? == want_blank {
+            if forward && row == last {
+                let line = document_row_string(doc, row)?;
+                let byte_col = if matches!(vim_mode, VimMode::Normal) && !line.is_empty() {
+                    text::prev_grapheme_boundary(&line, line.len())
+                } else {
+                    line.len()
+                };
+                return Some(DocPosition { row, byte_col });
+            }
+            if !forward && row == 0 {
+                return Some(DocPosition::default());
+            }
+            row = if forward { row + 1 } else { row - 1 };
+        }
+    }
+    Some(DocPosition { row, byte_col: 0 })
 }
 
 fn document_row_string<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<String> {
@@ -1007,6 +1095,45 @@ impl Window {
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
+            DocumentCommand::ParagraphForward(count)
+            | DocumentCommand::ParagraphBackward(count) => {
+                let text = buf.text();
+                let forward = matches!(command, DocumentCommand::ParagraphForward(_));
+                let mut cpos = self.cpos();
+                for _ in 0..count.max(1) {
+                    cpos = if forward {
+                        text::paragraph_forward_pos(&text, cpos)
+                    } else {
+                        text::paragraph_backward_pos(&text, cpos)
+                    };
+                }
+                if matches!(self.vim_mode(), VimMode::Normal) {
+                    crate::motions::clamp_normal(&text, &mut cpos);
+                }
+                self.set_cpos(cpos);
+                self.set_curswant(None);
+                self.resync(buf, viewport_rows);
+            }
+            DocumentCommand::YankTextObject(object) => {
+                let source = buf.text();
+                if let Some((start, end)) =
+                    crate::text_objects::text_object_for_spec(&source, self.cpos(), object.spec())
+                {
+                    copy = Some(start..end);
+                    self.set_cpos(start);
+                    self.set_curswant(None);
+                    self.resync(buf, viewport_rows);
+                }
+            }
+            DocumentCommand::YankMotion(motion) => {
+                let source = buf.text();
+                if let Some((range, cursor)) = buffer_motion_range(&source, self.cpos(), motion) {
+                    copy = Some(range);
+                    self.set_cpos(cursor);
+                    self.set_curswant(None);
+                    self.resync(buf, viewport_rows);
+                }
+            }
             DocumentCommand::StartVisual => {
                 self.begin_visual(VimMode::Visual, self.cpos());
             }
@@ -1327,6 +1454,51 @@ impl DocumentViewExecutor {
                     until: now + YANK_FLASH_DURATION,
                 });
             }
+            DocumentCommand::YankMotion(motion) => {
+                if let Some((range, cursor)) =
+                    yank_motion_range(document, current, total_rows, motion)
+                {
+                    copy = Some(range);
+                    state.yank_flash = Some(RowYankFlash {
+                        range,
+                        until: now + YANK_FLASH_DURATION,
+                    });
+                    state.preferred_cell_col = None;
+                    next = cursor;
+                }
+            }
+            DocumentCommand::YankTextObject(object) => {
+                if let Some(selection) =
+                    document_text_object_range(document, *state, current, object.spec())
+                {
+                    let range = if selection.linewise {
+                        DocRange {
+                            start: DocPosition {
+                                row: selection.start.row,
+                                byte_col: 0,
+                            },
+                            end: DocPosition {
+                                row: selection.cursor.row.saturating_add(1).min(total_rows),
+                                byte_col: 0,
+                            },
+                        }
+                    } else {
+                        order_document_range_including_cursor_cell(
+                            document,
+                            selection.start,
+                            selection.cursor,
+                            selection.include_cursor_cell,
+                        )
+                    };
+                    copy = Some(range);
+                    state.yank_flash = Some(RowYankFlash {
+                        range,
+                        until: now + YANK_FLASH_DURATION,
+                    });
+                    state.preferred_cell_col = None;
+                    next = selection.start;
+                }
+            }
             DocumentCommand::TextObject(object) => {
                 if let Some(selection) =
                     document_text_object_range(document, *state, current, object.spec())
@@ -1355,7 +1527,9 @@ impl DocumentViewExecutor {
             | DocumentCommand::MoveCursorCol(_)
             | DocumentCommand::WordForward(_)
             | DocumentCommand::WordEnd(_)
-            | DocumentCommand::WordBackward(_) => {}
+            | DocumentCommand::WordBackward(_)
+            | DocumentCommand::ParagraphForward(_)
+            | DocumentCommand::ParagraphBackward(_) => {}
             DocumentCommand::OpenAction => {}
             DocumentCommand::ClearSelection => {
                 state.selection_anchor = None;
@@ -1388,6 +1562,8 @@ impl DocumentViewExecutor {
                 | DocumentCommand::WordForward(_)
                 | DocumentCommand::WordBackward(_)
                 | DocumentCommand::WordEnd(_)
+                | DocumentCommand::ParagraphForward(_)
+                | DocumentCommand::ParagraphBackward(_)
         ) {
             if let Some(cell) = document_position_cell(document, next) {
                 state.preferred_cell_col = Some(cell);
@@ -1753,6 +1929,163 @@ fn document_byte_col_at_cell<D: DisplayDocument + ?Sized>(
         .into_iter()
         .next()?;
     Some(text::cell_to_byte(&row.text, cell))
+}
+
+/// The rows or text span `motion` covers from `current`, and where the cursor
+/// lands afterwards (the start of the span, as in vim).
+fn yank_motion_range<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    current: DocPosition,
+    total_rows: RowIndex,
+    motion: DocumentMotion,
+) -> Option<(DocRange, DocPosition)> {
+    let last_row = total_rows.saturating_sub(1);
+    let rows = |a: RowIndex, b: RowIndex| DocRange {
+        start: DocPosition {
+            row: a.min(b),
+            byte_col: 0,
+        },
+        end: DocPosition {
+            row: a.max(b).saturating_add(1).min(total_rows),
+            byte_col: 0,
+        },
+    };
+    let keep_column = |document: &mut D, row: RowIndex| {
+        let line = document_row_string(document, row).unwrap_or_default();
+        DocPosition {
+            row,
+            byte_col: text::snap_grapheme(&line, current.byte_col.min(line.len())),
+        }
+    };
+
+    let target =
+        match resolve_document_command(document, motion.command(), current, VimMode::Normal)? {
+            DocumentCommand::MoveRows(delta) => {
+                let row = add_signed_row(current.row, delta).min(last_row);
+                return Some((
+                    rows(current.row, row),
+                    keep_column(document, current.row.min(row)),
+                ));
+            }
+            DocumentCommand::BufferStart => {
+                return Some((rows(0, current.row), keep_column(document, 0)));
+            }
+            DocumentCommand::BufferEnd => {
+                return Some((rows(current.row, last_row), current));
+            }
+            DocumentCommand::LineStart => DocPosition {
+                row: current.row,
+                byte_col: 0,
+            },
+            DocumentCommand::GotoPosition(target) => target,
+            _ => return None,
+        };
+
+    let (start, mut end) = if (target.row, target.byte_col) < (current.row, current.byte_col) {
+        (target, current)
+    } else {
+        (current, target)
+    };
+    if matches!(motion, DocumentMotion::WordForward(_)) && end.row > start.row {
+        // A word motion off the last word of a row stops at the row's end.
+        end = DocPosition {
+            row: start.row,
+            byte_col: document_row_string(document, start.row)?.len(),
+        };
+    }
+    if motion.inclusive() {
+        end = advance_document_position_if_on_char(document, end, true);
+    } else if end.byte_col == 0 && end.row > start.row {
+        // An exclusive motion that ends in column 0 stops at the end of the
+        // previous row, and takes whole rows when it starts at the row's indent.
+        let prev = end.row - 1;
+        let line = document_row_string(document, start.row)?;
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        if start.byte_col <= indent {
+            return Some((rows(start.row, prev), keep_column(document, start.row)));
+        }
+        end = DocPosition {
+            row: prev,
+            byte_col: document_row_string(document, prev)?.len(),
+        };
+    }
+    (start != end).then_some((DocRange { start, end }, start))
+}
+
+/// The byte span `motion` covers from `cpos` in plain buffer text, and where the
+/// cursor lands afterwards.
+fn buffer_motion_range(
+    source: &str,
+    cpos: usize,
+    motion: DocumentMotion,
+) -> Option<(Range<usize>, usize)> {
+    let lines = |a: usize, b: usize| {
+        let start = text::line_start(source, a.min(b));
+        let end = text::line_end(source, a.max(b));
+        start..(end + 1).min(source.len())
+    };
+    let target = match motion {
+        DocumentMotion::WordForward(n) => {
+            let eol = text::line_end(source, cpos);
+            let mut p = cpos;
+            for _ in 0..n.max(1) {
+                p = text::word_forward_pos(source, p, text::CharClass::Word);
+            }
+            p.min(eol.max(cpos))
+        }
+        DocumentMotion::WordBackward(n) => {
+            let mut p = cpos;
+            for _ in 0..n.max(1) {
+                p = text::word_backward_pos(source, p, text::CharClass::Word);
+            }
+            p
+        }
+        DocumentMotion::WordEnd(n) => {
+            let mut p = cpos;
+            for _ in 0..n.max(1) {
+                p = text::word_end_pos(source, p, text::CharClass::Word);
+            }
+            text::next_grapheme_boundary(source, p)
+        }
+        DocumentMotion::ParagraphForward(n) | DocumentMotion::ParagraphBackward(n) => {
+            let forward = matches!(motion, DocumentMotion::ParagraphForward(_));
+            let mut p = cpos;
+            for _ in 0..n.max(1) {
+                p = if forward {
+                    text::paragraph_forward_pos(source, p)
+                } else {
+                    text::paragraph_backward_pos(source, p)
+                };
+            }
+            p
+        }
+        DocumentMotion::LineStart => text::line_start(source, cpos),
+        DocumentMotion::LineEnd => text::line_end(source, cpos),
+        DocumentMotion::Cols(n) => {
+            let mut p = cpos;
+            for _ in 0..n.unsigned_abs() {
+                p = if n < 0 {
+                    text::prev_grapheme_boundary(source, p)
+                } else {
+                    text::next_grapheme_boundary(source, p)
+                };
+            }
+            p
+        }
+        DocumentMotion::Rows(n) => {
+            let (target, _) = text::vertical_move(source, cpos, n, None);
+            return Some((
+                lines(cpos, target),
+                text::line_start(source, cpos.min(target)),
+            ));
+        }
+        DocumentMotion::BufferStart => return Some((lines(0, cpos), 0)),
+        DocumentMotion::BufferEnd => {
+            return Some((lines(cpos, source.len()), text::line_start(source, cpos)));
+        }
+    };
+    let (start, end) = (cpos.min(target), cpos.max(target));
+    (start < end).then_some((start..end, start))
 }
 
 fn order_document_range_including_cursor_cell<D: DisplayDocument + ?Sized>(
