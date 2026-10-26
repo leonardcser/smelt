@@ -580,6 +580,12 @@ impl TuiApp {
             (KeyCode::Char('N'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 self.repeat_search(target, true)
             }
+            (KeyCode::Char('*'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.search_word_under_cursor(target, SearchDirection::Forward)
+            }
+            (KeyCode::Char('#'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.search_word_under_cursor(target, SearchDirection::Backward)
+            }
             _ => false,
         }
     }
@@ -637,6 +643,61 @@ impl TuiApp {
         direction: SearchDirection,
         query: String,
     ) {
+        self.submit_search_from(target, direction, query, None);
+    }
+
+    /// Vim `*` / `#`: search for the word under the cursor, or the next one on
+    /// its row, and move to its next (`*`) or previous (`#`) occurrence.
+    fn search_word_under_cursor(&mut self, target: WinId, direction: SearchDirection) -> bool {
+        let Some(cursor) = self.search_origin(target) else {
+            return false;
+        };
+        let line = self
+            .with_display_document_for_win(target, |document| {
+                document
+                    .materialize(cursor.row..cursor.row.saturating_add(1))
+                    .rows
+                    .into_iter()
+                    .next()
+                    .map(|row| row.text)
+            })
+            .flatten()
+            .unwrap_or_default();
+        let col = smelt_buffer::text::snap_grapheme(&line, cursor.byte_col.min(line.len()));
+        let Some((start, end)) =
+            crate::smelt_edit::text::word_range_at_transparent(&line, col, &[]).or_else(|| {
+                let next = line[col..]
+                    .char_indices()
+                    .find(|(_, c)| c.is_alphanumeric() || *c == '_')
+                    .map(|(i, _)| col + i)?;
+                crate::smelt_edit::text::word_range_at_transparent(&line, next, &[])
+            })
+        else {
+            return false;
+        };
+        self.record_search_jump(target, false);
+        let from = match direction {
+            SearchDirection::Forward => DocPosition {
+                row: cursor.row,
+                byte_col: end,
+            },
+            SearchDirection::Backward => backward_origin_before(DocPosition {
+                row: cursor.row,
+                byte_col: start,
+            }),
+        };
+        self.submit_search_from(target, direction, line[start..end].to_string(), Some(from));
+        true
+    }
+
+    /// `submit_search` starting from `origin` instead of the window's cursor.
+    fn submit_search_from(
+        &mut self,
+        target: WinId,
+        direction: SearchDirection,
+        query: String,
+        origin: Option<DocPosition>,
+    ) {
         self.pending_transcript_search = None;
         if query.is_empty() || query.contains('\n') {
             self.clear_search();
@@ -651,7 +712,9 @@ impl TuiApp {
             self.defer_transcript_search(target, direction, query);
             return;
         }
-        let origin = self.search_origin(target).unwrap_or_default();
+        let origin = origin
+            .or_else(|| self.search_origin(target))
+            .unwrap_or_default();
         if transcript_target {
             let Some(mut transcript_session) =
                 self.new_transcript_search_session(&query, origin, direction)
@@ -828,15 +891,7 @@ impl TuiApp {
                 .and_then(TextRange::rows);
             let origin = match (current_range, direction) {
                 (Some(range), SearchDirection::Forward) => range.end,
-                (Some(range), SearchDirection::Backward)
-                    if range.start.row == 0 && range.start.byte_col == 0 =>
-                {
-                    DocPosition {
-                        row: RowIndex::MAX,
-                        byte_col: usize::MAX,
-                    }
-                }
-                (Some(range), SearchDirection::Backward) => previous_search_position(range.start),
+                (Some(range), SearchDirection::Backward) => backward_origin_before(range.start),
                 (None, _) => self.search_origin(target).unwrap_or_default(),
             };
             Some((session.query.clone(), origin))
@@ -1058,4 +1113,17 @@ fn visible_buffer_matches(
         ));
     }
     matches
+}
+
+/// Origin for a backward search that must not re-find a match starting at `start`.
+/// At the very top of the document it wraps to the end.
+fn backward_origin_before(start: DocPosition) -> DocPosition {
+    if start.row == 0 && start.byte_col == 0 {
+        DocPosition {
+            row: RowIndex::MAX,
+            byte_col: usize::MAX,
+        }
+    } else {
+        previous_search_position(start)
+    }
 }

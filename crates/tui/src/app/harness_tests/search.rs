@@ -1282,3 +1282,49 @@ fn prompt_search_follows_edits_before_repeating() {
     app.type_char('N');
     assert_eq!(app.prompt_cpos(), 0);
 }
+
+#[test]
+fn prompt_star_and_hash_search_the_word_under_the_cursor() {
+    let mut app = vim_prompt_app("foo bar\nbaz foo\nqux foo\nfoo");
+    app.type_char('*');
+    assert_eq!(app.prompt_cpos(), "foo bar\nbaz ".len());
+    app.type_char('*');
+    assert_eq!(app.prompt_cpos(), "foo bar\nbaz foo\nqux ".len());
+    app.type_char('n');
+    assert_eq!(app.prompt_cpos(), "foo bar\nbaz foo\nqux foo\n".len());
+    app.type_char('#');
+    assert_eq!(app.prompt_cpos(), "foo bar\nbaz foo\nqux ".len());
+    app.type_char('n');
+    assert_eq!(app.prompt_cpos(), "foo bar\nbaz ".len());
+    app.type_char('N');
+    assert_eq!(app.prompt_cpos(), "foo bar\nbaz foo\nqux ".len());
+}
+
+#[test]
+fn prompt_star_uses_the_next_word_when_the_cursor_is_on_a_gap() {
+    let mut app = vim_prompt_app("-- foo --\nfoo");
+    app.type_char('*');
+    assert_eq!(app.prompt_cpos(), "-- foo --\n".len());
+}
+
+#[test]
+fn transcript_star_jumps_to_the_next_row_with_the_word() {
+    let mut app = row_document_transcript_app(20, true);
+    app.type_text("gg");
+    app.render_silent();
+    let first = app.transcript_window().row_cursor.unwrap().row;
+    app.type_text("fa;*");
+    app.render_silent();
+    // The word is "alpha" (the cursor is on the second `a`), found on the next block's row.
+    let cursor = app.transcript_window().row_cursor.unwrap();
+    assert!(cursor.row > first);
+    let lines = transcript_buffer_lines(&app, 400);
+    assert!(lines[cursor.row as usize].contains("alpha"));
+    assert_eq!(
+        cursor.byte_col,
+        lines[cursor.row as usize].find("alpha").unwrap()
+    );
+    app.type_text("#");
+    app.render_silent();
+    assert_eq!(app.transcript_window().row_cursor.unwrap().row, first);
+}
