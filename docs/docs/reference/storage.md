@@ -49,6 +49,16 @@ OS credential prompt.
 | `BRAVE_SEARCH_API_KEY`   | Brave Search key, per `brave_search_api_key_env` |
 | `VISUAL`, `EDITOR`       | Editor for `Ctrl+X Ctrl+E` (`VISUAL` first) |
 | `NO_COLOR`, `FORCE_COLOR`, `TERM`, `COLORFGBG` | Color output and light/dark detection |
+| `SMELT_COLOR`           | Pin the color depth to `truecolor` (or `24bit`) or `256` |
+
+smelt draws in 24-bit color when the terminal says it can: `COLORTERM` set to
+`truecolor` or `24bit`, `TERM_PROGRAM` set to iTerm, VS Code, WezTerm, Ghostty or
+Hyper, `WT_SESSION` set (Windows Terminal), or a `TERM` for kitty, alacritty,
+ghostty, wezterm or ending in `-direct`. Otherwise every color snaps to the
+nearest of the 256-color palette, which Terminal.app, mosh, screen and the Linux
+console all handle. Over ssh, tmux or mosh the `COLORTERM` hint is often lost, so
+set `SMELT_COLOR=truecolor` in your shell profile if your terminal supports it, or
+`SMELT_COLOR=256` to force the palette.
 
 The OAuth variables hold a provider's complete credential record, not just an API
 key. Avoid putting them in shell history or in process environments other users

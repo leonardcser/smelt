@@ -13,6 +13,7 @@
 //!   suspend support for shell-outs.
 
 pub mod ansi;
+pub mod color_depth;
 pub mod compositor;
 pub mod flush;
 pub mod geometry;
@@ -24,11 +25,12 @@ pub mod session;
 pub mod snapshot;
 pub mod surface;
 
+pub use color_depth::{color_depth, detect_color_depth, ColorDepth, COLOR_ENV};
 pub use compositor::{
     kitty_control_sequence, kitty_image_exists, kitty_image_generation, kitty_placeholder_row,
     register_kitty_image, Compositor, KITTY_IMAGE_ROWS,
 };
-pub use flush::flush_diff;
+pub use flush::{flush_diff, flush_diff_at};
 pub use geometry::Insets;
 pub use grid::{
     display_width, truncate_width, Cell, CellSymbol, CellUpdate, Grid, GridSlice, Style, TextAlign,

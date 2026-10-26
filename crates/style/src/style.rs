@@ -63,6 +63,43 @@ impl Color {
     }
 }
 
+/// Nearest ANSI 256-color index for an sRGB triple: the closer, by squared
+/// distance, of the xterm 6×6×6 cube entry and the 24-step gray ramp.
+pub fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    const LEVELS: [i32; 6] = [0, 95, 135, 175, 215, 255];
+    fn band(c: u8) -> usize {
+        (0..LEVELS.len())
+            .min_by_key(|&i| (c as i32 - LEVELS[i]).abs())
+            .unwrap_or(0)
+    }
+    fn distance(a: (i32, i32, i32), b: (i32, i32, i32)) -> i32 {
+        (a.0 - b.0).pow(2) + (a.1 - b.1).pow(2) + (a.2 - b.2).pow(2)
+    }
+    let target = (r as i32, g as i32, b as i32);
+    let (ri, gi, bi) = (band(r), band(g), band(b));
+    let cube = (LEVELS[ri], LEVELS[gi], LEVELS[bi]);
+    let step = ((target.0 + target.1 + target.2) / 3 - 3)
+        .div_euclid(10)
+        .clamp(0, 23);
+    let level = 8 + 10 * step;
+    if distance(target, (level, level, level)) < distance(target, cube) {
+        232 + step as u8
+    } else {
+        (16 + 36 * ri + 6 * gi + bi) as u8
+    }
+}
+
+impl Color {
+    /// The color as a terminal limited to the 256-color palette would show
+    /// it: RGB snaps to the nearest palette entry, everything else is kept.
+    pub fn to_palette(self) -> Color {
+        match self {
+            Color::Rgb { r, g, b } => Color::AnsiValue(rgb_to_ansi256(r, g, b)),
+            other => other,
+        }
+    }
+}
+
 fn mix_channel(value: u8, target: u8, amount: f32) -> u8 {
     (value as f32 + (target as f32 - value as f32) * amount).round() as u8
 }
@@ -210,5 +247,37 @@ mod tests {
             Some(Color::Rgb { r: 128, g: 0, b: 0 })
         );
         assert_eq!(Color::Reset.mix_toward(Color::White, 0.5), None);
+    }
+
+    #[test]
+    fn rgb_to_ansi256_hits_cube_corners_and_edges() {
+        // 255,0,0 is the (5,0,0) cube corner: 16 + 36 * 5.
+        assert_eq!(rgb_to_ansi256(255, 0, 0), 196);
+        assert_eq!(rgb_to_ansi256(0, 0, 0), 16);
+        assert_eq!(rgb_to_ansi256(255, 255, 255), 231);
+    }
+
+    #[test]
+    fn rgb_to_ansi256_prefers_the_gray_ramp_for_grays() {
+        // 128 is exactly a ramp level (8 + 10 * 12); the nearest cube gray is 135.
+        assert_eq!(rgb_to_ansi256(128, 128, 128), 244);
+        // Not an exact gray, but far closer to the ramp (98) than to cube 95,95,95.
+        assert_eq!(rgb_to_ansi256(100, 102, 101), 241);
+    }
+
+    #[test]
+    fn rgb_to_ansi256_keeps_saturated_colors_in_the_cube() {
+        assert_eq!(rgb_to_ansi256(230, 90, 20), 166);
+    }
+
+    #[test]
+    fn to_palette_only_converts_rgb() {
+        assert_eq!(
+            Color::Rgb { r: 255, g: 0, b: 0 }.to_palette(),
+            Color::AnsiValue(196)
+        );
+        assert_eq!(Color::Red.to_palette(), Color::Red);
+        assert_eq!(Color::AnsiValue(208).to_palette(), Color::AnsiValue(208));
+        assert_eq!(Color::Reset.to_palette(), Color::Reset);
     }
 }

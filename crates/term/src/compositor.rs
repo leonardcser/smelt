@@ -307,12 +307,14 @@ impl Compositor {
 }
 
 fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
+    use super::color_depth::color_depth;
     use super::grid::Style;
     use crossterm::cursor::MoveTo;
     use crossterm::style::{
         Attribute, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     };
 
+    let depth = color_depth();
     let mut current_style = Style::default();
     for y in 0..grid.height() {
         w.queue(MoveTo(0, y))?;
@@ -342,10 +344,14 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
                 w.queue(SetAttribute(Attribute::Reset))?;
                 w.queue(ResetColor)?;
                 if let Some(fg) = cell.style.fg {
-                    w.queue(SetForegroundColor(super::grid::to_crossterm_color(fg)))?;
+                    w.queue(SetForegroundColor(super::grid::to_crossterm_color(
+                        fg, depth,
+                    )))?;
                 }
                 if let Some(bg) = cell.style.bg {
-                    w.queue(SetBackgroundColor(super::grid::to_crossterm_color(bg)))?;
+                    w.queue(SetBackgroundColor(super::grid::to_crossterm_color(
+                        bg, depth,
+                    )))?;
                 }
                 if cell.style.bold {
                     w.queue(SetAttribute(Attribute::Bold))?;

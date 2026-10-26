@@ -1,3 +1,4 @@
+use super::color_depth::{color_depth, ColorDepth};
 use super::grid::{to_crossterm_color, CellSymbol, CellUpdate, Style};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
@@ -9,6 +10,15 @@ pub fn flush_diff<'a, W: Write>(
     w: &mut W,
     updates: impl Iterator<Item = CellUpdate<'a>>,
 ) -> std::io::Result<()> {
+    flush_diff_at(w, updates, color_depth())
+}
+
+/// [`flush_diff`] for an explicit color depth instead of the detected one.
+pub fn flush_diff_at<'a, W: Write>(
+    w: &mut W,
+    updates: impl Iterator<Item = CellUpdate<'a>>,
+    depth: ColorDepth,
+) -> std::io::Result<()> {
     let mut current = Style::default();
     let mut cursor_x: u16 = u16::MAX;
     let mut cursor_y: u16 = u16::MAX;
@@ -18,7 +28,7 @@ pub fn flush_diff<'a, W: Write>(
             w.queue(cursor::MoveTo(update.x, update.y))?;
         }
         if update.cell.style != current {
-            emit_style_diff(w, &current, &update.cell.style)?;
+            emit_style_diff(w, &current, &update.cell.style, depth)?;
             current = update.cell.style;
         }
         let printable = printable_symbol(&update.cell.symbol);
@@ -50,7 +60,12 @@ fn printable_symbol(symbol: &CellSymbol) -> &str {
     }
 }
 
-fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Result<()> {
+fn emit_style_diff<W: Write>(
+    w: &mut W,
+    from: &Style,
+    to: &Style,
+    depth: ColorDepth,
+) -> std::io::Result<()> {
     let need_unbold = from.bold && !to.bold;
     let need_undim = from.dim && !to.dim;
     let need_unitalic = from.italic && !to.italic;
@@ -71,10 +86,10 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
         w.queue(ResetColor)?;
 
         if let Some(fg) = to.fg {
-            w.queue(SetForegroundColor(to_crossterm_color(fg)))?;
+            w.queue(SetForegroundColor(to_crossterm_color(fg, depth)))?;
         }
         if let Some(bg) = to.bg {
-            w.queue(SetBackgroundColor(to_crossterm_color(bg)))?;
+            w.queue(SetBackgroundColor(to_crossterm_color(bg, depth)))?;
         }
         if to.bold {
             w.queue(SetAttribute(Attribute::Bold))?;
@@ -140,14 +155,14 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
 
     if from.fg != to.fg {
         if let Some(fg) = to.fg {
-            w.queue(SetForegroundColor(to_crossterm_color(fg)))?;
+            w.queue(SetForegroundColor(to_crossterm_color(fg, depth)))?;
         } else {
             w.queue(SetForegroundColor(Color::Reset))?;
         }
     }
     if from.bg != to.bg {
         if let Some(bg) = to.bg {
-            w.queue(SetBackgroundColor(to_crossterm_color(bg)))?;
+            w.queue(SetBackgroundColor(to_crossterm_color(bg, depth)))?;
         } else {
             w.queue(SetBackgroundColor(Color::Reset))?;
         }
@@ -174,9 +189,13 @@ mod tests {
     /// Run `flush_diff` over the diff between `curr` and `prev` and return the bytes
     /// crossterm wrote. Tests assert on the exact byte sequence to pin SGR + cursor codes.
     fn flush_to_string(curr: &Grid, prev: &Grid) -> String {
+        flush_to_string_at(curr, prev, ColorDepth::TrueColor)
+    }
+
+    fn flush_to_string_at(curr: &Grid, prev: &Grid, depth: ColorDepth) -> String {
         crossterm::style::force_color_output(true);
         let mut out = Vec::new();
-        flush_diff(&mut out, curr.diff(prev)).unwrap();
+        flush_diff_at(&mut out, curr.diff(prev), depth).unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -286,6 +305,49 @@ mod tests {
         let s = flush_to_string(&curr, &prev);
         // Crossterm encodes truecolor fg as "\x1b[38;2;r;g;bm".
         assert!(s.contains("\x1b[38;2;10;20;30m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_snaps_rgb_to_the_palette_on_a_256_color_terminal() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(
+            0,
+            0,
+            'A',
+            Style::new()
+                .fg(Color::Rgb { r: 255, g: 0, b: 0 })
+                .bg(Color::Rgb {
+                    r: 128,
+                    g: 128,
+                    b: 128,
+                }),
+        );
+        let palette = flush_to_string_at(&curr, &prev, ColorDepth::Palette256);
+        assert!(palette.contains("\x1b[38;5;196m"), "got {palette:?}");
+        assert!(palette.contains("\x1b[48;5;244m"), "got {palette:?}");
+        assert!(!palette.contains(";2;"), "got {palette:?}");
+
+        let truecolor = flush_to_string_at(&curr, &prev, ColorDepth::TrueColor);
+        assert!(
+            truecolor.contains("\x1b[38;2;255;0;0m"),
+            "got {truecolor:?}"
+        );
+        assert!(
+            truecolor.contains("\x1b[48;2;128;128;128m"),
+            "got {truecolor:?}"
+        );
+    }
+
+    #[test]
+    fn flush_leaves_named_and_palette_colors_alone_on_a_256_color_terminal() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().fg(Color::AnsiValue(208)));
+        curr.set(1, 0, 'B', Style::new().fg(Color::Red));
+        let truecolor = flush_to_string_at(&curr, &prev, ColorDepth::TrueColor);
+        let palette = flush_to_string_at(&curr, &prev, ColorDepth::Palette256);
+        assert_eq!(truecolor, palette);
     }
 
     #[test]

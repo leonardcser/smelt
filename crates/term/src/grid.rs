@@ -1,13 +1,19 @@
+use super::color_depth::ColorDepth;
 use super::geometry::Rect;
 use compact_str::CompactString;
 pub use smelt_style::style::{Color, Style};
 use smelt_style::{cell_width, image::RasterImage};
 use std::sync::Arc;
 
-/// Convert `Color` to crossterm's `Color` at the SGR-emit boundary.
+/// Convert `Color` to crossterm's `Color` at the SGR-emit boundary, snapping
+/// RGB to the 256-color palette when the terminal is limited to it.
 /// A free function because the orphan rule prevents a `From` impl.
-pub(crate) fn to_crossterm_color(c: Color) -> crossterm::style::Color {
+pub(crate) fn to_crossterm_color(c: Color, depth: ColorDepth) -> crossterm::style::Color {
     use crossterm::style::Color as X;
+    let c = match depth {
+        ColorDepth::TrueColor => c,
+        ColorDepth::Palette256 => c.to_palette(),
+    };
     match c {
         Color::Reset => X::Reset,
         Color::Black => X::Black,
