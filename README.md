@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h1 align="center">smelt</h1>
+<h1 align="center">A terminal coding agent you hack like Neovim</h1>
 
 <p align="center">
   <a href="https://smeltagent.dev/">Documentation</a>
