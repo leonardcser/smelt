@@ -1,6 +1,6 @@
 ---
 title: "smelt.process: Lua API reference"
-description: "Run subprocesses and manage contained shell jobs. Lua API reference for smelt.process in smelt, the hackable terminal coding agent."
+description: "Run subprocesses and manage contained shell jobs. Lua API reference for smelt.process in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.process`

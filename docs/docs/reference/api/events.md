@@ -1,6 +1,6 @@
 ---
 title: "smelt.events: Lua API reference"
-description: "Occurrence-oriented subscriptions for events such as `turn_start`, `tool_start`, and `turn_complete`. Lua API reference for smelt.events in smelt, the hackable terminal coding agent."
+description: "Occurrence-oriented subscriptions for events such as `turn_start`, `tool_start`, and `turn_complete`. Lua API reference for smelt.events in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.events`

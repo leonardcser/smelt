@@ -1,6 +1,6 @@
 ---
 title: "smelt.perf: Lua API reference"
-description: "Lightweight scope timers that feed `smelt.metrics.perf_snapshot`. Lua API reference for smelt.perf in smelt, the hackable terminal coding agent."
+description: "Lightweight scope timers that feed `smelt.metrics.perf_snapshot`. Lua API reference for smelt.perf in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.perf`

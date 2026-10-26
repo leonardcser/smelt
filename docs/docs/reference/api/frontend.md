@@ -1,6 +1,6 @@
 ---
 title: "smelt.frontend: Lua API reference"
-description: "Query which frontend is active (TUI vs headless). Lua API reference for smelt.frontend in smelt, the hackable terminal coding agent."
+description: "Query which frontend is active (TUI vs headless). Lua API reference for smelt.frontend in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.frontend`

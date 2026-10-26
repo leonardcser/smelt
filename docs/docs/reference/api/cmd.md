@@ -1,6 +1,6 @@
 ---
 title: "smelt.cmd: Lua API reference"
-description: "Register and list slash commands. Lua API reference for smelt.cmd in smelt, the hackable terminal coding agent."
+description: "Register and list slash commands. Lua API reference for smelt.cmd in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.cmd`

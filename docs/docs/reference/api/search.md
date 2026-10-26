@@ -1,6 +1,6 @@
 ---
 title: "smelt.search: Lua API reference"
-description: "Search controls for the active UI session. Lua API reference for smelt.search in smelt, the hackable terminal coding agent."
+description: "Search controls for the active UI session. Lua API reference for smelt.search in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.search`

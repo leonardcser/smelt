@@ -1,6 +1,6 @@
 ---
 title: "smelt.lsp: Lua API reference"
-description: "Generic stdio Language Server Protocol client. Lua API reference for smelt.lsp in smelt, the hackable terminal coding agent."
+description: "Generic stdio Language Server Protocol client. Lua API reference for smelt.lsp in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.lsp`

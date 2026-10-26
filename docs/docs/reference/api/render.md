@@ -1,6 +1,6 @@
 ---
 title: "smelt.render: Lua API reference"
-description: "Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`. Lua API reference for smelt.render in smelt, the hackable terminal coding agent."
+description: "Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`. Lua API reference for smelt.render in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.render`

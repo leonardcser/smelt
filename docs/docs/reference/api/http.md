@@ -1,6 +1,6 @@
 ---
 title: "smelt.http: Lua API reference"
-description: "Asynchronous HTTP get/post. Lua API reference for smelt.http in smelt, the hackable terminal coding agent."
+description: "Asynchronous HTTP get/post. Lua API reference for smelt.http in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.http`

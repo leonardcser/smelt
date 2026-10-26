@@ -1,6 +1,6 @@
 ---
 title: "smelt.bar: Lua API reference"
-description: "The item shape shared by smelt's bars: the statusline and the rules above and below the prompt. Lua API reference for smelt.bar in smelt, the hackable terminal coding agent."
+description: "The item shape shared by smelt's bars: the statusline and the rules above and below the prompt. Lua API reference for smelt.bar in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.bar`

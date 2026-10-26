@@ -1,6 +1,6 @@
 ---
 title: "smelt.reg: Lua API reference"
-description: "Helpers for constructing `Reg` handles. Lua API reference for smelt.reg in smelt, the hackable terminal coding agent."
+description: "Helpers for constructing `Reg` handles. Lua API reference for smelt.reg in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.reg`

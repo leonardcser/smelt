@@ -1,6 +1,6 @@
 ---
 title: "smelt.config: Lua API reference"
-description: "Resolved application configuration introspection. Lua API reference for smelt.config in smelt, the hackable terminal coding agent."
+description: "Resolved application configuration introspection. Lua API reference for smelt.config in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.config`

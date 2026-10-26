@@ -1,6 +1,6 @@
 ---
 title: "smelt.ui.layout: Lua API reference"
-description: "Composable layout-tree primitives for the retained main TUI layout. Lua API reference for smelt.ui.layout in smelt, the hackable terminal coding agent."
+description: "Composable layout-tree primitives for the retained main TUI layout. Lua API reference for smelt.ui.layout in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.ui.layout`

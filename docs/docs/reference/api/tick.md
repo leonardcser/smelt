@@ -1,6 +1,6 @@
 ---
 title: "smelt.tick: Lua API reference"
-description: "Reload-safe periodic work. Lua API reference for smelt.tick in smelt, the hackable terminal coding agent."
+description: "Reload-safe periodic work. Lua API reference for smelt.tick in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.tick`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.settings: Lua API reference"
-description: "Metatable-backed proxy table for preferences. Lua API reference for smelt.settings in smelt, the hackable terminal coding agent."
+description: "Metatable-backed proxy table for preferences. Lua API reference for smelt.settings in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.settings`

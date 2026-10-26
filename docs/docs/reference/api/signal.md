@@ -1,6 +1,6 @@
 ---
 title: "smelt.signal: Lua API reference"
-description: "Named reactive values. Lua API reference for smelt.signal in smelt, the hackable terminal coding agent."
+description: "Named reactive values. Lua API reference for smelt.signal in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.signal`

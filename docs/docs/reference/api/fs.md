@@ -1,6 +1,6 @@
 ---
 title: "smelt.fs: Lua API reference"
-description: "Sync filesystem primitives. Lua API reference for smelt.fs in smelt, the hackable terminal coding agent."
+description: "Sync filesystem primitives. Lua API reference for smelt.fs in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.fs`

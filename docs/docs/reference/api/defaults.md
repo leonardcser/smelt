@@ -1,6 +1,6 @@
 ---
 title: "smelt.defaults: Lua API reference"
-description: "Startup fallbacks for new sessions. Lua API reference for smelt.defaults in smelt, the hackable terminal coding agent."
+description: "Startup fallbacks for new sessions. Lua API reference for smelt.defaults in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.defaults`

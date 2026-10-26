@@ -1,6 +1,6 @@
 ---
 title: "smelt.auth: Lua API reference"
-description: "Authenticated provider helpers. Lua API reference for smelt.auth in smelt, the hackable terminal coding agent."
+description: "Authenticated provider helpers. Lua API reference for smelt.auth in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.auth`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.terminal: Lua API reference"
-description: "Terminal integration helpers. Lua API reference for smelt.terminal in smelt, the hackable terminal coding agent."
+description: "Terminal integration helpers. Lua API reference for smelt.terminal in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.terminal`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.win: Lua API reference"
-description: "Window handle constructor. Lua API reference for smelt.win in smelt, the hackable terminal coding agent."
+description: "Window handle constructor. Lua API reference for smelt.win in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.win`

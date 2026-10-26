@@ -1,6 +1,6 @@
 ---
 title: "smelt.agent: Lua API reference"
-description: "Agent-facing prompt customization for Lua plugins. Lua API reference for smelt.agent in smelt, the hackable terminal coding agent."
+description: "Agent-facing prompt customization for Lua plugins. Lua API reference for smelt.agent in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.agent`

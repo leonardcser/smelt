@@ -1,6 +1,6 @@
 ---
 title: "smelt.image: Lua API reference"
-description: "Image file detection and base64 data-URL loading. Lua API reference for smelt.image in smelt, the hackable terminal coding agent."
+description: "Image file detection and base64 data-URL loading. Lua API reference for smelt.image in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.image`

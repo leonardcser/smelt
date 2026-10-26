@@ -1,6 +1,6 @@
 [project]
 site_name = "smelt"
-site_description = "A hackable coding agent for the terminal. Rust core, scriptable in Lua."
+site_description = "A fast, Lua-scriptable coding agent for the terminal. Rust core, vim mode, no build step."
 site_author = "Leonard Cseres"
 site_url = "https://smeltagent.dev/"
 repo_url = "https://github.com/leonardcser/smelt"

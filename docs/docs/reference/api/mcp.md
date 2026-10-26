@@ -1,6 +1,6 @@
 ---
 title: "smelt.mcp: Lua API reference"
-description: "Config-time MCP server registration. Lua API reference for smelt.mcp in smelt, the hackable terminal coding agent."
+description: "Config-time MCP server registration. Lua API reference for smelt.mcp in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.mcp`

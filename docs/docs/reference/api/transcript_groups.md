@@ -1,6 +1,6 @@
 ---
 title: "smelt.transcript.groups: Lua API reference"
-description: "Declarative transcript display grouping. Lua API reference for smelt.transcript.groups in smelt, the hackable terminal coding agent."
+description: "Declarative transcript display grouping. Lua API reference for smelt.transcript.groups in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.transcript.groups`

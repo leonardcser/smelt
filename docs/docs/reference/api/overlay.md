@@ -1,6 +1,6 @@
 ---
 title: "smelt.overlay: Lua API reference"
-description: "Overlay handle constructor. Lua API reference for smelt.overlay in smelt, the hackable terminal coding agent."
+description: "Overlay handle constructor. Lua API reference for smelt.overlay in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.overlay`

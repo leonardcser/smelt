@@ -1,6 +1,6 @@
 ---
 title: "smelt.confirm: Lua API reference"
-description: "Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution. Lua API reference for smelt.confirm in smelt, the hackable terminal coding agent."
+description: "Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution. Lua API reference for smelt.confirm in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.confirm`

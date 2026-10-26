@@ -1,6 +1,6 @@
 ---
 title: "smelt.shell: Lua API reference"
-description: "Shell command splitting and interactive/background-operator validators. Lua API reference for smelt.shell in smelt, the hackable terminal coding agent."
+description: "Shell command splitting and interactive/background-operator validators. Lua API reference for smelt.shell in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.shell`

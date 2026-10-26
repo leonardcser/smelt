@@ -1,6 +1,6 @@
 ---
 title: "smelt.task: Lua API reference"
-description: "Yield-then-resume coroutine bridge: alloc and resume external tasks. Lua API reference for smelt.task in smelt, the hackable terminal coding agent."
+description: "Yield-then-resume coroutine bridge: alloc and resume external tasks. Lua API reference for smelt.task in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.task`

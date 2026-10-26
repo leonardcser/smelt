@@ -1,6 +1,6 @@
 ---
 title: "smelt.skills: Lua API reference"
-description: "List and load skill content from the SkillLoader populated at startup. Lua API reference for smelt.skills in smelt, the hackable terminal coding agent."
+description: "List and load skill content from the SkillLoader populated at startup. Lua API reference for smelt.skills in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.skills`

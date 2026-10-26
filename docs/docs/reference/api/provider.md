@@ -1,6 +1,6 @@
 ---
 title: "smelt.provider: Lua API reference"
-description: "List built-in model providers and register custom ones. Lua API reference for smelt.provider in smelt, the hackable terminal coding agent."
+description: "List built-in model providers and register custom ones. Lua API reference for smelt.provider in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.provider`

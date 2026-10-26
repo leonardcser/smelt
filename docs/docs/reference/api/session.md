@@ -1,6 +1,6 @@
 ---
 title: "smelt.session: Lua API reference"
-description: "Current session metadata, turn list, message snapshots, rewind, and persisted session management. Lua API reference for smelt.session in smelt, the hackable terminal coding agent."
+description: "Current session metadata, turn list, message snapshots, rewind, and persisted session management. Lua API reference for smelt.session in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.session`

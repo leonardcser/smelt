@@ -1,6 +1,6 @@
 ---
 title: "smelt.vim: Lua API reference"
-description: "Read and write the vim mode of the focused vim-enabled surface. Lua API reference for smelt.vim in smelt, the hackable terminal coding agent."
+description: "Read and write the vim mode of the focused vim-enabled surface. Lua API reference for smelt.vim in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.vim`

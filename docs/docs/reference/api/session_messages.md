@@ -1,6 +1,6 @@
 ---
 title: "smelt.session.messages: Lua API reference"
-description: "Session messages. Lua API reference for smelt.session.messages in smelt, the hackable terminal coding agent."
+description: "Session messages. Lua API reference for smelt.session.messages in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.session.messages`

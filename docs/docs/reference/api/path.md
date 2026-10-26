@@ -1,6 +1,6 @@
 ---
 title: "smelt.path: Lua API reference"
-description: "Pure path arithmetic: normalize, join, relative, expand, display, etc. Lua API reference for smelt.path in smelt, the hackable terminal coding agent."
+description: "Pure path arithmetic: normalize, join, relative, expand, display, etc. Lua API reference for smelt.path in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.path`

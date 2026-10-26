@@ -1,6 +1,6 @@
 ---
 title: "smelt.keymap: Lua API reference"
-description: "Register chord→callback bindings and inspect the layered help index. Lua API reference for smelt.keymap in smelt, the hackable terminal coding agent."
+description: "Register chord→callback bindings and inspect the layered help index. Lua API reference for smelt.keymap in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.keymap`

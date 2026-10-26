@@ -1,6 +1,6 @@
 ---
 title: "smelt.prompt: Lua API reference"
-description: "The main editable input surface: win handle, text get/set, and cursor control. Lua API reference for smelt.prompt in smelt, the hackable terminal coding agent."
+description: "The main editable input surface: win handle, text get/set, and cursor control. Lua API reference for smelt.prompt in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.prompt`

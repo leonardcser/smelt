@@ -1,6 +1,6 @@
 ---
 title: "smelt.tips: Lua API reference"
-description: "Discovery tips shown in the prompt bar and banner. Lua API reference for smelt.tips in smelt, the hackable terminal coding agent."
+description: "Discovery tips shown in the prompt bar and banner. Lua API reference for smelt.tips in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.tips`

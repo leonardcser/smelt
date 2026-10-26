@@ -25,7 +25,7 @@ Source: https://github.com/leonardcser/smelt
 
 ## Extend
 
-- [Write plugins in Lua](https://smeltagent.dev/extend/): anatomy of a plugin, hot reload, state
+- [Write plugins in Lua](https://smeltagent.dev/extend/): anatomy of a plugin, state, reloading
 - [Commands, events and keymaps](https://smeltagent.dev/extend/commands-and-events/)
 - [UI: overlays, dialogs, statusline](https://smeltagent.dev/extend/ui/)
 - [Custom tools and transcript rendering](https://smeltagent.dev/extend/tools-and-agent/)

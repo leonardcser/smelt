@@ -1,6 +1,6 @@
 ---
 title: "smelt.build: Lua API reference"
-description: "Compile-time build identity and version metadata for plugins. Lua API reference for smelt.build in smelt, the hackable terminal coding agent."
+description: "Compile-time build identity and version metadata for plugins. Lua API reference for smelt.build in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.build`

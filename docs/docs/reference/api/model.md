@@ -1,6 +1,6 @@
 ---
 title: "smelt.model: Lua API reference"
-description: "Model selector. Lua API reference for smelt.model in smelt, the hackable terminal coding agent."
+description: "Model selector. Lua API reference for smelt.model in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.model`

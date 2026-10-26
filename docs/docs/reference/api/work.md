@@ -1,6 +1,6 @@
 ---
 title: "smelt.work: Lua API reference"
-description: "Push background work-state tokens. Lua API reference for smelt.work in smelt, the hackable terminal coding agent."
+description: "Push background work-state tokens. Lua API reference for smelt.work in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.work`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.permissions: Lua API reference"
-description: "Inspect, revoke, and extend permission policy state, or synchronize live session and persisted grants. Lua API reference for smelt.permissions in smelt, the hackable terminal coding agent."
+description: "Inspect, revoke, and extend permission policy state, or synchronize live session and persisted grants. Lua API reference for smelt.permissions in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.permissions`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.json: Lua API reference"
-description: "Encode/decode JSON for Lua plugins. Lua API reference for smelt.json in smelt, the hackable terminal coding agent."
+description: "Encode/decode JSON for Lua plugins. Lua API reference for smelt.json in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.json`

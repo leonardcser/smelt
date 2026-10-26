@@ -1,6 +1,6 @@
 ---
 title: "smelt.dialog: Lua API reference"
-description: "Root-docked modal dialog primitives. Lua API reference for smelt.dialog in smelt, the hackable terminal coding agent."
+description: "Root-docked modal dialog primitives. Lua API reference for smelt.dialog in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.dialog`

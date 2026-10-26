@@ -1,6 +1,6 @@
 ---
 title: "smelt.fuzzy: Lua API reference"
-description: "Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman). Lua API reference for smelt.fuzzy in smelt, the hackable terminal coding agent."
+description: "Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman). Lua API reference for smelt.fuzzy in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.fuzzy`

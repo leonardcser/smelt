@@ -1,6 +1,6 @@
 ---
 title: "smelt.inspect: Lua API reference"
-description: "Local session introspection web UI. Lua API reference for smelt.inspect in smelt, the hackable terminal coding agent."
+description: "Local session introspection web UI. Lua API reference for smelt.inspect in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.inspect`

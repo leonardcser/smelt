@@ -1,6 +1,6 @@
 ---
 title: "smelt.diff: Lua API reference"
-description: "Compact unified-patch indexing, metadata and expandable context folds. Lua API reference for smelt.diff in smelt, the hackable terminal coding agent."
+description: "Compact unified-patch indexing, metadata and expandable context folds. Lua API reference for smelt.diff in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.diff`

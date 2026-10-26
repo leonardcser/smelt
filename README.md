@@ -6,8 +6,6 @@
   </picture>
 </p>
 
-<h1 align="center">A terminal coding agent you hack like Neovim</h1>
-
 <p align="center">
   <a href="https://smeltagent.dev/">Documentation</a>
   &nbsp;·&nbsp;
@@ -24,20 +22,20 @@
 
 ## Why
 
-Most coding agents are bloated and hard to customize. smelt is small, fast, and
-scriptable in Lua like Neovim. Built from scratch, with care for the details.
+Most coding agents are heavy and hard to change. smelt runs in a fraction of
+their memory and CPU, and keymaps, commands, tools and the UI itself are plain
+Lua files with no build step.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="demo" width="800">
+  <img src="assets/demo.gif" alt="smelt running a coding task in the terminal" width="800">
 </p>
 
 ## What's inside
 
-- **Lua plugins.** Keymaps, commands, autocmds, custom tools, and custom modes.
+- **Lua plugins.** Keymaps, commands, custom tools and modes, and the UI itself,
+  from the statusline to the spinner. No build step.
 - **Terminal renderer.** Its own grid and layout engine, not `ratatui`.
 - **Vim editor.** Motions, text objects, registers, undo.
-- **Deterministic fuzzing.** Fixed clock and stubbed I/O, so any crash can be
-  replayed.
 - **No config needed.** Run with flags, or use `smelt auth` for ChatGPT, GitHub
   Copilot, and Kimi Code.
 

@@ -1,6 +1,6 @@
 ---
 title: "smelt.history: Lua API reference"
-description: "Prompt history entries and search. Lua API reference for smelt.history in smelt, the hackable terminal coding agent."
+description: "Prompt history entries and search. Lua API reference for smelt.history in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.history`

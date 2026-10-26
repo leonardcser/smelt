@@ -1,6 +1,6 @@
 ---
 title: "smelt.timer: Lua API reference"
-description: "One-shot and recurring timer callbacks. Lua API reference for smelt.timer in smelt, the hackable terminal coding agent."
+description: "One-shot and recurring timer callbacks. Lua API reference for smelt.timer in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.timer`

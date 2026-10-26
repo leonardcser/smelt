@@ -1,6 +1,6 @@
 ---
 title: "smelt.cli: Lua API reference"
-description: "Declare and read CLI flags from Lua. Lua API reference for smelt.cli in smelt, the hackable terminal coding agent."
+description: "Declare and read CLI flags from Lua. Lua API reference for smelt.cli in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.cli`

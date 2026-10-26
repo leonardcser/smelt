@@ -1,6 +1,6 @@
 ---
 title: "smelt.remember: Lua API reference"
-description: "Per-key opt-in to last-used recall on launch. Lua API reference for smelt.remember in smelt, the hackable terminal coding agent."
+description: "Per-key opt-in to last-used recall on launch. Lua API reference for smelt.remember in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.remember`

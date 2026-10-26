@@ -1,6 +1,6 @@
 ---
 title: "smelt.builtins: Lua API reference"
-description: "Opt out of bundled `smelt.<dotted>` modules. Lua API reference for smelt.builtins in smelt, the hackable terminal coding agent."
+description: "Opt out of bundled `smelt.<dotted>` modules. Lua API reference for smelt.builtins in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.builtins`

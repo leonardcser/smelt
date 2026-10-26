@@ -1,6 +1,6 @@
 ---
 title: "smelt.transcript: Lua API reference"
-description: "Transcript display policy and rendered transcript inspection. Lua API reference for smelt.transcript in smelt, the hackable terminal coding agent."
+description: "Transcript display policy and rendered transcript inspection. Lua API reference for smelt.transcript in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.transcript`

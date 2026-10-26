@@ -1,6 +1,6 @@
 ---
 title: "smelt.input: Lua API reference"
-description: "Single-line input handle constructor. Lua API reference for smelt.input in smelt, the hackable terminal coding agent."
+description: "Single-line input handle constructor. Lua API reference for smelt.input in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.input`

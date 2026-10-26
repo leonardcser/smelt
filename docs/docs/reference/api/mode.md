@@ -1,6 +1,6 @@
 ---
 title: "smelt.mode: Lua API reference"
-description: "Agent-mode selector. Lua API reference for smelt.mode in smelt, the hackable terminal coding agent."
+description: "Agent-mode selector. Lua API reference for smelt.mode in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.mode`

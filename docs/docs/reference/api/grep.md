@@ -1,6 +1,6 @@
 ---
 title: "smelt.grep: Lua API reference"
-description: "Ripgrep wrapper for searching files. Lua API reference for smelt.grep in smelt, the hackable terminal coding agent."
+description: "Ripgrep wrapper for searching files. Lua API reference for smelt.grep in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.grep`

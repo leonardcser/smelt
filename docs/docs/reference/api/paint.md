@@ -1,6 +1,6 @@
 ---
 title: "smelt.paint: Lua API reference"
-description: "Register Lua callbacks against custom paint regions. Lua API reference for smelt.paint in smelt, the hackable terminal coding agent."
+description: "Register Lua callbacks against custom paint regions. Lua API reference for smelt.paint in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.paint`

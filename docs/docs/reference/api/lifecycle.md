@@ -1,6 +1,6 @@
 ---
 title: "smelt.lifecycle: Lua API reference"
-description: "Host-phase hooks keyed by event name. Lua API reference for smelt.lifecycle in smelt, the hackable terminal coding agent."
+description: "Host-phase hooks keyed by event name. Lua API reference for smelt.lifecycle in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.lifecycle`

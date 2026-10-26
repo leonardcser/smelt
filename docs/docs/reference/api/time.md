@@ -1,6 +1,6 @@
 ---
 title: "smelt.time: Lua API reference"
-description: "Wall-clock time parsing and formatting. Lua API reference for smelt.time in smelt, the hackable terminal coding agent."
+description: "Wall-clock time parsing and formatting. Lua API reference for smelt.time in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.time`

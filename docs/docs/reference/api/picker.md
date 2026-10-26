@@ -1,6 +1,6 @@
 ---
 title: "smelt.picker: Lua API reference"
-description: "Picker facade. Lua API reference for smelt.picker in smelt, the hackable terminal coding agent."
+description: "Picker facade. Lua API reference for smelt.picker in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.picker`

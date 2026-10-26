@@ -1,6 +1,6 @@
 ---
 title: "smelt.metrics.perf: Lua API reference"
-description: "Perf instrumentation toggle, clear, and snapshot. Lua API reference for smelt.metrics.perf in smelt, the hackable terminal coding agent."
+description: "Perf instrumentation toggle, clear, and snapshot. Lua API reference for smelt.metrics.perf in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.metrics.perf`

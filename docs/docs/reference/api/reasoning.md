@@ -1,6 +1,6 @@
 ---
 title: "smelt.reasoning: Lua API reference"
-description: "Reasoning-effort selector. Lua API reference for smelt.reasoning in smelt, the hackable terminal coding agent."
+description: "Reasoning-effort selector. Lua API reference for smelt.reasoning in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.reasoning`

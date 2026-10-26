@@ -1,6 +1,6 @@
 ---
 title: "smelt.statusline: Lua API reference"
-description: "The statusline at the bottom of the screen. Lua API reference for smelt.statusline in smelt, the hackable terminal coding agent."
+description: "The statusline at the bottom of the screen. Lua API reference for smelt.statusline in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.statusline`

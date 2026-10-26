@@ -1,6 +1,6 @@
 ---
 title: "smelt.list: Lua API reference"
-description: "Picker-style virtual list widget. Lua API reference for smelt.list in smelt, the hackable terminal coding agent."
+description: "Picker-style virtual list widget. Lua API reference for smelt.list in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.list`

@@ -1,6 +1,6 @@
 ---
 title: "smelt: Lua API reference"
-description: "Root smelt namespace. Lua API reference for smelt in smelt, the hackable terminal coding agent."
+description: "Root smelt namespace. Lua API reference for smelt in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt`

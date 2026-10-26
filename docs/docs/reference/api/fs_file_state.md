@@ -1,6 +1,6 @@
 ---
 title: "smelt.fs.file_state: Lua API reference"
-description: "Cached file-state tracker used by tools to detect external modifications between reads and writes. Lua API reference for smelt.fs.file_state in smelt, the hackable terminal coding agent."
+description: "Cached file-state tracker used by tools to detect external modifications between reads and writes. Lua API reference for smelt.fs.file_state in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.fs.file_state`

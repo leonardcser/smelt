@@ -1,6 +1,6 @@
 ---
 title: "smelt.parse: Lua API reference"
-description: "Pure parsers: frontmatter extraction from markdown documents. Lua API reference for smelt.parse in smelt, the hackable terminal coding agent."
+description: "Pure parsers: frontmatter extraction from markdown documents. Lua API reference for smelt.parse in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.parse`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.git: Lua API reference"
-description: "Asynchronous Git snapshots and explicit file-level staging. Lua API reference for smelt.git in smelt, the hackable terminal coding agent."
+description: "Asynchronous Git snapshots and explicit file-level staging. Lua API reference for smelt.git in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.git`

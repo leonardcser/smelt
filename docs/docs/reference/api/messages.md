@@ -1,6 +1,6 @@
 ---
 title: "smelt.messages: Lua API reference"
-description: "Persistent message log with full bodies and tracebacks. Lua API reference for smelt.messages in smelt, the hackable terminal coding agent."
+description: "Persistent message log with full bodies and tracebacks. Lua API reference for smelt.messages in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.messages`

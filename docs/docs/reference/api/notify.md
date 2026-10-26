@@ -1,6 +1,6 @@
 ---
 title: "smelt.notify: Lua API reference"
-description: "Status-area toasts. Lua API reference for smelt.notify in smelt, the hackable terminal coding agent."
+description: "Status-area toasts. Lua API reference for smelt.notify in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.notify`

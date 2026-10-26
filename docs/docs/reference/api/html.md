@@ -1,6 +1,6 @@
 ---
 title: "smelt.html: Lua API reference"
-description: "HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results. Lua API reference for smelt.html in smelt, the hackable terminal coding agent."
+description: "HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results. Lua API reference for smelt.html in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.html`

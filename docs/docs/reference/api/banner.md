@@ -1,6 +1,6 @@
 ---
 title: "smelt.banner: Lua API reference"
-description: "Startup banner extension point. Lua API reference for smelt.banner in smelt, the hackable terminal coding agent."
+description: "Startup banner extension point. Lua API reference for smelt.banner in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.banner`

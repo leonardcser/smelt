@@ -1,6 +1,6 @@
 ---
 title: "smelt.state: Lua API reference"
-description: "Per-plugin state. Lua API reference for smelt.state in smelt, the hackable terminal coding agent."
+description: "Per-plugin state. Lua API reference for smelt.state in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.state`

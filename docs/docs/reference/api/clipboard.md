@@ -1,6 +1,6 @@
 ---
 title: "smelt.clipboard: Lua API reference"
-description: "Read and write the system clipboard. Lua API reference for smelt.clipboard in smelt, the hackable terminal coding agent."
+description: "Read and write the system clipboard. Lua API reference for smelt.clipboard in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.clipboard`

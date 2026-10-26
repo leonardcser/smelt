@@ -1,6 +1,6 @@
 ---
 title: "smelt.files: Lua API reference"
-description: "Workspace file search. Lua API reference for smelt.files in smelt, the hackable terminal coding agent."
+description: "Workspace file search. Lua API reference for smelt.files in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.files`

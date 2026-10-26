@@ -1,6 +1,6 @@
 ---
 title: "smelt.tools: Lua API reference"
-description: "Register, unregister, and resolve plugin tools for the engine. Lua API reference for smelt.tools in smelt, the hackable terminal coding agent."
+description: "Register, unregister, and resolve plugin tools for the engine. Lua API reference for smelt.tools in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.tools`

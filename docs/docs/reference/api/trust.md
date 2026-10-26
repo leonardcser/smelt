@@ -1,6 +1,6 @@
 ---
 title: "smelt.trust: Lua API reference"
-description: "Query and mutate the per-project content trust store. Lua API reference for smelt.trust in smelt, the hackable terminal coding agent."
+description: "Query and mutate the per-project content trust store. Lua API reference for smelt.trust in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.trust`

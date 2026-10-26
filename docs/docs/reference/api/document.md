@@ -1,6 +1,6 @@
 ---
 title: "smelt.document: Lua API reference"
-description: "Indexed read-only documents shared by native data providers and Lua-created windows. Lua API reference for smelt.document in smelt, the hackable terminal coding agent."
+description: "Indexed read-only documents shared by native data providers and Lua-created windows. Lua API reference for smelt.document in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.document`

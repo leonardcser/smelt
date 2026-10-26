@@ -1,6 +1,6 @@
 ---
 title: "smelt.ui: Lua API reference"
-description: "Screen-composition primitives: main layout composer and per-window renderer registration. Lua API reference for smelt.ui in smelt, the hackable terminal coding agent."
+description: "Screen-composition primitives: main layout composer and per-window renderer registration. Lua API reference for smelt.ui in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.ui`

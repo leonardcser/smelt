@@ -1,6 +1,6 @@
 ---
 title: "smelt.engine: Lua API reference"
-description: "LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval. Lua API reference for smelt.engine in smelt, the hackable terminal coding agent."
+description: "LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval. Lua API reference for smelt.engine in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.engine`

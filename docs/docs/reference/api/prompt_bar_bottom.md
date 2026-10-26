@@ -1,6 +1,6 @@
 ---
 title: "smelt.prompt_bar.bottom: Lua API reference"
-description: "The rule below the prompt, empty by default. Lua API reference for smelt.prompt_bar.bottom in smelt, the hackable terminal coding agent."
+description: "The rule below the prompt, empty by default. Lua API reference for smelt.prompt_bar.bottom in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.prompt_bar.bottom`

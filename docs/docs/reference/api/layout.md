@@ -1,6 +1,6 @@
 ---
 title: "smelt.layout: Lua API reference"
-description: "Declarative, width-independent content layout primitives for transcript/tool display. Lua API reference for smelt.layout in smelt, the hackable terminal coding agent."
+description: "Declarative, width-independent content layout primitives for transcript/tool display. Lua API reference for smelt.layout in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.layout`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.notebook: Lua API reference"
-description: "Parse and read notebook cells, apply edits, and compute preview data for the edit_notebook tool. Lua API reference for smelt.notebook in smelt, the hackable terminal coding agent."
+description: "Parse and read notebook cells, apply edits, and compute preview data for the edit_notebook tool. Lua API reference for smelt.notebook in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.notebook`

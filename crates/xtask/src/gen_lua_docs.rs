@@ -460,9 +460,9 @@ fn render_markdown(
     let mut s = String::new();
     let summary = first_sentence(mod_doc);
     let description = if summary.is_empty() {
-        format!("Lua API reference for {module} in smelt, the hackable terminal coding agent.")
+        format!("Lua API reference for {module} in smelt, the Lua-scriptable terminal coding agent.")
     } else {
-        format!("{summary} Lua API reference for {module} in smelt, the hackable terminal coding agent.")
+        format!("{summary} Lua API reference for {module} in smelt, the Lua-scriptable terminal coding agent.")
     };
     s.push_str(&front_matter(
         &format!("{module}: Lua API reference"),

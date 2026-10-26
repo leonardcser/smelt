@@ -1,6 +1,6 @@
 ---
 title: "smelt.buf: Lua API reference"
-description: "Buffer handle constructor. Lua API reference for smelt.buf in smelt, the hackable terminal coding agent."
+description: "Buffer handle constructor. Lua API reference for smelt.buf in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.buf`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.theme: Lua API reference"
-description: "List bundled colorschemes, or apply, read, and override the active one. Lua API reference for smelt.theme in smelt, the hackable terminal coding agent."
+description: "List bundled colorschemes, or apply, read, and override the active one. Lua API reference for smelt.theme in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.theme`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.headerline: Lua API reference"
-description: "Optional row above the transcript. Lua API reference for smelt.headerline in smelt, the hackable terminal coding agent."
+description: "Optional row above the transcript. Lua API reference for smelt.headerline in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.headerline`

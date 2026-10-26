@@ -1,6 +1,6 @@
 ---
 title: "Write smelt plugins in Lua"
-description: "Extend the smelt coding agent with plain Lua files: slash commands, events, tools, dialogs, overlays and transcript rendering, with hot reload and no build step."
+description: "Extend the smelt coding agent with plain Lua files: slash commands, events, tools, dialogs, overlays and transcript rendering, with no build step."
 ---
 
 # Extend
@@ -100,6 +100,14 @@ works in the TUI and in CI.
 Saved Lua files reload automatically; `F5` or `/reload` reloads manually. The
 transcript and agent state stay put, and a failing file leaves the previous
 config running (see [Reloading](../customize/index.md#reloading)).
+
+What a reload carries over, and what it does not:
+
+| Carried over | Wiped or re-read |
+| ------------ | ---------------- |
+| The transcript and agent state | Module-local Lua variables and anonymous buffers, windows and overlays |
+| Named resources and `M.state` (see below) | Timers and subscriptions, which your module body registers again |
+| `smelt.state.persistent` values | `AGENTS.md`, skills, MCP declarations and `--system-prompt` files, which only a manual `/reload` re-reads |
 
 To keep UI state across reloads:
 

@@ -1,6 +1,6 @@
 ---
 title: "smelt.os: Lua API reference"
-description: "Environment and system primitives: getenv, setenv, platform, cwd, pid, etc. Lua API reference for smelt.os in smelt, the hackable terminal coding agent."
+description: "Environment and system primitives: getenv, setenv, platform, cwd, pid, etc. Lua API reference for smelt.os in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.os`

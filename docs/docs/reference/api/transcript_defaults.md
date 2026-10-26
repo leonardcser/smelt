@@ -1,6 +1,6 @@
 ---
 title: "smelt.transcript.defaults: Lua API reference"
-description: "Bundled default transcript entry points for rendering semantic blocks and raw tool output. Lua API reference for smelt.transcript.defaults in smelt, the hackable terminal coding agent."
+description: "Bundled default transcript entry points for rendering semantic blocks and raw tool output. Lua API reference for smelt.transcript.defaults in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.transcript.defaults`

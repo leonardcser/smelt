@@ -1,6 +1,6 @@
 ---
 title: "smelt.prompt_bar.top: Lua API reference"
-description: "The rule above the prompt, which holds the working indicator, model, tokens and cost. Lua API reference for smelt.prompt_bar.top in smelt, the hackable terminal coding agent."
+description: "The rule above the prompt, which holds the working indicator, model, tokens and cost. Lua API reference for smelt.prompt_bar.top in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.prompt_bar.top`

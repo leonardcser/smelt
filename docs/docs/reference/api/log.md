@@ -1,6 +1,6 @@
 ---
 title: "smelt.log: Lua API reference"
-description: "Structured JSONL log entries written to the engine log file. Lua API reference for smelt.log in smelt, the hackable terminal coding agent."
+description: "Structured JSONL log entries written to the engine log file. Lua API reference for smelt.log in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.log`

@@ -1,6 +1,6 @@
 ---
 title: "smelt.http.cache: Lua API reference"
-description: "Runtime-owned HTTP response cache. Lua API reference for smelt.http.cache in smelt, the hackable terminal coding agent."
+description: "Runtime-owned HTTP response cache. Lua API reference for smelt.http.cache in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.http.cache`

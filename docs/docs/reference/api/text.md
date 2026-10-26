@@ -1,6 +1,6 @@
 ---
 title: "smelt.text: Lua API reference"
-description: "Terminal-cell measurement and pure text formatting. Lua API reference for smelt.text in smelt, the hackable terminal coding agent."
+description: "Terminal-cell measurement and pure text formatting. Lua API reference for smelt.text in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.text`
