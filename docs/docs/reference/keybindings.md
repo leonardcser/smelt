@@ -166,16 +166,20 @@ In normal mode, several emacs-style keys take on their vim meanings:
 
 In the prompt, normal and visual mode support:
 
-- **Motions:** `h` `j` `k` `l`, `w` `W` `b` `B` `e` `E`, `0` `^` `_` `$`, `gg` `G`,
-  `{` `}`, `%`, and find with `f` `F` `t` `T` repeated by `;` and `,`. Counts work
-  on all of them.
+- **Motions:** `h` `j` `k` `l`, `gj` `gk` (by display row), `w` `W` `b` `B` `e` `E`
+  `ge` `gE`, `0` `^` `_` `$`, `gg` `G`, `{` `}`, `%`, and find with `f` `F` `t` `T`
+  repeated by `;` and `,`. Counts work on all of them.
+- **Search:** `/` and `?` search the prompt, `n` and `N` repeat, and `*` and `#`
+  search for the word under the cursor.
+- **Visual:** `v` and `V`, `gv` to reselect the last selection, and `i` / `a` text
+  objects.
 - **Operators:** `d`, `c` and `y` with any motion above or a text object (`iw`,
   `a(`, `ip`...), plus `dd` `cc` `yy`, `D` `C` `Y`, `x` `X` `s` `S`, `r`, `~`, `J`,
   `p` `P`, `u` and `Ctrl+R`, `o` `O`, and `.` to repeat the last change.
 - **Surround:** `ys`, `ds` and `cs`.
 
 Not supported yet: registers (`"`), macros (`q`, `@`), marks, `>` `<` `=`, `R`,
-`gu` `gU` `g~`, `ge`, `*` `#`, `H` `M` `L`, `(` `)`, and `Ctrl+A` / `Ctrl+X`.
+`gu` `gU` `g~`, `(` `)`, and `Ctrl+A` / `Ctrl+X`.
 Prompt visual selections scope submit/steer actions to
 the selection.
 
@@ -211,12 +215,15 @@ With vim enabled, `G`, `gg`, `{` `}`, the block motions and searches are jumps:
 Plugins walk the same list with `win:jump{ older = n }`, `{ newer = n }` or
 `{ previous = true }`.
 
-With vim enabled the transcript supports `h` `j` `k` `l`, `w` `b` `e`, `0` `^`
-`$`, `gg` `G` and `{` `}` with counts, `v` / `V` visual selection, and `y` with a
-motion, a text object or `yy`; the yanked text flashes and the cursor stays at the
-start of what was yanked. `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` / `Ctrl+Y` /
-`Ctrl+E` scroll the viewport. `W` `B` `E`, `f` `t`, `%`, `H` `M` `L` and `*` `#` are
-not available in the transcript yet.
+With vim enabled the transcript supports `h` `j` `k` `l`, `gj` `gk`, `w` `W` `b`
+`B` `e` `E` `ge` `gE`, `0` `^` `$`, `gg` `G`, `{` `}`, `%`, find with `f` `F` `t`
+`T` repeated by `;` and `,`, and the screen-relative `H` `M` `L`, all with counts.
+`*` and `#` search for the word under the cursor. `v` / `V` start a visual
+selection (`gv` brings the last one back), and `y` takes a motion, a text object or
+`yy`; the yanked text flashes and the cursor stays at the start of what was yanked.
+`zz` `zt` `zb` put the cursor row in the middle, at the top or at the bottom of the
+screen. `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` / `Ctrl+Y` / `Ctrl+E` scroll the
+viewport.
 
 ## Cmdline (`:`)
 
