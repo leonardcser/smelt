@@ -1,0 +1,109 @@
+{
+  "vim": true,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 2063663103
+    },
+    {
+      "kind": "macro_prompt_edit",
+      "data": {
+        "text": "vvvvvvvvvvvvv",
+        "repetitions": 118,
+        "movement": 118,
+        "submit": false
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 0
+      }
+    },
+    {
+      "kind": "engine_request_permission_bash",
+      "data": {
+        "req_id": 97,
+        "call_id": 116,
+        "command": ""
+      }
+    }
+  ]
+}

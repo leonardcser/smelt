@@ -1290,6 +1290,11 @@ impl TuiApp {
             pctx.win.scroll_left = 0;
             pctx.win.pending_recenter = false;
             pctx.win.set_last_render_cpos(Some(pctx.win.cpos()));
+            // A docked dialog takes the prompt out of the layout. The layout above
+            // was built at zero width, so drop the viewport from its last frame.
+            if prompt_rect.width == 0 {
+                pctx.win.viewport = None;
+            }
         }
 
         if has_prompt_cursor {

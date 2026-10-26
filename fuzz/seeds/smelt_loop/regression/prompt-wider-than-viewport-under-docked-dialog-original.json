@@ -1,0 +1,275 @@
+{
+  "vim": true,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "key_unicode",
+      "data": 262154
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 3506438144
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 3974889619
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 2863311370
+    },
+    {
+      "kind": "clear_placeholder"
+    },
+    {
+      "kind": "clear_placeholder"
+    },
+    {
+      "kind": "clear_placeholder"
+    },
+    {
+      "kind": "clear_placeholder"
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 1987444736
+    },
+    {
+      "kind": "macro_prompt_edit",
+      "data": {
+        "text": "{{{{{{vvvvvvvvv",
+        "repetitions": 118,
+        "movement": 118,
+        "submit": false
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 118
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 118
+      }
+    },
+    {
+      "kind": "start_custom_command",
+      "data": {
+        "variant": 0
+      }
+    },
+    {
+      "kind": "engine_request_permission_bash",
+      "data": {
+        "req_id": 97,
+        "call_id": 116,
+        "command": "\u0000\u0000\u0000\u0000"
+      }
+    },
+    {
+      "kind": "engine_turn_error",
+      "data": "\u0000"
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": ""
+      }
+    },
+    {
+      "kind": "start_exec",
+      "data": {
+        "command": "\u0000I\u0000\u0000\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000pa\u0000path.\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000"
+      }
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 2256928768
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_unicode",
+      "data": 0
+    },
+    {
+      "kind": "key_special",
+      "data": 255
+    },
+    {
+      "kind": "key_special",
+      "data": 0
+    }
+  ]
+}
