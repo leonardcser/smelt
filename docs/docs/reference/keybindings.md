@@ -164,10 +164,20 @@ In normal mode, several emacs-style keys take on their vim meanings:
 | `Ctrl+A` | No-op                | Start of line         |
 | `Ctrl+W` | No-op                | Delete word backward  |
 
-Full vim support: motions, operators (`d`, `c`, `y`), text objects (`iw`,
-`a(`…), find (`f`, `t`, `F`, `T`, `;`, `,`), and commands (`x`, `s`, `r`, `p`,
-`u`, `~`, `J`, etc.). Prompt visual selections scope submit/steer actions to the
-selection.
+In the prompt, normal and visual mode support:
+
+- **Motions:** `h` `j` `k` `l`, `w` `W` `b` `B` `e` `E`, `0` `^` `_` `$`, `gg` `G`,
+  `{` `}`, `%`, and find with `f` `F` `t` `T` repeated by `;` and `,`. Counts work
+  on all of them.
+- **Operators:** `d`, `c` and `y` with any motion above or a text object (`iw`,
+  `a(`, `ip`...), plus `dd` `cc` `yy`, `D` `C` `Y`, `x` `X` `s` `S`, `r`, `~`, `J`,
+  `p` `P`, `u` and `Ctrl+R`, `o` `O`, and `.` to repeat the last change.
+- **Surround:** `ys`, `ds` and `cs`.
+
+Not supported yet: registers (`"`), macros (`q`, `@`), marks, `>` `<` `=`, `R`,
+`gu` `gU` `g~`, `ge`, `*` `#`, `H` `M` `L`, `(` `)`, and `Ctrl+A` / `Ctrl+X`.
+Prompt visual selections scope submit/steer actions to
+the selection.
 
 Yank / paste are mirrored with the system clipboard: `y` / `yy` / `d` / `x` push
 to the clipboard, and `p` / `P` read from it. If the clipboard was updated
@@ -188,9 +198,12 @@ paths; in vim mode, use `gf`.
 `/` searches the transcript forward and `?` backward; `n` and `N` repeat the last
 search in either direction, and `/nohl` clears the highlights.
 
-With vim enabled the full vim engine runs on the transcript (motions, `y` to
-yank, `v` / `V` visual selection, `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` /
-`Ctrl+Y` / `Ctrl+E` viewport scrolling).
+With vim enabled the transcript supports `h` `j` `k` `l`, `w` `b` `e`, `0` `^`
+`$`, `gg` `G` and `{` `}` with counts, `v` / `V` visual selection, and `y` with a
+motion, a text object or `yy`; the yanked text flashes and the cursor stays at the
+start of what was yanked. `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` / `Ctrl+Y` /
+`Ctrl+E` scroll the viewport. `W` `B` `E`, `f` `t`, `%`, `H` `M` `L` and `*` `#` are
+not available in the transcript yet.
 
 ## Cmdline (`:`)
 
