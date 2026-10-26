@@ -95,6 +95,16 @@ Selecting a line in visual mode and pressing `Enter` sends just that line:
 
 <figure class="term" data-replay="../../assets/replays/select.json" aria-label="Sending a selected line as its own message" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
+### Ask a side question
+
+`/btw <question>` asks something without touching the turn in progress. The
+answer streams into a dialog above the prompt, built from the live conversation
+so the model already knows the context, and `Esc` or `q` closes it. The side question
+is text only: it cannot call tools, and neither it nor its answer joins the
+conversation.
+
+<figure class="term" data-replay="../../assets/replays/btw.json" aria-label="Asking which file holds the discount logic with /btw while the agent works, then closing the answer" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
 ## Keep a long task going
 
 ### Goals and auto-continue

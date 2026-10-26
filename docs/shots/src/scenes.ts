@@ -574,4 +574,24 @@ export const scenes: Record<string, Scene> = {
       { pause: 2000 },
     ],
   },
+
+  /** A side question with /btw while the agent works: the answer streams into a dialog and the turn carries on. */
+  btw: {
+    steps: [
+      { pause: 1200 },
+      { type: "run the test suite and fix whatever fails" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /working/ },
+      { pause: 2500 },
+      { type: "/btw which file holds the discount logic?" },
+      { pause: 400 },
+      { key: "Enter" },
+      { pause: 9000 },
+      { key: "Escape" },
+      { pause: 1500 },
+      { until: /─ ● done/ },
+      { pause: 2000 },
+    ],
+  },
 };
