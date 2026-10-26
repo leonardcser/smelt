@@ -49,6 +49,10 @@
     } %}
   {% endif %}
   <script type="application/ld+json">{{ ld | tojson }}</script>
+  {#- Each color scheme sets its own logo from CSS, so the one for the other
+      scheme would only be fetched on the first switch. -#}
+  <link rel="prefetch" as="image" href="{{ 'logo-light.svg' | url }}">
+  <link rel="prefetch" as="image" href="{{ 'logo-dark.svg' | url }}">
 {% endblock %}
 
 {#- Instant navigation swaps the page container but keeps the header, so every

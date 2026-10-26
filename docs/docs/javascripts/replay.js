@@ -303,10 +303,11 @@
     this.visible = false;
   }
 
-  Replay.prototype.load = function () {
+  // `low` fetches without competing with what the page needs now.
+  Replay.prototype.load = function (low) {
     if (this.loading) return this.loading;
     var self = this;
-    this.loading = fetch(this.el.dataset.replay)
+    this.loading = fetch(this.el.dataset.replay, low ? { priority: "low" } : undefined)
       .then(function (r) {
         return r.json();
       })
@@ -350,6 +351,8 @@
     if (!this.cols) return;
     var pad = getComputedStyle(this.el);
     var width = this.el.clientWidth - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight);
+    // A figure hidden by the other color scheme has no width to fit yet.
+    if (!(width > 0)) return;
     var cell = width / this.cols;
     var size = (100 * width) / this.advance(100);
     var spacing = cell - this.advance(size) / this.cols;
@@ -461,6 +464,11 @@
     });
   });
 
+  function whenIdle(fn) {
+    if (window.requestIdleCallback) requestIdleCallback(fn, { timeout: 4000 });
+    else setTimeout(fn, 2000);
+  }
+
   function initReplays() {
     replays.forEach(function (r) {
       r.pause();
@@ -496,6 +504,10 @@
       seen.observe(el);
       near.observe(el);
       resized.observe(el);
+      // The recording for the other color scheme is hidden, so it never scrolls
+      // into view and `near` never loads it. Fetch it when the browser is idle,
+      // so switching schemes shows it at once.
+      if (el.dataset.scheme) whenIdle(function () { r.load(true); });
     });
   }
 
