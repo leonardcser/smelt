@@ -6,6 +6,7 @@
 pub mod callback;
 pub(crate) mod event;
 pub mod gutter;
+pub mod jumplist;
 pub(crate) mod modal;
 pub(crate) mod motions;
 pub mod named;
@@ -18,6 +19,7 @@ pub(crate) mod text_objects;
 pub mod vim;
 pub(crate) mod window;
 
+pub use jumplist::{JumpList, JumpMove};
 pub use named::NamedSlots;
 
 pub use smelt_buffer::attachment::AttachmentId;

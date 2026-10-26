@@ -1,5 +1,6 @@
 use super::document_motion::{clamp_to_row_text, resolve_rows, RowEnv};
 use super::*;
+use crate::jumplist::JumpMove;
 use crate::motions::{operator_span, resolve, Motion, Reach, Span, Use};
 use crate::row::{DisplayDocument, DisplayRow, DisplayRows, RowBreak, TextRange};
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
@@ -51,6 +52,7 @@ pub enum DocumentCommand {
         motion: Motion,
         count: Option<usize>,
     },
+    Jump(JumpMove),
     StartVisual,
     StartVisualLine,
     YankSelection,
@@ -874,6 +876,35 @@ impl Window {
         DocPosition { row, byte_col }
     }
 
+    /// The command a viewer should run for `command`: jumps leave the cursor
+    /// position in the jump list first, and jump-list moves become the goto
+    /// they resolve to. `None` when a jump-list move has nowhere to go.
+    pub fn resolve_viewer_jump(
+        &mut self,
+        buf: &Buffer,
+        command: DocumentCommand,
+    ) -> Option<DocumentCommand> {
+        if let DocumentCommand::Jump(jump) = command {
+            let from = self.viewer_doc_cursor(buf)?;
+            return self
+                .jumps
+                .resolve(from, jump)
+                .map(DocumentCommand::GotoPosition);
+        }
+        if command.is_jump() {
+            if let Some(from) = self.viewer_doc_cursor(buf) {
+                self.record_jump(from);
+            }
+        }
+        Some(command)
+    }
+
+    /// Remember `from` as the origin of a jump the host makes itself, such as
+    /// a search.
+    pub fn record_jump(&mut self, from: DocPosition) {
+        self.jumps.record(from);
+    }
+
     pub fn execute_viewer_command(
         &mut self,
         buf: &Buffer,
@@ -1021,7 +1052,7 @@ impl Window {
                 let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
                 self.pan_by_columns(delta, viewport_cols);
             }
-            DocumentCommand::OpenAction => {}
+            DocumentCommand::OpenAction | DocumentCommand::Jump(_) => {}
             DocumentCommand::ClearSelection => {
                 self.clear_selection_anchor();
                 self.text_state_mut().drag_endpoint = None;
@@ -1373,7 +1404,7 @@ impl DocumentViewExecutor {
                 *scroll_left =
                     pan_document_columns(document, *state, *scroll_left, delta, viewport_cols);
             }
-            DocumentCommand::OpenAction => {}
+            DocumentCommand::OpenAction | DocumentCommand::Jump(_) => {}
             DocumentCommand::ClearSelection => {
                 state.selection_anchor = None;
                 state.drag_endpoint = None;

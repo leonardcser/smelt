@@ -1,3 +1,4 @@
+use super::jumplist::JumpMove;
 use super::motions::{
     advance_chars, clamp_normal, current_line_content_range, current_line_range, first_non_blank,
     first_non_blank_at, line_end_normal, move_down, move_down_col, move_left, move_right_normal,
@@ -235,6 +236,9 @@ pub(crate) enum SubState {
     /// `[` or `]` pressed (`forward` for `]`), optionally after an operator,
     /// waiting for the key of the block kind to move to.
     WaitingBracket(Option<Op>, bool),
+    /// `'` or `` ` `` pressed, waiting for the mark name; only `''` and
+    /// `` `` `` exist, the position before the latest jump.
+    WaitingMark(char),
     /// Operator pending + `g` pressed, waiting for `g` to complete `gg` motion.
     WaitingOpG(Op),
     WaitingR,
@@ -480,6 +484,7 @@ impl VimWindowState {
                 }
                 out.push(if forward { ']' } else { '[' });
             }
+            SubState::WaitingMark(quote) => out.push(quote),
             SubState::WaitingOpG(op) => {
                 push_op(&mut out, op);
                 out.push('g');
@@ -717,6 +722,16 @@ pub fn handle_viewer_key(
             };
             return command(state, cmd);
         }
+        SubState::WaitingMark(_) => {
+            state.sub = SubState::Ready;
+            state.reset_pending();
+            return match key.code {
+                KeyCode::Char('\'' | '`') => {
+                    DocumentKeyResult::Command(DocumentCommand::Jump(JumpMove::Previous))
+                }
+                _ => DocumentKeyResult::Consumed,
+            };
+        }
         SubState::WaitingG => {
             state.sub = SubState::Ready;
             let cmd = match key.code {
@@ -759,6 +774,12 @@ pub fn handle_viewer_key(
             KeyCode::Char('f') => DocumentKeyResult::Command(DocumentCommand::PageRows(1)),
             KeyCode::Char('y') => DocumentKeyResult::Command(DocumentCommand::ScrollRows(-1)),
             KeyCode::Char('e') => DocumentKeyResult::Command(DocumentCommand::ScrollRows(1)),
+            KeyCode::Char('o') => DocumentKeyResult::Command(DocumentCommand::Jump(
+                JumpMove::Older(state.take_count()),
+            )),
+            KeyCode::Char('i') => DocumentKeyResult::Command(DocumentCommand::Jump(
+                JumpMove::Newer(state.take_count()),
+            )),
             _ => DocumentKeyResult::Passthrough,
         };
     }
@@ -783,6 +804,13 @@ pub fn handle_viewer_key(
         KeyCode::Char(c @ ('[' | ']')) => {
             state.sub = SubState::WaitingBracket(None, c == ']');
             DocumentKeyResult::Consumed
+        }
+        KeyCode::Char(quote @ ('\'' | '`')) => {
+            state.sub = SubState::WaitingMark(quote);
+            DocumentKeyResult::Consumed
+        }
+        KeyCode::Tab => {
+            DocumentKeyResult::Command(DocumentCommand::Jump(JumpMove::Newer(state.take_count())))
         }
         KeyCode::Char(c) if find_kind(c).is_some() => {
             state.sub = SubState::WaitingFind(find_kind(c).unwrap());
@@ -1012,7 +1040,10 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             return result;
         }
         // Only viewers wait for a block kind.
-        SubState::WaitingBracket(..) | SubState::WaitingVisualTextObj(_) | SubState::Ready => {}
+        SubState::WaitingBracket(..)
+        | SubState::WaitingMark(_)
+        | SubState::WaitingVisualTextObj(_)
+        | SubState::Ready => {}
     }
 
     if let KeyCode::Char(c) = key.code {
@@ -2439,6 +2470,7 @@ mod tests {
             (SubState::WaitingZ, "z"),
             (SubState::WaitingBracket(None, false), "["),
             (SubState::WaitingBracket(Some(Op::Yank), true), "y]"),
+            (SubState::WaitingMark('`'), "`"),
             (SubState::WaitingR, "r"),
             (SubState::WaitingFind(FindKind::Backward), "F"),
             (SubState::WaitingTextObj(Op::Change, true), "ci"),
@@ -2611,6 +2643,52 @@ mod tests {
             result,
             DocumentKeyResult::Command(block_move('t', false, Some(2)))
         );
+        assert!(state.is_idle());
+    }
+
+    fn ctrl_key(c: char, state: &mut VimWindowState) -> DocumentKeyResult {
+        let mut mode = VimMode::Normal;
+        handle_viewer_key(
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
+            &mut mode,
+            state,
+        )
+    }
+
+    fn jump(jump: JumpMove) -> DocumentKeyResult {
+        DocumentKeyResult::Command(DocumentCommand::Jump(jump))
+    }
+
+    #[test]
+    fn document_view_jump_list_keys() {
+        let mut state = VimWindowState::default();
+        assert_eq!(ctrl_key('o', &mut state), jump(JumpMove::Older(1)));
+        assert_eq!(ctrl_key('i', &mut state), jump(JumpMove::Newer(1)));
+
+        let (result, mut state) = viewer_keys("3");
+        assert_eq!(result, DocumentKeyResult::Consumed);
+        assert_eq!(ctrl_key('o', &mut state), jump(JumpMove::Older(3)));
+        assert!(state.is_idle());
+
+        let mut mode = VimMode::Normal;
+        let mut state = VimWindowState::default();
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(
+            handle_viewer_key(tab, &mut mode, &mut state),
+            jump(JumpMove::Newer(1))
+        );
+    }
+
+    #[test]
+    fn document_view_quote_marks_jump_to_the_previous_position() {
+        let (result, state) = viewer_keys("'");
+        assert_eq!(result, DocumentKeyResult::Consumed);
+        assert_eq!(state.pending_input().as_deref(), Some("'"));
+        assert_eq!(viewer_keys("''").0, jump(JumpMove::Previous));
+        assert_eq!(viewer_keys("``").0, jump(JumpMove::Previous));
+
+        let (result, state) = viewer_keys("'a");
+        assert_eq!(result, DocumentKeyResult::Consumed);
         assert!(state.is_idle());
     }
 

@@ -682,6 +682,9 @@ pub struct Window {
     /// its previously committed viewport until a larger exact projection is ready.
     prepared_viewport_height: Option<u16>,
 
+    /// Where viewer jumps (`G`, `}`, `]u`) left from, for `Ctrl-O` and `Ctrl-I`.
+    jumps: crate::jumplist::JumpList,
+
     scroll_top: RowIndex,
     /// Logical anchor for `scroll_top` - `(changedtick, logical_row, byte_offset)`
     /// of the chunk that was at the top of the viewport when scroll was last
@@ -734,6 +737,7 @@ impl Window {
             range_layers: WindowRangeLayers::default(),
             viewport: None,
             prepared_viewport_height: None,
+            jumps: crate::jumplist::JumpList::default(),
             scroll_top: 0,
             scroll_anchor: None,
             scroll_state: VerticalScroll::Pinned,
