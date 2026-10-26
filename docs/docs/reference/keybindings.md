@@ -214,8 +214,8 @@ only as a whole word.
 With vim enabled, `G`, `gg`, `{` `}`, the block motions and searches are jumps:
 `Ctrl+O` goes back to where the last one started, `Ctrl+I` or `Tab` forward again
 (both take counts), and `''` or ``` `` ``` toggles between the last two positions.
-Plugins walk the same list with `win:jump{ older = n }`, `{ newer = n }` or
-`{ previous = true }`.
+Without vim, `Ctrl+O` and `Tab` walk it while the transcript is focused. Plugins
+use `win:jump{ older = n }`, `{ newer = n }` or `{ previous = true }`.
 
 With vim enabled the transcript supports `h` `j` `k` `l`, `gj` `gk`, `w` `W` `b`
 `B` `e` `E` `ge` `gE`, `0` `^` `$`, `gg` `G`, `{` `}`, `%`, find with `f` `F` `t`

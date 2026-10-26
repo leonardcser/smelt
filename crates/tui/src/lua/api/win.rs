@@ -170,6 +170,12 @@ impl mlua::UserData for LuaWin {
             Ok(())
         });
 
+        methods.add_method("focused", |_, this, ()| -> LuaResult<bool> {
+            Ok(crate::lua::with_ui_host(|host| {
+                host.is_window_focused(this.id)
+            }))
+        });
+
         methods.add_method(
             "resize",
             |_, this, (axis, delta): (String, i32)| -> LuaResult<bool> {
@@ -848,6 +854,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         fields: smelt_core::class_methods! {
             "close" => fn() -> (), "Close the overlay leaf. No-op if the window is already closed.",
             "focus" => fn() -> (), "Move keyboard focus to this window. No-op if the window is not focusable.",
+            "focused" => fn() -> bool, "Whether this window holds keyboard focus.",
             "resize" => fn(axis: String, delta: i32) -> bool, "Grow this window along width or height by signed terminal cells; negative shrinks. Resizes the nearest matching hsplit/vsplit, or the containing overlay/docked dialog when no split applies. Shares mouse bounds and preserves focus and document state. Returns false if no resizable owner exists.",
             "equalize" => fn() -> bool, "Balance all enclosing hsplit/vsplit panes, respecting their minimum sizes. Does not change focus or document state. Returns false if the window is not in a resizable split.",
             "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone.",

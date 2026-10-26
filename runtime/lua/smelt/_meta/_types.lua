@@ -1170,6 +1170,7 @@
 ---@class smelt.win.Win
 ---@field close fun(): nil Close the overlay leaf. No-op if the window is already closed.
 ---@field focus fun(): nil Move keyboard focus to this window. No-op if the window is not focusable.
+---@field focused fun(): boolean Whether this window holds keyboard focus.
 ---@field resize fun(axis: string, delta: integer): boolean Grow this window along width or height by signed terminal cells; negative shrinks. Resizes the nearest matching hsplit/vsplit, or the containing overlay/docked dialog when no split applies. Shares mouse bounds and preserves focus and document state. Returns false if no resizable owner exists.
 ---@field equalize fun(): boolean Balance all enclosing hsplit/vsplit panes, respecting their minimum sizes. Does not change focus or document state. Returns false if the window is not in a resizable split.
 ---@field buf fun(): smelt.buf.Buf? Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone.

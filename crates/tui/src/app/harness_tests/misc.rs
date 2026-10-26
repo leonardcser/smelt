@@ -7789,6 +7789,33 @@ fn block_alt_arrows_work_without_vim() {
 }
 
 #[test]
+fn jump_keys_work_without_vim() {
+    let mut app = block_nav_app(false);
+    app.configure_transcript_vim(false, VimMode::Normal);
+    app.press_mod(KeyCode::Char('>'), KeyModifiers::ALT);
+    app.render_silent();
+    let start = transcript_row_cursor_row(&app);
+    app.press_mod(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    app.render_silent();
+    let moved = transcript_row_cursor_row(&app);
+    assert_ne!(moved, start);
+
+    ctrl_o(&mut app);
+    assert_eq!(transcript_row_cursor_row(&app), start);
+    ctrl_i(&mut app);
+    assert_eq!(transcript_row_cursor_row(&app), moved);
+}
+
+#[test]
+fn jump_keys_leave_the_prompt_alone() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.type_text("a");
+    app.press(KeyCode::Tab);
+    app.press_mod(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert_eq!(app.prompt_source(), "a");
+}
+
+#[test]
 fn block_chords_fall_through_when_the_prompt_is_focused() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.type_text("a[[b");

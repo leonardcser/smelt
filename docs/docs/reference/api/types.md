@@ -1742,6 +1742,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Most setters return the s
 | --- | --- | --- | --- |
 | `close` | `fun(): nil` | yes | Close the overlay leaf. No-op if the window is already closed. |
 | `focus` | `fun(): nil` | yes | Move keyboard focus to this window. No-op if the window is not focusable. |
+| `focused` | `fun(): boolean` | yes | Whether this window holds keyboard focus. |
 | `resize` | `fun(axis: string, delta: integer): boolean` | yes | Grow this window along width or height by signed terminal cells; negative shrinks. Resizes the nearest matching hsplit/vsplit, or the containing overlay/docked dialog when no split applies. Shares mouse bounds and preserves focus and document state. Returns false if no resizable owner exists. |
 | `equalize` | `fun(): boolean` | yes | Balance all enclosing hsplit/vsplit panes, respecting their minimum sizes. Does not change focus or document state. Returns false if the window is not in a resizable split. |
 | `buf` | `fun(): smelt.buf.Buf?` | yes | Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone. |

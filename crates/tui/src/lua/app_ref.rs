@@ -1008,6 +1008,10 @@ impl UiLuaHost<'_> {
         }
     }
 
+    pub(crate) fn is_window_focused(&self, id: crate::smelt_edit::WinId) -> bool {
+        self.app.ui.focus() == Some(id)
+    }
+
     pub(crate) fn resize_window(
         &mut self,
         id: crate::smelt_edit::WinId,
