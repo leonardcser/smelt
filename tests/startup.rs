@@ -2892,6 +2892,9 @@ smelt.tools.register({{
             stream
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
+            // The response is written a byte at a time; without TCP_NODELAY
+            // Nagle holds each byte until the client's delayed ACK arrives.
+            stream.set_nodelay(true).unwrap();
             let mut reader = BufReader::new(&mut stream);
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
