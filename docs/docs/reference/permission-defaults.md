@@ -29,7 +29,6 @@ What each mode allows before any of your own rules apply. To change them, see
 | `load_skill`          | Ask    | Allow              | Ask   | Allow |
 | `get_goal`            | Ask    | Ask                | Ask   | Allow |
 | `create_goal`         | Ask    | Ask                | Ask   | Allow |
-| `update_goal_progress` | Ask   | Ask                | Ask   | Allow |
 | `update_goal`         | Ask    | Ask                | Ask   | Allow |
 | `clear_goal`          | Ask    | Ask                | Ask   | Allow |
 | `present_plan`        | N/A    | Allow              | N/A   | N/A   |

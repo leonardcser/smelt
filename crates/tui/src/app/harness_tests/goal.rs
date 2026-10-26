@@ -167,6 +167,77 @@ fn clear_goal_tool_removes_goal_and_context_without_interrupting_turn() {
     }
 }
 
+fn call_update_goal(app: &mut TestApp, args: serde_json::Value) -> (String, bool) {
+    let args = args
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    app.app.handle_tool_call(
+        1,
+        protocol::InvocationId::new(1),
+        "update-goal".into(),
+        "update_goal".into(),
+        args,
+    );
+    app.drain_engine_sends()
+        .into_iter()
+        .find_map(|cmd| match cmd {
+            protocol::UiCommand::ToolResult {
+                content, is_error, ..
+            } => Some((content, is_error)),
+            _ => None,
+        })
+        .expect("update_goal returns a tool result")
+}
+
+#[test]
+fn update_goal_tool_records_progress_and_state() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"assert(require("smelt.goal").create("finish the work", { auto_continue = false }))"#,
+    ));
+
+    let (_, is_error) = call_update_goal(&mut app, serde_json::json!({}));
+    assert!(is_error, "empty update is rejected");
+    let (_, is_error) = call_update_goal(
+        &mut app,
+        serde_json::json!({ "progress": "Step 1/2", "state": "paused" }),
+    );
+    assert!(is_error, "invalid state is rejected");
+    let (_, is_error) = call_update_goal(&mut app, serde_json::json!({ "reason": "why" }));
+    assert!(is_error, "reason without state is rejected");
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal").current()
+            assert(goal.state == "active" and goal.progress == nil)
+        "#,
+    ));
+
+    let (_, is_error) = call_update_goal(&mut app, serde_json::json!({ "progress": "Step 1/2" }));
+    assert!(!is_error);
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal").current()
+            assert(goal.state == "active" and goal.progress.label == "Step 1/2")
+        "#,
+    ));
+
+    let (_, is_error) = call_update_goal(
+        &mut app,
+        serde_json::json!({ "progress": "Step 2/2", "state": "done", "reason": "tests pass" }),
+    );
+    assert!(!is_error);
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal").current()
+            assert(goal.state == "done" and goal.progress.label == "Step 2/2")
+            assert(goal.reason == "tests pass")
+        "#,
+    ));
+}
+
 #[test]
 fn clear_goal_prevents_pending_auto_continuation() {
     let mut app = TestApp::builder().build();

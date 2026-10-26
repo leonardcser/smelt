@@ -316,22 +316,19 @@ unfinished goal exists.
 | `summary` | Optional short label for the goal bar |
 | `auto_continue` | Continue automatically while idle (default: true) |
 
-### `update_goal_progress`
-
-Records durable phase or milestone progress for an active goal. Its required
-`progress` object accepts a short `label` and optional numeric `current`, `total`,
-or `percent` values. Numeric progress should only be used when grounded in an
-explicit plan or measurable work.
-
 ### `update_goal`
 
-Marks the current goal `done` with completion evidence, or `blocked` with the
-exact external blocker. It cannot pause, resume, clear, or rewrite a goal.
+Reports on the current goal. `progress` records a durable phase or milestone
+label; use it when starting a meaningful step, not for routine substeps. `state`
+marks the goal `done` with completion evidence, or `blocked` with the exact
+external blocker. At least one of `progress` or `state` is required, and both
+may be sent together. It cannot pause, resume, clear, or rewrite a goal.
 
 | Parameter | Description |
 | --------- | ----------- |
-| `state` | `done` or `blocked` (required) |
-| `reason` | Completion evidence or blocker |
+| `progress` | Short durable progress label |
+| `state` | `done` or `blocked` |
+| `reason` | Completion evidence or blocker (with `state`) |
 
 ### `clear_goal`
 

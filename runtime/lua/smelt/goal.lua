@@ -167,9 +167,9 @@ local function context_text(goal)
     "Goal instructions:",
     "- Keep future work aligned with this objective unless the user says otherwise.",
     "- Use get_goal to inspect the current goal state.",
-    "- Use update_goal_progress to record durable stage progress when starting each meaningful phase, including the first one.",
+    "- Use update_goal with progress to record durable stage progress when starting each meaningful phase, including the first one.",
     "- If the user explicitly asks to clear, cancel, stop, or remove this goal, call clear_goal.",
-    "- At the end, call update_goal only if the goal is done or genuinely blocked.",
+    "- At the end, call update_goal with state only if the goal is done or genuinely blocked.",
     "- Do not mark the goal done until current evidence proves the requested outcome is complete.",
   }, "\n")
 end
@@ -213,7 +213,7 @@ local function continuation_prompt(goal)
     "",
     "## Instructions",
     "- Pick the next concrete step and execute it.",
-    "- Call update_goal_progress when starting a meaningful phase, including the first one; skip routine substeps and live activity.",
+    "- Call update_goal with progress when starting a meaningful phase, including the first one; skip routine substeps and live activity.",
     "- Preserve the original scope; do not redefine success around the work already done.",
     "- Before marking the goal done, verify the current state against every explicit requirement, artifact, command, test, and deliverable in the objective.",
     "- Treat incomplete, indirect, weak, or missing evidence as not done; gather stronger evidence or keep working.",
@@ -605,7 +605,7 @@ local function register_tools()
 
   smelt.tools.register({
     name = "create_goal",
-    description = "Create a session goal only when the user explicitly asks to start, set, or create a persistent goal, or system/developer instructions explicitly require one. Do not infer goals from ordinary tasks, investigations, implementations, or requests to continue working. Fails if an unfinished goal already exists; use update_goal only to report done or blocked, or clear_goal when the user explicitly asks to remove it.",
+    description = "Create a session goal only when the user explicitly asks to start, set, or create a persistent goal, or system/developer instructions explicitly require one. Do not infer goals from ordinary tasks, investigations, implementations, or requests to continue working. Fails if an unfinished goal already exists; use update_goal to report progress, done or blocked, or clear_goal when the user explicitly asks to remove it.",
     parameters = {
       type = "object",
       properties = {
@@ -631,64 +631,37 @@ local function register_tools()
   })
 
   smelt.tools.register({
-    name = "update_goal_progress",
-    description = "Update durable progress for an existing active goal shown in the top goal bar. Do not call unless a goal already exists. Call when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass for that goal, including the first one after it is set. Do not use for routine substeps, individual tool calls, live activity, done, or blocked.",
-    parameters = {
-      type = "object",
-      properties = {
-        progress = {
-          type = "object",
-          description = "Durable user-facing progress. Use label for a brief stage description, such as 'Step 2/5, implementing validation'; use current/total or percent only when grounded in the goal or an explicit plan.",
-          properties = {
-            label = { type = "string", description = "Durable progress label, such as 'Step 2/5, implementing validation', 'Sprint 1/3, stabilizing imports', '75%, validating regressions', or 'Review, simplifying changes'. Not moment-to-moment activity." },
-            current = { type = "number", description = "Optional numeric current progress." },
-            total = { type = "number", description = "Optional numeric total progress." },
-            percent = { type = "number", description = "Optional percent complete. Do not invent percentages." },
-          },
-          required = smelt.json.array(),
-        },
-      },
-      required = { "progress" },
-    },
-    summary = function(args)
-      args = args or {}
-      return progress_label(args.progress) or "update goal progress"
-    end,
-    execute = function(args)
-      args = args or {}
-      if args.progress == nil then return { content = "progress is required", is_error = true } end
-      local goal, err = M.update_status({ progress = args.progress })
-      if not goal then return { content = err, is_error = true } end
-      return { content = "updated goal status\n" .. M.describe(goal) }
-    end,
-  })
-
-  smelt.tools.register({
     name = "update_goal",
-    description = "Report the current goal as done or genuinely blocked. Use state=done only when current evidence proves the objective is complete. Use state=blocked only when no meaningful progress is possible without user input or an external-state change. This tool cannot pause, resume, clear, or rewrite goals. Use clear_goal only when the user explicitly asks to remove the goal.",
+    description = "Report on the current goal. Set progress to record durable progress when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass, including the first one after the goal is set; do not use it for routine substeps, individual tool calls, or live activity. Set state to report the goal as done or genuinely blocked, and give the evidence or exact blocker in reason. Use state=done only when current evidence proves the objective is complete. Use state=blocked only when no meaningful progress is possible without user input or an external-state change. Do not call unless a goal already exists. This tool cannot pause, resume, clear, or rewrite goals. Use clear_goal only when the user explicitly asks to remove the goal.",
     parameters = {
       type = "object",
       properties = {
-        state = { type = "string", enum = { "done", "blocked" }, description = "Required lifecycle state update." },
-        reason = { type = "string", description = "Evidence for completion or the exact blocker." },
+        progress = { type = "string", description = "Durable progress label, such as 'Step 2/5, implementing validation', 'Sprint 1/3, stabilizing imports', '75%, validating regressions', or 'Review, simplifying changes'. Not moment-to-moment activity. Do not invent numbers." },
+        state = { type = "string", enum = { "done", "blocked" }, description = "Lifecycle state to report." },
+        reason = { type = "string", description = "Evidence for completion or the exact blocker. Only with state." },
       },
-      required = { "state" },
+      required = smelt.json.array(),
     },
     summary = function(args)
       args = args or {}
-      return args.state or "update goal"
+      return args.state or progress_label(args.progress) or "update goal"
     end,
     execute = function(args)
       args = args or {}
-      if args.state ~= "done" and args.state ~= "blocked" then
+      local progress = present(args.progress)
+      if args.state ~= nil and args.state ~= "done" and args.state ~= "blocked" then
         return { content = "update_goal can only set state to done or blocked", is_error = true }
       end
-      local goal, err
-      if args.state == "done" then
-        goal, err = M.complete(args.reason)
-      else
-        goal, err = M.block(args.reason)
+      if not progress and args.state == nil then
+        return { content = "progress or state is required", is_error = true }
       end
+      if args.reason ~= nil and args.state == nil then
+        return { content = "reason requires state", is_error = true }
+      end
+      local goal, err = require_goal()
+      if goal and progress then goal, err = M.update_status({ progress = progress }) end
+      if goal and args.state == "done" then goal, err = M.complete(args.reason) end
+      if goal and args.state == "blocked" then goal, err = M.block(args.reason) end
       if not goal then return { content = err, is_error = true } end
       return { content = "updated goal\n" .. M.describe(goal) }
     end,

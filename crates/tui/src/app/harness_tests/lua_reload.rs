@@ -1833,7 +1833,7 @@ fn lua_goal_module_persists_and_updates_session_goal() {
 }
 
 #[test]
-fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
+fn lua_goal_tools_limit_model_state_updates_to_done_or_blocked() {
     let mut app = TestApp::builder().build();
 
     assert!(app.run_lua(r#"require("smelt.goal").setup()"#));
@@ -1878,26 +1878,14 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
         update.parameters["properties"]["state"]["enum"],
         serde_json::json!(["done", "blocked"])
     );
-    assert_eq!(update.parameters["required"], serde_json::json!(["state"]));
-
-    let status = tools
-        .iter()
-        .find(|tool| tool.name == "update_goal_progress")
-        .expect("update_goal_progress should be registered");
-    assert!(status.description.contains("existing active goal"));
-    assert!(status.parameters["properties"].get("activity").is_none());
-    assert!(status.parameters["properties"].get("summary").is_none());
-    assert!(status.parameters["properties"]["progress"]
-        .get("properties")
-        .is_some());
     assert_eq!(
-        status.parameters["properties"]["progress"]["required"],
-        serde_json::json!([])
+        update.parameters["properties"]["progress"]["type"],
+        "string"
     );
-    assert_eq!(
-        status.parameters["required"],
-        serde_json::json!(["progress"])
-    );
+    assert!(update.parameters["properties"].get("activity").is_none());
+    assert!(update.parameters["properties"].get("summary").is_none());
+    assert_eq!(update.parameters["required"], serde_json::json!([]));
+    assert!(tools.iter().all(|tool| tool.name != "update_goal_progress"));
 }
 
 #[test]
@@ -1940,7 +1928,7 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
             assert(_G.__goal_submit.continuation_token == 42)
             assert(_G.__goal_submit.body:find("# Continue goal", 1, true))
             assert(_G.__goal_submit.body:find("finish &lt;the&gt; &amp; goal", 1, true))
-            assert(_G.__goal_submit.body:find("Call update_goal_progress when starting a meaningful phase", 1, true))
+            assert(_G.__goal_submit.body:find("Call update_goal with progress when starting a meaningful phase", 1, true))
             assert(_G.__goal_submit.body:find("skip routine substeps and live activity", 1, true))
             assert(_G.__goal_submit.body:find("Preserve the original scope", 1, true))
             assert(_G.__goal_submit.body:find("Treat incomplete, indirect, weak, or missing evidence as not done", 1, true))
