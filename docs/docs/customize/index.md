@@ -1,3 +1,8 @@
+---
+title: "Configure smelt with Lua"
+description: "Configure the smelt coding agent in Lua: your init.lua, project config, reloading and load order."
+---
+
 # Customize
 
 smelt is configured in Lua. Start with `init.lua`; reach for the other files

@@ -1,3 +1,8 @@
+---
+title: "Plugin UI: overlays, dialogs and statusline"
+description: "Build overlays, dialogs, pickers, resizable splits and statusline segments for the terminal UI of a smelt Lua plugin."
+---
+
 # UI
 
 All of these are UiHost APIs: they need the terminal UI and raise in headless

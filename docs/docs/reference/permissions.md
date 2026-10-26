@@ -1,3 +1,8 @@
+---
+title: "Permissions"
+description: "How smelt decides what the coding agent may do without asking: modes, rules, approval scopes, workspace restriction, project trust and secret redaction."
+---
+
 # Permissions
 
 The permission system controls what the agent can do without asking. Each

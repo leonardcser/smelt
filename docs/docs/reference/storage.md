@@ -1,3 +1,8 @@
+---
+title: "Storage and environment variables"
+description: "Where smelt keeps config, state, data and cache on each platform, how credentials are stored, and the environment variables it reads."
+---
+
 # Storage and environment
 
 smelt uses four platform directories: **config**, **state**, **data** and

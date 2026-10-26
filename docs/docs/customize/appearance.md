@@ -1,3 +1,8 @@
+---
+title: "Themes and keymaps"
+description: "Over thirty bundled smelt themes, file icons and custom keymaps for the terminal coding agent, set from init.lua."
+---
+
 # Themes and keymaps
 
 ## Themes

@@ -1,3 +1,8 @@
+---
+title: "Headless mode and CI"
+description: "Run the smelt coding agent without the TUI in scripts, CI pipelines and pre-commit hooks: flags, permissions, output formats, exit codes and sessions."
+---
+
 # Headless and CI
 
 Run the agent without the TUI for scripts, CI pipelines and pre-commit hooks. It

@@ -1,3 +1,8 @@
+---
+title: "Providers and models"
+description: "Register OpenAI-compatible, Ollama, ChatGPT, GitHub Copilot and other providers in smelt, choose models, set reasoning, helper models and per-model options."
+---
+
 # Providers and models
 
 Register providers in `init.lua` so you can run plain `smelt` with no flags. For

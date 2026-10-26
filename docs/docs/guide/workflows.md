@@ -1,3 +1,8 @@
+---
+title: "Common workflows"
+description: "Recipes for the terminal coding agent: attach files with @, review changes before they land, run hands-off, resume sessions and work on many tasks in parallel."
+---
+
 # Common workflows
 
 Short recipes for the things you do with smelt. For every key and command, see

@@ -1,3 +1,8 @@
+---
+title: "Permission defaults"
+description: "What each smelt mode (normal, plan, apply, yolo) allows for tools and bash commands before any of your own rules apply."
+---
+
 # Permission defaults
 
 What each mode allows before any of your own rules apply. To change them, see

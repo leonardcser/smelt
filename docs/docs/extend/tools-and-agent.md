@@ -1,3 +1,8 @@
+---
+title: "Custom tools and transcript rendering"
+description: "Give the smelt agent new tools from Lua, control how tool calls are displayed, group the transcript, add language-server tools and wrap provider requests."
+---
+
 # Tools and transcript
 
 ## Custom tools

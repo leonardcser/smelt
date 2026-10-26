@@ -1,3 +1,8 @@
+---
+title: "Bundled plugins"
+description: "The Lua plugins bundled with smelt, such as diff, compaction, session titles and input prediction, built on the same API available to you."
+---
+
 # Bundled plugins
 
 Much of smelt's own behavior, such as `/diff`, compaction, session titles and

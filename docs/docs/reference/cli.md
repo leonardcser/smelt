@@ -1,3 +1,8 @@
+---
+title: "CLI reference"
+description: "The smelt command line: flags for the initial message, connection, behavior, sampling, sessions and runtime, plus subcommands and exit status."
+---
+
 # CLI
 
 ```

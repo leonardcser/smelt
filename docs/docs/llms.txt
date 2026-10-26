@@ -1,0 +1,46 @@
+# smelt
+
+> smelt is an open-source coding agent for the terminal. It has a Rust core and is configured and extended in Lua, like Neovim. It supports ChatGPT, GitHub Copilot, Kimi Code and any OpenAI-compatible endpoint, and runs on Linux, macOS and Windows. It is in beta until 1.0, so interfaces may change between releases.
+
+Install: `curl -fsSL https://smeltagent.dev/install.sh | sh`
+
+Source: https://github.com/leonardcser/smelt
+
+## Guide
+
+- [Getting started](https://smeltagent.dev/guide/getting-started/): install, log in with `smelt auth`, first prompt
+- [Common workflows](https://smeltagent.dev/guide/workflows/): attach files, review changes, run hands-off, resume sessions
+- [Headless and CI](https://smeltagent.dev/guide/headless/): run without the TUI in scripts and pipelines
+- [Benchmarks](https://smeltagent.dev/guide/benchmarks/): Terminal-Bench 2.1 resource use against five other agents
+- [Troubleshooting](https://smeltagent.dev/guide/troubleshooting/): common problems and fixes
+
+## Customize
+
+- [Configure smelt with Lua](https://smeltagent.dev/customize/): init.lua, project config, reloading, load order
+- [Providers and models](https://smeltagent.dev/customize/providers/): register providers, choose models and reasoning
+- [Settings](https://smeltagent.dev/customize/settings/): every setting in init.lua
+- [Themes and keymaps](https://smeltagent.dev/customize/appearance/): bundled themes, file icons, keymaps
+- [Custom commands](https://smeltagent.dev/customize/commands/): Markdown and Lua slash commands
+- [Skills, MCP servers and AGENTS.md](https://smeltagent.dev/customize/agent/): instructions, skills, MCP
+
+## Extend
+
+- [Write plugins in Lua](https://smeltagent.dev/extend/): anatomy of a plugin, hot reload, state
+- [Commands, events and keymaps](https://smeltagent.dev/extend/commands-and-events/)
+- [UI: overlays, dialogs, statusline](https://smeltagent.dev/extend/ui/)
+- [Custom tools and transcript rendering](https://smeltagent.dev/extend/tools-and-agent/)
+- [Async tasks and I/O](https://smeltagent.dev/extend/async/)
+- [Bundled plugins](https://smeltagent.dev/extend/bundled-plugins/)
+- [Plugin gallery](https://smeltagent.dev/extend/gallery/)
+
+## Reference
+
+- [Slash commands](https://smeltagent.dev/reference/commands/)
+- [Keybindings](https://smeltagent.dev/reference/keybindings/)
+- [Built-in tools](https://smeltagent.dev/reference/tools/)
+- [Permissions](https://smeltagent.dev/reference/permissions/)
+- [Permission defaults](https://smeltagent.dev/reference/permission-defaults/)
+- [CLI](https://smeltagent.dev/reference/cli/)
+- [Storage and environment variables](https://smeltagent.dev/reference/storage/)
+- [Lua API reference](https://smeltagent.dev/reference/api/): every `smelt.*` namespace
+- [Lua API types](https://smeltagent.dev/reference/api/types/)

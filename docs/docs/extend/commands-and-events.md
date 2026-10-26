@@ -1,3 +1,8 @@
+---
+title: "Plugin commands, events and keymaps"
+description: "Register slash commands, subscribe to events and signals, and bind keymaps from a smelt Lua plugin."
+---
+
 # Commands and events
 
 ## Slash commands

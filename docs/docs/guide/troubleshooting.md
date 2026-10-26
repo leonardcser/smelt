@@ -1,3 +1,8 @@
+---
+title: "Troubleshooting"
+description: "Fix common smelt problems: no provider or model, config changes not loading, keys not working, clipboard issues, slow shell commands and damaged sessions."
+---
+
 # Troubleshooting
 
 Start with `/messages` inside the TUI. It collects configuration, provider,

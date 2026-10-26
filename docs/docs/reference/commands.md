@@ -1,3 +1,8 @@
+---
+title: "Slash commands reference"
+description: "All built-in smelt slash commands, with descriptions."
+---
+
 # Commands
 
 Type `/` to open the command picker with fuzzy search. Add your own with

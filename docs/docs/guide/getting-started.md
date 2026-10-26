@@ -1,3 +1,8 @@
+---
+title: "Install and get started"
+description: "Install smelt on Linux, macOS or Windows, log in with ChatGPT, GitHub Copilot or Kimi Code or use any OpenAI-compatible endpoint, and run your first prompt."
+---
+
 # Getting started
 
 <figure class="term" data-replay="../../assets/replays/demo.json" aria-label="smelt finding a failing test, fixing it and rerunning the tests" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
@@ -9,7 +14,7 @@
     On Linux or macOS, install the latest release into `~/.local/bin`:
 
     ```bash
-    curl -fsSL https://leonardcser.github.io/smelt/install.sh | sh
+    curl -fsSL https://smeltagent.dev/install.sh | sh
     ```
 
     The script verifies the archive against the release `SHA256SUMS`. Set

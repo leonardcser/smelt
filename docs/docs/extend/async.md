@@ -1,3 +1,8 @@
+---
+title: "Async tasks and I/O in plugins"
+description: "Wait, sleep, spawn processes, search and watch files from a smelt Lua plugin with coroutines while the terminal UI keeps rendering."
+---
+
 # Tasks and I/O
 
 Anything that waits (`smelt.sleep`, `smelt.dialog.open`, `smelt.picker.open`,

@@ -1,3 +1,8 @@
+---
+title: "Settings reference"
+description: "Every smelt setting in init.lua: vim mode, auto compaction, web search, notifications, transcript options, request audit and LaTeX math rendering."
+---
+
 # Settings
 
 Set preferences in `init.lua` by assigning to `smelt.settings`:

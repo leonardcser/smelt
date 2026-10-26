@@ -1,3 +1,8 @@
+---
+title: "Custom slash commands"
+description: "Add your own smelt slash commands as Markdown prompt templates or Lua functions, in your config or per project."
+---
+
 # Custom commands
 
 Add your own `/commands` either as a Markdown prompt template (no Lua needed) or

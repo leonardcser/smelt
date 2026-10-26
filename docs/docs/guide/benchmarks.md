@@ -1,3 +1,8 @@
+---
+title: "Benchmarks vs Claude Code, Codex and opencode"
+description: "Terminal-Bench 2.1 results for smelt, pi, codex, claude code, opencode and mini-swe-agent on the same model: memory, CPU time and wall time over 360 runs."
+---
+
 # Benchmarks
 
 Six coding agents on the same model and the same tasks: 20

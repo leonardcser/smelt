@@ -2,7 +2,7 @@
 site_name = "smelt"
 site_description = "A hackable coding agent for the terminal. Rust core, scriptable in Lua."
 site_author = "Leonard Cseres"
-site_url = "https://leonardcser.github.io/smelt/"
+site_url = "https://smeltagent.dev/"
 repo_url = "https://github.com/leonardcser/smelt"
 edit_uri = "edit/main/docs/docs/"
 extra_css = ["stylesheets/extra.css"]

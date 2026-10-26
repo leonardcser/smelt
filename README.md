@@ -9,9 +9,9 @@
 <h1 align="center">smelt</h1>
 
 <p align="center">
-  <a href="https://leonardcser.github.io/smelt/">Documentation</a>
+  <a href="https://smeltagent.dev/">Documentation</a>
   &nbsp;·&nbsp;
-  <a href="https://leonardcser.github.io/smelt/reference/api/">Lua API</a>
+  <a href="https://smeltagent.dev/reference/api/">Lua API</a>
   &nbsp;·&nbsp;
   <a href="https://github.com/leonardcser/smelt/releases">Releases</a>
   &nbsp;·&nbsp;
@@ -55,12 +55,12 @@ lower is better.
 | opencode       | 2.80 GiB     | 116 s     | 421 s     |
 | mini-swe-agent | 1.49 GiB     | 13.1 s    | 570 s     |
 
-[Full results](https://leonardcser.github.io/smelt/guide/benchmarks/)
+[Full results](https://smeltagent.dev/guide/benchmarks/)
 
 ## Install
 
 ```bash
-curl -fsSL https://leonardcser.github.io/smelt/install.sh | sh
+curl -fsSL https://smeltagent.dev/install.sh | sh
 ```
 
 Or grab a prebuilt binary (Linux and macOS on x86_64 and aarch64, Windows on
@@ -100,7 +100,7 @@ LSP-backed semantic code tools; enable them from `~/.config/smelt/init.lua`.
 
 Full documentation for configuration, Lua API, keybindings, permissions,
 providers, and plugin authoring lives at
-**[leonardcser.github.io/smelt](https://leonardcser.github.io/smelt/)**.
+**[smeltagent.dev](https://smeltagent.dev/)**.
 
 ## License
 

@@ -1,3 +1,8 @@
+---
+title: "Skills, MCP servers and AGENTS.md"
+description: "Shape what the smelt coding agent knows and can reach: AGENTS.md instructions, skills and MCP servers, with little or no Lua."
+---
+
 # Skills, MCP and instructions
 
 Three ways to shape what the agent knows and what it can reach, none of which

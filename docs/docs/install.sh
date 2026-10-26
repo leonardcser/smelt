@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the latest smelt release for Linux or macOS.
 #
-#   curl -fsSL https://leonardcser.github.io/smelt/install.sh | sh
+#   curl -fsSL https://smeltagent.dev/install.sh | sh
 #
 # Environment:
 #   SMELT_VERSION      release tag to install, e.g. v0.6.0 (default: latest)

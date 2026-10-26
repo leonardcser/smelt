@@ -1,3 +1,8 @@
+---
+title: "Plugin gallery"
+description: "Small smelt Lua plugins to copy: a crates.io lookup tool, a lualine-style statusline, a changes sidebar and a snake game."
+---
+
 # Plugin gallery
 
 Small plugins to copy into `~/.config/smelt/plugins/`. Each one is recorded

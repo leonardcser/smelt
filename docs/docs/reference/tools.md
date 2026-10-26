@@ -1,3 +1,8 @@
+---
+title: "Built-in tools"
+description: "The tools the smelt coding agent can call: file I/O, search, execution, web, interaction and more, each gated by the permissions system."
+---
+
 # Tools
 
 Built-in tools the agent can call. Each call is gated by the

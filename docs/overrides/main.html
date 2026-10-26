@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {% set home = page.canonical_url == config.site_url %}
+  {% set title = page.meta.title if page.meta and page.meta.title else (page.title | striptags if page.title and not home else config.site_name) %}
+  {% set description = page.meta.description if page.meta and page.meta.description else config.site_description %}
+  {% set image = config.site_url ~ "assets/social-card.png" %}
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:type" content="{{ 'website' if home else 'article' }}">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ description }}">
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  <meta property="og:image" content="{{ image }}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="smelt, a coding agent you hack like Neovim">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ title }}">
+  <meta name="twitter:description" content="{{ description }}">
+  <meta name="twitter:image" content="{{ image }}">
+  {% if home %}
+    {% set ld = {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": config.site_name,
+      "description": config.site_description,
+      "url": config.site_url,
+      "image": image,
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux, macOS, Windows",
+      "license": "https://github.com/leonardcser/smelt/blob/main/LICENSE",
+      "downloadUrl": "https://github.com/leonardcser/smelt/releases",
+      "codeRepository": config.repo_url,
+      "programmingLanguage": ["Rust", "Lua"],
+      "author": {"@type": "Person", "name": config.site_author},
+      "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+    } %}
+  {% else %}
+    {% set ld = {
+      "@context": "https://schema.org",
+      "@type": "TechArticle",
+      "headline": title,
+      "description": description,
+      "url": page.canonical_url,
+      "image": image,
+      "inLanguage": "en",
+      "isPartOf": {"@type": "WebSite", "name": config.site_name, "url": config.site_url},
+      "author": {"@type": "Person", "name": config.site_author}
+    } %}
+  {% endif %}
+  <script type="application/ld+json">{{ ld | tojson }}</script>
+{% endblock %}

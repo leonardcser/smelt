@@ -1,3 +1,8 @@
+---
+title: "Write smelt plugins in Lua"
+description: "Extend the smelt coding agent with plain Lua files: slash commands, events, tools, dialogs, overlays and transcript rendering, with hot reload and no build step."
+---
+
 # Extend
 
 smelt exposes a Lua API on the global `smelt` table. With it you can register

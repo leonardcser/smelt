@@ -2,7 +2,7 @@
 -- default browser via Rust's centralized opener checks, or falls back to
 -- copying the URL to the clipboard when auto-open is unavailable.
 
-local DOCS_URL = "https://leonardcser.github.io/smelt/"
+local DOCS_URL = "https://smeltagent.dev/"
 
 local function copy_fallback(reason)
   local ok = pcall(smelt.clipboard.write, DOCS_URL)

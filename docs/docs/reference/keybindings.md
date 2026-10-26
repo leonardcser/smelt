@@ -1,3 +1,8 @@
+---
+title: "Keybindings reference"
+description: "Every smelt key binding: input, modes, vim mode, transcript, command line, completer, dialogs and Esc chords, plus how to rebind them."
+---
+
 # Keybindings
 
 ## Input
