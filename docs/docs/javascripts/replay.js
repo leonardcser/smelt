@@ -2,7 +2,7 @@
 (function () {
   // The dark terminal palette, as the README GIF draws it (docs/shots/src/render.ts).
   var BASE16 = [
-    "#17140f", "#ef6b5b", "#8fbf6a", "#e6b450", "#6aa4e0", "#c586c0", "#56c2b0", "#e8dfd6",
+    "#000000", "#ef6b5b", "#8fbf6a", "#e6b450", "#6aa4e0", "#c586c0", "#56c2b0", "#e8dfd6",
     "#7d7268", "#ff8577", "#a8d98a", "#f5ca6e", "#8abaf2", "#dba1d6", "#7ad9c6", "#ffffff",
   ];
   // Its light counterpart, for terminals that ask for the light scheme with

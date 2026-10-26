@@ -10,7 +10,7 @@ const fonts = path.join(root, "node_modules/jetbrains-mono/fonts/webfonts");
 /** Each frame of `docs/docs/assets/replays/<name>.json` with `cell` px wide columns, and how long it shows. */
 export async function renderReplay(name: string, cell = 9): Promise<{ pngs: Buffer[]; ms: number[] }> {
   const replay = await Bun.file(path.join(site, `assets/replays/${name}.json`)).json();
-  // `.home` keeps the docs wallpaper off; the page is served beside the site so its relative URLs resolve.
+  // The terminal sits on the docs wallpaper; the page is served beside the site so its relative URLs resolve.
   const page = `<!doctype html><meta charset="utf-8">
 <link rel="stylesheet" href="/stylesheets/extra.css">
 <style>
@@ -20,7 +20,7 @@ export async function renderReplay(name: string, cell = 9): Promise<{ pngs: Buff
   body{margin:0}
   .md-typeset figure.term{width:${replay.cols * cell}px}
 </style>
-<div class="md-typeset home"><figure class="term" data-replay="/assets/replays/${name}.json"><pre class="term__screen"></pre></figure></div>
+<div class="md-typeset"><figure class="term" data-replay="/assets/replays/${name}.json"><pre class="term__screen"></pre></figure></div>
 <script src="/javascripts/replay.js"></script>`;
   const server = Bun.serve({
     port: 0,

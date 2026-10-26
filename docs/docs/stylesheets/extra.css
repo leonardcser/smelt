@@ -157,7 +157,7 @@
 }
 /* A recorded smelt session, replayed as text by javascripts/replay.js. */
 :root {
-  --term-bg: #17140f;
+  --term-bg: #000;
   --term-fg: #e8dfd6;
   --term-line: rgba(232, 223, 214, 0.12);
 }
