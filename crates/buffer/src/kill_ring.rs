@@ -21,7 +21,7 @@ fn strip_markers(text: String) -> String {
 const KILL_RING_MAX: usize = 32;
 
 /// Duration of the post-yank highlight flash.
-pub const YANK_FLASH_DURATION: Duration = Duration::from_millis(200);
+pub const YANK_FLASH_DURATION: Duration = Duration::from_millis(150);
 
 /// Kill ring shared by emacs-style edits and vim yank/paste operations.
 pub struct KillRing {
@@ -182,6 +182,13 @@ impl KillRing {
         self.last_yank_at = Some(now);
     }
 
+    /// Flash `start..end` without touching the kill text, for copies that go
+    /// straight to the system clipboard (mouse release, copy key).
+    pub fn flash_range(&mut self, start: usize, end: usize, now: Instant) {
+        self.source_range = Some((start, end));
+        self.last_yank_at = Some(now);
+    }
+
     /// Source range of the most recent yank if its flash window is still active.
     pub fn yank_flash_range(&self, now: Instant) -> Option<(usize, usize)> {
         let started = self.last_yank_at?;
@@ -245,6 +252,18 @@ mod tests {
         kr.mark_yanked(t0);
         let later = t0 + YANK_FLASH_DURATION + Duration::from_millis(50);
         assert!(kr.yank_flash_range(later).is_none());
+    }
+
+    #[test]
+    fn flash_range_flashes_without_changing_kill_text() {
+        let mut kr = KillRing::new();
+        kr.set("kept".into());
+        let t0 = Instant::now();
+        kr.flash_range(2, 6, t0);
+        assert_eq!(kr.yank_flash_range(t0), Some((2, 6)));
+        assert_eq!(kr.current(), "kept");
+        assert_eq!(kr.yank_tick(), 0);
+        assert!(kr.yank_flash_range(t0 + YANK_FLASH_DURATION).is_none());
     }
 
     #[test]

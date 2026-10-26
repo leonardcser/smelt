@@ -693,7 +693,7 @@ fn vim_yy_yank_flash_expires_after_tick() {
         "yank flash range should be active right after yy"
     );
 
-    // Advance past the 200ms flash window. If the clock chain is wired
+    // Advance past the 150ms flash window. If the clock chain is wired
     // correctly, the flash deadline now sits in the virtual past.
     app.feed_one(SourceEvent::Tick(300));
     let now = app.core_probe().clock.instant_now();

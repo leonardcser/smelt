@@ -751,6 +751,7 @@ impl PromptState {
         action: KeyAction,
         history: Option<&mut History>,
         clipboard: &mut crate::smelt_edit::Clipboard,
+        now: std::time::Instant,
     ) -> Action {
         if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
             clipboard.kill_ring.clear_yank();
@@ -1090,6 +1091,7 @@ impl PromptState {
                             .record_clipboard_write(out.clipboard.clone());
                     }
                     clipboard.kill_ring.set(out.kill_ring);
+                    clipboard.kill_ring.flash_range(start, end, now);
                 }
                 Action::Noop
             }
@@ -1282,7 +1284,7 @@ impl PromptState {
             };
 
             if let Some(action) = keymap::lookup(code, modifiers, &key_ctx) {
-                return self.execute_key_action(ctx, action, history, clipboard);
+                return self.execute_key_action(ctx, action, history, clipboard, now);
             }
 
             if let KeyCode::Char(c) = code {
@@ -1424,8 +1426,13 @@ mod tests {
                 buf: &mut self.buf,
                 win: &mut self.win,
             };
-            self.state
-                .execute_key_action(&mut ctx, action, None, &mut clip)
+            self.state.execute_key_action(
+                &mut ctx,
+                action,
+                None,
+                &mut clip,
+                std::time::Instant::now(),
+            )
         }
     }
 
@@ -2346,18 +2353,26 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input
-                .state
-                .execute_key_action(&mut ctx, KeyAction::SelectRight, None, &mut clip);
+            input.state.execute_key_action(
+                &mut ctx,
+                KeyAction::SelectRight,
+                None,
+                &mut clip,
+                std::time::Instant::now(),
+            );
         }
         {
             let mut ctx = PromptCtx {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input
-                .state
-                .execute_key_action(&mut ctx, KeyAction::KillToEndOfLine, None, &mut clip);
+            input.state.execute_key_action(
+                &mut ctx,
+                KeyAction::KillToEndOfLine,
+                None,
+                &mut clip,
+                std::time::Instant::now(),
+            );
         }
         assert_eq!(input.buf.source(), " world");
         // Killed text lands on the TuiApp-level kill ring.
@@ -2649,6 +2664,7 @@ mod tests {
             KeyAction::ClipboardImage,
             None,
             &mut clipboard,
+            std::time::Instant::now(),
         );
 
         assert!(matches!(action, Action::Redraw));
@@ -2676,6 +2692,7 @@ mod tests {
             KeyAction::ClipboardImage,
             None,
             &mut clipboard,
+            std::time::Instant::now(),
         );
 
         assert!(matches!(action, Action::Redraw));
@@ -2698,9 +2715,13 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input
-                .state
-                .execute_key_action(&mut ctx, action, None, &mut clipboard);
+            input.state.execute_key_action(
+                &mut ctx,
+                action,
+                None,
+                &mut clipboard,
+                std::time::Instant::now(),
+            );
         }
         // C-k put "world" in the ring, but C-y pulled the stale OS clipboard.
         assert_eq!(input.buf.source(), "hello OUTSIDE");
@@ -2720,9 +2741,13 @@ mod tests {
                 buf: &mut input.buf,
                 win: &mut input.win,
             };
-            input
-                .state
-                .execute_key_action(&mut ctx, action, None, &mut clipboard);
+            input.state.execute_key_action(
+                &mut ctx,
+                action,
+                None,
+                &mut clipboard,
+                std::time::Instant::now(),
+            );
         }
         assert_eq!(input.buf.source(), "hello world");
     }

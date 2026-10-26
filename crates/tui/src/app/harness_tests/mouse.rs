@@ -638,3 +638,73 @@ fn transcript_click_drag_in_vim_survives_multiple_drag_events() {
         "vim drag selection should stay active across every Drag event"
     );
 }
+
+fn flash_cells(app: &mut TestApp) -> usize {
+    let flash_bg = app.ui_probe().theme().get("YankFlash").bg;
+    assert!(
+        flash_bg.is_some(),
+        "theme should define a YankFlash background"
+    );
+    let frame = app.render_to_frame();
+    frame
+        .styles
+        .iter()
+        .flatten()
+        .filter(|style| style.bg == flash_bg)
+        .count()
+}
+
+fn assert_flash_paints_then_expires(app: &mut TestApp, what: &str) {
+    assert!(flash_cells(app) > 0, "{what} should paint the yank flash");
+    app.clock.advance(
+        smelt_buffer::kill_ring::YANK_FLASH_DURATION + std::time::Duration::from_millis(1),
+    );
+    assert_eq!(flash_cells(app), 0, "{what} flash should expire");
+}
+
+#[test]
+fn transcript_visual_line_yank_paints_flash() {
+    let mut app = row_document_transcript_app(20, true);
+    app.type_char('V');
+    app.type_char('j');
+    app.type_char('y');
+    assert_flash_paints_then_expires(&mut app, "transcript linewise yank");
+}
+
+#[test]
+fn prompt_vim_visual_yank_paints_flash() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("hello world");
+    app.press(KeyCode::Esc);
+    app.type_char('0');
+    app.type_char('v');
+    app.type_char('e');
+    app.type_char('y');
+    assert_flash_paints_then_expires(&mut app, "prompt visual yank");
+}
+
+#[test]
+fn prompt_drag_selection_release_paints_flash() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().build();
+    app.type_text("hello world");
+    app.render_silent();
+    let rect = app
+        .ui_probe()
+        .split_rect(crate::app::PROMPT_WIN)
+        .expect("prompt rect after render");
+    let mouse = |kind, column| {
+        SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind,
+            row: rect.top,
+            column,
+            modifiers: KeyModifiers::empty(),
+        }))
+    };
+    let start = rect.left + 2;
+    app.feed_one(mouse(MouseEventKind::Down(MouseButton::Left), start));
+    app.feed_one(mouse(MouseEventKind::Drag(MouseButton::Left), start + 5));
+    app.feed_one(mouse(MouseEventKind::Up(MouseButton::Left), start + 5));
+    assert_flash_paints_then_expires(&mut app, "prompt mouse release");
+}

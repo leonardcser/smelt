@@ -37,7 +37,7 @@ local groups = {
   Comment             = fg({ ansi = 244 }), -- comment grey
   Visual              = bg(dl(238, 153)),
   Search              = { fg = { ansi = 0 }, bg = accent },
-  YankFlash           = bg(dl(240, 195)),
+  YankFlash           = bg(dl(94, 223)),
   CursorLine          = bg(dl(237, 251)),
   ErrorMsg            = fg({ ansi = 9 }),   -- bright red
   WarningMsg          = fg({ ansi = 11 }),  -- bright yellow

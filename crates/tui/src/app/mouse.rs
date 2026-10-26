@@ -722,11 +722,13 @@ impl TuiApp {
                 click_count,
             };
             let (_, range) = win.handle_mouse(buf, me, mouse_ctx);
-            range.map(|(s, e)| buf.copy_range(s..e))
+            range.map(|(s, e)| (s, e, buf.copy_range(s..e)))
         };
-        if let Some(out) = yank {
+        if let Some((start, end, out)) = yank {
             if !out.is_empty() {
                 self.yank_to_clipboard(out);
+                let now = self.core.clock.instant_now();
+                self.core.clipboard.kill_ring.flash_range(start, end, now);
             }
         }
     }
@@ -774,6 +776,10 @@ impl TuiApp {
             return (status, None);
         };
         let text = smelt_buffer::coords::copy_byte_range(buf, range.0, range.1);
+        let now = self.core.clock.instant_now();
+        if let Some(win) = self.ui.win_mut(win) {
+            win.set_byte_yank_flash(range.0..range.1, now);
+        }
         let out = crate::smelt_edit::CopyOutput::same(text);
         let out = if out.is_empty() { None } else { Some(out) };
         (status, out)

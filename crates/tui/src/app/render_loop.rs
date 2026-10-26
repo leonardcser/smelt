@@ -1178,7 +1178,9 @@ impl TuiApp {
                     let (Some(win), Some(buf)) = (win, buf) else {
                         return;
                     };
-                    if !win.has_materialized_rows() {
+                    // The prompt's flash layer is owned by `sync_prompt_overlays`; this
+                    // pass would wipe it before paint.
+                    if !win.has_materialized_rows() && request.win != crate::app::PROMPT_WIN {
                         win.sync_yank_flash_layer(buf, request.viewport_rect.height, render_now);
                     }
                     win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
