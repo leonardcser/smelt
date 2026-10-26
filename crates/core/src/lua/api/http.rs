@@ -1,7 +1,7 @@
 //! `smelt.http` - asynchronous HTTP get/post. The Rust binding yields the
 //! Lua coroutine via `smelt.task.external` and resolves it from a tokio
 //! task, so the runtime never blocks on a request. `smelt.http.get` and
-//! `smelt.http.post` are defined in `_bootstrap.lua` over the
+//! `smelt.http.post` are defined in `bootstrap/async.lua` over the
 //! `__start_get` / `__start_post` primitives below; both
 //! require a yieldable context.
 

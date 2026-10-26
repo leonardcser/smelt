@@ -45,14 +45,12 @@ pub(crate) fn inspect_reachability(
     )? {
         revision_queue.push_back(RevisionId::from_db(revision)?);
     }
-    if crate::schema::has_shared_storage(conn)? {
-        for revision in query_strings(
-            conn,
-            "SELECT result_revision_id FROM lineage_session_receipt_results WHERE lineage_id = ?1",
-            lineage,
-        )? {
-            revision_queue.push_back(RevisionId::from_db(revision)?);
-        }
+    for revision in query_strings(
+        conn,
+        "SELECT result_revision_id FROM lineage_session_receipt_results WHERE lineage_id = ?1",
+        lineage,
+    )? {
+        revision_queue.push_back(RevisionId::from_db(revision)?);
     }
     let mut reachable_revisions = BTreeSet::new();
     let mut reachable_roots = BTreeSet::new();
@@ -61,39 +59,28 @@ pub(crate) fn inspect_reachability(
         if !reachable_revisions.insert(id.as_str().to_owned()) {
             continue;
         }
-        let revision = load_revision(conn, lineage, &id)?;
-        if let Some(parent) = revision.parent_id {
+        let (parent, released) = revision_link(conn, lineage, &id)?;
+        if let Some(parent) = parent {
             revision_queue.push_back(parent);
         }
+        if released {
+            continue;
+        }
+        let revision = load_revision(conn, lineage, &id)?;
         reachable_roots.insert(revision.history_root.id.as_str().to_owned());
         reachable_roots.insert(revision.transcript_root.id.as_str().to_owned());
-        let mut owners = vec![revision.state_payload_id.as_str().to_owned()];
-        if crate::schema::has_shared_storage(conn)? {
-            let projected = conn
-                .query_row(
-                    "SELECT projected_payload_id FROM lineage_revision_state_projections
-                 WHERE lineage_id = ?1 AND original_payload_id = ?2",
-                    (lineage.as_str(), revision.state_payload_id.as_str()),
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            owners.extend(projected);
-        }
-        for owner in owners {
-            reachable_payloads.insert(owner.clone());
-            if crate::schema::has_shared_storage(conn)? {
-                let roots = conn
-                    .prepare(
-                        "SELECT root_id FROM lineage_revision_state_roots
-                         WHERE lineage_id = ?1 AND state_payload_id = ?2",
-                    )?
-                    .query_map((lineage.as_str(), owner.as_str()), |row| {
-                        row.get::<_, String>(0)
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                reachable_roots.extend(roots);
-            }
-        }
+        let owner = revision.state_payload_id.as_str().to_owned();
+        let roots = conn
+            .prepare(
+                "SELECT root_id FROM lineage_revision_state_roots
+                 WHERE lineage_id = ?1 AND state_payload_id = ?2",
+            )?
+            .query_map((lineage.as_str(), owner.as_str()), |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        reachable_roots.extend(roots);
+        reachable_payloads.insert(owner);
     }
 
     let mut node_queue = VecDeque::new();

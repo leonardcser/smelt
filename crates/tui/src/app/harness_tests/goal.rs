@@ -56,6 +56,7 @@ fn goal_controls_apply_while_agent_is_running_without_changing_queued_messages()
         ("blocked waiting", "current.state == 'blocked' and current.reason == 'waiting' and not current.auto_continue", "goal marked blocked"),
         ("done", "current.state == 'done' and not current.auto_continue", "goal marked done"),
         ("clear", "current == nil", "goal cleared"),
+        ("cancel", "current == nil", "goal cleared"),
         ("stop", "current == nil", "goal cleared"),
         ("auto on", "current.state == 'active' and current.auto_continue", "goal auto-continue on"),
         ("auto off", "current.state == 'paused' and not current.auto_continue", "goal auto-continue off"),
@@ -100,6 +101,99 @@ fn goal_controls_apply_while_agent_is_running_without_changing_queued_messages()
             assert_only_history_updates(&app);
         }
     }
+}
+
+#[test]
+fn clear_goal_tool_removes_goal_and_context_without_interrupting_turn() {
+    for state in ["active", "paused", "blocked", "done", "absent"] {
+        let mut app = TestApp::builder().build();
+        app.type_text("/goal finish the current work");
+        app.press(KeyCode::Enter);
+        app.wait_for_turn_persistence();
+        app.feed_one(SourceEvent::Tick(0));
+        let turn_id = app.current_turn_id().expect("goal starts a turn");
+        match state {
+            "paused" => assert!(app.run_lua(r#"require("smelt.goal").pause()"#)),
+            "blocked" => assert!(app.run_lua(r#"require("smelt.goal").block("waiting")"#)),
+            "done" => assert!(app.run_lua(r#"require("smelt.goal").complete()"#)),
+            "absent" => assert!(app.run_lua(r#"require("smelt.goal").clear()"#)),
+            _ => {}
+        }
+        app.type_text("follow-up request");
+        app.press(KeyCode::Enter);
+        app.clear_actions();
+
+        app.app.handle_tool_call(
+            1,
+            protocol::InvocationId::new(1),
+            "clear-goal".into(),
+            "clear_goal".into(),
+            Default::default(),
+        );
+
+        assert!(
+            app.drain_engine_sends().iter().any(|cmd| matches!(
+                cmd,
+                protocol::UiCommand::ToolResult { content, is_error: false, .. }
+                    if content == "goal cleared"
+            )),
+            "clear_goal from {state}"
+        );
+        assert_eq!(app.current_turn_id(), Some(turn_id));
+        assert!(app.agent_running());
+        assert_eq!(app.state().queued_inputs, vec!["follow-up request"]);
+        assert!(app.run_lua(
+            r#"
+                local goal = require("smelt.goal")
+                assert(goal.current() == nil)
+                assert(goal.status_text() == nil)
+                assert(goal.auto_continue_request() == nil)
+            "#,
+        ));
+        let frame = app.render_to_frame();
+        assert!(!frame.rows[0].contains(" GOAL "), "{}", frame.text());
+        assert!(!frame.rows[0].contains(" PAUSED "), "{}", frame.text());
+        assert!(!frame.rows[0].contains(" BLOCKED "), "{}", frame.text());
+
+        let raw =
+            std::fs::read_to_string(app.session_storage_root().join("plugins").join("goal.json"))
+                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let session_id = app.session_snapshot().id.clone();
+        assert!(json["sessions"][session_id.as_str()].is_null());
+        assert!(json["context_notes"][session_id.as_str()].is_null());
+        app.reload_lua();
+        assert!(app.run_lua(r#"assert(require("smelt.goal").current() == nil)"#));
+    }
+}
+
+#[test]
+fn clear_goal_prevents_pending_auto_continuation() {
+    let mut app = TestApp::builder().build();
+    app.type_text("/goal finish the current work");
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
+    app.discard_turn(crate::app::TurnEnd::Complete);
+    app.wait_for_turn_persistence();
+
+    app.app.handle_tool_call(
+        1,
+        protocol::InvocationId::new(1),
+        "clear-goal".into(),
+        "clear_goal".into(),
+        Default::default(),
+    );
+    app.drain_engine_sends();
+    app.feed_one(SourceEvent::Tick(2000));
+    app.tick_timers();
+    app.wait_for_turn_persistence();
+    assert!(!app.agent_running());
+    assert!(!app
+        .drain_engine_sends()
+        .iter()
+        .any(|cmd| matches!(cmd, protocol::UiCommand::StartTurn(_))));
+    assert!(app.run_lua(r#"assert(require("smelt.goal").create("new goal"))"#));
 }
 
 #[test]

@@ -448,7 +448,7 @@ mod tests {
         };
         save_tokens_to(&tokens, &env.token_store).unwrap();
 
-        let token = access_token_with_env(&reqwest::Client::new(), &env)
+        let token = access_token_with_env(&smelt_provider::http_client(), &env)
             .await
             .unwrap();
 
@@ -476,7 +476,7 @@ mod tests {
         };
         save_tokens_to(&tokens, &env.token_store).unwrap();
 
-        let token = access_token_with_env(&reqwest::Client::new(), &env)
+        let token = access_token_with_env(&smelt_provider::http_client(), &env)
             .await
             .unwrap();
 
@@ -515,7 +515,7 @@ mod tests {
         };
         save_tokens_to(&tokens, &env.token_store).unwrap();
 
-        let error = fetch_models_fresh_with_env(&reqwest::Client::new(), &env)
+        let error = fetch_models_fresh_with_env(&smelt_provider::http_client(), &env)
             .await
             .unwrap_err();
 

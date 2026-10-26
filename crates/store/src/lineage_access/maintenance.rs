@@ -135,7 +135,7 @@ pub(super) fn lineage_doctor_report(
     conn: &Connection,
     path: &Path,
     lineage: &LineageId,
-    branch: Option<&BranchId>,
+    branch: Option<(&BranchId, &Path)>,
 ) -> Result<crate::DoctorReport> {
     let _read = conn
         .is_autocommit()
@@ -171,22 +171,8 @@ pub(super) fn lineage_doctor_report(
             "foreign_key_check: table={table} rowid={rowid:?} parent={parent} constraint={constraint}"
         ));
     }
-    if crate::schema::has_shared_storage(conn)? {
-        let hashes = conn
-            .prepare("SELECT object_hash FROM object_data_roots ORDER BY object_hash")?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for hash in hashes {
-            if let Err(error) = crate::object::object(conn, &hash) {
-                issues.push(format!("shared object {hash}: {error}"));
-            }
-        }
-    }
     if let Err(error) = lineage::verify_archive_coordinates(conn, lineage) {
         issues.push(format!("archive coordinates: {error}"));
-    }
-    if let Err(error) = lineage::verify_revision_projections(conn, lineage) {
-        issues.push(format!("revision projection: {error}"));
     }
     if let Err(error) = lineage::verify_session_receipt_results(conn, lineage) {
         issues.push(format!("session receipt result: {error}"));
@@ -215,9 +201,11 @@ pub(super) fn lineage_doctor_report(
             issues.push(format!("canonical branch: {error}"));
         }
     }
-    let stats = lineage_storage_stats(conn, path, branch)?;
+    let stats = lineage_storage_stats(conn, path, branch.map(|(branch, _)| branch))?;
     let search = branch
-        .map(|branch| crate::lineage_search::search_projection_status(conn, path, lineage, branch))
+        .map(|(branch, search_path)| {
+            crate::lineage_search::search_projection_status(conn, search_path, lineage, branch)
+        })
         .transpose()?;
     Ok(crate::DoctorReport {
         schema_version,
@@ -248,4 +236,156 @@ fn positive_u64(value: i64, field: &str) -> Result<u64> {
         return Err(StoreError::Integrity(format!("{field} must be positive")));
     }
     Ok(value)
+}
+
+/// Canonical rows examined per background reclamation transaction.
+pub const RECLAMATION_STEP_ROWS: usize = 256;
+/// Free space kept for reuse instead of being returned to the filesystem.
+const COMPACTION_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
+/// Pages returned to the filesystem per compaction transaction.
+const COMPACTION_STEP_PAGES: u64 = 256;
+
+/// Returns free pages beyond [`COMPACTION_RESERVE_BYTES`] to the filesystem in
+/// one bounded step of an incremental auto-vacuum database. Returns the pages
+/// released; 0 means nothing is due.
+pub(super) fn release_free_pages(conn: &Connection) -> Result<u64> {
+    let excess = excess_free_pages(conn)?;
+    if excess == 0 {
+        return Ok(0);
+    }
+    let mut statement = conn.prepare(&format!(
+        "PRAGMA incremental_vacuum({})",
+        excess.min(COMPACTION_STEP_PAGES)
+    ))?;
+    let mut rows = statement.query([])?;
+    let mut released = 0;
+    while rows.next()?.is_some() {
+        released += 1;
+    }
+    Ok(released)
+}
+
+fn excess_free_pages(conn: &Connection) -> Result<u64> {
+    let pragma = |name: &str| -> Result<u64> {
+        let value = conn.pragma_query_value(None, name, |row| row.get::<_, i64>(0))?;
+        nonnegative_u64(value, name)
+    };
+    if pragma("auto_vacuum")? != 2 {
+        return Ok(0);
+    }
+    let reserve = COMPACTION_RESERVE_BYTES / pragma("page_size")?.max(1);
+    Ok(pragma("freelist_count")?.saturating_sub(reserve))
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct IdleMaintenance {
+    pub lineages_maintained: usize,
+    pub lineages_failed: usize,
+    pub pages_released: u64,
+}
+
+/// Brings every lineage no process is writing up to date: completes a
+/// reclamation pass when content changed since the last completed
+/// pass, and returns excess free pages to the filesystem. Work runs in bounded
+/// transactions at half duty cycle under shared ownership, so opening a session
+/// is never blocked; a lineage is left to its owner as soon as another
+/// connection writes to it. Returns once every lineage was visited or `cancel`
+/// is set.
+pub fn maintain_idle_lineages(
+    root: impl AsRef<Path>,
+    cancel: &AtomicBool,
+) -> Result<IdleMaintenance> {
+    let root = root.as_ref();
+    validate_storage_root(root)?;
+    let mut report = IdleMaintenance::default();
+    let entries = match fs::read_dir(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+        entries => entries?,
+    };
+    for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(lineage) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| LineageId::from_hex(name.to_owned()).ok())
+        else {
+            continue;
+        };
+        match maintain_idle_lineage(root, &lineage, cancel, &mut report) {
+            Ok(true) => report.lineages_maintained += 1,
+            Ok(false) => {}
+            Err(_) => report.lineages_failed += 1,
+        }
+    }
+    Ok(report)
+}
+
+fn maintain_idle_lineage(
+    root: &Path,
+    lineage: &LineageId,
+    cancel: &AtomicBool,
+    report: &mut IdleMaintenance,
+) -> Result<bool> {
+    let path = lineage_database_path(root, lineage);
+    reject_symlink(&path)?;
+    if !path.is_file() || !idle_maintenance_due(&path)? {
+        return Ok(false);
+    }
+    let maintenance_name = format!("{}.maintenance", lineage.as_str());
+    let (_maintenance, _lease) = match LineageLease::acquire_named(root, &maintenance_name, false)
+        .and_then(|maintenance| Ok((maintenance, LineageLease::acquire_shared(root, lineage)?)))
+    {
+        Ok(leases) => leases,
+        Err(StoreError::OwnershipConflict { .. }) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut conn = open_write_connection(&path, lineage)?;
+    crate::schema::initialize_lineage_schema(&mut conn)?;
+    let data_version = |conn: &Connection| {
+        conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+    };
+    let mut seen = data_version(&conn)?;
+    let mut reclaimed = false;
+    loop {
+        // data_version only moves for other connections' commits.
+        if cancel.load(Ordering::Relaxed) || data_version(&conn)? != seen {
+            return Ok(false);
+        }
+        let started = Instant::now();
+        let released = if reclaimed {
+            let released = release_free_pages(&conn)?;
+            report.pages_released += released;
+            released
+        } else {
+            reclaimed = lineage::reclaim_step(&mut conn, lineage, RECLAMATION_STEP_ROWS)?.complete;
+            1
+        };
+        if released == 0 {
+            break;
+        }
+        seen = data_version(&conn)?;
+        std::thread::sleep(started.elapsed());
+    }
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(true)
+}
+
+fn idle_maintenance_due(path: &Path) -> Result<bool> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    if crate::schema::user_version(&conn)? != crate::schema::LINEAGE_SCHEMA_VERSION {
+        return Ok(false);
+    }
+    Ok(
+        lineage::reclaimed_marker(&conn)? != Some(lineage::reclaimed_fingerprint(&conn)?)
+            || excess_free_pages(&conn)? > 0,
+    )
 }

@@ -5,7 +5,7 @@ use std::time::Duration;
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
 pub const CHATGPT_BACKEND_API_BASE: &str = "https://chatgpt.com/backend-api";
-pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+pub const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 pub const FAST_SERVICE_TIER: &str = "priority";
 pub const REFRESH_INTERVAL_SECS: u64 = 8 * 24 * 3600;
 pub const OAUTH_PORT: u16 = 1455;
@@ -982,5 +982,10 @@ mod tests {
         assert!(model.catalog.show_in_picker);
         assert_eq!(model.catalog.default_reasoning_effort, None);
         assert!(model.catalog.supported_reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn api_base_needs_no_normalization() {
+        assert!(crate::api_base_normalization_hint(CODEX_API_BASE).is_none());
     }
 }

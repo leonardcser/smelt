@@ -324,7 +324,7 @@ impl CanonicalHistoryDelta {
 ///
 /// Event ordering within a turn:
 ///   Ready → (ReasoningPart* → Text* → ToolCallDraft* → tool-lifecycle)*
-///         → TurnComplete | TurnError
+///         → TurnError? → TurnComplete
 ///
 /// tool-lifecycle is one of:
 ///   ToolRejected

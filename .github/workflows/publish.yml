@@ -103,6 +103,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
+          make_latest: false
           body: |
             Published [`${{ steps.parse.outputs.crate }} v${{ steps.parse.outputs.version }}`](https://crates.io/crates/${{ steps.parse.outputs.crate }}/${{ steps.parse.outputs.version }}) to crates.io.
 

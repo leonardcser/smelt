@@ -5,6 +5,7 @@
 //! lossy translation.
 
 pub mod cache_common;
+pub mod engine_sim;
 pub mod lua_loop;
 pub mod runtime;
 pub mod shrink;
@@ -1176,14 +1177,19 @@ struct Snapshot {
     streaming: tui::app::test_harness::StreamingState,
     session_messages: usize,
     queued_messages: usize,
+    queue_empty: bool,
+    turn_paused: bool,
     queued_next_starts: bool,
     follow_up_context_append: bool,
+    follow_up_context_append_unfiltered: bool,
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
     checkpoint_first_live_index: Option<usize>,
     pending_history_appends: usize,
     pending_history_follow_up: bool,
+    pending_history_follow_up_unfiltered: bool,
+    submitted_history_idx: Option<usize>,
     pending_lua_reload: bool,
     transcript_blocks: usize,
     pending_confirms: usize,
@@ -1208,14 +1214,19 @@ impl Snapshot {
             streaming: app.streaming_state(),
             session_messages: app.session_message_count(),
             queued_messages: app.queued_message_count(),
+            queue_empty: app.queue_is_empty(),
+            turn_paused: app.turn_is_paused(),
             queued_next_starts: app.next_queued_input_starts_turn(),
             follow_up_context_append: app.next_follow_up_appends_context_note(),
+            follow_up_context_append_unfiltered: app.next_follow_up_appends_context_note_unfiltered(),
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
             checkpoint_first_live_index: app.checkpoint_first_live_index(),
             pending_history_appends: app.pending_history_append_count(),
             pending_history_follow_up: app.has_pending_history_follow_up(),
+            pending_history_follow_up_unfiltered: app.has_pending_history_follow_up_unfiltered(),
+            submitted_history_idx: app.submitted_history_idx(),
             pending_lua_reload: app.pending_lua_reload(),
             transcript_blocks: app.transcript_block_count(),
             pending_confirms: app.pending_confirm_count(),
@@ -1235,9 +1246,31 @@ fn expected_model_history_len(pre: &Snapshot, msg_count: usize) -> usize {
     pre.checkpoint_first_live_index.unwrap_or(0) + msg_count
 }
 
-fn completed_turn_starts_queued_followup(pre: &Snapshot, targeted_active: bool) -> bool {
+/// Whether the turn's final history drops the item the active turn submitted.
+fn submitted_item_dropped(pre: &Snapshot, msg_count: usize) -> bool {
+    let first_index = pre.checkpoint_first_live_index.unwrap_or(0);
+    pre.submitted_history_idx
+        .is_some_and(|idx| idx >= first_index && idx - first_index >= msg_count)
+}
+
+/// Whether a deferred note still needs to start a follow-up once the turn's
+/// final history is merged. A note identical to the submitted item is delivered
+/// by that item unless the incoming history replaces the item away.
+fn pending_follow_up_after_merge(pre: &Snapshot, msg_count: usize) -> bool {
+    if submitted_item_dropped(pre, msg_count) {
+        pre.pending_history_follow_up_unfiltered
+    } else {
+        pre.pending_history_follow_up
+    }
+}
+
+fn completed_turn_starts_queued_followup(
+    pre: &Snapshot,
+    msg_count: usize,
+    targeted_active: bool,
+) -> bool {
     targeted_active
-        && (pre.queued_next_starts || pre.pending_history_follow_up)
+        && (pre.queued_next_starts || pending_follow_up_after_merge(pre, msg_count))
         && !pre.working.busy
 }
 
@@ -1246,8 +1279,13 @@ fn expected_completed_history_len(
     msg_count: usize,
     targeted_active: bool,
 ) -> usize {
-    let queued_followup = completed_turn_starts_queued_followup(pre, targeted_active);
-    let queued_context_append = usize::from(queued_followup && pre.follow_up_context_append);
+    let queued_followup = completed_turn_starts_queued_followup(pre, msg_count, targeted_active);
+    let context_append = if submitted_item_dropped(pre, msg_count) {
+        pre.follow_up_context_append_unfiltered
+    } else {
+        pre.follow_up_context_append
+    };
+    let queued_context_append = usize::from(queued_followup && context_append);
     let queued_request_append = usize::from(queued_followup);
     expected_model_history_len(pre, msg_count) + queued_context_append + queued_request_append
 }
@@ -1467,7 +1505,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 let expected = expected_completed_history_len(pre, msg_count, targeted_active);
                 let pending_appends = if targeted_active {
                     pre.pending_history_appends
-                        .saturating_sub(usize::from(pre.pending_history_follow_up))
+                        .saturating_sub(usize::from(pending_follow_up_after_merge(pre, msg_count)))
                 } else {
                     0
                 };
@@ -1503,7 +1541,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     );
                 }
             }
-            if targeted_active && !completed_turn_starts_queued_followup(pre, targeted_active) {
+            if targeted_active && !completed_turn_starts_queued_followup(pre, msg_count, targeted_active) {
                 assert!(
                     !post.agent_running,
                     "TurnComplete against active turn did not end it",
@@ -1546,7 +1584,8 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             }
         }
         PostCheck::JobCompleted => {
-            if !pre.agent_running && !pre.working.busy {
+            // A queued input or a paused turn holds the completion back.
+            if !pre.agent_running && !pre.working.busy && pre.queue_empty && !pre.turn_paused {
                 assert_eq!(
                     post.transcript_blocks,
                     pre.transcript_blocks + 1,
@@ -1738,12 +1777,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 "prompt char {ch:?} inserted at wrong location: pre cpos {}, pre {:?}, post {:?}",
                 pre.prompt_cpos, pre.prompt_source, post.prompt_source,
             );
+            // Text already to the right can join the new char into one grapheme.
+            let expected_cpos = smelt_buffer::text::ceil_grapheme(&expected, at + ch.len_utf8());
             assert_eq!(
+                post.prompt_cpos, expected_cpos,
+                "prompt char {ch:?} left cursor at {}, expected {expected_cpos}",
                 post.prompt_cpos,
-                at + ch.len_utf8(),
-                "prompt char {ch:?} left cursor at {}, expected {}",
-                post.prompt_cpos,
-                at + ch.len_utf8(),
             );
         }
         PostCheck::PromptTextInserted { text } => {
@@ -1759,6 +1798,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                 let at = smelt_buffer::text::insert_str(&mut expected, pre.prompt_cpos, &inserted);
                 at + inserted.len()
             };
+            let expected_cpos = smelt_buffer::text::ceil_grapheme(&expected, expected_cpos);
             assert_eq!(
                 post.prompt_source, expected,
                 "prompt paste changed source incorrectly: pre cpos {}, selection {:?}, pasted {:?}, normalized {:?}, pre {:?}, post {:?}",
@@ -2193,7 +2233,7 @@ fn apply_macro_tool_round_trip(
     is_error: bool,
 ) {
     if !app.agent_running() {
-        app.start_turn(u64::from(call_id));
+        app.start_turn(app.next_turn_id());
     }
     apply(
         app,
@@ -2229,14 +2269,13 @@ fn apply_macro_tool_round_trip(
 
 fn apply_macro_stream_turn(
     app: &mut TestApp,
-    turn_id: u8,
     text: String,
     thinking: String,
     chunks: u8,
     error: bool,
 ) {
     if !app.agent_running() {
-        app.start_turn(u64::from(turn_id));
+        app.start_turn(app.next_turn_id());
     }
     let text = smelt_buffer::text::slice(&text, 0..256).to_string();
     let thinking = smelt_buffer::text::slice(&thinking, 0..256).to_string();
@@ -2289,7 +2328,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
             app.install_prompt_placeholder(text, accept, dismiss);
         }
         FuzzOp::ClearPlaceholder => app.clear_prompt_placeholder(),
-        FuzzOp::StartTurn(id) => app.start_turn(u64::from(id)),
+        FuzzOp::StartTurn(_) => app.start_turn(app.next_turn_id()),
         FuzzOp::TogglePaneFocus => app.toggle_pane_focus(),
         FuzzOp::OpenOverlay { variant } => app.open_synthetic_overlay(variant),
         FuzzOp::ReloadLua => {
@@ -2420,12 +2459,12 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
             is_error,
         } => apply_macro_tool_round_trip(app, call_id, tool_name, args, output, is_error),
         FuzzOp::MacroStreamTurn {
-            turn_id,
             text,
             thinking,
             chunks,
             error,
-        } => apply_macro_stream_turn(app, turn_id, text, thinking, chunks, error),
+            ..
+        } => apply_macro_stream_turn(app, text, thinking, chunks, error),
         FuzzOp::ProbePromptCursorAfterTurn { variant } => {
             app.probe_prompt_cursor_after_turn(variant);
         }
@@ -2507,6 +2546,10 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
         // before a later macro can install a synthetic turn.
         app.wait_for_turn_persistence();
         app.feed_one_within_budget(SourceEvent::Tick(0), AllocBudget::DEFAULT);
+    }
+    if matches!(check, PostCheck::ExecCleared) {
+        // Finishing an exec is queued transcript work that the next frame applies.
+        app.render_silent();
     }
     let post = Snapshot::capture(app);
     let new_actions = app.actions_since(pre.action_count);

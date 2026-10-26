@@ -1,0 +1,36 @@
+{
+  "vim": false,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 136
+      }
+    },
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 130
+      }
+    },
+    {
+      "kind": "macro_prompt_edit",
+      "data": {
+        "text": "",
+        "repetitions": 255,
+        "movement": 255,
+        "submit": true
+      }
+    },
+    {
+      "kind": "macro_prompt_edit",
+      "data": {
+        "text": "",
+        "repetitions": 134,
+        "movement": 134,
+        "submit": true
+      }
+    }
+  ]
+}

@@ -118,22 +118,22 @@ pub use compression::{
 pub use diagnostics::{DoctorReport, StorageStats};
 pub use error::{Result, StoreError};
 pub use history::{
-    StoredTranscriptBlock, TranscriptBlockMetadataRecord, TranscriptExtentProfile,
-    TranscriptNavigationRecord, TranscriptRecordHydration, TranscriptRecordOffset,
-    TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice, TranscriptRowLocation,
+    transcript_text_extent_profile, StoredTranscriptBlock, TranscriptBlockMetadataRecord,
+    TranscriptExtentProfile, TranscriptNavigationRecord, TranscriptRecordHydration,
+    TranscriptRecordOffset, TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice,
     TranscriptSearchCandidate, TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
-pub use lineage::{ObjectSharingCursor, ObjectSharingStep};
 pub use lineage_access::{
     cleanup_abandoned_lineages, lineage_session_ids, lineage_session_locations,
-    verify_lineage_backup, LineageReclamation, LineageSessionLocation, LineageSessionReader,
-    LineageSessionState, LineageVacuum, OwnedLineageWriter,
+    maintain_idle_lineages, verify_lineage_backup, IdleMaintenance, LineageReclamation,
+    LineageSessionLocation, LineageSessionReader, LineageSessionState, LineageVacuum,
+    OwnedLineageWriter, RECLAMATION_STEP_ROWS,
 };
 pub use lineage_search::{
     LineageSearchProjector, SearchProjectionState, SearchProjectionStatus, SEARCH_FORMAT_VERSION,
 };
 pub use meta::{SessionCostUsd, SessionIdentity, SessionMetadata};
-pub use object::{ObjectCodec, ObjectLayout, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
+pub use object::{ObjectCodec, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
 pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
     RequestAuditStats, RequestAuditSummary, ResponsePayloadKind,

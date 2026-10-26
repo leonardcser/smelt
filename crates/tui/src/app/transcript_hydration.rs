@@ -65,15 +65,15 @@ impl LoadedRecordWindow {
                 .into_iter()
                 .enumerate()
                 .map(|(offset, mut row)| {
+                    let indexed_text = std::mem::take(&mut row.indexed_text);
                     let estimated_text_bytes = row.estimated_text_bytes;
-                    let preview = std::mem::take(&mut row.preview_text);
                     let record = TranscriptBlockRecordWithId::try_from(row).ok()?;
                     let (block_id, stored) = StoredBlockRef::from_record(
                         start.get().saturating_add(offset),
                         record.block_id,
                         &record.record,
+                        &indexed_text,
                         estimated_text_bytes,
-                        preview,
                     );
                     if materialize_block_ids.contains(&block_id) {
                         materialized.insert(block_id, (Arc::clone(&stored), record));
@@ -225,6 +225,10 @@ impl TranscriptHydrationQueue {
         })
     }
 
+    pub(super) fn awaits_record(&self, result: &TranscriptHydrationWorkerResult) -> bool {
+        self.record.as_ref() == result.record.as_ref()
+    }
+
     pub(super) fn complete(&mut self, result: &TranscriptHydrationWorkerResult) {
         if result.revision != self.revision {
             return;
@@ -240,6 +244,13 @@ impl TranscriptHydrationQueue {
 
     pub(super) fn is_empty(&self) -> bool {
         self.record.is_none() && self.blocks.is_empty()
+    }
+
+    pub(super) fn cancel_record(&mut self) {
+        if self.record.take().is_some() {
+            self.record_semantic = false;
+            self.bump_revision();
+        }
     }
 
     pub(super) fn record_is_pending(&self) -> bool {
@@ -833,15 +844,15 @@ mod tests {
             .into_records()
             .pop()
             .unwrap();
+        let indexed_text = std::mem::take(&mut row.indexed_text);
         let estimated_text_bytes = row.estimated_text_bytes;
-        let preview = std::mem::take(&mut row.preview_text);
         let record = TranscriptBlockRecordWithId::try_from(row).unwrap();
         let (block_id, stored) = StoredBlockRef::from_record(
             5,
             record.block_id,
             &record.record,
+            &indexed_text,
             estimated_text_bytes,
-            preview,
         );
         let mut request = record_request(1, address, 0..10);
         request.blocks.insert(5, (block_id, stored));

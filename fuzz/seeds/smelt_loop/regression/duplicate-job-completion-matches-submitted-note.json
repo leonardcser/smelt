@@ -1,0 +1,28 @@
+{
+  "vim": false,
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": -1751672937,
+        "termination": "signaled"
+      }
+    },
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": -1751672937,
+        "termination": "signaled"
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 104
+      }
+    }
+  ]
+}

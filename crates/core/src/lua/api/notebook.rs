@@ -2,6 +2,7 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::value;
 use crate::notebook;
 use mlua::prelude::*;
 use std::collections::HashMap;
@@ -22,8 +23,8 @@ pub(super) fn register(
     m.private_live_only_fn(
         "__start_prepare_edit",
         &["task_id", "args"],
-        move |_, (task_id, args): (u64, mlua::Table)| -> LuaResult<()> {
-            let mut args = lua_table_to_json_map(&args)
+        move |lua, (task_id, args): (u64, mlua::Table)| -> LuaResult<()> {
+            let mut args = value::table_to_object(lua, &args)
                 .map_err(|error| LuaError::RuntimeError(format!("notebook preparation: {error}")))?;
             resolve_notebook_path(&mut args, &preview_context);
             let files = crate::host::try_with_core(|core| core.files.clone());
@@ -90,7 +91,7 @@ pub(super) fn register(
         "Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file. Returns `(message_table, nil)` on success or `(nil, err_msg)` on failure. Callers are expected to hold the per-path advisory flock.",
         &["args"],
         move |lua, args: mlua::Table| -> LuaResult<(Option<mlua::Value>, Option<String>)> {
-            let mut args_map = lua_table_to_json_map(&args)
+            let mut args_map = value::table_to_object(lua, &args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.apply_edit: {e}")))?;
             resolve_notebook_path(&mut args_map, &apply_context);
             let cwd = apply_context.evaluation_cwd();
@@ -109,7 +110,7 @@ pub(super) fn register(
                     row.set("message", outcome.message)?;
                     row.set(
                         "metadata",
-                        crate::lua::json_to_lua(lua, &outcome.metadata)?,
+                        crate::lua::value::from_json(lua, &outcome.metadata)?,
                     )?;
                     Ok((Some(LuaValue::Table(row)), None))
                 }
@@ -161,8 +162,8 @@ pub(super) fn register(
         m.private_live_only_fn(
             "__start_apply_edit",
             &["task_id", "args", "expected_mtime_ms"],
-            move |_, (task_id, args, expected_mtime_ms): (u64, mlua::Table, Option<u64>)| -> LuaResult<()> {
-                let mut args_map = lua_table_to_json_map(&args).map_err(|e| {
+            move |lua, (task_id, args, expected_mtime_ms): (u64, mlua::Table, Option<u64>)| -> LuaResult<()> {
+                let mut args_map = value::table_to_object(lua, &args).map_err(|e| {
                     LuaError::RuntimeError(format!("notebook.apply_edit_async: {e}"))
                 })?;
                 resolve_notebook_path(&mut args_map, &context);
@@ -259,45 +260,4 @@ fn cell_to_lua(lua: &Lua, cell: &notebook::Cell) -> LuaResult<mlua::Table> {
         t.set("execution_count", n)?;
     }
     Ok(t)
-}
-
-/// Shallow Lua table → JSON map. Nested tables become arrays or objects based on shape.
-fn lua_table_to_json_map(t: &mlua::Table) -> mlua::Result<HashMap<String, serde_json::Value>> {
-    let mut out = HashMap::new();
-    for pair in t.clone().pairs::<String, mlua::Value>() {
-        let (k, v) = pair?;
-        out.insert(k, lua_value_to_json(&v)?);
-    }
-    Ok(out)
-}
-
-fn lua_value_to_json(v: &mlua::Value) -> mlua::Result<serde_json::Value> {
-    use serde_json::Value as J;
-    Ok(match v {
-        mlua::Value::Nil => J::Null,
-        mlua::Value::Boolean(b) => J::Bool(*b),
-        mlua::Value::Integer(i) => J::Number((*i).into()),
-        mlua::Value::Number(n) => serde_json::Number::from_f64(*n)
-            .map(J::Number)
-            .unwrap_or(J::Null),
-        mlua::Value::String(s) => J::String(s.to_str()?.to_string()),
-        mlua::Value::Table(t) => {
-            let len = t.raw_len();
-            if len > 0 {
-                let mut arr = Vec::with_capacity(len);
-                for i in 1..=len {
-                    arr.push(lua_value_to_json(&t.raw_get::<mlua::Value>(i)?)?);
-                }
-                J::Array(arr)
-            } else {
-                let mut obj = serde_json::Map::new();
-                for pair in t.clone().pairs::<String, mlua::Value>() {
-                    let (k, v) = pair?;
-                    obj.insert(k, lua_value_to_json(&v)?);
-                }
-                J::Object(obj)
-            }
-        }
-        _ => J::Null,
-    })
 }

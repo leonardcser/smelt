@@ -355,6 +355,85 @@ app_story!(edit_file_permission_dialog_with_diff, |ctx| {
     ctx.assert_snapshot();
 });
 
+fn open_edit_file_permission_after_draft(ctx: &mut AppStoryCtx) {
+    ctx.set_viewport(80, 30);
+    let content = "fn main() {\n    println!(\"hello, world\");\n}\n";
+    let path = ctx.write_fixture("src/main.rs", content);
+    ctx.cache_file_read(&path, content);
+    let old_string = "println!(\"hello, world\");";
+    let new_string = "println!(\"hello, smelt\");";
+    ctx.engine(EngineEvent::ToolCallDraftStarted {
+        stream_id: "draft-1".into(),
+        call_id: Some("call-1".into()),
+        tool_name: Some("edit_file".into()),
+    });
+    ctx.engine(EngineEvent::ToolCallDraftFinished {
+        stream_id: "draft-1".into(),
+        call_id: "call-1".into(),
+        tool_name: "edit_file".into(),
+        arguments: json!({
+            "file_path": path,
+            "old_string": old_string,
+            "new_string": new_string,
+        })
+        .to_string(),
+    });
+    ctx.request_permission(
+        "edit_file",
+        args([
+            ("file_path", json!(path)),
+            ("old_string", json!(old_string)),
+            ("new_string", json!(new_string)),
+        ]),
+        vec![],
+    );
+}
+
+app_story!(
+    edit_file_permission_dialog_collapses_transcript_diff,
+    |ctx| {
+        open_edit_file_permission_after_draft(ctx);
+        ctx.assert_snapshot();
+    }
+);
+
+app_story!(
+    edit_file_permission_allowed_restores_transcript_diff,
+    |ctx| {
+        open_edit_file_permission_after_draft(ctx);
+        ctx.press_char('1');
+        ctx.assert_snapshot();
+    }
+);
+
+app_story!(
+    write_file_permission_dialog_collapses_transcript_body,
+    |ctx| {
+        ctx.set_viewport(80, 30);
+        let content = "fn main() {\n    println!(\"hello, world\");\n}\n";
+        ctx.engine(EngineEvent::ToolCallDraftStarted {
+            stream_id: "draft-1".into(),
+            call_id: Some("call-1".into()),
+            tool_name: Some("write_file".into()),
+        });
+        ctx.engine(EngineEvent::ToolCallDraftFinished {
+            stream_id: "draft-1".into(),
+            call_id: "call-1".into(),
+            tool_name: "write_file".into(),
+            arguments: json!({ "file_path": "src/main.rs", "content": content }).to_string(),
+        });
+        ctx.request_permission(
+            "write_file",
+            args([
+                ("file_path", json!("src/main.rs")),
+                ("content", json!(content)),
+            ]),
+            vec![],
+        );
+        ctx.assert_snapshot();
+    }
+);
+
 app_story!(edit_file_long_path_permission_dialog_wraps, |ctx| {
     ctx.set_viewport(70, 24);
     let content = "# Plan\n";

@@ -145,7 +145,7 @@ fn relevant_file(rel: &Path) -> bool {
         .unwrap_or_default();
     let name = rel.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let ext = rel.extension().and_then(|s| s.to_str()).unwrap_or("");
-    if parent.is_empty() && name == "init.lua" {
+    if parent.is_empty() && matches!(name, "init.lua" | "early.lua") {
         return true;
     }
     if parent == "plugins" && ext == "lua" {
@@ -233,6 +233,8 @@ mod tests {
     #[test]
     fn relevant_file_rules() {
         assert!(relevant_file(Path::new("init.lua")));
+        assert!(relevant_file(Path::new("early.lua")));
+        assert!(relevant_file(Path::new("early.lua")));
         assert!(relevant_file(Path::new("plugins/foo.lua")));
         assert!(relevant_file(Path::new("commands/bar.md")));
         assert!(relevant_file(Path::new("runtime/widgets/x.lua")));

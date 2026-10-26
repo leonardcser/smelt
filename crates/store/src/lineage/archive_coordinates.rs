@@ -175,8 +175,7 @@ pub(super) fn archive_header_coordinates(
     if let Some(coordinates) = load_archive_coordinates(conn, lineage, payload, kind)? {
         return Ok(coordinates);
     }
-    // A missing legacy projection is a verified cold transition. It is never
-    // guessed or backfilled by a schema migration.
+    // Missing coordinates are derived from the verified archive bytes.
     let bytes = hydrate_payload_ref(conn, payload, PayloadKind::Data, stats)?;
     publish_archive_coordinates(conn, lineage, payload, kind, &bytes)
 }
@@ -278,9 +277,6 @@ pub(crate) fn verify_archive_coordinates(conn: &Connection, lineage: &LineageId)
         .is_autocommit()
         .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
         .transpose()?;
-    if crate::schema::user_version(conn)? == 3 {
-        return Ok(());
-    }
     let headers = conn.prepare(
         "SELECT header_payload_id, header_kind FROM lineage_archive_coordinates WHERE lineage_id = ?1",
     )?.query_map([lineage.as_str()], |row| {
@@ -304,32 +300,31 @@ pub(crate) fn verify_archive_coordinates(conn: &Connection, lineage: &LineageId)
             ));
         }
     }
-    if crate::schema::has_shared_storage(conn)? {
-        let headers = conn.prepare(
-            "SELECT header_payload_id FROM lineage_checkpoint_summary_presence WHERE lineage_id = ?1",
-        )?.query_map([lineage.as_str()], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for id in headers {
-            let payload = load_payload_ref(conn, lineage, &PayloadId::from_db(id)?)?;
-            let stored =
-                load_checkpoint_summary_presence(conn, lineage, &payload)?.ok_or_else(|| {
-                    StoreError::Integrity(
-                        "checkpoint summary presence disappeared from read snapshot".into(),
-                    )
-                })?;
-            let bytes = hydrate_payload_ref(
-                conn,
-                &payload,
-                PayloadKind::Data,
-                &mut OperationStats::default(),
-            )?;
-            if stored != derive_checkpoint_summary_presence(&bytes)? {
-                return Err(StoreError::Integrity(
-                    "checkpoint summary presence differs from its authoritative header".into(),
-                ));
-            }
+    let headers = conn.prepare(
+        "SELECT header_payload_id FROM lineage_checkpoint_summary_presence WHERE lineage_id = ?1",
+    )?.query_map([lineage.as_str()], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in headers {
+        let payload = load_payload_ref(conn, lineage, &PayloadId::from_db(id)?)?;
+        let stored =
+            load_checkpoint_summary_presence(conn, lineage, &payload)?.ok_or_else(|| {
+                StoreError::Integrity(
+                    "checkpoint summary presence disappeared from read snapshot".into(),
+                )
+            })?;
+        let bytes = hydrate_payload_ref(
+            conn,
+            &payload,
+            PayloadKind::Data,
+            &mut OperationStats::default(),
+        )?;
+        if stored != derive_checkpoint_summary_presence(&bytes)? {
+            return Err(StoreError::Integrity(
+                "checkpoint summary presence differs from its authoritative header".into(),
+            ));
         }
     }
+
     Ok(())
 }
 

@@ -1,8 +1,9 @@
 # Session storage
 
-Session storage retains lossless current and historical state without copying
-unchanged archives into every revision. New unique content and revision metadata
-still consume space; this is not a fixed-size retention policy.
+Session storage retains lossless current state, every turn boundary and the
+recent revisions in full, without copying unchanged archives into every revision.
+Older intermediate saves keep only their chain link. New unique content and
+revision metadata still consume space; this is not a fixed-size retention policy.
 
 ## Persistent representation
 
@@ -30,7 +31,7 @@ The implementation has three main ownership boundaries:
   two-phase writer close; explicit replacement helpers still use a bounded
   synchronous close. A blocked save requires explicit retry.
 - `crates/store/src/lineage/` owns transactional publication, immutable archive
-  storage, semantic queries, physical sharing and canonical reclamation.
+  storage, semantic queries and canonical reclamation.
 
 ## Execution and persistence lifecycle
 
@@ -130,21 +131,19 @@ truncation and compaction maintain those counts without re-ranking the retained
 suffix. Metadata-only saves preserve the prefix count, and older acknowledgements
 cannot erase newer users.
 
-Schema v6 stores cumulative user ordinals in its canonical history index. Exact
-prefix counts require a bounded lookup without history-body reads, including users
-without transcript records and excluding legacy synthetic User messages. Changed
-suffixes inherit the retained prefix ordinal. Resume captures the initial count,
+The canonical history index stores cumulative user ordinals. Exact prefix counts
+require a bounded lookup without history-body reads, including users without
+transcript records and excluding synthetic User messages. Changed suffixes inherit the retained prefix ordinal. Resume captures the initial count,
 header, archives and transcript tail in one SQLite snapshot. Rewind workers capture
 the boundary count in their existing snapshot; application does not read storage.
 Submission rollback retains its pre-submission count even after durable compaction.
-Read-only v3/v4/v5 fallback scans use chunks of at most 256 and check cancellation
-between chunks on the resume/rewind workers. Explicit synchronous history
+Explicit synchronous history
 replacement prepares its count before mutation and fails without appending a suffix
 if preparation fails.
 
 These boundaries do not make every session operation nonblocking. Explicit
 synchronous replacement helpers retain their bounded close deadline. Full-history
-materialization, migration and maintenance remain cold operations.
+materialization and maintenance remain cold operations.
 
 ## Preparation, publication and forks
 
@@ -225,79 +224,74 @@ it is not a universal commit-time guarantee. The retained-history results and ex
 recovery requirements support the canonical boundary without claiming that large
 changed batches are cheap.
 
-## Responsive-runtime validation
+## Supported schemas
 
-The completed runtime and follow-up simplifications passed the full workspace
-nextest run with `smelt-tui/harness`: 6,439 passed, 12 skipped, no failures. The run
-includes actual terminal resume/rewind and submission interactions, spinner and
-F3/F12 regressions, queue/continuation/background-wakeup ordering, immutable capture
-tests, exact receipt recovery, v3/v4/v5 migration rollback and subprocess crash
-boundaries, and all storybook snapshots. Follow-up regressions cover rejection
-preserving hook history and callback display, targeted resume among 8,192 parked
-Lua tasks, bounded timer bursts, cancellation while page readers wait or retain
-physical capacity, and resume reuse invalidated by head, width or target-row
-changes. Strict workspace clippy, generated Lua documentation, format checks and
-whitespace checks also passed. Fixtures use isolated synthetic session stores;
-real session databases are not migration or test targets.
+Databases use schema v7, defined by `crates/store/src/lineage_schema.sql`. Schema
+validation checks the exact layout, not just its version marker, and any other
+version is refused without writing. Earlier layouts are not migrated.
 
-## Supported schemas and compatibility
-
-Fresh databases use schema v6. A writable open migrates an exact deployed v3, v4
-or v5 database in one transaction. Read-only access validates the original layout
-without writing or migrating it. The `response_diagnostics` request-object role
-introduced in v5 remains distinct from full responses under the `response` role,
-independent of whether the request body is retained.
-
-Schema validation checks the exact layout, not just its version marker. Unreleased
-development layouts are not supported migration sources. Production DDL consists
-of `crates/store/src/lineage_schema.sql` and the historical snapshots
-`crates/store/src/lineage_v3.sql`, `crates/store/src/lineage_v4.sql` and
-`crates/store/src/lineage_v5.sql`.
-
-Migration preserves original logical bytes, hashes, revision identities and
-deployed receipt/journal domains. It backfills completed-node proofs where needed
-and builds count-capable history semantic mappings in parent-first order. The v4/v5
-derived root mappings are replaced; existing immutable semantic nodes remain exact.
-Migration restores installed canonical guards and the caller's foreign-key mode,
-and validates the final layout and foreign keys before publishing version markers.
-Crashes expose either the original database or the complete v6 database.
-
-Every new revision must reference a completed current-format history semantic
-mapping. This SQL guard fences writers opened before migration: an unchanged,
-already-indexed root remains safe, but an unindexed changed root cannot publish.
-
-Deployed format-1 revision states remain readable. Verified format-2 projections
-allow small envelope reads without rehashing their originals. Full historical
-reads remain original-authoritative; cold integrity checks verify projections and
-reconstructed bytes. A schema upgrade does not authorize deletion of original
-objects or inference of missing legacy receipt outcomes.
-
-See [compatibility debt](compat.md) for independent removal conditions.
+Every new revision must reference a completed history semantic mapping, and every
+revision state is a format-2 shared state whose archives live in sequence roots.
+The `response_diagnostics` request-object role remains distinct from full
+responses under the `response` role, independent of whether the request body is
+retained.
 
 ## Retention and maintenance
 
-One epoch-fenced, resumable canonical collector marks and sweeps in bounded
-transactions. Reachability protects historical revisions, fork roots, receipt
-results, journal recovery and request objects. Deleted branches retain their
-initial revision for creation replay. Idle persistence uses this collector; it
-does not perform global physical sharing, search pruning or vacuuming.
+One epoch-fenced, resumable canonical collector releases, marks and sweeps in
+bounded transactions. Each pass first releases the content of revisions the
+retention policy no longer needs: their history root, transcript root and state
+references become NULL together, and their session receipt results are dropped
+because they can no longer replay. The revision row stays as a chain link, so
+revision identities, parents, extents, commit receipts and turns are unchanged.
+
+Content is kept for:
+
+- branch heads and initial revisions;
+- retained revisions;
+- turn boundaries: each submitted turn revision and its parent;
+- every revision from the 16th newest submitted turn of a branch onwards, which
+  covers archive bases and recent command replay.
+
+SQL guards make release the only permitted revision update, refuse it for branch
+endpoints, retained revisions and submitted turns, and only allow dropping a
+receipt result once its revision is released. Loading a released revision
+reports its content as missing; ancestry checks walk chain links only.
+
+Reachability then protects revision chains, the content of unreleased revisions,
+fork roots, receipt results, journal recovery and request objects, and the sweep
+reclaims sequence trees, states and objects that only released revisions used.
+Deleted branches retain their initial revision for creation replay.
+
+A completed pass records a fingerprint of the reachability roots (row counts and
+highest rowids of the root tables, plus branch heads) in `store_meta` under
+`reclaimed_through`. A pass that restarts over the same fingerprint completes
+immediately. A fingerprint collision can only defer reclamation to the next
+change, never reclaim reachable data.
+
+Maintenance runs automatically in bounded steps of 256 rows:
+
+- The persistence actor of an open session waits until its head has been stable
+  for 5 seconds, completes a pass, then returns free pages beyond a 4 MiB reuse
+  reserve to the filesystem with incremental vacuum.
+- Thirty seconds after an interactive launch, a background worker removes
+  abandoned lineages, then visits every lineage whose fingerprint changed or
+  whose free pages exceed the reserve. It reclaims and compacts under shared ownership at half duty cycle, so opening a
+  session is never blocked, and it leaves a lineage to its owner as soon as
+  another connection commits. Exiting cancels it between steps.
+
+Automatic maintenance does not prune search data.
 
 Explicit cold maintenance runs through the same collector:
 
 ```sh
 smelt session doctor --json <session>
-smelt session gc <session>
+smelt session compact <session>
 smelt session doctor --json <session>
 ```
 
-`session gc` shares repeated physical object content, prunes cold search data,
-reclaims unreachable canonical rows and objects, then vacuums and checkpoints the
-database.
-Sharing preserves logical object hashes and bytes and commits only cohorts that
-save occupied pages. It can reclaim repetition inside still-reachable historical
-objects, which ordinary reachability GC alone cannot remove.
-
-The command reports sharing, deletion, page-recovery and WAL-truncation counters.
+`session compact` prunes cold search data, reclaims unreachable canonical rows and
+objects, then vacuums and checkpoints the database. It reports deletion, page-recovery and WAL-truncation counters.
 Object-byte accounting, occupied SQLite pages, free pages and database/WAL file
 sizes are different measurements. Free pages alone do not prove file-space recovery.
 Large retained histories make this cold operation expensive; it is not an
@@ -311,77 +305,10 @@ Validation that mutates historical state must use additional independent copies,
 not the original database or the preserved control. Session bodies, credentials
 and arbitrary real-data errors must not appear in evidence logs.
 
-## Measured scaling
+## Scaling
 
-The optimized synthetic gates hold live context fixed while varying unchanged
-archives. Ten samples per fixture on source
-`4a121e10bbde5f451cb3ec9977914a2802592c0417c80720e7e760d2d454f9ac`
-produced the following ranges:
-
-| Operation | Retained content | Observed work |
-| --- | --- | --- |
-| 20 title changes | 0 / 32 / 128 checkpoints | 20,660-26,630 additional physical object bytes |
-| 10 title changes | 128-byte / 256-KiB / 1-MiB initial message | 10,070 additional physical object bytes |
-| Title-save preparation | 0 / 32 / 128 checkpoints | 43,200-43,826 allocation bytes |
-| Actual-command clean fork capture | 0 / 4,096 / 16,384 retained records | 268,495-271,241 UI-thread allocation bytes |
-| Enter preparation | 0 / 16 / 64 / 128 checkpoints | About 137,619-138,426 allocation bytes |
-| Enter object hydration | Same checkpoint counts | 7,504-8,000 object bytes |
-
-Earlier matched reproductions added 15,867,200 physical object bytes for ten title
-changes with a 1-MiB initial message, and 20,982,720 bytes for twenty title changes
-with 128 checkpoints. Enter with 128 checkpoints allocated about 174 MB across
-the process; the accepted optimized fixture allocated about 2.29-2.34 MB.
-
-These measurements demonstrate removal of the unchanged-archive slope, not a
-universal wall-clock speedup. The machine is shared. Actual live context and new
-unique retained content still require proportional work and storage.
-
-Final-v4 maintenance on an isolated real-data copy reduced its canonical file
-from 11,981,516,800 to 2,591,383,552 bytes, recovering 9,390,133,248 bytes (78.4%).
-Physical recovery was measured on source
-`9c0a68abf69cc04a6e16878878a5e1ec7b759174d677616ece476a6ac40b325a`.
-The store and core archive sources are byte-identical after the landing rebase;
-real-data integrity and lifecycle checks also passed on the rebased source.
-
-## Validation
-
-Fresh automated acceptance passed on the measured final implementation source:
-
-- Optimized workspace: 6,250/6,250 tests passed, 22 skipped, including actual CLI
-  maintenance, v3 migration/crash controls and applicable UI snapshots.
-- Optimized scaling/stress: 3,190/3,190 executions passed. Eight ignored scaling
-  gates and the core archive, fork/load/document, persistence actor, history/load
-  and writer groups each ran ten times.
-- Strict workspace all-target lint, formatting and tracked/untracked whitespace
-  checks passed.
-- Actual CI: 6,237/6,237 tests passed, 12 skipped; 89.53% line coverage against the
-  unchanged 80% floor.
-- Independent audits reconciled selected counts, unique passing identities and
-  every exact stress iteration. All 33 scaling fixtures and 12 preparation,
-  hydration and dispatch groups had ten accepted samples; every measured turn
-  dispatched exactly once and all native fingerprint inputs were verified.
-
-Isolated real-data acceptance also passed on the rebased source. Complete current
-snapshot, history, transcript and request digests matched the preserved v3 baseline.
-All 15,540 original revision graphs, required logical hashes and receipt rows were
-retained; doctor reported a healthy v4 database, and repeated maintenance was
-idempotent with unchanged file size and a truncated WAL.
-
-Two additional independent v3/v4 copies passed migration and historical lifecycle
-checks at revisions 15,000, 7,770, 1,000 and 1: exact source-bound forks, retained
-ranges, supplied no-op saves, receipt replay after reopen, rejection boundaries and
-integrity checks. Original data and preserved controls were not mutating targets;
-interrupted copies and complete validation evidence remain archived locally.
-
-Full acceptance includes optimized workspace tests, eight ignored scaling gates
-repeated ten times, core archive/fork/actor/history/writer stress, applicable CLI
-and crash/UI controls, strict lint, format/whitespace, independent count and metric
-audits, and the actual CI gate:
-
-```sh
-CARGO_INCREMENTAL=0 cargo llvm-cov nextest --workspace \
-  --features smelt-tui/harness --fail-under-lines 80
-```
-
-Large real-data I/O runs separately from timing-sensitive gates. Every acceptance
-result binds to a frozen source digest; older results do not prove a newer source.
+Saves, title changes, forks, and Enter preparation do no work proportional to
+unchanged archived content: holding live context fixed while growing archives
+from 0 to 128 checkpoints leaves allocation and new physical object bytes flat.
+New live context and new unique retained content still cost proportional work
+and storage.

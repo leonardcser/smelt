@@ -253,7 +253,7 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskResponseFormat
 ---@field name string Schema name (used by some providers as the response_format label).
----@field schema table JSON schema describing the expected response shape. Accepts a Lua table that round-trips through `lua_table_to_json` into a JSON value.
+---@field schema table JSON schema describing the expected response shape. Accepts a Lua table that converts to a JSON value.
 
 --- Spec for `smelt.engine.ask`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -741,6 +741,21 @@
 ---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
 ---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
 
+--- One piece of statusline content. Items are laid out left to right, with
+--- `align_right` items packed against the right edge. When the line is too
+--- narrow, whole items drop from the highest `priority` down, and truncatable
+--- items of the highest remaining priority shrink first.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.statusline.Item
+---@field text string Text to show.
+---@field style? smelt.buf.MarkOpts Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
+---@field priority? integer Drop order when space runs out; higher values drop first. Defaults to 0.
+---@field separated? boolean Draw a separator between this item and the previous separated item on the same side.
+---@field truncatable? boolean Allow shrinking this item before dropping it.
+---@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
+---@field align_right? boolean Pack against the right edge instead of the left.
+---@field selectable? boolean Include the text in drag-copy. Defaults to true.
+
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.theme.ColorDecl
@@ -768,6 +783,16 @@
 ---@field syntax? string Bundled syntect/two-face syntax theme name for code highlighting.
 ---@field light? boolean Whether this colorscheme is light. Omit to use terminal background detection.
 ---@field groups table<string, string | smelt.theme.StyleDecl> Highlight groups keyed by group name.
+
+--- A discovery tip shown in the prompt bar.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.tips.Tip
+---@field id string Stable identifier. Registering an existing `id` replaces that tip.
+---@field text string Short tip text.
+---@field detail? string Longer explanation.
+---@field key? string Key or key sequence the tip is about, shown beside the text.
+---@field when? "vim_enabled"|"vim_disabled"|fun(): boolean Show the tip only while the condition holds. Defaults to always.
+---@field placement? string Only `"prompt"` tips are kept for the prompt bar. Defaults to `"prompt"`.
 
 --- Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1158,7 +1183,7 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
 
---- Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
+--- Name of an event. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.events.Name string|"block_done"|"cmd_post"|"cmd_pre"|"confirm_resolved"|"history"|"input_submit"|"session_ended"|"session_started"|"shutdown"|"stream_delta"|"stream_phase"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"
 
@@ -1173,9 +1198,9 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@alias smelt.permissions.Decision "allow"|"ask"|"deny"
 
---- Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
+--- Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"spinner_frame"|"task_label"|"tokens_used"|"tps"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

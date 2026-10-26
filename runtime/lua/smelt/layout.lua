@@ -15,7 +15,13 @@
 -- Plugins that want a different shape call `smelt.ui.layout.set(fn)`
 -- with their own composer; passing `nil` (or never calling `set`) means
 -- the engine falls back to its hardcoded seed layout, not this one.
--- Loading this module installs the default composer.
+-- Loading this module installs the default composer and returns it as
+-- `compose`, so a plugin can wrap the default tree instead of rebuilding it:
+--
+--   local default = require("smelt.layout").compose
+--   smelt.ui.layout.set(function(state)
+--     return smelt.ui.layout.hbox({ { default(state), width = "fill" }, ... })
+--   end)
 
 local prompt_bar = require("smelt.prompt_bar")
 local statusline = require("smelt.statusline")
@@ -25,7 +31,9 @@ local headerline = require("smelt.headerline")
 -- to grow.
 local MIN_TRANSCRIPT_ROWS = 2
 
-smelt.ui.layout.set(function(state)
+local M = {}
+
+function M.compose(state)
   local term_h = state.term_h or 24
   local input_rows = state.prompt_input_rows or 1
   local header_rows = headerline.rows()
@@ -90,6 +98,8 @@ smelt.ui.layout.set(function(state)
       main,
     },
   })
-end)
+end
 
-return {}
+smelt.ui.layout.set(M.compose)
+
+return M

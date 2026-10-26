@@ -1,0 +1,28 @@
+{
+  "vim": true,
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "signaled"
+      }
+    },
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "signaled"
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 1
+      }
+    }
+  ]
+}

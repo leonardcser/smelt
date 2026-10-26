@@ -409,9 +409,10 @@ mod tests {
         .await;
         let env = test_env(token_url, tmp.path().join("tokens.json"));
 
-        let tokens = refresh_tokens_with_env(&reqwest::Client::new(), "github-refresh", &env)
-            .await
-            .unwrap();
+        let tokens =
+            refresh_tokens_with_env(&smelt_provider::http_client(), "github-refresh", &env)
+                .await
+                .unwrap();
 
         assert_eq!(tokens.refresh_token, "github-refresh");
         assert_eq!(tokens.expires_at, 1_500);

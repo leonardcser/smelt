@@ -3228,15 +3228,10 @@ impl Ui {
         });
     }
 
-    /// Resolve a pointer row against the scrollbar geometry frozen at pointer-down.
-    ///
-    /// Returns the thumb-position numerator and denominator, total rows, and viewport
-    /// rows. Without an active drag, the current window geometry is used.
-    pub fn scrollbar_pointer_fraction(
-        &self,
-        owner: WinId,
-        row: u16,
-    ) -> Option<(u64, u64, RowIndex, u16)> {
+    /// Resolve a pointer row to a thumb position fraction `(numerator, denominator)`
+    /// against the scrollbar geometry frozen at pointer-down. Without an active
+    /// drag, the current window geometry is used.
+    pub fn scrollbar_pointer_fraction(&self, owner: WinId, row: u16) -> Option<(u64, u64)> {
         let (rect_top, bar, thumb_grab_row) =
             if let Some(drag) = self.scrollbar_drag.filter(|drag| drag.owner == owner) {
                 (drag.rect_top, drag.bar, drag.thumb_grab_row)
@@ -3261,8 +3256,6 @@ impl Ui {
         Some((
             u64::from(thumb_top),
             u64::from(metrics.max_thumb_top.max(1)),
-            bar.total_rows,
-            bar.viewport_rows,
         ))
     }
 
@@ -6683,8 +6676,8 @@ mod tests {
 
         assert_eq!(
             ui.scrollbar_pointer_fraction(win, 18),
-            Some((8, 16, 100, 20)),
-            "an active drag must retain its pointer-down track and extent",
+            Some((8, 16)),
+            "an active drag must retain its pointer-down track",
         );
     }
 

@@ -27,9 +27,7 @@ impl DisplayDocument for TranscriptDisplayDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
         DisplaySnapshot {
             generation: self.document.content.projection.projection_generation(),
-            total_rows: self
-                .document
-                .approximate_scrollbar_total_rows(self.lua, self.width),
+            total_rows: self.document.total_rows(self.lua, self.width),
         }
     }
 

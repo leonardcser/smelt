@@ -343,9 +343,7 @@ impl ConversationRuntime {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         width: u16,
     ) -> crate::smelt_edit::RowIndex {
-        self.document
-            .transcript
-            .approximate_scrollbar_total_rows(lua, width)
+        self.document.transcript.total_rows(lua, width)
     }
 
     pub(crate) fn transcript_search_anchor_at_row(
@@ -593,10 +591,12 @@ impl ConversationRuntime {
 
     pub(super) fn pending_transcript_scrollbar_display_scroll_top(
         &self,
+        total_rows: crate::smelt_edit::RowIndex,
+        viewport_rows: u16,
     ) -> Option<crate::smelt_edit::RowIndex> {
         self.document
             .transcript
-            .pending_scrollbar_display_scroll_top()
+            .pending_scrollbar_display_scroll_top(total_rows, viewport_rows)
     }
 
     pub(super) fn take_pending_transcript_hydration_request(

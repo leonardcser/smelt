@@ -802,8 +802,8 @@ mod tests {
         let canonical = canonical_group_names(&lua);
         let root = workspace_root();
         for relative in [
-            "docs/docs/guide/customization.md",
-            "docs/docs/reference/configuration.md",
+            "docs/docs/customize/appearance.md",
+            "docs/docs/customize/settings.md",
             "runtime/skills/customize/SKILL.md",
         ] {
             let text =
@@ -926,6 +926,12 @@ mod tests {
         let light = compile(&spec, true).unwrap();
         assert_eq!(dark.get("SmeltUserBg").bg, Some(Color::AnsiValue(236)));
         assert_eq!(light.get("SmeltUserBg").bg, Some(Color::AnsiValue(252)));
+    }
+
+    #[test]
+    fn baked_default_leaves_syntax_theme_to_the_terminal_background() {
+        let spec = baked_default_spec();
+        assert_eq!(spec.syntax_theme, None);
     }
 
     #[test]

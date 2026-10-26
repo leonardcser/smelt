@@ -538,6 +538,48 @@ fn deeply_nested_brace_expansion_does_not_hang_permissions() {
 }
 
 #[test]
+fn oversized_expansion_numbers_do_not_panic_permissions() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in [
+        "echo {1..99999999999999999999}",
+        "echo {1..2..99999999999999999999}",
+        "echo {-99999999999999999999..1}",
+        "echo ~+99999999999999999999",
+        "echo ~-99999999999999999999/x",
+        "echo ~99999999999999999999:",
+    ] {
+        permissions.check_subcommand(normal(), "bash", command);
+        assert_eq!(split_shell_commands(command), vec![command.to_string()]);
+    }
+    for command in [
+        "echo {1..99999999999999999999}; rm x",
+        "echo ~+99999999999999999999 && rm x",
+    ] {
+        assert_eq!(
+            permissions.check_subcommand(normal(), "bash", command),
+            Decision::Deny,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn blank_heredoc_tags_do_not_exhaust_memory_permissions() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in [
+        "<<\r\t",
+        "<<\r ",
+        "<<-\r\t",
+        "<<\x0c\t",
+        "echo hi <<\r\r\t",
+        "echo `<<\r\t`",
+    ] {
+        permissions.check_subcommand(normal(), "bash", command);
+        split_shell_commands(command);
+    }
+}
+
+#[test]
 fn split_shell_commands_input_fd_duplication_is_not_background() {
     assert_eq!(
         split_shell_commands("cat <&0 | head"),
@@ -5309,4 +5351,51 @@ fn store_compile_rules_handles_empty_rules() {
     let compiled = compile_rules(&rules).unwrap();
     assert!(compiled.tools.is_empty());
     assert!(compiled.dirs.is_empty());
+}
+
+#[test]
+fn unterminated_heredoc_does_not_hide_following_commands() {
+    for (command, following) in [
+        ("echo hi <<x; rm x", "rm x"),
+        ("echo hi <<x && rm x", "rm x"),
+        ("echo hi <<x | rm x", "rm x"),
+        ("cat <<'a b'; echo a", "echo a"),
+        ("cat <<-\"x\"; echo a", "echo a"),
+        ("cat <<\\x; echo a", "echo a"),
+        ("cat <<a <<b; echo c", "echo c"),
+    ] {
+        let segments = split_shell_commands(command);
+        assert!(
+            segments.iter().any(|segment| segment == following),
+            "{command}: {segments:?}"
+        );
+    }
+}
+
+#[test]
+fn unterminated_heredoc_body_is_not_a_command() {
+    assert_eq!(
+        split_shell_commands("echo hi <<x\nrm x"),
+        vec!["echo hi <<x\nrm x"]
+    );
+}
+
+#[test]
+fn unterminated_heredoc_permissions_check_following_commands() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in [
+        "echo hi <<x; rm x",
+        "echo hi <<x && rm x",
+        "echo hi <<x | rm x",
+    ] {
+        assert_eq!(
+            permissions.check_subcommand(normal(), "bash", command),
+            Decision::Deny,
+            "{command}"
+        );
+    }
+    assert_eq!(
+        permissions.check_subcommand(normal(), "bash", "echo hi <<x\nrm x"),
+        Decision::Allow
+    );
 }

@@ -5,6 +5,7 @@
 -- `smelt.settings.show_tips = false` disables both banner and prompt tips.
 
 local M = {}
+smelt.tips = M
 
 local prompt_tips = {}
 local prompt_by_id = {}
@@ -67,11 +68,27 @@ local function normalize_tip(tip)
   }
 end
 
-function M.enabled()
+--- A discovery tip shown in the prompt bar.
+---@class smelt.tips.Tip
+---@field id string Stable identifier. Registering an existing `id` replaces that tip.
+---@field text string Short tip text.
+---@field detail? string Longer explanation.
+---@field key? string Key or key sequence the tip is about, shown beside the text.
+---@field when? "vim_enabled"|"vim_disabled"|fun(): boolean Show the tip only while the condition holds. Defaults to always.
+---@field placement? string Only `"prompt"` tips are kept for the prompt bar. Defaults to `"prompt"`.
+
+--- Whether tips are shown (`smelt.settings.show_tips`).
+---@tier ui_host
+---@type fun(): boolean
+function smelt.tips.enabled()
   return tips_enabled()
 end
 
-function M.register(tip)
+--- Register a prompt tip, or replace the tip with the same `id`. Returns the
+--- tip as stored. Raises when `id` or `text` is not a non-empty string.
+---@tier ui_host
+---@type fun(tip: smelt.tips.Tip): smelt.tips.Tip
+function smelt.tips.register(tip)
   tip = normalize_tip(tip)
   if tip.placement ~= "prompt" then return tip end
 
@@ -85,7 +102,10 @@ function M.register(tip)
   return tip
 end
 
-function M.list()
+--- The registered prompt tips, in registration order.
+---@tier ui_host
+---@type fun(): smelt.tips.Tip[]
+function smelt.tips.list()
   local out = {}
   for i, tip in ipairs(prompt_tips) do
     out[i] = {
@@ -483,7 +503,5 @@ local ok, banner = pcall(require, "smelt.banner")
 if ok and banner and smelt.banner and smelt.banner.source then
   smelt.banner.source("tips", M.banner_lines)
 end
-
-smelt.tips = M
 
 return M

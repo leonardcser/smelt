@@ -369,7 +369,7 @@ async fn run_login(kind: AuthProvider) -> bool {
         on_message: &on_message,
     };
 
-    let client = reqwest::Client::new();
+    let client = smelt_provider::http_client();
     match engine::auth::login(kind, method, &client, &progress).await {
         Ok(_details) => {
             println!("\nLogged in successfully!");

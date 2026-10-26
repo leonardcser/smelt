@@ -126,11 +126,6 @@ impl TestApp {
     /// `flushed_snapshot()` captures that exact frame without running a second,
     /// callback-free UI render. ANSI bytes are written to a sink so tests stay quiet.
     pub fn render_to_frame(&mut self) -> crate::smelt_edit::SnapshotFrame {
-        // The main loop refreshes diff signals once per tick before
-        // rendering; storybook drives the render path directly without
-        // that loop, so we have to publish here or Lua renderers see
-        // stale `work_*` / `vim_mode` / `now` values.
-        self.app.publish_diff_signals();
         let mut sink = std::io::sink();
         self.app.render_normal_to(&mut sink);
         self.settle_transcript_hydration(&mut sink);
@@ -158,7 +153,7 @@ impl TestApp {
                     std::time::Instant::now() < idle_deadline,
                     "background transcript hydration did not make progress within {HYDRATION_IDLE_TIMEOUT:?}"
                 );
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(super::POLL_INTERVAL);
             };
             self.app.handle_app_event(event);
             if self.app.frame_scheduler.has_pending() {
@@ -206,10 +201,6 @@ impl TestApp {
     /// internal grid to the OS-reported size.
     pub fn set_terminal_size(&mut self, width: u16, height: u16) {
         self.app.handle_resize(width, height);
-    }
-
-    pub(crate) fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W) {
-        self.app.render_frame_to(out);
     }
 
     pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {

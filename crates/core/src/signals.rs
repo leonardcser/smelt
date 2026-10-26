@@ -1,7 +1,10 @@
 //! Typed reactive signal registry with deferred subscriber notification.
 //!
-//! Each signal is an `Rc<dyn Any>` slot. Writes queue direct + glob subscribers for firing after
-//! the `&mut Signals` borrow releases, so subscriber bodies can re-enter `Signals` freely. Lua signals
+//! Each signal is an `Rc<dyn Any>` slot of one [`SignalKind`]: state signals retain a current
+//! value and are written with `set_dyn`; event signals retain nothing and are written with
+//! `emit_dyn`. Each write path refuses the other kind. Writes queue direct + glob subscribers for
+//! firing after the `&mut Signals` borrow releases, so subscriber bodies can re-enter `Signals`
+//! freely. Lua signals
 //! store an `mlua::RegistryKey`; Rust-typed signals use a per-`TypeId` `LuaProjector` to convert to
 //! `mlua::Value` at drain time.
 
@@ -43,7 +46,17 @@ struct GlobSubscriber {
     kind: SubscriberKind,
 }
 
+/// How a signal is written and observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalKind {
+    /// Durable state where the current value is meaningful.
+    State,
+    /// Occurrence-shaped signal with no current value; subscribers only see future payloads.
+    Event,
+}
+
 struct Slot {
+    kind: SignalKind,
     value: Rc<dyn Any>,
     subscribers: Vec<Subscriber>,
     persistent: bool,
@@ -117,11 +130,28 @@ impl Signals {
     }
 
     /// Project the signal at `name` to a Lua value. Returns `Nil` when undeclared or no projector.
+    #[cfg(test)]
     pub(crate) fn get_lua(&self, name: &str, lua: &mlua::Lua) -> mlua::Value {
         let Some(slot) = self.slots.get(name) else {
             return mlua::Value::Nil;
         };
         self.project_to_lua(&*slot.value, lua)
+    }
+
+    /// Project the state signal at `name` to a Lua value in one lookup. Returns `Nil` when
+    /// undeclared, or the actual kind when `name` is not a state signal.
+    pub(crate) fn get_state_lua(
+        &self,
+        name: &str,
+        lua: &mlua::Lua,
+    ) -> Result<mlua::Value, SignalKind> {
+        match self.slots.get(name) {
+            None => Ok(mlua::Value::Nil),
+            Some(slot) if slot.kind == SignalKind::State => {
+                Ok(self.project_to_lua(&*slot.value, lua))
+            }
+            Some(slot) => Err(slot.kind),
+        }
     }
 
     pub fn project_to_lua(&self, value: &dyn Any, lua: &mlua::Lua) -> mlua::Value {
@@ -132,12 +162,32 @@ impl Signals {
         }
     }
 
-    /// Declare or reset a signal. Re-declaration resets the value and drops all subscribers.
+    /// Kind of the signal at `name`, or `None` when undeclared.
+    pub(crate) fn kind(&self, name: &str) -> Option<SignalKind> {
+        self.slots.get(name).map(|slot| slot.kind)
+    }
+
+    /// Declare or reset a state signal. Re-declaration resets the value and drops all subscribers.
     pub(crate) fn declare<T: Any + 'static>(&mut self, name: impl Into<String>, initial: T) {
         self.slots.insert(
             name.into(),
             Slot {
+                kind: SignalKind::State,
                 value: Rc::new(initial),
+                subscribers: Vec::new(),
+                persistent: true,
+                lua_generations: HashSet::new(),
+            },
+        );
+    }
+
+    /// Declare or reset an event signal. Re-declaration drops all subscribers.
+    pub(crate) fn declare_event(&mut self, name: impl Into<String>) {
+        self.slots.insert(
+            name.into(),
+            Slot {
+                kind: SignalKind::Event,
+                value: Rc::new(EventStub),
                 subscribers: Vec::new(),
                 persistent: true,
                 lua_generations: HashSet::new(),
@@ -148,10 +198,12 @@ impl Signals {
     pub(crate) fn declare_if_missing_for_generation<T: Any + 'static>(
         &mut self,
         name: impl Into<String>,
+        kind: SignalKind,
         initial: T,
         generation: u64,
     ) {
         let slot = self.slots.entry(name.into()).or_insert_with(|| Slot {
+            kind,
             value: Rc::new(initial),
             subscribers: Vec::new(),
             persistent: false,
@@ -162,15 +214,23 @@ impl Signals {
         }
     }
 
-    fn callbacks_for(&self, name: &str, subscribers: &[Subscriber]) -> VecDeque<PendingCallback> {
-        let mut callbacks: VecDeque<PendingCallback> = subscribers
+    fn direct_callbacks(subscribers: &[Subscriber]) -> VecDeque<PendingCallback> {
+        subscribers
             .iter()
             .map(|s| PendingCallback {
                 kind: s.kind.clone(),
                 is_glob: false,
                 generation: s.generation,
             })
-            .collect();
+            .collect()
+    }
+
+    /// Append every glob subscriber whose pattern matches `name` after the direct callbacks.
+    fn with_glob_callbacks(
+        &self,
+        name: &str,
+        mut callbacks: VecDeque<PendingCallback>,
+    ) -> VecDeque<PendingCallback> {
         for g in &self.glob_subs {
             if g.pattern.matches(name) {
                 callbacks.push_back(PendingCallback {
@@ -183,36 +243,25 @@ impl Signals {
         callbacks
     }
 
-    /// Overwrite a signal and queue subscribers. Returns `false` when `name` is undeclared.
+    /// Overwrite a state signal and queue subscribers. Returns `false` when `name` is undeclared
+    /// or is an event, which is a caller bug and trips a debug assertion.
     pub fn set_dyn(&mut self, name: &str, value: Rc<dyn Any>) -> bool {
-        let (prev, snapshot, direct_callbacks) = {
+        let (prev, snapshot, direct) = {
             let Some(slot) = self.slots.get_mut(name) else {
                 return false;
             };
+            debug_assert!(
+                slot.kind == SignalKind::State,
+                "set_dyn on event `{name}`; use emit_dyn"
+            );
+            if slot.kind != SignalKind::State {
+                return false;
+            }
             let prev = std::mem::replace(&mut slot.value, value);
             let snapshot = Rc::clone(&slot.value);
-            let callbacks: VecDeque<PendingCallback> = slot
-                .subscribers
-                .iter()
-                .map(|s| PendingCallback {
-                    kind: s.kind.clone(),
-                    is_glob: false,
-                    generation: s.generation,
-                })
-                .collect();
-            (prev, snapshot, callbacks)
+            (prev, snapshot, Self::direct_callbacks(&slot.subscribers))
         };
-
-        let mut callbacks = direct_callbacks;
-        for g in &self.glob_subs {
-            if g.pattern.matches(name) {
-                callbacks.push_back(PendingCallback {
-                    kind: g.kind.clone(),
-                    is_glob: true,
-                    generation: g.generation,
-                });
-            }
-        }
+        let callbacks = self.with_glob_callbacks(name, direct);
         if callbacks.is_empty() {
             return true;
         }
@@ -225,12 +274,20 @@ impl Signals {
         true
     }
 
-    /// Queue an occurrence without replacing the signal's current value.
+    /// Queue an occurrence of an event signal. Returns `false` when `name` is undeclared or is
+    /// state, which is a caller bug and trips a debug assertion.
     pub fn emit_dyn(&mut self, name: &str, payload: Rc<dyn Any>) -> bool {
         let Some(slot) = self.slots.get(name) else {
             return false;
         };
-        let callbacks = self.callbacks_for(name, &slot.subscribers);
+        debug_assert!(
+            slot.kind == SignalKind::Event,
+            "emit_dyn on state signal `{name}`; use set_dyn"
+        );
+        if slot.kind != SignalKind::Event {
+            return false;
+        }
+        let callbacks = self.with_glob_callbacks(name, Self::direct_callbacks(&slot.subscribers));
         if callbacks.is_empty() {
             return true;
         }
@@ -502,33 +559,24 @@ pub struct StreamDelta {
     pub tool_name: Option<String>,
 }
 
-/// How a built-in signal should be presented to Lua users.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinSignalKind {
-    /// Durable state where the current value is meaningful.
-    State,
-    /// Occurrence-shaped signal where subscribers usually care only about future payloads.
-    Event,
-}
-
 /// Built-in signals declared by [`build_with_builtins`]. This is the source of
 /// truth for generated `smelt.signal.Name` and `smelt.events.Name` autocomplete.
 pub struct BuiltinSignal {
     pub name: &'static str,
-    pub kind: BuiltinSignalKind,
+    pub kind: SignalKind,
 }
 
 const fn state(name: &'static str) -> BuiltinSignal {
     BuiltinSignal {
         name,
-        kind: BuiltinSignalKind::State,
+        kind: SignalKind::State,
     }
 }
 
 const fn event(name: &'static str) -> BuiltinSignal {
     BuiltinSignal {
         name,
-        kind: BuiltinSignalKind::Event,
+        kind: SignalKind::Event,
     }
 }
 
@@ -599,16 +647,20 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("work_state"),
 ];
 
-pub fn builtin_signal_names() -> Vec<&'static str> {
-    BUILTIN_SIGNALS.iter().map(|signal| signal.name).collect()
+fn builtin_names(kind: SignalKind) -> Vec<&'static str> {
+    BUILTIN_SIGNALS
+        .iter()
+        .filter(|signal| signal.kind == kind)
+        .map(|signal| signal.name)
+        .collect()
+}
+
+pub fn builtin_state_names() -> Vec<&'static str> {
+    builtin_names(SignalKind::State)
 }
 
 pub fn builtin_event_names() -> Vec<&'static str> {
-    BUILTIN_SIGNALS
-        .iter()
-        .filter(|signal| signal.kind == BuiltinSignalKind::Event)
-        .map(|signal| signal.name)
-        .collect()
+    builtin_names(SignalKind::Event)
 }
 
 /// Project a `StyledLines` payload into the same shape Lua sees from
@@ -794,7 +846,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         let _ = t.set("tool", s.tool.as_str());
         if let Ok(args) = lua.create_table() {
             for (k, v) in &s.args {
-                if let Ok(lv) = crate::lua::json_to_lua(lua, v) {
+                if let Ok(lv) = crate::lua::value::from_json(lua, v) {
                     let _ = args.set(k.as_str(), lv);
                 }
             }
@@ -847,7 +899,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
         }
         if let Ok(args) = lua.create_table() {
             for (k, v) in &r.args {
-                if let Ok(lv) = crate::lua::json_to_lua(lua, v) {
+                if let Ok(lv) = crate::lua::value::from_json(lua, v) {
                     let _ = args.set(k.as_str(), lv);
                 }
             }
@@ -920,9 +972,9 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
 
     for signal in BUILTIN_SIGNALS
         .iter()
-        .filter(|signal| signal.kind == BuiltinSignalKind::Event)
+        .filter(|signal| signal.kind == SignalKind::Event)
     {
-        signals.declare(signal.name, EventStub);
+        signals.declare_event(signal.name);
     }
 
     signals
@@ -954,6 +1006,65 @@ mod tests {
         declared.sort_unstable();
         metadata.sort_unstable();
         assert_eq!(declared, metadata);
+        for signal in BUILTIN_SIGNALS {
+            assert_eq!(
+                signals.kind(signal.name),
+                Some(signal.kind),
+                "builtin signal `{}` is declared with the wrong kind",
+                signal.name
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "set_dyn on event `tick`")]
+    fn set_dyn_on_event_is_a_caller_bug() {
+        let mut c = Signals::new();
+        c.declare_event("tick");
+        c.set_dyn("tick", Rc::new(1u32));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "emit_dyn on state signal `count`")]
+    fn emit_dyn_on_state_is_a_caller_bug() {
+        let mut c = Signals::new();
+        c.declare("count", 0u32);
+        c.emit_dyn("count", Rc::new(1u32));
+    }
+
+    #[test]
+    fn glob_subscribers_observe_both_kinds() {
+        let lua = Lua::new();
+        let mut c = Signals::new();
+        c.declare("turn_count", 0u32);
+        c.declare_event("turn_start");
+        c.glob_subscribe(
+            glob::Pattern::new("turn_*").unwrap(),
+            SubscriberKind::Lua(handle(&lua, "function() end")),
+        );
+        c.emit_dyn("turn_start", Rc::new(EventStub));
+        c.set_dyn("turn_count", Rc::new(1u32));
+        let fires = c.drain_pending();
+        assert_eq!(fires.len(), 2);
+        assert!(fires[0].prev.is_none());
+        assert!(fires[1].prev.is_some());
+    }
+
+    #[test]
+    fn get_state_lua_reports_the_kind_of_events() {
+        let lua = Lua::new();
+        let mut c = Signals::new();
+        c.declare_event("tick");
+        assert_eq!(
+            c.get_state_lua("tick", &lua).unwrap_err(),
+            SignalKind::Event
+        );
+        assert!(matches!(
+            c.get_state_lua("missing", &lua),
+            Ok(mlua::Value::Nil)
+        ));
     }
 
     #[test]
@@ -1111,7 +1222,7 @@ mod tests {
     fn emit_dyn_has_no_previous_value() {
         let lua = Lua::new();
         let mut c = Signals::new();
-        c.declare("event", EventStub);
+        c.declare_event("event");
         c.subscribe_kind("event", SubscriberKind::Lua(handle(&lua, "function() end")))
             .unwrap();
         c.emit_dyn("event", Rc::new(42u32));
@@ -1323,7 +1434,7 @@ mod tests {
                 .get(name)
                 .unwrap_or_else(|| panic!("builtin signal `{name}` is not declared"));
             assert!(
-                signal.kind == BuiltinSignalKind::Event
+                signal.kind == SignalKind::Event
                     || signals
                         .lua_projectors
                         .contains_key(&(*slot.value).type_id()),
@@ -1391,11 +1502,15 @@ mod tests {
             branch: String::new(),
         });
 
-        // Set typed payloads via set_dyn - Signals::project_to_lua keys
-        // on the stored value's TypeId, so the typed projector takes
-        // over even though the slot was declared with EventStub.
+        // Emit typed payloads - Signals::project_to_lua keys on the
+        // payload's TypeId, so the typed projector takes over.
         let mut signals = signals;
-        signals.set_dyn(
+        for name in builtin_event_names() {
+            signals
+                .subscribe_kind(name, SubscriberKind::Lua(handle(&lua, "function() end")))
+                .expect("builtin event should be declared");
+        }
+        signals.emit_dyn(
             "turn_complete",
             Rc::new(TurnMeta {
                 elapsed_ms: 12000,
@@ -1404,13 +1519,13 @@ mod tests {
                 interrupted: false,
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "turn_error",
             Rc::new(TurnError {
                 message: "boom".into(),
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "turn_end",
             Rc::new(TurnEnd {
                 cancelled: true,
@@ -1419,21 +1534,21 @@ mod tests {
                 retry_at_ms: Some(123_000),
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "confirm_resolved",
             Rc::new(ConfirmResolved {
                 handle_id: 7,
                 decision: "always_session".into(),
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "history",
             Rc::new(HistoryDelta {
                 kind: "set".into(),
                 count: 4,
             }),
         );
-        signals.set_dyn("session_started", Rc::new(String::from("sess-001")));
+        signals.emit_dyn("session_started", Rc::new(String::from("sess-001")));
         signals.set_dyn(
             "confirm_requested",
             Rc::new(ConfirmRequested {
@@ -1450,7 +1565,16 @@ mod tests {
             }),
         );
 
-        match signals.get_lua("turn_complete", &lua) {
+        let fires = signals.drain_pending();
+        let projected = |name: &str| {
+            let fire = fires
+                .iter()
+                .find(|fire| fire.name == name)
+                .unwrap_or_else(|| panic!("`{name}` did not fire"));
+            signals.project_to_lua(&*fire.value, &lua)
+        };
+
+        match projected("turn_complete") {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("elapsed_ms").unwrap(), 12000);
                 assert!((t.get::<f64>("avg_tps").unwrap() - 33.5).abs() < f64::EPSILON);
@@ -1459,13 +1583,13 @@ mod tests {
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match signals.get_lua("turn_error", &lua) {
+        match projected("turn_error") {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<String>("message").unwrap(), "boom");
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match signals.get_lua("turn_end", &lua) {
+        match projected("turn_end") {
             mlua::Value::Table(t) => {
                 assert!(t.get::<bool>("cancelled").unwrap());
                 assert_eq!(t.get::<i64>("continuation_token").unwrap(), 9);
@@ -1474,21 +1598,21 @@ mod tests {
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match signals.get_lua("confirm_resolved", &lua) {
+        match projected("confirm_resolved") {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("handle_id").unwrap(), 7);
                 assert_eq!(t.get::<String>("decision").unwrap(), "always_session");
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match signals.get_lua("history", &lua) {
+        match projected("history") {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<String>("kind").unwrap(), "set");
                 assert_eq!(t.get::<i64>("count").unwrap(), 4);
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match signals.get_lua("session_started", &lua) {
+        match projected("session_started") {
             mlua::Value::String(s) => assert_eq!(s.to_str().unwrap(), "sess-001"),
             other => panic!("expected String, got {other:?}"),
         }
@@ -1513,9 +1637,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_signals_queue_subscribers_on_set() {
-        // Every state-changing event in the engine pipeline reaches
-        // the right signal setter and queues subscribers.
+    fn builtin_signals_queue_subscribers_on_write() {
+        // Every write in the engine pipeline reaches the right setter or
+        // emitter and queues subscribers.
         let lua = Lua::new();
         let mut signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
@@ -1527,7 +1651,7 @@ mod tests {
             branch: String::new(),
         });
 
-        // Subscribe to a mix of stateful and event-shaped built-in signals.
+        // Subscribe to a mix of state and event built-in signals.
         for name in [
             "agent_mode",
             "turn_complete",
@@ -1544,7 +1668,7 @@ mod tests {
         }
 
         signals.set_dyn("agent_mode", Rc::new("apply".to_string()));
-        signals.set_dyn(
+        signals.emit_dyn(
             "turn_complete",
             Rc::new(TurnMeta {
                 elapsed_ms: 100,
@@ -1553,20 +1677,20 @@ mod tests {
                 interrupted: false,
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "turn_error",
             Rc::new(TurnError {
                 message: "err".into(),
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "tool_start",
             Rc::new(ToolStart {
                 tool: "bash".into(),
                 args: std::collections::HashMap::new(),
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "tool_end",
             Rc::new(ToolEnd {
                 tool: "bash".into(),
@@ -1574,7 +1698,7 @@ mod tests {
                 elapsed_ms: None,
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "history",
             Rc::new(HistoryDelta {
                 kind: "append".into(),
@@ -1591,7 +1715,7 @@ mod tests {
                 grant_options: vec![],
             }),
         );
-        signals.set_dyn(
+        signals.emit_dyn(
             "confirm_resolved",
             Rc::new(ConfirmResolved {
                 handle_id: 1,

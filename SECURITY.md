@@ -2,10 +2,9 @@
 
 ## Supported versions
 
-smelt is beta software until 1.0 and currently supports only the latest
-published release. Beta maturity is not encoded as a SemVer prerelease: `0.x`
-versions are normal releases. Older releases do not receive security fixes.
-Upgrade before reporting or verifying a fix whenever practical.
+smelt is beta until 1.0 and only the latest release is supported. Older
+releases do not receive security fixes. Upgrade before reporting or verifying a
+fix.
 
 | Version | Supported |
 | ------- | --------- |

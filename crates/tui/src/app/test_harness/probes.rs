@@ -347,14 +347,14 @@ impl TestApp {
             self.install_prompt_cursor_trap(variant);
         }
 
-        let mut turn_id = 10_000 + u64::from(variant);
+        let mut turn_id = self.next_turn_id();
         let prediction_probe = variant & 0x80 != 0 && matches!(variant % 4, 0 | 1);
         self.start_turn(turn_id);
         if variant & 0x40 != 0 {
             self.press(KeyCode::Esc);
             self.press(KeyCode::Esc);
             if !self.agent_running() {
-                turn_id += 1;
+                turn_id = self.next_turn_id();
                 self.start_turn(turn_id);
             }
         } else if variant & 0x20 != 0 {
@@ -483,7 +483,7 @@ impl TestApp {
 
         self.install_compaction_prepare_fixture();
         if !self.agent_running() || variant % 2 == 1 {
-            self.start_turn(20_000 + u64::from(variant));
+            self.start_turn(self.next_turn_id());
         }
 
         let full_history = protocol::history_to_messages(&self.app.model_history());

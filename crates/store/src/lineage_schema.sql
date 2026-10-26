@@ -218,22 +218,6 @@ CREATE TABLE lineage_retained_revisions (
         REFERENCES lineage_revisions(lineage_id, revision_id) ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE lineage_revision_state_projections (
-    lineage_id TEXT NOT NULL,
-    original_payload_id TEXT NOT NULL,
-    projected_payload_id TEXT NOT NULL,
-    original_format_version INTEGER NOT NULL CHECK (original_format_version = 1),
-    projection_id TEXT NOT NULL CHECK (
-        length(projection_id) = 64 AND projection_id NOT GLOB '*[^0-9a-f]*'
-    ),
-    PRIMARY KEY (lineage_id, original_payload_id),
-    CHECK (original_payload_id <> projected_payload_id),
-    FOREIGN KEY (lineage_id, original_payload_id)
-        REFERENCES lineage_payload_object_refs(lineage_id, payload_id) ON DELETE CASCADE,
-    FOREIGN KEY (lineage_id, projected_payload_id)
-        REFERENCES lineage_payload_object_refs(lineage_id, payload_id)
-) STRICT;
-
 CREATE TABLE "lineage_revision_state_roots" (
     lineage_id TEXT NOT NULL,
     state_payload_id TEXT NOT NULL,
@@ -249,7 +233,7 @@ CREATE TABLE "lineage_revision_state_roots" (
         REFERENCES lineage_sequence_roots(lineage_id, root_id)
 ) STRICT;
 
-CREATE TABLE lineage_revisions (
+CREATE TABLE "lineage_revisions" (
     lineage_id TEXT NOT NULL,
     revision_id TEXT NOT NULL
         CHECK (length(revision_id) = 64 AND revision_id NOT GLOB '*[^0-9a-f]*'),
@@ -257,9 +241,9 @@ CREATE TABLE lineage_revisions (
     parent_revision_id TEXT,
     operation_kind TEXT NOT NULL
         CHECK (operation_kind IN ('initial', 'append', 'split', 'rewind')),
-    history_root_id TEXT NOT NULL,
-    transcript_root_id TEXT NOT NULL,
-    state_payload_id TEXT NOT NULL,
+    history_root_id TEXT,
+    transcript_root_id TEXT,
+    state_payload_id TEXT,
     history_len INTEGER NOT NULL CHECK (history_len >= 0),
     transcript_record_count INTEGER NOT NULL CHECK (transcript_record_count >= 0),
     transcript_byte_count INTEGER NOT NULL CHECK (transcript_byte_count >= 0),
@@ -279,6 +263,10 @@ CREATE TABLE lineage_revisions (
         OR
         (operation_kind != 'initial' AND parent_revision_id IS NOT NULL
             AND commit_fingerprint IS NOT NULL)
+    ),
+    CHECK (
+        (history_root_id IS NULL) = (transcript_root_id IS NULL)
+        AND (history_root_id IS NULL) = (state_payload_id IS NULL)
     ),
     FOREIGN KEY (lineage_id, created_by_session_id)
         REFERENCES lineage_branches(lineage_id, session_id),
@@ -486,14 +474,6 @@ CREATE TABLE lineage_turns (
         REFERENCES lineage_turns(lineage_id, session_id, turn_id)
 ) STRICT;
 
-CREATE TABLE object_data_roots (
-    object_hash TEXT PRIMARY KEY REFERENCES objects(hash) ON DELETE CASCADE,
-    lineage_id TEXT NOT NULL,
-    root_id TEXT NOT NULL,
-    FOREIGN KEY (lineage_id, root_id)
-        REFERENCES lineage_sequence_roots(lineage_id, root_id)
-) STRICT;
-
 CREATE TABLE objects (
     hash TEXT PRIMARY KEY CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
     codec TEXT NOT NULL CHECK (codec IN ('none', 'zstd')),
@@ -610,8 +590,6 @@ CREATE INDEX lineage_request_attempts_branch_idx
 CREATE INDEX lineage_retained_kind_idx
     ON lineage_retained_revisions(lineage_id, retention_kind, retained_at);
 
-CREATE INDEX lineage_revision_state_projections_projected_idx
-    ON lineage_revision_state_projections(lineage_id, projected_payload_id);
 
 CREATE INDEX lineage_revision_state_roots_root_idx
     ON lineage_revision_state_roots(lineage_id, root_id);
@@ -655,7 +633,6 @@ CREATE INDEX lineage_turns_revision_idx
 CREATE INDEX lineage_turns_state_idx
     ON lineage_turns(lineage_id, session_id, turn_state, turn_id DESC);
 
-CREATE INDEX object_data_roots_root_idx ON object_data_roots(lineage_id, root_id);
 
 CREATE INDEX objects_sharing_idx ON objects(raw_size, hash) WHERE raw_size >= 131072;
 
@@ -972,42 +949,6 @@ BEGIN
     ) THEN RAISE(ABORT, 'revision state has the wrong payload kind') END;
 END;
 
-CREATE TRIGGER lineage_revision_state_projection_delete
-BEFORE DELETE ON lineage_revision_state_projections
-WHEN EXISTS (
-    SELECT 1 FROM lineage_payload_object_refs
-    WHERE lineage_id = OLD.lineage_id AND payload_id = OLD.original_payload_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'revision state projections belong to their original payload');
-END;
-
-CREATE TRIGGER lineage_revision_state_projection_insert
-BEFORE INSERT ON lineage_revision_state_projections
-BEGIN
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM lineage_payload_object_refs original
-        JOIN lineage_payload_object_refs projected
-          ON projected.lineage_id = original.lineage_id
-         AND projected.payload_id = NEW.projected_payload_id
-        WHERE original.lineage_id = NEW.lineage_id
-          AND original.payload_id = NEW.original_payload_id
-          AND original.payload_kind = 'revision_state'
-          AND projected.payload_kind = 'revision_state'
-    ) OR EXISTS (
-        SELECT 1 FROM lineage_revision_state_projections
-        WHERE lineage_id = NEW.lineage_id
-          AND (original_payload_id = NEW.projected_payload_id
-               OR projected_payload_id = NEW.original_payload_id)
-    ) THEN RAISE(ABORT, 'invalid revision state projection') END;
-END;
-
-CREATE TRIGGER lineage_revision_state_projection_update
-BEFORE UPDATE ON lineage_revision_state_projections
-BEGIN
-    SELECT RAISE(ABORT, 'revision state projections are immutable');
-END;
-
 CREATE TRIGGER lineage_revision_state_root_delete
 BEFORE DELETE ON lineage_revision_state_roots
 WHEN EXISTS (
@@ -1043,10 +984,39 @@ BEGIN
     SELECT RAISE(ABORT, 'revision archive roots are immutable');
 END;
 
+-- Releasing content clears all three content references and nothing else.
+-- Branch endpoints, retained revisions and submitted turns keep their content.
 CREATE TRIGGER lineage_revision_update
 BEFORE UPDATE ON lineage_revisions
+WHEN NOT (
+    OLD.state_payload_id IS NOT NULL
+    AND NEW.history_root_id IS NULL AND NEW.transcript_root_id IS NULL
+    AND NEW.state_payload_id IS NULL
+    AND NEW.lineage_id = OLD.lineage_id AND NEW.revision_id = OLD.revision_id
+    AND NEW.created_by_session_id = OLD.created_by_session_id
+    AND NEW.parent_revision_id IS OLD.parent_revision_id
+    AND NEW.operation_kind = OLD.operation_kind
+    AND NEW.history_len = OLD.history_len
+    AND NEW.transcript_record_count = OLD.transcript_record_count
+    AND NEW.transcript_byte_count = OLD.transcript_byte_count
+    AND NEW.commit_fingerprint IS OLD.commit_fingerprint
+    AND NEW.history_start_idx IS OLD.history_start_idx
+    AND NEW.transcript_start_idx IS OLD.transcript_start_idx
+    AND NEW.turn_id IS OLD.turn_id
+    AND NEW.created_at = OLD.created_at
+) OR EXISTS (
+    SELECT 1 FROM lineage_branches
+    WHERE lineage_id = OLD.lineage_id
+      AND (head_revision_id = OLD.revision_id OR initial_revision_id = OLD.revision_id)
+) OR EXISTS (
+    SELECT 1 FROM lineage_retained_revisions
+    WHERE lineage_id = OLD.lineage_id AND revision_id = OLD.revision_id
+) OR EXISTS (
+    SELECT 1 FROM lineage_turns
+    WHERE lineage_id = OLD.lineage_id AND submitted_revision_id = OLD.revision_id
+)
 BEGIN
-    SELECT RAISE(ABORT, 'lineage revisions are immutable');
+    SELECT RAISE(ABORT, 'lineage revisions are immutable except for releasing content');
 END;
 
 CREATE TRIGGER lineage_sequence_entry_complete
@@ -1195,6 +1165,10 @@ WHEN EXISTS (
     SELECT 1 FROM lineage_session_receipts
     WHERE lineage_id = OLD.lineage_id AND session_id = OLD.session_id
       AND fingerprint = OLD.fingerprint
+) AND EXISTS (
+    SELECT 1 FROM lineage_revisions
+    WHERE lineage_id = OLD.lineage_id AND revision_id = OLD.result_revision_id
+      AND state_payload_id IS NOT NULL
 )
 BEGIN
     SELECT RAISE(ABORT, 'session receipt results belong to their retained receipts');
@@ -1272,37 +1246,3 @@ BEGIN
     SELECT RAISE(ABORT, 'lineage turn transitions are immutable');
 END;
 
-CREATE TRIGGER object_data_root_delete
-BEFORE DELETE ON object_data_roots
-WHEN EXISTS (SELECT 1 FROM objects WHERE hash = OLD.object_hash)
-BEGIN
-    SELECT RAISE(ABORT, 'object data roots belong to their logical object');
-END;
-
-CREATE TRIGGER object_data_root_insert
-BEFORE INSERT ON object_data_roots
-BEGIN
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM objects object
-        JOIN lineage_sequence_roots root
-          ON root.lineage_id = NEW.lineage_id AND root.root_id = NEW.root_id
-        WHERE object.hash = NEW.object_hash
-          AND object.codec = 'none' AND object.stored_size = 0
-          AND object.raw_size BETWEEN 131072 AND 67108864
-          AND root.root_kind = 'data' AND root.byte_count = object.raw_size
-          AND root.depth BETWEEN 1 AND 3 AND root.item_count BETWEEN 2 AND 8192
-    ) THEN RAISE(ABORT, 'object data root does not match logical object') END;
-END;
-
-CREATE TRIGGER object_data_root_object_update
-BEFORE UPDATE ON objects
-WHEN EXISTS (SELECT 1 FROM object_data_roots WHERE object_hash = OLD.hash)
-BEGIN
-    SELECT RAISE(ABORT, 'shared logical objects are immutable');
-END;
-
-CREATE TRIGGER object_data_root_update
-BEFORE UPDATE ON object_data_roots
-BEGIN
-    SELECT RAISE(ABORT, 'object data roots are immutable');
-END;

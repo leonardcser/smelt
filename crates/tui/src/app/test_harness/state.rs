@@ -70,7 +70,7 @@ impl TestApp {
         while self.state().active_modal.is_none() {
             self.feed_one(SourceEvent::LuaWakeup);
             assert!(std::time::Instant::now() < deadline, "Lua dialog timed out");
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -83,7 +83,7 @@ impl TestApp {
                 self.app.pump_lua();
             }
             assert!(std::time::Instant::now() < deadline, "rewind timed out");
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -94,6 +94,9 @@ impl TestApp {
                 self.app.handle_app_event(event);
             }
             self.app.pump_lua();
+            if self.app.frame_scheduler.has_pending() {
+                self.app.render_normal_to(&mut std::io::sink());
+            }
             if !self.app.conversation.canonical_operations_are_pending()
                 && !self.app.turn_submission_is_pending()
             {
@@ -103,7 +106,7 @@ impl TestApp {
                 std::time::Instant::now() < deadline,
                 "turn persistence timed out"
             );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -178,6 +181,21 @@ impl TestApp {
         self.app.prompt.queued_request_len()
     }
 
+    /// The id the app allocates to its next turn.
+    pub fn next_turn_id(&self) -> u64 {
+        self.app.conversation.next_turn_id()
+    }
+
+    /// Whether the conversation is paused after an interrupted or failed turn.
+    pub fn turn_is_paused(&self) -> bool {
+        self.app.conversation.turn_pause().is_some()
+    }
+
+    /// Whether no input of any stage waits behind the running work.
+    pub fn queue_is_empty(&self) -> bool {
+        self.app.prompt.queue_is_empty()
+    }
+
     /// Whether completing the active turn would immediately start a queued
     /// input with non-empty display text.
     pub fn next_queued_input_starts_turn(&self) -> bool {
@@ -193,7 +211,18 @@ impl TestApp {
     /// replaces local history and drops any current context note; with a
     /// checkpoint, only notes before `first_live_index` survive the merge.
     pub fn next_follow_up_appends_context_note(&self) -> bool {
-        if !self.next_queued_input_starts_turn() && !self.has_pending_history_follow_up() {
+        self.follow_up_appends_context_note(self.has_pending_history_follow_up())
+    }
+
+    /// Like [`Self::next_follow_up_appends_context_note`] for a turn whose final
+    /// history drops the submitted item, so a note identical to it still starts
+    /// the follow-up.
+    pub fn next_follow_up_appends_context_note_unfiltered(&self) -> bool {
+        self.follow_up_appends_context_note(self.has_pending_history_follow_up_unfiltered())
+    }
+
+    fn follow_up_appends_context_note(&self, pending_follow_up: bool) -> bool {
+        if !self.next_queued_input_starts_turn() && !pending_follow_up {
             return false;
         }
         let context = self.app.current_context_note_text();
@@ -218,8 +247,12 @@ impl TestApp {
     /// `queued_inputs` is filled by pressing Enter on the prompt while a
     /// turn is active; the harness short-circuits that flow but honors
     /// the same `MAX_QUEUED_MESSAGES` cap so the fuzz observes the real
-    /// drop-on-overflow behavior instead of unbounded growth.
+    /// drop-on-overflow behavior instead of unbounded growth. Like the prompt,
+    /// it never queues an empty submission.
     pub fn push_queued_message(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
         self.app
             .prompt
             .try_queue_turn(crate::app::QueuedInput::request_from_text(
@@ -276,14 +309,50 @@ impl TestApp {
     }
 
     /// Whether an unconsumed deferred note will start a follow-up turn after
-    /// the active turn finishes successfully.
+    /// the active turn finishes successfully. A note identical to the item the
+    /// active turn submitted is already delivered by that turn's own history.
     pub fn has_pending_history_follow_up(&self) -> bool {
+        self.pending_follow_up_appends(true)
+    }
+
+    /// Like [`Self::has_pending_history_follow_up`], but counts a note identical
+    /// to the submitted item as well: the turn's final history can drop that
+    /// item, leaving the note undelivered.
+    pub fn has_pending_history_follow_up_unfiltered(&self) -> bool {
+        self.pending_follow_up_appends(false)
+    }
+
+    /// Session history index of the item the active turn submitted.
+    pub fn submitted_history_idx(&self) -> Option<usize> {
+        self.app
+            .conversation
+            .active()
+            .map(|turn| turn.submitted_history_idx)
+    }
+
+    fn pending_follow_up_appends(&self, skip_submitted: bool) -> bool {
+        let submitted = self
+            .app
+            .conversation
+            .active()
+            .filter(|_| skip_submitted)
+            .and_then(|turn| {
+                let idx = turn.submitted_history_idx;
+                self.app
+                    .session_history_range(idx..idx + 1)
+                    .ok()?
+                    .into_iter()
+                    .next()
+            });
         self.app
             .conversation
             .pending_history_appends()
             .iter()
             .any(|append| {
                 append.delivery() == crate::app::PendingHistoryDelivery::FollowUpIfUnconsumed
+                    && !submitted
+                        .as_ref()
+                        .is_some_and(|item| append.matches_history_item(item))
             })
     }
 
@@ -530,6 +599,15 @@ impl TestApp {
         true
     }
 
+    /// Whether the engine ask with this id still has a response callback.
+    pub fn ask_is_pending(&self, id: u64) -> bool {
+        let shared = self.app.lua.shared().core_arc();
+        shared
+            .ask_callbacks
+            .lock()
+            .is_ok_and(|callbacks| callbacks.contains_key(&id))
+    }
+
     /// Smallest pending `smelt.engine.ask` callback id, if any.
     /// Stories that drive `/btw` or other ask flows use this to
     /// pair their synthesised `EngineAskResponse` to the right id.
@@ -615,7 +693,7 @@ impl TestApp {
                 std::time::Instant::now() < deadline,
                 "writer startup timed out"
             );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(super::POLL_INTERVAL);
         }
     }
 
@@ -630,7 +708,7 @@ impl TestApp {
                     std::time::Instant::now() < deadline,
                     "session lifecycle timed out"
                 );
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(super::POLL_INTERVAL);
             }
         }
     }

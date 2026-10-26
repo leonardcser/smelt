@@ -3,10 +3,9 @@
 //! this module supplies the file I/O primitives that
 //! `smelt.state.persistent(name)` builds on.
 
-use crate::lua::api::{lua_table_to_json, lua_value_to_json};
 use crate::lua::doc::Tier;
-use crate::lua::json_to_lua;
 use crate::lua::module::LuaMod;
+use crate::lua::value;
 use mlua::prelude::*;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +29,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, state_root: &Path) -> Lua
             };
             let json: serde_json::Value =
                 serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()));
-            match json_to_lua(lua, &json)? {
+            match value::from_json(lua, &json)? {
                 mlua::Value::Table(t) => Ok(t),
                 _ => lua.create_table(),
             }
@@ -39,11 +38,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, state_root: &Path) -> Lua
     m.private_live_only_fn(
         "__save",
         &["name", "value"],
-        move |lua, (name, value): (String, mlua::Value)| -> LuaResult<()> {
-            let json = match &value {
-                mlua::Value::Table(t) => lua_table_to_json(lua, t),
-                other => lua_value_to_json(lua, other),
-            };
+        move |lua, (name, state): (String, mlua::Value)| -> LuaResult<()> {
+            let json = value::to_json(lua, &state)?;
             let serialized = serde_json::to_string(&json)
                 .map_err(|e| LuaError::RuntimeError(format!("smelt.state.__save: {e}")))?;
             let path = state_path(&plugin_state_dir, &name);

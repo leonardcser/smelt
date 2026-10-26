@@ -63,6 +63,7 @@ pub(super) struct TranscriptScrollProbeState {
     last_user_delta_anchor: Option<UserDeltaAnchor>,
     pending_wheel_movement: Option<PendingWheelMovement>,
     pending_search_match_check: bool,
+    selection_clearing_command: bool,
     fixture: Option<SparseTranscriptFixture>,
 }
 
@@ -711,6 +712,8 @@ impl TestApp {
         self.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         self.app.transcript_win_mut().set_vim_enabled(true);
         self.app.transcript_win_mut().set_vim_mode(VimMode::Normal);
+        self.transcript_scroll_probe.selection_clearing_command =
+            self.app.transcript_win().selection_active();
         match command {
             TranscriptScrollProbeCommand::MoveDown => self.press(KeyCode::Down),
             TranscriptScrollProbeCommand::MoveUp => self.press(KeyCode::Up),
@@ -1067,6 +1070,7 @@ fn assert_transcript_scroll_probe_frames(
     state: &mut TranscriptScrollProbeState,
     frames: &[TranscriptScrollTraceFrame],
 ) {
+    let selection_clearing_command = std::mem::take(&mut state.selection_clearing_command);
     for frame in frames {
         assert!(
             !frame.placeholder_rows_visible,
@@ -1091,6 +1095,11 @@ fn assert_transcript_scroll_probe_frames(
                     "local transcript movement lost its visible content anchor: {frame:?}"
                 );
                 assert_record_ranges_overlap(state, frame);
+                // A motion key first clears the selection, which scrolls the
+                // cursor into view before the motion applies.
+                if selection_clearing_command && frame.input_event_or_tick == "document_command" {
+                    continue;
+                }
                 assert_user_delta_from_frame_start(*rows, frame);
                 assert_user_delta_direction(state, *rows, frame);
             }
@@ -1205,12 +1214,16 @@ fn viewport_anchor_preserved(frame: &TranscriptScrollTraceFrame) -> bool {
 fn no_input_scroll_top_change_preserved_content(frames: &[TranscriptScrollTraceFrame]) -> bool {
     !frames.is_empty()
         && frames.iter().all(|frame| {
-            matches!(
-                frame.scroll_intent,
+            if frame.placeholder_rows_visible {
+                return false;
+            }
+            match frame.scroll_intent {
                 TranscriptScrollIntent::PreserveViewport
-                    | TranscriptScrollIntent::ResizeReflow { .. }
-            ) && viewport_anchor_preserved(frame)
-                && !frame.placeholder_rows_visible
+                | TranscriptScrollIntent::ResizeReflow { .. } => viewport_anchor_preserved(frame),
+                // A no-input render submits no input, so any other intent is
+                // one an earlier unsettled render left pending.
+                _ => true,
+            }
         })
 }
 
@@ -1469,12 +1482,21 @@ fn sparse_preserve_frame_settled_stale_resolved_anchor(frame: &TranscriptScrollT
     else {
         return false;
     };
+    let (Some(first_visible), Some(last_visible)) = (
+        frame.first_visible_content_anchor,
+        frame.last_visible_content_anchor,
+    ) else {
+        return false;
+    };
+    // The scroll top is unchanged and still shows content, so the frame only
+    // re-resolved a stale anchor somewhere inside the viewport.
     matches!(
         frame.projection_target,
         TranscriptProjectionTargetTrace::StableRowDelta { row, delta: 0 }
             if row == frame.window_scroll_before
                 && row == frame.resolved_scroll_top
-                && after_row == row
+                && first_visible.virtual_row == row
+                && (row..=last_visible.virtual_row).contains(&after_row)
                 && before_row != row
     ) && !frame.placeholder_rows_visible
         && before == after

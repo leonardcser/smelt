@@ -16,7 +16,7 @@ json.array = nil
 ---@type fun(text: string): any, string?
 json.decode = nil
 
---- Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` for an empty array.
+--- Encode a Lua value as JSON. Pass `{ pretty = true }` to format with indentation. Tables with contiguous 1..N integer keys encode as arrays; other tables encode as objects. Use `smelt.json.array()` for an empty array. Raises an error for cycles, nesting deeper than 128 levels, functions and other non-data values, non-finite numbers, and strings that are not valid UTF-8.
 ---@see smelt.json.array
 ---@type fun(value: any, opts: table?): string
 json.encode = nil

@@ -2280,6 +2280,9 @@ impl TuiApp {
             .publish_if_changed("cwd_branch", self.workspace.branch().to_owned());
         self.core
             .signals
+            .publish_if_changed("branch", self.workspace.branch().to_owned());
+        self.core
+            .signals
             .publish_if_changed("cwd_worktree", self.workspace.worktree().to_owned());
         self.core.signals.publish_if_changed(
             "cwd_worktree_path",
@@ -3571,7 +3574,7 @@ impl TuiApp {
         }
         self.warn_if_api_base_normalized();
 
-        self.core.signals.set_dyn(
+        self.core.signals.emit_dyn(
             "session_started",
             std::rc::Rc::new(self.conversation.session().id.clone()),
         );
@@ -3674,6 +3677,7 @@ impl TuiApp {
             }
         }
 
+        let mut animating_last_tick = false;
         'main: loop {
             if self.pending_quit {
                 self.discard_turn(TurnEnd::Cancelled);
@@ -3825,7 +3829,12 @@ impl TuiApp {
                     .drag_autoscroll_interval()
                     .unwrap_or(Duration::from_millis(16));
                 self.request_animation_render(interval);
+            } else if animating_last_tick {
+                // The last animated frame is stale once animation stops
+                // (spinner, elapsed clock); paint the settled state.
+                self.request_urgent_render();
             }
+            animating_last_tick = has_animation;
             let next_scheduled_frame_delay = self.scheduled_frame_delay();
 
             tokio::select! {
@@ -3908,7 +3917,6 @@ impl TuiApp {
                     }
 
                     self.dispatch_ui_window_events(false);
-                    self.publish_diff_signals();
                     self.render_normal();
                 }
 
@@ -3985,7 +3993,6 @@ impl TuiApp {
                     if has_animation && self.tick_drag_autoscroll_with_transcript_intent() {
                         self.dispatch_ui_window_events(false);
                     }
-                    self.publish_diff_signals();
                     self.render_normal();
                 }
 
@@ -3994,7 +4001,6 @@ impl TuiApp {
                     self.drive_lua_tasks();
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
-                    self.publish_diff_signals();
                     self.render_normal();
                 }
 

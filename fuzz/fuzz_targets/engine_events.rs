@@ -124,8 +124,31 @@ enum HistoryEntry {
 #[derive(Default)]
 struct Model {
     active_turn: Option<u64>,
+    submitted_history_idx: usize,
     history: Vec<HistoryItem>,
     sequence: u64,
+}
+
+impl Model {
+    fn begin_turn(&mut self, id: u64) {
+        self.active_turn = Some(id);
+        self.submitted_history_idx = self.history.len().saturating_sub(1);
+    }
+
+    /// A completed turn keeps the item it submitted verbatim when the incoming
+    /// history replaces it with a different one.
+    fn complete_history(&mut self, first: usize, items: &[HistoryItem]) {
+        let submitted = self.history.get(self.submitted_history_idx).cloned();
+        self.history.truncate(first);
+        self.history.extend(items.iter().cloned());
+        if let (Some(relative), Some(submitted)) =
+            (self.submitted_history_idx.checked_sub(first), submitted)
+        {
+            if let Some(slot) = self.history.get_mut(first + relative).filter(|_| relative < items.len()) {
+                *slot = submitted;
+            }
+        }
+    }
 }
 
 fuzz_target!(|input: Input| {
@@ -163,7 +186,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             if model.active_turn.is_none() {
                 let id = u64::from(id);
                 app.start_turn(id);
-                model.active_turn = Some(id);
+                model.begin_turn(id);
             }
         }
         Op::Ready => feed(app, EngineEvent::Ready),
@@ -495,6 +518,10 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             assert_eq!(app.pending_confirm_count(), 1);
             assert!(app.resolve_first_confirm(approve, None));
             assert_eq!(app.pending_confirm_count(), 0);
+            if !approve {
+                // Denying without a message stops the agent and ends the turn.
+                model.active_turn = None;
+            }
             let decisions: Vec<_> = app
                 .actions_since(action_index)
                 .iter()
@@ -550,8 +577,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
             let history = items.map(|items| {
                 let first = usize::from(first) % (model.history.len() + 1);
                 let items = history_items(items);
-                model.history.truncate(first);
-                model.history.extend(items.clone());
+                model.complete_history(first, &items);
                 CanonicalHistoryDelta::new(first, items)
             });
             feed(
@@ -604,7 +630,7 @@ fn ensure_turn(app: &mut TestApp, model: &mut Model) {
     if model.active_turn.is_none() {
         let id = model.sequence;
         app.start_turn(id);
-        model.active_turn = Some(id);
+        model.begin_turn(id);
     }
 }
 
@@ -615,13 +641,17 @@ fn ask_round_trip(
     response: String,
     fail: bool,
 ) {
+    let before = app.actions_since(0).len();
     app.start_engine_ask_probe(&small_text(question));
     let id = app
-        .drain_engine_sends()
-        .into_iter()
-        .find_map(|command| match command {
-            UiCommand::EngineAsk { id, .. } => Some(id),
-            _ => None,
+        .actions_since(before)
+        .iter()
+        .find_map(|action| match action {
+            Action::EngineSend(command) => match command.as_ref() {
+                UiCommand::EngineAsk { id, .. } => Some(*id),
+                _ => None,
+            },
+            Action::Quit => None,
         })
         .expect("engine ask probe did not send a request");
     feed(
@@ -651,7 +681,7 @@ fn ask_round_trip(
     };
     feed(app, EngineEvent::EngineAskResponse { id, message, error });
     assert!(
-        app.pending_ask_id().is_none(),
+        !app.ask_is_pending(id),
         "engine ask callback survived its terminal response"
     );
 }

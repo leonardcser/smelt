@@ -1,9 +1,9 @@
 //! `smelt.tools` - register/unregister plugin tools and resolve their results to the engine.
 
-use super::{lua_table_to_args, lua_table_to_json};
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
+use crate::lua::value;
 use crate::lua::{LuaHandle, LuaShared, ToolHandles};
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
@@ -148,10 +148,10 @@ pub struct LuaToolDef {
     pub override_core: bool,
 }
 
-fn tool_parameters_json(lua: &Lua, params: &mlua::Table) -> serde_json::Value {
-    let mut json = lua_table_to_json(lua, params);
+fn tool_parameters_json(lua: &Lua, params: &mlua::Table) -> LuaResult<serde_json::Value> {
+    let mut json = value::table_to_json(lua, params)?;
     reorder_schema_properties(&mut json);
-    json
+    Ok(json)
 }
 
 fn reorder_schema_properties(value: &mut serde_json::Value) {
@@ -257,7 +257,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let meta = lua.create_table()?;
                 meta.set("description", def.description)?;
                 if let Some(params) = def.parameters {
-                    let params_json = tool_parameters_json(lua, &params);
+                    let params_json = tool_parameters_json(lua, &params)?;
                     if let Ok(json_str) = serde_json::to_string(&params_json) {
                         meta.set("parameters_json", json_str)?;
                     }
@@ -349,7 +349,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     meta.set("description", description)?;
                 }
                 if let Ok(Some(parameters)) = patch.get::<Option<mlua::Table>>("parameters") {
-                    let parameters = tool_parameters_json(lua, &parameters);
+                    let parameters = tool_parameters_json(lua, &parameters)?;
                     if let Ok(json_str) = serde_json::to_string(&parameters) {
                         meta.set("parameters_json", json_str)?;
                     }
@@ -473,7 +473,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             let parent_invocation_id = crate::lua::current_tool_invocation()
                 .map(|invocation| invocation.invocation_id)
                 .ok_or_else(|| mlua::Error::external("tools.call: no active tool invocation"))?;
-            let arg_map = lua_table_to_args(lua, &args);
+            let arg_map = value::table_to_object(lua, &args)?;
             crate::host::with_core(|core| {
                 core.engine.send(protocol::UiCommand::CallCoreTool {
                     request_id,

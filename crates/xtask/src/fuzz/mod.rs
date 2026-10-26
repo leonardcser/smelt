@@ -334,6 +334,10 @@ pub(super) const TARGETS: &[FuzzTarget] = &[
         name: "engine_events",
         kind: TargetKind::Bytes,
     },
+    FuzzTarget {
+        name: "engine_turns",
+        kind: TargetKind::Bytes,
+    },
 ];
 
 pub(super) fn all_targets() -> &'static [FuzzTarget] {

@@ -223,7 +223,10 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
                         result.set("content", inv.result.content.as_str())?;
                         result.set("is_error", inv.result.is_error)?;
                         if let Some(metadata) = &inv.result.metadata {
-                            result.set("metadata", smelt_core::lua::json_to_lua(lua, metadata)?)?;
+                            result.set(
+                                "metadata",
+                                smelt_core::lua::value::from_json(lua, metadata)?,
+                            )?;
                         }
                         row.set("result", result)?;
                         invocations.set(j + 1, row)?;
@@ -890,7 +893,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "turns",
-        "Return rewindable user turns as `{ history_idx, block_idx, label }` rows where `history_idx` is the canonical rewind coordinate, deprecated `block_idx` is its compatibility alias, and `label` is the first line of the user message.",
+        "Return rewindable user turns as `{ history_idx, label }` rows where `history_idx` is the rewind coordinate and `label` is the first line of the user message.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let turns = crate::lua::try_with_session_host(|host| host.rewind_turns())
@@ -901,8 +904,6 @@ pub(super) fn register(
             for (i, turn) in turns.into_iter().enumerate() {
                 let row = lua.create_table()?;
                 row.set("history_idx", turn.history_idx)?;
-                // COMPAT(lua-session-turn-block-idx): remove after third-party rewind dialogs use history_idx.
-                row.set("block_idx", turn.history_idx)?;
                 row.set("label", turn.label)?;
                 out.set(i + 1, row)?;
             }

@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * edit_file src/lib.rs                                                 14:37:03
-
+  3 old lines, 3 new lines
 
 
 

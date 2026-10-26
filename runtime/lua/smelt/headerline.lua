@@ -1,6 +1,6 @@
 -- Headerline window - Lua-allocated, Lua-rendered top chrome.
 --
--- Features register named sources with `M.add(name, spec)`. Each spec may
+-- Features register named sources with `smelt.headerline.add(name, spec)`. Each spec may
 -- expose:
 --   * visible() -> boolean      whether this source currently reserves a row
 --   * render(width) -> row      returns `{ text, highlights }` for one row
@@ -11,6 +11,7 @@
 local bar = require("smelt._bar")
 
 local M = {}
+smelt.headerline = M
 
 local NS = smelt.ns("smelt.headerline")
 local sources = {} -- ordered { name, spec } pairs
@@ -19,28 +20,71 @@ local renderer_subscriptions = {}
 -- Repaint and recompose the layout after plugin-owned state changes that are
 -- not represented by a built-in signal. Visibility may change the row count.
 -- Adding, replacing, and removing sources invalidates automatically.
-function M.invalidate()
+---@tier ui_host
+---@type fun()
+function smelt.headerline.invalidate()
   if M.win then M.win:invalidate_renderer() end
   smelt.ui.layout.invalidate()
 end
 
-function M.add(name, spec)
+--- One header row: its text and the highlight ranges to paint over it.
+---@class smelt.headerline.Row
+---@field text string Row text.
+---@field highlights? smelt.headerline.Highlight[] Highlights over `text`.
+
+--- A highlight over a header row, in byte offsets into the row text.
+---@class smelt.headerline.Highlight
+---@field bytes_start integer Start byte offset (inclusive).
+---@field bytes_end integer End byte offset (exclusive).
+---@field style smelt.buf.MarkOpts Style to apply.
+---@field selectable? boolean Include the range in drag-copy.
+
+--- A headerline source. The first source whose `visible` returns true owns the row.
+---@class smelt.headerline.Spec
+---@field render fun(width: integer): smelt.headerline.Row Build the row for a given content width.
+---@field visible? fun(): boolean Whether this source currently reserves the row. Defaults to always visible.
+
+--- Add a named headerline source; a bare function is shorthand for `{ render = fn }`.
+--- The header takes a row above the transcript only while some source is visible.
+--- Adding a name that already exists replaces that source in place. Returns a
+--- `Reg` that removes this source, unless a later `add` with the same name has
+--- replaced it.
+---@tier ui_host
+---@type fun(name: string, spec: smelt.headerline.Spec|fun(width: integer): smelt.headerline.Row): smelt.Reg
+function smelt.headerline.add(name, spec)
+  if type(name) ~= "string" or name == "" then
+    error("smelt.headerline.add: name must be a non-empty string", 2)
+  end
   if type(spec) == "function" then spec = { render = spec } end
   if type(spec) ~= "table" or type(spec.render) ~= "function" then
     error("smelt.headerline.add: spec must be a table with render(width)", 2)
   end
-  for _, src in ipairs(sources) do
+  local entry = { name = name, spec = spec }
+  local replaced = false
+  for i, src in ipairs(sources) do
     if src.name == name then
-      src.spec = spec
-      M.invalidate()
-      return
+      sources[i] = entry
+      replaced = true
+      break
     end
   end
-  sources[#sources + 1] = { name = name, spec = spec }
+  if not replaced then sources[#sources + 1] = entry end
   M.invalidate()
+  return smelt.reg.new(function()
+    for i, src in ipairs(sources) do
+      if src == entry then
+        table.remove(sources, i)
+        M.invalidate()
+        return
+      end
+    end
+  end)
 end
 
-function M.remove(name)
+--- Remove every source named `name`.
+---@tier ui_host
+---@type fun(name: string)
+function smelt.headerline.remove(name)
   for i = #sources, 1, -1 do
     if sources[i].name == name then table.remove(sources, i) end
   end

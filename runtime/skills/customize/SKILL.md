@@ -449,6 +449,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.predict` | Input prediction plugin. |
 | `smelt.plugins.process_control` | Ctrl-G: stop following a foreground bash job while it keeps running. |
 | `smelt.plugins.scroll_pills` | Clickable scroll-pill overlays navigate the transcript. |
+| `smelt.plugins.snake` | /snake (or F11) - snake in a floating window. hjkl or the arrows steer, space starts over, q, Esc or Ctrl-C closes. |
 | `smelt.plugins.terminal_title` | Keeps the terminal window/tab title in sync with smelt. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.turn_notifications` | Optional terminal desktop notification when an agent turn ends. |
@@ -561,6 +562,7 @@ Use the generated Lua API reference for complete signatures and types.
 
 - `smelt.agent` - Agent-facing prompt customization for Lua plugins.
 - `smelt.auth` - Authenticated provider helpers.
+- `smelt.banner` - Startup banner extension point.
 - `smelt.build` - Compile-time build identity and version metadata for plugins.
 - `smelt.builtins` - Opt out of bundled `smelt.<dotted>` modules.
 - `smelt.cli` - Declare and read CLI flags from Lua.
@@ -568,7 +570,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.defaults` - Startup fallbacks for new sessions.
 - `smelt.diff` - Compact unified-patch indexing, metadata and expandable context folds.
 - `smelt.document` - Indexed read-only documents shared by native data providers and Lua-created windows.
-- `smelt.events` - Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`.
+- `smelt.events` - Occurrence-oriented subscriptions for events such as `turn_start`, `tool_start`, and `turn_complete`.
 - `smelt.files` - Workspace file search.
 - `smelt.frontend` - Query which frontend is active (TUI vs headless).
 - `smelt.fs` - Sync filesystem primitives.
@@ -576,6 +578,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.fuzzy` - Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
 - `smelt.git` - Asynchronous Git snapshots and explicit file-level staging.
 - `smelt.grep` - Ripgrep wrapper for searching files.
+- `smelt.headerline` - Optional row above the transcript.
 - `smelt.html` - HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 - `smelt.http` - Asynchronous HTTP get/post.
 - `smelt.http.cache` - Runtime-owned HTTP response cache.
@@ -601,6 +604,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.shell` - Shell command splitting and interactive/background-operator validators.
 - `smelt.signal` - Named reactive values.
 - `smelt.skills` - List and load skill content from the SkillLoader populated at startup.
+- `smelt.spinner` - Shared spinner glyph and traveling-wave grayscale color for plugin animations.
 - `smelt.state` - Per-plugin state.
 - `smelt.task` - Yield-then-resume coroutine bridge: alloc and resume external tasks.
 - `smelt.text` - Terminal-cell measurement and pure text formatting.
@@ -633,7 +637,9 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.session.messages` - Session messages.
 - `smelt.session.slug` - Session slug.
 - `smelt.session.title` - Session title.
+- `smelt.statusline` - The statusline at the bottom of the screen.
 - `smelt.terminal` - Terminal integration helpers.
+- `smelt.tips` - Discovery tips shown in the prompt bar and banner.
 - `smelt.ui` - Screen-composition primitives: main layout composer and per-window renderer registration.
 - `smelt.ui.layout` - Composable layout-tree primitives for the retained main TUI layout.
 - `smelt.vim` - Read and write the vim mode of the focused vim-enabled surface.

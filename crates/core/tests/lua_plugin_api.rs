@@ -1,7 +1,7 @@
 //! Integration tests for the Lua plugin API surface.
 //!
 //! Boots a [`LuaRuntime`] with the host-tier API registered and the
-//! bundled `_bootstrap.lua` evaluated, then exercises the public
+//! bundled bootstrap chunks evaluated, then exercises the public
 //! primitives (`smelt.task.timeout/race/all`, `smelt.reg.compose`,
 //! `smelt.fs.watch`, `smelt.fs.read_async`, `smelt.process.run`,
 //! cancellation behavior, …) end-to-end.
@@ -217,6 +217,41 @@ fn json_api_round_trips_tables_and_reports_decode_errors() {
         .expect("json api round trip");
 }
 
+#[test]
+fn json_encode_rejects_values_it_cannot_represent() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            local function fails(value, pattern)
+                local ok, err = pcall(smelt.json.encode, value)
+                assert(not ok, "expected an error")
+                assert(tostring(err):find(pattern, 1, true), tostring(err))
+            end
+
+            local cyclic = {}
+            cyclic.self = cyclic
+            fails(cyclic, "table cycle")
+
+            local deep = {}
+            local node = deep
+            for _ = 1, 100000 do
+                local child = {}
+                node[1] = child
+                node = child
+            end
+            fails(deep, "depth limit")
+
+            fails({ value = 0 / 0 }, "non-finite")
+            fails({ value = math.huge }, "non-finite")
+            fails({ callback = function() end }, "unsupported Lua function")
+            fails({ text = "\255" }, "UTF-8")
+            "#,
+        )
+        .exec()
+        .expect("json encode failures");
+}
+
 // -- tools.register -------------------------------------------------------
 
 #[test]
@@ -341,7 +376,7 @@ async fn lua_tool_schema_reaches_openai_compatible_request_with_array_required_f
     let cancel = CancellationToken::new();
     let options = ChatOptions::new(&cancel);
 
-    ProviderClient::new(reqwest::Client::new())
+    ProviderClient::new(smelt_provider::http_client())
         .chat(
             ChatRequest {
                 provider: ChatProvider::api_key(ProviderKind::OpenAiCompatible, "test-key"),
@@ -1626,7 +1661,7 @@ fn runtime_constructor_defers_bootstrap_until_explicit_load() {
         let relative_path = chunk.path;
         let path = runtime_dir.join("smelt").join(relative_path);
         std::fs::create_dir_all(path.parent().unwrap()).expect("bootstrap parent");
-        let source = if relative_path == "_bootstrap.lua" {
+        let source = if relative_path == smelt_core::lua::runtime::BOOTSTRAP_CHUNKS[0].path {
             "BOOTSTRAP_COUNT = (BOOTSTRAP_COUNT or 0) + 1\n"
         } else {
             ""

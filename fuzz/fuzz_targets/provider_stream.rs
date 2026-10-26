@@ -238,16 +238,16 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                     _ => {}
                 }
             }
-            summary.ok &= tools.values().all(|(id, name, args)| {
-                !id.is_empty()
-                    && !name.is_empty()
-                    && serde_json::from_str::<serde_json::Value>(args).is_ok()
-            });
+            summary.ok &= tool_batch_is_valid(tools.values());
         }
         1 => {
             let mut active_tools = std::collections::HashSet::new();
+            let mut tool_without_item_id = false;
             for event in events {
                 match event {
+                    Event::OpenAiToolStart { item, .. } if item.is_empty() => {
+                        tool_without_item_id = true;
+                    }
                     Event::OpenAiText(text) if !text.is_empty() => {
                         summary.content_len += text.len();
                         summary.text_deltas += 1;
@@ -268,9 +268,12 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                     _ => {}
                 }
             }
+            // A tool call the provider cannot identify invalidates the whole stream.
+            summary.ok &= !tool_without_item_id;
         }
         _ => {
-            let mut active_tools = std::collections::HashSet::new();
+            let mut tools: std::collections::HashMap<u8, (&str, &str, String)> =
+                std::collections::HashMap::new();
             for event in events {
                 match event {
                     Event::AnthropicText(text) if !text.is_empty() => {
@@ -281,18 +284,21 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
                         summary.reasoning_len += text.len();
                         summary.thinking_deltas += 1;
                     }
-                    Event::AnthropicToolStart { idx, .. } => {
-                        active_tools.insert(*idx);
+                    // A repeated start for an index replaces the earlier call.
+                    Event::AnthropicToolStart { idx, id, name } => {
+                        tools.insert(*idx, (id.as_str(), name.as_str(), String::new()));
                     }
-                    Event::AnthropicToolArgs { idx, args }
-                        if !args.is_empty() && active_tools.contains(idx) =>
-                    {
-                        summary.tool_arg_deltas += 1;
+                    Event::AnthropicToolArgs { idx, args } if !args.is_empty() => {
+                        if let Some(tool) = tools.get_mut(idx) {
+                            tool.2.push_str(args);
+                            summary.tool_arg_deltas += 1;
+                        }
                     }
                     Event::AnthropicDone => summary.ok = true,
                     _ => {}
                 }
             }
+            summary.ok &= tool_batch_is_valid(tools.values());
         }
     }
     if !summary.ok {
@@ -300,6 +306,21 @@ fn expected_stream_summary(wire: u8, events: &[Event]) -> ExpectedSummary {
         summary.reasoning_len = 0;
     }
     summary
+}
+
+/// The provider rejects the whole batch when any call lacks an id or name,
+/// repeats an id, or has arguments that are not a JSON object.
+fn tool_batch_is_valid<'a>(tools: impl Iterator<Item = &'a (&'a str, &'a str, String)>) -> bool {
+    let mut ids = std::collections::HashSet::new();
+    tools.into_iter().all(|(id, name, args)| {
+        !id.is_empty()
+            && !name.is_empty()
+            && ids.insert(*id)
+            && matches!(
+                serde_json::from_str::<serde_json::Value>(args),
+                Ok(serde_json::Value::Object(_))
+            )
+    })
 }
 
 fn assert_controlled_summary(actual: &FuzzProviderSummary, expected: ExpectedSummary) {
@@ -430,8 +451,9 @@ fuzz_target!(|input: Input| {
     let complete: Vec<_> = complete_events.iter().map(event_json).collect();
     let complete_expected = expected_stream_summary(wire, &complete_events);
     let complete_summary = fuzz_parse_provider_stream(wire, &complete);
+    let complete_ok = complete_expected.ok;
     assert_controlled_summary(&complete_summary, complete_expected);
-    if wire % 3 != 0 {
+    if wire % 3 != 0 && complete_ok {
         assert!(
             complete_summary.ok,
             "terminal provider event did not complete lifecycle"

@@ -103,8 +103,8 @@ jobs:
           cargo xtask gen-lua-docs
           git diff --exit-code -- \
             docs/docs/reference/api \
-            docs/docs/reference/configuration.md \
-            docs/docs/guide/plugins.md \
+            docs/docs/customize/settings.md \
+            docs/docs/extend/bundled-plugins.md \
             runtime/lua/smelt/_meta \
             runtime/skills/customize/SKILL.md \
             docs/zensical.toml \

@@ -20,6 +20,7 @@ mod process_status;
 mod prompt;
 mod resize;
 mod resources;
+mod scroll_geometry;
 mod search;
 mod transcript_folds;
 mod vim;
@@ -464,7 +465,7 @@ fn read_overlay_title(app: &TestApp, name: &str) -> Option<String> {
 // Nested tables stashed in `smelt.state` must keep their identity
 // (deep values intact) across `/reload`.
 
-// `_bootstrap.lua` wraps `smelt.tools.register` to inject a default
+// `bootstrap/tools.lua` wraps `smelt.tools.register` to inject a default
 // `summary`. The wrap must remain a *single* layer across many
 // reloads - never re-wrap the previous wrap.
 

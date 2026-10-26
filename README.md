@@ -9,9 +9,9 @@
 <h1 align="center">smelt</h1>
 
 <p align="center">
-  <a href="https://leonardcser.github.io/smelt/">Documentation</a>
+  <a href="https://smeltagent.dev/">Documentation</a>
   &nbsp;·&nbsp;
-  <a href="https://leonardcser.github.io/smelt/reference/api/">Lua API</a>
+  <a href="https://smeltagent.dev/reference/api/">Lua API</a>
   &nbsp;·&nbsp;
   <a href="https://github.com/leonardcser/smelt/releases">Releases</a>
   &nbsp;·&nbsp;
@@ -19,9 +19,8 @@
 </p>
 
 > [!WARNING]
-> smelt is beta software until 1.0. Beta maturity is not encoded as a SemVer
-> prerelease: releases use normal `0.x.y` versions. Use the latest release and
-> update often; interfaces may still change between releases.
+> smelt is beta until 1.0. Interfaces may change between releases, so stay on
+> the latest version.
 
 ## Why
 
@@ -42,10 +41,30 @@ scriptable in Lua like Neovim. Built from scratch, with care for the details.
 - **No config needed.** Run with flags, or use `smelt auth` for ChatGPT, GitHub
   Copilot, and Kimi Code.
 
+## Benchmarks
+
+Same model, same tasks: Terminal-Bench 2.1 with Qwen3.8 27B, 360 runs. Medians,
+lower is better.
+
+|                | Memory       | CPU time  | Wall time |
+| -------------- | ------------ | --------- | --------- |
+| **smelt**      | **0.20 GiB** | **6.1 s** | **352 s** |
+| pi             | 0.71 GiB     | 9.7 s     | 399 s     |
+| codex          | 2.09 GiB     | 9.8 s     | 372 s     |
+| claude code    | 1.42 GiB     | 17.5 s    | 783 s     |
+| opencode       | 2.80 GiB     | 116 s     | 421 s     |
+| mini-swe-agent | 1.49 GiB     | 13.1 s    | 570 s     |
+
+[Full results](https://smeltagent.dev/guide/benchmarks/)
+
 ## Install
 
-Prebuilt Linux and macOS binaries for x86_64 and aarch64, plus Windows x86_64,
-are on the [Releases](https://github.com/leonardcser/smelt/releases) page. Extract
+```bash
+curl -fsSL https://smeltagent.dev/install.sh | sh
+```
+
+Or grab a prebuilt binary (Linux and macOS on x86_64 and aarch64, Windows on
+x86_64) from the [Releases](https://github.com/leonardcser/smelt/releases) page. Extract
 the archive and put `smelt` (`smelt.exe` on Windows) on your `PATH`, or install
 from source:
 
@@ -81,7 +100,7 @@ LSP-backed semantic code tools; enable them from `~/.config/smelt/init.lua`.
 
 Full documentation for configuration, Lua API, keybindings, permissions,
 providers, and plugin authoring lives at
-**[leonardcser.github.io/smelt](https://leonardcser.github.io/smelt/)**.
+**[smeltagent.dev](https://smeltagent.dev/)**.
 
 ## License
 

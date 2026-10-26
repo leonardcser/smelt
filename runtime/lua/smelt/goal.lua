@@ -168,6 +168,7 @@ local function context_text(goal)
     "- Keep future work aligned with this objective unless the user says otherwise.",
     "- Use get_goal to inspect the current goal state.",
     "- Use update_goal_progress to record durable stage progress when starting each meaningful phase, including the first one.",
+    "- If the user explicitly asks to clear, cancel, stop, or remove this goal, call clear_goal.",
     "- At the end, call update_goal only if the goal is done or genuinely blocked.",
     "- Do not mark the goal done until current evidence proves the requested outcome is complete.",
   }, "\n")
@@ -558,6 +559,7 @@ local command_handlers = {
     if on then M.schedule_auto_continue() end
   end,
 }
+command_handlers.cancel = command_handlers.clear
 command_handlers.stop = command_handlers.clear
 command_handlers.blocked = command_handlers.block
 
@@ -603,7 +605,7 @@ local function register_tools()
 
   smelt.tools.register({
     name = "create_goal",
-    description = "Create a session goal only when the user explicitly asks to start, set, or create a persistent goal, or system/developer instructions explicitly require one. Do not infer goals from ordinary tasks, investigations, implementations, or requests to continue working. Fails if an unfinished goal already exists; use update_goal only to report done or blocked.",
+    description = "Create a session goal only when the user explicitly asks to start, set, or create a persistent goal, or system/developer instructions explicitly require one. Do not infer goals from ordinary tasks, investigations, implementations, or requests to continue working. Fails if an unfinished goal already exists; use update_goal only to report done or blocked, or clear_goal when the user explicitly asks to remove it.",
     parameters = {
       type = "object",
       properties = {
@@ -663,7 +665,7 @@ local function register_tools()
 
   smelt.tools.register({
     name = "update_goal",
-    description = "Report the current goal as done or genuinely blocked. Use state=done only when current evidence proves the objective is complete. Use state=blocked only when no meaningful progress is possible without user input or an external-state change. The model cannot pause, resume, clear, or rewrite goals.",
+    description = "Report the current goal as done or genuinely blocked. Use state=done only when current evidence proves the objective is complete. Use state=blocked only when no meaningful progress is possible without user input or an external-state change. This tool cannot pause, resume, clear, or rewrite goals. Use clear_goal only when the user explicitly asks to remove the goal.",
     parameters = {
       type = "object",
       properties = {
@@ -689,6 +691,17 @@ local function register_tools()
       end
       if not goal then return { content = err, is_error = true } end
       return { content = "updated goal\n" .. M.describe(goal) }
+    end,
+  })
+
+  smelt.tools.register({
+    name = "clear_goal",
+    description = "Clear the current session goal only when the user explicitly asks to clear, cancel, stop, or remove it. Removes the goal and stops future goal-driven auto-continuation without marking it done or interrupting the current turn. Safe to call when no goal is set. Do not infer a request to clear the goal from a blocker or a change of topic.",
+    parameters = { type = "object", properties = {}, required = smelt.json.array() },
+    summary = function() return "clear goal" end,
+    execute = function()
+      M.clear()
+      return { content = "goal cleared" }
     end,
   })
 end

@@ -17,13 +17,14 @@ use smelt_core::buffer::{LineDecoration, Span};
 use smelt_core::buffer::{RenderedBufferRebuild, RenderedRowMetadata};
 use smelt_core::content::highlight::InlineOptions;
 use smelt_core::transcript_model::{BlockHistory, BlockId, BlockText, LayoutKey, ViewState};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 const COPY_CHUNK_NODES: usize = 64;
 
 pub(crate) struct TranscriptProjection {
     transcript_scene: TranscriptScene,
+    row_hints: RowHints,
     default_view_policy: TranscriptDefaultViewPolicy,
     presentation: TranscriptPresentationState,
     layout_cache: LayoutCache,
@@ -41,20 +42,40 @@ pub(crate) struct TranscriptProjection {
     counters: TranscriptProjectionCounters,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct TranscriptExactHeightObservation {
-    pub(crate) block_id: BlockId,
-    pub(crate) key: LayoutKey,
-    pub(crate) rows: RowIndex,
+/// Rows the caller already knows for unmeasured persisted blocks at one width,
+/// preferred over the blocks' stored estimates.
+#[derive(Default)]
+struct RowHints {
+    width: u16,
+    rows: HashMap<BlockId, RowIndex>,
+}
+
+impl RowHints {
+    fn estimated_rows(&self, history: &BlockHistory, id: BlockId, width: u16) -> Option<RowIndex> {
+        self.rows
+            .get(&id)
+            .filter(|_| self.width == width)
+            .copied()
+            .or_else(|| {
+                history
+                    .stored_ref(id)
+                    .map(|stored| stored.extent.estimated_rows(width))
+            })
+    }
+}
+
+/// Rows the projection measured for one node (`None` until measured) together
+/// with the blocks the node renders.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptNodeHeight {
+    pub(crate) blocks: Vec<BlockId>,
+    pub(crate) rows: Option<RowIndex>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TranscriptExactHeightSnapshot {
+pub(crate) struct TranscriptNodeHeights {
     pub(crate) width: u16,
-    pub(crate) renderer_generation: u64,
-    pub(crate) renderer_cache_key: Option<u64>,
-    pub(crate) presentation_generation: u64,
-    pub(crate) observations: Vec<TranscriptExactHeightObservation>,
+    pub(crate) nodes: Vec<TranscriptNodeHeight>,
 }
 
 #[derive(Clone, Copy)]
@@ -245,6 +266,7 @@ impl TranscriptHeightIndex {
     fn rebuild_if_stale(
         &mut self,
         history: &BlockHistory,
+        hints: &RowHints,
         plan: &TranscriptScene,
         policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
@@ -288,7 +310,7 @@ impl TranscriptHeightIndex {
                         .find(|node| node.id == id)
                         .map(TranscriptHeightNode::measured_or_estimated_height)
                 })
-                .unwrap_or_else(|| estimate_node_height(history, plan, index, node_key));
+                .unwrap_or_else(|| estimate_node_height(history, hints, plan, index, node_key));
             let same_previous = index == 0
                 || old_nodes
                     .get(index.saturating_sub(1))
@@ -345,6 +367,7 @@ impl TranscriptHeightIndex {
     fn try_reuse_or_extend(
         &mut self,
         history: &BlockHistory,
+        hints: &RowHints,
         plan: &TranscriptScene,
         policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
@@ -392,7 +415,9 @@ impl TranscriptHeightIndex {
                         self.nodes.push(TranscriptHeightNode {
                             id,
                             key: node_key,
-                            estimated_height: estimate_node_height(history, plan, index, node_key),
+                            estimated_height: estimate_node_height(
+                                history, hints, plan, index, node_key,
+                            ),
                             exact_height: None,
                         });
                     }
@@ -408,9 +433,11 @@ impl TranscriptHeightIndex {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_changed_blocks(
         &mut self,
         history: &BlockHistory,
+        hints: &RowHints,
         plan: &TranscriptScene,
         policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
@@ -433,6 +460,79 @@ impl TranscriptHeightIndex {
             };
             changed_indices.push(index);
         }
+        if !self.reset_nodes(
+            history,
+            hints,
+            plan,
+            policy,
+            presentation,
+            key,
+            changed_indices,
+        ) {
+            return false;
+        }
+        self.generation = plan.revision;
+        true
+    }
+
+    /// Brings a current index up to a newer presentation generation by
+    /// re-estimating only the nodes whose view state changed.
+    fn apply_presentation_changes(
+        &mut self,
+        history: &BlockHistory,
+        hints: &RowHints,
+        plan: &TranscriptScene,
+        policy: &TranscriptDefaultViewPolicy,
+        presentation: &TranscriptPresentationState,
+        key: RowIndexKey,
+    ) -> bool {
+        if self.presentation_generation == key.presentation_generation {
+            return true;
+        }
+        if self.generation != plan.revision
+            || self.renderer_generation != key.renderer_generation
+            || self.renderer_cache_key != key.renderer_cache_key
+            || self.width != key.width
+            || self.nodes.len() != plan.len()
+        {
+            return false;
+        }
+        let Some(changed) = presentation.changed_since(self.presentation_generation) else {
+            return false;
+        };
+        let mut changed_indices = Vec::new();
+        for id in changed {
+            let Some(index) = plan.index_of(id) else {
+                return false;
+            };
+            changed_indices.push(index);
+        }
+        if !self.reset_nodes(
+            history,
+            hints,
+            plan,
+            policy,
+            presentation,
+            key,
+            changed_indices,
+        ) {
+            return false;
+        }
+        self.presentation_generation = key.presentation_generation;
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reset_nodes(
+        &mut self,
+        history: &BlockHistory,
+        hints: &RowHints,
+        plan: &TranscriptScene,
+        policy: &TranscriptDefaultViewPolicy,
+        presentation: &TranscriptPresentationState,
+        key: RowIndexKey,
+        mut changed_indices: Vec<usize>,
+    ) -> bool {
         changed_indices.sort_unstable();
         changed_indices.dedup();
         let mut dirty_from = None;
@@ -441,7 +541,7 @@ impl TranscriptHeightIndex {
             else {
                 return false;
             };
-            let estimated_height = estimate_node_height(history, plan, index, node_key);
+            let estimated_height = estimate_node_height(history, hints, plan, index, node_key);
             let Some(node) = self.nodes.get_mut(index) else {
                 return false;
             };
@@ -454,7 +554,8 @@ impl TranscriptHeightIndex {
 
             let next_index = index.saturating_add(1);
             if let Some(next) = self.nodes.get_mut(next_index) {
-                next.estimated_height = estimate_node_height(history, plan, next_index, next.key);
+                next.estimated_height =
+                    estimate_node_height(history, hints, plan, next_index, next.key);
                 next.exact_height = None;
             }
             dirty_from = Some(dirty_from.map_or(index, |dirty: usize| dirty.min(index)));
@@ -462,7 +563,6 @@ impl TranscriptHeightIndex {
         if let Some(index) = dirty_from {
             self.mark_prefix_dirty_from(index);
         }
-        self.generation = plan.revision;
         true
     }
 
@@ -620,20 +720,18 @@ impl TranscriptHeightIndex {
         true
     }
 
-    fn exact_height_snapshot(&self) -> TranscriptExactHeightSnapshot {
-        TranscriptExactHeightSnapshot {
+    fn node_heights(&self, plan: &TranscriptScene) -> TranscriptNodeHeights {
+        TranscriptNodeHeights {
             width: self.width,
-            renderer_generation: self.renderer_generation,
-            renderer_cache_key: self.renderer_cache_key,
-            presentation_generation: self.presentation_generation,
-            observations: self
+            nodes: self
                 .nodes
                 .iter()
                 .filter_map(|node| {
-                    Some(TranscriptExactHeightObservation {
-                        block_id: node.id.as_block_id()?,
-                        key: node.key,
-                        rows: node.exact_height?,
+                    let mut blocks = Vec::new();
+                    plan.push_block_ids_for_node(plan.index_of(node.id)?, &mut blocks);
+                    Some(TranscriptNodeHeight {
+                        blocks,
+                        rows: node.exact_height,
                     })
                 })
                 .collect(),
@@ -987,10 +1085,6 @@ impl ProjectionPlan {
         self.node_range.clone()
     }
 
-    pub(crate) fn scroll_top(&self) -> RowIndex {
-        self.scroll_top
-    }
-
     pub(crate) fn total_rows(&self) -> RowIndex {
         self.total_rows
     }
@@ -1199,12 +1293,28 @@ fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> 
     }
 }
 
+/// Estimated rows of a node before it is measured. Persisted blocks use their
+/// row hint or stored estimate, so a node estimates the same rows whether it is loaded,
+/// hydrated or only known to the store.
 fn estimate_node_height(
     history: &BlockHistory,
+    hints: &RowHints,
     plan: &TranscriptScene,
     index: usize,
     key: NodeLayoutKey,
 ) -> RowIndex {
+    let stored_rows = |id: BlockId| hints.estimated_rows(history, id, key.width);
+    let stored = match plan.node(index) {
+        Some(RenderNode::Block { id, .. }) => stored_rows(*id),
+        Some(RenderNode::Group(group)) => group.child_ids().map(stored_rows).sum(),
+        None => None,
+    };
+    if let Some(rows) = stored {
+        // Estimates count one separator row; the node's real gap replaces it.
+        let rows = rows.saturating_sub(1);
+        let gap = plan.rendered_node_gap(history, index, rows as usize) as RowIndex;
+        return gap.saturating_add(rows).max(1);
+    }
     let rows = match plan.node(index) {
         Some(RenderNode::Block { id, .. }) => estimate_block_text_rows(history, *id, key.width),
         Some(RenderNode::Group(group)) => group
@@ -1355,6 +1465,7 @@ impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
             transcript_scene: TranscriptScene::empty(),
+            row_hints: RowHints::default(),
             default_view_policy: TranscriptDefaultViewPolicy::default(),
             presentation: TranscriptPresentationState::default(),
             layout_cache: LayoutCache::new(),
@@ -1408,7 +1519,6 @@ impl TranscriptProjection {
             );
             if refresh.structure_changed {
                 self.pending_changed_blocks.clear();
-                self.layout_cache.retain_nodes(self.transcript_scene.ids());
             } else {
                 for (block_id, appends) in &refresh.appended_ranges {
                     let Some(index) = self.transcript_scene.index_for_block(*block_id) else {
@@ -1437,7 +1547,9 @@ impl TranscriptProjection {
                 self.pending_changed_blocks.extend(refresh.changed_blocks);
             }
             if refresh.prune_required {
-                self.presentation.prune(self.transcript_scene.ids());
+                let scene = &self.transcript_scene;
+                self.layout_cache.retain_nodes(|id| scene.contains_id(id));
+                self.presentation.prune(|id| scene.contains_id(id));
             }
         }
     }
@@ -1526,8 +1638,51 @@ impl TranscriptProjection {
         self.projection_generation
     }
 
-    pub(crate) fn exact_height_snapshot(&self) -> TranscriptExactHeightSnapshot {
-        self.measurements.active.exact_height_snapshot()
+    pub(crate) fn node_heights(&self) -> TranscriptNodeHeights {
+        self.measurements
+            .active
+            .node_heights(&self.transcript_scene)
+    }
+
+    /// Estimate unmeasured persisted blocks at `width` with `rows`, and
+    /// re-estimate the unmeasured nodes that already exist.
+    pub(crate) fn set_row_hints(
+        &mut self,
+        history: &BlockHistory,
+        width: u16,
+        rows: HashMap<BlockId, RowIndex>,
+    ) {
+        self.row_hints = RowHints { width, rows };
+        let index = &mut self.measurements.active;
+        let mut first_changed = None;
+        for (position, node) in index.nodes.iter_mut().enumerate() {
+            if node.exact_height.is_some() {
+                continue;
+            }
+            let Some(scene_index) = self.transcript_scene.index_of(node.id) else {
+                continue;
+            };
+            let estimated = estimate_node_height(
+                history,
+                &self.row_hints,
+                &self.transcript_scene,
+                scene_index,
+                node.key,
+            );
+            if estimated != node.estimated_height {
+                node.estimated_height = estimated;
+                first_changed.get_or_insert(position);
+            }
+        }
+        if let Some(position) = first_changed {
+            index.mark_prefix_dirty_from(position);
+        }
+    }
+
+    /// Renderer generation and cache key the active heights were measured with.
+    pub(crate) fn measured_renderer(&self) -> (u64, Option<u64>) {
+        let active = &self.measurements.active;
+        (active.renderer_generation, active.renderer_cache_key)
     }
 
     pub(crate) fn height_suffix_is_exact(&self, anchor: TranscriptRowAnchor) -> bool {
@@ -1637,8 +1792,13 @@ impl TranscriptProjection {
             return;
         }
         node.key = node_key;
-        node.estimated_height =
-            estimate_node_height(history, &self.transcript_scene, index, node_key);
+        node.estimated_height = estimate_node_height(
+            history,
+            &self.row_hints,
+            &self.transcript_scene,
+            index,
+            node_key,
+        );
         node.exact_height = None;
         self.measurements.active.mark_prefix_dirty_from(index);
     }
@@ -1817,20 +1977,40 @@ impl TranscriptProjection {
             renderer_cache_key,
             self.presentation.generation(),
         );
+        if self.update_active_index(history, row_key) {
+            self.measurements.active.refresh_prefix_rows();
+        }
+        row_key
+    }
+
+    /// Updates the active height index for `row_key`, patching changed nodes
+    /// when possible. Returns whether the existing index was reused.
+    fn update_active_index(&mut self, history: &BlockHistory, row_key: RowIndexKey) -> bool {
+        let plan = &self.transcript_scene;
+        let active = &mut self.measurements.active;
+        let presentation_current = active.apply_presentation_changes(
+            history,
+            &self.row_hints,
+            plan,
+            &self.default_view_policy,
+            &self.presentation,
+            row_key,
+        );
         let changed_blocks = std::mem::take(&mut self.pending_changed_blocks);
-        let patched_index = !changed_blocks.is_empty()
-            && self.measurements.active.apply_changed_blocks(
+        let patched_index = presentation_current
+            && !changed_blocks.is_empty()
+            && active.apply_changed_blocks(
                 history,
-                &self.transcript_scene,
+                &self.row_hints,
+                plan,
                 &self.default_view_policy,
                 &self.presentation,
                 row_key,
                 &changed_blocks,
             );
-        let plan = &self.transcript_scene;
         let hydrated_index = !patched_index
             && Self::try_hydrate_row_index(
-                &mut self.measurements.active,
+                active,
                 &self.measurements.entries,
                 history,
                 plan,
@@ -1840,8 +2020,9 @@ impl TranscriptProjection {
             );
         let reused_index = patched_index
             || hydrated_index
-            || self.measurements.active.try_reuse_or_extend(
+            || active.try_reuse_or_extend(
                 history,
+                &self.row_hints,
                 plan,
                 &self.default_view_policy,
                 &self.presentation,
@@ -1853,17 +2034,16 @@ impl TranscriptProjection {
         );
         if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:prepare_row_index:rebuild_index");
-            self.measurements.active.rebuild_if_stale(
+            active.rebuild_if_stale(
                 history,
+                &self.row_hints,
                 plan,
                 &self.default_view_policy,
                 &self.presentation,
                 row_key,
             );
-        } else {
-            self.measurements.active.refresh_prefix_rows();
         }
-        row_key
+        reused_index
     }
 
     fn collect_missing_node_indices(&self, indices: impl IntoIterator<Item = usize>) -> Vec<usize> {
@@ -2524,18 +2704,6 @@ impl TranscriptProjection {
         self.measurements
             .active
             .row_for_node_anchor(anchor.id, anchor.row_offset)
-    }
-
-    pub(crate) fn row_for_stable_anchor(
-        &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        history: &mut BlockHistory,
-        width: u16,
-        theme: &Theme,
-        anchor: StableRowAnchor,
-    ) -> Option<RowIndex> {
-        self.prepare_layout(lua, history, width);
-        self.scroll_top_for_anchor(history, theme, anchor.0)
     }
 
     pub(crate) fn stable_anchor_is_present(
@@ -3295,9 +3463,13 @@ impl TranscriptProjection {
         }
 
         let row = plan.scroll_top;
-        if let Some(out) =
-            self.reuse_visible_projection_for_row(buf, plan.key, row, plan.viewport_rows)
-        {
+        if let Some(out) = self.reuse_visible_projection_for_row(
+            buf,
+            plan.key,
+            row,
+            plan.viewport_rows,
+            plan.total_rows,
+        ) {
             return out;
         }
 
@@ -3316,6 +3488,7 @@ impl TranscriptProjection {
         key: ProjectKey,
         row: RowIndex,
         viewport_rows: u16,
+        planned_total_rows: RowIndex,
     ) -> Option<MaterializedRows> {
         let prev = self.last_project_key()?;
         if prev.generation != key.generation
@@ -3330,6 +3503,10 @@ impl TranscriptProjection {
         }
 
         if !self.target_has_projection(prev, buf) {
+            return None;
+        }
+
+        if self.visible.total_rows != planned_total_rows {
             return None;
         }
 
@@ -3762,45 +3939,7 @@ impl TranscriptProjection {
             renderer_cache_key,
             self.presentation.generation(),
         );
-        let changed_blocks = std::mem::take(&mut self.pending_changed_blocks);
-        let patched_index = !changed_blocks.is_empty()
-            && self.measurements.active.apply_changed_blocks(
-                history,
-                &self.transcript_scene,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-                &changed_blocks,
-            );
-        let plan = &self.transcript_scene;
-        let hydrated_index = !patched_index
-            && Self::try_hydrate_row_index(
-                &mut self.measurements.active,
-                &self.measurements.entries,
-                history,
-                plan,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-            );
-        let reused_index = patched_index
-            || hydrated_index
-            || self.measurements.active.try_reuse_or_extend(
-                history,
-                plan,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-            );
-        if !reused_index {
-            self.measurements.active.rebuild_if_stale(
-                history,
-                plan,
-                &self.default_view_policy,
-                &self.presentation,
-                row_key,
-            );
-        }
+        self.update_active_index(history, row_key);
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.measurements.active.nodes.len();
         self.ensure_node_indices(env, history, block_indices.clone());

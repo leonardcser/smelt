@@ -111,6 +111,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         Tier::UiHost,
     )?;
     module.private_fn(
+        "__check_chord",
+        &["chord"],
+        |_, (chord,): (String,)| -> LuaResult<()> {
+            parse_keybind(&chord).map(|_| ()).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("dialog:key: unknown chord `{chord}`"))
+            })
+        },
+    )?;
+    module.private_fn(
         "__open",
         &["opts"],
         |_, (opts,): (LuaDialogOpenOpts,)| -> LuaResult<LuaDockedDialog> {

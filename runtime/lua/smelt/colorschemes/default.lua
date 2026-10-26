@@ -101,6 +101,5 @@ local groups = {
 
 return {
   name = "default",
-  syntax = "Monokai Extended",
   groups = groups,
 }

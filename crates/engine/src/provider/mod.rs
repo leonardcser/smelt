@@ -269,6 +269,14 @@ impl EngineProvider {
         &self.api_key
     }
 
+    pub fn with_transport(
+        mut self,
+        transport: Option<std::sync::Arc<dyn smelt_provider::ChatTransport>>,
+    ) -> Self {
+        self.client = self.client.with_transport(transport);
+        self
+    }
+
     pub fn with_model_config(mut self, config: ModelConfig) -> Self {
         self.model_config = config;
         self
@@ -555,6 +563,9 @@ impl EngineProvider {
     }
 
     async fn ensure_catalog_loaded(&self) {
+        if self.client.has_transport() {
+            return;
+        }
         let catalog_cache_dir = crate::paths::cache_dir().join("web");
         smelt_provider::catalog::ensure_loaded(self.client.http(), Some(&catalog_cache_dir)).await;
     }
@@ -688,7 +699,7 @@ mod tests {
             smelt_provider::kimi_code::API_BASE.to_string(),
             "token".to_string(),
             "openai-compatible",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
 
@@ -702,14 +713,14 @@ mod tests {
             smelt_provider::kimi_code::API_BASE.to_string(),
             "token".to_string(),
             "kimi-code",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
         let openai = EngineProvider::new(
             "https://api.openai.com/v1".to_string(),
             "token".to_string(),
             "openai",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
 
@@ -807,7 +818,7 @@ mod tests {
             "https://api.cerebras.ai/v1/chat/completions".to_string(),
             "token".to_string(),
             "openai-compatible",
-            Client::new(),
+            smelt_provider::http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
 
@@ -1413,7 +1424,7 @@ mod tests {
     // ---- Provider basics ----
 
     fn http_client() -> Client {
-        Client::new()
+        smelt_provider::http_client()
     }
 
     #[test]
@@ -1549,7 +1560,7 @@ mod tests {
                 api_base.clone(),
                 String::new(),
                 provider_type,
-                Client::builder()
+                smelt_provider::http_client_builder()
                     .timeout(Duration::from_millis(50))
                     .build()
                     .unwrap(),
@@ -1573,7 +1584,7 @@ mod tests {
                 api_base.clone(),
                 String::new(),
                 provider_type,
-                Client::builder()
+                smelt_provider::http_client_builder()
                     .timeout(Duration::from_millis(50))
                     .build()
                     .unwrap(),

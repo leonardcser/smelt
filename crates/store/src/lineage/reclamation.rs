@@ -44,8 +44,9 @@ const MARK_ROOT: i64 = 1;
 const MARK_NODE: i64 = 2;
 const MARK_PAYLOAD: i64 = 3;
 const MARK_HISTORY_INDEX: i64 = 4;
-const MARK_FRONTIER: i64 = 8;
-const SWEEP: i64 = 9;
+const RELEASE: i64 = 0;
+const MARK_FRONTIER: i64 = 7;
+const SWEEP: i64 = 8;
 const COMPLETE: i64 = SWEEP + SWEEP_SPECS.len() as i64;
 
 struct ReclamationPass {
@@ -61,7 +62,7 @@ impl ReclamationPass {
             .epoch
             .checked_add(1)
             .ok_or_else(|| StoreError::Integrity("reclamation epoch exhausted".into()))?;
-        self.phase = 0;
+        self.phase = RELEASE;
         self.cursor = i64::MIN;
         self.dirty = false;
         Ok(())
@@ -149,6 +150,9 @@ fn prepare_reclamation_pass(tx: &Transaction<'_>, lineage: &LineageId) -> Result
         || schema_version != main_pragma(tx, "schema_version")?
     {
         pass.restart()?;
+        if reclaimed_marker(tx)? == Some(reclaimed_fingerprint(tx)?) {
+            pass.phase = COMPLETE;
+        }
     }
     // Publish the epoch before querying the reachability views in this transaction.
     tx.execute(
@@ -206,6 +210,7 @@ fn expand_mark(
 ) -> Result<()> {
     match kind {
         MARK_REVISION => {
+            // Released revisions keep only their chain link.
             let (parent, history, transcript, state) = tx.query_row(
                 "SELECT parent_revision_id, history_root_id, transcript_root_id, state_payload_id
                  FROM lineage_revisions WHERE lineage_id = ?1 AND revision_id = ?2",
@@ -213,16 +218,16 @@ fn expand_mark(
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )?;
             mark(tx, epoch, MARK_REVISION, parent.as_deref())?;
-            mark(tx, epoch, MARK_ROOT, Some(&history))?;
-            mark(tx, epoch, MARK_ROOT, Some(&transcript))?;
-            mark(tx, epoch, MARK_PAYLOAD, Some(&state))?;
+            mark(tx, epoch, MARK_ROOT, history.as_deref())?;
+            mark(tx, epoch, MARK_ROOT, transcript.as_deref())?;
+            mark(tx, epoch, MARK_PAYLOAD, state.as_deref())?;
         }
         MARK_ROOT => {
             let node: Option<String> = tx.query_row(
@@ -303,7 +308,29 @@ fn advance_reclamation_marks(
     let phase = pass.phase;
     let mut examined = 0;
     match phase {
-        0 => {
+        RELEASE => {
+            let rows = tx
+                .prepare(
+                    "SELECT rowid FROM lineage_revisions NOT INDEXED
+                     WHERE rowid >= ?1 ORDER BY rowid LIMIT ?2",
+                )?
+                .query_map((pass.cursor, limit), |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            examined = rows.len();
+            match (rows.first(), rows.last()) {
+                (Some(&lower), Some(&upper)) => {
+                    release_revision_content(tx, lineage, lower, upper)?;
+                    match upper.checked_add(1) {
+                        Some(next) if examined == usize::try_from(limit).unwrap() => {
+                            pass.cursor = next;
+                        }
+                        _ => pass.advance(),
+                    }
+                }
+                _ => pass.advance(),
+            }
+        }
+        1 => {
             examined = tx.execute(
                 "DELETE FROM smelt_gc_marks WHERE (epoch, kind, id) IN (
                      SELECT epoch, kind, id FROM smelt_gc_marks WHERE epoch < ?1 LIMIT ?2)",
@@ -313,7 +340,7 @@ fn advance_reclamation_marks(
                 pass.advance();
             }
         }
-        1 => {
+        2 => {
             examined = tx.execute(
                 "DELETE FROM smelt_gc_receipts WHERE (epoch, session_id, fingerprint) IN (
                      SELECT epoch, session_id, fingerprint FROM smelt_gc_receipts WHERE epoch < ?1 LIMIT ?2)",
@@ -343,23 +370,18 @@ fn advance_reclamation_marks(
                 examined += 1;
             }
         }
-        2..=7 => {
+        3..=6 => {
             let (table, columns) = match phase {
-                2 => (
+                3 => (
                     "lineage_branches",
                     "initial_revision_id, CASE WHEN deleted_at IS NULL THEN head_revision_id END",
                 ),
-                3 => ("lineage_retained_revisions", "revision_id, NULL"),
-                4 => (
+                4 => ("lineage_retained_revisions", "revision_id, NULL"),
+                5 => (
                     "lineage_session_receipt_results",
                     "result_revision_id, session_id, fingerprint",
                 ),
-                5 => ("object_data_roots", "root_id, NULL"),
                 6 => ("lineage_revision_state_roots", "root_id, NULL"),
-                7 => (
-                    "lineage_revision_state_projections",
-                    "projected_payload_id, NULL",
-                ),
                 _ => unreachable!(),
             };
             // Seek candidates before filtering ownership, including foreign
@@ -375,7 +397,7 @@ fn advance_reclamation_marks(
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        if phase == 4 {
+                        if phase == 5 {
                             row.get::<_, Option<String>>(4)?
                         } else {
                             None
@@ -388,18 +410,12 @@ fn advance_reclamation_marks(
                 if owner != lineage.as_str() {
                     continue;
                 }
-                let kind = if phase <= 4 {
-                    MARK_REVISION
-                } else if phase <= 6 {
-                    MARK_ROOT
-                } else {
-                    MARK_PAYLOAD
-                };
+                let kind = if phase <= 5 { MARK_REVISION } else { MARK_ROOT };
                 mark(tx, pass.epoch, kind, first.as_deref())?;
-                if phase == 2 {
+                if phase == 3 {
                     mark(tx, pass.epoch, MARK_REVISION, second.as_deref())?;
                 }
-                if phase == 4 {
+                if phase == 5 {
                     tx.execute(
                         "INSERT OR IGNORE INTO smelt_gc_receipts VALUES (?1, ?2, ?3)",
                         (pass.epoch, second.as_deref(), fingerprint.as_deref()),
@@ -545,10 +561,59 @@ fn advance_reclamation_sweep(
                 [pass.epoch],
             )?;
         } else {
+            tx.execute(
+                "INSERT INTO store_meta (key, value, updated_at) VALUES (?1, ?2, unixepoch())
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (RECLAIMED_THROUGH, reclaimed_fingerprint(tx)?),
+            )?;
             step.complete = true;
         }
     }
     Ok(step)
+}
+
+/// `store_meta` key naming the fingerprint the last completed pass covered.
+const RECLAIMED_THROUGH: &str = "reclaimed_through";
+
+/// Tables whose rows root reachability or select retained revision content.
+/// Content-addressed edges below them never change, so a pass that completed
+/// over the same roots and branch heads has nothing left to reclaim.
+const RECLAMATION_ROOTS: &[&str] = &[
+    "lineage_revisions",
+    "lineage_turns",
+    "lineage_retained_revisions",
+    "lineage_session_receipt_results",
+    "lineage_revision_state_roots",
+    "request_object_refs",
+];
+
+/// Summarizes the roots a completed pass covered by row count, highest rowid
+/// and branch heads. A collision can only defer reclamation to the next change.
+pub(crate) fn reclaimed_fingerprint(conn: &Connection) -> Result<String> {
+    let roots = RECLAMATION_ROOTS
+        .iter()
+        .map(|table| format!("(SELECT count(*) || '.' || coalesce(max(rowid), 0) FROM {table})"))
+        .collect::<Vec<_>>()
+        .join(" || ':' || ");
+    Ok(conn.query_row(
+        &format!(
+            "SELECT {roots} || ':' || (SELECT coalesce(group_concat(head, ','), '') FROM (
+                 SELECT session_id || '=' || coalesce(head_revision_id, '') AS head
+                 FROM lineage_branches ORDER BY session_id))"
+        ),
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn reclaimed_marker(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM store_meta WHERE key = ?1",
+            [RECLAIMED_THROUGH],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 const SWEEP_SPECS: &[(&str, &str)] = &[
@@ -644,8 +709,6 @@ const SWEEP_SPECS: &[(&str, &str)] = &[
         SELECT 1 FROM lineage_revisions revision WHERE revision.lineage_id = candidate.lineage_id AND revision.history_root_id = candidate.root_id
     ) AND NOT EXISTS (
         SELECT 1 FROM lineage_revisions revision WHERE revision.lineage_id = candidate.lineage_id AND revision.transcript_root_id = candidate.root_id
-    ) AND NOT EXISTS (
-        SELECT 1 FROM object_data_roots object WHERE object.lineage_id = candidate.lineage_id AND object.root_id = candidate.root_id
     ) AND NOT EXISTS (
         SELECT 1 FROM lineage_revision_state_roots archive WHERE archive.lineage_id = candidate.lineage_id AND archive.root_id = candidate.root_id
     )"),

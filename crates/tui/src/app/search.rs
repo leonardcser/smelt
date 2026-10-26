@@ -147,6 +147,7 @@ struct LiveSearchState {
 pub(crate) struct SearchState {
     pub(crate) session: Option<SearchSession>,
     pub(super) transcript_index: Option<TranscriptSearchIndex>,
+    pub(super) dirty_text: Option<super::transcript_search::DirtyTranscriptText>,
     pub(super) transcript_store: Option<TranscriptSearchStore>,
     live: Option<LiveSearchState>,
     worker: Option<TranscriptSearchWorker>,
@@ -160,6 +161,7 @@ impl Default for SearchState {
         Self {
             session: None,
             transcript_index: None,
+            dirty_text: None,
             transcript_store: None,
             live: None,
             worker: None,
@@ -371,15 +373,16 @@ impl TuiApp {
             u64::from(self.conversation.request_search_projection()),
         );
         if !self.conversation.transcript_records_persisted() {
-            let block_indices = self.dirty_transcript_candidate_blocks(&query);
+            // Every record is dirty, so the dirty scan is a complete candidate set.
+            let complete = self.conversation.transcript().history().record_dirty_from() == Some(0);
             self.apply_live_transcript_candidates(
                 generation,
                 current_context,
                 query,
                 direction,
                 SqliteTranscriptCandidateBlocks {
-                    available: !block_indices.is_empty(),
-                    block_indices,
+                    available: complete,
+                    block_indices: Vec::new(),
                 },
             );
             return;
@@ -486,6 +489,7 @@ impl TuiApp {
             active.awaiting_worker = false;
             if active.confirmed {
                 search.live = None;
+                search.dirty_text = None;
             }
         }
     }
@@ -525,6 +529,7 @@ impl TuiApp {
         live.confirmed = true;
         if !live.awaiting_worker {
             search.live = None;
+            search.dirty_text = None;
         }
     }
 
@@ -532,6 +537,7 @@ impl TuiApp {
         let live = {
             let search = self.overlays.search_state_mut();
             let live = search.live.take();
+            search.dirty_text = None;
             search.cancel_worker();
             live
         };

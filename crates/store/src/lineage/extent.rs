@@ -2,7 +2,7 @@ use super::*;
 
 use crate::history::{
     transcript_record_extent_profile, TranscriptExtentProfile, TranscriptNavigationRecord,
-    TranscriptRecordOffset, TranscriptRecordProfile, TranscriptRecordRange, TranscriptRowLocation,
+    TranscriptRecordOffset, TranscriptRecordProfile, TranscriptRecordRange,
     TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
 
@@ -409,12 +409,28 @@ pub(crate) fn install_transcript_node_profile(
     Ok(())
 }
 
+/// Transcript nodes whose aggregate index was already proven, with their level.
+#[derive(Default)]
+pub(crate) struct TranscriptIndexValidation {
+    profiles: HashMap<NodeId, (u32, TranscriptNodeProfile)>,
+}
+
 fn validate_node_profile(
     conn: &Connection,
     lineage: &LineageId,
     node_id: &NodeId,
     expected_level: u32,
+    validated: &mut TranscriptIndexValidation,
 ) -> Result<TranscriptNodeProfile> {
+    if let Some((level, profile)) = validated.profiles.get(node_id) {
+        if *level != expected_level {
+            return Err(StoreError::Integrity(format!(
+                "transcript index reached invalid node {}",
+                node_id.as_str()
+            )));
+        }
+        return Ok(profile.clone());
+    }
     let node = load_node_shallow(conn, lineage, node_id, None)?;
     if node.kind != SequenceKind::Transcript || node.level != expected_level {
         return Err(StoreError::Integrity(format!(
@@ -428,9 +444,13 @@ fn validate_node_profile(
             EntryTarget::Item(payload) => {
                 TranscriptNodeProfile::from_record(&load_record_profile(conn, lineage, payload)?)?
             }
-            EntryTarget::Child(child) => {
-                validate_node_profile(conn, lineage, child, expected_level.saturating_sub(1))?
-            }
+            EntryTarget::Child(child) => validate_node_profile(
+                conn,
+                lineage,
+                child,
+                expected_level.saturating_sub(1),
+                validated,
+            )?,
         };
         if profile.record_count != entry.item_count {
             return Err(StoreError::Integrity(format!(
@@ -456,6 +476,9 @@ fn validate_node_profile(
             node_id.as_str()
         )));
     }
+    validated
+        .profiles
+        .insert(node_id.clone(), (expected_level, computed.clone()));
     Ok(computed)
 }
 
@@ -463,6 +486,20 @@ pub(crate) fn validate_transcript_indexes(
     conn: &Connection,
     lineage: &LineageId,
     root: &SequenceRoot,
+) -> Result<()> {
+    validate_transcript_indexes_in(
+        conn,
+        lineage,
+        root,
+        &mut TranscriptIndexValidation::default(),
+    )
+}
+
+pub(crate) fn validate_transcript_indexes_in(
+    conn: &Connection,
+    lineage: &LineageId,
+    root: &SequenceRoot,
+    validated: &mut TranscriptIndexValidation,
 ) -> Result<()> {
     validate_transcript_root(root)?;
     let Some(node) = &root.node_id else {
@@ -473,7 +510,8 @@ pub(crate) fn validate_transcript_indexes(
             "nonempty transcript root has no indexed node".into(),
         ));
     };
-    let profile = validate_node_profile(conn, lineage, node, root.depth.saturating_sub(1))?;
+    let profile =
+        validate_node_profile(conn, lineage, node, root.depth.saturating_sub(1), validated)?;
     if profile.record_count != root.item_count {
         return Err(StoreError::Integrity(
             "transcript root and aggregate index disagree".into(),
@@ -620,70 +658,6 @@ pub(crate) fn lineage_transcript_total_estimated_rows(
         ));
     }
     Ok(profile.extent.estimated_rows(width))
-}
-
-pub(crate) fn lineage_transcript_row_location(
-    conn: &Connection,
-    lineage: &LineageId,
-    root: &SequenceRoot,
-    width: u16,
-    row: u64,
-) -> Result<Option<TranscriptRowLocation>> {
-    validate_transcript_root(root)?;
-    let Some(mut node_id) = root.node_id.clone() else {
-        return Ok(None);
-    };
-    let mut expected_level = root.depth.saturating_sub(1);
-    let mut record_base = 0_u64;
-    let mut target_row = row;
-    loop {
-        let node = load_node_shallow(conn, lineage, &node_id, None)?;
-        if node.kind != SequenceKind::Transcript || node.level != expected_level {
-            return Err(StoreError::Integrity(
-                "transcript row lookup reached an invalid node".into(),
-            ));
-        }
-        let mut entry_start = 0_u64;
-        let mut selected = None;
-        for entry in &node.entries {
-            let profile = entry_profile(conn, lineage, entry)?;
-            let rows = profile.extent.estimated_rows(width).max(1);
-            if target_row < rows || entry == node.entries.last().expect("nonempty node") {
-                selected = Some((entry, profile, entry_start, rows));
-                break;
-            }
-            target_row = target_row.saturating_sub(rows);
-            entry_start = entry.cumulative_item_count;
-        }
-        let Some((entry, profile, entry_start, rows)) = selected else {
-            return Err(StoreError::Integrity(
-                "transcript row lookup selected no sequence entry".into(),
-            ));
-        };
-        record_base = record_base.saturating_add(entry_start);
-        match &entry.target {
-            EntryTarget::Item(_) => {
-                let record_index = usize::try_from(record_base).map_err(|_| {
-                    StoreError::Integrity(
-                        "transcript row lookup index exceeds platform limits".into(),
-                    )
-                })?;
-                return Ok(Some(TranscriptRowLocation {
-                    record_index: TranscriptRecordOffset::new(record_index),
-                    row_offset: target_row.min(rows.saturating_sub(1)),
-                }));
-            }
-            EntryTarget::Child(child) => {
-                if profile.record_count != entry.item_count || expected_level == 0 {
-                    return Err(StoreError::Integrity(
-                        "transcript row lookup found an invalid child extent".into(),
-                    ));
-                }
-                node_id = child.clone();
-                expected_level -= 1;
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1168,7 +1142,6 @@ mod benchmark_tests {
         previous_kind_us: Vec<u64>,
         next_role_us: Vec<u64>,
         block_lookup_us: Vec<u64>,
-        row_lookup_us: Vec<u64>,
         extent_range_us: Vec<u64>,
         extent_total_us: Vec<u64>,
     }
@@ -1179,7 +1152,6 @@ mod benchmark_tests {
                 previous_kind_us: Vec::with_capacity(capacity),
                 next_role_us: Vec::with_capacity(capacity),
                 block_lookup_us: Vec::with_capacity(capacity),
-                row_lookup_us: Vec::with_capacity(capacity),
                 extent_range_us: Vec::with_capacity(capacity),
                 extent_total_us: Vec::with_capacity(capacity),
             }
@@ -1628,15 +1600,6 @@ mod benchmark_tests {
                 );
                 timings.block_lookup_us.push(elapsed_us(started_at));
 
-                let started_at = std::time::Instant::now();
-                let row_location =
-                    lineage_transcript_row_location(&conn, &lineage, &root, 80, index as u64)
-                        .expect("row lookup")
-                        .expect("row location");
-                assert_eq!(row_location.record_index.get(), index);
-                assert_eq!(row_location.row_offset, 0);
-                timings.row_lookup_us.push(elapsed_us(started_at));
-
                 let range_end = index.saturating_add(129).min(record_count);
                 let started_at = std::time::Instant::now();
                 let profile = lineage_transcript_extent_profile(
@@ -1668,7 +1631,6 @@ mod benchmark_tests {
             let previous_kind_p99_us = p99(&mut timings.previous_kind_us);
             let next_role_p99_us = p99(&mut timings.next_role_us);
             let block_lookup_p99_us = p99(&mut timings.block_lookup_us);
-            let row_lookup_p99_us = p99(&mut timings.row_lookup_us);
             let extent_range_p99_us = p99(&mut timings.extent_range_us);
             let extent_total_p99_us = p99(&mut timings.extent_total_us);
             assert!(
@@ -1688,7 +1650,6 @@ mod benchmark_tests {
                     "previous_kind_p99_us": previous_kind_p99_us,
                     "next_role_p99_us": next_role_p99_us,
                     "block_lookup_p99_us": block_lookup_p99_us,
-                    "row_lookup_p99_us": row_lookup_p99_us,
                     "extent_range_p99_us": extent_range_p99_us,
                     "extent_total_p99_us": extent_total_p99_us,
                     "payloads_loaded": payloads_loaded(&snapshot),

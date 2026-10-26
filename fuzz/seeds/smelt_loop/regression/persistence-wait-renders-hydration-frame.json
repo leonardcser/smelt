@@ -1,0 +1,58 @@
+{
+  "vim": true,
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "exited"
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 0,
+        "button": 0,
+        "col": 1,
+        "row": 1,
+        "mods": 1
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 111
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 95
+      }
+    },
+    {
+      "kind": "job_completed",
+      "data": {
+        "id": "",
+        "exit_code": null,
+        "termination": "signaled"
+      }
+    },
+    {
+      "kind": "engine_tool_draft_delta",
+      "data": {
+        "call_id": "",
+        "tool_name": "",
+        "delta": ""
+      }
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 114
+      }
+    }
+  ]
+}

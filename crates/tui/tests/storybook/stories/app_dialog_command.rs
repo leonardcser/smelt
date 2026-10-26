@@ -183,6 +183,92 @@ app_story!(ps_dialog_list_and_details_wrap_command, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(ps_dialog_navigation, |ctx| {
+    ctx.set_viewport(70, 22);
+    ctx.run_lua(
+        r#"
+        local rows = {
+          { id = "proc_1", command = "first command", elapsed_secs = 1 },
+          { id = "proc_2", command = "second command", elapsed_secs = 2 },
+          { id = "proc_3", command = "third command", elapsed_secs = 3 },
+        }
+        smelt.process.list = function() return rows end
+        smelt.process.output = function(id)
+          opened_process = id
+          return { text = "logs", running = true }
+        end
+        smelt.process.kill = function(id)
+          killed_process = id
+          for i, row in ipairs(rows) do
+            if row.id == id then table.remove(rows, i); break end
+          end
+        end
+    "#,
+    );
+    ctx.run_command("ps");
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('j'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('k'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    ctx.press_enter();
+    ctx.run_lua("assert(opened_process == 'proc_1', tostring(opened_process))");
+    ctx.press_key(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    assert!(!ctx.frame_text().contains("filter jobs"));
+    ctx.press_char('j');
+    ctx.press_char('j');
+    ctx.press_char('k');
+    ctx.press_enter();
+    ctx.run_lua("assert(opened_process == 'proc_2', tostring(opened_process))");
+    ctx.press_key(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    ctx.press_char('j');
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('r'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyModifiers::ALT,
+    );
+    ctx.run_lua("assert(killed_process == 'proc_2', tostring(killed_process))");
+    assert!(!ctx.frame_text().contains("second command"));
+    ctx.press_enter();
+    ctx.run_lua("assert(opened_process == 'proc_3', tostring(opened_process))");
+    ctx.press_key(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyModifiers::ALT,
+    );
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyModifiers::ALT,
+    );
+    assert!(ctx.frame_text().contains("(no jobs)"));
+    ctx.run_lua("killed_process = nil; opened_process = nil");
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyModifiers::ALT,
+    );
+    ctx.press_char('j');
+    ctx.press_char('k');
+    ctx.press_enter();
+    ctx.run_lua("assert(killed_process == nil and opened_process == nil)");
+    ctx.press_char('q');
+    assert!(!ctx.frame_text().contains("(no jobs)"));
+});
+
 app_story!(messages_dialog_empty, |ctx| {
     // `/messages` with zero entries - the dialog shows the placeholder
     // body. Pins the empty-state branch in `format_lines`.

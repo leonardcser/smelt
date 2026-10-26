@@ -14,6 +14,23 @@
   --md-accent-fg-color--transparent: #ff9c3b1a;
 }
 
+/* Links: underlined, and filled with the accent on hover. Permalinks and
+   links around images keep the theme's behavior. */
+.md-typeset a:not(.headerlink):not(:has(img)) {
+  text-decoration: underline;
+  transition: none;
+}
+.md-typeset a:not(.headerlink):not(:has(img)):hover,
+.md-typeset a:not(.headerlink):not(:has(img)):focus-visible {
+  color: #000;
+  background: var(--md-accent-fg-color);
+}
+.md-typeset a:not(.headerlink):not(:has(img)):hover code,
+.md-typeset a:not(.headerlink):not(:has(img)):focus-visible code {
+  color: inherit;
+  background: none;
+}
+
 .md-logo img {
   height: 1.6rem;
   width: auto;
@@ -25,4 +42,228 @@
 
 [data-md-color-scheme="slate"] .md-logo img {
   content: url("../logo-dark.svg");
+}
+
+.copy-page {
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+}
+
+.copy-page .copy-page__done,
+.copy-page .copy-page__fail,
+.copy-page[data-state="copied"] .copy-page__copy,
+.copy-page[data-state="failed"] .copy-page__copy {
+  display: none;
+}
+
+.copy-page[data-state="copied"] .copy-page__done,
+.copy-page[data-state="failed"] .copy-page__fail {
+  display: block;
+}
+
+.copy-page[data-state="copied"] {
+  color: var(--md-accent-fg-color);
+}
+
+.copy-page[data-state="failed"] {
+  color: var(--md-typeset-del-color, #e5484d);
+}
+
+
+/* The logo already spells the name: drop the repeated site title from the
+   header and the mobile drawer. */
+.md-header__topic:first-child {
+  display: none;
+}
+.md-nav--primary > .md-nav__title[for="__drawer"] {
+  font-size: 0;
+}
+
+/* Benchmark profiles over time (javascripts/profile.js): smelt in the
+   primary color, the other agents as recessive context. */
+.md-typeset .profiles {
+  position: relative;
+}
+.profiles svg {
+  display: block;
+  overflow: visible;
+}
+.profiles .grid {
+  stroke: var(--md-default-fg-color--lightest);
+}
+.profiles .tick {
+  fill: var(--md-default-fg-color--light);
+  font: 9px var(--md-code-font-family), monospace;
+}
+.profiles .label {
+  fill: var(--md-default-fg-color--light);
+  font: 10px var(--md-code-font-family), monospace;
+}
+.profiles .label.me {
+  fill: var(--md-default-fg-color);
+  font-weight: 700;
+}
+.profiles .line {
+  fill: none;
+  stroke: var(--md-default-fg-color--light);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+.profiles .line.me {
+  stroke: var(--md-primary-fg-color);
+  stroke-width: 2;
+}
+.profiles .area {
+  fill: var(--md-default-fg-color--lightest);
+}
+.profiles .area.me {
+  fill: color-mix(in srgb, var(--md-primary-fg-color) 22%, transparent);
+}
+.profiles .track {
+  fill: var(--md-default-fg-color--lightest);
+}
+.profiles .heat {
+  fill: var(--md-default-fg-color);
+}
+.profiles .heat.me {
+  fill: var(--md-primary-fg-color);
+}
+.profiles .cross {
+  stroke: var(--md-default-fg-color--light);
+  pointer-events: none;
+}
+.profiles .hit {
+  fill: transparent;
+  cursor: crosshair;
+}
+.profile__tip {
+  position: absolute;
+  top: 0;
+  z-index: 1;
+  display: none;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  background: var(--md-default-bg-color);
+  font: 0.58rem/1.5 var(--md-code-font-family), monospace;
+  white-space: pre;
+  color: var(--md-default-fg-color--light);
+  pointer-events: none;
+}
+.profile__tip div:first-child,
+.profile__tip .me {
+  color: var(--md-default-fg-color);
+  font-weight: 700;
+}
+/* A recorded smelt session, replayed as text by javascripts/replay.js. */
+:root {
+  --term-bg: #000;
+  --term-fg: #e8dfd6;
+  --term-line: rgba(232, 223, 214, 0.12);
+}
+.md-typeset figure.term {
+  display: block;
+  box-sizing: content-box;
+  width: auto;
+  max-width: none;
+  margin: 0;
+  text-align: left;
+}
+/* In the docs, terminals sit on the macOS Ventura wallpaper, which also shows
+   around a window a recording shrinks. They turn light with the page. */
+.md-typeset figure.term:not(.home *) {
+  margin: 1rem 0;
+  padding: clamp(0.75rem, 4vw, 2.5rem);
+  background: #3a0f1e url("../assets/wallpaper.jpg") center / cover no-repeat;
+}
+[data-md-color-scheme="default"] .md-typeset figure.term:not(.home *) {
+  --term-scheme: light;
+  --term-bg: #ffffff;
+  --term-fg: #3a2f27;
+  --term-line: rgba(0, 0, 0, 0.12);
+}
+/* A recording made once per scheme: show the one matching the page. */
+[data-md-color-scheme="default"] figure.term[data-scheme="dark"],
+[data-md-color-scheme="slate"] figure.term[data-scheme="light"] {
+  display: none;
+}
+/* A faint edge, so the terminal keeps its bounds on a dark page. */
+.term__window {
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--term-line);
+  background: var(--term-bg);
+  color: var(--term-fg);
+}
+/* Keys pressed in a replay, as keycaps in the top-right corner. */
+.term__keys {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  display: flex;
+  gap: 0.25rem;
+  pointer-events: none;
+}
+.md-typeset .term__keys kbd {
+  min-width: 1.4rem;
+  height: 1.4rem;
+  margin: 0;
+  padding: 0 0.4rem;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: #2a2a2e;
+  color: #fff;
+  font: 700 0.7rem/1 var(--md-code-font-family), monospace;
+}
+/* File-type icons are Nerd Font glyphs, which JetBrains Mono does not carry. */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("../assets/fonts/SymbolsNerdFontMono-subset.woff2") format("woff2");
+  unicode-range: U+E000-F8FF, U+F0000-FFFFD;
+  font-display: swap;
+}
+.md-typeset .term__screen {
+  margin: 0;
+  padding: 0;
+  box-sizing: content-box;
+  overflow: hidden;
+  font-family: var(--md-code-font-family), "Symbols Nerd Font Mono", monospace;
+  font-size: 15px;
+  white-space: pre;
+  font-variant-ligatures: none;
+  color: var(--term-fg);
+  background: var(--term-bg);
+}
+/* One row per screen line, on whole pixels (set by replay.js). */
+.term__screen > div {
+  height: var(--row);
+  line-height: var(--row);
+}
+.term__screen span {
+  display: inline-block;
+  height: var(--row);
+  vertical-align: top;
+}
+/* A single cell: any non-ASCII character, so fallback glyphs keep the grid. */
+.term__screen .c {
+  overflow: hidden;
+  text-align: center;
+}
+/* Nerd Font icons are one em wide; scale them to the cell so none of the glyph is clipped. */
+.term__screen .n {
+  font-size: var(--cell);
+}
+/* Painted cells (blocks, box lines) keep their text for copy but hide the glyph. */
+.term__screen .x {
+  overflow: hidden;
+  -webkit-text-fill-color: transparent;
+}
+/* Plugin code can carry Nerd Font icons. */
+.md-typeset pre > code {
+  font-family: var(--md-code-font-family), "Symbols Nerd Font Mono", monospace;
 }

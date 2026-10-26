@@ -15,8 +15,8 @@ use crate::content::display_safe_text;
 #[cfg(test)]
 use crate::content::markdown_stream::thinking_summary;
 use crate::lua::{
-    json_to_lua, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent,
-    ToolCallIds, ToolEnv, ToolExecResult, TranscriptGroupSpec,
+    value, LuaShared, LuaToolResultParts, TaskCompletion, TaskDriveOutput, TaskEvent, ToolCallIds,
+    ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
 use crate::transcript_model::{Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus};
@@ -54,6 +54,17 @@ pub struct ShutdownHookContext<'a> {
 
 /// Embedded `runtime/lua/smelt/` tree; every `.lua` file is `require`-able as `smelt.<path>`.
 static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/lua/smelt");
+
+include!(concat!(env!("OUT_DIR"), "/embedded_bytecode.rs"));
+
+/// Precompiled bytecode for an [`EMBEDDED_LUA`] file, by its `/`-separated
+/// path relative to `runtime/lua/smelt/`.
+fn embedded_bytecode(rel: &str) -> Option<&'static [u8]> {
+    EMBEDDED_BYTECODE
+        .binary_search_by_key(&rel, |(path, _)| path)
+        .ok()
+        .map(|index| EMBEDDED_BYTECODE[index].1)
+}
 
 /// Embedded `runtime/skills/` tree; extracted alongside Lua built-ins so
 /// built-in skills have real on-disk locations for `/skills` and `load_skill`.
@@ -96,7 +107,17 @@ impl BootstrapChunk {
 
 /// Bundled chunks executed at bootstrap time, in dependency order.
 pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
-    BootstrapChunk::host("_bootstrap.lua"),
+    BootstrapChunk::host("bootstrap/task.lua"),
+    BootstrapChunk::host("bootstrap/tools.lua"),
+    BootstrapChunk::host("bootstrap/provider.lua"),
+    BootstrapChunk::host("bootstrap/reg.lua"),
+    BootstrapChunk::host("bootstrap/lifecycle.lua"),
+    BootstrapChunk::host("bootstrap/async.lua"),
+    BootstrapChunk::host("bootstrap/watch.lua"),
+    BootstrapChunk::host("bootstrap/appearance.lua"),
+    BootstrapChunk::host("bootstrap/state.lua"),
+    BootstrapChunk::host("bootstrap/notify.lua"),
+    BootstrapChunk::host("bootstrap/model.lua"),
     BootstrapChunk::host("transcript/defaults.lua"),
     BootstrapChunk::host("transcript.lua"),
     BootstrapChunk::ui("dialog.lua"),
@@ -1140,7 +1161,7 @@ impl LuaRuntime {
     }
 
     fn install_state_snapshot(&self, state: &serde_json::Value) -> LuaResult<()> {
-        let value = crate::lua::json_to_lua(&self.lua, state)?;
+        let value = crate::lua::value::from_json(&self.lua, state)?;
         crate::lua::module::internal_api_root(&self.lua)?.raw_set("__state", value)
     }
 
@@ -1910,7 +1931,7 @@ impl LuaRuntime {
             return;
         }
         if let Some(meta) = metadata {
-            match json_to_lua(&self.lua, &meta) {
+            match value::from_json(&self.lua, &meta) {
                 Ok(v) => {
                     let _ = table.set("metadata", v);
                 }
@@ -1945,7 +1966,7 @@ impl LuaRuntime {
                     self.resolve_external(external_id, v);
                 }
                 TaskEvent::ExternalResolvedJson { external_id, value } => {
-                    let v = json_to_lua(&self.lua, &value).unwrap_or(mlua::Value::Nil);
+                    let v = value::from_json(&self.lua, &value).unwrap_or(mlua::Value::Nil);
                     self.resolve_external(external_id, v);
                 }
             }
@@ -2642,7 +2663,7 @@ impl LuaRuntime {
                     .flatten()
             })?;
         Some(crate::utils::hash_serializable(
-            &crate::lua::api::lua_table_to_json(&self.lua, &transcript),
+            &value::table_to_json(&self.lua, &transcript).ok()?,
         ))
     }
 
@@ -3212,7 +3233,7 @@ fn tool_output_to_lua_table(
     set_content_metadata(&table, &output.content)?;
     table.set("is_error", output.is_error)?;
     if let Some(metadata) = output.metadata.as_ref() {
-        table.set("metadata", json_to_lua(lua, metadata)?)?;
+        table.set("metadata", value::from_json(lua, metadata)?)?;
     }
     if !output.content_fields.is_empty() {
         let fields = lua.create_table_with_capacity(0, output.content_fields.len())?;
@@ -3879,7 +3900,7 @@ fn args_to_lua_table(
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     for (key, value) in args {
-        t.set(key.as_str(), json_to_lua(lua, value)?)?;
+        t.set(key.as_str(), value::from_json(lua, value)?)?;
     }
     Ok(t)
 }
@@ -4145,18 +4166,18 @@ fn load_bootstrap_group_with_roots(
 ) -> mlua::Result<()> {
     for chunk in BOOTSTRAP_CHUNKS.iter().filter(|chunk| mode.includes(chunk)) {
         let rel = chunk.path;
-        let (source, name, path, trusted) =
-            read_bootstrap_source_from_roots(rel, roots, trusted_root)?;
-        if let (Some(files), Some(path)) = (loaded_files, path) {
+        let source = read_bootstrap_chunk_from_roots(rel, roots, trusted_root)?;
+        if let (Some(files), Some(path)) = (loaded_files, source.path) {
             files
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .push(path);
         }
-        lua.load(&source)
-            .set_name(name)
+        lua.load(&*source.chunk)
+            .set_name(source.name)
             .set_environment(crate::lua::module::bootstrap_chunk_environment(
-                lua, trusted,
+                lua,
+                source.trusted,
             )?)
             .exec()?;
     }
@@ -4262,36 +4283,51 @@ fn write_dir_recursive(dir: &Dir<'_>, target: &std::path::Path) -> std::io::Resu
     Ok(())
 }
 
+/// A bootstrap chunk ready to load: source text from a disk overlay, or
+/// precompiled bytecode from the embedded snapshot.
+struct BootstrapChunkSource {
+    chunk: std::borrow::Cow<'static, [u8]>,
+    name: String,
+    path: Option<PathBuf>,
+    trusted: bool,
+}
+
 /// Resolve a bootstrap-file relative path to its source, walking the
 /// same disk-overlay roots as `require()` before falling back to the
 /// baked-in [`EMBEDDED_LUA`] snapshot. Lets `dialog.lua`, `cmd.lua`,
 /// etc. hot-reload from disk on `/reload` - same dev-loop parity as
-/// autoloaded plugins. Returns `(source, chunk_name)`; the chunk name
-/// reflects where the source actually came from so Lua tracebacks
-/// point at the file you're editing.
-fn read_bootstrap_source_from_roots(
+/// autoloaded plugins. The chunk name reflects where the chunk actually came
+/// from so Lua tracebacks point at the file you're editing.
+fn read_bootstrap_chunk_from_roots(
     rel: &str,
     roots: &[PathBuf],
     trusted_root: Option<&std::path::Path>,
-) -> mlua::Result<(String, String, Option<PathBuf>, bool)> {
+) -> mlua::Result<BootstrapChunkSource> {
     for root in roots {
         let candidate = root.join("smelt").join(rel);
-        if let Ok(source) = std::fs::read_to_string(&candidate) {
+        if let Ok(source) = std::fs::read(&candidate) {
             let trusted = trusted_root.is_some_and(|root| candidate.starts_with(root));
             let name = candidate.display().to_string();
-            return Ok((source, name, Some(candidate), trusted));
+            return Ok(BootstrapChunkSource {
+                chunk: source.into(),
+                name,
+                path: Some(candidate),
+                trusted,
+            });
         }
     }
-    let file = EMBEDDED_LUA.get_file(rel).ok_or_else(|| {
+    let bytecode = embedded_bytecode(rel).ok_or_else(|| {
         LuaError::RuntimeError(format!("missing embedded bootstrap chunk: {rel}"))
     })?;
-    let source = file
-        .contents_utf8()
-        .ok_or_else(|| LuaError::RuntimeError(format!("bootstrap chunk not utf-8: {rel}")))?
-        .to_string();
-    Ok((source, format!("smelt/{rel}"), None, true))
+    Ok(BootstrapChunkSource {
+        chunk: bytecode.into(),
+        name: format!("smelt/{rel}"),
+        path: None,
+        trusted: true,
+    })
 }
 
+#[cfg(test)]
 fn embedded_lua_modules() -> impl Iterator<Item = (String, &'static str)> {
     fn walk(dir: &'static Dir<'static>, out: &mut Vec<(String, &'static str)>) {
         for entry in dir.entries() {
@@ -4391,7 +4427,6 @@ fn register_module_searcher_with_roots(
     trusted_root: Option<PathBuf>,
     loaded_files: Option<Arc<Mutex<Vec<PathBuf>>>>,
 ) -> LuaResult<()> {
-    let modules: HashMap<String, &'static str> = embedded_lua_modules().collect();
     let searcher = lua.create_function(move |lua, module: String| {
         let rel = module_to_relpath(&module);
         for root in &roots {
@@ -4419,10 +4454,12 @@ fn register_module_searcher_with_roots(
                 return Ok(mlua::Value::Function(wrapped));
             }
         }
-        if let Some(source) = modules.get(&module) {
+        let embedded = module
+            .strip_prefix("smelt.")
+            .and_then(|name| embedded_bytecode(&format!("{}.lua", name.replace('.', "/"))));
+        if let Some(bytecode) = embedded {
             let loader = lua
-                .load(*source)
-                .set_name(module.as_str())
+                .load(bytecode)
                 .set_environment(crate::lua::module::bundled_chunk_environment(lua)?)
                 .into_function()?;
             let wrapped = wrap_in_scope(lua, loader.clone()).unwrap_or(loader);
@@ -4514,6 +4551,45 @@ mod tests {
 
         ensure_builtins_extracted(data_dir.path()).unwrap();
         assert_eq!(std::fs::read(meta).unwrap(), embedded);
+    }
+
+    #[test]
+    fn every_embedded_lua_file_has_loadable_bytecode() {
+        fn walk(dir: &Dir<'static>, lua: &Lua, loaded: &mut usize) {
+            for entry in dir.entries() {
+                match entry {
+                    DirEntry::File(file) if file.path().extension().is_some_and(|e| e == "lua") => {
+                        let rel = file.path().to_str().unwrap().replace('\\', "/");
+                        let bytecode = embedded_bytecode(&rel)
+                            .unwrap_or_else(|| panic!("no bytecode for {rel}"));
+                        lua.load(bytecode)
+                            .into_function()
+                            .unwrap_or_else(|error| panic!("{rel}: {error}"));
+                        *loaded += 1;
+                    }
+                    DirEntry::Dir(dir) => walk(dir, lua, loaded),
+                    DirEntry::File(_) => {}
+                }
+            }
+        }
+
+        let mut loaded = 0;
+        walk(&EMBEDDED_LUA, &Lua::new(), &mut loaded);
+        assert_eq!(loaded, EMBEDDED_BYTECODE.len());
+    }
+
+    #[test]
+    fn embedded_bytecode_keeps_chunk_name_for_tracebacks() {
+        let lua = Lua::new();
+        let loader = lua
+            .load(embedded_bytecode("argv.lua").unwrap())
+            .into_function()
+            .unwrap();
+        assert_eq!(
+            loader.info().short_src.as_deref(),
+            Some("[string \"smelt/argv.lua\"]")
+        );
+        assert!(loader.info().line_defined.is_some());
     }
 
     #[test]

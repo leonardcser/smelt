@@ -10,7 +10,7 @@ encoded with a `-beta` suffix.
   hooks Internal. Supported and Advanced are provisional guidance during alpha,
   not a compatibility freeze of the broad callable surface.
 - Complete the [Lua API boundary](lua-api-boundary.md), generated reference, and
-  [plugin guide](docs/guide/plugins.md) so authors do not need Rust or bundled Lua
+  [plugin guide](docs/extend/index.md) so authors do not need Rust or bundled Lua
   source to understand normal usage, failures, ownership, or runtime tiers.
 - Add external-style coverage for major Supported capabilities across cold start,
   successful reload, failed candidate rollback, removal, and repeated cycles.

@@ -50,9 +50,6 @@ pub(crate) fn load_session_receipt_result(
         .is_autocommit()
         .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
         .transpose()?;
-    if crate::schema::user_version(conn)? == 3 {
-        return Ok(None);
-    }
     let row = conn
         .query_row(
             "SELECT receipt.command_kind, receipt.save_receipt_json,
@@ -84,14 +81,7 @@ pub(crate) fn load_session_receipt_result(
     let receipt: SaveReceipt = serde_json::from_str(&save_json)?;
     let revision = load_revision(conn, lineage, &id)?;
     validate_receipt_result(conn, lineage, branch, &receipt, &revision)?;
-    if !matches!(
-        load_revision_envelope(conn, lineage, &revision, &mut OperationStats::default())?,
-        StoredRevisionState::Shared(_)
-    ) {
-        return Err(StoreError::Integrity(
-            "session receipt result has no verified shared archive state".into(),
-        ));
-    }
+    load_revision_envelope(conn, lineage, &revision, &mut OperationStats::default())?;
     Ok(Some(SessionCommitResult {
         receipt,
         revision_id: id.as_str().to_owned(),
@@ -104,7 +94,6 @@ pub(crate) fn retain_session_receipt_result(
     branch: &BranchId,
     fingerprint: &str,
     receipt: SaveReceipt,
-    compression: ObjectCompression,
 ) -> Result<SessionCommitResult> {
     if conn.is_autocommit() {
         return Err(StoreError::Integrity(
@@ -140,14 +129,7 @@ pub(crate) fn retain_session_receipt_result(
     let id = branch_revision_at_sequence(conn, lineage, branch, receipt.current.revision.get())?;
     let revision = load_revision(conn, lineage, &id)?;
     validate_receipt_result(conn, lineage, branch, &receipt, &revision)?;
-    if !matches!(
-        load_revision_for_save(conn, lineage, &revision, compression)?,
-        StoredRevisionState::Shared(_)
-    ) {
-        return Err(StoreError::Integrity(
-            "session receipt result has no verified shared archive state".into(),
-        ));
-    }
+    load_revision_envelope(conn, lineage, &revision, &mut OperationStats::default())?;
     conn.execute(
         "INSERT INTO lineage_session_receipt_results
          (lineage_id, session_id, fingerprint, result_revision_id, result_id)
@@ -171,15 +153,15 @@ pub(crate) fn verify_session_receipt_results(conn: &Connection, lineage: &Lineag
         .is_autocommit()
         .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
         .transpose()?;
-    if crate::schema::user_version(conn)? == 3 {
-        return Ok(());
-    }
     let owners = conn.prepare(
         "SELECT session_id, fingerprint FROM lineage_session_receipt_results WHERE lineage_id = ?1",
     )?.query_map([lineage.as_str()], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut verified = HashSet::new();
+    // Kept revisions share nearly all of their sequence structure.
+    let mut sequences = ValidationState::default();
+    let mut indexes = TranscriptIndexValidation::default();
     for (branch, fingerprint) in owners {
         let branch = BranchId::new(branch)?;
         let result = load_session_receipt_result(conn, lineage, &branch, &fingerprint)?
@@ -194,9 +176,9 @@ pub(crate) fn verify_session_receipt_results(conn: &Connection, lineage: &Lineag
         let id = RevisionId::from_db(result.revision_id)?;
         let revision = load_revision(conn, lineage, &id)?;
         load_revision_state(conn, lineage, &revision)?;
-        validate_sequence(conn, lineage, &revision.history_root)?;
-        validate_sequence(conn, lineage, &revision.transcript_root)?;
-        validate_transcript_indexes(conn, lineage, &revision.transcript_root)?;
+        validate_sequence_in(conn, lineage, &revision.history_root, &mut sequences)?;
+        validate_sequence_in(conn, lineage, &revision.transcript_root, &mut sequences)?;
+        validate_transcript_indexes_in(conn, lineage, &revision.transcript_root, &mut indexes)?;
     }
     Ok(())
 }

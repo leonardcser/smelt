@@ -133,7 +133,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     "smelt.config.runtime_status: app not initialized",
                 ));
             };
-            match smelt_core::lua::json_to_lua(lua, &status)? {
+            match smelt_core::lua::value::from_json(lua, &status)? {
                 mlua::Value::Table(table) => Ok(table),
                 _ => Err(LuaError::external(
                     "smelt.config.runtime_status: invalid status shape",

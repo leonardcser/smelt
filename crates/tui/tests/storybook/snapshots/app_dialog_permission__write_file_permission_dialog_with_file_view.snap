@@ -1,11 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-expression: text
+expression: frame.text()
 ---
 * write_file src/main.rs                                               14:37:03
-   1   fn main() {
-   2       println!("hello, world");
-   3   }
+  wrote 3 lines
+
+
 
 
 

@@ -888,8 +888,7 @@ fn structured_tool_output_uses_shared_code_content() {
 #[test]
 fn ps_details_dialog_uses_list_dialog_height() {
     assert!(PS_LUA.contains("local DIALOG_HEIGHT = \"60%\""));
-    assert!(PS_LUA.contains("height = DIALOG_HEIGHT"));
-    assert!(PS_LUA.contains("height      = DIALOG_HEIGHT"));
+    assert_eq!(PS_LUA.matches("height = DIALOG_HEIGHT").count(), 2);
     assert!(!PS_LUA.contains("max_height = \"70%\""));
 }
 

@@ -16,7 +16,7 @@ use smelt_core::transcript_content::TranscriptContent;
 use smelt_core::transcript_model::BlockId;
 use smelt_core::transcript_model::{Block, BlockHistory, Status, ViewState};
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -494,10 +494,65 @@ struct CachedInlineSyntax {
     retained_bytes: usize,
 }
 
+/// Least-recently-used order with logarithmic touch, removal and eviction.
+struct Lru<K> {
+    tick: u64,
+    stamps: HashMap<K, u64>,
+    order: BTreeMap<u64, K>,
+}
+
+impl<K> Default for Lru<K> {
+    fn default() -> Self {
+        Self {
+            tick: 0,
+            stamps: HashMap::new(),
+            order: BTreeMap::new(),
+        }
+    }
+}
+
+impl<K: Copy + Eq + Hash> Lru<K> {
+    fn clear(&mut self) {
+        self.stamps.clear();
+        self.order.clear();
+    }
+
+    fn touch(&mut self, key: K) {
+        self.tick += 1;
+        if let Some(previous) = self.stamps.insert(key, self.tick) {
+            self.order.remove(&previous);
+        }
+        self.order.insert(self.tick, key);
+    }
+
+    fn remove(&mut self, key: &K) {
+        if let Some(stamp) = self.stamps.remove(key) {
+            self.order.remove(&stamp);
+        }
+    }
+
+    fn pop_oldest(&mut self) -> Option<K> {
+        let (_, key) = self.order.pop_first()?;
+        self.stamps.remove(&key);
+        Some(key)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        let order = &mut self.order;
+        self.stamps.retain(|key, stamp| {
+            let kept = keep(key);
+            if !kept {
+                order.remove(stamp);
+            }
+            kept
+        });
+    }
+}
+
 #[derive(Default)]
 struct InlineSyntaxCache {
     entries: HashMap<u64, Vec<CachedInlineSyntax>>,
-    lru: VecDeque<u64>,
+    lru: Lru<u64>,
     retained_bytes: usize,
     theme_revision: u64,
 }
@@ -565,12 +620,11 @@ impl InlineSyntaxCache {
     }
 
     fn touch(&mut self, key: u64) {
-        self.lru.retain(|candidate| *candidate != key);
-        self.lru.push_back(key);
+        self.lru.touch(key);
     }
 
     fn evict_oldest(&mut self) -> bool {
-        let Some(key) = self.lru.pop_front() else {
+        let Some(key) = self.lru.pop_oldest() else {
             return false;
         };
         let Some(entries) = self.entries.remove(&key) else {
@@ -602,7 +656,7 @@ pub(crate) struct DisplayMemorySnapshot {
 pub(crate) struct LayoutCache {
     blocks: HashMap<RenderNodeId, CachedLayout>,
     inline_syntax: InlineSyntaxCache,
-    lru: RefCell<VecDeque<RenderNodeId>>,
+    lru: RefCell<Lru<RenderNodeId>>,
     pinned: HashSet<RenderNodeId>,
     retained_bytes: usize,
     budget: usize,
@@ -614,7 +668,7 @@ impl Default for LayoutCache {
         Self {
             blocks: HashMap::new(),
             inline_syntax: InlineSyntaxCache::default(),
-            lru: RefCell::new(VecDeque::new()),
+            lru: RefCell::new(Lru::default()),
             pinned: HashSet::new(),
             retained_bytes: 0,
             budget: 16 * 1024 * 1024,
@@ -634,9 +688,26 @@ impl LayoutCache {
     }
 
     pub(crate) fn set_pinned_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
-        self.pinned.clear();
+        let previous = std::mem::take(&mut self.pinned);
         self.pinned.extend(ids);
+        {
+            let mut lru = self.lru.borrow_mut();
+            for id in &self.pinned {
+                lru.remove(id);
+            }
+            for id in previous.difference(&self.pinned) {
+                if self.blocks.contains_key(id) {
+                    lru.touch(*id);
+                }
+            }
+        }
         self.enforce_budget();
+        if smelt_perf::perf::enabled() {
+            smelt_perf::perf::record_value(
+                "transcript:render_cache:pinned_bytes",
+                self.memory_snapshot().pinned_layout_bytes as u64,
+            );
+        }
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -699,9 +770,9 @@ impl LayoutCache {
     }
 
     fn touch(&self, id: RenderNodeId) {
-        let mut lru = self.lru.borrow_mut();
-        lru.retain(|candidate| *candidate != id);
-        lru.push_back(id);
+        if !self.pinned.contains(&id) {
+            self.lru.borrow_mut().touch(id);
+        }
     }
 
     fn recompute_earliest_refresh_at(&mut self) {
@@ -713,33 +784,26 @@ impl LayoutCache {
     }
 
     fn enforce_budget(&mut self) {
-        let mut attempts = self.lru.borrow().len();
-        while self.retained_bytes() > self.budget && attempts > 0 {
-            attempts -= 1;
-            let Some(id) = self.lru.borrow_mut().pop_front() else {
+        let mut evicted_refresh = false;
+        while self.retained_bytes() > self.budget {
+            let Some(id) = self.lru.borrow_mut().pop_oldest() else {
                 break;
             };
-            if self.pinned.contains(&id) {
-                self.lru.borrow_mut().push_back(id);
-                continue;
-            }
             if let Some(entry) = self.blocks.remove(&id) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
-                attempts = self.lru.borrow().len();
+                evicted_refresh |= entry.refresh_at.is_some();
             }
         }
         while self.retained_bytes() > self.budget && self.inline_syntax.evict_oldest() {}
-        self.recompute_earliest_refresh_at();
+        if evicted_refresh {
+            self.recompute_earliest_refresh_at();
+        }
+        if !smelt_perf::perf::enabled() {
+            return;
+        }
         smelt_perf::perf::record_value(
             "transcript:render_cache:retained_bytes",
             self.retained_bytes() as u64,
-        );
-        smelt_perf::perf::record_value(
-            "transcript:render_cache:pinned_bytes",
-            self.pinned
-                .iter()
-                .filter_map(|id| self.blocks.get(id).map(|entry| entry.weight))
-                .sum::<usize>() as u64,
         );
         smelt_perf::perf::record_value(
             "transcript:render_cache:oversize_debt_bytes",
@@ -874,7 +938,7 @@ impl LayoutCache {
                                 self.retained_bytes.saturating_sub(removed.weight);
                             removed_cached_layout = true;
                         }
-                        self.lru.borrow_mut().retain(|candidate| *candidate != id);
+                        self.lru.borrow_mut().remove(&id);
                         continue;
                     };
                     if history.status(block_id) == Some(Status::Streaming) {
@@ -961,10 +1025,18 @@ impl LayoutCache {
         )>,
     ) {
         let _perf = smelt_perf::perf::begin("transcript:layout_cache:insert_cache");
+        let mut replaced_refresh = false;
         for (id, key, layout, refresh_at) in layouts {
             let weight = layout.retained_bytes();
             if let Some(previous) = self.blocks.remove(&id) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(previous.weight);
+                replaced_refresh |= previous.refresh_at.is_some();
+            }
+            if let Some(refresh_at) = refresh_at {
+                self.earliest_refresh_at = Some(
+                    self.earliest_refresh_at
+                        .map_or(refresh_at, |earliest| earliest.min(refresh_at)),
+                );
             }
             self.retained_bytes = self.retained_bytes.saturating_add(weight);
             self.blocks.insert(
@@ -982,21 +1054,24 @@ impl LayoutCache {
             );
             self.touch(id);
         }
+        if replaced_refresh {
+            self.recompute_earliest_refresh_at();
+        }
         self.enforce_budget();
     }
 
-    pub(crate) fn retain_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
-        let live: HashSet<RenderNodeId> = ids.into_iter().collect();
+    pub(crate) fn retain_nodes(&mut self, live: impl Fn(RenderNodeId) -> bool) {
         self.blocks.retain(|id, entry| {
-            if live.contains(id) {
+            if live(*id) {
                 true
             } else {
                 self.retained_bytes = self.retained_bytes.saturating_sub(entry.weight);
                 false
             }
         });
-        self.lru.borrow_mut().retain(|id| live.contains(id));
-        self.pinned.retain(|id| live.contains(id));
+        self.lru.borrow_mut().retain(|id| live(*id));
+        self.pinned.retain(|id| live(*id));
+        self.recompute_earliest_refresh_at();
         self.enforce_budget();
     }
 
@@ -1005,6 +1080,12 @@ impl LayoutCache {
     }
 
     pub(crate) fn expire_due_refreshes(&mut self, now: std::time::Instant) -> Vec<RenderNodeId> {
+        if self
+            .earliest_refresh_at
+            .is_none_or(|earliest| earliest > now)
+        {
+            return Vec::new();
+        }
         let due = self
             .blocks
             .iter()
@@ -1021,8 +1102,11 @@ impl LayoutCache {
             }
         }
         if !due.is_empty() {
-            let due_set = due.iter().copied().collect::<HashSet<_>>();
-            self.lru.borrow_mut().retain(|id| !due_set.contains(id));
+            let mut lru = self.lru.borrow_mut();
+            for id in &due {
+                lru.remove(id);
+            }
+            drop(lru);
             self.recompute_earliest_refresh_at();
         }
         due
@@ -2550,7 +2634,7 @@ mod tests {
             layout.clone(),
             Some(start + std::time::Duration::from_secs(1)),
         )]);
-        model.retain_nodes([static_node]);
+        model.retain_nodes(|id| id == static_node);
         assert_eq!(model.next_refresh_at(), None);
 
         model.insert_compiled_blocks(vec![(

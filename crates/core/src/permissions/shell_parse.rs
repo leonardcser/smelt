@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Cursor;
 
 use brush_parser::ast::{
@@ -11,17 +12,119 @@ use smelt_buffer::text::{byte_of_char, slice, trim_whitespace};
 const SEPARATOR_OPERATORS: &[&str] = &["&&", "||", ";", "|", "&", "\n"];
 const MAX_ARITHMETIC_PAREN_DEPTH: usize = 16;
 const MAX_BRACE_EXPANSION_DEPTH: usize = 16;
+const MIN_OVERFLOWING_DIGITS: usize = 19;
 
 pub(super) fn parse(command: &str) -> Option<ast::Program> {
-    if has_unrepresentable_io_number(command) || has_deep_arithmetic_parentheses(command) {
+    let command = neutralize_blank_heredoc_tags(command);
+    parse_guarded(&command).or_else(|| parse_guarded(&terminate_heredocs(&command)?))
+}
+
+fn parse_guarded(command: &str) -> Option<ast::Program> {
+    if has_unrepresentable_io_number(command)
+        || has_deep_arithmetic_parentheses(command)
+        || has_unrepresentable_expansion_number(command)
+    {
         return None;
     }
     let mut parser = Parser::new(Cursor::new(command.as_bytes()), &ParserOptions::default());
     parser.parse_program().ok()
 }
 
+/// Appends a terminator line for every heredoc tag so a heredoc that runs to the
+/// end of the input still parses. The shell runs the commands around such a
+/// heredoc, so they must stay visible. The appended lines lie past the original
+/// text, so spans over them are clipped when segments are sliced from it.
+fn terminate_heredocs(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut terminators = String::new();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if !bytes[index..].starts_with(b"<<") {
+            index += 1;
+            continue;
+        }
+        index += 2;
+        if bytes.get(index) == Some(&b'<') {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index) == Some(&b'-') {
+            index += 1;
+        }
+        while matches!(bytes.get(index), Some(b' ' | b'\t')) {
+            index += 1;
+        }
+        let (tag, end) = heredoc_tag(text, index);
+        index = end;
+        if !tag.is_empty() {
+            terminators.push('\n');
+            terminators.push_str(&tag);
+        }
+    }
+    (!terminators.is_empty()).then(|| format!("{text}{terminators}"))
+}
+
+/// Reads the delimiter word starting at `start` with its quoting removed, and
+/// returns it with the offset just past the word.
+fn heredoc_tag(text: &str, start: usize) -> (String, usize) {
+    let mut tag = String::new();
+    let mut chars = text[start..].char_indices();
+    let mut quote = None;
+    let mut end = text.len();
+    while let Some((offset, ch)) = chars.next() {
+        match (quote, ch) {
+            (Some(open), ch) if ch == open => quote = None,
+            (Some(_), ch) => tag.push(ch),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '\\') => {
+                if let Some((_, escaped)) = chars.next() {
+                    tag.push(escaped);
+                }
+            }
+            (None, ch) if ch.is_whitespace() || ";&|()<>".contains(ch) => {
+                end = start + offset;
+                break;
+            }
+            (None, ch) => tag.push(ch),
+        }
+    }
+    (tag, end)
+}
+
+fn tokenize(command: &str) -> Option<Vec<Token>> {
+    tokenize_str(&neutralize_blank_heredoc_tags(command)).ok()
+}
+
+/// Replaces a heredoc tag's leading carriage return or form feed with a letter.
+/// The tokenizer trims such a tag to nothing and never finishes the heredoc,
+/// growing a buffer until allocation fails. The replacement has the same length,
+/// so token offsets still index the original text.
+fn neutralize_blank_heredoc_tags(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let blank_tags = (0..bytes.len().saturating_sub(2))
+        .filter_map(|index| {
+            let rest = bytes[index..].strip_prefix(b"<<")?;
+            let rest = rest.strip_prefix(b"-").unwrap_or(rest);
+            let blanks = rest
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            matches!(rest.get(blanks), Some(b'\r' | b'\x0c'))
+                .then(|| bytes.len() - rest.len() + blanks)
+        })
+        .collect::<Vec<_>>();
+    if blank_tags.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let mut neutralized = text.to_string();
+    for index in blank_tags {
+        neutralized.replace_range(index..=index, "x");
+    }
+    Cow::Owned(neutralized)
+}
+
 fn has_unrepresentable_io_number(command: &str) -> bool {
-    let Ok(tokens) = tokenize_str(command) else {
+    let Some(tokens) = tokenize(command) else {
         return false;
     };
     tokens.windows(2).any(|tokens| {
@@ -34,6 +137,33 @@ fn has_unrepresentable_io_number(command: &str) -> bool {
             && number.chars().all(|ch| ch.is_ascii_digit())
             && number.parse::<ast::IoFd>().is_err()
     })
+}
+
+/// Whether a brace sequence bound or tilde stack index is too large for the
+/// parser's integer type, which makes the parser panic instead of failing.
+fn has_unrepresentable_expansion_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        let digits = slice(text, start..index);
+        if digits.len() < MIN_OVERFLOWING_DIGITS || digits.parse::<i64>().is_ok() {
+            continue;
+        }
+        let before = slice(text, 0..start);
+        let before = before.strip_suffix(['+', '-']).unwrap_or(before);
+        if before.ends_with(['{', '~']) || before.ends_with("..") {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_deep_arithmetic_parentheses(command: &str) -> bool {
@@ -93,17 +223,31 @@ fn has_deep_brace_expansion(word: &str) -> bool {
 }
 
 pub(super) fn parse_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
-    if has_deep_arithmetic_parentheses(word) || has_deep_brace_expansion(word) {
+    if has_deep_arithmetic_parentheses(word)
+        || has_deep_brace_expansion(word)
+        || has_unrepresentable_expansion_number(word)
+    {
         return None;
     }
-    word::parse(word, &ParserOptions::default()).ok()
+    word::parse(
+        &neutralize_blank_heredoc_tags(word),
+        &ParserOptions::default(),
+    )
+    .ok()
 }
 
 pub(super) fn parse_heredoc_word(word: &str) -> Option<Vec<WordPieceWithSource>> {
-    if has_deep_arithmetic_parentheses(word) || has_deep_brace_expansion(word) {
+    if has_deep_arithmetic_parentheses(word)
+        || has_deep_brace_expansion(word)
+        || has_unrepresentable_expansion_number(word)
+    {
         return None;
     }
-    word::parse_heredoc(word, &ParserOptions::default()).ok()
+    word::parse_heredoc(
+        &neutralize_blank_heredoc_tags(word),
+        &ParserOptions::default(),
+    )
+    .ok()
 }
 
 pub(super) enum BraceExpansion {
@@ -113,7 +257,7 @@ pub(super) enum BraceExpansion {
 }
 
 pub(super) fn brace_expansion(word: &str, limit: usize) -> BraceExpansion {
-    if has_deep_brace_expansion(word) {
+    if has_deep_brace_expansion(word) || has_unrepresentable_expansion_number(word) {
         return BraceExpansion::Unresolved;
     }
     let parts = match word::parse_brace_expansions(word, &ParserOptions::default()) {
@@ -592,7 +736,7 @@ fn collect_piece_commands(pieces: &[WordPieceWithSource], out: &mut Vec<String>)
 }
 
 fn tokenized_split(command: &str) -> Vec<(String, Option<String>)> {
-    let Ok(tokens) = tokenize_str(command) else {
+    let Some(tokens) = tokenize(command) else {
         let trimmed = trim_whitespace(command);
         return (!trimmed.is_empty())
             .then(|| (trimmed.to_string(), None))
@@ -768,7 +912,7 @@ fn is_shell_stream(path: &str) -> bool {
 }
 
 fn tokenized_has_output_redirection(command: &str) -> bool {
-    let Ok(tokens) = tokenize_str(command) else {
+    let Some(tokens) = tokenize(command) else {
         return false;
     };
     let mut tokens = tokens.iter().peekable();

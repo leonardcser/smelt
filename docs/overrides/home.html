@@ -1,10 +1,15 @@
-{% extends "base.html" %} {% block styles %} {{ super() }}
+{% extends "main.html" %} {% block styles %} {{ super() }}
 <style>
-  /* Hide sidebar, content, footer on home page */
-  .md-sidebar,
+  /* Hide the table of contents and footer on the home page. The primary
+     sidebar is the mobile nav drawer, so only hide it where it is a column. */
   .md-sidebar--secondary,
   .md-sidebar[data-md-type="toc"] {
     display: none !important;
+  }
+  @media screen and (min-width: 76.25em) {
+    .md-sidebar--primary {
+      display: none !important;
+    }
   }
   .md-footer {
     display: none !important;
@@ -12,13 +17,18 @@
 
   :root {
     --home-header-height: 2.5rem;
+    --home-ember: #ff8c42;
+    --home-muted: #6b5348;
+    --home-line: rgba(58, 47, 39, 0.14);
+    --home-panel: #fbf6f2;
+  }
+  [data-md-color-scheme="slate"] {
+    --home-muted: #c4a894;
+    --home-line: rgba(232, 223, 214, 0.12);
+    --home-panel: #1d1914;
   }
 
-  .md-main {
-    margin: 0;
-    padding: 0;
-  }
-
+  .md-main,
   .md-main__inner,
   .md-main__inner.md-grid,
   .md-grid,
@@ -30,252 +40,617 @@
     max-width: none;
     width: 100%;
   }
-
   .md-content__inner,
   .md-content__inner > article {
     min-height: auto;
     height: auto;
   }
-
-  .md-content__inner {
-    margin: 0;
-    padding: 0;
-  }
-
   .md-content__inner::before,
   .md-typeset::before {
     display: none !important;
     content: none !important;
   }
-
   .md-content__button {
     display: none;
   }
+  /* The full-width header loses its grid padding with the rules above; line
+     the logo up with the first nav tab's text below it. */
+  .md-header__button.md-logo {
+    margin-left: 0.6rem;
+  }
 
+  .home {
+    font-family: var(--md-code-font-family), monospace;
+    font-size: 0.8rem;
+    overflow: hidden;
+  }
+  .home .hero-subtitle,
+  .home .cell h2,
+  .home .cell .feature h3,
+  .home .cell p:not(.legend) {
+    font-family: var(--md-text-font-family), sans-serif;
+  }
+  .home .cell h3 {
+    margin: 2rem 0 0.75rem;
+    font-family: inherit;
+    font-size: 0.72rem;
+    font-weight: 400;
+    color: var(--home-muted);
+  }
+
+  .home code,
+  .home pre,
+  .home kbd {
+    font-family: var(--md-code-font-family), monospace;
+  }
+
+  /* Layers of one still ASCII field, drawn by home.js: around the hero, in
+     the margins beside the sections, and below them. */
+  .ascii {
+    position: absolute;
+    overflow: hidden;
+    font: 14px/1.2 var(--md-code-font-family), monospace;
+    white-space: pre;
+    opacity: 0.38;
+    pointer-events: none;
+    user-select: none;
+  }
   .hero {
     position: relative;
-    width: 100%;
-    min-height: calc(100vh - var(--home-header-height));
-    height: calc(100vh - var(--home-header-height));
-    overflow: hidden;
-    background: transparent;
+    padding-bottom: clamp(3.5rem, 8vw, 5rem);
   }
-
-  #hero-lava {
-    position: absolute;
+  .hero-ascii {
     inset: 0;
+    /* Clear behind the title and install, rising toward the sides. */
+    -webkit-mask-image: radial-gradient(ellipse min(36rem, 60vw) 15rem at 50% 13rem, transparent 40%, #000);
+    mask-image: radial-gradient(ellipse min(36rem, 60vw) 15rem at 50% 13rem, transparent 40%, #000);
+  }
+  .hero-intro,
+  .hero-demo {
+    position: relative;
   }
 
-  #lava-canvas {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    padding: 0;
-    font-family: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
-    font-size: 18px;
-    line-height: 1.2;
-    letter-spacing: 1px;
-    white-space: pre;
-    user-select: none;
-    overflow: hidden;
-    background: none !important;
-    border: none !important;
-    pointer-events: none;
+  /* Every block shares one column, so their edges line up. */
+  .home {
+    --home-width: 64rem;
+    --term-bg: #000;
   }
-
-  /* No page-specific background overlay */
-  .hero::after {
-    content: none;
+  /* In the light scheme the terminals and code turn light too (replay.js),
+     a shade off white so they stand out from the page. */
+  [data-md-color-scheme="default"] .home {
+    --term-scheme: light;
+    --term-bg: #faf8f6;
+    --term-fg: #3a2f27;
+    --term-line: var(--home-line);
   }
-
-  .hero-overlay {
-    position: absolute;
-    inset: 0;
+  .hero-intro {
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    z-index: 2;
     text-align: center;
-    padding: 0 2rem;
-    pointer-events: none;
+    padding: clamp(2rem, 6vh, 3.5rem) 1rem 0;
   }
-
-  .hero-overlay > * {
-    pointer-events: auto;
-  }
-
   .hero-logo {
-    position: relative;
-    width: min(18rem, 48vw);
-    margin: 0 0 1.25rem 0;
+    width: min(10rem, 40vw);
+    margin: 0 0 1rem;
   }
-
   .hero-logo img {
     display: block;
     width: 100%;
     height: auto;
     image-rendering: pixelated;
   }
-
   [data-md-color-scheme="default"] .hero-logo img {
     content: url("logo-light.svg");
   }
-
   [data-md-color-scheme="slate"] .hero-logo img {
     content: url("logo-dark.svg");
   }
-
-  .hero-subtitle {
-    font-family: var(--md-code-font-family), monospace;
-    font-size: clamp(0.9rem, 1.6vw, 1.15rem);
-    font-weight: 400;
-    line-height: 1.6;
-    max-width: 32rem;
-    margin: 0 0 0.75rem 0;
-    letter-spacing: 0.01em;
-  }
-
-  .hero-status {
+  .home .hero-intro h1.hero-subtitle {
+    font-size: clamp(0.95rem, 1.7vw, 1.2rem);
+    line-height: 1.55;
     max-width: 34rem;
-    margin: 0 0 2rem 0;
-    padding: 0.35rem 0.65rem;
-    border: 1px solid currentColor;
-    border-radius: 0.2rem;
-    font-family: var(--md-code-font-family), monospace;
-    font-size: clamp(0.7rem, 1.1vw, 0.82rem);
-    line-height: 1.4;
-  }
-
-  [data-md-color-scheme="default"] .hero-subtitle,
-  [data-md-color-scheme="default"] .hero-status {
-    color: #6b5348;
-  }
-  [data-md-color-scheme="slate"] .hero-subtitle,
-  [data-md-color-scheme="slate"] .hero-status {
-    color: #c4a894;
-  }
-
-  .hero-actions {
-    display: flex;
-    gap: 1.5rem;
-    flex-wrap: wrap;
-    justify-content: center;
-  }
-
-  .hero-actions a {
-    position: relative;
-    z-index: 0;
-    isolation: isolate;
-    display: inline-block;
-    font-family: var(--md-code-font-family), monospace;
-    font-size: clamp(0.7rem, 1.2vw, 0.85rem);
+    margin: 0 0 1.25rem;
     font-weight: 400;
-    text-decoration: none;
-    white-space: pre;
-    line-height: 1.1;
+    letter-spacing: normal;
+    color: var(--home-muted);
+  }
+  .home .hero-intro h1.hero-subtitle strong {
+    color: var(--md-default-fg-color);
+    font-weight: 600;
   }
 
-  .hero-actions .btn-shadow,
-  .hero-actions .btn-bg {
-    line-height: 1;
-    transform: scaleY(1.1);
-    transform-origin: top;
-  }
-
-  .hero-actions .btn-shadow {
-    position: absolute;
-    top: 0.2em;
-    left: -0.3em;
-    color: #ff7a1a;
-    display: block;
-    opacity: 0;
-    pointer-events: none;
-    z-index: -1;
-  }
-
-  .hero-actions .btn-row {
-    display: block;
-  }
-
-  .hero-actions a:hover .btn-shadow,
-  .hero-actions a:focus-visible .btn-shadow {
-    opacity: 1;
-  }
-
-  .hero-actions a:focus-visible {
-    outline: 2px solid #ff8c42;
-    outline-offset: 0.35rem;
-  }
-
-  .hero-actions a:active {
-    transform: scale(0.95);
-    transform-origin: center;
-  }
-
-  .hero-actions .btn-bg {
-    position: relative;
-    z-index: 1;
-    color: #ff8c42;
-    background: var(--md-default-bg-color);
-    display: block;
-  }
-
-  .hero-actions .btn-label {
-    position: absolute;
-    inset: 0;
+  .install {
     display: flex;
     align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    padding-top: 0.3em;
-    z-index: 2;
-    color: #1a0e09;
+    gap: 0.75rem;
+    max-width: 100%;
+    margin: 0 0 0.9rem;
+    padding: 0.55rem 0.55rem 0.55rem 0.9rem;
+    border: 1px solid var(--home-line);
+    background: var(--md-default-bg-color);
+    font-family: var(--md-code-font-family), monospace;
+    font-size: clamp(0.66rem, 1.4vw, 0.8rem);
   }
-  [data-md-color-scheme="slate"] .hero-actions .btn-label {
-    color: #fff7f2;
+  .install code {
+    overflow-x: auto;
+    white-space: nowrap;
+    background: none;
+    padding: 0;
+    color: var(--md-default-fg-color);
+  }
+  .install code::before {
+    content: "$ ";
+    color: var(--home-ember);
+  }
+  .copy {
+    flex: none;
+    border: 1px solid var(--home-line);
+    padding: 0.3rem 0.6rem;
+    font: inherit;
+    font-size: 0.85em;
+    color: var(--home-muted);
+    background: var(--home-panel);
+    cursor: pointer;
+  }
+  .copy:hover,
+  .copy:focus-visible {
+    color: var(--home-ember);
+    border-color: var(--home-ember);
+  }
+  .copy .copy__done,
+  .copy[data-state="copied"] .copy__idle {
+    display: none;
+  }
+  .copy[data-state="copied"] .copy__done {
+    display: inline;
+  }
+
+  .hero-note {
+    margin: 0;
+    font-family: var(--md-code-font-family), monospace;
+    font-size: 0.68rem;
+    color: var(--home-muted);
+  }
+
+  .hero-demo {
+    width: calc(100% - 2rem);
+    max-width: var(--home-width);
+    margin: clamp(1.75rem, 5vh, 2.75rem) auto 0;
+  }
+
+  .home figure {
+    display: block;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    text-align: left;
+  }
+  /* Sections below the hero, between rules that run the full width of the
+     page; their content lines up with the demo's edges. */
+  .home .grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1px;
+    margin: 0;
+    padding-top: 1px;
+    background: var(--home-line);
+  }
+  .home .cell {
+    min-width: 0;
+    padding: clamp(1rem, 2.5vw, 1.75rem) max(1rem, (100% - var(--home-width)) / 2);
+    background: var(--md-default-bg-color);
+  }
+  /* The margins beside the sections, only where there is room for them. */
+  .home .gutter {
+    display: none;
+    z-index: 1;
+    top: 0;
+    bottom: 0;
+    width: calc((100% - var(--home-width)) / 2 - 1px);
+  }
+  .home .gutter--left {
+    left: 0;
+  }
+  .home .gutter--right {
+    right: 0;
+  }
+  /* With margins beside the sections, the page ends on a band of the field
+     below them; without, it ends on the last section. */
+  .home .foot {
+    display: none;
+    position: relative;
+    height: 3rem;
+  }
+  .home .foot .ascii {
+    inset: 0;
+  }
+  /* With room beside the column, rule its sides and inset the content. The
+     rules between sections stop at the column, so the margins stay one open
+     field. */
+  @media (min-width: 1321px) {
+    .home .foot {
+      display: block;
+    }
+    .home .grid {
+      padding-bottom: 1px;
+      /* Centered, so it ends flush with the outer edges of the side rules. */
+      background: linear-gradient(var(--home-line), var(--home-line)) 50% 0 / calc(var(--home-width) + 1px) 100%
+        no-repeat;
+    }
+    .home .gutter {
+      display: block;
+    }
+    .home .cell {
+      --edge: calc((100% - var(--home-width)) / 2);
+      padding-inline: calc(var(--edge) + 1.75rem);
+      background:
+        linear-gradient(var(--home-line), var(--home-line)) var(--edge) 0 / 1px 100% no-repeat,
+        linear-gradient(var(--home-line), var(--home-line)) calc(100% - var(--edge)) 0 / 1px 100% no-repeat,
+        var(--md-default-bg-color);
+    }
+  }
+  .home .cell h2 {
+    margin: 0 0 0.35rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--md-default-fg-color);
+  }
+  .home .cell p {
+    margin: 0 0 1.1rem;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: var(--home-muted);
+  }
+  .home .cell code {
+    font-size: 0.9em;
+  }
+  .home .cell a.more {
+    display: inline-block;
+    margin-top: 0.9rem;
+    font-family: var(--md-code-font-family), monospace;
+    font-size: 0.7rem;
+  }
+  /* Smaller features side by side; a wide one takes a row of its own. Each
+     terminal sits at the bottom of its card so neighbours line up. */
+  .home .features {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2.5rem 1.5rem;
+  }
+  .home .feature {
+    display: flex;
+    flex-direction: column;
+  }
+  .home .feature .term {
+    margin-top: auto;
+  }
+  .home .feature--wide {
+    grid-column: 1 / -1;
+  }
+  @media (max-width: 52em) {
+    .home .features {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  @media (max-width: 52em) {
+    .home .code pre {
+      font-size: 0.58rem;
+    }
+  }
+  .home .cell .feature h3 {
+    margin: 0 0 0.6rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--md-default-fg-color);
+  }
+  .home .cell a.more + a.more {
+    margin-left: 1.5rem;
+  }
+  .home .code {
+    border: 1px solid var(--term-line);
+    background: var(--term-bg) padding-box;
+  }
+  .home .code pre {
+    margin: 0;
+    padding: 0.8rem 0.9rem;
+    overflow-x: auto;
+    font-family: var(--md-code-font-family), "Symbols Nerd Font Mono", monospace;
+    font-size: 0.66rem;
+    line-height: 1.6;
+    color: var(--term-fg);
+    background: none;
+  }
+  .home .code .c {
+    color: #7d7268;
+  }
+  .home .code .k {
+    color: #ef6b5b;
+  }
+  .home .code .s {
+    color: #8fbf6a;
+  }
+  .home .code .f {
+    color: #6aa4e0;
+  }
+  .home .code .n {
+    color: #e6b450;
+  }
+  .home .code .p {
+    color: var(--home-ember);
+  }
+  [data-md-color-scheme="default"] .home .code .c {
+    color: #8a7a6e;
+  }
+  [data-md-color-scheme="default"] .home .code .k {
+    color: #c8372d;
+  }
+  [data-md-color-scheme="default"] .home .code .s {
+    color: #3f7d20;
+  }
+  [data-md-color-scheme="default"] .home .code .f {
+    color: #1f5fae;
+  }
+  [data-md-color-scheme="default"] .home .code .n {
+    color: #a86b00;
+  }
+  .home .charts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.5rem 2.5rem;
+  }
+  .home .chart figcaption {
+    margin: 0 0 0.5rem;
+    font-size: 0.68rem;
+    color: var(--md-default-fg-color);
+  }
+  .home .chart ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .home .chart li {
+    display: grid;
+    grid-template-columns: 7.5rem minmax(0, 1fr) 4.5rem;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 2px !important;
+    font-size: 0.64rem;
+    color: var(--home-muted);
+  }
+  /* The bar is the median; the capped line spans the middle half of runs. */
+  .home .chart li i {
+    position: relative;
+    height: 0.75rem;
+    background: linear-gradient(to right, var(--bar) 0 var(--v), transparent 0);
+    --bar: var(--home-line);
+  }
+  .home .chart li i::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: var(--lo);
+    width: calc(var(--hi) - var(--lo));
+    height: 0.45rem;
+    box-sizing: border-box;
+    transform: translateY(-50%);
+    border-left: 1px solid var(--home-muted);
+    border-right: 1px solid var(--home-muted);
+    background: linear-gradient(var(--home-muted), var(--home-muted)) center / 100% 1px no-repeat;
+  }
+  .home .chart li b {
+    font-weight: 400;
+    text-align: right;
+  }
+  .home .chart li.me {
+    color: var(--md-default-fg-color);
+    font-weight: 700;
+  }
+  .home .chart li.me i {
+    --bar: var(--home-ember);
+  }
+  .home .chart li.me b {
+    font-weight: 700;
+  }
+  .home .cell p.legend {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 1rem 0 0;
+    font-size: 0.64rem;
+  }
+  .home .legend i {
+    width: 1.2rem;
+    height: 0.6rem;
+    background: var(--home-line);
+  }
+  .home .legend i.range {
+    margin-left: 0.8rem;
+    height: 0.45rem;
+    box-sizing: border-box;
+    border-left: 1px solid var(--home-muted);
+    border-right: 1px solid var(--home-muted);
+    background: linear-gradient(var(--home-muted), var(--home-muted)) center / 100% 1px no-repeat;
+  }
+  @media (max-width: 52rem) {
+    .home .charts {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .home .chart li {
+      grid-template-columns: 7rem minmax(0, 1fr) 4.5rem;
+    }
+  }
+
+  /* Narrow, the command wraps at its slashes so all of it shows before it is copied. */
+  @media (max-width: 600px) {
+    .install {
+      width: 100%;
+      box-sizing: border-box;
+      text-align: left;
+    }
+    .install code {
+      white-space: normal;
+    }
   }
 </style>
 {% endblock %} {% block content %}
-<section class="hero">
-  <div id="hero-lava"></div>
-  <div class="hero-overlay">
-    <div class="hero-logo">
-      <img src="logo-dark.svg" alt="smelt" />
+<div class="home">
+  <section class="hero">
+    <div class="ascii hero-ascii" aria-hidden="true"></div>
+    <div class="hero-intro">
+      <div class="hero-logo">
+        <img src="logo-dark.svg" alt="smelt" />
+      </div>
+      <h1 class="hero-subtitle">
+        A terminal coding agent you <strong>hack like Neovim</strong>. Rust
+        core, Lua plugins, hot reload.
+      </h1>
+      <div class="install">
+        <code>curl -fsSL https://smeltagent.dev/<wbr />install.sh | sh</code>
+        <button
+          class="copy"
+          type="button"
+          data-copy="curl -fsSL https://smeltagent.dev/install.sh | sh"
+          aria-label="Copy install command"
+        >
+          <span class="copy__idle">copy</span><span class="copy__done">copied</span>
+        </button>
+      </div>
+      <p class="hero-note">
+        Linux, macOS and
+        <a href="guide/getting-started/#install">Windows</a> · beta until 1.0
+      </p>
     </div>
-    <p class="hero-subtitle">
-      A coding agent you hack like Neovim. Rust core, Lua plugins, hot reload.
-    </p>
-    <p class="hero-status">
-      Pre-1.0 beta - normal 0.x releases; update often as interfaces evolve.
-    </p>
-    <div class="hero-actions">
-      <a href="guide/getting-started/" aria-label="Get started with smelt"
-        ><span class="btn-shadow" aria-hidden="true"
-          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
-          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
-          ><span class="btn-row">░░░░░░░░░░░░░░░░</span></span
-        ><span class="btn-bg" aria-hidden="true"
-          ><span class="btn-row">████████████████</span
-          ><span class="btn-row">████████████████</span
-          ><span class="btn-row">████████████████</span></span
-        ><span class="btn-label">Get Started</span></a
+    <div class="hero-demo">
+      <figure
+        class="term"
+        data-replay="assets/replays/demo.json"
+        aria-label="smelt finding a failing test, fixing it and rerunning the tests"
       >
-      <a href="https://github.com/leonardcser/smelt" aria-label="smelt on GitHub"
-        ><span class="btn-shadow" aria-hidden="true"
-          ><span class="btn-row">████████████████</span
-          ><span class="btn-row">████████████████</span
-          ><span class="btn-row">████████████████</span></span
-        ><span class="btn-bg" aria-hidden="true"
-          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
-          ><span class="btn-row">░░░░░░░░░░░░░░░░</span
-          ><span class="btn-row">░░░░░░░░░░░░░░░░</span></span
-        ><span class="btn-label">GitHub</span></a
-      >
+        <pre class="term__screen" aria-hidden="true"></pre>
+      </figure>
     </div>
+  </section>
+
+  <section class="grid">
+    <div class="ascii gutter gutter--left" aria-hidden="true"></div>
+    <div class="ascii gutter gutter--right" aria-hidden="true"></div>
+    <div class="cell">
+      <h2>Plugins in a few lines of Lua</h2>
+      <p>Drop a file in <code>~/.config/smelt/plugins/</code> and it loads, no restart.</p>
+      <div class="features">
+        <div class="feature">
+          <h3>Changes sidebar</h3>
+          <p>Every file the agent changed, with line counts, beside the conversation.</p>
+          <figure class="term" data-replay="assets/replays/changes.json" aria-label="A sidebar listing the files the agent changed, beside the conversation">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+        <div class="feature">
+          <h3>Snake</h3>
+          <p>Built in, in plain Lua like yours. Type <code>/snake</code> while the agent works.</p>
+          <figure class="term" data-replay="assets/replays/snake.json" aria-label="Playing snake in a floating window while the agent works">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+        <div class="feature feature--wide">
+          <h3>Statusline</h3>
+          <p>Mode, directory, branch and changed files, in the style of lualine.</p>
+          <figure class="term" data-replay="assets/replays/lualine.json" aria-label="A lualine-style statusline with the mode, working directory, branch and changed-file counts">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+      </div>
+      <a class="more" href="extend/">Write a plugin →</a>
+      <a class="more" href="extend/gallery/">More plugins →</a>
+    </div>
+    <div class="cell">
+      <div class="features">
+        <div class="feature">
+          <h2>Themes</h2>
+          <p>Over thirty bundled themes, or build your own and change any color you like.</p>
+          <figure class="term" data-scheme="dark" data-replay="assets/replays/themes-dark.json" aria-label="An answer recolored by one bundled dark theme after another">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+          <figure class="term" data-scheme="light" data-replay="assets/replays/themes-light.json" aria-label="An answer recolored by one bundled light theme after another">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+        <div class="feature">
+          <h2>LaTeX in the terminal</h2>
+          <p>Equations render as typeset images, with a Unicode fallback in any terminal.</p>
+          <figure class="term" data-replay="assets/replays/math.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+        <div class="feature feature--wide">
+          <h2>Vim in the prompt</h2>
+          <p>
+            Insert, normal and visual modes in the prompt and the transcript, with
+            motions, text objects, yank and undo. One line turns it on:
+            <code>smelt.settings.vim = true</code>
+          </p>
+          <figure class="term" data-replay="assets/replays/vim.json" aria-label="Editing a multi-line prompt with vim motions">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+        </div>
+      </div>
+    </div>
+    <div class="cell">
+      <h2>Light on your machine</h2>
+      <p>Terminal-Bench 2.1, Qwen3.8 27B, six agents, 360 runs. Lower is better.</p>
+      <div class="charts">
+        <figure class="chart">
+          <figcaption>memory</figcaption>
+          <ol>
+            <li class="me" title="smelt: median 0.20 GiB, middle half 0.16 to 0.32 GiB"><span>smelt</span><i style="--v:6.9%;--lo:5.5%;--hi:11.1%"></i><b>0.20 GiB</b></li>
+            <li title="pi: median 0.71 GiB, middle half 0.67 to 0.78 GiB"><span>pi</span><i style="--v:24.6%;--lo:23.2%;--hi:27.0%"></i><b>0.71 GiB</b></li>
+            <li title="claude code: median 1.42 GiB, middle half 1.23 to 1.53 GiB"><span>claude code</span><i style="--v:49.1%;--lo:42.6%;--hi:52.9%"></i><b>1.42 GiB</b></li>
+            <li title="mini-swe-agent: median 1.49 GiB, middle half 1.34 to 1.55 GiB"><span>mini-swe-agent</span><i style="--v:51.6%;--lo:46.4%;--hi:53.6%"></i><b>1.49 GiB</b></li>
+            <li title="codex: median 2.09 GiB, middle half 2.02 to 2.19 GiB"><span>codex</span><i style="--v:72.3%;--lo:69.9%;--hi:75.8%"></i><b>2.09 GiB</b></li>
+            <li title="opencode: median 2.80 GiB, middle half 2.57 to 2.89 GiB"><span>opencode</span><i style="--v:96.9%;--lo:88.9%;--hi:100.0%"></i><b>2.80 GiB</b></li>
+          </ol>
+        </figure>
+        <figure class="chart">
+          <figcaption>CPU time</figcaption>
+          <ol>
+            <li class="me" title="smelt: median 6.1 s, middle half 3.5 to 17.1 s"><span>smelt</span><i style="--v:2.3%;--lo:1.3%;--hi:6.4%"></i><b>6.1 s</b></li>
+            <li title="pi: median 9.7 s, middle half 5.6 to 16 s"><span>pi</span><i style="--v:3.6%;--lo:2.1%;--hi:6.0%"></i><b>9.7 s</b></li>
+            <li title="codex: median 9.8 s, middle half 6.9 to 33.9 s"><span>codex</span><i style="--v:3.7%;--lo:2.6%;--hi:12.7%"></i><b>9.8 s</b></li>
+            <li title="mini-swe-agent: median 13.1 s, middle half 9.3 to 49.7 s"><span>mini-swe-agent</span><i style="--v:4.9%;--lo:3.5%;--hi:18.6%"></i><b>13.1 s</b></li>
+            <li title="claude code: median 17.5 s, middle half 8.6 to 33.8 s"><span>claude code</span><i style="--v:6.5%;--lo:3.2%;--hi:12.6%"></i><b>17.5 s</b></li>
+            <li title="opencode: median 116 s, middle half 44.1 to 267.5 s"><span>opencode</span><i style="--v:43.4%;--lo:16.5%;--hi:100.0%"></i><b>116 s</b></li>
+          </ol>
+        </figure>
+        <figure class="chart">
+          <figcaption>wall time</figcaption>
+          <ol>
+            <li class="me" title="smelt: median 352 s, middle half 126 to 915 s"><span>smelt</span><i style="--v:36.1%;--lo:12.9%;--hi:93.8%"></i><b>352 s</b></li>
+            <li title="codex: median 372 s, middle half 205 to 760 s"><span>codex</span><i style="--v:38.2%;--lo:21.0%;--hi:77.9%"></i><b>372 s</b></li>
+            <li title="pi: median 399 s, middle half 148 to 803 s"><span>pi</span><i style="--v:40.9%;--lo:15.2%;--hi:82.4%"></i><b>399 s</b></li>
+            <li title="opencode: median 421 s, middle half 185 to 857 s"><span>opencode</span><i style="--v:43.2%;--lo:19.0%;--hi:87.9%"></i><b>421 s</b></li>
+            <li title="mini-swe-agent: median 570 s, middle half 237 to 916 s"><span>mini-swe-agent</span><i style="--v:58.5%;--lo:24.3%;--hi:93.9%"></i><b>570 s</b></li>
+            <li title="claude code: median 783 s, middle half 264 to 975 s"><span>claude code</span><i style="--v:80.3%;--lo:27.1%;--hi:100.0%"></i><b>783 s</b></li>
+          </ol>
+        </figure>
+      </div>
+      <p class="legend"><i></i> median <i class="range"></i> middle half of runs</p>
+      <a class="more" href="guide/benchmarks/">Benchmarks →</a>
+    </div>
+    <div class="cell">
+      <h2>Try it</h2>
+      <figure class="code">
+        <pre><span class="p">$</span> curl -fsSL https://smeltagent.dev/install.sh | sh
+<span class="p">$</span> smelt auth   <span class="c"># ChatGPT, GitHub Copilot or Kimi Code</span>
+<span class="p">$</span> smelt</pre>
+      </figure>
+    </div>
+  </section>
+  <div class="foot">
+    <div class="ascii" aria-hidden="true"></div>
   </div>
-</section>
-<script src="javascripts/hero-lava.js"></script>
+</div>
+<script src="javascripts/home.js"></script>
 {% endblock %} {% block footer %}{% endblock %}

@@ -120,24 +120,6 @@ impl SqliteTranscriptStore {
         self.hydrate_navigation_record(navigation)
     }
 
-    pub(super) fn total_estimated_record_rows(&self, width: u16) -> smelt_store::Result<u64> {
-        #[cfg(test)]
-        self.extent_read_count
-            .set(self.extent_read_count.get().saturating_add(1));
-        self.reader.transcript_total_estimated_rows(width.max(1))
-    }
-
-    pub(super) fn record_for_row(
-        &self,
-        width: u16,
-        row: RowIndex,
-    ) -> smelt_store::Result<Option<smelt_store::TranscriptRowLocation>> {
-        #[cfg(test)]
-        self.extent_read_count
-            .set(self.extent_read_count.get().saturating_add(1));
-        self.reader.transcript_record_for_row(width.max(1), row)
-    }
-
     #[cfg(test)]
     pub(super) fn extent_read_count(&self) -> usize {
         self.extent_read_count.get()

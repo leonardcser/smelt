@@ -34,6 +34,9 @@ set -o pipefail; CARGO_INCREMENTAL=0 cargo llvm-cov nextest --workspace --featur
 # regenerate Lua API stubs + reference docs (commit the result)
 set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120
 
+# regenerate the docs terminal replays and the README demo GIF (see docs/shots/README.md)
+cd docs/shots && bun install && bun run all
+
 # storybook snapshots (run when changing transcript_scene, tool renderers, or permission/transcript UI)
 set -o pipefail; cargo test -p smelt-tui --test storybook_main --features harness app_dialog_permission 2>&1 | tail -120
 ```

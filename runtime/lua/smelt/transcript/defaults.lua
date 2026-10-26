@@ -179,10 +179,14 @@ function M.render_tool_summary(block, ctx, presentation)
 end
 
 --- Render a full tool block using the current generic primitives and explicit item
---- construction.
+--- construction. A block awaiting permission renders its compact summary: the
+--- permission dialog already shows the full preview.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 function M.render_tool_full(block, ctx, presentation)
   presentation = tool_presentation(block, presentation)
+  if block.status == "confirm" then
+    return M.render_tool_summary(block, ctx, presentation)
+  end
   local items = {}
   items[#items + 1] = M.render_tool_header(block, ctx, nil, presentation)
 

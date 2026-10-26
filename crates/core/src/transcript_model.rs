@@ -1078,16 +1078,16 @@ pub fn compact_block_rows(
 ) -> Result<Vec<StoredBlockWithId>, serde_json::Error> {
     rows.into_iter()
         .enumerate()
-        .map(|(offset, row)| {
+        .map(|(offset, mut row)| {
+            let indexed_text = std::mem::take(&mut row.indexed_text);
             let estimated_text_bytes = row.estimated_text_bytes;
-            let preview = row.preview_text.clone();
             let record = TranscriptBlockRecordWithId::try_from(row)?;
             let (block_id, stored) = StoredBlockRef::from_record(
                 start_record_index.saturating_add(offset),
                 record.block_id,
                 &record.record,
+                &indexed_text,
                 estimated_text_bytes,
-                preview,
             );
             Ok(StoredBlockWithId { block_id, stored })
         })
@@ -1824,6 +1824,8 @@ pub struct StoredBlockRef {
     pub kind: StoredBlockKind,
     pub preview: String,
     pub estimated_text_bytes: u64,
+    /// Row estimate profile, identical to what the store aggregates.
+    pub extent: smelt_store::TranscriptExtentProfile,
     pub content_hash: u64,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
@@ -1847,10 +1849,17 @@ impl StoredBlockRef {
         record_index: usize,
         block_id: BlockId,
         record: &TranscriptBlockRecord,
+        indexed_text: &str,
         estimated_text_bytes: u64,
-        preview: String,
     ) -> (BlockId, Arc<Self>) {
         let block = &record.block;
+        let preview = preview(indexed_text, 512);
+        let extent = smelt_store::transcript_text_extent_profile(
+            block.kind(),
+            &preview,
+            indexed_text,
+            estimated_text_bytes,
+        );
         let tool_state = record.tool_state.as_ref();
         let kind = StoredBlockKind::from_kind(block.kind())
             .expect("transcript blocks use a known block kind");
@@ -1923,6 +1932,7 @@ impl StoredBlockRef {
                 kind,
                 preview,
                 estimated_text_bytes,
+                extent,
                 content_hash: if record.content_hash == 0 {
                     block.content_hash()
                 } else {
@@ -3210,8 +3220,8 @@ impl BlockHistory {
             record_index,
             id,
             &record.record,
+            &indexed.indexed_text,
             indexed.estimated_text_bytes,
-            preview(&indexed.indexed_text, 512),
         );
         Some(stored)
     }
@@ -3242,8 +3252,8 @@ impl BlockHistory {
                     record_index,
                     record.block_id,
                     &record.record,
+                    &indexed.indexed_text,
                     indexed.estimated_text_bytes,
-                    preview(&indexed.indexed_text, 512),
                 )
             })
             .collect::<Vec<_>>();
@@ -3740,8 +3750,8 @@ impl BlockHistory {
             order_index,
             id,
             &record,
+            &indexed.indexed_text,
             indexed.estimated_text_bytes,
-            preview(&indexed.indexed_text, 512),
         );
         let block_weight = block_retained_bytes(&record.block);
         let tool_state_weight = record
@@ -6070,8 +6080,8 @@ mod tests {
             0,
             id,
             &record,
+            "retained code",
             "retained code".len() as u64,
-            "retained code".into(),
         );
         let mut history = BlockHistory::new();
 

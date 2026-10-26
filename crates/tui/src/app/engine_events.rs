@@ -500,17 +500,18 @@ impl TuiApp {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as u64,
-                        prompt_tokens: usage.prompt_tokens.unwrap_or(0),
-                        completion_tokens: usage.completion_tokens.unwrap_or(0),
+                        calls: 1,
+                        prompt_tokens: usage.prompt_tokens.unwrap_or(0).into(),
+                        completion_tokens: usage.completion_tokens.unwrap_or(0).into(),
                         model: self
                             .core
                             .config
                             .active_model()
                             .map_or_else(|| "unknown".into(), |model| model.model_name.clone()),
                         cost_usd,
-                        cache_read_tokens: usage.cache_read_tokens,
-                        cache_write_tokens: usage.cache_write_tokens,
-                        reasoning_tokens: usage.reasoning_tokens,
+                        cache_read_tokens: usage.cache_read_tokens.map(u64::from),
+                        cache_write_tokens: usage.cache_write_tokens.map(u64::from),
+                        reasoning_tokens: usage.reasoning_tokens.map(u64::from),
                     },
                 );
                 SessionControl::Continue

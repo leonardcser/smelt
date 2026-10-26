@@ -737,6 +737,13 @@ impl MaterializedRows {
                 .min(self.total_rows)
     }
 
+    /// Adopts a document's current row count without shrinking below the rows
+    /// the window already backs; a re-measured document can report fewer rows
+    /// than an earlier projection materialized.
+    pub fn adopt_document_total(&mut self, total_rows: RowIndex) {
+        self.total_rows = total_rows.max(self.row_base.saturating_add(self.materialized_rows));
+    }
+
     pub fn contains_abs_row(self, row: RowIndex) -> bool {
         self.materialized_range().contains(&row)
     }
@@ -817,6 +824,21 @@ pub fn row_to_usize(row: RowIndex) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adopting_a_smaller_document_total_keeps_the_materialized_window_backed() {
+        let mut rows = MaterializedRows {
+            clamped_scroll: 2000,
+            row_base: 1988,
+            total_rows: 2039,
+            materialized_rows: 51,
+        };
+        rows.adopt_document_total(1912);
+        assert_eq!(rows.total_rows, 2039);
+        assert!(rows.covers_viewport(2000, 34));
+        rows.adopt_document_total(3000);
+        assert_eq!(rows.total_rows, 3000);
+    }
 
     #[test]
     fn signed_row_arithmetic_saturates_at_both_bounds() {

@@ -43,7 +43,6 @@ fn function_key_overlays_toggle_and_dismiss_without_mouse_focus() {
         "Esc should close help without a mouse click"
     );
 
-    assert!(app.run_lua(r#"require("smelt.examples.snake")"#));
     for key in [KeyCode::F(3), KeyCode::F(11), KeyCode::F(12)] {
         app.press(key);
         assert!(
@@ -1692,7 +1691,7 @@ async fn installing_the_runtime_http_client_starts_managed_refreshes() {
         Vec::new(),
     )]);
 
-    app.install_http_client(engine::HttpClient::new());
+    app.install_http_client(smelt_provider::http_client());
 
     assert_eq!(
         app.managed_model_status(engine::auth::AuthProvider::Codex),

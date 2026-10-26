@@ -1174,7 +1174,6 @@ mod tests {
     use smelt_core::content::block_layout::{
         BlockLayout, CapKeep, CapMarker, ContentRenderSpec, LuaLeaf, TextSpec,
     };
-    use smelt_core::lua::api::lua_table_to_json;
     use smelt_core::transcript_content::ContentId;
     use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
 
@@ -3034,28 +3033,6 @@ mod tests {
             .unwrap();
         let layout = render_transcript_block(&rt, &block, None);
         assert!(matches!(layout, BlockLayout::Empty));
-    }
-
-    #[test]
-    fn lua_sequence_tables_serialize_as_json_arrays() {
-        let lua = Lua::new();
-        let tbl: mlua::Table = lua
-            .load(r#"return { "label", "description" }"#)
-            .eval()
-            .expect("eval");
-        let json = lua_table_to_json(&lua, &tbl);
-        assert_eq!(
-            json,
-            serde_json::json!(["label", "description"]),
-            "1..N integer keys must become JSON array"
-        );
-
-        let obj: mlua::Table = lua
-            .load(r#"return { type = "object", properties = {} }"#)
-            .eval()
-            .expect("eval");
-        let json2 = lua_table_to_json(&lua, &obj);
-        assert_eq!(json2["type"], serde_json::json!("object"));
     }
 
     #[test]

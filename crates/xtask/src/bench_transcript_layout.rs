@@ -84,6 +84,9 @@ pub fn run(args: Vec<String>) {
     let mut tall_diff_only = false;
     let mut tall_diff_lines: Option<String> = None;
     let mut no_warmup = false;
+    let mut scaling = false;
+    let mut scaling_blocks: Option<String> = None;
+    let mut scaling_compacted = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -249,6 +252,15 @@ pub fn run(args: Vec<String>) {
                 active_memory_bytes = Some(bytes);
             }
             "--no-warmup" => no_warmup = true,
+            "--scaling" => scaling = true,
+            "--scaling-blocks" => {
+                scaling = true;
+                scaling_blocks = Some(take_required_arg(&mut iter, "--scaling-blocks"));
+            }
+            "--scaling-compacted" => {
+                scaling = true;
+                scaling_compacted = true;
+            }
             "--save-request-history" => {
                 let value = iter.next().unwrap_or_else(|| {
                     eprintln!("bench-transcript-layout: --save-request-history requires a value");
@@ -413,6 +425,26 @@ pub fn run(args: Vec<String>) {
         env,
     );
 
+    if scaling {
+        let mut env = vec![("SMELT_TRANSCRIPT_SCALING_BENCH", "1".to_string())];
+        if let Some(blocks) = scaling_blocks {
+            env.push(("SMELT_TRANSCRIPT_SCALING_BLOCKS", blocks));
+        }
+        if scaling_compacted {
+            env.push(("SMELT_TRANSCRIPT_SCALING_COMPACTED", "1".to_string()));
+        }
+        env.push(("SMELT_TRANSCRIPT_SCALING_REPS", runs.clone()));
+        eprintln!(
+            "running transcript scaling benchmark: profile={}",
+            if release { "release" } else { "test/debug" },
+        );
+        run_tui_bench(
+            "bench-transcript-scaling",
+            "transcript_scaling_benchmark_suite",
+            release,
+            env,
+        );
+    }
     if resume {
         let mut env = Vec::new();
         if let Some(bytes) = &resume_bytes {
@@ -471,7 +503,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--tall-diff-only] [--tall-diff-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-resumed-bytes N] [--stream-resumed-position top|middle|tail] [--stream-boundary-record-bytes N] [--stream-chunks N] [--stream-bytes N] [--stream-width N] [--stream-height N] [--stream-parallel-tools N] [--stream-workload text|bash|mixed|exec|write-draft|explore-group] [--stream-scheduled] [--stream-scroll] [--stream-idle-frames N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--tall-diff-only] [--tall-diff-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-resumed-bytes N] [--stream-resumed-position top|middle|tail] [--stream-boundary-record-bytes N] [--stream-chunks N] [--stream-bytes N] [--stream-width N] [--stream-height N] [--stream-parallel-tools N] [--stream-workload text|bash|mixed|exec|write-draft|explore-group] [--stream-scheduled] [--stream-scroll] [--stream-idle-frames N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--scaling] [--scaling-blocks CSV] [--scaling-compacted] [--debug]");
     eprintln!();
     eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -531,4 +563,7 @@ fn print_usage() {
     eprintln!("--save-request-item-bytes N pads each generated history item to at least N bytes for byte-heavy latency and memory tests.");
     eprintln!("--scale-500mb enables 500 MiB search/resume benchmark targets and disables warmup.");
     eprintln!("--no-warmup skips benchmark warmup samples for large-session runs.");
+    eprintln!("--scaling sweeps block count and fits how size-independent interactions scale; --runs sets repetitions per operation.");
+    eprintln!("--scaling-blocks CSV sets swept block counts; default is 2000,8000,32000.");
+    eprintln!("--scaling-compacted persists and dematerializes the fixture before measuring.");
 }

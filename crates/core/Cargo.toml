@@ -53,3 +53,6 @@ ratex-font = "0.1.14"
 [dev-dependencies]
 smelt-store = { workspace = true, features = ["test-util"] }
 smelt-test-support = { workspace = true }
+
+[build-dependencies]
+mlua.workspace = true

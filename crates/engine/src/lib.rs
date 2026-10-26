@@ -221,6 +221,10 @@ pub struct EngineConfig {
     /// [`clock::RealClock`]; deterministic-simulation harnesses inject a
     /// [`clock::VirtualClock`] so scenarios can replay against advanced time.
     pub clock: Arc<dyn clock::Clock>,
+    /// Replaces the network for provider chat requests. Production leaves this
+    /// unset; deterministic harnesses answer requests in-process, which also
+    /// keeps the engine from fetching the model catalog.
+    pub transport: Option<Arc<dyn smelt_provider::ChatTransport>>,
 }
 
 impl EngineConfig {
@@ -233,6 +237,7 @@ impl EngineConfig {
             cwd,
             skill_section: None,
             clock,
+            transport: None,
         }
     }
 

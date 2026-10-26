@@ -489,7 +489,7 @@ fn ordered_prepare_request_paints_transient_streaming_state() {
         if outcome == crate::app::render_loop::EngineOutputDrainOutcome::Drained {
             break;
         }
-        app.render_frame_to(&mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         streamed_frames.push(app.ui_snapshot().text());
     }
 

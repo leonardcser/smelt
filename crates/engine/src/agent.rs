@@ -139,14 +139,16 @@ pub(crate) async fn engine_task(
 ) {
     // Some openai-compatible endpoints gate on User-Agent (e.g. api.kimi.com).
     // Per-request header() calls (Copilot, Codex) still override this.
-    let client = reqwest::Client::builder()
+    let client = smelt_provider::http_client_builder()
         .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    smelt_provider::catalog::spawn_fetch(
-        client.clone(),
-        Some(crate::paths::cache_dir().join("web")),
-    );
+        .unwrap_or_else(|_| smelt_provider::http_client());
+    if config.transport.is_none() {
+        smelt_provider::catalog::spawn_fetch(
+            client.clone(),
+            Some(crate::paths::cache_dir().join("web")),
+        );
+    }
 
     let _ = event_tx.send(EngineEvent::Ready);
 
@@ -227,8 +229,7 @@ pub(crate) async fn engine_task(
                     }
                 };
 
-                let provider =
-                    build_provider(&model_target, &client, std::sync::Arc::clone(&config.clock));
+                let provider = build_provider(&model_target, &client, &config);
                 let system_prompt = tui_system_prompt
                     .or_else(|| config.system_prompt_override.clone())
                     .unwrap_or_else(|| {
@@ -644,7 +645,7 @@ fn spawn_engine_ask(
     } else {
         dispatcher.definitions()
     };
-    let provider = build_provider(&target, client, std::sync::Arc::clone(&config.clock));
+    let provider = build_provider(&target, client, config);
     let model_name = target.model.clone();
     let pricing_target = target.clone();
     let tx = event_tx.clone();
@@ -844,15 +845,16 @@ fn is_context_window_error(e: &ProviderError) -> bool {
 fn build_provider(
     target: &ModelTarget,
     client: &reqwest::Client,
-    clock: std::sync::Arc<dyn crate::clock::Clock>,
+    config: &EngineConfig,
 ) -> EngineProvider {
     EngineProvider::new(
         target.api_base.clone(),
         target.api_key.clone(),
         &target.provider_type,
         client.clone(),
-        clock,
+        std::sync::Arc::clone(&config.clock),
     )
+    .with_transport(config.transport.clone())
     .with_model_config(target.config.clone())
 }
 
@@ -1525,11 +1527,7 @@ impl<'a> Turn<'a> {
     }
 
     fn apply_model_change(&mut self, target: ModelTarget, system_prompt: String) {
-        self.provider = build_provider(
-            &target,
-            self.http_client,
-            std::sync::Arc::clone(&self.config.clock),
-        );
+        self.provider = build_provider(&target, self.http_client, self.config);
         self.model_target = target;
         self.target_revision = self.target_revision.wrapping_add(1);
         self.install_system_prompt(system_prompt);
@@ -3765,7 +3763,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_history_preparation_retains_turn_commands_in_order() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
         let (event_tx, host_tx, _outputs) = crate::output_channel(crate::HostCallbacks::Enabled);
@@ -4094,7 +4092,7 @@ mod tests {
 
     #[test]
     fn current_turn_input_classifies_notes_and_preserves_commands() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, host_tx, _output_rx) = crate::output_channel(crate::HostCallbacks::Enabled);
@@ -4326,7 +4324,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequential_tool_wait_replays_ordered_context_updates_before_result() {
-        let client = reqwest::Client::new();
+        let client = smelt_provider::http_client();
         let dispatcher = crate::tools::EmptyDispatcher::new();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, host_tx, _output_rx) = crate::output_channel(crate::HostCallbacks::Enabled);
@@ -4541,11 +4539,11 @@ mod tests {
             },
             ..model_target()
         };
-        let provider = build_provider(
-            &target,
-            &reqwest::Client::new(),
+        let config = EngineConfig::new(
+            std::path::PathBuf::from("/tmp"),
             std::sync::Arc::new(crate::clock::RealClock),
         );
+        let provider = build_provider(&target, &smelt_provider::http_client(), &config);
 
         assert_eq!(provider.api_base(), "https://target.example/v1");
         assert_eq!(provider.api_key(), "target-key");

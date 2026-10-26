@@ -10,6 +10,7 @@ pub mod reg;
 pub mod runtime;
 mod shared;
 mod task;
+pub mod value;
 pub mod watchers;
 
 pub use reg::LuaReg;
@@ -130,8 +131,7 @@ fn tool_metadata_from_lua(
         return Ok((None, None));
     }
     let mlua::Value::Table(table) = value else {
-        let metadata =
-            api::bounded_tool_metadata_from_lua(lua, value, &[]).map_err(mlua::Error::external)?;
+        let metadata = value::tool_metadata(lua, value, &[]).map_err(mlua::Error::external)?;
         return Ok((Some(metadata), None));
     };
 
@@ -157,8 +157,8 @@ fn tool_metadata_from_lua(
     if attachment.is_some() {
         ignored_keys.push("data_url");
     }
-    let metadata = api::bounded_tool_metadata_from_lua(lua, value, &ignored_keys)
-        .map_err(mlua::Error::external)?;
+    let metadata =
+        value::tool_metadata(lua, value, &ignored_keys).map_err(mlua::Error::external)?;
     Ok((Some(metadata), attachment))
 }
 
@@ -250,7 +250,7 @@ impl Drop for LuaHandle {
 /// Use [`serde_to_lua_preserving_nulls`] for protocol data that must round-trip.
 pub fn serde_to_lua<T: serde::Serialize>(lua: &Lua, value: &T) -> LuaResult<mlua::Value> {
     let json = serde_json::to_value(value).map_err(mlua::Error::external)?;
-    json_to_lua(lua, &json)
+    value::from_json(lua, &json)
 }
 
 /// Serialize protocol data without dropping JSON null fields or array entries.
@@ -261,26 +261,15 @@ pub fn serde_to_lua_preserving_nulls<T: serde::Serialize>(
     value: &T,
 ) -> LuaResult<mlua::Value> {
     let json = serde_json::to_value(value).map_err(mlua::Error::external)?;
-    json_to_lua_with_null(lua, &json, &mlua::Value::NULL)
+    value::from_json_preserving_nulls(lua, &json)
 }
 
 /// Deserialize a Lua value into a `DeserializeOwned` Rust type via JSON.
-/// Inverse of [`serde_to_lua_preserving_nulls`]. Returns `None` if either the Lua→JSON
-/// conversion drops fields the deserializer requires, or the JSON
-/// doesn't match the target shape. Callers treat `None` as "no
+/// Inverse of [`serde_to_lua_preserving_nulls`]. Returns `None` if the Lua value
+/// can't be converted to JSON, or the JSON doesn't match the target shape. Callers treat `None` as "no
 /// mutation" (the original payload stays in flight).
 pub fn lua_to_serde<T: serde::de::DeserializeOwned>(lua: &Lua, value: &mlua::Value) -> Option<T> {
-    let json = match value {
-        mlua::Value::Table(t) => api::lua_table_to_json(lua, t),
-        mlua::Value::Nil => serde_json::Value::Null,
-        mlua::Value::LightUserData(ptr) if ptr.0.is_null() => serde_json::Value::Null,
-        mlua::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        mlua::Value::Integer(i) => serde_json::json!(*i),
-        mlua::Value::Number(n) => serde_json::json!(*n),
-        mlua::Value::String(s) => serde_json::Value::String(s.to_string_lossy().to_string()),
-        _ => return None,
-    };
-    serde_json::from_value(json).ok()
+    serde_json::from_value(value::to_json(lua, value).ok()?).ok()
 }
 
 /// Decode a Lua value into one styled line.
@@ -400,44 +389,6 @@ fn styled_span_from_lua(span: mlua::Value, label: &str) -> LuaResult<protocol::S
         out.italic |= style.get::<Option<bool>>("italic")?.unwrap_or(false);
     }
     Ok(out)
-}
-
-pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
-    json_to_lua_with_null(lua, v, &mlua::Value::Nil)
-}
-
-fn json_to_lua_with_null(
-    lua: &Lua,
-    v: &serde_json::Value,
-    null: &mlua::Value,
-) -> LuaResult<mlua::Value> {
-    match v {
-        serde_json::Value::Null => Ok(null.clone()),
-        serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(mlua::Value::Integer(i))
-            } else {
-                Ok(mlua::Value::Number(n.as_f64().unwrap_or(0.0)))
-            }
-        }
-        serde_json::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let t = lua.create_table()?;
-            crate::lua::api::mark_json_array(lua, &t)?;
-            for (i, elem) in arr.iter().enumerate() {
-                t.set(i + 1, json_to_lua_with_null(lua, elem, null)?)?;
-            }
-            Ok(mlua::Value::Table(t))
-        }
-        serde_json::Value::Object(map) => {
-            let t = lua.create_table()?;
-            for (k, val) in map {
-                t.set(k.as_str(), json_to_lua_with_null(lua, val, null)?)?;
-            }
-            Ok(mlua::Value::Table(t))
-        }
-    }
 }
 
 #[cfg(test)]

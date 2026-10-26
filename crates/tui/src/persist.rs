@@ -19,6 +19,8 @@ pub(crate) const DEFAULT_PERSISTENCE_DEADLINE: Duration = Duration::from_secs(5)
 pub(crate) const INTERACTIVE_PERSISTENCE_DEADLINE: Duration = Duration::from_millis(500);
 const DROP_PERSISTENCE_DEADLINE: Duration = Duration::from_millis(250);
 const IDLE_RECLAMATION_INTERVAL: Duration = Duration::from_secs(1);
+/// Every save restarts a reclamation pass, so passes wait for the head to settle.
+const RECLAMATION_QUIET: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SessionEpoch(u64);
@@ -2025,6 +2027,8 @@ struct PersistenceActor {
     search_projector: Option<smelt_store::LineageSearchProjector>,
     search_projection_requested: bool,
     head: smelt_store::StoreHead,
+    /// The head reclamation last observed and when it did.
+    reclamation_head: (smelt_store::StoreHead, Instant),
     durable: PersistenceGeneration,
     last_publication: Option<PersistenceAcknowledgement>,
     retained_save: Option<RetainedSessionSave>,
@@ -2152,6 +2156,7 @@ fn persistence_actor(
         search_projector,
         search_projection_requested: false,
         head: actual_head,
+        reclamation_head: (actual_head, Instant::now()),
         durable: generation,
         last_publication: None,
         retained_save: None,
@@ -2444,6 +2449,12 @@ impl PersistenceActor {
         {
             return false;
         }
+        if self.reclamation_head.0 != self.head {
+            self.reclamation_head = (self.head, Instant::now());
+        }
+        if self.reclamation_head.1.elapsed() < RECLAMATION_QUIET {
+            return false;
+        }
         let writer = self.writer.as_mut().expect("actor writer");
         let result = writer.reopen_connection().and_then(|()| {
             let actual = writer.store_head()?;
@@ -2452,16 +2463,21 @@ impl PersistenceActor {
                     "session store head changed during idle reclamation".into(),
                 ));
             }
-            writer.lineage_writer_mut().reclaim_step(1)
+            let lineage = writer.lineage_writer_mut();
+            let step = lineage.reclaim_step(smelt_store::RECLAMATION_STEP_ROWS)?;
+            smelt_perf::perf::record_value(
+                "persist:reclamation:rows_examined",
+                step.rows_examined as u64,
+            );
+            if !step.complete {
+                return Ok(step.made_progress());
+            }
+            let released = lineage.release_free_pages()?;
+            smelt_perf::perf::record_value("persist:reclamation:pages_released", released);
+            Ok(released > 0)
         });
         match result {
-            Ok(step) => {
-                smelt_perf::perf::record_value(
-                    "persist:reclamation:rows_examined",
-                    step.rows_examined as u64,
-                );
-                !step.complete && step.made_progress()
-            }
+            Ok(more) => more,
             Err(error) => {
                 // Maintenance does not change durable acknowledgements or turn a
                 // failed canonical operation into an implicit retry. The next
@@ -3714,7 +3730,7 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(1));
         }
-        let idle_deadline = Instant::now() + Duration::from_secs(3);
+        let idle_deadline = Instant::now() + RECLAMATION_QUIET + Duration::from_secs(3);
         while (abandoned_exists() || reader.storage_stats().unwrap().object_rows >= before)
             && Instant::now() < idle_deadline
         {
@@ -3917,7 +3933,7 @@ mod tests {
         ));
         let published = actor.status().acknowledgement.unwrap();
         assert_eq!(published.result.receipt.current, committed.head);
-        let idle_deadline = Instant::now() + Duration::from_secs(3);
+        let idle_deadline = Instant::now() + RECLAMATION_QUIET + Duration::from_secs(3);
         while (abandoned_exists()
             || reader.storage_stats().unwrap().object_rows >= before_reclamation)
             && Instant::now() < idle_deadline

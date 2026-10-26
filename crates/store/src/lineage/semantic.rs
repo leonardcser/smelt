@@ -561,46 +561,6 @@ pub(crate) fn ensure_history_index(
     Ok(stats)
 }
 
-pub(crate) fn backfill_history_indexes(conn: &Connection) -> Result<()> {
-    let mut statement = conn.prepare(
-        "WITH RECURSIVE ordered(lineage_id, revision_id, history_root_id, parent_history_root_id, depth) AS (
-             SELECT lineage_id, revision_id, history_root_id, NULL, 0 FROM lineage_revisions
-             WHERE parent_revision_id IS NULL
-             UNION ALL
-             SELECT child.lineage_id, child.revision_id, child.history_root_id, parent.history_root_id, parent.depth + 1
-             FROM ordered parent JOIN lineage_revisions child
-               ON child.lineage_id = parent.lineage_id AND child.parent_revision_id = parent.revision_id
-         ) SELECT lineage_id, history_root_id, parent_history_root_id FROM ordered ORDER BY depth"
-    )?;
-    let revisions = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        ))
-    })?;
-    let count: i64 = conn.query_row("SELECT count(*) FROM lineage_revisions", [], |row| {
-        row.get(0)
-    })?;
-    let mut indexed = 0;
-    for revision in revisions {
-        let (lineage, root, parent) = revision?;
-        let lineage = LineageId::from_hex(lineage)?;
-        let root = load_root(conn, &lineage, &RootId::from_db(root)?)?;
-        let parent = parent
-            .map(|id| load_root(conn, &lineage, &RootId::from_db(id)?))
-            .transpose()?;
-        ensure_history_index(conn, &lineage, &root, parent.as_ref())?;
-        indexed += 1;
-    }
-    if nonnegative_u64(count, "revision count")? != indexed {
-        return Err(StoreError::Integrity(
-            "history semantic migration encountered invalid ancestry".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn find_key(
     conn: &Connection,
     lineage: &LineageId,
@@ -695,26 +655,6 @@ pub(crate) fn history_user_count_cancellable(
     if end == 0 {
         return Ok((0, stats));
     }
-    // COMPAT(lineage-schema-v4): old read-only layouts have no authoritative ordinals.
-    if matches!(crate::schema::user_version(conn)?, 3..=5) {
-        let mut count = 0;
-        let mut start = 0;
-        while start < end {
-            if cancelled() {
-                return Err(StoreError::Cancelled);
-            }
-            let stop = start.saturating_add(HISTORY_CHUNK_ITEMS).min(end);
-            let (items, read_stats) = sequence_range(conn, lineage, root, start, stop)?;
-            stats.nodes_read += read_stats.nodes_read;
-            stats.payloads_read += read_stats.payloads_read;
-            for bytes in items {
-                let item: SemanticHistoryItem = serde_json::from_slice(&bytes)?;
-                count += u64::from(item.is_user_turn());
-            }
-            start = stop;
-        }
-        return Ok((count, stats));
-    }
     let id = index_root(conn, lineage, &root.id)?
         .ok_or_else(|| StoreError::Integrity("history semantic index is missing".into()))?;
     let index = id
@@ -737,60 +677,8 @@ pub(crate) fn history_semantic_range(
     if range.start >= end {
         return Ok((None, stats));
     }
-    // COMPAT(history-semantic-v3): read-only databases are not upgraded.
-    if crate::schema::user_version(conn)? == 3 {
-        let mut cursor = if last { end } else { range.start };
-        loop {
-            let (start, stop) = if last {
-                (
-                    cursor.saturating_sub(HISTORY_CHUNK_ITEMS).max(range.start),
-                    cursor,
-                )
-            } else {
-                (cursor, cursor.saturating_add(HISTORY_CHUNK_ITEMS).min(end))
-            };
-            let (bytes, read_stats) = sequence_range(conn, lineage, root, start, stop)?;
-            stats.nodes_read += read_stats.nodes_read;
-            stats.payloads_read += read_stats.payloads_read;
-            let mut found = None;
-            for (offset, bytes) in bytes.into_iter().enumerate() {
-                let item: SemanticHistoryItem = serde_json::from_slice(&bytes)?;
-                let value = match semantic {
-                    HistorySemantic::Context(name) => item
-                        .as_note()
-                        .and_then(protocol::HistoryNote::context_name)
-                        .filter(|found| *found == name),
-                    HistorySemantic::Mode => item.as_note().and_then(protocol::HistoryNote::mode),
-                    HistorySemantic::BaseMode => {
-                        item.as_note().and_then(protocol::HistoryNote::base_mode)
-                    }
-                    HistorySemantic::Visible => item.is_transcript_visible().then_some(""),
-                    HistorySemantic::User => {
-                        return Err(StoreError::Integrity(
-                            "legacy index has no user ordinals".into(),
-                        ))
-                    }
-                };
-                if let Some(value) = value.filter(|_| last || found.is_none()) {
-                    found = Some((start + offset as u64, value.to_owned()));
-                }
-            }
-            if found.is_some() {
-                return Ok((found, stats));
-            }
-            cursor = if last { start } else { stop };
-            if (last && cursor == range.start) || (!last && cursor == end) {
-                return Ok((None, stats));
-            }
-        }
-    }
-    // COMPAT(lineage-schema-v4): preserve the original semantic mapping for read-only reads.
-    let id = if matches!(crate::schema::user_version(conn)?, 4 | 5) {
-        conn.prepare_cached("SELECT index_node_id FROM lineage_history_indexes WHERE lineage_id = ?1 AND history_root_id = ?2")?
-            .query_row((lineage.as_str(), root.id.as_str()), |row| row.get::<_, Option<String>>(0)).optional()?
-    } else {
-        index_root(conn, lineage, &root.id)?
-    }.ok_or_else(|| StoreError::Integrity("history semantic index is missing".into()))?;
+    let id = index_root(conn, lineage, &root.id)?
+        .ok_or_else(|| StoreError::Integrity("history semantic index is missing".into()))?;
     let found = if let Some(id) = id {
         let node = load_index_node(conn, lineage, &id, &mut stats)?;
         find_key(
@@ -816,49 +704,6 @@ pub(crate) fn history_semantic_range(
         found.map(|node| (position(&node.min), node.value.unwrap())),
         stats,
     ))
-}
-
-#[cfg(test)]
-pub(crate) fn backfill_shared_fixture_indexes(conn: &Connection) -> Result<()> {
-    let lineage = LineageId::from_hex(conn.query_row(
-        "SELECT lineage_id FROM lineage_identity",
-        [],
-        |row| row.get::<_, String>(0),
-    )?)?;
-    let roots = conn
-        .prepare("SELECT DISTINCT history_root_id FROM lineage_revisions")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for id in roots {
-        let root = load_root(conn, &lineage, &RootId::from_db(id)?)?;
-        conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS smelt_new_history_keys (key BLOB PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID; DELETE FROM smelt_new_history_keys;")?;
-        let items = sequence_range(conn, &lineage, &root, 0, root.item_count)?.0;
-        for (position, bytes) in items.iter().enumerate() {
-            let item: SemanticHistoryItem = serde_json::from_slice(bytes)?;
-            let note = item.as_note();
-            for (semantic, value) in [
-                note.and_then(protocol::HistoryNote::context_name)
-                    .map(|name| (HistorySemantic::Context(name), name)),
-                note.and_then(protocol::HistoryNote::mode)
-                    .map(|mode| (HistorySemantic::Mode, mode)),
-                note.and_then(protocol::HistoryNote::base_mode)
-                    .map(|mode| (HistorySemantic::BaseMode, mode)),
-                item.is_transcript_visible()
-                    .then_some((HistorySemantic::Visible, "")),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                conn.execute(
-                    "INSERT INTO smelt_new_history_keys (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![&semantic.key(position as u64)[..], value],
-                )?;
-            }
-        }
-        let index = build_delta_index(conn, &lineage, &mut OperationStats::default())?;
-        conn.execute("INSERT OR IGNORE INTO lineage_history_indexes (lineage_id, history_root_id, index_node_id) VALUES (?1, ?2, ?3)", rusqlite::params![lineage.as_str(), root.id.as_str(), index.map(|node| node.id)])?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -961,96 +806,6 @@ mod tests {
     }
 
     #[test]
-    fn already_open_historical_writer_cannot_publish_an_unindexed_history_root() {
-        for version in [4, 5] {
-            let (source, lineage, branch, _, _) =
-                crate::schema::tests::shared_archived_fixture(version);
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join(format!("isolated-v{version}.db"));
-            crate::diagnostics::backup_connection_to(&source, &path).unwrap();
-            let mut old_writer = Connection::open(&path).unwrap();
-            old_writer
-                .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
-                .unwrap();
-            let parent = lineage_session_head(&old_writer, &lineage, &branch).unwrap();
-            let parent_revision =
-                load_revision(&old_writer, &lineage, &parent.revision_id).unwrap();
-            let sql = "INSERT INTO lineage_revisions (
-            lineage_id, revision_id, parent_revision_id, created_by_session_id, operation_kind,
-            history_root_id, transcript_root_id, state_payload_id, history_len,
-            transcript_record_count, transcript_byte_count, commit_fingerprint, created_at
-        ) SELECT lineage_id, ?1, revision_id, created_by_session_id, 'append', ?2,
-            transcript_root_id, state_payload_id, ?3, transcript_record_count,
-            transcript_byte_count, ?5, 2 FROM lineage_revisions WHERE revision_id = ?4";
-            old_writer.prepare_cached(sql).unwrap();
-            let mut migration = Connection::open(&path).unwrap();
-            crate::schema::initialize_lineage_schema(&mut migration).unwrap();
-            for changed in [false, true] {
-                let tx = old_writer.transaction().unwrap();
-                let root = if changed {
-                    let bytes = serde_json::to_vec(&HistoryItem::user(protocol::Content::text(
-                        "new request",
-                    )))
-                    .unwrap();
-                    append_sequence_in(
-                        &tx,
-                        &lineage,
-                        &parent_revision.history_root,
-                        &[bytes],
-                        ObjectCompression::None,
-                    )
-                    .unwrap()
-                    .0
-                } else {
-                    parent_revision.history_root.clone()
-                };
-                let mut revision = make_revision(
-                    &lineage,
-                    Some(parent_revision.id.clone()),
-                    branch.clone(),
-                    Some(LineageOperation::Append),
-                    root.clone(),
-                    parent_revision.transcript_root.clone(),
-                    parent_revision.state_payload_id.clone(),
-                    2,
-                )
-                .unwrap();
-                revision.commit_fingerprint = Some("b".repeat(64));
-                let result = tx.prepare_cached(sql).unwrap().execute(rusqlite::params![
-                    revision.id.as_str(),
-                    root.id.as_str(),
-                    root.item_count as i64,
-                    parent_revision.id.as_str(),
-                    revision.commit_fingerprint
-                ]);
-                if changed {
-                    let error = result.unwrap_err().to_string();
-                    assert!(
-                        error.contains("completed history semantic index"),
-                        "unexpected rejection: {error}"
-                    );
-                } else {
-                    assert_eq!(
-                        result.unwrap(),
-                        1,
-                        "an already indexed unchanged root remains safe"
-                    );
-                    assert_eq!(
-                        load_revision(&tx, &lineage, &revision.id).unwrap(),
-                        revision
-                    );
-                }
-                tx.rollback().unwrap();
-            }
-            assert_eq!(
-                lineage_session_head(&old_writer, &lineage, &branch).unwrap(),
-                parent
-            );
-            crate::schema::validate_lineage_schema(&old_writer).unwrap();
-        }
-    }
-
-    #[test]
     fn user_ordinals_count_exact_prefixes_after_append_replacement_and_truncation() {
         let (mut conn, lineage) = fixture();
         let empty = empty_sequence(&conn, &lineage, SequenceKind::History).unwrap();
@@ -1105,87 +860,6 @@ mod tests {
     }
 
     #[test]
-    fn read_only_historical_user_counts_match_prefixes_without_migration() {
-        let items = [
-            HistoryItem::system("hidden"),
-            HistoryItem::user(protocol::Content::text("first request")),
-            HistoryItem::user(protocol::compaction_summary_content("legacy summary")),
-            HistoryItem::user(protocol::Content::text(format!(
-                "{}plan",
-                protocol::note::MODE_NOTE_PREFIX
-            ))),
-            HistoryItem::user(protocol::Content::text(format!(
-                "{}finished",
-                protocol::note::PROCESS_STATUS_NOTE_PREFIX
-            ))),
-            HistoryItem::user(protocol::Content::text("second request")),
-        ];
-        for version in [3, 4, 5] {
-            let mut conn = match version {
-                3 => crate::schema::tests::v3_connection(),
-                4 => crate::schema::tests::v4_connection(),
-                5 => crate::schema::tests::v5_connection(),
-                _ => unreachable!(),
-            };
-            let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
-            create_lineage(&conn, &lineage, 1).unwrap();
-            let empty = empty_sequence(&conn, &lineage, SequenceKind::History).unwrap();
-            let root = append(&mut conn, &lineage, &empty, &items);
-            conn.pragma_update(None, "query_only", true).unwrap();
-            let changes = conn.total_changes();
-            for (end, expected) in [0, 0, 1, 1, 1, 1, 2, 2].into_iter().enumerate() {
-                let (count, stats) =
-                    history_user_count(&conn, &lineage, &root, end as u64).unwrap();
-                assert_eq!(count, expected, "v{version}, prefix {end}");
-                assert_eq!(stats.payloads_read, (end as u64).min(root.item_count));
-            }
-            assert_eq!(conn.total_changes(), changes);
-            assert_eq!(crate::schema::user_version(&conn).unwrap(), version);
-            crate::schema::validate_lineage_schema(&conn).unwrap();
-        }
-    }
-
-    #[test]
-    fn historical_user_count_cancels_between_bounded_chunks_without_writes() {
-        for version in [3, 4, 5] {
-            let mut conn = match version {
-                3 => crate::schema::tests::v3_connection(),
-                4 => crate::schema::tests::v4_connection(),
-                5 => crate::schema::tests::v5_connection(),
-                _ => unreachable!(),
-            };
-            let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
-            create_lineage(&conn, &lineage, 1).unwrap();
-            let empty = empty_sequence(&conn, &lineage, SequenceKind::History).unwrap();
-            let mut items = (0..513)
-                .map(|index| {
-                    serde_json::to_vec(&HistoryItem::user(protocol::Content::text(format!(
-                        "request {index}"
-                    ))))
-                    .unwrap()
-                })
-                .collect::<Vec<_>>();
-            items[256] = br#"{"kind":"invalid"}"#.to_vec();
-            let root =
-                append_sequence(&mut conn, &lineage, &empty, &items, ObjectCompression::None)
-                    .unwrap()
-                    .0;
-            conn.pragma_update(None, "query_only", true).unwrap();
-            let changes = conn.total_changes();
-            let checks = std::cell::Cell::new(0);
-            let outcome = history_user_count_cancellable(&conn, &lineage, &root, u64::MAX, &|| {
-                checks.set(checks.get() + 1);
-                checks.get() == 3
-            });
-            assert!(matches!(outcome, Err(StoreError::Cancelled)));
-            assert_eq!(checks.get(), 3);
-            assert!(history_user_count(&conn, &lineage, &root, u64::MAX).is_err());
-            assert_eq!(conn.total_changes(), changes);
-            assert_eq!(crate::schema::user_version(&conn).unwrap(), version);
-        }
-    }
-
-    #[test]
     fn user_ordinal_lookups_and_appends_do_not_read_retained_history() {
         for count in [1, 32, 33, 1024, 4096] {
             let (mut conn, lineage) = fixture();
@@ -1225,47 +899,6 @@ mod tests {
         let root = append(&mut conn, &lineage, &empty, &items);
         ensure_history_index(&conn, &lineage, &root, None).unwrap();
         assert_queries(&conn, &lineage, &root, &items);
-    }
-
-    #[test]
-    fn legacy_history_semantics_validate_the_entire_scanned_chunk() {
-        let mut conn = crate::schema::tests::v3_connection();
-        let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
-        create_lineage(&conn, &lineage, 1).unwrap();
-        let empty = empty_sequence(&conn, &lineage, SequenceKind::History).unwrap();
-        let items = [
-            serde_json::to_vec(&HistoryItem::user(protocol::Content::text("visible"))).unwrap(),
-            br#"{"kind":"invalid"}"#.to_vec(),
-        ];
-        let root = append_sequence(&mut conn, &lineage, &empty, &items, ObjectCompression::None)
-            .unwrap()
-            .0;
-        assert_eq!(
-            history_semantic_range(
-                &conn,
-                &lineage,
-                &root,
-                HistorySemantic::Visible,
-                0..1,
-                false
-            )
-            .unwrap()
-            .0,
-            Some((0, String::new())),
-        );
-        for last in [false, true] {
-            assert!(matches!(
-                history_semantic_range(
-                    &conn,
-                    &lineage,
-                    &root,
-                    HistorySemantic::Visible,
-                    0..2,
-                    last
-                ),
-                Err(StoreError::Json(_))
-            ));
-        }
     }
 
     #[test]

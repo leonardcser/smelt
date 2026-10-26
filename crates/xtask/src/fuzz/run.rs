@@ -20,6 +20,10 @@ use std::path::Path;
 use std::time::Duration;
 
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Floor for replaying a small corpus of slow, structured inputs.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Per-input allowance that lets the replay limit grow with the corpus.
+const PREFLIGHT_PER_INPUT: Duration = Duration::from_secs(2);
 const FAIL_FAST: [&str; 3] = ["-ignore_crashes=0", "-ignore_ooms=0", "-ignore_timeouts=0"];
 
 #[derive(clap::Args)]
@@ -104,6 +108,11 @@ pub fn run(project: &Project, options: Options) -> Result<()> {
     Ok(())
 }
 
+fn preflight_timeout(inputs: usize) -> Duration {
+    let inputs = u32::try_from(inputs).unwrap_or(u32::MAX);
+    PREFLIGHT_TIMEOUT.max(PREFLIGHT_PER_INPUT.saturating_mul(inputs))
+}
+
 fn preflight(
     project: &Project,
     data: &FuzzData,
@@ -112,11 +121,12 @@ fn preflight(
     corpus: &Path,
 ) -> Result<()> {
     println!("xtask fuzz: preflight corpus {target}");
+    let timeout = preflight_timeout(input_files(corpus)?.len());
     let mut command = project.target_command(target, sanitizer, data)?;
     command.arg(corpus).arg("-runs=0").args(FAIL_FAST);
     project
         .runner
-        .run(command, Some(MAINTENANCE_TIMEOUT), OutputMode::Inherit)?
+        .run(command, Some(timeout), OutputMode::Inherit)?
         .success(&format!(
             "{target} corpus preflight; inspect {}",
             data.artifacts(target).display()
@@ -200,6 +210,17 @@ mod tests {
             unreachable!()
         };
         Ok(options)
+    }
+
+    #[test]
+    fn preflight_timeout_grows_with_the_corpus() {
+        assert_eq!(preflight_timeout(0), PREFLIGHT_TIMEOUT);
+        assert_eq!(preflight_timeout(100), PREFLIGHT_TIMEOUT);
+        assert_eq!(preflight_timeout(7684), Duration::from_secs(15368));
+        assert_eq!(
+            preflight_timeout(usize::MAX),
+            PREFLIGHT_PER_INPUT.saturating_mul(u32::MAX)
+        );
     }
 
     #[test]

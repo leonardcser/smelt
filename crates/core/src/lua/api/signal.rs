@@ -3,8 +3,9 @@
 //! `smelt.signal.subscribe(name, handler)` observes changes, and
 //! `smelt.signal.new(name, initial)` declares a new signal.
 //! `smelt.signal.glob(pattern, handler)` subscribes across every signal name
-//! matching `pattern`; both subscriptions return a `Reg` userdata whose
-//! `:remove()` drops the subscription.
+//! matching `pattern`, events included; both subscriptions return a `Reg`
+//! userdata whose `:remove()` drops the subscription. Named access to an event
+//! belongs to `smelt.events` and is rejected here.
 
 use crate::lua::doc::{record_alias, Tier};
 use crate::lua::lua_type::{LuaAliasDecl, LuaCallback, LuaType, LuaTypeTuple};
@@ -12,6 +13,7 @@ use crate::lua::module::LuaMod;
 use crate::lua::reg::LuaReg;
 use crate::lua::LuaHandle;
 use crate::lua::LuaShared;
+use crate::signals::SignalKind;
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -26,9 +28,9 @@ impl LuaType for LuaSignalName {
     fn lua_type() -> String {
         record_alias(LuaAliasDecl {
             name: "smelt.signal.Name",
-            doc: "Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.",
+            doc: "Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.",
             classification: crate::lua::doc::ApiClassification::Supported,
-            variants: crate::signals::builtin_signal_names(),
+            variants: crate::signals::builtin_state_names(),
             open: true,
         });
         "smelt.signal.Name".into()
@@ -71,7 +73,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "signal",
-        "Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every name matching a glob pattern. Use `smelt.events.on` for event-shaped signals where only occurrences matter.",
+        "Named reactive values. `smelt.signal.get(name)` reads the current value, `smelt.signal.set(name, value)` publishes a new value, `smelt.signal.subscribe(name, handler)` observes changes, and `smelt.signal.new(name, initial)` declares a new signal. `smelt.signal.glob` subscribes across every signal matching a glob pattern, events included. Occurrences such as `turn_start` are events, not signals: use `smelt.events.on` for them. Passing an event name to `smelt.signal.get`, `set`, `subscribe` or `new` raises an error, and so does using `set` or `subscribe` on a name that was never declared.",
         Tier::Host,
     )?;
 
@@ -89,6 +91,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Publish `value` for signal `name`.",
             &["name", "value"],
             move |lua, (name, value): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
+                require_declared_state(&name.0)?;
                 signal_set(lua, &name.0, value, shared.generation_id())
             },
         )?;
@@ -106,6 +109,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 LuaCallback<(mlua::Value, mlua::Value), ()>,
             )|
                   -> LuaResult<LuaReg> {
+                require_declared_state(&name.0)?;
                 signal_subscribe(
                     lua,
                     name.0,
@@ -123,11 +127,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Declare a signal named `name` with `initial` as its starting value. No-op if the signal already exists.",
             &["name", "initial"],
             move |lua, (name, initial): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
+                require_kind(&name.0, SignalKind::State)?;
                 let key = lua.create_registry_value(initial)?;
                 let generation = shared.generation_id();
                 crate::host::try_with_core(|core| {
                     core.signals.declare_if_missing_for_generation(
                         name.0,
+                        SignalKind::State,
                         LuaSignalValue { key },
                         generation,
                     );
@@ -141,7 +147,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared = Arc::clone(shared);
         m.fn_(
             "glob",
-            "Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax). Returns a `Reg` whose `:remove()` drops the glob subscription.",
+            "Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax); `previous` is `nil` for events. Returns a `Reg` whose `:remove()` drops the glob subscription.",
             &["pattern", "handler"],
             move |lua,
                   (pattern, handler): (
@@ -194,6 +200,7 @@ pub(super) fn subscribe_lua_event(name: String, handle: LuaHandle, generation: u
     crate::host::try_with_core(|core| {
         core.signals.declare_if_missing_for_generation(
             name.clone(),
+            crate::signals::SignalKind::Event,
             crate::signals::EventStub,
             generation,
         );
@@ -201,11 +208,44 @@ pub(super) fn subscribe_lua_event(name: String, handle: LuaHandle, generation: u
     subscribe_lua_signal(name, handle, generation)
 }
 
+fn kind_mismatch(name: &str, expected: SignalKind) -> LuaError {
+    LuaError::RuntimeError(match expected {
+        SignalKind::State => {
+            format!("`{name}` is an event; use smelt.events.on / smelt.events.emit")
+        }
+        SignalKind::Event => {
+            format!("`{name}` is a state signal; use smelt.signal.get / set / subscribe")
+        }
+    })
+}
+
+/// Reject a name already declared as the other kind, pointing at the module that owns it.
+/// Undeclared names pass: the caller decides what that means.
+pub(super) fn require_kind(name: &str, expected: SignalKind) -> LuaResult<()> {
+    match crate::host::try_with_core(|core| core.signals.kind(name)).flatten() {
+        Some(actual) if actual != expected => Err(kind_mismatch(name, expected)),
+        _ => Ok(()),
+    }
+}
+
+/// Require `name` to be a declared state signal, so a typo fails loudly instead of leaving a
+/// subscription that never fires or a write that is dropped.
+fn require_declared_state(name: &str) -> LuaResult<()> {
+    match crate::host::try_with_core(|core| core.signals.kind(name)) {
+        Some(None) => Err(LuaError::RuntimeError(format!(
+            "signal `{name}` is not declared; create it with smelt.signal.new(name, initial)"
+        ))),
+        Some(Some(SignalKind::Event)) => Err(kind_mismatch(name, SignalKind::State)),
+        _ => Ok(()),
+    }
+}
+
 fn signal_get(lua: &Lua, name: &str) -> LuaResult<mlua::Value> {
-    Ok(
-        crate::host::try_with_core(|core| core.signals.get_lua(name, lua))
-            .unwrap_or(mlua::Value::Nil),
-    )
+    match crate::host::try_with_core(|core| core.signals.get_state_lua(name, lua)) {
+        None => Ok(mlua::Value::Nil),
+        Some(Ok(value)) => Ok(value),
+        Some(Err(_)) => Err(kind_mismatch(name, SignalKind::State)),
+    }
 }
 
 fn signal_set(lua: &Lua, name: &str, value: mlua::Value, generation: u64) -> LuaResult<()> {

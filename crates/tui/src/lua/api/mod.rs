@@ -117,6 +117,31 @@ impl LuaRuntime {
             ApiClassification::Supported,
         );
         record_module_doc(
+            "smelt.banner",
+            "Startup banner extension point. `smelt.banner.source(name, fn)` adds subtitle lines under the logo and returns a `Reg` that removes them. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.spinner",
+            "Shared spinner glyph and traveling-wave grayscale color for plugin animations. Frames derive from wall-clock time, so every animation in every process stays in lockstep. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.statusline",
+            "The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority. `add` returns a `Reg` that removes the source. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.headerline",
+            "Optional row above the transcript. Register named sources with `smelt.headerline.add(name, spec)`; the first source whose `visible` returns true owns the row, and the row is reserved only while one is visible. `add` returns a `Reg` that removes the source. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
+            "smelt.tips",
+            "Discovery tips shown in the prompt bar and banner. `smelt.tips.register(tip)` adds or replaces a prompt tip by `id`; `smelt.settings.show_tips = false` hides all tips. UiHost-only.",
+            ApiClassification::Supported,
+        );
+        record_module_doc(
             "smelt.list",
             "Picker-style virtual list widget. `smelt.list.new(opts)` returns a handle that owns the buffer, current selection, and keymaps so a plugin can render a scrollable selectable list inside any window or dialog leaf. UiHost-only.",
             ApiClassification::Supported,

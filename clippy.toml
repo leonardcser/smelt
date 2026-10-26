@@ -1,0 +1,6 @@
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "build clients with smelt_provider::http_client(), which installs the TLS crypto provider reqwest requires" },
+    { path = "reqwest::Client::builder", reason = "build clients with smelt_provider::http_client_builder(), which installs the TLS crypto provider reqwest requires" },
+    { path = "reqwest::get", reason = "build clients with smelt_provider::http_client(), which installs the TLS crypto provider reqwest requires" },
+    { path = "reqwest::ClientBuilder::new", reason = "build clients with smelt_provider::http_client_builder(), which installs the TLS crypto provider reqwest requires" },
+]
