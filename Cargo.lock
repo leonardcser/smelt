@@ -3673,7 +3673,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-style"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "unicode-segmentation",
  "unicode-width",
@@ -3681,7 +3681,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-term"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "compact_str",
  "crossterm",
