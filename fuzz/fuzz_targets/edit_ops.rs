@@ -53,6 +53,9 @@ enum Op {
         shift: bool,
     },
     Paste(String),
+    /// Keys from vim's command alphabet, so sequences such as `"ayi(`, `>ip`
+    /// or `3<C-a>` come up far more often than random characters allow.
+    VimKeys(Vec<u8>),
     Mouse {
         kind: u8,
         button: u8,
@@ -66,6 +69,10 @@ enum Op {
     ToggleWrap,
     Render,
 }
+
+/// Vim keys `VimKeys` draws from, Control chords last.
+const VIM_KEYS: &[u8] = b"hjklwbeWBEge0^$GgfFtT;,%()[]{}<>'`\"mxXdDcCsSyYpPrRuU~JiaIAoOvV.nN*#/?123_+-zZ\x1b";
+const VIM_CTRL_KEYS: &[char] = &['a', 'x', 'r', 'o', 'i', 'u', 'd', 'v'];
 
 const SPECIALS: &[KeyCode] = &[
     KeyCode::Enter,
@@ -165,6 +172,20 @@ fn run(input: Input) {
                 dispatch(&mut ui, Event::Key(key(code, mods(false, shift, false))));
             }
             Op::Paste(s) => dispatch(&mut ui, Event::Paste(plain_text(&s))),
+            Op::VimKeys(keys) => {
+                for k in keys.into_iter().take(16) {
+                    let index = usize::from(k) % (VIM_KEYS.len() + VIM_CTRL_KEYS.len());
+                    let event = match VIM_KEYS.get(index) {
+                        Some(0x1b) => key(KeyCode::Esc, KeyModifiers::NONE),
+                        Some(&c) => key(KeyCode::Char(char::from(c)), KeyModifiers::NONE),
+                        None => key(
+                            KeyCode::Char(VIM_CTRL_KEYS[index - VIM_KEYS.len()]),
+                            KeyModifiers::CONTROL,
+                        ),
+                    };
+                    dispatch(&mut ui, Event::Key(event));
+                }
+            }
             Op::Mouse {
                 kind,
                 button,
