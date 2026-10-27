@@ -1,0 +1,50 @@
+/* The version selector lives in the header topic that extra.css hides for the
+   site name: show the selector without the name. build_versions.py adds this
+   sheet to every version it builds. */
+.md-header__topic:first-child:has(.md-version) {
+  display: flex;
+}
+.md-header__topic:first-child:has(.md-version) > .md-ellipsis {
+  display: none;
+}
+
+/* The theme spaces the selector for a site name before it; with the name
+   gone it sits by the logo, sized like the section links, as a pill that
+   shows it can be clicked. The theme's spacing rules name the direction, so
+   these go through `.md-version` to outrank them. */
+.md-header__title:has(.md-version) {
+  margin-inline-start: 0;
+}
+.md-version {
+  display: flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: normal;
+}
+.md-version .md-version__current {
+  top: 0;
+  margin: 0;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.4rem;
+  color: var(--md-default-fg-color--light);
+  transition: background-color 0.25s, color 0.25s;
+}
+.md-version:hover .md-version__current,
+.md-version:focus-within .md-version__current {
+  background-color: var(--md-default-fg-color--lightest);
+  color: var(--md-default-fg-color);
+}
+
+/* The menu takes the rounded look of the theme's other menus. */
+.md-version__list {
+  top: 2rem;
+  margin: 0;
+  padding: 0.2rem 0;
+  border-radius: 0.4rem;
+}
+.md-version__item {
+  line-height: 1.6rem;
+}
+.md-version .md-version__link {
+  padding: 0 0.8rem;
+}

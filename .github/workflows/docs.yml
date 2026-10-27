@@ -11,6 +11,11 @@ on:
       - "crates/tui/src/lua/**"
       - "crates/xtask/src/gen_lua_docs.rs"
       - "runtime/lua/smelt/**"
+  # A finished release adds its version to the selector. This runs on main,
+  # which the Pages environment deploys from.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   pull_request:
     branches: [main]
     paths:
@@ -38,6 +43,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          # Every release tag builds its own version of the docs.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -47,8 +55,8 @@ jobs:
       - name: Install zensical
         run: pip install zensical==0.0.50
 
-      - name: Build docs
-        run: cd docs && zensical build --strict
+      - name: Build docs for main and every release
+        run: python3 docs/build_versions.py
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v5
@@ -57,7 +65,7 @@ jobs:
 
   deploy:
     name: Deploy
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
     needs: build
     runs-on: ubuntu-latest
     environment:
