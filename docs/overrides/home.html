@@ -155,28 +155,88 @@
     font-weight: 600;
   }
 
+  /* One box: the install methods as tabs along its top, the chosen one's
+     command below. It keeps its width as they switch. */
+  .installer {
+    box-sizing: border-box;
+    width: min(100%, 31rem);
+    margin: 0 0 0.9rem;
+    border: 1px solid var(--home-line);
+    background: var(--md-default-bg-color);
+  }
+  .installer__tabs {
+    display: flex;
+    border-bottom: 1px solid var(--home-line);
+    background: var(--home-panel);
+  }
+  .installer__tabs button {
+    margin-bottom: -1px;
+    border: 1px solid transparent;
+    border-top: 0;
+    padding: 0.35rem 0.75rem;
+    font: inherit;
+    font-family: var(--md-code-font-family), monospace;
+    font-size: 0.7rem;
+    color: var(--home-muted);
+    background: none;
+    cursor: pointer;
+  }
+  /* The box's own edge stands in for the first tab's. */
+  .installer__tabs button:first-child {
+    border-left: 0;
+  }
+  .installer__tabs button:hover,
+  .installer__tabs button:focus-visible {
+    color: var(--home-ember);
+  }
+  .installer__tabs button[aria-selected="true"] {
+    border-color: var(--home-line);
+    border-bottom-color: var(--md-default-bg-color);
+    background: var(--md-default-bg-color);
+    color: var(--md-default-fg-color);
+  }
   .install {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    max-width: 100%;
-    margin: 0 0 0.9rem;
+    min-height: 3rem;
     padding: 0.55rem 0.55rem 0.55rem 0.9rem;
-    border: 1px solid var(--home-line);
-    background: var(--md-default-bg-color);
     font-family: var(--md-code-font-family), monospace;
     font-size: clamp(0.66rem, 1.4vw, 0.8rem);
   }
+  .install[hidden] {
+    display: none;
+  }
+  /* A wrapped command hangs under its first character, past the prompt. */
   .install code {
-    overflow-x: auto;
-    white-space: nowrap;
+    flex: 1;
+    padding: 0 0 0 2ch;
+    text-indent: -2ch;
+    text-align: left;
     background: none;
-    padding: 0;
     color: var(--md-default-fg-color);
+  }
+  .install code span {
+    white-space: nowrap;
   }
   .install code::before {
     content: "$ ";
     color: var(--home-ember);
+  }
+  .install--link span {
+    flex: 1;
+    text-align: left;
+    font-size: 0.85em;
+    color: var(--home-muted);
+  }
+  .md-typeset .install a.copy {
+    text-decoration: none;
+    color: var(--home-muted);
+  }
+  .md-typeset .install a.copy:hover,
+  .md-typeset .install a.copy:focus-visible {
+    color: var(--home-ember);
+    background: var(--home-panel);
   }
   .copy {
     flex: none;
@@ -478,17 +538,6 @@
     }
   }
 
-  /* Narrow, the command wraps at its slashes so all of it shows before it is copied. */
-  @media (max-width: 600px) {
-    .install {
-      width: 100%;
-      box-sizing: border-box;
-      text-align: left;
-    }
-    .install code {
-      white-space: normal;
-    }
-  }
 </style>
 {% endblock %} {% block content %}
 <div class="home">
@@ -501,16 +550,38 @@
       <h1 class="hero-subtitle">
         A fast, open-source, <strong>Lua-scriptable</strong> coding agent for the terminal.
       </h1>
-      <div class="install">
-        <code>curl -fsSL https://smeltagent.dev/<wbr />install.sh | sh</code>
-        <button
-          class="copy"
-          type="button"
-          data-copy="curl -fsSL https://smeltagent.dev/install.sh | sh"
-          aria-label="Copy install command"
-        >
-          <span class="copy__idle">copy</span><span class="copy__done">copied</span>
-        </button>
+      <div class="installer">
+        <div class="installer__tabs" role="tablist" aria-label="Install method">
+          <button role="tab" type="button" aria-selected="true" aria-controls="install-shell">shell</button>
+          <button role="tab" type="button" aria-selected="false" aria-controls="install-cargo">cargo</button>
+          <button role="tab" type="button" aria-selected="false" aria-controls="install-binary">binary</button>
+        </div>
+        <div class="install" id="install-shell" role="tabpanel">
+          <code>curl -fsSL https://smeltagent.dev/<wbr />install.sh | sh</code>
+          <button
+            class="copy"
+            type="button"
+            data-copy="curl -fsSL https://smeltagent.dev/install.sh | sh"
+            aria-label="Copy install command"
+          >
+            <span class="copy__idle">copy</span><span class="copy__done">copied</span>
+          </button>
+        </div>
+        <div class="install" id="install-cargo" role="tabpanel" hidden>
+          <code>cargo install --locked --git https://github.com/<wbr />leonardcser/smelt.git <span>smelt-agent</span></code>
+          <button
+            class="copy"
+            type="button"
+            data-copy="cargo install --locked --git https://github.com/leonardcser/smelt.git smelt-agent"
+            aria-label="Copy install command"
+          >
+            <span class="copy__idle">copy</span><span class="copy__done">copied</span>
+          </button>
+        </div>
+        <div class="install install--link" id="install-binary" role="tabpanel" hidden>
+          <span>Linux, macOS and Windows binaries on GitHub</span>
+          <a class="copy" href="https://github.com/leonardcser/smelt/releases/latest">releases</a>
+        </div>
       </div>
       <p class="hero-note">
         <a href="https://github.com/leonardcser/smelt/blob/main/LICENSE">MIT</a> ·

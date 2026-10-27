@@ -1,5 +1,18 @@
-// Homepage behavior: the install command's copy button.
+// Homepage behavior: the install method tabs and the install command's copy button.
 (function () {
+  function initTabs() {
+    var tabs = document.querySelectorAll(".installer__tabs [role=tab]");
+    tabs.forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        tabs.forEach(function (other) {
+          var selected = other === tab;
+          other.setAttribute("aria-selected", selected);
+          document.getElementById(other.getAttribute("aria-controls")).hidden = !selected;
+        });
+      });
+    });
+  }
+
   function initCopy() {
     document.querySelectorAll("[data-copy]").forEach(function (button) {
       button.addEventListener("click", function () {
@@ -100,6 +113,7 @@
     new ResizeObserver(redraw).observe(document.querySelector(".home"));
   }
 
+  initTabs();
   initCopy();
   initFields();
 })();
