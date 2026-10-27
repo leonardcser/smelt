@@ -167,19 +167,33 @@ In normal mode, several emacs-style keys take on their vim meanings:
 In the prompt, normal and visual mode support:
 
 - **Motions:** `h` `j` `k` `l`, `gj` `gk` (by display row), `w` `W` `b` `B` `e` `E`
-  `ge` `gE`, `0` `^` `_` `$`, `gg` `G`, `{` `}`, `%`, and find with `f` `F` `t` `T`
-  repeated by `;` and `,`. Counts work on all of them.
+  `ge` `gE`, `0` `^` `_` `+` `-` `|` `$` `g_`, `gg` `G` and `N%` (a line, by count or
+  percentage), `{` `}` (paragraphs), `(` `)` (sentences), `%`, `go` (a byte offset),
+  and find with `f` `F` `t` `T` repeated by `;` and `,`. Counts work on all of them,
+  and they match Vim's edge cases: `cw` acts like `ce`, an empty line is a word, and
+  `dw` on a line's last word stops at its end.
 - **Search:** `/` and `?` search the prompt, `n` and `N` repeat, and `*` and `#`
   search for the word under the cursor.
-- **Visual:** `v` and `V`, `gv` to reselect the last selection, and `i` / `a` text
-  objects.
-- **Operators:** `d`, `c` and `y` with any motion above or a text object (`iw`,
-  `a(`, `ip`...), plus `dd` `cc` `yy`, `D` `C` `Y`, `x` `X` `s` `S`, `r`, `~`, `J`,
-  `p` `P`, `u` and `Ctrl+R`, `o` `O`, and `.` to repeat the last change.
+- **Text objects:** `iw` `aw` `iW` `aW`, `is` `as` (sentences), `ip` `ap`
+  (paragraphs), `i(` `a(` (also `b`), `i[` `a[`, `i{` `a{` (also `B`), `i<` `a<`,
+  `it` `at`, and the quotes `i"` `a"`, `i'` `a'`, ``i` `` ``a` ``. They take counts
+  (`2daw`, `d2i(`), look ahead on the line when the cursor is not inside one, and
+  grow a visual selection when repeated (`viwiw`, `vi(i(`). `iq` `aq` take the
+  nearest quote pair and `il` `al` the line.
+- **Visual:** `v` and `V`, `gv` to reselect the last selection, `o` to swap ends,
+  and text objects. In `v` the cursor can rest on the line break, so `v$` and `vl`
+  at the end of a line select it too. `d` `x` `c` `s` `y` `r` `J` `gJ` `p` `P` `U`
+  `u` `~` act on the selection, `D` `X` `C` `S` `R` `Y` on its whole lines, and `.`
+  repeats the command over the same amount of text from the cursor.
+- **Operators:** `d`, `c`, `y`, `gU`, `gu` and `g~` with any motion above or a text
+  object, plus `dd` `cc` `yy` `gUU` `guu` `g~~`, `D` `C` `Y` (to the end of the
+  line, as Neovim's `Y`), `x` `X` `s` `S`, `r`, `~`, `J` `gJ`, `p` `P` (with counts),
+  `i` `a` `I` `A` `o` `O` `gi` `gI` (counts type the insert again), `u` and
+  `Ctrl+R`, and `.` to repeat the last change.
 - **Surround:** `ys`, `ds` and `cs`.
 
-Not supported yet: registers (`"`), macros (`q`, `@`), marks, `>` `<` `=`, `R`,
-`gu` `gU` `g~`, `(` `)`, and `Ctrl+A` / `Ctrl+X`.
+Not supported yet: registers (`"`), macros (`q`, `@`), marks, `>` `<` `=`, replace
+mode (`R` in normal mode), blockwise visual (`Ctrl+V`), and `Ctrl+A` / `Ctrl+X`.
 Prompt visual selections scope submit/steer actions to
 the selection.
 
