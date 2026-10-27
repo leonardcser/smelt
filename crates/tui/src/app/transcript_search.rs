@@ -249,7 +249,7 @@ fn persistent_transcript_candidate_blocks(
         SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
         SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
     };
-    let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
+    let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES;
     let mut page = store.search_candidate_page(
         &request.query,
         request.origin_block_idx,
@@ -593,7 +593,7 @@ impl TuiApp {
             SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
             SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
         };
-        let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
+        let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES;
         let records_persisted = self.conversation.transcript_records_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db

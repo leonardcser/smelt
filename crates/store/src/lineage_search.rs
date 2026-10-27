@@ -1577,6 +1577,11 @@ pub(crate) fn search_transcript_candidate_page(
         cancelled,
     };
     request.check_cancelled()?;
+    // One read snapshot for the page, so record reads don't each open a transaction.
+    let _read = canonical
+        .is_autocommit()
+        .then(|| rusqlite::Transaction::new_unchecked(canonical, TransactionBehavior::Deferred))
+        .transpose()?;
     let (transcript_root_id, transcript_item_count) =
         lineage::lineage_transcript_root_identity(canonical, lineage, branch)?;
     let search = open_search_reader(search_path, lineage).ok().flatten();
@@ -1740,6 +1745,32 @@ fn append_projected_search_doc_batch(
 ) -> Result<()> {
     let (source, segment) = load_projected_source(search, projected)?;
     append_hydrated_search_doc_batch(docs, source, segment, request, seen, candidates)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_search_doc_batch(
+    search: &Connection,
+    sources: &mut [ProjectedSearchSource],
+    pending_source_index: &mut Option<usize>,
+    pending_docs: &mut Vec<SearchDoc>,
+    request: &CandidateSearch<'_>,
+    seen: &mut HashSet<u64>,
+    candidates: &mut Vec<TranscriptSearchCandidate>,
+) -> Result<()> {
+    let Some(index) = pending_source_index.take() else {
+        return Ok(());
+    };
+    append_projected_search_doc_batch(
+        search,
+        &mut sources[index],
+        pending_docs,
+        request,
+        seen,
+        candidates,
+    )?;
+    pending_docs.clear();
+    trim_candidate_page(candidates, request.direction, request.limit);
+    Ok(())
 }
 
 fn search_long_candidate_page(
@@ -2065,23 +2096,16 @@ fn search_ready_fts_sources(
                     sql_i64(doc.doc_id, "search document ID")?,
                 );
 
-                let flush_pending = !pending_docs.is_empty()
-                    && (pending_source_index != Some(source_index)
-                        || pending_docs.len() == SEARCH_DOC_VERIFY_BATCH);
-                if flush_pending {
-                    let pending_index = pending_source_index
-                        .take()
-                        .expect("nonempty search document batch has a source");
-                    append_projected_search_doc_batch(
+                if pending_source_index.is_some_and(|index| index != source_index) {
+                    flush_search_doc_batch(
                         search,
-                        &mut batch[pending_index],
-                        &pending_docs,
+                        batch,
+                        &mut pending_source_index,
+                        &mut pending_docs,
                         request,
                         &mut seen,
                         &mut output,
                     )?;
-                    pending_docs.clear();
-                    trim_candidate_page(&mut output, request.direction, request.limit);
                 }
                 if candidate_doc_is_beyond_page(&doc, &output, request) {
                     page_is_beyond_output = true;
@@ -2089,18 +2113,37 @@ fn search_ready_fts_sources(
                 }
                 pending_source_index = Some(source_index);
                 pending_docs.push(doc);
+                // Each record yields at most one candidate, so verify as soon as
+                // the pending records could fill the rest of the page.
+                let pending_records = pending_docs
+                    .iter()
+                    .map(|doc| {
+                        (doc.last_record_ordinal + 1).saturating_sub(doc.first_record_ordinal)
+                    })
+                    .sum::<usize>();
+                if pending_docs.len() == SEARCH_DOC_VERIFY_BATCH
+                    || pending_records >= request.limit.saturating_sub(output.len())
+                {
+                    flush_search_doc_batch(
+                        search,
+                        batch,
+                        &mut pending_source_index,
+                        &mut pending_docs,
+                        request,
+                        &mut seen,
+                        &mut output,
+                    )?;
+                }
             }
-            if let Some(pending_index) = pending_source_index {
-                append_projected_search_doc_batch(
-                    search,
-                    &mut batch[pending_index],
-                    &pending_docs,
-                    request,
-                    &mut seen,
-                    &mut output,
-                )?;
-                trim_candidate_page(&mut output, request.direction, request.limit);
-            }
+            flush_search_doc_batch(
+                search,
+                batch,
+                &mut pending_source_index,
+                &mut pending_docs,
+                request,
+                &mut seen,
+                &mut output,
+            )?;
             if page_is_beyond_output || row_count < doc_page {
                 break;
             }
