@@ -39,7 +39,12 @@ impl TuiApp {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
             let focused = matches!(ev, Event::FocusGained);
             self.platform.set_terminal_focus(focused);
-            if !focused {
+            if focused {
+                // tmux drops graphics passthrough from hidden panes, so images uploaded
+                // while unfocused may never have reached the terminal. Repaint and resend.
+                self.ui.force_redraw();
+                self.request_urgent_render();
+            } else {
                 self.ui.cancel_pointer_interaction();
             }
             return false;

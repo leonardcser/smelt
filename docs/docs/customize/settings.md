@@ -134,7 +134,8 @@ wins over config.
 LaTeX math in Markdown (`$$...$$`, `\[...\]`, `$...$`, `\(...\)`) renders as images on
 terminals that support the Kitty graphics protocol and as Unicode text elsewhere.
 Set `math_rendering = "unicode"` to always use text. Inside tmux, enable
-passthrough with `set -g allow-passthrough on`. Copying an equation copies its
-original Markdown source.
+passthrough with `set -g allow-passthrough all`; with `on`, tmux drops images
+drawn while the pane is hidden until smelt regains focus. Copying an equation
+copies its original Markdown source.
 
 <figure class="term" data-replay="../../assets/replays/math.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>

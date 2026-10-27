@@ -1753,6 +1753,24 @@ fn lua_reports_terminal_focus_state() {
 }
 
 #[test]
+fn regaining_focus_repaints_the_full_frame() {
+    // The full repaint retransmits kitty images that tmux dropped while the pane was hidden.
+    fn render(app: &mut TestApp) -> Vec<u8> {
+        let mut out = Vec::new();
+        app.render_normal_to(&mut out);
+        out
+    }
+    let mut app = TestApp::builder().build();
+    let full = render(&mut app);
+
+    app.feed_one(SourceEvent::Term(Event::FocusLost));
+    assert!(render(&mut app).len() < full.len());
+
+    app.feed_one(SourceEvent::Term(Event::FocusGained));
+    assert_eq!(render(&mut app), full);
+}
+
+#[test]
 fn prompt_tips_do_not_rotate_while_terminal_is_unfocused() {
     let mut app = TestApp::builder().build();
 
