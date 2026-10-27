@@ -1,7 +1,7 @@
 use super::event::Status;
 use super::gutter::GutterProvider;
 use super::text;
-use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
+use super::vim::{self, Action, ScreenMotion, ScreenTarget, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
 use super::{BufId, UndoHistory, WinId};
@@ -1209,19 +1209,71 @@ impl Window {
         key: KeyEvent,
         now: std::time::Instant,
     ) -> Action {
-        let (text, history) = buf.edit_refs();
-        let text_state = self.surface.text_mut();
-        let mut ctx = VimContext {
-            buf: text,
-            cpos: &mut text_state.cpos,
-            history,
-            clipboard,
-            mode: &mut text_state.vim_mode,
-            curswant: &mut text_state.curswant,
-            vim_state: &mut text_state.vim_state,
-            now,
+        let action = self.with_vim(buf, clipboard, now, |ctx| vim::handle_key(key, ctx));
+        let Action::Screen(motion) = action else {
+            return action;
         };
-        vim::handle_key(key, &mut ctx)
+        let target = self.screen_target(buf, motion);
+        self.with_vim(buf, clipboard, now, |ctx| {
+            vim::finish_screen_motion(target, ctx)
+        })
+    }
+
+    /// Run `f` on a vim context over this window's text and cursor. A readonly
+    /// buffer gets a scratch copy, so whatever vim writes to it is dropped.
+    fn with_vim<R>(
+        &mut self,
+        buf: &mut Buffer,
+        clipboard: &mut Clipboard,
+        now: std::time::Instant,
+        f: impl FnOnce(&mut VimContext<'_>) -> R,
+    ) -> R {
+        let text_state = self.surface.text_mut();
+        if buf.readonly {
+            let mut scratch = buf.text();
+            let mut scratch_attachments = Vec::new();
+            f(&mut VimContext {
+                buf: smelt_buffer::attached::AttachedTextMut::new(
+                    &mut scratch,
+                    &mut scratch_attachments,
+                ),
+                cpos: &mut text_state.cpos,
+                history: &mut UndoHistory::default(),
+                clipboard,
+                mode: &mut text_state.vim_mode,
+                curswant: &mut text_state.curswant,
+                vim_state: &mut text_state.vim_state,
+                now,
+            })
+        } else {
+            let (text, history) = buf.edit_refs();
+            f(&mut VimContext {
+                buf: text,
+                cpos: &mut text_state.cpos,
+                history,
+                clipboard,
+                mode: &mut text_state.vim_mode,
+                curswant: &mut text_state.curswant,
+                vim_state: &mut text_state.vim_state,
+                now,
+            })
+        }
+    }
+
+    /// Where a screen motion lands in this window: `gj` / `gk` keep the
+    /// display column across soft wraps, and `H`, `M` and `L` take the first
+    /// non-blank of a visible row.
+    fn screen_target(&mut self, buf: &Buffer, motion: ScreenMotion) -> ScreenTarget {
+        let width = self.viewport.map(|v| v.content_width).unwrap_or(80);
+        self.ensure_layout(buf, width);
+        if let ScreenMotion::Rows(delta) = motion {
+            return self.display_rows_target(buf, delta);
+        }
+        let viewport_rows = self.viewport.map(|v| v.rect.height).unwrap_or(1);
+        ScreenTarget {
+            pos: self.screen_row_cpos(buf, motion, viewport_rows),
+            complete: true,
+        }
     }
 
     pub fn set_surface(&mut self, surface: WindowSurface) {
@@ -3076,50 +3128,9 @@ impl Window {
     ) -> Status {
         let width = self.viewport.map(|v| v.content_width).unwrap_or(80);
         let viewport_rows = self.viewport.map(|v| v.rect.height).unwrap_or(1);
-        let action = {
-            let mut cpos = self.cpos();
-            let action = if buf.readonly {
-                let mut scratch = buf.text();
-                let mut scratch_history = UndoHistory::default();
-                let mut scratch_attachments = Vec::new();
-                let text_state = self.surface.text_mut();
-                let mut ctx = VimContext {
-                    buf: smelt_buffer::attached::AttachedTextMut::new(
-                        &mut scratch,
-                        &mut scratch_attachments,
-                    ),
-                    cpos: &mut cpos,
-                    history: &mut scratch_history,
-                    clipboard,
-                    mode: &mut text_state.vim_mode,
-                    curswant: &mut text_state.curswant,
-                    vim_state: &mut text_state.vim_state,
-                    now,
-                };
-                vim::handle_key(k, &mut ctx)
-            } else {
-                let (text, history) = buf.edit_refs();
-                let text_state = self.surface.text_mut();
-                let mut ctx = VimContext {
-                    buf: text,
-                    cpos: &mut cpos,
-                    history,
-                    clipboard,
-                    mode: &mut text_state.vim_mode,
-                    curswant: &mut text_state.curswant,
-                    vim_state: &mut text_state.vim_state,
-                    now,
-                };
-                vim::handle_key(k, &mut ctx)
-            };
-            self.set_cpos(cpos);
-            if matches!(action, Action::Passthrough) {
-                return Status::Ignored;
-            }
-            action
-        };
-        if let Action::DisplayRows(delta) = action {
-            self.move_display_rows(buf, delta);
+        let action = self.handle_vim_key(buf, clipboard, k, now);
+        if matches!(action, Action::Passthrough) {
+            return Status::Ignored;
         }
         if self.vim_enabled() && self.vim_mode() == VimMode::Insert {
             self.set_vim_mode(VimMode::Normal);
@@ -3165,27 +3176,19 @@ impl Window {
         Status::Consumed
     }
 
-    /// Vim `gj` / `gk`: move the cursor `delta` display rows, following soft
-    /// wraps and keeping its display column.
-    pub fn move_display_rows(&mut self, buf: &Buffer, delta: isize) {
-        let width = self.viewport.map(|v| v.content_width).unwrap_or(80);
-        self.ensure_layout(buf, width);
+    /// Where `gj` / `gk` land `delta` display rows away, keeping the display
+    /// column they remember.
+    fn display_rows_target(&mut self, buf: &Buffer, delta: isize) -> ScreenTarget {
         let total = self.visual_row_total(buf);
-        if total == 0 {
-            return;
-        }
         let (row, col) = self.cursor_visual(buf, self.cpos());
         let want = self.curswant().unwrap_or(col as usize);
-        let target = (row as isize)
-            .saturating_add(delta)
-            .clamp(0, total as isize - 1);
+        let wanted = (row as isize).saturating_add(delta);
+        let target = wanted.clamp(0, (total as isize - 1).max(0));
         self.set_curswant(Some(want));
-        let mut cpos = self.cpos_at_visual(buf, target as usize, want);
-        if self.vim_mode() == VimMode::Normal {
-            let text = buf.text();
-            super::motions::clamp_normal(&text, &mut cpos);
+        ScreenTarget {
+            pos: self.cpos_at_visual(buf, target as usize, want),
+            complete: target == wanted,
         }
-        self.set_cpos(cpos);
     }
 
     /// Vim `zt` / `zz` / `zb`: scroll so the cursor row sits at the top, the

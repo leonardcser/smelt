@@ -514,6 +514,10 @@ pub(super) fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 
         _ => {
             if let Some(motion) = Motion::from_char(c) {
+                if let Some(screen) = ScreenMotion::of(motion, 1) {
+                    let count = ctx.vim_state.take_typed_count().unwrap_or(1);
+                    return request_screen(ctx, None, screen.with_count(count));
+                }
                 move_cursor(ctx, motion);
             }
             Action::Consumed

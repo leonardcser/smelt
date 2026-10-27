@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum MotionRange {
     Span(Span),
     Pending(SubState),
+    Screen(ScreenMotion),
     None,
 }
 
@@ -31,6 +32,10 @@ pub(super) fn resolve_motion_range(
         KeyCode::Char(c @ (';' | ',')) => Motion::repeat_find(ctx.vim_state.last_find, c == ','),
         code => Motion::from_key(code),
     };
+    if let Some(screen) = motion.and_then(|motion| ScreenMotion::of(motion, 1)) {
+        let count = ctx.vim_state.take_typed_count().unwrap_or(1);
+        return MotionRange::Screen(screen.with_count(count));
+    }
     match motion.and_then(|motion| motion_span(ctx, op, motion)) {
         Some(span) => MotionRange::Span(span),
         None => MotionRange::None,
@@ -52,11 +57,7 @@ pub(super) fn motion_span(
     let from = *ctx.cpos;
     let (pos, reach) = resolve(ctx.buf.as_str(), from, motion, count, usage)?;
     let span = operator_span(ctx.buf.as_str(), from, pos, reach)?;
-    // A yank leaves the cursor where the motion ended when that is on a line above.
-    if op == Some(Op::Yank)
-        && matches!(span, Span::Lines(..) | Span::AdjustedLines(..))
-        && line_start(ctx.buf.as_str(), pos) < line_start(ctx.buf.as_str(), from)
-    {
+    if op.is_some_and(|op| yank_ends_above(ctx, op, from, pos, span)) {
         if motion.keeps_column(count) {
             let cell = cursor_cell(ctx);
             place_on_line(ctx, pos, cell);
@@ -66,6 +67,21 @@ pub(super) fn motion_span(
         }
     }
     Some(span)
+}
+
+/// A yank over lines leaves the cursor where the motion ended when that is on
+/// a line above.
+pub(super) fn yank_ends_above(
+    ctx: &VimContext<'_>,
+    op: Op,
+    from: usize,
+    pos: usize,
+    span: Span,
+) -> bool {
+    let buf = ctx.buf.as_str();
+    op == Op::Yank
+        && matches!(span, Span::Lines(..) | Span::AdjustedLines(..))
+        && line_start(buf, pos) < line_start(buf, from)
 }
 
 /// Vim deletes whole lines when a multi-line charwise `d` starts in the indent
@@ -106,6 +122,7 @@ pub(super) fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>)
             ctx.vim_state.sub = sub;
             Action::Consumed
         }
+        MotionRange::Screen(motion) => request_screen(ctx, Some(op), motion),
         MotionRange::None => Action::Consumed,
     }
 }

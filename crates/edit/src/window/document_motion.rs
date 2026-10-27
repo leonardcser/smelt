@@ -162,14 +162,10 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
                 .saturating_sub(env.scroll_top)
                 .min(env.viewport_rows as RowIndex)
                 .max(1);
-            let offset = match motion {
-                Motion::ScreenTop => (n as RowIndex - 1).min(visible - 1),
-                Motion::ScreenMiddle => (visible - 1) / 2,
-                _ => (visible - 1).saturating_sub(n as RowIndex - 1),
-            };
-            let row = env.scroll_top.saturating_add(offset).min(last);
-            let line = row_text(doc, row)?;
-            (at(row, first_non_blank(&line)), Reach::Linewise)
+            let offset = ScreenMotion::of(motion, n)?.visible_row(row_to_usize(visible))?;
+            let row = env.scroll_top.saturating_add(offset as RowIndex).min(last);
+            // The column stays, as nvim's 'nostartofline' keeps it.
+            (at(row, same_cell(doc, row)), Reach::Linewise)
         }
     })
 }

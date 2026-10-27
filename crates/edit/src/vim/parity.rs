@@ -97,8 +97,8 @@ struct Session {
 }
 
 impl Session {
-    fn press(&mut self, key: KeyEvent) {
-        let mut ctx = VimContext {
+    fn ctx(&mut self) -> VimContext<'_> {
+        VimContext {
             buf: AttachedTextMut::new(&mut self.buf, &mut self.attachments),
             cpos: &mut self.cpos,
             history: &mut self.history,
@@ -107,10 +107,45 @@ impl Session {
             curswant: &mut self.curswant,
             vim_state: &mut self.vim_state,
             now: std::time::Instant::now(),
-        };
-        let action = handle_key(key, &mut ctx);
+        }
+    }
+
+    fn press(&mut self, key: KeyEvent) {
+        let action = handle_key(key, &mut self.ctx());
+        if let Action::Screen(motion) = action {
+            let target = self.screen_target(motion);
+            finish_screen_motion(target, &mut self.ctx());
+        }
         if action == Action::Passthrough && self.mode == VimMode::Insert {
             self.type_in_insert(key);
+        }
+    }
+
+    /// Every line is one row on screen, as in headless nvim with these short
+    /// cases.
+    fn screen_target(&mut self, motion: ScreenMotion) -> ScreenTarget {
+        let buf = self.buf.as_str();
+        let lines = buf.split('\n').count();
+        let Some(row) = motion.visible_row(lines) else {
+            let ScreenMotion::Rows(delta) = motion else {
+                unreachable!("only gj and gk have no visible row");
+            };
+            let line = buf[..self.cpos].matches('\n').count() as isize;
+            let (pos, want) = crate::text::vertical_move(buf, self.cpos, delta, self.curswant);
+            self.curswant = Some(want);
+            return ScreenTarget {
+                pos,
+                complete: (0..lines as isize).contains(&(line + delta)),
+            };
+        };
+        let pos = buf
+            .split('\n')
+            .take(row)
+            .map(|line| line.len() + 1)
+            .sum::<usize>();
+        ScreenTarget {
+            pos,
+            complete: true,
         }
     }
 
@@ -245,6 +280,23 @@ mod pinned {
     fn open_line_keeps_indent_and_esc_strips_unused_indent() {
         assert_eq!(text_after("  ab", "o<Esc>"), "  ab\n");
         assert_eq!(text_after("  ab", "Ox<Esc>"), "  x\n  ab");
+    }
+
+    /// `H`, `M`, `L`, `gj` and `gk` go through the host, which here shows
+    /// every line on screen.
+    #[test]
+    fn screen_motions_take_operators_counts_and_repeat() {
+        let text = "one\ntwo\nthree\nfour";
+        for (text, keys, expected) in [
+            (text, "jjdH", "four"),
+            (text, "dL", ""),
+            (text, "jdM", "one\nthree\nfour"),
+            ("one two\nthree", "wdgj", "one e"),
+            ("a\nb\nc", "dgj.", "c"),
+            ("one\ntwo", "d2gj", "one\ntwo"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
     }
 
     #[test]

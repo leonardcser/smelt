@@ -100,9 +100,8 @@ pub(super) fn handle_waiting_op_find(
 
 pub(super) fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
-    if let KeyCode::Char(c @ ('j' | 'k')) = key.code {
-        let rows = ctx.vim_state.take_count() as isize;
-        return Action::DisplayRows(if c == 'j' { rows } else { -rows });
+    if let Some(motion) = display_rows(key, ctx) {
+        return request_screen(ctx, None, motion);
     }
     if key.code == KeyCode::Char('v') {
         ctx.vim_state
@@ -159,11 +158,23 @@ pub(super) fn handle_waiting_op_g(key: KeyEvent, op: Op, ctx: &mut VimContext<'_
             .record_change(RepeatCommand::Linewise { op, count });
         return action;
     }
+    if let Some(motion) = display_rows(key, ctx) {
+        return request_screen(ctx, Some(op), motion);
+    }
     if let Some(span) = motion_after_g(key).and_then(|motion| motion_span(ctx, Some(op), motion)) {
         return apply_span(op, ctx, span);
     }
     ctx.vim_state.reset_pending();
     Action::Consumed
+}
+
+/// `gj` / `gk` from the key after `g`, consuming the typed count.
+fn display_rows(key: KeyEvent, ctx: &mut VimContext<'_>) -> Option<ScreenMotion> {
+    let KeyCode::Char(c @ ('j' | 'k')) = key.code else {
+        return None;
+    };
+    let rows = ctx.vim_state.take_typed_count().unwrap_or(1) as isize;
+    Some(ScreenMotion::Rows(if c == 'j' { rows } else { -rows }))
 }
 
 pub(super) fn motion_after_g(key: KeyEvent) -> Option<Motion> {

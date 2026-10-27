@@ -46,7 +46,8 @@ impl PromptState {
         }
 
         match result {
-            vim::Action::Consumed => {
+            // The window resolves screen motions before returning.
+            vim::Action::Consumed | vim::Action::Screen(_) => {
                 // Clear shift+key selection on any vim-consumed key
                 // (e.g. Esc in insert mode, Esc in visual mode).
                 self.clear_selection(ctx.win);
@@ -68,10 +69,6 @@ impl PromptState {
                     let entry = entry.to_string();
                     self.install_history_entry(ctx, &entry, true);
                 }
-                VimBridgeResult::Handled(Action::Redraw)
-            }
-            vim::Action::DisplayRows(delta) => {
-                ctx.win.move_display_rows(ctx.buf, delta);
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::CenterScroll => VimBridgeResult::Handled(Action::CenterScroll),

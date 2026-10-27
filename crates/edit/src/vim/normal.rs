@@ -114,7 +114,9 @@ pub(super) fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             if op != Op::Yank
                 && !matches!(
                     ctx.vim_state.sub,
-                    SubState::WaitingOpFind(_, _) | SubState::WaitingOpG(_)
+                    SubState::WaitingOpFind(_, _)
+                        | SubState::WaitingOpG(_)
+                        | SubState::WaitingScreen(..)
                 )
             {
                 if let Some(motion) = repeat_key {
@@ -133,6 +135,7 @@ pub(super) fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         | SubState::WaitingMark(_)
         | SubState::WaitingRegister
         | SubState::WaitingVisualTextObj(_)
+        | SubState::WaitingScreen(..)
         | SubState::Ready => {}
     }
 
@@ -235,6 +238,10 @@ pub(super) fn repeat_last_change(ctx: &mut VimContext<'_>) -> Action {
             let n = ctx.vim_state.repeat_count(count);
             ctx.vim_state.count1 = Some(n);
             handle_waiting_textobj(RepeatKey::Char(object).key_event(), op, inner, ctx)
+        }
+        RepeatCommand::OpScreen { op, motion } => {
+            let n = ctx.vim_state.repeat_count(motion.count());
+            request_screen(ctx, Some(op), motion.with_count(n))
         }
         RepeatCommand::Visual { action, shape } => {
             shape.select(ctx);
@@ -496,6 +503,10 @@ pub(super) fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 
         _ => {
             if let Some(motion) = Motion::from_char(c) {
+                if let Some(screen) = ScreenMotion::of(motion, 1) {
+                    let count = ctx.vim_state.take_typed_count().unwrap_or(1);
+                    return request_screen(ctx, None, screen.with_count(count));
+                }
                 move_cursor(ctx, motion);
             }
             ctx.vim_state.reset_pending();

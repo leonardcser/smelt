@@ -1015,20 +1015,24 @@ impl Window {
                     self.move_cursor_by_lines(buf, rows, viewport_rows);
                 }
                 _ => {
-                    let text = buf.text();
-                    let target = match motion {
-                        Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom => {
-                            Some(self.screen_row_cpos(buf, &text, motion, count, viewport_rows))
+                    // `H`, `M` and `L` keep the column, as `j` and `k` do.
+                    if let Some(screen) = ScreenMotion::of(motion, count.unwrap_or(1)) {
+                        let target = self.screen_row_cpos(buf, screen, viewport_rows);
+                        let line = |cpos| buf.display_byte_pos(cpos).0 as isize;
+                        let rows = line(target) - line(self.cpos());
+                        self.move_cursor_by_lines(buf, rows, viewport_rows);
+                    } else {
+                        let text = buf.text();
+                        if let Some((mut cpos, _)) =
+                            resolve(&text, self.cpos(), motion, count, Use::Move)
+                        {
+                            if matches!(self.vim_mode(), VimMode::Normal) {
+                                crate::motions::clamp_normal(&text, &mut cpos);
+                            }
+                            self.set_cpos(cpos);
+                            self.set_curswant(None);
+                            self.resync(buf, viewport_rows);
                         }
-                        _ => resolve(&text, self.cpos(), motion, count, Use::Move).map(|(p, _)| p),
-                    };
-                    if let Some(mut cpos) = target {
-                        if matches!(self.vim_mode(), VimMode::Normal) {
-                            crate::motions::clamp_normal(&text, &mut cpos);
-                        }
-                        self.set_cpos(cpos);
-                        self.set_curswant(None);
-                        self.resync(buf, viewport_rows);
                     }
                 }
             },
@@ -1137,14 +1141,11 @@ impl Window {
         copy
     }
 
-    /// The cursor position `H`, `M` or `L` picks in a buffer-backed viewer: the
-    /// first non-blank of the chosen visible row.
-    fn screen_row_cpos(
+    /// The start of the visible row `H`, `M` or `L` picks.
+    pub(super) fn screen_row_cpos(
         &self,
         buf: &Buffer,
-        text: &str,
-        motion: Motion,
-        count: Option<usize>,
+        motion: ScreenMotion,
         viewport_rows: u16,
     ) -> usize {
         let total = self.visual_row_total(buf);
@@ -1153,15 +1154,9 @@ impl Window {
             .saturating_sub(top)
             .min(viewport_rows as RowIndex)
             .max(1);
-        let n = count.unwrap_or(1).max(1) as RowIndex;
-        let offset = match motion {
-            Motion::ScreenTop => (n - 1).min(visible - 1),
-            Motion::ScreenMiddle => (visible - 1) / 2,
-            _ => (visible - 1).saturating_sub(n - 1),
-        };
+        let offset = motion.visible_row(row_to_usize(visible)).unwrap_or(0) as RowIndex;
         let row = top.saturating_add(offset).min(total.saturating_sub(1));
-        let cpos = self.cpos_at_visual(buf, row_to_usize(row), 0);
-        crate::motions::first_non_blank(text, cpos)
+        self.cpos_at_visual(buf, row_to_usize(row), 0)
     }
 
     fn viewer_line_range(&self, buf: &Buffer, count: RowIndex) -> Option<Range<usize>> {

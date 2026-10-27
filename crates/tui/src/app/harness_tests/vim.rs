@@ -962,17 +962,30 @@ fn transcript_screen_motions_pick_visible_rows() {
     app.render_silent();
     let top = app.transcript_window().scroll_top() as usize;
     let height = app.transcript_window().viewport.unwrap().rect.height as usize;
+    // The column stays, as nvim's 'nostartofline' keeps it; blank rows
+    // between blocks hold the cursor at 0.
+    app.type_text("0w");
+    let column = transcript_cursor(&app).1;
+    assert!(column > 0);
+    let mut kept = 0;
+    let mut at = |app: &TestApp, row: usize| {
+        let cursor = transcript_cursor(app);
+        assert_eq!(cursor.0, row);
+        assert!(cursor.1 == column || cursor.1 == 0, "column on row {row}");
+        kept += usize::from(cursor.1 == column);
+    };
 
     app.type_text("L");
-    assert_eq!(transcript_cursor(&app).0, top + height - 1);
+    at(&app, top + height - 1);
     app.type_text("H");
-    assert_eq!(transcript_cursor(&app).0, top);
+    at(&app, top);
     app.type_text("M");
-    assert_eq!(transcript_cursor(&app).0, top + (height - 1) / 2);
+    at(&app, top + (height - 1) / 2);
     app.type_text("2L");
-    assert_eq!(transcript_cursor(&app).0, top + height - 2);
+    at(&app, top + height - 2);
     app.type_text("3H");
-    assert_eq!(transcript_cursor(&app).0, top + 2);
+    at(&app, top + 2);
+    assert!(kept > 0, "some visible rows have text");
 }
 
 #[test]
@@ -1054,6 +1067,41 @@ fn vim_gj_and_gk_follow_wrapped_prompt_rows() {
     assert_eq!(app.prompt_cpos(), first);
     app.type_text("gkgk");
     assert_eq!(app.prompt_cpos(), 0);
+}
+
+#[test]
+fn vim_screen_motions_use_the_visible_prompt_rows() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(40, 16);
+    app.type_text("line 0");
+    for n in 1..30 {
+        app.press(KeyCode::Esc);
+        app.type_text(&format!("oline {n}"));
+    }
+    app.press(KeyCode::Esc);
+    app.render_silent();
+    let line = |app: &TestApp| {
+        app.state().prompt_text[..app.prompt_cpos()]
+            .matches('\n')
+            .count()
+    };
+    assert_eq!(line(&app), 29);
+
+    app.type_text("H");
+    let top = line(&app);
+    assert!(
+        top > 0 && top < 29,
+        "H stops at the first visible row: {top}"
+    );
+    app.type_text("L");
+    assert_eq!(line(&app), 29);
+    app.type_text("M");
+    let middle = line(&app);
+    assert!(top < middle && middle < 29, "M lies between: {middle}");
+
+    app.type_text("dH");
+    let lines = app.state().prompt_text.lines().count();
+    assert_eq!(lines, 30 - (middle - top + 1));
 }
 
 #[test]

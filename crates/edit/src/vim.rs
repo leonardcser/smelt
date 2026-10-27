@@ -95,8 +95,9 @@ pub enum Action {
     HistoryPrev,
     /// Navigate history down.
     HistoryNext,
-    /// Move the cursor by `delta` display rows, following soft wraps (`gj`, `gk`).
-    DisplayRows(isize),
+    /// A motion only the host's layout can place. The host resolves it to a
+    /// byte position and passes that to [`finish_screen_motion`].
+    Screen(ScreenMotion),
     /// Center the input viewport on the cursor (zz).
     CenterScroll,
     /// Pan the viewport horizontally by `delta` cells (vim `zh`/`zl`).
@@ -105,6 +106,62 @@ pub enum Action {
     PanColumns(isize),
     /// Key not handled - caller should use its own logic.
     Passthrough,
+}
+
+/// A motion over the rows on screen, which only the host's layout knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenMotion {
+    /// `gj` / `gk`: this many display rows down, or up when negative,
+    /// following soft wraps and keeping the display column.
+    Rows(isize),
+    /// `H`: the `n`th visible row from the top.
+    Top(usize),
+    /// `M`: the middle visible row.
+    Middle,
+    /// `L`: the `n`th visible row from the bottom.
+    Bottom(usize),
+}
+
+impl ScreenMotion {
+    /// `H`, `M` or `L` with `count`.
+    pub fn of(motion: Motion, count: usize) -> Option<Self> {
+        match motion {
+            Motion::ScreenTop => Some(Self::Top(count)),
+            Motion::ScreenMiddle => Some(Self::Middle),
+            Motion::ScreenBottom => Some(Self::Bottom(count)),
+            _ => None,
+        }
+    }
+
+    /// Which of `visible` rows `H`, `M` or `L` picks, counted from the top;
+    /// `None` for `gj` / `gk`.
+    pub fn visible_row(self, visible: usize) -> Option<usize> {
+        let last = visible.saturating_sub(1);
+        match self {
+            Self::Rows(_) => None,
+            Self::Top(n) => Some(n.saturating_sub(1).min(last)),
+            Self::Middle => Some(last / 2),
+            Self::Bottom(n) => Some(last.saturating_sub(n.saturating_sub(1))),
+        }
+    }
+
+    fn count(self) -> usize {
+        match self {
+            Self::Rows(delta) => delta.unsigned_abs(),
+            Self::Top(n) | Self::Bottom(n) => n,
+            Self::Middle => 1,
+        }
+    }
+
+    fn with_count(self, n: usize) -> Self {
+        let n = n.max(1);
+        match self {
+            Self::Rows(delta) => Self::Rows(n as isize * delta.signum()),
+            Self::Top(_) => Self::Top(n),
+            Self::Middle => Self::Middle,
+            Self::Bottom(_) => Self::Bottom(n),
+        }
+    }
 }
 
 /// Shared mutable state for vim operations. Borrowed from the host per keypress.
@@ -372,6 +429,9 @@ pub(crate) enum SubState {
     WaitingChangeSurroundTarget,
     /// `cs{target}` pressed, waiting for replacement delimiter.
     WaitingChangeSurroundReplacement(char),
+    /// A screen motion went to the host, optionally after an operator, waiting
+    /// for the position it resolves to.
+    WaitingScreen(Option<Op>, ScreenMotion),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -449,6 +509,10 @@ enum RepeatCommand {
         inner: bool,
         object: char,
         count: usize,
+    },
+    OpScreen {
+        op: Op,
+        motion: ScreenMotion,
     },
     DeleteSurround {
         target: char,
@@ -706,6 +770,7 @@ impl VimWindowState {
                 out.push_str("cs");
                 out.push(target);
             }
+            SubState::WaitingScreen(..) => {}
         }
 
         (!out.is_empty()).then_some(out)
@@ -799,6 +864,10 @@ pub fn visual_anchor(state: &VimWindowState, buf: &str, mode: VimMode) -> Option
 
 /// Process a key event, mutating `ctx` (buffer, cursor, kill ring, undo, mode).
 pub fn handle_key(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
+    // A host that never resolved the last screen motion drops it.
+    if let SubState::WaitingScreen(..) = ctx.vim_state.sub {
+        ctx.vim_state.reset_pending();
+    }
     let named = matches!(ctx.vim_state.sub, SubState::WaitingRegister);
     let action = match *ctx.mode {
         _ if named => {
@@ -810,6 +879,72 @@ pub fn handle_key(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         VimMode::Visual | VimMode::VisualLine => handle_visual(key, ctx),
     };
     ctx.vim_state.settle_register(named);
+    action
+}
+
+/// Hand `motion` to the host to place, keeping `op` until it comes back.
+fn request_screen(ctx: &mut VimContext<'_>, op: Option<Op>, motion: ScreenMotion) -> Action {
+    ctx.vim_state.sub = SubState::WaitingScreen(op, motion);
+    Action::Screen(motion)
+}
+
+/// Where the host's layout put a screen motion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenTarget {
+    pub pos: usize,
+    /// `gj` / `gk` covered their whole count. Stopped short at the first or
+    /// last row, they still move the cursor, but an operator does nothing.
+    pub complete: bool,
+}
+
+/// Finish the motion [`handle_key`] returned as [`Action::Screen`], at the
+/// target the host's layout resolved it to. `H`, `M` and `L` keep the column,
+/// as nvim's 'nostartofline' does, and an operator takes their lines whole;
+/// `gj` / `gk` reach their target exclusively.
+pub fn finish_screen_motion(target: ScreenTarget, ctx: &mut VimContext<'_>) -> Action {
+    let SubState::WaitingScreen(op, motion) = ctx.vim_state.sub else {
+        return Action::Consumed;
+    };
+    ctx.vim_state.reset_pending();
+    let mut pos =
+        smelt_buffer::text::snap_grapheme(ctx.buf.as_str(), target.pos.min(ctx.buf.len()));
+    let rows = matches!(motion, ScreenMotion::Rows(_));
+    let action = match op {
+        _ if rows && (op.is_none() || !target.complete) => {
+            *ctx.cpos = pos;
+            clamp_cursor(ctx);
+            Action::Consumed
+        }
+        None => {
+            let cell = cursor_cell(ctx);
+            place_on_line(ctx, pos, cell);
+            Action::Consumed
+        }
+        Some(op) => {
+            let from = *ctx.cpos;
+            let reach = if rows {
+                clamp_normal(ctx.buf.as_str(), &mut pos);
+                Reach::Exclusive
+            } else {
+                Reach::Linewise
+            };
+            match operator_span(ctx.buf.as_str(), from, pos, reach) {
+                Some(span) => {
+                    if yank_ends_above(ctx, op, from, pos, span) {
+                        let cell = cursor_cell(ctx);
+                        place_on_line(ctx, pos, cell);
+                    }
+                    if op != Op::Yank {
+                        ctx.vim_state
+                            .record_change(RepeatCommand::OpScreen { op, motion });
+                    }
+                    apply_span(op, ctx, span)
+                }
+                None => Action::Consumed,
+            }
+        }
+    };
+    ctx.vim_state.settle_register(false);
     action
 }
 

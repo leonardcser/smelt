@@ -21,7 +21,7 @@ pub(super) fn handle_waiting_surround_motion(key: KeyEvent, ctx: &mut VimContext
             ctx.vim_state.sub = SubState::WaitingSurroundChar(start, end);
             Action::Consumed
         }
-        MotionRange::Pending(_) | MotionRange::None => {
+        MotionRange::Pending(_) | MotionRange::Screen(_) | MotionRange::None => {
             ctx.vim_state.reset_pending();
             Action::Consumed
         }
