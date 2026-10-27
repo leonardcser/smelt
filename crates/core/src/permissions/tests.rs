@@ -5399,3 +5399,80 @@ fn unterminated_heredoc_permissions_check_following_commands() {
         Decision::Allow
     );
 }
+
+#[test]
+fn expansion_after_heredoc_tag_does_not_hide_its_commands() {
+    let permissions = perms_with_bash(&["cat *", "echo *"], &[], &["rm *"]);
+    for command in [
+        "cat <<x $(rm foo)\nx",
+        "cat <<x ${a:-$(rm foo)}\nx",
+        "cat <<x \"$(rm foo)\"\nx",
+        "cat <<x $((1+2)) $(rm foo)\nx",
+        "cat <<x 'a\nb' $(rm foo)\nx",
+        "cat <<x; echo $(rm foo)\nx",
+        "cat <<x | echo $((1 + 2))\nbody\nx",
+        "cat <<$'a\\'' $(rm foo)\n'x",
+    ] {
+        assert_ne!(
+            decide(
+                &permissions,
+                normal(),
+                "bash",
+                &args_with("command", command)
+            ),
+            Decision::Allow,
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn heredocs_with_expansions_elsewhere_stay_allowed() {
+    let permissions = perms_with_bash(&["cat *", "echo *", "git commit *"], &[], &["rm *"]);
+    for command in [
+        "git commit -m \"$(cat <<'EOF'\nfix(scope): $(not run)\nEOF\n)\"",
+        "echo $(echo a) <<< $(echo b)",
+        "cat <<'x'\n$(rm foo)\nx",
+        "cat <<'x'\n${a} $[1]\nx",
+    ] {
+        assert_eq!(
+            decide(
+                &permissions,
+                normal(),
+                "bash",
+                &args_with("command", command)
+            ),
+            Decision::Allow,
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn expansions_around_heredocs_do_not_panic_the_tokenizer() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in [
+        "cat <<x $[$]$[\nx",
+        "cat <<x $[$]$[x\nx",
+        "<<a $[$]$[\na",
+        "<<a &$[$]$[\na",
+        "<<\0&$[$]$[\0\0\0\0\0\n\0",
+        "$(<<a\n)",
+        "${<<a\n}",
+        "$($(<<a)",
+        "$[))<<a\n]",
+        "$(<<-a\n)",
+    ] {
+        split_shell_commands(command);
+        permissions.check_subcommand(normal(), "bash", command);
+    }
+}
+
+#[test]
+fn heredoc_tags_with_expansions_do_not_exhaust_memory() {
+    let permissions = perms_with_bash(&["echo *"], &[], &["rm *"]);
+    for command in ["<<a$[  ", "<<a$(  ", "<<a$((  ", "cat <<a$[  "] {
+        split_shell_commands(command);
+        permissions.check_subcommand(normal(), "bash", command);
+    }
+}

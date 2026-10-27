@@ -15,6 +15,9 @@ const MAX_BRACE_EXPANSION_DEPTH: usize = 16;
 const MIN_OVERFLOWING_DIGITS: usize = 19;
 
 pub(super) fn parse(command: &str) -> Option<ast::Program> {
+    if has_untokenizable_heredoc(command) {
+        return None;
+    }
     let command = neutralize_blank_heredoc_tags(command);
     parse_guarded(&command).or_else(|| parse_guarded(&terminate_heredocs(&command)?))
 }
@@ -35,20 +38,39 @@ fn parse_guarded(command: &str) -> Option<ast::Program> {
 /// heredoc, so they must stay visible. The appended lines lie past the original
 /// text, so spans over them are clipped when segments are sliced from it.
 fn terminate_heredocs(text: &str) -> Option<String> {
+    let terminators = heredoc_operators(text)
+        .into_iter()
+        .filter(|operator| !operator.tag.is_empty())
+        .map(|operator| format!("\n{}", operator.tag))
+        .collect::<String>();
+    (!terminators.is_empty()).then(|| format!("{text}{terminators}"))
+}
+
+struct HeredocOperator {
+    /// Offset of the `<<`.
+    start: usize,
+    strip_tabs: bool,
+    tag: String,
+}
+
+/// Finds the heredoc operators in `text`, skipping here-strings.
+fn heredoc_operators(text: &str) -> Vec<HeredocOperator> {
     let bytes = text.as_bytes();
-    let mut terminators = String::new();
+    let mut operators = Vec::new();
     let mut index = 0;
     while index + 1 < bytes.len() {
         if !bytes[index..].starts_with(b"<<") {
             index += 1;
             continue;
         }
+        let start = index;
         index += 2;
         if bytes.get(index) == Some(&b'<') {
             index += 1;
             continue;
         }
-        if bytes.get(index) == Some(&b'-') {
+        let strip_tabs = bytes.get(index) == Some(&b'-');
+        if strip_tabs {
             index += 1;
         }
         while matches!(bytes.get(index), Some(b' ' | b'\t')) {
@@ -56,12 +78,13 @@ fn terminate_heredocs(text: &str) -> Option<String> {
         }
         let (tag, end) = heredoc_tag(text, index);
         index = end;
-        if !tag.is_empty() {
-            terminators.push('\n');
-            terminators.push_str(&tag);
-        }
+        operators.push(HeredocOperator {
+            start,
+            strip_tabs,
+            tag,
+        });
     }
-    (!terminators.is_empty()).then(|| format!("{text}{terminators}"))
+    operators
 }
 
 /// Reads the delimiter word starting at `start` with its quoting removed, and
@@ -92,7 +115,75 @@ fn heredoc_tag(text: &str, start: usize) -> (String, usize) {
 }
 
 fn tokenize(command: &str) -> Option<Vec<Token>> {
+    if has_untokenizable_heredoc(command) {
+        return None;
+    }
     tokenize_str(&neutralize_blank_heredoc_tags(command)).ok()
+}
+
+/// Whether the tokenizer cannot be trusted with `text`, which holds a heredoc
+/// operator and one of:
+/// - A `$(`, `${` or `$[` expansion on the operator's line. The tokenizer reads
+///   it while the heredoc is pending, so it queues the expansion's inner tokens
+///   after the heredoc body, hiding the commands in it, and some inputs make it
+///   panic or grow a buffer until allocation fails.
+/// - An unterminated heredoc after an expansion opener, which makes it panic.
+///
+/// Callers must not tokenize such text or allow it on the strength of rules.
+pub(super) fn has_untokenizable_heredoc(text: &str) -> bool {
+    let first_expansion = ["$(", "${", "$["]
+        .iter()
+        .filter_map(|opener| text.find(opener))
+        .min();
+    heredoc_operators(text).iter().any(|operator| {
+        let line = &text[operator.start + 2..];
+        let (line_end, has_expansion) = scan_heredoc_line(line);
+        has_expansion
+            || (first_expansion.is_some_and(|first| first < operator.start)
+                && !operator.tag.is_empty()
+                && !has_terminator_line(line.get(line_end + 1..), operator))
+    })
+}
+
+/// Finds where the line ends, which is the first newline that is not quoted or
+/// escaped, and whether an expansion opens before it. Quotes are only tracked to
+/// find the end, and the scan reports expansions inside them too.
+fn scan_heredoc_line(text: &str) -> (usize, bool) {
+    let bytes = text.as_bytes();
+    let mut quote = None;
+    let mut ansi_c = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match (quote, bytes[index]) {
+            (None, b'\n') => return (index, false),
+            (_, b'$') if matches!(bytes.get(index + 1), Some(b'(' | b'{' | b'[')) => {
+                return (index, true);
+            }
+            (Some(b'\''), b'\\') => index += usize::from(ansi_c),
+            (None | Some(b'"' | b'`'), b'\\') => index += 1,
+            (Some(open), byte) if byte == open => quote = None,
+            (None, byte @ (b'\'' | b'"' | b'`')) => {
+                ansi_c = byte == b'\'' && index > 0 && bytes[index - 1] == b'$';
+                quote = Some(byte);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    (bytes.len(), false)
+}
+
+fn has_terminator_line(body: Option<&str>, operator: &HeredocOperator) -> bool {
+    body.is_some_and(|body| {
+        body.split('\n').any(|line| {
+            let line = if operator.strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            line == operator.tag
+        })
+    })
 }
 
 /// Replaces a heredoc tag's leading carriage return or form feed with a letter.

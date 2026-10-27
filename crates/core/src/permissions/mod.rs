@@ -1702,6 +1702,14 @@ fn shell_parser_decide_commands(
     command: &str,
     commands: &[String],
 ) -> Option<Decision> {
+    let decision = shell_parser_decide_split(rs, command, commands);
+    if decision == Some(Decision::Allow) && shell_parse::has_untokenizable_heredoc(command) {
+        return Some(Decision::Ask);
+    }
+    decision
+}
+
+fn shell_parser_decide_split(rs: &RuleSet, command: &str, commands: &[String]) -> Option<Decision> {
     if commands.len() <= 1 {
         let command = smelt_buffer::text::trim_whitespace(command);
         if is_cd_command(command) {
