@@ -103,7 +103,7 @@ impl LuaRuntime {
         );
         record_module_doc(
             "smelt.tick",
-            "Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.",
+            "Reload-safe periodic work. Runs your callback right away and then at a fixed interval, idle or not - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.",
             ApiClassification::Supported,
         );
         record_module_doc(

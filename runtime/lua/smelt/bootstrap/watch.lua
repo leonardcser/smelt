@@ -2,19 +2,13 @@ local internal = __smelt_internal
 
 smelt.tick = smelt.tick or {}
 
--- Reload-safe periodic work. Subscribes to the `now` cell (a one-second
--- wall-clock tick the host publishes while the app is alive) and fires
--- `fn` at most once every `secs` seconds. `fn` runs inside a fresh
--- `smelt.spawn`, so it may yield (HTTP, processes, sleeps) without
--- blocking the cell pump.
+-- Reload-safe periodic work. Fires `fn` once right away and then every `secs`
+-- seconds, idle or not. `fn` runs inside a fresh `smelt.spawn`, so it may
+-- yield (HTTP, processes, sleeps). Safe to call from a plugin's module body:
+-- `/reload` cancels the timers and the body re-arms them.
 --
--- Unlike `smelt.timer.every`, this idiom is safe to call from a
--- plugin's module body: cell subscriptions are wiped on `/reload` and
--- re-armed when the body re-runs, so no Reg juggling is required for
--- hot-reload survival.
---
--- Returns a `Reg` whose `:remove()` unsubscribes.
----@type fun(secs: integer, fn: fun()): smelt.Reg
+-- Returns a `Reg` whose `:remove()` stops it.
+---@type fun(secs: number, fn: fun()): smelt.Reg
 function smelt.tick.every(secs, fn)
   if type(secs) ~= "number" or secs <= 0 then
     error("smelt.tick.every: secs must be a positive number", 2)
@@ -22,12 +16,12 @@ function smelt.tick.every(secs, fn)
   if type(fn) ~= "function" then
     error("smelt.tick.every: fn must be a function", 2)
   end
-  local last = 0
-  return smelt.signal.subscribe("now", function(now)
-    if (now or 0) - last >= secs then
-      last = now or 0
-      smelt.spawn(function() fn() end)
-    end
+  local function run() smelt.spawn(function() fn() end) end
+  local first = smelt.timer.set(0, run)
+  local every = smelt.timer.every(math.max(1, math.floor(secs * 1000)), run)
+  return smelt.reg.new(function()
+    first:remove()
+    every:remove()
   end)
 end
 

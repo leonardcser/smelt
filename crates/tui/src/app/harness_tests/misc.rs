@@ -1025,6 +1025,38 @@ fn a_running_turn_repaints_only_when_the_working_indicator_asks() {
 }
 
 #[test]
+fn tick_every_runs_while_idle_and_only_now_listeners_wake_each_second() {
+    let mut app = TestApp::builder().build();
+    app.clear_timers();
+    assert_eq!(
+        app.app.next_second_delay(),
+        None,
+        "nothing listens to `now` by default, so idle never wakes for it"
+    );
+
+    app.run_lua("_G.ticks = 0; smelt.tick.every(1, function() _G.ticks = _G.ticks + 1 end)");
+    for _ in 0..3 {
+        app.clock.advance(std::time::Duration::from_secs(1));
+        app.tick_timers();
+        app.drive_lua_tasks();
+    }
+    assert_eq!(
+        app.lua_int_global("ticks"),
+        Some(4),
+        "tick.every runs at once and then every second without any repaint"
+    );
+
+    app.run_lua("_G.listener = smelt.signal.subscribe('now', function() end)");
+    let delay = app
+        .app
+        .next_second_delay()
+        .expect("a `now` listener wakes the loop");
+    assert!(delay <= std::time::Duration::from_secs(1));
+    app.run_lua("_G.listener:remove()");
+    assert_eq!(app.app.next_second_delay(), None);
+}
+
+#[test]
 fn truncated_live_output_is_replaced_by_the_final_bounded_output() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);

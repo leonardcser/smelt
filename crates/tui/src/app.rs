@@ -3398,6 +3398,21 @@ impl TuiApp {
         self.overlays.notification_expiry_delay(now)
     }
 
+    /// Time until the wall clock reaches its next second, while anything listens
+    /// to the `now` signal. The frame that wakes then publishes the new second.
+    pub(crate) fn next_second_delay(&self) -> Option<Duration> {
+        if !self.core.signals.has_subscribers("now") {
+            return None;
+        }
+        let since_epoch = self
+            .core
+            .clock
+            .system_now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Some(Duration::from_secs(1) - Duration::from_nanos(u64::from(since_epoch.subsec_nanos())))
+    }
+
     /// How often to repaint while feedback that follows the user's hand
     /// animates (drags, yank flashes, overlays), or `None` when nothing does.
     /// Everything else schedules its own repaints: transcript renderers with
@@ -3805,11 +3820,13 @@ impl TuiApp {
                 .conversation
                 .next_transcript_refresh_at()
                 .map(|deadline| deadline.saturating_duration_since(now));
+            let next_second_delay = self.next_second_delay();
             let next_idle_delay = [
                 next_timer_delay,
                 next_notification_delay,
                 next_keymap_delay,
                 next_transcript_refresh_delay,
+                next_second_delay,
             ]
             .into_iter()
             .flatten()

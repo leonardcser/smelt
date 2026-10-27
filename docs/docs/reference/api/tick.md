@@ -9,26 +9,20 @@ description: "Reload-safe periodic work. Lua API reference for smelt.tick in sme
 
 **Availability:** Everywhere, including headless mode.
 
-Reload-safe periodic work. Subscribes to the host's one-second `now` cell and throttles your callback to a fixed interval - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.
+Reload-safe periodic work. Runs your callback right away and then at a fixed interval, idle or not - safe to call from plugin module bodies. Use this for recurring polling; reserve `smelt.timer.every` for transient timers armed by user actions.
 
 ## `smelt.tick.every`
 
 ```lua
-fun(secs: integer, fn: fun()): smelt.Reg
+fun(secs: number, fn: fun()): smelt.Reg
 ```
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Reload-safe periodic work. Subscribes to the `now` cell (a one-second
-wall-clock tick the host publishes while the app is alive) and fires
-`fn` at most once every `secs` seconds. `fn` runs inside a fresh
-`smelt.spawn`, so it may yield (HTTP, processes, sleeps) without
-blocking the cell pump.
+Reload-safe periodic work. Fires `fn` once right away and then every `secs`
+seconds, idle or not. `fn` runs inside a fresh `smelt.spawn`, so it may
+yield (HTTP, processes, sleeps). Safe to call from a plugin's module body:
+`/reload` cancels the timers and the body re-arms them.
 
-Unlike `smelt.timer.every`, this idiom is safe to call from a
-plugin's module body: cell subscriptions are wiped on `/reload` and
-re-armed when the body re-runs, so no Reg juggling is required for
-hot-reload survival.
-
-Returns a `Reg` whose `:remove()` unsubscribes.
+Returns a `Reg` whose `:remove()` stops it.
 

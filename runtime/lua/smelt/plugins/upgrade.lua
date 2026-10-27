@@ -753,10 +753,9 @@ end, { desc = "show release notes for the latest smelt build" })
 
 -- ── boot ───────────────────────────────────────────────────────────────
 
--- `smelt.tick.every` is the reload-safe periodic primitive: subscribes
--- to the host's one-second `now` cell, throttles to POLL_TICK_SECS, and
--- dispatches into a fresh coroutine so the HTTP fetch can yield. The
--- tick rate is intentionally tighter than the configured interval so
+-- `smelt.tick.every` is the reload-safe periodic primitive: it checks at
+-- boot and then every POLL_TICK_SECS, each time in a fresh coroutine so the
+-- HTTP fetch can yield. The tick rate is intentionally tighter than the configured interval so
 -- live changes to `autoupgrade_interval` take effect on the next poll;
 -- the actual network fetch is gated by `should_check_now`.
 smelt.tick.every(POLL_TICK_SECS, function() run_check(false, nil, { background = true }) end)

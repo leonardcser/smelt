@@ -406,6 +406,14 @@ impl Signals {
         self.slots.contains_key(name)
     }
 
+    /// Whether any direct or glob subscriber listens to `name`.
+    pub fn has_subscribers(&self, name: &str) -> bool {
+        self.slots
+            .get(name)
+            .is_some_and(|slot| !slot.subscribers.is_empty())
+            || self.glob_subs.iter().any(|g| g.pattern.matches(name))
+    }
+
     /// Retire only subscriptions owned by one Lua generation.
     pub fn clear_lua_generation(&mut self, generation: u64) {
         for slot in self.slots.values_mut() {
@@ -1152,6 +1160,25 @@ mod tests {
         let fires = c.drain_pending();
         assert_eq!(fires.len(), 1);
         assert_eq!(fires[0].callbacks.len(), 3);
+    }
+
+    #[test]
+    fn has_subscribers_counts_direct_and_glob_listeners() {
+        let lua = Lua::new();
+        let mut c = Signals::new();
+        c.declare("now", 0u64);
+        assert!(!c.has_subscribers("now"));
+        let id = c
+            .subscribe_kind("now", SubscriberKind::Lua(handle(&lua, "function() end")))
+            .unwrap();
+        assert!(c.has_subscribers("now"));
+        c.unsubscribe("now", id);
+        assert!(!c.has_subscribers("now"));
+        c.glob_subscribe(
+            glob::Pattern::new("n*").unwrap(),
+            SubscriberKind::Lua(handle(&lua, "function() end")),
+        );
+        assert!(c.has_subscribers("now"));
     }
 
     #[test]

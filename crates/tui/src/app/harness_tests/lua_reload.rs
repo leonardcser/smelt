@@ -4224,7 +4224,11 @@ fn reload_clears_every_lua_surface() {
         .any(|p| p.name.as_deref() == Some("seed_provider")));
     assert!(shared.mcp_configs.lock().unwrap().contains_key("seed_mcp"));
     assert!(!shared.hooks.provider_response.is_empty());
-    assert!(!app.core_probe().timers.is_empty());
+    let seeded_generation = app.lua_probe().id;
+    assert!(app
+        .core_probe()
+        .timers
+        .contains_generation(seeded_generation));
     assert!(!shared.tasks.lock().unwrap().is_empty());
     let anon_overlay = (1u32..)
         .map(crate::smelt_edit::OverlayId)
@@ -4293,7 +4297,12 @@ fn reload_clears_every_lua_surface() {
         shared.hooks.provider_response.is_empty(),
         "provider middleware cleared"
     );
-    assert!(app.core_probe().timers.is_empty(), "timers cleared");
+    assert!(
+        !app.core_probe()
+            .timers
+            .contains_generation(seeded_generation),
+        "timers cleared"
+    );
     assert!(shared.tasks.lock().unwrap().is_empty(), "tasks cleared");
     assert!(
         shared.task_inbox.lock().unwrap().is_empty(),
