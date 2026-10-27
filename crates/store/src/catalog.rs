@@ -709,6 +709,13 @@ impl CatalogReader {
         if !path.is_file() {
             return Ok(None);
         }
+        // A writer creates the database and enables WAL under this lock. Until
+        // then readers wait on SQLite locks that its busy handler gives up on.
+        let initialization = FileLock::acquire(
+            &catalog_initialization_path(path),
+            "wait for session catalog initialization",
+            CATALOG_WRITE_BUSY_TIMEOUT,
+        )?;
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -724,6 +731,7 @@ impl CatalogReader {
             return Ok(None);
         }
         validate_schema(&conn)?;
+        drop(initialization);
         Ok(Some(Self {
             path: path.to_path_buf(),
             conn,
@@ -878,7 +886,7 @@ impl CatalogMarkerLock {
 fn open_catalog_connection(path: &Path) -> Result<Connection> {
     // SQLite can return SQLITE_BUSY immediately when connections race to enable WAL.
     let _initialization_lock = FileLock::acquire(
-        &sqlite_companion_path(path, ".open.lock"),
+        &catalog_initialization_path(path),
         "initialize session catalog",
         CATALOG_WRITE_BUSY_TIMEOUT,
     )?;
@@ -900,6 +908,10 @@ fn open_catalog_connection(path: &Path) -> Result<Connection> {
     validate_schema(&tx)?;
     tx.commit()?;
     Ok(conn)
+}
+
+fn catalog_initialization_path(path: &Path) -> PathBuf {
+    sqlite_companion_path(path, ".open.lock")
 }
 
 fn catalog_lease_path(path: &Path) -> PathBuf {
@@ -2062,5 +2074,33 @@ mod tests {
 
         let recovered = CatalogReconciliation::open(path).unwrap();
         assert!(!recovered.rebuilt());
+    }
+
+    #[test]
+    fn reader_waits_for_catalog_initialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        let initializing = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer = {
+            let path = path.clone();
+            let initializing = initializing.clone();
+            std::thread::spawn(move || {
+                let _lock = FileLock::acquire(
+                    &catalog_initialization_path(&path),
+                    "initialize session catalog",
+                    CATALOG_WRITE_BUSY_TIMEOUT,
+                )
+                .unwrap();
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+                initializing.wait();
+                std::thread::sleep(CATALOG_READ_BUSY_TIMEOUT * 3);
+                conn.execute_batch("COMMIT").unwrap();
+            })
+        };
+        initializing.wait();
+
+        assert!(CatalogReader::open_existing(&path).unwrap().is_none());
+        writer.join().unwrap();
     }
 }
