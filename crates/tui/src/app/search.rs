@@ -173,6 +173,11 @@ impl Default for SearchState {
 }
 
 impl SearchState {
+    #[cfg(test)]
+    pub(crate) fn awaiting_worker(&self) -> bool {
+        self.live.as_ref().is_some_and(|live| live.awaiting_worker)
+    }
+
     fn advance_generation(&mut self) -> u64 {
         let generation = self.next_generation;
         self.next_generation = self

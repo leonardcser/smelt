@@ -6750,7 +6750,7 @@ fn scaling_bench_block(index: usize) -> smelt_core::transcript_model::Block {
         },
         _ => Block::Text {
             content: format!(
-                "## Result {index}\n\n- checked output\n- updated module\n\n{}",
+                "## Result {index}\n\n- checked output\n- updated module\n\nThe list [ {index} never closes.\n\n{}",
                 "alpha beta gamma delta ".repeat(6)
             )
             .into(),
@@ -6804,7 +6804,11 @@ fn scaling_save(app: &mut TestApp, save_ms: &mut Vec<f64>) {
     save_ms.push(elapsed_ms(started_at.elapsed()));
 }
 
-fn scaling_bench_app(blocks: usize, compacted: bool) -> ScalingFixture {
+fn scaling_bench_app(
+    blocks: usize,
+    compacted: bool,
+    block_at: fn(usize) -> smelt_core::transcript_model::Block,
+) -> ScalingFixture {
     const SAVE_BATCH_BLOCKS: usize = 256;
     const RENDER_EVERY_BLOCKS: usize = 64;
 
@@ -6819,7 +6823,7 @@ fn scaling_bench_app(blocks: usize, compacted: bool) -> ScalingFixture {
     app.app.handle_resize(100, 32);
     let mut content_bytes = 0usize;
     for index in 0..blocks {
-        let block = scaling_bench_block(index);
+        let block = block_at(index);
         content_bytes += scaling_bench_block_bytes(&block);
         app.app.push_block(block);
         if (index + 1) % RENDER_EVERY_BLOCKS == 0 {
@@ -6936,7 +6940,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         content_bytes,
         retained_bytes,
         save_ms,
-    } = scaling_bench_app(blocks, compacted);
+    } = scaling_bench_app(blocks, compacted, scaling_bench_block);
     if compacted {
         let disk_bytes = directory_bytes(app.app.core.sessions.layout().sessions_root());
         let first = save_ms.first().copied().unwrap_or_default();
@@ -7146,6 +7150,269 @@ fn transcript_scaling_benchmark_suite() {
         };
         eprintln!(
             "{op:<20} {} {exponent:>9.2}",
+            medians
+                .iter()
+                .map(|ms| format!("{ms:>12.3}"))
+                .collect::<String>()
+        );
+    }
+}
+
+fn keys_bench_enabled() -> bool {
+    std::env::var("SMELT_TRANSCRIPT_KEYS_BENCH").as_deref() == Ok("1")
+}
+
+/// A scaling block whose answers also carry inline code, quotes and a fenced
+/// code block, so text objects and `%` have something to act on.
+fn keys_bench_block(index: usize) -> smelt_core::transcript_model::Block {
+    match index % 4 {
+        3 => smelt_core::transcript_model::Block::Text {
+            content: format!(
+                "## Result {index}\n\nCall `keys_call({index}, b)` (see \"notes {index}\") then rerun it. The fix holds.\n\n```rust\nfn keys_bench_{index}(a: u32) -> u32 {{\n    (a + {index}) * 2\n}}\n```\n\n- checked output\n- updated module\n\nThe list [ {index} never closes.\n\n{}",
+                "alpha beta gamma delta ".repeat(6)
+            )
+            .into(),
+        },
+        _ => scaling_bench_block(index),
+    }
+}
+
+/// Feed `keys` to the app: characters as typed, `<C-x>` with Control, and
+/// `<CR>` `<Esc>` `<Tab>` as their keys.
+fn feed_keys(app: &mut TestApp, keys: &str) {
+    let mut rest = keys;
+    while let Some(c) = rest.chars().next() {
+        if c == '<' {
+            if let Some(end) = rest.find('>') {
+                let name = &rest[1..end];
+                rest = &rest[end + 1..];
+                match name {
+                    "CR" => {
+                        app.press(KeyCode::Enter);
+                        app.settle_live_search();
+                    }
+                    "Esc" => app.press(KeyCode::Esc),
+                    "Tab" => app.press(KeyCode::Tab),
+                    _ => {
+                        let key = name
+                            .strip_prefix("C-")
+                            .and_then(|key| key.chars().next())
+                            .unwrap_or_else(|| panic!("unknown key <{name}>"));
+                        app.press_mod(KeyCode::Char(key), KeyModifiers::CONTROL);
+                    }
+                }
+                continue;
+            }
+        }
+        app.type_char(c);
+        rest = &rest[c.len_utf8()..];
+    }
+}
+
+/// Every transcript key, as `(name, setup, keys)`: `setup` puts the cursor in
+/// place untimed, then `keys` and the frame they cause are timed.
+const KEYS_BENCH_OPS: &[(&str, &str, &str)] = &[
+    ("render", "50%", ""),
+    ("j", "50%", "j"),
+    ("k", "50%", "k"),
+    ("100j", "50%", "100j"),
+    ("gj", "50%", "gj"),
+    ("l", "50%", "l"),
+    ("w", "50%", "w"),
+    ("b", "50%", "b"),
+    ("e", "50%", "e"),
+    ("ge", "50%", "ge"),
+    ("W", "50%", "W"),
+    ("B", "50%", "B"),
+    ("100w", "50%", "100w"),
+    ("$", "50%", "$"),
+    ("^", "50%$", "^"),
+    ("0", "50%$", "0"),
+    ("gg", "50%", "gg"),
+    ("G", "50%", "G"),
+    ("50%", "gg", "50%"),
+    ("}", "50%", "}"),
+    ("{", "50%", "{"),
+    ("20}", "50%", "20}"),
+    (")", "50%", ")"),
+    ("(", "50%", "("),
+    ("%", "50%/keys_call<CR>f(", "%"),
+    ("f(", "50%/keys_call<CR>0", "f("),
+    (";", "50%/keys_call<CR>0f ", ";"),
+    ("H", "50%", "H"),
+    ("M", "50%", "M"),
+    ("L", "50%", "L"),
+    ("zz", "50%", "zz"),
+    ("zt", "50%", "zt"),
+    ("<C-d>", "50%", "<C-d>"),
+    ("<C-u>", "50%", "<C-u>"),
+    ("<C-f>", "50%", "<C-f>"),
+    ("<C-b>", "50%", "<C-b>"),
+    ("<C-e>", "50%", "<C-e>"),
+    ("<C-y>", "50%", "<C-y>"),
+    ("]]", "50%", "]]"),
+    ("[[", "50%", "[["),
+    ("]u", "50%", "]u"),
+    ("[u", "50%", "[u"),
+    ("]a", "50%", "]a"),
+    ("]t", "50%", "]t"),
+    ("10]u", "50%", "10]u"),
+    ("<C-o>", "50%G", "<C-o>"),
+    ("<Tab>", "50%G<C-o>", "<Tab>"),
+    ("''", "50%G", "''"),
+    ("*", "50%/keys_call<CR>", "*"),
+    ("#", "50%/keys_call<CR>", "#"),
+    ("n", "50%/keys_call<CR>", "n"),
+    ("N", "50%/keys_call<CR>", "N"),
+    ("/search", "50%", "/notes 1<CR>"),
+    ("/common", "50%", "/keys_call<CR>"),
+    ("yy", "50%", "yy"),
+    ("yw", "50%", "yw"),
+    ("y}", "50%", "y}"),
+    ("yip", "50%", "yip"),
+    ("yap", "50%", "yap"),
+    ("yis", "50%/keys_call<CR>", "yis"),
+    ("yiw", "50%", "yiw"),
+    ("yi(", "50%/keys_call<CR>", "yi("),
+    ("yi\"", "50%/notes<CR>", "yi\""),
+    ("yi`", "50%/keys_call<CR>", "yi`"),
+    ("yic", "50%/a + <CR>", "yic"),
+    ("yac", "50%/a + <CR>", "yac"),
+    ("vjy", "50%", "vjy"),
+    ("Vjy", "50%", "Vjy"),
+    ("vip", "50%", "vip"),
+    ("gv", "50%vj<Esc>", "gv"),
+    ("za", "50%", "za"),
+    ("<CR>", "50%", "<CR>"),
+    ("zM", "50%", "zM"),
+    ("zR", "50%zM", "zR"),
+    ("w@end", "G$", "w"),
+    ("b@start", "gg0", "b"),
+    ("ge@start", "gg0", "ge"),
+    ("}@end", "G", "}"),
+    ("{@start", "gg", "{"),
+    (")@end", "G$", ")"),
+    ("(@start", "gg0", "("),
+    ("%@none", "50%/alpha<CR>", "%"),
+    ("%@unmatched", "50%/never closes<CR>0", "%"),
+    ("yi(@none", "50%/alpha<CR>", "yi("),
+    ("yi[@unmatched", "50%/never closes<CR>", "yi["),
+    ("]u@end", "G", "]u"),
+    ("[u@start", "gg", "[u"),
+];
+
+/// Times every transcript key in sessions of growing size and reports which
+/// ones scale with it. A key whose time grows with the session or passes a
+/// frame budget is flagged.
+#[test]
+fn transcript_keys_benchmark_suite() {
+    if !benchmark_target_enabled() || !keys_bench_enabled() {
+        return;
+    }
+    const SLOW_MS: f64 = 4.0;
+    let counts = scaling_bench_block_counts();
+    let compacted = scaling_bench_compacted();
+    let reps = scaling_bench_reps();
+    // Comma-separated keys whose slowest timed run prints where its time went.
+    let profiled = std::env::var("SMELT_TRANSCRIPT_KEYS_PERF").unwrap_or_default();
+    let mut results: Vec<Vec<(f64, f64)>> = Vec::new();
+    for &blocks in &counts {
+        let mut app = scaling_bench_app(blocks, compacted, keys_bench_block).app;
+        if compacted {
+            wait_for_bench_search_projection(&app, "keys");
+        }
+        scaling_focus_transcript(&mut app);
+        app.render_silent();
+        let mut per_op = Vec::with_capacity(KEYS_BENCH_OPS.len());
+        for (name, setup, keys) in KEYS_BENCH_OPS {
+            let mut times = Vec::with_capacity(reps);
+            let profile = profiled.split(',').any(|key| key == *name);
+            let mut slowest: Option<(f64, smelt_perf::perf::Snapshot)> = None;
+            for rep in 0..reps + 2 {
+                feed_keys(&mut app, "<Esc>zR");
+                feed_keys(&mut app, setup);
+                app.render_silent();
+                if profile {
+                    smelt_perf::perf::clear();
+                    smelt_perf::perf::set_enabled(true);
+                }
+                let started_at = std::time::Instant::now();
+                feed_keys(&mut app, keys);
+                app.render_silent();
+                let elapsed = elapsed_ms(started_at.elapsed());
+                if profile {
+                    let snapshot = smelt_perf::perf::snapshot();
+                    smelt_perf::perf::set_enabled(false);
+                    if rep >= 2 && slowest.as_ref().is_none_or(|(ms, _)| elapsed > *ms) {
+                        slowest = Some((elapsed, snapshot));
+                    }
+                }
+                if rep >= 2 {
+                    times.push(elapsed);
+                }
+            }
+            if let Some((_, snapshot)) = slowest {
+                for row in snapshot.durations.iter().take(25) {
+                    eprintln!(
+                        "TRANSCRIPT_KEYS_PERF blocks={blocks} key={name} metric={} count={} total_us={} max_us={}",
+                        row.label, row.count, row.total_us, row.max_us
+                    );
+                }
+                for row in &snapshot.values {
+                    eprintln!(
+                        "TRANSCRIPT_KEYS_PERF blocks={blocks} key={name} value={} count={} last={}",
+                        row.label, row.count, row.last
+                    );
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            let sample = (times[times.len() / 2], *times.last().expect("key samples"));
+            eprintln!(
+                "TRANSCRIPT_KEYS_SAMPLE compacted={compacted} blocks={blocks} rows={} key={name} median_ms={:.3} max_ms={:.3}",
+                transcript_total_rows(&app),
+                sample.0,
+                sample.1
+            );
+            per_op.push(sample);
+        }
+        results.push(per_op);
+    }
+
+    let first = *counts.first().expect("key bench block counts") as f64;
+    let last = *counts.last().expect("key bench block counts") as f64;
+    eprintln!();
+    eprintln!("TRANSCRIPT_KEYS_SUMMARY compacted={compacted} reps={reps} slow_ms={SLOW_MS}");
+    eprintln!(
+        "{:<12} {} {:>10} {:>9}",
+        "key",
+        counts
+            .iter()
+            .map(|blocks| format!("{:>12}", format!("{blocks} ms")))
+            .collect::<String>(),
+        "max ms",
+        "exponent"
+    );
+    for (index, (name, _, _)) in KEYS_BENCH_OPS.iter().enumerate() {
+        let medians = results
+            .iter()
+            .map(|samples| samples[index].0)
+            .collect::<Vec<_>>();
+        let max = results
+            .iter()
+            .map(|samples| samples[index].1)
+            .fold(0.0, f64::max);
+        let exponent = if counts.len() > 1 && medians[0] > 0.0 {
+            (medians[medians.len() - 1] / medians[0]).ln() / (last / first).ln()
+        } else {
+            0.0
+        };
+        let flag = if medians.iter().any(|ms| *ms > SLOW_MS) || exponent > 0.3 {
+            "  SLOW"
+        } else {
+            ""
+        };
+        eprintln!(
+            "{name:<12} {} {max:>10.3} {exponent:>9.2}{flag}",
             medians
                 .iter()
                 .map(|ms| format!("{ms:>12.3}"))

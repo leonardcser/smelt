@@ -1389,6 +1389,24 @@ impl TestApp {
         self.app.platform.try_recv_app_event()
     }
 
+    /// Applies app events until the live search has its worker result.
+    #[cfg(test)]
+    pub(crate) fn settle_live_search(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.app.overlays.search_state().awaiting_worker() {
+            match self.app.platform.try_recv_app_event() {
+                Some(event) => self.app.handle_app_event(event),
+                None => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "live search worker did not answer"
+                    );
+                    std::thread::yield_now();
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_context_token_baseline_for_harness(&mut self, tokens: Option<u32>) {
         if let Some(tokens) = tokens {

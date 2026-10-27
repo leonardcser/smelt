@@ -87,6 +87,7 @@ pub fn run(args: Vec<String>) {
     let mut scaling = false;
     let mut scaling_blocks: Option<String> = None;
     let mut scaling_compacted = false;
+    let mut keys = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -257,6 +258,7 @@ pub fn run(args: Vec<String>) {
                 scaling = true;
                 scaling_blocks = Some(take_required_arg(&mut iter, "--scaling-blocks"));
             }
+            "--keys" => keys = true,
             "--scaling-compacted" => {
                 scaling = true;
                 scaling_compacted = true;
@@ -312,6 +314,30 @@ pub fn run(args: Vec<String>) {
             "bench-transcript-layout: --tall-write-only and --tall-diff-only are mutually exclusive"
         );
         std::process::exit(2);
+    }
+
+    if keys {
+        let mut env = vec![
+            ("SMELT_TRANSCRIPT_KEYS_BENCH", "1".to_string()),
+            ("SMELT_TRANSCRIPT_SCALING_REPS", runs.clone()),
+        ];
+        if let Some(blocks) = scaling_blocks {
+            env.push(("SMELT_TRANSCRIPT_SCALING_BLOCKS", blocks));
+        }
+        if scaling_compacted {
+            env.push(("SMELT_TRANSCRIPT_SCALING_COMPACTED", "1".to_string()));
+        }
+        eprintln!(
+            "running transcript keys benchmark: profile={}",
+            if release { "release" } else { "test/debug" },
+        );
+        run_tui_bench(
+            "bench-transcript-keys",
+            "transcript_keys_benchmark_suite",
+            release,
+            env,
+        );
+        return;
     }
 
     let mut env = vec![("SMELT_TRANSCRIPT_BENCH_RUNS", runs.clone())];
@@ -503,7 +529,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--tall-diff-only] [--tall-diff-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-resumed-bytes N] [--stream-resumed-position top|middle|tail] [--stream-boundary-record-bytes N] [--stream-chunks N] [--stream-bytes N] [--stream-width N] [--stream-height N] [--stream-parallel-tools N] [--stream-workload text|bash|mixed|exec|write-draft|explore-group] [--stream-scheduled] [--stream-scroll] [--stream-idle-frames N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--scaling] [--scaling-blocks CSV] [--scaling-compacted] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--tall-diff-only] [--tall-diff-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-resumed-bytes N] [--stream-resumed-position top|middle|tail] [--stream-boundary-record-bytes N] [--stream-chunks N] [--stream-bytes N] [--stream-width N] [--stream-height N] [--stream-parallel-tools N] [--stream-workload text|bash|mixed|exec|write-draft|explore-group] [--stream-scheduled] [--stream-scroll] [--stream-idle-frames N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--scaling] [--scaling-blocks CSV] [--scaling-compacted] [--keys] [--debug]");
     eprintln!();
     eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -566,4 +592,7 @@ fn print_usage() {
     eprintln!("--scaling sweeps block count and fits how size-independent interactions scale; --runs sets repetitions per operation.");
     eprintln!("--scaling-blocks CSV sets swept block counts; default is 2000,8000,32000.");
     eprintln!("--scaling-compacted persists and dematerializes the fixture before measuring.");
+    eprintln!(
+        "--keys times every transcript key at each --scaling-blocks size and runs nothing else."
+    );
 }
