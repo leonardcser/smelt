@@ -10,13 +10,17 @@
 //!   - SMELT_DISPLAY         canonical user-facing identity string. Single
 //!     source of truth for the banner, `/version`, `/upgrade`, and `--version`.
 //!     Shape: `{tag}` for a clean tagged build, `{tag}-{commits}-{sha}[-dirty]`
-//!     for a dev build, `v{CARGO_PKG_VERSION}` when git is unavailable.
+//!     for a dev build, `v{CARGO_PKG_VERSION}-{sha}` when no version tag is
+//!     reachable (e.g. `cargo install --git`), `v{CARGO_PKG_VERSION}` when git
+//!     is unavailable. Committed manifests carry the `0.0.0-dev` placeholder;
+//!     release runners materialize the tag version.
 //!
 //! The git lookups go through `git rev-parse` / `git show` / `git describe`,
 //! so they work for ordinary checkouts and worktrees alike. Release runners
 //! set `SMELT_RELEASE_TAG` after materializing the matching package version;
 //! this preserves the exact tag identity despite runner-local manifest edits.
-//! When Git is unavailable, the display falls back to `CARGO_PKG_VERSION`.
+//! Without a version tag, the display falls back to `CARGO_PKG_VERSION` and
+//! the commit.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -24,7 +28,7 @@ use std::process::Command;
 mod build_support;
 
 fn main() {
-    let sha = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let sha = git(&["rev-parse", "--short", "HEAD"]);
     let date = git(&["show", "-s", "--format=%cI", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".into());
 
@@ -33,9 +37,14 @@ fn main() {
         "describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*",
     ]);
     let release_tag = std::env::var("SMELT_RELEASE_TAG").ok();
-    let identity =
-        build_support::resolve_identity(described.as_deref(), pkg_version, release_tag.as_deref())
-            .unwrap_or_else(|error| panic!("{error}"));
+    let identity = build_support::resolve_identity(
+        described.as_deref(),
+        sha.as_deref(),
+        pkg_version,
+        release_tag.as_deref(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let sha = sha.unwrap_or_else(|| "unknown".into());
 
     println!("cargo:rustc-env=SMELT_BUILD_SHA={sha}");
     println!("cargo:rustc-env=SMELT_BUILD_DATE={date}");

@@ -1,6 +1,6 @@
 [package]
 name = "smelt-protocol"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 edition = "2021"
 rust-version.workspace = true
 publish = false
@@ -11,4 +11,4 @@ name = "protocol"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-smelt-buffer = { version = "0.5.0-alpha.9", path = "../buffer" }
+smelt-buffer = { version = "0.0.0-dev", path = "../buffer" }

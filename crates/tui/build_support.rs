@@ -10,6 +10,7 @@ pub(crate) struct BuildIdentity {
 
 pub(crate) fn resolve_identity(
     described: Option<&str>,
+    sha: Option<&str>,
     pkg_version: &str,
     release_tag: Option<&str>,
 ) -> Result<BuildIdentity, String> {
@@ -29,16 +30,25 @@ pub(crate) fn resolve_identity(
     }
 
     Ok(described
-        .map(|described| parse_describe(described, pkg_version))
+        .map(|described| parse_describe(described, sha, pkg_version))
         .unwrap_or_else(|| BuildIdentity {
             tag: "unknown".into(),
             commits: "0".into(),
             dirty: "0".into(),
-            display: format!("v{pkg_version}"),
+            display: untagged_display(sha, pkg_version),
         }))
 }
 
-fn parse_describe(described: &str, pkg_version: &str) -> BuildIdentity {
+/// Identity for a checkout without reachable version tags, such as the one
+/// `cargo install --git` builds from: the placeholder version plus the commit.
+fn untagged_display(sha: Option<&str>, pkg_version: &str) -> String {
+    match sha {
+        Some(sha) => format!("v{pkg_version}-{sha}"),
+        None => format!("v{pkg_version}"),
+    }
+}
+
+fn parse_describe(described: &str, sha: Option<&str>, pkg_version: &str) -> BuildIdentity {
     let (core, dirty) = match described.strip_suffix("-dirty") {
         Some(rest) => (rest, "1"),
         None => (described, "0"),
@@ -52,7 +62,7 @@ fn parse_describe(described: &str, pkg_version: &str) -> BuildIdentity {
             tag: "unknown".into(),
             commits: "0".into(),
             dirty: dirty.into(),
-            display: format!("v{pkg_version}"),
+            display: untagged_display(sha, pkg_version),
         };
     };
     let display_tag = if tag.starts_with('v') {

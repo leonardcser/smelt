@@ -3339,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-buffer"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "base64",
  "serde",
@@ -3351,7 +3351,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-core"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "atomic-write-file",
  "brush-parser",
@@ -3400,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-edit"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "crossterm",
  "smelt-buffer",
@@ -3409,7 +3409,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-engine"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "apple-native-keyring-store",
  "atomic-write-file",
@@ -3466,7 +3466,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-lua-doc-derive"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3479,7 +3479,7 @@ version = "0.2.0"
 
 [[package]]
 name = "smelt-protocol"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "serde",
  "serde_json",
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-provider"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "atomic-write-file",
  "base64",
@@ -3511,7 +3511,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-store"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "fs4",
  "getrandom 0.4.3",
@@ -3548,11 +3548,11 @@ dependencies = [
 
 [[package]]
 name = "smelt-test-support"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 
 [[package]]
 name = "smelt-tui"
-version = "0.5.0-alpha.12"
+version = "0.0.0-dev"
 dependencies = [
  "base64",
  "crossterm",

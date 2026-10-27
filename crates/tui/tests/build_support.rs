@@ -45,6 +45,7 @@ fn tracked_file_paths_resolve_from_repo_root() {
 fn matching_release_tag_overrides_runner_local_dirty_state() {
     let identity = build_support::resolve_identity(
         Some("v0.5.0-alpha.12-12-g3311c2d9-dirty"),
+        Some("3311c2d9"),
         "0.6.0",
         Some("v0.6.0"),
     )
@@ -58,7 +59,7 @@ fn matching_release_tag_overrides_runner_local_dirty_state() {
 
 #[test]
 fn release_tag_must_match_materialized_package_version() {
-    let error = build_support::resolve_identity(None, "0.6.0", Some("v0.7.0")).unwrap_err();
+    let error = build_support::resolve_identity(None, None, "0.6.0", Some("v0.7.0")).unwrap_err();
     assert!(error.contains("does not match package version `0.6.0`"));
 }
 
@@ -66,7 +67,8 @@ fn release_tag_must_match_materialized_package_version() {
 fn development_identity_preserves_git_distance_and_dirty_state() {
     let identity = build_support::resolve_identity(
         Some("v0.5.0-alpha.12-12-g3311c2d9-dirty"),
-        "0.5.0-alpha.12",
+        Some("3311c2d9"),
+        "0.0.0-dev",
         None,
     )
     .unwrap();
@@ -75,4 +77,20 @@ fn development_identity_preserves_git_distance_and_dirty_state() {
     assert_eq!(identity.commits, "12");
     assert_eq!(identity.dirty, "1");
     assert_eq!(identity.display, "v0.5.0-alpha.12-12-3311c2d9-dirty");
+}
+
+#[test]
+fn untagged_checkout_reports_placeholder_version_and_commit() {
+    let identity =
+        build_support::resolve_identity(None, Some("3311c2d9"), "0.0.0-dev", None).unwrap();
+
+    assert_eq!(identity.tag, "unknown");
+    assert_eq!(identity.display, "v0.0.0-dev-3311c2d9");
+}
+
+#[test]
+fn missing_git_reports_placeholder_version() {
+    let identity = build_support::resolve_identity(None, None, "0.0.0-dev", None).unwrap();
+
+    assert_eq!(identity.display, "v0.0.0-dev");
 }
