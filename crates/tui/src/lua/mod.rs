@@ -3704,9 +3704,8 @@ mod tests {
 
         let shared = rt.shared.clone();
         assert!(shared.commands.lock().unwrap().contains_key("plug_cmd"));
-        let has_user_chord = |k: &std::collections::HashMap<(String, String), _>| {
-            k.keys().any(|(_, c)| c == "<F9>")
-        };
+        let has_user_chord =
+            |k: &std::collections::HashMap<(String, String), _>| k.keys().any(|(_, c)| c == "<F9>");
         assert!(has_user_chord(&shared.keymaps.lock().unwrap()));
 
         // Reload to an empty body: every user-registered surface disappears.
