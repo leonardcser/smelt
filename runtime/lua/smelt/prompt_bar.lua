@@ -220,6 +220,14 @@ function smelt.prompt_bar.top.invalidate()
   bar.invalidate(top_bar)
 end
 
+--- Repaint after `ms` milliseconds. An animated source calls it on every paint
+--- to ask for its next frame; the earliest pending request wins.
+---@tier ui_host
+---@type fun(ms: integer)
+function smelt.prompt_bar.top.invalidate_after(ms)
+  bar.invalidate_after(top_bar, ms)
+end
+
 --- Add a named source of items to the rule of the bar above the prompt.
 --- `handler` runs on every repaint and returns a list of items (see
 --- `smelt.bar.Item`); errors are reported on stderr and skip the source. The
@@ -247,6 +255,14 @@ end
 ---@type fun()
 function smelt.prompt_bar.bottom.invalidate()
   bar.invalidate(bottom_bar)
+end
+
+--- Repaint after `ms` milliseconds. An animated source calls it on every paint
+--- to ask for its next frame; the earliest pending request wins.
+---@tier ui_host
+---@type fun(ms: integer)
+function smelt.prompt_bar.bottom.invalidate_after(ms)
+  bar.invalidate_after(bottom_bar, ms)
 end
 
 --- Add a named source of items to the rule of the bar below the prompt. It has
@@ -308,7 +324,9 @@ end
 -- leaves it still and dim in its color. A finished turn cools it to gray over a
 -- second, and an interrupted one, which you asked for, goes gray at once. The
 -- label types in white-hot whenever it changes, rests in gray, and a hammer
--- sweep runs along it on repeat.
+-- sweep runs along it on repeat. Each paint asks for the next frame: fast while
+-- letters type in and cool, slow while only the coal breathes and the sweep
+-- steps, and none once the coal is still.
 local COAL = "\u{25CF}"
 local MIN_HEAT = 0.05
 local CALL_BUMP = 0.15
@@ -325,6 +343,8 @@ local SWEEP_MS = 2200
 local SWEEP_STEP_MS = 110
 local FLARE_COOL_MS = 650
 local PAUSED_LEVEL = 0.4
+local FAST_FRAME_MS = 33
+local SLOW_FRAME_MS = 100
 
 local function mix(a, b, t)
   t = math.max(0, math.min(t, 1))
@@ -408,25 +428,13 @@ local function banked_coal()
   return coal_item(mix(ground(), heat(), 0.15 + 0.45 * progress))
 end
 
--- A finished turn cools to gray; the timer repaints it, since nothing else
--- animates once the turn is over.
-local done_at, cooling
+local done_at
 smelt.signal.subscribe("work_state", function(state)
   if state == "done" or state == "interrupted" or state == "idle" then
     settle(smelt.time.now_ms())
     pending_calls = 0
   end
-  if state ~= "done" then
-    done_at = nil
-    return
-  end
-  done_at = smelt.time.now_ms()
-  if cooling then cooling:remove() end
-  cooling = smelt.timer.every(50, function() bar.invalidate(top_bar) end)
-  smelt.timer.set(COOL_MS + 100, function()
-    cooling:remove()
-    cooling = nil
-  end)
+  done_at = state == "done" and smelt.time.now_ms() or nil
 end)
 
 -- How far letter `i` is flared toward white, from 0 (resting gray) to 1: it
@@ -485,7 +493,10 @@ builtin.indicator = function()
       backoff = nil
       mark = working_coal(now)
     end
-    return { mark, typed_label(label, now) }
+    local item = typed_label(label, now)
+    local typing = now - shown_since < #label * TYPE_MS + FLARE_COOL_MS
+    bar.invalidate_after(top_bar, typing and FAST_FRAME_MS or SLOW_FRAME_MS)
+    return { mark, item }
   end
 
   started, backoff, shown = nil, nil, nil
@@ -495,6 +506,7 @@ builtin.indicator = function()
   elseif state == "done" then
     local cool = done_at and math.min((now - done_at) / COOL_MS, 1) or 1
     mark = coal_item(mix(heat(), ash(), cool))
+    if cool < 1 then bar.invalidate_after(top_bar, FAST_FRAME_MS) end
   else
     mark = coal_item(ash())
   end
@@ -509,7 +521,11 @@ end
 builtin.elapsed = function()
   local state = work_state()
   if not state or state == "interrupted" then return nil end
-  local secs = math.floor((smelt.signal.get("work_elapsed_ms") or 0) / 1000)
+  local elapsed_ms = smelt.signal.get("work_elapsed_ms") or 0
+  if state == "working" or state == "busy" or state == "retrying" then
+    bar.invalidate_after(top_bar, 1000 - elapsed_ms % 1000)
+  end
+  local secs = math.floor(elapsed_ms / 1000)
   if secs <= 0 then return nil end
   return {
     text = smelt.text.format_duration(secs),
@@ -523,6 +539,7 @@ builtin.retry = function()
   local attempt = smelt.signal.get("work_retry_attempt") or 0
   if attempt <= 0 then return nil end
   local remaining_ms = smelt.signal.get("work_retry_remaining_ms") or 0
+  if remaining_ms > 0 then bar.invalidate_after(top_bar, (remaining_ms - 1) % 1000 + 1) end
   return {
     text = string.format("(retrying in %ds #%d)", math.max(1, math.ceil(remaining_ms / 1000)), attempt),
     style = COMMENT_DIM_STYLE,
@@ -734,11 +751,13 @@ invalidate_on(M.top_win, {
   "reasoning",
   "session_epoch",
   "tokens_used",
-  "work_elapsed_ms",
   "work_label",
   "work_retry_attempt",
   "work_state",
 })
+invalidate_when_changed(M.top_win, "work_elapsed_ms", function(value)
+  return math.floor((tonumber(value) or 0) / 1000)
+end)
 invalidate_when_changed(M.top_win, "work_retry_remaining_ms", function(value)
   return math.max(1, math.ceil((tonumber(value) or 0) / 1000))
 end)

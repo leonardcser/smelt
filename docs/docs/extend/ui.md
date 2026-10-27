@@ -257,9 +257,9 @@ end)
 smelt.prompt_bar.top.remove("cost")
 ```
 
-The bar above the prompt repaints on every frame while the agent works, so a
-source can animate from `smelt.time.now_ms()`. After the turn
-ends nothing animates, so a source that keeps moving, like the built-in
-`indicator` cooling its dot, repaints with a short `smelt.timer`. A source that
-depends on state of its own calls `invalidate()` on its bar when that state
-changes. A failing source is reported on stderr and skipped.
+A bar repaints only when something it shows changes. A source that animates
+draws from `smelt.time.now_ms()` and asks for its next frame on every paint
+with `invalidate_after(ms)`, the way the built-in `indicator` breathes while the agent
+works and cools its dot after. A source that depends on state of its own calls
+`invalidate()` on its bar when that state changes. A failing source is reported
+on stderr and skipped.

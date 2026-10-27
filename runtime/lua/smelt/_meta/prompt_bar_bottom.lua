@@ -21,6 +21,11 @@ prompt_bar_bottom.add = nil
 ---@type fun()
 prompt_bar_bottom.invalidate = nil
 
+--- Repaint after `ms` milliseconds. An animated source calls it on every paint
+--- to ask for its next frame; the earliest pending request wins.
+---@type fun(ms: integer)
+prompt_bar_bottom.invalidate_after = nil
+
 --- Remove every source named `name` from the bar below the prompt.
 ---@type fun(name: string)
 prompt_bar_bottom.remove = nil

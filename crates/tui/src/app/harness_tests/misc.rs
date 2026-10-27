@@ -980,6 +980,51 @@ fn provider_tool_completion_reuses_streamed_content_identity() {
 }
 
 #[test]
+fn a_running_turn_repaints_only_when_the_working_indicator_asks() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.animate_with_virtual_clock();
+    app.start_turn(42);
+    assert_eq!(
+        app.app.animation_frame_interval(),
+        None,
+        "waiting on the model must not run the frame loop"
+    );
+
+    let mut dots = std::collections::HashSet::new();
+    for _ in 0..8 {
+        let frame = app.advance_animation(150);
+        dots.insert(app.working_dot_style(&frame).expect("styled working dot"));
+    }
+    assert!(
+        dots.len() >= 4,
+        "the coal keeps breathing on its own timer: {dots:?}"
+    );
+
+    app.finish_turn();
+    for _ in 0..10 {
+        app.advance_animation(150);
+    }
+    app.clear_timers();
+    app.run_lua("smelt.prompt_bar.top.invalidate()");
+    app.advance_animation(150);
+    assert_eq!(
+        app.app.core.timers.next_deadline(),
+        None,
+        "a cooled coal stops asking for frames"
+    );
+
+    app.type_text("alpha");
+    app.press(KeyCode::Esc);
+    app.type_char('y');
+    app.type_char('y');
+    assert_eq!(
+        app.app.animation_frame_interval(),
+        Some(std::time::Duration::from_millis(16)),
+        "a yank flash follows the user's input at full rate"
+    );
+}
+
+#[test]
 fn truncated_live_output_is_replaced_by_the_final_bounded_output() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);

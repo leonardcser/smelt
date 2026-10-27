@@ -89,28 +89,20 @@ local function render(colors, word, width, phase, round, live)
   return { { runs = runs, priority = 1 } }
 end
 
--- Nothing else repaints a finished turn, so a timer drives the decode.
-local done_at, decoding
+local done_at
 smelt.signal.subscribe("work_state", function(state)
-  if state ~= "done" then
-    done_at = nil
-    return
-  end
-  done_at = smelt.time.now_ms()
-  if decoding then decoding:remove() end
-  decoding = smelt.timer.every(FRAME_MS, function() smelt.prompt_bar.top.invalidate() end)
-  smelt.timer.set(DECODE_MS + FRAME_MS, function()
-    decoding:remove()
-    decoding = nil
-  end)
+  done_at = state == "done" and smelt.time.now_ms() or nil
 end)
 
+-- Each frame asks for the next one, until "done" has decoded.
 smelt.prompt_bar.top.add("indicator", function()
   if smelt.signal.get("work_state") == "done" and not smelt.signal.get("auto_continue_status") then
     local phase = done_at and smelt.time.now_ms() - done_at or DECODE_MS
+    if phase < DECODE_MS then smelt.prompt_bar.top.invalidate_after(FRAME_MS) end
     return render(palette(), DONE, #DONE, phase, 0, false)
   end
   if not working() then return fallback() end
+  smelt.prompt_bar.top.invalidate_after(FRAME_MS)
   local now = smelt.time.now_ms()
   local round = math.floor(now / CYCLE_MS)
   return render(palette(), WORDS[round % #WORDS + 1], WIDTH, now % CYCLE_MS, round, true)

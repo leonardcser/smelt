@@ -28,6 +28,11 @@ statusline.builtin = nil
 ---@type fun()
 statusline.invalidate = nil
 
+--- Repaint after `ms` milliseconds. An animated source calls it on every paint
+--- to ask for its next frame; the earliest pending request wins.
+---@type fun(ms: integer)
+statusline.invalidate_after = nil
+
 --- Remove every source named `name`.
 ---@type fun(name: string)
 statusline.remove = nil

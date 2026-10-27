@@ -139,8 +139,9 @@ impl TestApp {
             .unwrap();
     }
 
-    /// Advance the virtual clock by `ms`, publish it to Lua animations and
-    /// render one frame without waiting for transcript hydration.
+    /// Advance the virtual clock by `ms`, publish it to Lua animations, fire the
+    /// timers that came due and render one frame without waiting for transcript
+    /// hydration.
     pub fn advance_animation(&mut self, ms: u64) -> crate::smelt_edit::SnapshotFrame {
         self.feed_one(SourceEvent::Tick(ms));
         self.app
@@ -152,6 +153,7 @@ impl TestApp {
                 engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
             )
             .unwrap();
+        self.app.tick_timers();
         self.app.publish_diff_signals();
         self.render_unsettled_silent()
     }

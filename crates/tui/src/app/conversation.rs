@@ -2416,10 +2416,6 @@ impl ConversationRuntime {
         )
     }
 
-    pub(crate) fn has_active_exec(&self) -> bool {
-        self.parser.has_active_exec()
-    }
-
     pub(crate) fn set_active_tools_paused(&mut self, paused: bool, now: std::time::Instant) {
         self.parser
             .set_active_tools_paused(self.document.transcript.history_mut(), paused, now);

@@ -95,10 +95,6 @@ impl TuiApp {
         self.request_urgent_render();
     }
 
-    pub(crate) fn has_active_exec(&self) -> bool {
-        self.conversation.has_active_exec()
-    }
-
     pub(crate) fn append_active_output_line(
         &mut self,
         invocation_id: protocol::InvocationId,

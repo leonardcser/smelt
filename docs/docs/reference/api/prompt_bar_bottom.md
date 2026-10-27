@@ -33,6 +33,15 @@ Repaint after plugin-owned state changes that are not represented by a
 built-in signal. Adding, replacing, and removing sources invalidates
 automatically.
 
+## `smelt.prompt_bar.bottom.invalidate_after`
+
+```lua
+fun(ms: integer)
+```
+
+Repaint after `ms` milliseconds. An animated source calls it on every paint
+to ask for its next frame; the earliest pending request wins.
+
 ## `smelt.prompt_bar.bottom.remove`
 
 ```lua

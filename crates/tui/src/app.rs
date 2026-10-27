@@ -3398,6 +3398,28 @@ impl TuiApp {
         self.overlays.notification_expiry_delay(now)
     }
 
+    /// How often to repaint while feedback that follows the user's hand
+    /// animates (drags, yank flashes, overlays), or `None` when nothing does.
+    /// Everything else schedules its own repaints: transcript renderers with
+    /// `refresh_after`, Lua with timers.
+    pub(crate) fn animation_frame_interval(&self) -> Option<Duration> {
+        let now = self.core.clock.instant_now();
+        let animating = self.ui.focused_overlay().is_some()
+            || self
+                .core
+                .clipboard
+                .kill_ring
+                .yank_flash_until()
+                .is_some_and(|t| t > now)
+            || self.ui.yank_flash_active(now)
+            || self.ui.drag_capture_window().is_some();
+        animating.then(|| {
+            self.ui
+                .drag_autoscroll_interval()
+                .unwrap_or(Duration::from_millis(16))
+        })
+    }
+
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn notification_win(&self) -> Option<crate::smelt_edit::WinId> {
         self.overlays.notification_win()
@@ -3770,21 +3792,8 @@ impl TuiApp {
             }
 
             let now = self.core.clock.instant_now();
-            let yank_flash_active = self
-                .core
-                .clipboard
-                .kill_ring
-                .yank_flash_until()
-                .is_some_and(|t| t > now);
-            let window_yank_flash_active = self.ui.yank_flash_active(now);
-            let drag_active = self.ui.drag_capture_window().is_some();
-            let has_animation = self.ui.focused_overlay().is_some()
-                || self.has_active_exec()
-                || self.working.is_animating()
-                || self.busy_stack.is_busy()
-                || yank_flash_active
-                || window_yank_flash_active
-                || drag_active;
+            let animation_interval = self.animation_frame_interval();
+            let has_animation = animation_interval.is_some();
             let next_timer_delay = self
                 .core
                 .timers
@@ -3815,15 +3824,11 @@ impl TuiApp {
                     std::future::pending::<Option<()>>().await
                 }
             };
-            if has_animation {
-                let interval = self
-                    .ui
-                    .drag_autoscroll_interval()
-                    .unwrap_or(Duration::from_millis(16));
+            if let Some(interval) = animation_interval {
                 self.request_animation_render(interval);
             } else if animating_last_tick {
                 // The last animated frame is stale once animation stops
-                // (spinner, elapsed clock); paint the settled state.
+                // (a flash, a closed overlay); paint the settled state.
                 self.request_urgent_render();
             }
             animating_last_tick = has_animation;

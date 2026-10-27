@@ -435,6 +435,20 @@ function M.invalidate(bar)
   if bar.win then bar.win:invalidate_renderer() end
 end
 
+-- Repaint after `ms` milliseconds. Nothing repaints on its own, so an animated
+-- source asks for its next frame here on every paint; the earliest pending
+-- request wins, so sources animating at different rates share one timer.
+function M.invalidate_after(bar, ms)
+  local now = smelt.time.now_ms()
+  if bar.repaint and now <= bar.repaint_at and bar.repaint_at <= now + ms then return end
+  if bar.repaint then bar.repaint:remove() end
+  bar.repaint_at = now + ms
+  bar.repaint = smelt.timer.set(ms, function()
+    bar.repaint = nil
+    M.invalidate(bar)
+  end)
+end
+
 function M.add(bar, name, handler)
   if type(name) ~= "string" or name == "" then
     error(bar.name .. ".add: name must be a non-empty string", 3)

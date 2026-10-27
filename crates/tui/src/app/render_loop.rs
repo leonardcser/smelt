@@ -1979,6 +1979,7 @@ mod tests {
             prompt_bar.top_win:set_renderer(function(win)
               _G.animation_renderer_calls = _G.animation_renderer_calls + 1
               win:buf():lines({ tostring(smelt.signal.get("work_elapsed_ms")) })
+              smelt.timer.set(16, function() win:invalidate_renderer() end)
             end)
             "#,
         )
@@ -1997,6 +1998,7 @@ mod tests {
 
         for _ in 0..3 {
             app.clock.advance(std::time::Duration::from_millis(16));
+            app.app.tick_timers();
             app.app
                 .request_animation_render(std::time::Duration::from_millis(16));
             assert!(app

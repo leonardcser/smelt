@@ -31,6 +31,11 @@ prompt_bar_top.builtin = nil
 ---@type fun()
 prompt_bar_top.invalidate = nil
 
+--- Repaint after `ms` milliseconds. An animated source calls it on every paint
+--- to ask for its next frame; the earliest pending request wins.
+---@type fun(ms: integer)
+prompt_bar_top.invalidate_after = nil
+
 --- Remove every source named `name` from the bar above the prompt.
 ---@type fun(name: string)
 prompt_bar_top.remove = nil

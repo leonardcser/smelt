@@ -37,6 +37,14 @@ function smelt.statusline.invalidate()
   bar.invalidate(line)
 end
 
+--- Repaint after `ms` milliseconds. An animated source calls it on every paint
+--- to ask for its next frame; the earliest pending request wins.
+---@tier ui_host
+---@type fun(ms: integer)
+function smelt.statusline.invalidate_after(ms)
+  bar.invalidate_after(line, ms)
+end
+
 --- Add a named source of statusline items. `handler` runs on every repaint and
 --- returns a list of items (see `smelt.bar.Item`); errors are reported on
 --- stderr and skip the source. Adding a name that already exists replaces that
