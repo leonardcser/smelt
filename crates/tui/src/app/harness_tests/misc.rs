@@ -980,6 +980,56 @@ fn provider_tool_completion_reuses_streamed_content_identity() {
 }
 
 #[test]
+fn truncated_live_output_is_replaced_by_the_final_bounded_output() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(42);
+    let invocation_id = protocol::InvocationId::new(1);
+    let call_id = "truncated-preview".to_string();
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolStarted {
+        invocation_id,
+        call_id: call_id.clone(),
+        tool_name: "bash".into(),
+        args: std::collections::HashMap::new(),
+        called_at_ms: 0,
+    }));
+    for line in [
+        "line 1",
+        "line 2",
+        smelt_core::process::LIVE_OUTPUT_TRUNCATION_NOTICE,
+    ] {
+        app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
+            invocation_id,
+            call_id: call_id.clone(),
+            line: line.into(),
+        }));
+    }
+    app.render_silent();
+    let block_id = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .last_block_id()
+        .expect("tool block");
+
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolFinished {
+        invocation_id,
+        call_id,
+        result: protocol::ToolOutcome::new("line 1\nline 2\nline 3".into(), false, None),
+        elapsed_ms: Some(10),
+    }));
+
+    let output = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .tool_state(block_id)
+        .and_then(|state| state.output.as_ref())
+        .expect("finished output");
+    assert_eq!(output.content.snapshot(), "line 1\nline 2\nline 3");
+}
+
+#[test]
 fn oversized_provider_output_is_sliced_before_completion_and_turn_finalization() {
     const SLICE_BYTES: usize = 4 * 1024 * 1024;
 

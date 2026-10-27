@@ -522,7 +522,9 @@ fn complete_utf8_prefix_len(bytes: &[u8]) -> usize {
     consumed
 }
 
-const LIVE_OUTPUT_TRUNCATION_NOTICE: &str =
+/// The last line of a live preview the job stopped forwarding; the job's final
+/// bounded output replaces the preview when it finishes.
+pub const LIVE_OUTPUT_TRUNCATION_NOTICE: &str =
     "[live process output truncated; final bounded output will replace this preview]";
 
 impl JobSupervisor {

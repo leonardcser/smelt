@@ -39,6 +39,18 @@ fn is_reasoning_summary(event: &EngineEvent) -> bool {
     )
 }
 
+/// Whether a live preview ends at the job's truncation notice, so the final
+/// bounded output must replace it.
+fn live_output_truncated(live: &smelt_core::transcript_content::TranscriptContent) -> bool {
+    let read = live.read();
+    read.logical_line_count()
+        .checked_sub(1)
+        .and_then(|last| read.line(last))
+        .is_some_and(|line| {
+            line.trim_end_matches('\n') == smelt_core::process::LIVE_OUTPUT_TRUNCATION_NOTICE
+        })
+}
+
 impl TuiApp {
     fn dispatch_engine_ask_event(&mut self, event: &EngineEvent, arrived_at: std::time::Instant) {
         match event {
@@ -198,6 +210,7 @@ impl TuiApp {
             let content = self
                 .conversation
                 .active_tool_output_content(invocation_id)
+                .filter(|live| !live_output_truncated(live))
                 .unwrap_or_else(|| result.content.into());
             let output = Some(Box::new(ToolOutput::from_display_content(
                 content,
