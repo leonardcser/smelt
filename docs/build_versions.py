@@ -2,7 +2,8 @@
 """Build the docs for main and every release tag into one versioned site.
 
 Each version lands in `site/<tag>/` and main in `site/main/`; `site/latest/`
-holds the newest release. `versions.json` feeds the theme's version selector in
+holds the newest release. Every version shows the landing page from main.
+`versions.json` feeds the theme's version selector in
 the format mike writes. The root, and any link from before the site had
 versions, redirects to `latest/`.
 
@@ -35,6 +36,9 @@ FIRST = (0, 6, 0)
 # What a docs build reads from a checkout.
 TREES = ("docs", "runtime")
 SELECTOR_CSS = "stylesheets/versions.css"
+# The landing page, relative to `docs/`. It belongs to the site, not to any one
+# version, so every build takes it from main, with the replays it embeds.
+HOME = ("overrides/home.html", "docs/index.md", "docs/javascripts/home.js")
 
 
 def git(*args: str) -> bytes:
@@ -52,6 +56,12 @@ def release_tags() -> list[str]:
     ]
 
 
+def home_files() -> list[str]:
+    """`HOME` and the replays the landing page embeds."""
+    replays = re.findall(r'data-replay="(assets/replays/[^"]+)"', (DOCS / HOME[0]).read_text())
+    return [*HOME, *(f"docs/{replay}" for replay in replays)]
+
+
 def build(source: Path, name: str, strict: bool) -> bool:
     """Build the docs tree at `source` into `site/<name>/`."""
     config = source / "zensical.toml"
@@ -61,6 +71,9 @@ def build(source: Path, name: str, strict: bool) -> bool:
     text += '\n[project.extra.version]\nprovider = "mike"\n'
     text = re.sub(r"^extra_css = \[", f'extra_css = ["{SELECTOR_CSS}", ', text, count=1, flags=re.M)
     shutil.copy(DOCS / "versions.css", source / "docs" / SELECTOR_CSS)
+    for path in home_files():
+        (source / path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(DOCS / path, source / path)
     config.write_text(text)
     command = ["zensical", "build", "--strict"] if strict else ["zensical", "build"]
     if subprocess.run(command, cwd=source).returncode != 0:
