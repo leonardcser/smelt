@@ -237,6 +237,8 @@ With vim enabled the transcript supports `h` `j` `k` `l`, `gj` `gk`, `w` `W` `b`
 `*` and `#` search for the word under the cursor. `v` / `V` start a visual
 selection (`gv` brings the last one back), and `y` takes a motion, a text object or
 `yy`; the yanked text flashes and the cursor stays at the start of what was yanked.
+`ic` selects the code of the fenced code block under the cursor and `ac` the whole
+block, so `yic` copies the code and `yac` copies it as fenced markdown.
 `zz` `zt` `zb` put the cursor row in the middle, at the top or at the bottom of the
 screen. `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` / `Ctrl+Y` / `Ctrl+E` scroll the
 viewport.

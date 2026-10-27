@@ -1350,6 +1350,7 @@ impl DocumentViewExecutor {
                         until: now + YANK_FLASH_DURATION,
                     });
                     state.selection_anchor = None;
+                    next = range.start;
                 }
             }
             DocumentCommand::YankSelectionLinewise => {
@@ -1360,7 +1361,7 @@ impl DocumentViewExecutor {
                         .max(current.row)
                         .saturating_add(1)
                         .min(total_rows);
-                    copy = Some(DocRange {
+                    let range = DocRange {
                         start: DocPosition {
                             row: start,
                             byte_col: 0,
@@ -1369,12 +1370,14 @@ impl DocumentViewExecutor {
                             row: end,
                             byte_col: 0,
                         },
-                    });
-                    state.yank_flash = copy.map(|range| RowYankFlash {
+                    };
+                    copy = Some(range);
+                    state.yank_flash = Some(RowYankFlash {
                         range,
                         until: now + YANK_FLASH_DURATION,
                     });
                     state.selection_anchor = None;
+                    next = range.start;
                 }
             }
             DocumentCommand::YankLines(count) => {
@@ -1993,6 +1996,9 @@ fn document_text_object_range<D: DisplayDocument + ?Sized>(
     if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
         return document_paragraph_text_object(document, state, cursor, spec.inner);
     }
+    if spec.kind == crate::text_objects::TextObjectKind::CodeBlock {
+        return document_code_block_text_object(document, cursor.row, spec.inner);
+    }
 
     let row = document
         .materialize(cursor.row..cursor.row.saturating_add(1))
@@ -2012,6 +2018,72 @@ fn document_text_object_range<D: DisplayDocument + ?Sized>(
         },
         include_cursor_cell: false,
         linewise: false,
+    })
+}
+
+/// `ic` and `ac`: the rows of the code block holding `row`. `ic` is the code
+/// itself and `ac` its rows, which copy as fenced markdown.
+fn document_code_block_text_object<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    row: RowIndex,
+    inner: bool,
+) -> Option<RowTextObjectSelection> {
+    const CHUNK: RowIndex = 64;
+    let total_rows = document.snapshot().total_rows;
+    let rows = document.materialize(row..row.saturating_add(1)).rows;
+    if !rows.first()?.code_block {
+        return None;
+    }
+    let mut first = row;
+    'up: while first > 0 {
+        let from = first.saturating_sub(CHUNK);
+        let rows = document.materialize(from..first).rows;
+        if rows.is_empty() {
+            break;
+        }
+        for (offset, above) in rows.iter().enumerate().rev() {
+            if !above.code_block {
+                break 'up;
+            }
+            first = from + offset as RowIndex;
+        }
+    }
+    let mut last = row;
+    'down: while last + 1 < total_rows {
+        let from = last + 1;
+        let rows = document
+            .materialize(from..(from + CHUNK).min(total_rows))
+            .rows;
+        if rows.is_empty() {
+            break;
+        }
+        for (offset, below) in rows.iter().enumerate() {
+            if !below.code_block {
+                break 'down;
+            }
+            last = from + offset as RowIndex;
+        }
+    }
+    let end = if inner {
+        let tail = document.materialize(last..last + 1).rows;
+        DocPosition {
+            row: last,
+            byte_col: tail.first().map_or(0, |tail| tail.text.len()),
+        }
+    } else {
+        DocPosition {
+            row: last,
+            byte_col: 0,
+        }
+    };
+    Some(RowTextObjectSelection {
+        start: DocPosition {
+            row: first,
+            byte_col: 0,
+        },
+        cursor: end,
+        include_cursor_cell: false,
+        linewise: !inner,
     })
 }
 
@@ -2805,6 +2877,93 @@ mod tests {
                 row: 3,
                 byte_col: 0
             }
+        );
+    }
+
+    fn code_block_document() -> StaticRowsDocument {
+        let row = |text: &str, code: bool| {
+            DisplayRow::new(text.into(), std::iter::once(0..text.len()).collect())
+                .with_code_block(code)
+        };
+        StaticRowsDocument::new(vec![
+            row("before", false),
+            row("fn main() {", true),
+            row("    wrapped line", true),
+            row("}", true),
+            row("", false),
+            row("other", true),
+        ])
+    }
+
+    #[test]
+    fn yank_code_block_takes_the_code_rows_and_a_code_block_takes_the_rows_whole() {
+        let mut state = state_for_rows(6);
+        state.cursor = DocPosition {
+            row: 2,
+            byte_col: 3,
+        };
+        let inner = execute(
+            &mut code_block_document(),
+            &mut state,
+            DocumentCommand::YankTextObject(DocumentTextObject::new(true, 'c').unwrap()),
+            6,
+        )
+        .expect("inner range");
+        assert_eq!(
+            (inner.start, inner.end),
+            (
+                DocPosition {
+                    row: 1,
+                    byte_col: 0
+                },
+                DocPosition {
+                    row: 3,
+                    byte_col: 1
+                }
+            )
+        );
+
+        state.cursor = DocPosition {
+            row: 3,
+            byte_col: 0,
+        };
+        let around = execute(
+            &mut code_block_document(),
+            &mut state,
+            DocumentCommand::YankTextObject(DocumentTextObject::new(false, 'c').unwrap()),
+            6,
+        )
+        .expect("around range");
+        assert_eq!(
+            (around.start, around.end),
+            (
+                DocPosition {
+                    row: 1,
+                    byte_col: 0
+                },
+                DocPosition {
+                    row: 4,
+                    byte_col: 0
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn code_block_object_needs_the_cursor_on_a_code_row() {
+        let mut state = state_for_rows(6);
+        state.cursor = DocPosition {
+            row: 4,
+            byte_col: 0,
+        };
+        assert_eq!(
+            execute(
+                &mut code_block_document(),
+                &mut state,
+                DocumentCommand::YankTextObject(DocumentTextObject::new(true, 'c').unwrap()),
+                6,
+            ),
+            None
         );
     }
 

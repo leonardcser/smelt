@@ -91,6 +91,8 @@ pub struct DisplayRow {
     /// Cell ranges in `text` that trigger actions such as opening links/files.
     pub actions: Vec<DisplayAction>,
     pub atomic_ranges: Vec<DisplayAtomicRange>,
+    /// The row belongs to a fenced code block.
+    pub code_block: bool,
 }
 
 impl DisplayRow {
@@ -101,7 +103,13 @@ impl DisplayRow {
             selectable_ranges,
             actions: Vec::new(),
             atomic_ranges: Vec::new(),
+            code_block: false,
         }
+    }
+
+    pub fn with_code_block(mut self, code_block: bool) -> Self {
+        self.code_block = code_block;
+        self
     }
 
     pub fn with_atomic_spans(mut self, spans: &[smelt_buffer::buffer::Span]) -> Self {

@@ -266,6 +266,9 @@ pub struct LineDecoration {
     /// expands through adjacent rows with the same bit. This is generic row
     /// metadata for preformatted structures, not transcript-specific behavior.
     pub block_selectable: bool,
+    /// Rows of a fenced code block, including the continuation rows of wrapped
+    /// lines. Vim's `ic` and `ac` select the contiguous run of these rows.
+    pub code_block: bool,
     /// When `true`, `copy_byte_range` treats this row as part of the previous
     /// row's copy group: it skips the newline and, if `source_text` was already
     /// emitted from the group's first row, skips this row entirely. This is
@@ -1595,6 +1598,7 @@ impl Buffer {
             soft_wrapped: false,
             cell_selectable: false,
             block_selectable: false,
+            code_block: false,
             copy_continuation: false,
             copy_excluded: false,
             source_text: None,

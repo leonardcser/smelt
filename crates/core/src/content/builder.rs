@@ -415,6 +415,11 @@ impl<'a> LineBuilder<'a> {
         self.cur_decoration.block_selectable = true;
     }
 
+    /// Mark the current row as part of a fenced code block.
+    pub fn mark_code_block(&mut self) {
+        self.cur_decoration.code_block = true;
+    }
+
     /// Attach raw source text to the current line so copy emits markdown rather than display text.
     pub fn set_source_text(&mut self, text: &str) {
         self.cur_decoration.source_text = Some(text.to_string());
@@ -856,6 +861,7 @@ fn has_decoration(dec: &LineDecoration) -> bool {
         || dec.soft_wrapped
         || dec.cell_selectable
         || dec.block_selectable
+        || dec.code_block
         || dec.copy_continuation
         || dec.source_text.is_some()
 }

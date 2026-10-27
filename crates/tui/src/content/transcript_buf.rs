@@ -4068,7 +4068,12 @@ impl TranscriptProjection {
                     crate::smelt_edit::selectable_byte_ranges_for_line(text, &highlights);
                 let row = DisplayRow::new(text.clone(), selectable)
                     .with_actions(crate::smelt_edit::display_actions_for_spans(&highlights))
-                    .with_atomic_spans(&highlights);
+                    .with_atomic_spans(&highlights)
+                    .with_code_block(
+                        metadata
+                            .decoration_at(index)
+                            .is_some_and(|decoration| decoration.code_block),
+                    );
                 if index == local_start {
                     row
                 } else if metadata

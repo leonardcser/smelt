@@ -34,6 +34,9 @@ pub(super) fn apply_temp_decoration(
     if dec.block_selectable {
         out.mark_block_selectable();
     }
+    if dec.code_block {
+        out.mark_code_block();
+    }
     if copy_fill_bg {
         if let Some(bg) = dec.fill_bg {
             out.fill_line_bg(bg);

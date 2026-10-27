@@ -186,6 +186,7 @@ pub fn render_code_block_range(
                     })
                     .collect::<Vec<_>>();
                 out.save_style();
+                out.mark_code_block();
                 if !kind.is_continuation() && fence {
                     let mut external_src = String::new();
                     if line_idx == 0 {

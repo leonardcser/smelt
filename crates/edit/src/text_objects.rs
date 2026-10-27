@@ -44,10 +44,15 @@ pub(crate) enum TextObjectKind {
     Sentence,
     Quote(char),
     AnyQuote,
-    Pair { open: char, close: char },
+    Pair {
+        open: char,
+        close: char,
+    },
     Tag,
     Paragraph,
     Line,
+    /// A fenced code block, which only a row document knows.
+    CodeBlock,
 }
 
 impl TextObjectKind {
@@ -59,6 +64,7 @@ impl TextObjectKind {
             'q' => Some(Self::AnyQuote),
             's' => Some(Self::Sentence),
             'l' => Some(Self::Line),
+            'c' => Some(Self::CodeBlock),
             '(' | ')' | 'b' => Some(Self::Pair {
                 open: '(',
                 close: ')',
@@ -166,6 +172,8 @@ pub(crate) fn select_object(
         TextObjectKind::Sentence => scan.current_sent(count, include),
         TextObjectKind::Paragraph => scan.current_par(count, include),
         TextObjectKind::Line => scan.current_line(include),
+        // Only a row document knows its code blocks.
+        TextObjectKind::CodeBlock => false,
         TextObjectKind::Quote(quote) => scan.current_quote(count, include, quote),
         TextObjectKind::Pair { open, close } => scan.current_block(count, include, open, close),
         TextObjectKind::AnyQuote | TextObjectKind::Tag => {

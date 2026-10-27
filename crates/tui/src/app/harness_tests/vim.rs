@@ -1094,3 +1094,62 @@ fn viewer_gv_reselects_the_last_visual_selection() {
 
     assert_eq!(app.core_probe().clipboard.kill_ring.current(), "beta");
 }
+
+fn transcript_with_code_block() -> (TestApp, usize) {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 24);
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: "intro\n\n```rust\nfn main() {}\nlet x = 1;\n```\n\noutro\n".into(),
+    });
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.type_text("gg");
+    app.render_silent();
+    let row = transcript_row_of(&app, "fn main");
+    move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
+    (app, row)
+}
+
+#[test]
+fn transcript_yank_in_code_block_copies_the_code() {
+    let (mut app, _) = transcript_with_code_block();
+    app.type_text("yic");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "fn main() {}\nlet x = 1;"
+    );
+}
+
+#[test]
+fn transcript_yank_around_code_block_copies_fenced_markdown() {
+    let (mut app, _) = transcript_with_code_block();
+    app.type_text("yac");
+    let copied = app.core_probe().clipboard.kill_ring.current().to_string();
+    assert!(
+        copied.starts_with("```rust\nfn main() {}\nlet x = 1;\n```"),
+        "{copied:?}"
+    );
+}
+
+#[test]
+fn transcript_visual_code_block_selects_only_the_code() {
+    let (mut app, row) = transcript_with_code_block();
+    app.type_text("vic");
+    assert_eq!(app.transcript_window().vim_mode, VimMode::Visual);
+    app.type_text("y");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "fn main() {}\nlet x = 1;"
+    );
+    assert_eq!(transcript_cursor(&app).0, row);
+}
+
+#[test]
+fn transcript_code_block_object_ignores_prose() {
+    let (mut app, _) = transcript_with_code_block();
+    let outro = transcript_row_of(&app, "outro");
+    move_transcript_cursor_to_row(&mut app, outro as crate::smelt_edit::RowIndex);
+    app.type_text("yic");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "");
+}
