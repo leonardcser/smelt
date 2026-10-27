@@ -32,9 +32,11 @@ permissions:
   pages: write
   id-token: write
 
+# Deploys queue so a release finishing right after a push doesn't cancel it.
+# Pull request builds never deploy, so they only supersede their own runs.
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
