@@ -5,8 +5,9 @@ use super::document_view::{
     document_byte_col_at_cell, document_position_cell, document_row_string, BlockMotion,
 };
 use super::*;
-use crate::motions::{find_counted, find_reach, LineTo, Motion, Reach, Use, WordTo};
+use crate::motions::{find_counted, find_reach, scan_motion, LineTo, Motion, Reach, Use};
 use crate::row::{BlockBoundary, DisplayDocument};
+use crate::scan::Scan;
 
 /// What a row motion needs to know besides the motion itself.
 #[derive(Clone, Copy)]
@@ -79,7 +80,9 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             let row = add_signed_row(from.row, delta).min(last);
             (at(row, same_cell(doc, row)), Reach::Linewise)
         }
-        Motion::Word(to, class) => (word_position(doc, from, to, class, n, env)?, word_reach(to)),
+        Motion::Word(..) | Motion::Sentence { .. } | Motion::Paragraph { .. } => {
+            scan_rows(doc, from, motion, n, env)?
+        }
         Motion::LineStart => (at(from.row, 0), Reach::Exclusive),
         Motion::FirstNonBlank => {
             let line = row_text(doc, from.row)?;
@@ -127,13 +130,6 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             let row = count.map_or(last, |c| (c as RowIndex).saturating_sub(1).min(last));
             (at(row, same_cell(doc, row)), Reach::Linewise)
         }
-        Motion::Paragraph { forward } => {
-            let mut pos = from;
-            for _ in 0..n {
-                pos = paragraph_position(doc, env.total_rows, pos, forward)?;
-            }
-            (pos, Reach::Exclusive)
-        }
         Motion::MatchBracket => match count {
             Some(percent) if percent <= 100 => {
                 let row = (percent as RowIndex * env.total_rows).div_ceil(100).max(1) - 1;
@@ -158,7 +154,7 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             block_position(doc, env.total_rows, from, block, n)?,
             Reach::Exclusive,
         ),
-        Motion::Sentence { .. } | Motion::ByteOffset => return None,
+        Motion::ByteOffset => return None,
         Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom => {
             let visible = env
                 .total_rows
@@ -195,123 +191,62 @@ pub(super) fn clamp_to_row_text<D: DisplayDocument + ?Sized>(
     pos
 }
 
-fn word_reach(to: WordTo) -> Reach {
-    match to {
-        WordTo::Next | WordTo::Prev => Reach::Exclusive,
-        WordTo::End | WordTo::PrevEnd => Reach::Inclusive,
-    }
-}
-
 fn first_non_blank(line: &str) -> usize {
     line.len() - line.trim_start_matches([' ', '\t']).len()
 }
 
-fn word_position<D: DisplayDocument + ?Sized>(
+/// Rows a scan starts with on each side of the cursor; it widens while the
+/// scan reaches the edge of what was loaded.
+const SCAN_ROWS: RowIndex = 128;
+
+/// Run a word, sentence or paragraph motion over the rows around `from`, each
+/// row a line, as `motions::resolve` does over plain text.
+fn scan_rows<D: DisplayDocument + ?Sized>(
     doc: &mut D,
     from: DocPosition,
-    to: WordTo,
-    class: text::CharClass,
+    motion: Motion,
     n: usize,
     env: RowEnv,
-) -> Option<DocPosition> {
+) -> Option<(DocPosition, Reach)> {
     let last = env.total_rows.saturating_sub(1);
-    let mut pos = from;
-    for step in 0..n {
-        let line = document_row_string(doc, pos.row)?;
-        pos.byte_col = text::snap_grapheme(&line, pos.byte_col.min(line.len()));
-        match to {
-            WordTo::Next => {
-                let col = text::word_forward_pos(&line, pos.byte_col, class);
-                if col < line.len() || pos.row >= last {
-                    pos.byte_col = col;
-                } else if env.usage != Use::Move && step + 1 == n {
-                    // An operator over a row's last word stops at the row's end.
-                    pos.byte_col = line.len();
-                } else {
-                    pos = DocPosition {
-                        row: pos.row + 1,
-                        byte_col: 0,
-                    };
-                }
+    let mut radius = SCAN_ROWS;
+    loop {
+        let first_row = from.row.saturating_sub(radius);
+        let last_row = from.row.saturating_add(radius).min(last);
+        let mut window = String::new();
+        let mut starts = Vec::new();
+        for row in first_row..=last_row {
+            if row > first_row {
+                window.push('\n');
             }
-            WordTo::Prev => {
-                let col = text::word_backward_pos(&line, pos.byte_col, class);
-                if col > 0 || pos.row == 0 {
-                    pos.byte_col = col;
-                } else {
-                    pos.row -= 1;
-                    pos.byte_col = document_row_string(doc, pos.row)?.len();
-                }
-            }
-            WordTo::End => {
-                let col = text::word_end_pos(&line, pos.byte_col, class);
-                if col > pos.byte_col || pos.row >= last {
-                    pos.byte_col = col;
-                } else {
-                    pos = DocPosition {
-                        row: pos.row + 1,
-                        byte_col: 0,
-                    };
-                }
-            }
-            WordTo::PrevEnd => {
-                if line[..pos.byte_col].chars().any(|c| !c.is_whitespace()) {
-                    pos.byte_col = text::word_end_backward_pos(&line, pos.byte_col, class);
-                } else {
-                    pos = previous_word_end(doc, pos.row, class)?;
-                }
-            }
+            starts.push(window.len());
+            // A row the document cannot supply reads as an empty line.
+            window.push_str(&document_row_string(doc, row).unwrap_or_default());
         }
-    }
-    Some(pos)
-}
-
-/// The last character of the closest word on a row before `row`, or the start
-/// of the document when there is none.
-fn previous_word_end<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    row: RowIndex,
-    class: text::CharClass,
-) -> Option<DocPosition> {
-    for row in (0..row).rev() {
-        let line = document_row_string(doc, row)?;
-        if line.chars().any(|c| !c.is_whitespace()) {
-            return Some(DocPosition {
-                row,
-                byte_col: text::word_end_backward_pos(&line, line.len(), class),
-            });
+        let line = usize::try_from(from.row - first_row).ok()?;
+        let col = from.byte_col.min(window.len() - starts[line]);
+        let mut scan = Scan::new(&window, starts[line] + col);
+        let result = scan_motion(&mut scan, motion, n, env.usage);
+        let cut_before = first_row > 0 && scan.cur.line == 0;
+        let cut_after = last_row < last && scan.cur.line == starts.len() - 1;
+        let whole_document = first_row == 0 && last_row == last;
+        if (result.is_none() || cut_before || cut_after) && !whole_document {
+            radius = radius.saturating_mul(2);
+            continue;
         }
+        let reach = result?;
+        return Some((
+            DocPosition {
+                row: first_row + scan.cur.line as RowIndex,
+                byte_col: scan.cur.col,
+            },
+            reach,
+        ));
     }
-    Some(DocPosition::default())
 }
 
 fn document_row_is_blank<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<bool> {
     Some(document_row_string(doc, row)?.trim().is_empty())
-}
-
-/// The start of the next (`}`) or previous (`{`) blank row past the paragraph at
-/// `pos`, or the end or start of the document when there is none.
-fn paragraph_position<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    total_rows: RowIndex,
-    pos: DocPosition,
-    forward: bool,
-) -> Option<DocPosition> {
-    let last = total_rows.saturating_sub(1);
-    let mut row = pos.row.min(last);
-    for want_blank in [true, false] {
-        while document_row_is_blank(doc, row)? == want_blank {
-            if forward && row == last {
-                let byte_col = document_row_string(doc, row)?.len();
-                return Some(DocPosition { row, byte_col });
-            }
-            if !forward && row == 0 {
-                return Some(DocPosition::default());
-            }
-            row = if forward { row + 1 } else { row - 1 };
-        }
-    }
-    Some(DocPosition { row, byte_col: 0 })
 }
 
 /// The bracket matching the first one at or after `from` on its row (vim `%`),
@@ -428,4 +363,104 @@ fn block_position<D: DisplayDocument + ?Sized>(
         }
     }
     Some(DocPosition { row, byte_col: 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::motions::WordTo;
+    use crate::row::{DisplayRow, StaticRowsDocument};
+
+    fn env(total_rows: RowIndex) -> RowEnv {
+        RowEnv {
+            total_rows,
+            vim_mode: VimMode::Normal,
+            usage: Use::Move,
+            scroll_top: 0,
+            viewport_rows: 10,
+        }
+    }
+
+    fn document(rows: usize, blank_at: &[usize]) -> StaticRowsDocument {
+        StaticRowsDocument::new(
+            (0..rows)
+                .map(|row| {
+                    let text = if blank_at.contains(&row) {
+                        String::new()
+                    } else {
+                        format!("line {row}. next")
+                    };
+                    DisplayRow::new(text, Vec::new())
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn paragraph_motion_widens_the_scan_past_the_first_window() {
+        let mut doc = document(1000, &[700]);
+        let found = resolve_rows(
+            &mut doc,
+            DocPosition::default(),
+            Motion::Paragraph { forward: true },
+            None,
+            env(1000),
+        );
+        assert_eq!(
+            found,
+            Some((
+                DocPosition {
+                    row: 700,
+                    byte_col: 0
+                },
+                Reach::Exclusive
+            ))
+        );
+        let back = resolve_rows(
+            &mut doc,
+            DocPosition {
+                row: 900,
+                byte_col: 0,
+            },
+            Motion::Paragraph { forward: false },
+            None,
+            env(1000),
+        );
+        assert_eq!(back.map(|(pos, _)| pos.row), Some(700));
+    }
+
+    #[test]
+    fn sentence_motion_walks_rows_as_lines() {
+        let mut doc = document(3, &[]);
+        let found = resolve_rows(
+            &mut doc,
+            DocPosition::default(),
+            Motion::Sentence { forward: true },
+            None,
+            env(3),
+        );
+        assert_eq!(
+            found.map(|(pos, _)| pos),
+            Some(DocPosition {
+                row: 0,
+                byte_col: "line 0. ".len()
+            })
+        );
+    }
+
+    #[test]
+    fn a_word_motion_past_the_last_row_stays_in_the_document() {
+        let mut doc = document(2, &[]);
+        let found = resolve_rows(
+            &mut doc,
+            DocPosition {
+                row: 1,
+                byte_col: 0,
+            },
+            Motion::Word(WordTo::Next, text::CharClass::Word),
+            Some(50),
+            env(2),
+        );
+        assert_eq!(found.map(|(pos, _)| pos.row), Some(1));
+    }
 }

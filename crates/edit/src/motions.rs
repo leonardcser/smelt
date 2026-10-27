@@ -219,7 +219,6 @@ pub(crate) fn resolve(
         Motion::Right => (repeat(move_right_normal), Reach::Exclusive),
         Motion::Down => (lines_away(buf, from, n, false)?, Reach::Linewise),
         Motion::Up => (lines_away(buf, from, n, true)?, Reach::Linewise),
-        Motion::Word(to, class) => word(buf, from, to, class, n, usage)?,
         Motion::LineStart => (line_start(buf, from), Reach::Exclusive),
         Motion::FirstNonBlank => (first_non_blank(buf, from), Reach::Exclusive),
         Motion::Line(to) => {
@@ -262,28 +261,9 @@ pub(crate) fn resolve(
             count.map_or(buf.len(), |c| goto_line(buf, c.saturating_sub(1))),
             Reach::Linewise,
         ),
-        Motion::Paragraph { forward } => {
+        Motion::Word(..) | Motion::Paragraph { .. } | Motion::Sentence { .. } => {
             let mut scan = Scan::new(buf, from);
-            if !scan.findpar(forward, n) {
-                return None;
-            }
-            let reach = if scan.oap.inclusive {
-                Reach::Inclusive
-            } else {
-                Reach::Exclusive
-            };
-            (scan.offset(scan.cur), reach)
-        }
-        Motion::Sentence { forward } => {
-            let mut scan = Scan::new(buf, from);
-            if !scan.findsent(forward, n) {
-                return None;
-            }
-            let reach = if usage != Use::Move && scan.adjust_cursor() {
-                Reach::Inclusive
-            } else {
-                Reach::Exclusive
-            };
+            let reach = scan_motion(&mut scan, motion, n, usage)?;
             (scan.offset(scan.cur), reach)
         }
         Motion::ByteOffset => {
@@ -311,55 +291,62 @@ pub(crate) fn resolve(
     })
 }
 
-/// The word motions as vim runs them (`nv_wordcmd`, `nv_bck_word`). A failed
-/// backward motion cancels an operator; a forward one leaves the cursor where
-/// the scan stopped.
-fn word(
-    buf: &str,
-    from: usize,
-    to: WordTo,
-    class: CharClass,
-    n: usize,
-    usage: Use,
-) -> Option<(usize, Reach)> {
-    let big = class == CharClass::WORD;
+/// The motions that walk text with vim's scans (words, paragraphs, sentences),
+/// run on `scan`, which ends where the cursor goes. `None` when the motion
+/// fails and cancels an operator; a failed `Use::Move` still leaves the cursor
+/// where the scan stopped.
+pub(crate) fn scan_motion(scan: &mut Scan, motion: Motion, n: usize, usage: Use) -> Option<Reach> {
     let operator = usage != Use::Move;
-    let mut scan = Scan::new(buf, from);
+    let start = scan.offset(scan.cur);
     let mut reach = Reach::Exclusive;
-    match to {
-        // `cw` on a non-blank acts like `ce`, except that it stays on the end
-        // of the word it starts on.
-        WordTo::Next
+    match motion {
+        // `cw` acts like `ce` on a non-blank, staying on the end of the word it starts on.
+        Motion::Word(WordTo::Next, class)
             if usage == Use::Change && !matches!(scan.char_at_cursor(), '\0' | ' ' | '\t') =>
         {
-            scan.end_word(n, big, true, false);
+            scan.end_word(n, class == CharClass::WORD, true, false);
             reach = Reach::Inclusive;
         }
-        WordTo::Next => {
-            scan.fwd_word(n, big, operator);
+        Motion::Word(WordTo::Next, class) => {
+            scan.fwd_word(n, class == CharClass::WORD, operator);
         }
-        WordTo::End => {
-            scan.end_word(n, big, false, false);
+        Motion::Word(WordTo::End, class) => {
+            scan.end_word(n, class == CharClass::WORD, false, false);
             reach = Reach::Inclusive;
         }
-        WordTo::Prev => {
-            if !scan.bck_word(n, big, false) && operator {
+        Motion::Word(WordTo::Prev, class) => {
+            if !scan.bck_word(n, class == CharClass::WORD, false) && operator {
                 return None;
             }
         }
-        WordTo::PrevEnd => {
+        Motion::Word(WordTo::PrevEnd, class) => {
             reach = Reach::Inclusive;
-            if !scan.bckend_word(n, big, false) && operator {
+            if !scan.bckend_word(n, class == CharClass::WORD, false) && operator {
                 return None;
             }
         }
+        Motion::Paragraph { forward } => {
+            if !scan.findpar(forward, n) {
+                return None;
+            }
+            if scan.oap.inclusive {
+                reach = Reach::Inclusive;
+            }
+            return Some(reach);
+        }
+        Motion::Sentence { forward } => {
+            if !scan.findsent(forward, n) {
+                return None;
+            }
+        }
+        _ => return None,
     }
-    let moved_forward = scan.offset(scan.cur) > from;
-    // Visual mode may rest on the line break, which `Use::Move` leaves to the caller.
-    if operator && moved_forward && scan.adjust_cursor() {
+    // A forward motion may not rest on a line's end, which `Use::Move` leaves
+    // to the caller so Visual mode can.
+    if operator && scan.offset(scan.cur) > start && scan.adjust_cursor() {
         reach = Reach::Inclusive;
     }
-    Some((scan.offset(scan.cur), reach))
+    Some(reach)
 }
 
 /// The text span an operator takes for a motion from `from` that landed on

@@ -879,9 +879,15 @@ fn transcript_big_word_motions_and_word_end_backward() {
 #[test]
 fn transcript_ge_continues_onto_the_previous_row() {
     let (mut app, row) = transcript_at(100, "row 003 alpha beta");
+    // As in vim, an empty row is a word of its own, so `ge` stops on the blank
+    // row between blocks before reaching the previous block's last word.
     app.type_text("0ge");
+    let (blank_row, _) = transcript_cursor(&app);
+    assert!(blank_row < row);
+    assert!(transcript_buffer_lines(&app, 400)[blank_row].is_empty());
+    app.type_text("ge");
     let (prev_row, col) = transcript_cursor(&app);
-    assert!(prev_row < row, "ge skips the blank rows between blocks");
+    assert!(prev_row < blank_row);
     assert!(transcript_buffer_lines(&app, 400)[prev_row].contains("row 002 alpha beta"));
     assert_eq!(col, "row 002 alpha bet".len());
 }

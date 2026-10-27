@@ -232,7 +232,7 @@ Without vim, `Ctrl+O` and `Tab` walk it while the transcript is focused. Plugins
 use `win:jump{ older = n }`, `{ newer = n }` or `{ previous = true }`.
 
 With vim enabled the transcript supports `h` `j` `k` `l`, `gj` `gk`, `w` `W` `b`
-`B` `e` `E` `ge` `gE`, `0` `^` `$`, `gg` `G`, `{` `}`, `%`, find with `f` `F` `t`
+`B` `e` `E` `ge` `gE`, `0` `^` `$`, `gg` `G`, `{` `}`, `(` `)`, `%`, find with `f` `F` `t`
 `T` repeated by `;` and `,`, and the screen-relative `H` `M` `L`, all with counts.
 `*` and `#` search for the word under the cursor. `v` / `V` start a visual
 selection (`gv` brings the last one back), and `y` takes a motion, a text object or
