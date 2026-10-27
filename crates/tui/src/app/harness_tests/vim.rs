@@ -1159,3 +1159,38 @@ fn transcript_code_block_object_ignores_prose() {
     app.type_text("yic");
     assert_eq!(app.core_probe().clipboard.kill_ring.current(), "");
 }
+
+#[test]
+fn transcript_yank_into_a_named_register_keeps_the_clipboard() {
+    let (mut app, _) = transcript_at(100, "row 003 alpha beta");
+    app.type_text("0yiw");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.last_clipboard_write(),
+        Some("row")
+    );
+    app.type_text("w\"ayiw");
+    let ring = &app.core_probe().clipboard.kill_ring;
+    assert_eq!(ring.register('a'), Some(("003", false)));
+    assert_eq!(ring.current(), "003");
+    assert_eq!(ring.last_clipboard_write(), Some("row"));
+    assert_eq!(ring.register('0'), Some(("row", false)));
+    app.type_text("w\"_yiw");
+    assert_eq!(app.core_probe().clipboard.kill_ring.current(), "003");
+}
+
+#[test]
+fn transcript_marks_return_to_where_they_were_set() {
+    let (mut app, row) = transcript_at(100, "row 003 alpha beta");
+    app.type_text("wma");
+    let marked = (row, "row ".len());
+    assert_eq!(transcript_cursor(&app), marked);
+    app.type_text("40j");
+    let below = transcript_cursor(&app);
+    assert_ne!(below, marked);
+    app.type_text("'a");
+    assert_eq!(transcript_cursor(&app), marked);
+    app.type_text("``");
+    assert_eq!(transcript_cursor(&app), below);
+    app.type_text("`b");
+    assert_eq!(transcript_cursor(&app), below, "an unset mark stays put");
+}

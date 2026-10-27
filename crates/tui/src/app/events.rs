@@ -1710,13 +1710,14 @@ impl TuiApp {
             return Status::Consumed;
         }
 
-        let command = {
+        let (command, register) = {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let (Some(win), Some(buf)) = (win, buf) else {
                 return Status::Ignored;
             };
+            let register = win.take_viewer_register();
             match win.resolve_viewer_jump(buf, command) {
-                Some(command) => command,
+                Some(command) => (command, register),
                 None => return Status::Consumed,
             }
         };
@@ -1730,7 +1731,7 @@ impl TuiApp {
             let buf = buf.expect("buffer");
             win.execute_viewer_command(buf, command, viewport_rows, now)
         };
-        self.copy_viewer_selection(win_id, buf_id, copied, now);
+        self.copy_viewer_selection(win_id, buf_id, copied, register, now);
         Status::Consumed
     }
 
@@ -1739,12 +1740,13 @@ impl TuiApp {
         win_id: crate::smelt_edit::WinId,
         buf_id: crate::smelt_edit::BufId,
         copied: Option<crate::smelt_edit::DocumentCopy>,
+        register: Option<char>,
         now: std::time::Instant,
     ) {
         match copied {
             Some(crate::smelt_edit::DocumentCopy::Rows(range)) => {
                 if let Some(out) = self.copy_document_rows(win_id, range) {
-                    self.yank_to_clipboard(out);
+                    self.yank_to_register(out, register);
                 }
             }
             Some(crate::smelt_edit::DocumentCopy::Bytes(range)) => {
@@ -1753,10 +1755,33 @@ impl TuiApp {
                     win.set_byte_yank_flash(range, now);
                 }
                 if let Some(out) = copied {
-                    self.yank_to_clipboard(out);
+                    self.yank_to_register(out, register);
                 }
             }
             None => {}
+        }
+    }
+
+    /// Put a viewer yank in the register `"` named: a named register keeps
+    /// the system clipboard as it was, `"_` drops the text, and any other
+    /// register goes to the clipboard.
+    fn yank_to_register(&mut self, out: crate::smelt_edit::CopyOutput, register: Option<char>) {
+        match register {
+            Some('_') => {}
+            Some(name) if name.is_ascii_alphabetic() => {
+                let ring = &mut self.core.clipboard.kill_ring;
+                ring.store(name, out.kill_ring, false);
+                let (text, linewise) = ring.register(name).unwrap_or_default();
+                let text = text.to_owned();
+                ring.set_with_linewise(text, linewise);
+            }
+            _ => {
+                self.core
+                    .clipboard
+                    .kill_ring
+                    .store('0', out.kill_ring.clone(), false);
+                self.yank_to_clipboard(out);
+            }
         }
     }
 

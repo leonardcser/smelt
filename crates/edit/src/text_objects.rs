@@ -2,7 +2,6 @@
 
 use super::scan::{Scan, Visual};
 use super::text::{line_end, line_start, next_grapheme_boundary, prev_grapheme_boundary};
-use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SurroundDelimiters {
@@ -10,16 +9,6 @@ pub(crate) struct SurroundDelimiters {
     pub open_end: usize,
     pub close_start: usize,
     pub close_end: usize,
-}
-
-impl SurroundDelimiters {
-    pub fn inner_range(self) -> (usize, usize) {
-        (self.open_end, self.close_start)
-    }
-
-    pub fn outer_range(self) -> (usize, usize) {
-        (self.open_start, self.close_end)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,7 +98,7 @@ pub(crate) struct ObjectSelection {
 
 impl ObjectSelection {
     /// The bytes it covers, with the line break after a linewise object.
-    fn range(self, buf: &str) -> (usize, usize) {
+    pub fn range(self, buf: &str) -> (usize, usize) {
         let (lo, hi) = (self.start.min(self.end), self.start.max(self.end));
         if self.linewise {
             return (line_start(buf, lo), (line_end(buf, hi) + 1).min(buf.len()));
@@ -124,6 +113,7 @@ impl ObjectSelection {
     }
 }
 
+/// The bytes the `kind` object covers from `cpos`.
 pub(crate) fn text_object(
     buf: &str,
     cpos: usize,
@@ -131,15 +121,6 @@ pub(crate) fn text_object(
     kind: char,
 ) -> Option<(usize, usize)> {
     let spec = TextObjectSpec::new(inner, kind)?;
-    text_object_for_spec(buf, cpos, spec)
-}
-
-/// The bytes the object covers from `cpos`.
-pub(crate) fn text_object_for_spec(
-    buf: &str,
-    cpos: usize,
-    spec: TextObjectSpec,
-) -> Option<(usize, usize)> {
     Some(select_object(buf, cpos, None, spec, 1).ok()?.range(buf))
 }
 
@@ -172,41 +153,24 @@ pub(crate) fn select_object(
         TextObjectKind::Sentence => scan.current_sent(count, include),
         TextObjectKind::Paragraph => scan.current_par(count, include),
         TextObjectKind::Line => scan.current_line(include),
-        // Only a row document knows its code blocks.
-        TextObjectKind::CodeBlock => false,
-        TextObjectKind::Quote(quote) => scan.current_quote(count, include, quote),
-        TextObjectKind::Pair { open, close } => scan.current_block(count, include, open, close),
-        TextObjectKind::AnyQuote | TextObjectKind::Tag => {
-            let (start, end) = match spec.kind {
-                TextObjectKind::Tag => surrounding_delimiters(buf, cursor, 't'),
-                _ => nearest_quote_delimiters(buf, cursor),
-            }
-            .map(|d| {
-                if spec.inner {
-                    d.inner_range()
-                } else {
-                    d.outer_range()
-                }
-            })
-            .ok_or(Stranded {
+        TextObjectKind::CodeBlock => {
+            return code_block(buf, cursor, spec.inner).ok_or(Stranded {
                 cursor,
                 anchor: visual.map(|v| v.anchor),
-            })?;
-            return Ok(if visual.is_some() {
-                ObjectSelection {
-                    start,
-                    end: prev_grapheme_boundary(buf, end).max(start),
-                    inclusive: true,
-                    linewise: false,
-                }
-            } else {
-                ObjectSelection {
-                    start,
-                    end,
-                    inclusive: false,
-                    linewise: false,
-                }
-            });
+            })
+        }
+        TextObjectKind::Quote(quote) => scan.current_quote(count, include, quote),
+        TextObjectKind::Pair { open, close } => scan.current_block(count, include, open, close),
+        TextObjectKind::Tag => scan.current_tagblock(count, include),
+        TextObjectKind::AnyQuote => {
+            let Some(quote) = nearest_quote(buf, cursor) else {
+                return Err(Stranded {
+                    cursor,
+                    anchor: visual.map(|v| v.anchor),
+                });
+            };
+            let kind = TextObjectKind::Quote(quote);
+            return select_object(buf, cursor, visual, TextObjectSpec { kind, ..spec }, count);
         }
     };
     let end = scan.offset(scan.cur);
@@ -239,311 +203,124 @@ pub(crate) fn select_object(
     })
 }
 
-fn find_next_quote(line: &str, from: usize, quote: char, respect_escape: bool) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let qbyte = quote as u32;
-    debug_assert!(qbyte < 0x80, "quote chars are ASCII");
-    let q = qbyte as u8;
-    let mut i = from;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if respect_escape && b == b'\\' {
-            i += 1;
-            if i >= bytes.len() {
-                return None;
-            }
-            i += 1;
-            continue;
+/// `ic` and `ac`: the lines of the fenced code block around `cursor`, without
+/// or with its fences. `ic` fails on an empty block.
+fn code_block(buf: &str, cursor: usize, inner: bool) -> Option<ObjectSelection> {
+    let (open, close) = code_fence_around(buf, cursor)?;
+    let (start, end) = if inner {
+        let first = line_end(buf, open) + 1;
+        if first >= close {
+            return None;
         }
-        if b == q {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+        (first, line_start(buf, close - 1))
+    } else {
+        (open, close)
+    };
+    Some(ObjectSelection {
+        start,
+        end,
+        inclusive: true,
+        linewise: true,
+    })
 }
 
-fn find_prev_quote(line: &str, from: usize, quote: char, respect_escape: bool) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let qbyte = quote as u32;
-    debug_assert!(qbyte < 0x80, "quote chars are ASCII");
-    let q = qbyte as u8;
-    let mut i = from;
-    while i > 0 {
-        i -= 1;
-        if bytes[i] == q {
-            if respect_escape {
-                let mut esc = 0usize;
-                while i > esc && bytes[i - esc - 1] == b'\\' {
-                    esc += 1;
+/// The starts of the opening and closing fence lines of the Markdown code
+/// block that holds the line `cursor` is on. A fence is a run of at least
+/// three backticks or tildes; the closing one is at least as long as the
+/// opening one and has nothing after it.
+fn code_fence_around(buf: &str, cursor: usize) -> Option<(usize, usize)> {
+    let mut open: Option<(usize, char, usize)> = None;
+    let mut line = 0;
+    loop {
+        let eol = line_end(buf, line);
+        let text = buf[line..eol].trim_start_matches(' ');
+        let mark = text.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let run = mark.map_or(0, |mark| text.len() - text.trim_start_matches(mark).len());
+        match open {
+            None if run >= 3 => open = mark.map(|mark| (line, mark, run)),
+            Some((start, held, len))
+                if mark == Some(held) && run >= len && text[run..].trim().is_empty() =>
+            {
+                if start <= cursor && cursor <= eol {
+                    return Some((start, line));
                 }
-                if esc % 2 == 1 {
-                    continue;
-                }
+                open = None;
             }
-            return Some(i);
+            _ => {}
         }
+        if eol >= buf.len() || (open.is_none() && eol >= cursor) {
+            return None;
+        }
+        line = eol + 1;
     }
-    None
 }
 
-fn nearest_quote_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
-    let cursor = smelt_buffer::text::snap_grapheme(buf, cpos.min(buf.len()));
+/// The quote character of the string nearest `cursor` on its line: the
+/// smallest one around it, or else the first one after it.
+fn nearest_quote(buf: &str, cursor: usize) -> Option<char> {
     ['"', '\'', '`']
         .into_iter()
-        .filter_map(|quote| quote_delimiters(buf, cursor, quote))
-        .filter(|d| cursor >= d.open_start && cursor <= d.close_end)
-        .min_by_key(|d| d.close_end.saturating_sub(d.open_start))
+        .filter_map(|quote| {
+            // `2i"` takes the quotes and nothing around them.
+            let spec = TextObjectSpec {
+                inner: true,
+                kind: TextObjectKind::Quote(quote),
+            };
+            let (start, end) = select_object(buf, cursor, None, spec, 2).ok()?.range(buf);
+            let around = start <= cursor && cursor < end;
+            Some((!around, if around { end - start } else { start }, quote))
+        })
+        .min()
+        .map(|(_, _, quote)| quote)
 }
 
+/// The delimiters of the `kind` object around `cpos`, which `ds` and `cs`
+/// edit: its first and last characters, or a tag block's tags.
 pub(crate) fn surrounding_delimiters(
     buf: &str,
     cpos: usize,
     kind: char,
 ) -> Option<SurroundDelimiters> {
-    match kind {
-        'q' | 's' => nearest_quote_delimiters(buf, cpos),
-        '"' | '\'' | '`' => quote_delimiters(buf, cpos, kind),
-        '(' | ')' | 'b' => pair_delimiters(buf, cpos, '(', ')'),
-        '[' | ']' | 'r' => pair_delimiters(buf, cpos, '[', ']'),
-        '{' | '}' | 'B' => pair_delimiters(buf, cpos, '{', '}'),
-        '<' | '>' | 'a' => pair_delimiters(buf, cpos, '<', '>'),
-        't' => tag_delimiters(buf, cpos),
-        _ => None,
-    }
-}
-
-fn grapheme_delimiters(
-    buf: &str,
-    open_start: usize,
-    open_end: usize,
-    close_start: usize,
-    close_end: usize,
-) -> Option<SurroundDelimiters> {
-    let open = smelt_buffer::text::covering_grapheme_range(buf, open_start..open_end);
-    let close = smelt_buffer::text::covering_grapheme_range(buf, close_start..close_end);
-    let delimiters = SurroundDelimiters {
-        open_start: open.start,
-        open_end: open.end,
-        close_start: close.start,
-        close_end: close.end,
+    let kind = if kind == 's' { 'q' } else { kind };
+    let select = |inner: bool, count: usize| {
+        let spec = TextObjectSpec::new(inner, kind)?;
+        Some(select_object(buf, cpos, None, spec, count).ok()?.range(buf))
     };
-    (delimiters.open_end <= delimiters.close_start).then_some(delimiters)
-}
-
-fn quote_delimiters(buf: &str, cpos: usize, quote: char) -> Option<SurroundDelimiters> {
-    let line_s = line_start(buf, cpos);
-    let line_e = line_end(buf, cpos);
-    let line = &buf[line_s..line_e];
-    let rel = cpos.saturating_sub(line_s);
-    let qlen = quote.len_utf8();
-
-    let mut open = find_prev_quote(line, rel, quote, true);
-    if open.is_none() {
-        open = find_next_quote(line, rel, quote, false);
-    }
-    let open = open?;
-    let close = find_next_quote(line, open + qlen, quote, true)?;
-    grapheme_delimiters(
-        buf,
-        line_s + open,
-        line_s + open + qlen,
-        line_s + close,
-        line_s + close + qlen,
-    )
-}
-
-fn pair_delimiters(buf: &str, cpos: usize, open: char, close: char) -> Option<SurroundDelimiters> {
-    find_pair_delimiters(buf, cpos, open, close)
-}
-
-#[derive(Clone, Debug)]
-struct HtmlTag<'a> {
-    start: usize,
-    end: usize,
-    name: &'a str,
-    closing: bool,
-    self_closing: bool,
-}
-
-// Lightweight HTML/XML tag matching for Vim `it`/`at` and surround `t`.
-// It is deliberately syntax-only: quoted attributes are skipped while looking
-// for `>`, self-closing tags are ignored, and malformed tags do not match.
-fn tag_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
-    let cursor = smelt_buffer::text::snap_grapheme(buf, cpos.min(buf.len()));
-    let mut stack: Vec<HtmlTag<'_>> = Vec::new();
-    let mut best: Option<SurroundDelimiters> = None;
-    let mut i = 0usize;
-
-    while i < buf.len() {
-        let Some(rel) = buf[i..].find('<') else { break };
-        let start = i + rel;
-        let Some(tag) = parse_html_tag(buf, start) else {
-            i = start + 1;
-            continue;
-        };
-        i = tag.end;
-
-        if tag.closing {
-            if let Some(open_idx) = stack
-                .iter()
-                .rposition(|open| open.name.eq_ignore_ascii_case(tag.name))
-            {
-                let open = stack.remove(open_idx);
-                let Some(candidate) =
-                    grapheme_delimiters(buf, open.start, open.end, tag.start, tag.end)
-                else {
-                    continue;
-                };
-                if cursor >= candidate.open_start && cursor <= candidate.close_end {
-                    let replace = best
-                        .map(|current| {
-                            candidate.close_end - candidate.open_start
-                                < current.close_end - current.open_start
-                        })
-                        .unwrap_or(true);
-                    if replace {
-                        best = Some(candidate);
-                    }
-                }
-            }
-        } else if !tag.self_closing {
-            stack.push(tag);
+    let (start, end, inner) = match TextObjectKind::from_char(kind)? {
+        TextObjectKind::Tag => {
+            let (start, end) = select(false, 1)?;
+            (start, end, select(true, 1)?)
         }
-    }
-
-    best
-}
-
-fn parse_html_tag<'a>(buf: &'a str, start: usize) -> Option<HtmlTag<'a>> {
-    let bytes = buf.as_bytes();
-    if bytes.get(start) != Some(&b'<') {
-        return None;
-    }
-
-    let mut i = start + 1;
-    let mut closing = false;
-    if bytes.get(i) == Some(&b'/') {
-        closing = true;
-        i += 1;
-    }
-    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
-        i += 1;
-    }
-
-    let name_start = i;
-    while i < bytes.len() && is_tag_name_byte(bytes[i]) {
-        i += 1;
-    }
-    if i == name_start {
-        return None;
-    }
-    let name = &buf[name_start..i];
-
-    let mut quote: Option<u8> = None;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
-            }
-        } else if b == b'"' || b == b'\'' {
-            quote = Some(b);
-        } else if b == b'>' {
-            let mut j = i;
-            while j > start && matches!(bytes[j - 1], b' ' | b'\t' | b'\n' | b'\r') {
-                j -= 1;
-            }
-            return Some(HtmlTag {
+        TextObjectKind::Quote(_) | TextObjectKind::AnyQuote => {
+            let (start, end) = select(true, 2)?;
+            (
                 start,
-                end: i + 1,
-                name,
-                closing,
-                self_closing: !closing && j > start && bytes[j - 1] == b'/',
-            });
+                end,
+                (
+                    next_grapheme_boundary(buf, start),
+                    prev_grapheme_boundary(buf, end),
+                ),
+            )
         }
-        i += 1;
-    }
-    None
-}
-
-fn is_tag_name_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-')
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ParagraphLine {
-    pub is_blank: bool,
-}
-
-pub(crate) fn paragraph_line_range(
-    lines: &[ParagraphLine],
-    cursor_line: usize,
-    inner: bool,
-) -> Option<Range<usize>> {
-    if lines.is_empty() {
-        return None;
-    }
-    // The scan only needs to know which lines are blank.
-    let text = lines
-        .iter()
-        .map(|line| if line.is_blank { "" } else { "x" })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let cursor = cursor_line.min(lines.len() - 1);
-    let cursor = text
-        .split('\n')
-        .take(cursor)
-        .map(|line| line.len() + 1)
-        .sum::<usize>();
-    let mut scan = Scan::new(&text, cursor);
-    scan.current_par(1, !inner)
-        .then(|| scan.oap.start.line..scan.cur.line + 1)
-}
-
-fn find_pair_delimiters(
-    buf: &str,
-    cpos: usize,
-    open: char,
-    close: char,
-) -> Option<SurroundDelimiters> {
-    let mut depth = 0i32;
-    let mut open_pos = None;
-    let snapped = smelt_buffer::text::snap_grapheme(buf, cpos);
-    let upper = next_grapheme_boundary(buf, snapped);
-    for (i, c) in buf[..upper].char_indices().rev() {
-        if c == close && i != snapped {
-            depth += 1;
-        } else if c == open {
-            if depth == 0 {
-                open_pos = Some(i);
-                break;
-            }
-            depth -= 1;
+        TextObjectKind::Pair { .. } => {
+            let (start, end) = select(false, 1)?;
+            (
+                start,
+                end,
+                (
+                    next_grapheme_boundary(buf, start),
+                    prev_grapheme_boundary(buf, end),
+                ),
+            )
         }
-    }
-    let open_pos = open_pos?;
-
-    depth = 0;
-    let search_start = open_pos + open.len_utf8();
-    for (i, c) in buf[search_start..].char_indices() {
-        if c == open {
-            depth += 1;
-        } else if c == close {
-            if depth == 0 {
-                let close_pos = search_start + i;
-                return grapheme_delimiters(
-                    buf,
-                    open_pos,
-                    open_pos + open.len_utf8(),
-                    close_pos,
-                    close_pos + close.len_utf8(),
-                );
-            }
-            depth -= 1;
-        }
-    }
-    None
+        _ => return None,
+    };
+    (inner.0 <= inner.1).then_some(SurroundDelimiters {
+        open_start: start,
+        open_end: inner.0,
+        close_start: inner.1,
+        close_end: end,
+    })
 }
 
 #[cfg(test)]

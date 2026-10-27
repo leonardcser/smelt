@@ -144,29 +144,57 @@ impl VimContext<'_> {
         }
     }
 
-    /// Stage `buf[start..end]` in the kill ring with its source byte range.
-    /// The system clipboard is **not** written here - `Window::handle_key`'s
-    /// caller observes the kill-ring's `source_range` change and pushes the
-    /// rendered (`BufferCopy::copy`) form to the system clipboard. Keeping
-    /// vim out of the system clipboard means raw markers stay in the kill
-    /// ring for paste-back fidelity, while the clipboard gets `[label]` etc.
-    fn yank_range(&mut self, start: usize, end: usize, linewise: bool) {
+    /// Stage `buf[start..end]`, which `op` yanks or removes, in the pending
+    /// register and the kill ring with its source byte range. The system
+    /// clipboard is **not** written here - `Window::handle_key`'s caller
+    /// observes the kill ring's `yank_tick` change and pushes the rendered
+    /// (`BufferCopy::copy`) form to the system clipboard. Keeping vim out of
+    /// the system clipboard means raw markers stay in the kill ring for
+    /// paste-back fidelity, while the clipboard gets `[label]` etc. A named
+    /// register keeps the clipboard as it was; `"_` stores nothing.
+    fn yank_range(&mut self, op: Op, start: usize, end: usize, linewise: bool) {
         // The kill ring carries plain text only; an attachment id has no
         // representation here. If the yanked range covers an
         // ATTACHMENT_MARKER, dropping the marker is the only way to keep
         // a later `p`/`P` from producing orphan marker bytes in source.
         let text = self.buf.as_str()[start..end].replace(ATTACHMENT_MARKER, "");
-        self.clipboard
-            .kill_ring
-            .set_with_source(text, linewise, start, end);
+        let ring = &mut self.clipboard.kill_ring;
+        match self.vim_state.register {
+            Some('_') => {}
+            Some(name) if name.is_ascii_alphabetic() => {
+                ring.store(name, text, linewise);
+                // The unnamed register follows the last write, as in vim.
+                let (text, linewise) = ring.register(name).unwrap_or_default();
+                let (text, linewise) = (text.to_owned(), linewise);
+                ring.set_quietly(text, linewise, start, end);
+            }
+            _ => {
+                if op == Op::Yank {
+                    ring.store('0', text.clone(), linewise);
+                }
+                ring.set_with_source(text, linewise, start, end);
+            }
+        }
     }
 
-    fn register(&self) -> &str {
-        self.clipboard.kill_ring.current()
-    }
-
-    fn register_linewise(&self) -> bool {
-        self.clipboard.kill_ring.is_linewise()
+    /// The text `p` puts from the pending register, and whether it is
+    /// linewise. The unnamed register first takes the system clipboard when
+    /// something else changed it.
+    fn put_text(&mut self) -> (String, bool) {
+        let ring = &self.clipboard.kill_ring;
+        match self.vim_state.register {
+            Some('_') => (String::new(), false),
+            Some('.') => (ring.last_insert().unwrap_or_default().to_owned(), false),
+            Some(name) if name == '0' || name.is_ascii_alphabetic() => ring
+                .register(name)
+                .map(|(text, linewise)| (text.to_owned(), linewise))
+                .unwrap_or_default(),
+            _ => {
+                self.sync_paste_from_clipboard();
+                let ring = &self.clipboard.kill_ring;
+                (ring.current().to_owned(), ring.is_linewise())
+            }
+        }
     }
 
     /// Sync the kill ring from the system clipboard before a paste.
@@ -225,6 +253,8 @@ pub(crate) enum Op {
     Upper,
     Lower,
     Toggle,
+    Indent,
+    Dedent,
 }
 
 impl Op {
@@ -237,6 +267,8 @@ impl Op {
             Op::Upper => "gU",
             Op::Lower => "gu",
             Op::Toggle => "g~",
+            Op::Indent => ">",
+            Op::Dedent => "<",
         }
     }
 
@@ -261,7 +293,7 @@ impl Op {
             Op::Upper => Some(text.chars().map(upper_char).collect()),
             Op::Lower => Some(text.chars().map(lower_char).collect()),
             Op::Toggle => Some(text.chars().map(toggle_char).collect()),
-            Op::Delete | Op::Change | Op::Yank => None,
+            Op::Delete | Op::Change | Op::Yank | Op::Indent | Op::Dedent => None,
         }
     }
 }
@@ -296,9 +328,11 @@ pub(crate) enum SubState {
     /// `[` or `]` pressed (`forward` for `]`), optionally after an operator,
     /// waiting for the key of the block kind to move to.
     WaitingBracket(Option<Op>, bool),
-    /// `'` or `` ` `` pressed, waiting for the mark name; only `''` and
-    /// `` `` `` exist, the position before the latest jump.
+    /// `m`, `'` or `` ` `` pressed, waiting for the name of the mark to set or
+    /// go to; `''` and `` `` `` go back to before the latest jump.
     WaitingMark(char),
+    /// `"` pressed, waiting for the name of the register the next command uses.
+    WaitingRegister,
     /// Operator pending + `g` pressed, waiting for `g` to complete `gg` motion.
     WaitingOpG(Op),
     WaitingR,
@@ -389,6 +423,10 @@ enum RepeatCommand {
     JoinWithoutSpaces {
         count: usize,
     },
+    Add {
+        subtract: bool,
+        count: usize,
+    },
     TextObject {
         op: Op,
         inner: bool,
@@ -453,12 +491,14 @@ pub struct VimWindowState {
     opens_line: bool,
     /// Where the last insert session ended, for `gi`.
     last_insert_end: Option<usize>,
-    /// Last mutating Normal-mode command for `.` repeat.
-    last_change: Option<RepeatCommand>,
+    /// Last mutating Normal-mode command for `.` repeat, with its register.
+    last_change: Option<(RepeatCommand, Option<char>)>,
     /// Guard used while replaying `.` so the repeated command does not replace itself.
     replaying_change: bool,
     /// In-flight sub-state for multi-key sequences.
     pub(crate) sub: SubState,
+    /// Register named with `"` for the command being typed.
+    pub(crate) register: Option<char>,
     /// Count before the operator (or standalone motion).
     pub(crate) count1: Option<usize>,
     /// Count after the operator, before the motion.
@@ -504,7 +544,7 @@ impl VimWindowState {
 
     fn record_change(&mut self, command: RepeatCommand) {
         if !self.replaying_change {
-            self.last_change = Some(command);
+            self.last_change = Some((command, self.register));
         }
     }
 
@@ -552,6 +592,36 @@ impl VimWindowState {
         self.reset_counts();
     }
 
+    /// Name the register for the command being typed, from the key after `"`.
+    /// `""` names the unnamed register; anything else cancels the sequence.
+    fn name_register(&mut self, key: KeyEvent) {
+        self.sub = SubState::Ready;
+        match key.code {
+            KeyCode::Char('"') => self.register = None,
+            KeyCode::Char(c @ ('a'..='z' | 'A'..='Z' | '0' | '_' | '+' | '*' | '.')) => {
+                self.register = Some(c);
+            }
+            _ => {
+                self.register = None;
+                self.reset_counts();
+            }
+        }
+    }
+
+    /// Forget the register once the command that named it is done, unless
+    /// `named` says this key was the register's name.
+    fn settle_register(&mut self, named: bool) {
+        if !named && matches!(self.sub, SubState::Ready) && self.count1.is_none() {
+            self.register = None;
+        }
+    }
+
+    /// The register named for the command just run, which clears it. Viewer
+    /// hosts read it after running a yank.
+    pub fn take_register(&mut self) -> Option<char> {
+        self.register.take()
+    }
+
     /// True when no multi-key sequence and no count accumulator are pending,
     /// i.e. Esc in Normal mode would be a no-op.
     pub fn is_idle(&self) -> bool {
@@ -564,6 +634,10 @@ impl VimWindowState {
     /// `3d2` the next key is still a motion for that exact sequence.
     pub fn pending_input(&self) -> Option<String> {
         let mut out = String::new();
+        if let Some(register) = self.register {
+            out.push('"');
+            out.push(register);
+        }
         if let Some(count) = self.count1 {
             out.push_str(&count.to_string());
         }
@@ -587,6 +661,7 @@ impl VimWindowState {
                 out.push(if forward { ']' } else { '[' });
             }
             SubState::WaitingMark(quote) => out.push(quote),
+            SubState::WaitingRegister => out.push('"'),
             SubState::WaitingOpG(op) => {
                 push_op(&mut out, op);
                 out.push('g');
@@ -710,6 +785,19 @@ pub fn handle_viewer_key(
     mode: &mut VimMode,
     state: &mut VimWindowState,
 ) -> DocumentKeyResult {
+    if matches!(state.sub, SubState::WaitingRegister) {
+        state.name_register(key);
+        return DocumentKeyResult::Consumed;
+    }
+    let result = viewer_key(key, mode, state);
+    // A command keeps its register for the host, which takes it.
+    if !matches!(result, DocumentKeyResult::Command(_)) {
+        state.settle_register(false);
+    }
+    result
+}
+
+fn viewer_key(key: KeyEvent, mode: &mut VimMode, state: &mut VimWindowState) -> DocumentKeyResult {
     if *mode == VimMode::Insert {
         state.set_mode(mode, VimMode::Normal);
         return DocumentKeyResult::Consumed;
@@ -815,9 +903,9 @@ pub fn handle_viewer_key(
         SubState::WaitingTextObj(Op::Yank, inner) => {
             state.sub = SubState::Ready;
             let cmd = match key.code {
-                KeyCode::Char(kind) => {
-                    DocumentTextObject::new(inner, kind).map(DocumentCommand::YankTextObject)
-                }
+                KeyCode::Char(kind) => DocumentTextObject::new(inner, kind).map(|object| {
+                    DocumentCommand::YankTextObject(object.counted(state.effective_count()))
+                }),
                 _ => None,
             };
             return command(state, cmd);
@@ -825,9 +913,8 @@ pub fn handle_viewer_key(
         SubState::WaitingVisualTextObj(inner) => {
             state.sub = SubState::Ready;
             let cmd = match key.code {
-                KeyCode::Char(kind) => {
-                    DocumentTextObject::new(inner, kind).map(DocumentCommand::TextObject)
-                }
+                KeyCode::Char(kind) => DocumentTextObject::new(inner, kind)
+                    .map(|object| DocumentCommand::TextObject(object.counted(state.take_count()))),
                 _ => None,
             };
             return command(state, cmd);
@@ -848,15 +935,16 @@ pub fn handle_viewer_key(
             };
             return command(state, cmd);
         }
-        SubState::WaitingMark(_) => {
-            state.sub = SubState::Ready;
+        SubState::WaitingMark(key_char) => {
             state.reset_pending();
-            return match key.code {
-                KeyCode::Char('\'' | '`') => {
-                    DocumentKeyResult::Command(DocumentCommand::Jump(JumpMove::Previous))
-                }
-                _ => DocumentKeyResult::Consumed,
+            let command = match (key_char, key.code) {
+                ('m', KeyCode::Char(name @ 'a'..='z')) => DocumentCommand::SetMark(name),
+                ('m', _) => return DocumentKeyResult::Consumed,
+                (_, KeyCode::Char('\'' | '`')) => DocumentCommand::Jump(JumpMove::Previous),
+                (_, KeyCode::Char(name @ 'a'..='z')) => DocumentCommand::Jump(JumpMove::Mark(name)),
+                _ => return DocumentKeyResult::Consumed,
             };
+            return DocumentKeyResult::Command(command);
         }
         SubState::WaitingG => {
             state.sub = SubState::Ready;
@@ -932,8 +1020,12 @@ pub fn handle_viewer_key(
             state.sub = SubState::WaitingBracket(None, c == ']');
             DocumentKeyResult::Consumed
         }
-        KeyCode::Char(quote @ ('\'' | '`')) => {
-            state.sub = SubState::WaitingMark(quote);
+        KeyCode::Char(key_char @ ('m' | '\'' | '`')) => {
+            state.sub = SubState::WaitingMark(key_char);
+            DocumentKeyResult::Consumed
+        }
+        KeyCode::Char('"') => {
+            state.sub = SubState::WaitingRegister;
             DocumentKeyResult::Consumed
         }
         KeyCode::Tab => {
@@ -1013,11 +1105,18 @@ pub fn handle_viewer_key(
 
 /// Process a key event, mutating `ctx` (buffer, cursor, kill ring, undo, mode).
 pub fn handle_key(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
-    match *ctx.mode {
+    let named = matches!(ctx.vim_state.sub, SubState::WaitingRegister);
+    let action = match *ctx.mode {
+        _ if named => {
+            ctx.vim_state.name_register(key);
+            Action::Consumed
+        }
         VimMode::Insert => handle_insert(key, ctx),
         VimMode::Normal => handle_normal(key, ctx),
         VimMode::Visual | VimMode::VisualLine => handle_visual(key, ctx),
-    }
+    };
+    ctx.vim_state.settle_register(named);
+    action
 }
 
 // ── Insert mode ─────────────────────────────────────────────────────
@@ -1056,6 +1155,15 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         match key.code {
             KeyCode::Char('r') => {
                 ctx.redo();
+                return Action::Consumed;
+            }
+            KeyCode::Char(c @ ('a' | 'x')) => {
+                let count = ctx.vim_state.take_count();
+                add_to_number(ctx, add_amount(c, count));
+                ctx.vim_state.record_change(RepeatCommand::Add {
+                    subtract: c == 'x',
+                    count,
+                });
                 return Action::Consumed;
             }
             // Pass through keys that the main handler needs.
@@ -1138,7 +1246,7 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                         Op::Yank => Some(SubState::WaitingSurroundMotion),
                         Op::Delete => Some(SubState::WaitingDeleteSurround),
                         Op::Change => Some(SubState::WaitingChangeSurroundTarget),
-                        Op::Upper | Op::Lower | Op::Toggle => None,
+                        Op::Upper | Op::Lower | Op::Toggle | Op::Indent | Op::Dedent => None,
                     };
                     if let Some(sub) = surround {
                         ctx.vim_state.sub = sub;
@@ -1173,6 +1281,7 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         // Only viewers wait for a block kind.
         SubState::WaitingBracket(..)
         | SubState::WaitingMark(_)
+        | SubState::WaitingRegister
         | SubState::WaitingVisualTextObj(_)
         | SubState::Ready => {}
     }
@@ -1216,10 +1325,12 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
 }
 
 fn repeat_last_change(ctx: &mut VimContext<'_>) -> Action {
-    let Some(command) = ctx.vim_state.last_change else {
+    let Some((command, register)) = ctx.vim_state.last_change else {
         ctx.vim_state.reset_pending();
         return Action::Consumed;
     };
+    // A register named before `.` replaces the one the change used.
+    ctx.vim_state.register = ctx.vim_state.register.or(register);
 
     let was_replaying = ctx.vim_state.replaying_change;
     ctx.vim_state.replaying_change = true;
@@ -1258,6 +1369,11 @@ fn repeat_last_change(ctx: &mut VimContext<'_>) -> Action {
             let n = ctx.vim_state.repeat_count(count);
             join_lines(ctx, n, false);
             ctx.vim_state.reset_pending();
+            Action::Consumed
+        }
+        RepeatCommand::Add { subtract, count } => {
+            let n = ctx.vim_state.repeat_count(count);
+            add_to_number(ctx, add_amount(if subtract { 'x' } else { 'a' }, n));
             Action::Consumed
         }
         RepeatCommand::TextObject {
@@ -1315,6 +1431,10 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
     match c {
         // ── Repeat last change ───────────────────────────────────────
         '.' => repeat_last_change(ctx),
+        '"' => {
+            ctx.vim_state.sub = SubState::WaitingRegister;
+            Action::Consumed
+        }
 
         // ── Operators ───────────────────────────────────────────────
         'd' => {
@@ -1327,6 +1447,14 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         }
         'y' => {
             ctx.vim_state.sub = SubState::WaitingOp(Op::Yank);
+            Action::Consumed
+        }
+        '>' => {
+            ctx.vim_state.sub = SubState::WaitingOp(Op::Indent);
+            Action::Consumed
+        }
+        '<' => {
+            ctx.vim_state.sub = SubState::WaitingOp(Op::Dedent);
             Action::Consumed
         }
 
@@ -1577,9 +1705,7 @@ fn open_line(ctx: &mut VimContext<'_>, below: bool) {
 /// `p` (after the cursor, or after its line for a linewise register) and `P`
 /// (before), repeated `count` times.
 fn paste(ctx: &mut VimContext<'_>, after: bool, count: usize) {
-    ctx.sync_paste_from_clipboard();
-    let linewise = ctx.register_linewise();
-    let text = ctx.register().to_string();
+    let (text, linewise) = ctx.put_text();
     if text.is_empty() && !linewise {
         return;
     }
@@ -1735,7 +1861,13 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Action::Passthrough;
+        return match key.code {
+            KeyCode::Char(c @ ('a' | 'x')) => {
+                let amount = add_amount(c, ctx.vim_state.take_count());
+                visual_command(VisualAction::Add(amount), false, ctx)
+            }
+            _ => Action::Passthrough,
+        };
     }
 
     if let KeyCode::Char(c) = key.code {
@@ -1791,7 +1923,11 @@ const LINE_END_COLUMN: usize = u16::MAX as usize;
 enum VisualAction {
     Operator(Op),
     Replace(char),
-    Join { spaces: bool },
+    Join {
+        spaces: bool,
+    },
+    /// Ctrl-A and Ctrl-X: add this to the first number on each line.
+    Add(i64),
 }
 
 /// The size of a selection, which `.` selects again from the cursor.
@@ -1901,6 +2037,7 @@ fn visual_command(action: VisualAction, whole_lines: bool, ctx: &mut VimContext<
             Action::Consumed
         }
         VisualAction::Join { spaces } => visual_join(ctx, spaces),
+        VisualAction::Add(amount) => visual_add(ctx, amount),
     }
 }
 
@@ -1916,6 +2053,8 @@ fn visual_span(ctx: &VimContext<'_>) -> Option<Span> {
 
 fn visual_operator(op: Op, ctx: &mut VimContext<'_>) -> Action {
     let span = visual_span(ctx);
+    // A count shifts the selected lines that many times.
+    let times = ctx.vim_state.take_count();
     exit_visual(ctx);
     // Deleting from an empty buffer leaves the register alone.
     if op == Op::Delete && ctx.buf.is_empty() {
@@ -1926,6 +2065,22 @@ fn visual_operator(op: Op, ctx: &mut VimContext<'_>) -> Action {
             Span::Chars(start, end) | Span::Lines(start, end) | Span::AdjustedLines(start, end),
         ) if op.recase("").is_some() => {
             recase_range(op, ctx, start, end, start);
+            Action::Consumed
+        }
+        Some(Span::Chars(start, end)) if matches!(op, Op::Indent | Op::Dedent) => {
+            shift_lines(
+                op,
+                ctx,
+                start,
+                last_char(ctx.buf.as_str(), start, end),
+                times,
+            );
+            Action::Consumed
+        }
+        Some(Span::Lines(start, end) | Span::AdjustedLines(start, end))
+            if matches!(op, Op::Indent | Op::Dedent) =>
+        {
+            shift_lines(op, ctx, start, end, times);
             Action::Consumed
         }
         Some(Span::Chars(start, end)) => {
@@ -1959,6 +2114,156 @@ fn visual_join(ctx: &mut VimContext<'_>, spaces: bool) -> Action {
     Action::Consumed
 }
 
+/// What Ctrl-A (`a`) or Ctrl-X (`x`) adds with `count`.
+fn add_amount(key: char, count: usize) -> i64 {
+    let count = i64::try_from(count).unwrap_or(i64::MAX);
+    if key == 'x' {
+        -count
+    } else {
+        count
+    }
+}
+
+/// A number Ctrl-A and Ctrl-X change, as byte offsets in its line: decimal
+/// with an optional `-`, hex after `0x`, or binary after `0b`.
+struct NumberToken {
+    start: usize,
+    digits: std::ops::Range<usize>,
+    radix: u32,
+}
+
+/// The number under `col` in `line`, or the first one after it.
+fn number_at(line: &str, col: usize) -> Option<NumberToken> {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let prefixed = |marks: &[u8], radix: u32| {
+            b[i] == b'0'
+                && b.get(i + 1).is_some_and(|c| marks.contains(c))
+                && b.get(i + 2).is_some_and(|c| char::from(*c).is_digit(radix))
+        };
+        let (radix, first) = if prefixed(b"xX", 16) {
+            (16, i + 2)
+        } else if prefixed(b"bB", 2) {
+            (2, i + 2)
+        } else {
+            (10, i)
+        };
+        let mut end = first;
+        while end < b.len() && char::from(b[end]).is_digit(radix) {
+            end += 1;
+        }
+        if end > col {
+            let negative = radix == 10 && i > 0 && b[i - 1] == b'-';
+            return Some(NumberToken {
+                start: if negative { i - 1 } else { i },
+                digits: first..end,
+                radix,
+            });
+        }
+        i = end;
+    }
+    None
+}
+
+/// `number` in `line` with `amount` added. Decimal keeps a zero-padded width
+/// and crosses zero; hex and binary keep their digit count and wrap as vim's
+/// unsigned 64-bit numbers do, and hex keeps its letter case.
+fn added_number(line: &str, number: &NumberToken, amount: i64) -> Option<String> {
+    let digits = &line[number.digits.clone()];
+    let width = digits.len();
+    if number.radix == 10 {
+        let magnitude = digits.parse::<i128>().ok()?;
+        let value = if number.start < number.digits.start {
+            -magnitude
+        } else {
+            magnitude
+        };
+        let new = value + i128::from(amount);
+        let width = if digits.starts_with('0') { width } else { 0 };
+        let sign = if new < 0 { "-" } else { "" };
+        return Some(format!("{sign}{:0width$}", new.unsigned_abs()));
+    }
+    let value = u64::from_str_radix(digits, number.radix).ok()?;
+    let new = value.wrapping_add_signed(amount);
+    let prefix = &line[number.start..number.digits.start];
+    Some(if number.radix == 2 {
+        format!("{prefix}{new:0width$b}")
+    } else if digits.bytes().any(|c| c.is_ascii_uppercase()) {
+        format!("{prefix}{new:0width$X}")
+    } else {
+        format!("{prefix}{new:0width$x}")
+    })
+}
+
+/// Add `amount` to the number in the line `line_start` begins, looking from
+/// `from` and taking only numbers that start before `limit`. Returns where
+/// the new number ends.
+fn add_in_line(
+    ctx: &mut VimContext<'_>,
+    line_start: usize,
+    from: usize,
+    limit: usize,
+    amount: i64,
+) -> Option<usize> {
+    let buf = ctx.buf.as_str();
+    let line = &buf[line_start..line_end(buf, line_start)];
+    let number = number_at(line, from - line_start)?;
+    if line_start + number.start >= limit {
+        return None;
+    }
+    let new = added_number(line, &number, amount)?;
+    let (start, end) = (line_start + number.start, line_start + number.digits.end);
+    ctx.replace_range(start, end, &new);
+    Some(start + new.len())
+}
+
+/// Ctrl-A and Ctrl-X in Normal mode: add `amount` to the number under or
+/// after the cursor on its line, and land on its last digit.
+fn add_to_number(ctx: &mut VimContext<'_>, amount: i64) {
+    let buf = ctx.buf.as_str();
+    let sol = line_start(buf, *ctx.cpos);
+    let line = &buf[sol..line_end(buf, sol)];
+    if number_at(line, *ctx.cpos - sol).is_none() {
+        return;
+    }
+    ctx.save_undo();
+    if let Some(end) = add_in_line(ctx, sol, *ctx.cpos, usize::MAX, amount) {
+        *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), end);
+    }
+}
+
+/// Visual Ctrl-A and Ctrl-X: add `amount` to the first number each selected
+/// line holds within the selection, as one undo step, and return to its start.
+fn visual_add(ctx: &mut VimContext<'_>, amount: i64) -> Action {
+    let range = visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode);
+    exit_visual(ctx);
+    let Some((start, mut end)) = range else {
+        return Action::Consumed;
+    };
+    ctx.save_undo();
+    let mut sol = line_start(ctx.buf.as_str(), start);
+    let mut from = start;
+    loop {
+        let before = ctx.buf.len();
+        add_in_line(ctx, sol, from, end, amount);
+        end = (end + ctx.buf.len()).saturating_sub(before);
+        let eol = line_end(ctx.buf.as_str(), sol);
+        if eol >= end || eol >= ctx.buf.len() {
+            break;
+        }
+        sol = eol + 1;
+        from = sol;
+    }
+    *ctx.cpos = start;
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+    Action::Consumed
+}
+
 /// Visual `r{char}`: every character of the selection becomes `c`, line
 /// breaks stay.
 fn visual_replace(c: char, ctx: &mut VimContext<'_>) {
@@ -1983,9 +2288,7 @@ fn visual_replace(c: char, ctx: &mut VimContext<'_>) {
 /// Visual `p` and `P`: replace the selection with the register. `p` leaves
 /// the replaced text in the register.
 fn visual_put(keep_register: bool, ctx: &mut VimContext<'_>) -> Action {
-    ctx.sync_paste_from_clipboard();
-    let text = ctx.register().to_string();
-    let put_lines = ctx.register_linewise();
+    let (text, put_lines) = ctx.put_text();
     let span = visual_span(ctx);
     exit_visual(ctx);
     let Some(span) = span.filter(|_| !text.is_empty() || put_lines) else {
@@ -2032,6 +2335,10 @@ fn visual_put(keep_register: bool, ctx: &mut VimContext<'_>) -> Action {
 
 fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
     match c {
+        '"' => {
+            ctx.vim_state.sub = SubState::WaitingRegister;
+            Action::Consumed
+        }
         // ── Escape visual mode ─────────────────────────────────────
         'v' if *ctx.mode == VimMode::Visual => {
             exit_visual(ctx);
@@ -2058,6 +2365,8 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
         'C' | 'S' | 'R' => visual_command(VisualAction::Operator(Op::Change), true, ctx),
         'y' => visual_command(VisualAction::Operator(Op::Yank), false, ctx),
         'Y' => visual_command(VisualAction::Operator(Op::Yank), true, ctx),
+        '>' => visual_command(VisualAction::Operator(Op::Indent), false, ctx),
+        '<' => visual_command(VisualAction::Operator(Op::Dedent), false, ctx),
 
         // ── Case change on selection ───────────────────────────────
         '~' => visual_command(VisualAction::Operator(Op::Toggle), false, ctx),
@@ -2358,10 +2667,12 @@ fn handle_waiting_textobj(key: KeyEvent, op: Op, inner: bool, ctx: &mut VimConte
         };
         if op == Op::Yank || op.recase("").is_some() {
             *ctx.cpos = sel.start;
+            clamp_normal(buf, ctx.cpos);
         }
         // A tag block keeps a closing tag in column 0 out of the end adjustment.
         if spec.kind == TextObjectKind::Tag {
-            return Some(Span::Chars(sel.start, sel.end));
+            let (start, end) = sel.range(buf);
+            return Some(Span::Chars(start, end));
         }
         let reach = match (sel.linewise, sel.inclusive) {
             (true, _) => Reach::Linewise,
@@ -2674,19 +2985,21 @@ fn execute_linewise_op(op: Op, ctx: &mut VimContext<'_>) -> Action {
 fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize) -> Action {
     // An empty span deletes and yanks nothing, but `c` still starts inserting.
     if start == end && matches!(op, Op::Delete | Op::Yank) {
+        *ctx.cpos = start;
+        clamp_normal(ctx.buf.as_str(), ctx.cpos);
         return Action::Consumed;
     }
     match op {
         Op::Delete => {
             ctx.save_undo();
-            ctx.yank_range(start, end, false);
+            ctx.yank_range(op, start, end, false);
             ctx.delete_range(start, end);
             *ctx.cpos = start;
             clamp_normal(ctx.buf.as_str(), ctx.cpos);
         }
         Op::Change => {
             ctx.save_undo();
-            ctx.yank_range(start, end, false);
+            ctx.yank_range(op, start, end, false);
             ctx.delete_range(start, end);
             *ctx.cpos = start;
             enter_insert_mode(ctx);
@@ -2694,9 +3007,13 @@ fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             return Action::Consumed;
         }
         Op::Yank => {
-            ctx.yank_range(start, end, false);
+            ctx.yank_range(op, start, end, false);
             ctx.clipboard.kill_ring.mark_yanked(ctx.now);
             *ctx.cpos = start;
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
+        }
+        Op::Indent | Op::Dedent => {
+            shift_lines(op, ctx, start, last_char(ctx.buf.as_str(), start, end), 1);
         }
         Op::Upper | Op::Lower | Op::Toggle => {
             // Vim treats an empty exclusive span as the char under it.
@@ -2709,6 +3026,66 @@ fn apply_charwise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
         }
     }
     Action::Consumed
+}
+
+/// Columns `>` and `<` shift a line by.
+const SHIFT_WIDTH: usize = 2;
+
+/// The start of the last character of the charwise span `start..end`, which
+/// names the last line it touches.
+fn last_char(buf: &str, start: usize, end: usize) -> usize {
+    if end > start {
+        prev_grapheme_boundary(buf, end).max(start)
+    } else {
+        start
+    }
+}
+
+/// `>` and `<`: shift the lines from `first`'s to `last`'s right or left by
+/// `times` shift widths as one undo step, and put the cursor on the first
+/// line's first non-blank. `>` leaves empty lines alone; `<` takes a tab as
+/// one shift width.
+fn shift_lines(op: Op, ctx: &mut VimContext<'_>, first: usize, last: usize, times: usize) {
+    let buf = ctx.buf.as_str();
+    let start = line_start(buf, first);
+    let end = line_end(buf, last.max(first));
+    let width = SHIFT_WIDTH.saturating_mul(times);
+    let shifted = buf[start..end]
+        .split('\n')
+        .map(|line| {
+            if op == Op::Indent {
+                return if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}{line}", " ".repeat(width))
+                };
+            }
+            let mut columns = 0;
+            let cut = line
+                .find(|c| {
+                    let step = match c {
+                        ' ' => 1,
+                        '\t' => SHIFT_WIDTH,
+                        _ => return true,
+                    };
+                    if columns + step > width {
+                        return true;
+                    }
+                    columns += step;
+                    false
+                })
+                .unwrap_or(line.len());
+            line[cut..].to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if shifted != buf[start..end] {
+        *ctx.cpos = start;
+        ctx.save_undo();
+        ctx.replace_range(start, end, &shifted);
+    }
+    *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), start);
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }
 
 /// Rewrite the case of `start..end` with a case operator as one undo step and
@@ -2737,7 +3114,7 @@ fn apply_linewise_op(
     match op {
         Op::Delete => {
             ctx.save_undo();
-            ctx.yank_range(start, end, true);
+            ctx.yank_range(op, start, end, true);
             let column = cursor_cell(ctx);
             let removed = linewise_delete_range(ctx.buf.as_str(), start..end);
             ctx.delete_range(removed.start, removed.end);
@@ -2751,7 +3128,7 @@ fn apply_linewise_op(
         }
         Op::Change => {
             ctx.save_undo();
-            ctx.yank_range(start, end, true);
+            ctx.yank_range(op, start, end, true);
             // The first line keeps its indent.
             let content_start = first_non_blank_at(ctx.buf.as_str(), start);
             ctx.delete_range(content_start, end);
@@ -2764,9 +3141,10 @@ fn apply_linewise_op(
             // Linewise yank does not reposition the cursor (vim default).
             // The register holds the line contents without a trailing newline
             // so a linewise paste can prepend or append its own.
-            ctx.yank_range(start, end, true);
+            ctx.yank_range(op, start, end, true);
             ctx.clipboard.kill_ring.mark_yanked(ctx.now);
         }
+        Op::Indent | Op::Dedent => shift_lines(op, ctx, start, end, 1),
         Op::Upper | Op::Lower | Op::Toggle => {
             // The cursor keeps its column and moves to the first line.
             let column = *ctx.cpos - line_start(ctx.buf.as_str(), *ctx.cpos);
@@ -3162,14 +3540,19 @@ mod tests {
     }
 
     #[test]
-    fn document_view_quote_marks_jump_to_the_previous_position() {
+    fn document_view_quote_marks_jump_to_marks_and_the_previous_position() {
         let (result, state) = viewer_keys("'");
         assert_eq!(result, DocumentKeyResult::Consumed);
         assert_eq!(state.pending_input().as_deref(), Some("'"));
         assert_eq!(viewer_keys("''").0, jump(JumpMove::Previous));
         assert_eq!(viewer_keys("``").0, jump(JumpMove::Previous));
 
-        let (result, state) = viewer_keys("'a");
+        assert_eq!(viewer_keys("'a").0, jump(JumpMove::Mark('a')));
+        assert_eq!(
+            viewer_keys("ma").0,
+            DocumentKeyResult::Command(DocumentCommand::SetMark('a'))
+        );
+        let (result, state) = viewer_keys("'A");
         assert_eq!(result, DocumentKeyResult::Consumed);
         assert!(state.is_idle());
     }
@@ -4962,5 +5345,209 @@ mod tests {
         h.handle(key('v'));
         h.handle(key(';'));
         assert_eq!(h.cpos, 4);
+    }
+
+    #[test]
+    fn named_registers_hold_text_apart_from_the_unnamed_one() {
+        let mut h = TestHarness::new("one\ntwo\nthree");
+        keys(&mut h, "\"ayyj");
+        let tick = h.clipboard.kill_ring.yank_tick();
+        keys(&mut h, "yyj\"ap");
+        assert_eq!(h.buf, "one\ntwo\nthree\none");
+        keys(&mut h, "p");
+        assert_eq!(h.buf, "one\ntwo\nthree\none\ntwo", "unnamed kept `two`");
+        assert!(h.clipboard.kill_ring.yank_tick() > tick);
+
+        let mut h = TestHarness::new("one two");
+        let tick = h.clipboard.kill_ring.yank_tick();
+        keys(&mut h, "\"byw");
+        assert_eq!(
+            h.clipboard.kill_ring.yank_tick(),
+            tick,
+            "a named yank leaves the system clipboard alone"
+        );
+        assert_eq!(h.clipboard.kill_ring.register('b'), Some(("one ", false)));
+    }
+
+    #[test]
+    fn uppercase_registers_append() {
+        let mut h = TestHarness::new("one two");
+        keys(&mut h, "\"ayiww\"Ayiw");
+        assert_eq!(h.clipboard.kill_ring.register('a'), Some(("onetwo", false)));
+        let mut h = TestHarness::new("one\ntwo");
+        keys(&mut h, "\"ayyj\"Ayy");
+        assert_eq!(
+            h.clipboard.kill_ring.register('a'),
+            Some(("one\ntwo", true))
+        );
+    }
+
+    #[test]
+    fn yank_register_keeps_the_last_yank_through_deletes() {
+        let mut h = TestHarness::new("keep drop");
+        keys(&mut h, "yiwwdiw0\"0P");
+        assert_eq!(h.buf, "keepkeep ");
+    }
+
+    #[test]
+    fn black_hole_register_deletes_without_storing() {
+        let mut h = TestHarness::new("keep drop");
+        keys(&mut h, "yiww\"_diw0P");
+        assert_eq!(h.buf, "keepkeep ");
+        // `.` repeats the delete into the black hole too.
+        let mut h = TestHarness::new("a b c");
+        keys(&mut h, "yl\"_x.");
+        assert_eq!(h.buf, "b c");
+        assert_eq!(h.clipboard.kill_ring.current(), "a");
+    }
+
+    #[test]
+    fn register_is_forgotten_after_its_command() {
+        let mut h = TestHarness::new("one two");
+        keys(&mut h, "\"ayiw");
+        assert!(h.vim_state.is_idle());
+        assert_eq!(h.vim_state.pending_input(), None);
+        keys(&mut h, "\"a2");
+        assert_eq!(h.vim_state.pending_input().as_deref(), Some("\"a2"));
+        h.handle(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(h.vim_state.is_idle());
+    }
+
+    #[test]
+    fn dot_register_puts_the_last_insert() {
+        let mut h = TestHarness::new("x");
+        h.clipboard.kill_ring.set_last_insert(Some("hi".into()));
+        keys(&mut h, "\".p");
+        assert_eq!(h.buf, "xhi");
+    }
+
+    #[test]
+    fn visual_yank_and_put_use_the_named_register() {
+        let mut h = TestHarness::new("one two");
+        keys(&mut h, "ve\"cy");
+        assert_eq!(h.clipboard.kill_ring.register('c'), Some(("one", false)));
+        keys(&mut h, "wviw\"cp");
+        assert_eq!(h.buf, "one one");
+    }
+
+    #[test]
+    fn shift_operators_indent_and_dedent_lines() {
+        for (text, cpos, input, expected, cursor) in [
+            ("a\nb\nc", 0, ">>", "  a\nb\nc", 2),
+            ("a\nb\nc", 0, "2>>", "  a\n  b\nc", 2),
+            ("a\n\nc", 0, ">2j", "  a\n\n  c", 2),
+            ("    a\nb", 4, "<<", "  a\nb", 2),
+            ("\ta\n b", 1, "<j", "a\nb", 0),
+            ("a\nb", 0, ">>.", "    a\nb", 4),
+            ("a\nb\nc", 0, "Vj>", "  a\n  b\nc", 2),
+            ("a\nb\nc", 0, "Vj2>", "    a\n    b\nc", 4),
+            ("a b\nc", 2, "vj<", "a b\nc", 0),
+            ("x\n  a\n  b\n\ny", 2, ">ip", "  x\n    a\n    b\n\ny", 2),
+        ] {
+            let mut h = TestHarness::new(text);
+            h.cpos = cpos;
+            keys(&mut h, input);
+            assert_eq!(h.buf, expected, "{input}");
+            assert_eq!(h.cpos, cursor, "{input}");
+        }
+    }
+
+    #[test]
+    fn shift_is_one_undo_step() {
+        let mut h = TestHarness::new("a\nb");
+        keys(&mut h, ">ju");
+        assert_eq!(h.buf, "a\nb");
+    }
+
+    fn ctrl(h: &mut TestHarness, c: char) {
+        h.handle(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_x_add_to_the_number_at_or_after_the_cursor() {
+        for (text, cpos, count, key, expected, cursor) in [
+            ("x 41 y", 0, "", 'a', "x 42 y", 3),
+            ("x 41 y", 3, "", 'x', "x 40 y", 3),
+            ("x 9", 0, "", 'a', "x 10", 3),
+            ("x 0", 0, "", 'x', "x -1", 3),
+            ("x -1", 0, "", 'a', "x 0", 2),
+            ("x -5", 3, "10", 'a', "x 5", 2),
+            ("v007", 0, "", 'a', "v008", 3),
+            ("0x0f", 0, "", 'a', "0x10", 3),
+            ("0xFF", 2, "", 'a', "0x100", 4),
+            ("0x00", 0, "", 'x', "0xffffffffffffffff", 17),
+            ("0b101", 0, "", 'a', "0b110", 4),
+            ("a1 b2", 3, "", 'a', "a1 b3", 4),
+            ("none", 0, "", 'a', "none", 0),
+            ("12 after", 5, "", 'a', "12 after", 5),
+        ] {
+            let mut h = TestHarness::new(text);
+            h.cpos = cpos;
+            keys(&mut h, count);
+            ctrl(&mut h, key);
+            assert_eq!(h.buf, expected, "{count}<C-{key}> on {text:?}");
+            assert_eq!(h.cpos, cursor, "{count}<C-{key}> on {text:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_a_repeats_with_dot_and_undoes_in_one_step() {
+        let mut h = TestHarness::new("n 1");
+        keys(&mut h, "5");
+        ctrl(&mut h, 'a');
+        keys(&mut h, ".");
+        assert_eq!(h.buf, "n 11");
+        keys(&mut h, "uu");
+        assert_eq!(h.buf, "n 1");
+    }
+
+    #[test]
+    fn visual_ctrl_a_adds_to_each_selected_line() {
+        let mut h = TestHarness::new("a 1 2\nb 9\nc\nd 3");
+        keys(&mut h, "Vjjj2");
+        ctrl(&mut h, 'a');
+        assert_eq!(h.buf, "a 3 2\nb 11\nc\nd 5");
+        assert_eq!(h.cpos, 0);
+        keys(&mut h, "u");
+        assert_eq!(h.buf, "a 1 2\nb 9\nc\nd 3");
+        // A charwise selection only takes numbers that start inside it.
+        let mut h = TestHarness::new("1 2 3");
+        keys(&mut h, "wv");
+        ctrl(&mut h, 'x');
+        assert_eq!(h.buf, "1 1 3");
+    }
+
+    #[test]
+    fn code_block_objects_take_the_fenced_lines() {
+        let text = "intro\n```rust\nfn a() {}\nfn b() {}\n```\noutro";
+        for (cpos, input, expected) in [
+            (20, "dic", "intro\n```rust\n```\noutro"),
+            (20, "dac", "intro\noutro"),
+            (6, "dic", "intro\n```rust\n```\noutro"),
+            (0, "dic", text),
+            (text.len() - 1, "dac", text),
+        ] {
+            let mut h = TestHarness::new(text);
+            h.cpos = cpos;
+            keys(&mut h, input);
+            assert_eq!(h.buf, expected, "{input} at {cpos}");
+        }
+        let mut h = TestHarness::new(text);
+        h.cpos = 20;
+        keys(&mut h, "yic");
+        assert_eq!(h.clipboard.kill_ring.current(), "fn a() {}\nfn b() {}");
+        assert!(h.clipboard.kill_ring.is_linewise());
+    }
+
+    #[test]
+    fn code_block_closing_fence_must_match_the_opening_one() {
+        let text = "~~~~\n```\ncode\n~~~\n~~~~~\nafter";
+        let mut h = TestHarness::new(text);
+        h.cpos = 10;
+        keys(&mut h, "dic");
+        assert_eq!(h.buf, "~~~~\n~~~~~\nafter");
+        let mut h = TestHarness::new("```\n```\nx");
+        keys(&mut h, "dic");
+        assert_eq!(h.buf, "```\n```\nx", "an empty block has no inside");
     }
 }

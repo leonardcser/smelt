@@ -161,7 +161,8 @@ In normal mode, several emacs-style keys take on their vim meanings:
 | `Ctrl+K` | History prev         | Kill to end of line   |
 | `Ctrl+R` | Redo                 | History search        |
 | `v` / `V` | Visual / visual-line selection | n/a            |
-| `Ctrl+A` | No-op                | Start of line         |
+| `Ctrl+A` | Add to number        | Start of line         |
+| `Ctrl+X` | Subtract from number | `Ctrl+X Ctrl+E` chord |
 | `Ctrl+W` | No-op                | Delete word backward  |
 
 In the prompt, normal and visual mode support:
@@ -179,21 +180,32 @@ In the prompt, normal and visual mode support:
   `it` `at`, and the quotes `i"` `a"`, `i'` `a'`, ``i` `` ``a` ``. They take counts
   (`2daw`, `d2i(`), look ahead on the line when the cursor is not inside one, and
   grow a visual selection when repeated (`viwiw`, `vi(i(`). `iq` `aq` take the
-  nearest quote pair and `il` `al` the line.
+  nearest quote pair, `il` `al` the line, and `ic` `ac` the lines of the fenced
+  code block around the cursor, without or with its fences.
 - **Visual:** `v` and `V`, `gv` to reselect the last selection, `o` to swap ends,
   and text objects. In `v` the cursor can rest on the line break, so `v$` and `vl`
   at the end of a line select it too. `d` `x` `c` `s` `y` `r` `J` `gJ` `p` `P` `U`
-  `u` `~` act on the selection, `D` `X` `C` `S` `R` `Y` on its whole lines, and `.`
-  repeats the command over the same amount of text from the cursor.
-- **Operators:** `d`, `c`, `y`, `gU`, `gu` and `g~` with any motion above or a text
-  object, plus `dd` `cc` `yy` `gUU` `guu` `g~~`, `D` `C` `Y` (to the end of the
-  line, as Neovim's `Y`), `x` `X` `s` `S`, `r`, `~`, `J` `gJ`, `p` `P` (with counts),
-  `i` `a` `I` `A` `o` `O` `gi` `gI` (counts type the insert again), `u` and
-  `Ctrl+R`, and `.` to repeat the last change.
+  `u` `~` `>` `<` act on the selection, `D` `X` `C` `S` `R` `Y` on its whole lines,
+  `Ctrl+A` / `Ctrl+X` add to the first number of each selected line (a count sets
+  the amount), and `.` repeats the command over the same amount of text from the
+  cursor.
+- **Operators:** `d`, `c`, `y`, `gU`, `gu`, `g~`, `>` and `<` with any motion above
+  or a text object, plus `dd` `cc` `yy` `gUU` `guu` `g~~` `>>` `<<`, `D` `C` `Y` (to
+  the end of the line, as Neovim's `Y`), `x` `X` `s` `S`, `r`, `~`, `J` `gJ`, `p` `P`
+  (with counts), `i` `a` `I` `A` `o` `O` `gi` `gI` (counts type the insert again),
+  `u` and `Ctrl+R`, and `.` to repeat the last change. `>` and `<` shift lines by
+  two spaces; `<` takes a tab as one shift.
+- **Numbers:** `Ctrl+A` and `Ctrl+X` add or subtract the count (default 1) to the
+  number under or after the cursor: decimal (with a leading `-`), `0x` hex and
+  `0b` binary. Zero padding and hex case are kept.
+- **Registers:** `"a` to `"z` before a yank, delete, change or put name a register;
+  `"A` to `"Z` append to it. `"0` holds the last yank, `"_` discards, `".` puts the
+  last inserted text, and `""`, `"+` and `"*` are the unnamed register, which the
+  system clipboard mirrors. A named register leaves the clipboard as it was.
 - **Surround:** `ys`, `ds` and `cs`.
 
-Not supported yet: registers (`"`), macros (`q`, `@`), marks, `>` `<` `=`, replace
-mode (`R` in normal mode), blockwise visual (`Ctrl+V`), and `Ctrl+A` / `Ctrl+X`.
+Not supported yet: macros (`q`, `@`), marks in the prompt, `=`, replace mode (`R`
+in normal mode), and blockwise visual (`Ctrl+V`).
 Prompt visual selections scope submit/steer actions to
 the selection.
 
@@ -228,6 +240,8 @@ only as a whole word.
 With vim enabled, `G`, `gg`, `{` `}`, the block motions and searches are jumps:
 `Ctrl+O` goes back to where the last one started, `Ctrl+I` or `Tab` forward again
 (both take counts), and `''` or ``` `` ``` toggles between the last two positions.
+`m` plus a letter sets a mark at the cursor and `'` or `` ` `` plus that letter
+jumps back to it.
 Without vim, `Ctrl+O` and `Tab` walk it while the transcript is focused. Plugins
 use `win:jump{ older = n }`, `{ newer = n }` or `{ previous = true }`.
 
@@ -237,6 +251,8 @@ With vim enabled the transcript supports `h` `j` `k` `l`, `gj` `gk`, `w` `W` `b`
 `*` and `#` search for the word under the cursor. `v` / `V` start a visual
 selection (`gv` brings the last one back), and `y` takes a motion, a text object or
 `yy`; the yanked text flashes and the cursor stays at the start of what was yanked.
+Text objects reach across rows and take counts (`y2i(`, `yap`), and `"a` before a
+yank puts it in a register.
 `ic` selects the code of the fenced code block under the cursor and `ac` the whole
 block, so `yic` copies the code and `yac` copies it as fenced markdown.
 `zz` `zt` `zb` put the cursor row in the middle, at the top or at the bottom of the

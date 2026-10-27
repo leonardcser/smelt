@@ -93,6 +93,9 @@ pub struct DisplayRow {
     pub atomic_ranges: Vec<DisplayAtomicRange>,
     /// The row belongs to a fenced code block.
     pub code_block: bool,
+    /// The row is the first of a document block, such as a transcript
+    /// message. Text objects and `%` stay inside one block.
+    pub block_start: bool,
 }
 
 impl DisplayRow {
@@ -104,11 +107,17 @@ impl DisplayRow {
             actions: Vec::new(),
             atomic_ranges: Vec::new(),
             code_block: false,
+            block_start: false,
         }
     }
 
     pub fn with_code_block(mut self, code_block: bool) -> Self {
         self.code_block = code_block;
+        self
+    }
+
+    pub fn with_block_start(mut self, block_start: bool) -> Self {
+        self.block_start = block_start;
         self
     }
 

@@ -1,5 +1,5 @@
 //! Vim's jump list: the positions a window left through jumps such as `G`,
-//! `}` or `]u`, walked with `Ctrl-O` and `Ctrl-I`.
+//! `}` or `]u`, walked with `Ctrl-O` and `Ctrl-I`, and the marks `m` sets.
 
 use crate::row::DocPosition;
 
@@ -15,6 +15,8 @@ pub enum JumpMove {
     Newer(usize),
     /// `''`: the position before the latest jump; repeating it toggles.
     Previous,
+    /// `'a`: the position mark `a` holds.
+    Mark(char),
 }
 
 /// Rows are the identity of an entry: a later jump from the same row replaces
@@ -25,6 +27,8 @@ pub struct JumpList {
     /// The entry the cursor stands on after moving through the list, or
     /// `entries.len()` while it is at the newest end.
     index: usize,
+    /// Marks `a`-`z`.
+    marks: [Option<DocPosition>; 26],
 }
 
 impl JumpList {
@@ -38,14 +42,26 @@ impl JumpList {
         self.index = self.entries.len();
     }
 
+    /// `m{name}`: remember `at` as mark `name`, one of `a`-`z`.
+    pub fn set_mark(&mut self, name: char, at: DocPosition) {
+        if let Some(mark) = mark_index(name).and_then(|index| self.marks.get_mut(index)) {
+            *mark = Some(at);
+        }
+    }
+
     /// Where `jump` takes a cursor standing on `from`, or `None` when the list
-    /// has nothing that far back or forward.
+    /// has nothing that far back or forward, or the mark is not set.
     pub fn resolve(&mut self, from: DocPosition, jump: JumpMove) -> Option<DocPosition> {
         match jump {
             JumpMove::Older(count) => self.step(from, -(count.max(1) as isize)),
             JumpMove::Newer(count) => self.step(from, count.max(1) as isize),
             JumpMove::Previous => {
                 let target = *self.entries.last().filter(|entry| entry.row != from.row)?;
+                self.record(from);
+                Some(target)
+            }
+            JumpMove::Mark(name) => {
+                let target = (*self.marks.get(mark_index(name)?)?)?;
                 self.record(from);
                 Some(target)
             }
@@ -67,6 +83,11 @@ impl JumpList {
         self.index = target;
         Some(position)
     }
+}
+
+fn mark_index(name: char) -> Option<usize> {
+    name.is_ascii_lowercase()
+        .then(|| usize::from(name as u8 - b'a'))
 }
 
 #[cfg(test)]
@@ -154,5 +175,16 @@ mod tests {
         let jumps = list(&rows);
         assert_eq!(jumps.entries.len(), CAPACITY);
         assert_eq!(jumps.entries[0], at(5));
+    }
+
+    #[test]
+    fn marks_return_to_where_they_were_set_and_leave_a_jump_back() {
+        let mut jumps = JumpList::default();
+        jumps.set_mark('a', at(7));
+        assert_eq!(jumps.resolve(at(40), JumpMove::Mark('a')), Some(at(7)));
+        assert_eq!(jumps.resolve(at(7), JumpMove::Previous), Some(at(40)));
+        assert_eq!(jumps.resolve(at(7), JumpMove::Mark('b')), None);
+        jumps.set_mark('A', at(3));
+        assert_eq!(jumps.resolve(at(7), JumpMove::Mark('A')), None);
     }
 }

@@ -443,9 +443,24 @@ impl TranscriptPresentationState {
         history: &BlockHistory,
         view_state: ViewState,
     ) -> bool {
+        let _perf = smelt_perf::perf::begin("transcript:presentation:set_all");
         let mut changed = false;
-        for id in plan.ids().collect::<Vec<_>>() {
-            changed |= self.set(policy, plan, history, id, view_state);
+        for (index, node) in plan.nodes.iter().enumerate() {
+            let id = node.id();
+            let Some(default) = plan.node_default_view_state(policy, history, index) else {
+                continue;
+            };
+            changed |= if view_state == default {
+                self.overrides.remove(&id).is_some()
+            } else {
+                self.overrides.insert(id, view_state) != Some(view_state)
+            };
+        }
+        if changed {
+            // Too many nodes changed for the change log to list them.
+            self.bump();
+            self.changes.clear();
+            self.changes_floor = self.generation;
         }
         changed
     }
@@ -808,6 +823,11 @@ impl TranscriptScene {
         self.nodes.get(index).map(RenderNode::id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn ids(&self) -> impl Iterator<Item = RenderNodeId> + '_ {
+        self.nodes.iter().map(RenderNode::id)
+    }
+
     pub(crate) fn contains_id(&self, id: RenderNodeId) -> bool {
         self.node_index.contains(id)
     }
@@ -926,10 +946,6 @@ impl TranscriptScene {
             RenderNode::Block { block_index, .. } => Some(*block_index),
             RenderNode::Group(group) => Some(group.child_range.start),
         }
-    }
-
-    pub(crate) fn ids(&self) -> impl Iterator<Item = RenderNodeId> + '_ {
-        self.nodes.iter().map(RenderNode::id)
     }
 }
 

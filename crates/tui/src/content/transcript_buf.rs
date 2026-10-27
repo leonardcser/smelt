@@ -4037,6 +4037,10 @@ impl TranscriptProjection {
         if node_range.start >= node_range.end {
             return DisplayRows::empty();
         }
+        let node_starts: Vec<RowIndex> = node_range
+            .clone()
+            .map(|index| self.measurements.active.prefix_row(index))
+            .collect();
 
         let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
@@ -4066,6 +4070,7 @@ impl TranscriptProjection {
                 let highlights = metadata.highlights_at(index);
                 let selectable =
                     crate::smelt_edit::selectable_byte_ranges_for_line(text, &highlights);
+                let row_index = materialized.row_base + index as RowIndex;
                 let row = DisplayRow::new(text.clone(), selectable)
                     .with_actions(crate::smelt_edit::display_actions_for_spans(&highlights))
                     .with_atomic_spans(&highlights)
@@ -4073,7 +4078,8 @@ impl TranscriptProjection {
                         metadata
                             .decoration_at(index)
                             .is_some_and(|decoration| decoration.code_block),
-                    );
+                    )
+                    .with_block_start(node_starts.binary_search(&row_index).is_ok());
                 if index == local_start {
                     row
                 } else if metadata

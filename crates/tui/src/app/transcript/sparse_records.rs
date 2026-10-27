@@ -253,7 +253,7 @@ impl SparseTranscriptRecords {
 
     pub(super) fn navigation_record(
         &self,
-        role: &str,
+        roles: &[&str],
         anchor: smelt_store::TranscriptRecordOffset,
         direction: TranscriptNavigationDirection,
     ) -> Option<(usize, StoredBlockWithId)> {
@@ -263,7 +263,9 @@ impl SparseTranscriptRecords {
                     .range(..anchor)
                     .rev()
                     .find_map(|(index, record)| {
-                        (record.stored.kind.as_str() == role).then(|| (index.get(), record.clone()))
+                        roles
+                            .contains(&record.stored.kind.as_str())
+                            .then(|| (index.get(), record.clone()))
                     })
             }
             TranscriptNavigationDirection::Next => {
@@ -272,7 +274,9 @@ impl SparseTranscriptRecords {
                 self.records
                     .range(after_anchor..)
                     .find_map(|(index, record)| {
-                        (record.stored.kind.as_str() == role).then(|| (index.get(), record.clone()))
+                        roles
+                            .contains(&record.stored.kind.as_str())
+                            .then(|| (index.get(), record.clone()))
                     })
             }
         }

@@ -766,8 +766,11 @@ enum TranscriptMaterializationPlan {
 fn inert_sparse_gap_rows(count: RowIndex) -> Vec<DisplayRow> {
     (0..count)
         .map(|_| {
+            // Rows of records not loaded yet: each one ends any scan that
+            // stays inside a block.
             DisplayRow::new(String::new(), Vec::new())
                 .with_break_before(crate::smelt_edit::RowBreak::Hard)
+                .with_block_start(true)
         })
         .collect()
 }
@@ -3487,7 +3490,7 @@ impl TranscriptDocument {
     fn containing_navigation_block(
         &self,
         anchor: TranscriptSemanticAnchor,
-        role: &str,
+        roles: &[&str],
     ) -> Option<TranscriptNavigationBlock> {
         if anchor.row_offset == 0 {
             return None;
@@ -3500,7 +3503,7 @@ impl TranscriptDocument {
                 .record(smelt_store::TranscriptRecordOffset::new(
                     anchor.record_index,
                 ))?;
-            if record.block_id != anchor.block_id || record.stored.kind.as_str() != role {
+            if record.block_id != anchor.block_id || !roles.contains(&record.stored.kind.as_str()) {
                 return None;
             }
             return Self::navigation_block_from_record(anchor.record_index, record);
@@ -3508,7 +3511,7 @@ impl TranscriptDocument {
 
         let history = self.history();
         if history.order.get(anchor.record_index).copied() != Some(anchor.block_id)
-            || transcript_history_role(history, anchor.block_id) != role
+            || !roles.contains(&transcript_history_role(history, anchor.block_id))
         {
             return None;
         }
@@ -3521,15 +3524,17 @@ impl TranscriptDocument {
         })
     }
 
-    fn navigation_block_from_anchor(
+    /// Nearest actionable block matching any of `roles` in `direction`. A block
+    /// containing the anchor below its first row counts as the previous one.
+    pub(crate) fn navigation_block(
         &self,
         anchor: TranscriptSemanticAnchor,
-        role: &str,
+        roles: &[&str],
         direction: TranscriptNavigationDirection,
     ) -> Option<TranscriptNavigationBlock> {
         let _perf = smelt_perf::perf::begin("transcript:navigation:block_from_anchor");
         if direction == TranscriptNavigationDirection::Previous {
-            if let Some(block) = self.containing_navigation_block(anchor, role) {
+            if let Some(block) = self.containing_navigation_block(anchor, roles) {
                 return Some(block);
             }
         }
@@ -3539,8 +3544,15 @@ impl TranscriptDocument {
             let loaded = self
                 .records
                 .sparse
-                .navigation_record(role, record_anchor, direction);
-            let stored = self.navigation_record_from_store(role, anchor.record_index, direction);
+                .navigation_record(roles, record_anchor, direction);
+            let stored = roles
+                .iter()
+                .filter_map(|role| {
+                    self.navigation_record_from_store(role, anchor.record_index, direction)
+                })
+                .fold(None, |best, record| {
+                    Self::choose_navigation_record(best, Some(record), direction)
+                });
             let (index, record) = Self::choose_navigation_record(loaded, stored, direction)?;
             return Self::navigation_block_from_record(index, &record);
         }
@@ -3566,7 +3578,8 @@ impl TranscriptDocument {
             ),
         };
         for (index, block_id) in iter {
-            if transcript_history_role(history, block_id) != role {
+            let role = transcript_history_role(history, block_id);
+            if !roles.contains(&role) {
                 continue;
             }
             let first_line = transcript_raw_first_line(history, block_id);
@@ -3576,32 +3589,11 @@ impl TranscriptDocument {
             return Some(TranscriptNavigationBlock {
                 record_index: index,
                 block_id,
-                role: transcript_history_role(history, block_id),
+                role,
                 first_line,
             });
         }
         None
-    }
-
-    /// Nearest actionable block matching any of `roles` in `direction`. A block
-    /// containing the anchor below its first row counts as the previous one.
-    pub(crate) fn navigation_block(
-        &self,
-        anchor: TranscriptSemanticAnchor,
-        roles: &[&str],
-        direction: TranscriptNavigationDirection,
-    ) -> Option<TranscriptNavigationBlock> {
-        let candidates = roles
-            .iter()
-            .filter_map(|role| self.navigation_block_from_anchor(anchor, role, direction));
-        match direction {
-            TranscriptNavigationDirection::Previous => {
-                candidates.max_by_key(|block| block.record_index)
-            }
-            TranscriptNavigationDirection::Next => {
-                candidates.min_by_key(|block| block.record_index)
-            }
-        }
     }
 
     #[cfg(test)]
@@ -6278,6 +6270,7 @@ impl TranscriptDocument {
         width: u16,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
+        let _perf = smelt_perf::perf::begin("transcript:fold_all");
         self.prepare_layout(lua, width);
         let changed = self
             .content

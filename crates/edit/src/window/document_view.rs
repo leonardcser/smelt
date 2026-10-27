@@ -1,26 +1,36 @@
-use super::document_motion::{clamp_to_row_text, resolve_rows, RowEnv};
+use super::document_motion::{
+    clamp_to_row_text, over_rows, resolve_rows, Edges, RowEnv, ScanBound,
+};
 use super::*;
 use crate::jumplist::JumpMove;
 use crate::motions::{operator_span, resolve, Motion, Reach, Span, Use};
 use crate::row::{DisplayDocument, DisplayRow, DisplayRows, RowBreak, TextRange};
+use crate::text_objects::{select_object, TextObjectKind, TextObjectSpec, VisualArea};
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
 use std::ops::Range;
 use std::time::Instant;
 
+/// A text object a viewer selects or yanks, such as `2i(`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DocumentTextObject {
-    spec: crate::text_objects::TextObjectSpec,
+    spec: TextObjectSpec,
+    count: usize,
 }
 
 impl DocumentTextObject {
     pub fn new(inner: bool, kind: char) -> Option<Self> {
         Some(Self {
-            spec: crate::text_objects::TextObjectSpec::new(inner, kind)?,
+            spec: TextObjectSpec::new(inner, kind)?,
+            count: 1,
         })
     }
 
-    pub(crate) fn spec(self) -> crate::text_objects::TextObjectSpec {
-        self.spec
+    /// The same object, `count` of them.
+    pub fn counted(self, count: usize) -> Self {
+        Self {
+            count: count.max(1),
+            ..self
+        }
     }
 }
 
@@ -53,6 +63,8 @@ pub enum DocumentCommand {
         count: Option<usize>,
     },
     Jump(JumpMove),
+    /// `m{a-z}`: set a mark at the cursor.
+    SetMark(char),
     StartVisual,
     StartVisualLine,
     YankSelection,
@@ -156,28 +168,29 @@ impl DisplayDocument for MaterializedBufferDocument<'_> {
 
     fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
         let start = range.start;
-        let rows = range
-            .filter_map(|row| {
-                if !self.materialized.contains_abs_row(row) {
-                    return None;
+        let rows = (range.start..range.end.min(self.materialized.total_rows))
+            .map(|row| {
+                let local = row_to_usize(self.materialized.local_row(row));
+                // A row outside the loaded slice reads as an empty one.
+                let line = self
+                    .materialized
+                    .contains_abs_row(row)
+                    .then(|| self.buf.get_line(local))
+                    .flatten();
+                let Some(line) = line else {
+                    return DisplayRow::new(String::new(), Vec::new())
+                        .with_break_before(RowBreak::Hard);
+                };
+                let display_row = DisplayRow::new(line.to_string(), Vec::new())
+                    .with_atomic_spans(&self.buf.highlights_at(local));
+                let decoration = self.buf.decoration_at(local);
+                if row == start {
+                    display_row
+                } else if decoration.soft_wrapped || decoration.copy_continuation {
+                    display_row.with_break_before(RowBreak::Soft)
+                } else {
+                    display_row.with_break_before(RowBreak::Hard)
                 }
-                let local = self.materialized.local_row(row);
-                self.buf.get_line(row_to_usize(local)).map(|line| {
-                    let display_row = DisplayRow::new(line.to_string(), Vec::new())
-                        .with_atomic_spans(&self.buf.highlights_at(row_to_usize(local)));
-                    if row == start {
-                        display_row
-                    } else if self.buf.decoration_at(row_to_usize(local)).soft_wrapped
-                        || self
-                            .buf
-                            .decoration_at(row_to_usize(local))
-                            .copy_continuation
-                    {
-                        display_row.with_break_before(RowBreak::Soft)
-                    } else {
-                        display_row.with_break_before(RowBreak::Hard)
-                    }
-                })
             })
             .collect();
         DisplayRows { rows }
@@ -733,6 +746,12 @@ impl Window {
         vim::handle_viewer_key(key, &mut text.vim_mode, &mut text.vim_state)
     }
 
+    /// The register `"` named for the viewer command about to run, which
+    /// clears it.
+    pub fn take_viewer_register(&mut self) -> Option<char> {
+        self.text_state_mut().vim_state.take_register()
+    }
+
     /// Save the Visual selection in progress so `gv` can restore it once the
     /// key being handled leaves Visual mode.
     fn remember_visual(&mut self) {
@@ -927,6 +946,11 @@ impl Window {
                 .resolve(from, jump)
                 .map(DocumentCommand::GotoPosition);
         }
+        if let DocumentCommand::SetMark(name) = command {
+            let at = self.viewer_doc_cursor(buf)?;
+            self.jumps.set_mark(name, at);
+            return None;
+        }
         if command.is_jump() {
             if let Some(from) = self.viewer_doc_cursor(buf) {
                 self.record_jump(from);
@@ -1010,9 +1034,10 @@ impl Window {
             },
             DocumentCommand::YankTextObject(object) => {
                 let source = buf.text();
-                if let Some((start, end)) =
-                    crate::text_objects::text_object_for_spec(&source, self.cpos(), object.spec())
+                if let Ok(selection) =
+                    select_object(&source, self.cpos(), None, object.spec, object.count)
                 {
+                    let (start, end) = selection.range(&source);
                     copy = Some(start..end);
                     self.set_cpos(start);
                     self.set_curswant(None);
@@ -1072,24 +1097,20 @@ impl Window {
             }
             DocumentCommand::TextObject(object) => {
                 let source = buf.text();
-                let spec = object.spec();
-                if let Some((start, end)) =
-                    crate::text_objects::text_object_for_spec(&source, self.cpos(), spec)
+                let area = VisualArea {
+                    anchor: self.vim_state().visual_anchor_at(&source),
+                    linewise: self.vim_mode() == VimMode::VisualLine,
+                };
+                if let Ok(selection) =
+                    select_object(&source, self.cpos(), Some(area), object.spec, object.count)
                 {
-                    self.text_state_mut().vim_state.visual_anchor = start;
-                    let cursor = if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
-                        self.set_vim_mode(VimMode::VisualLine);
-                        if end > start {
-                            text::line_start(&source, text::prev_grapheme_boundary(&source, end))
-                        } else {
-                            start
-                        }
-                    } else if end > 0 {
-                        text::prev_grapheme_boundary(&source, end)
+                    self.set_vim_mode(if selection.linewise {
+                        VimMode::VisualLine
                     } else {
-                        end
-                    };
-                    self.set_cpos(cursor);
+                        VimMode::Visual
+                    });
+                    self.text_state_mut().vim_state.visual_anchor = selection.start;
+                    self.set_cpos(selection.end);
                     self.resync(buf, viewport_rows);
                 }
             }
@@ -1101,7 +1122,9 @@ impl Window {
                 let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
                 self.pan_by_columns(delta, viewport_cols);
             }
-            DocumentCommand::OpenAction | DocumentCommand::Jump(_) => {}
+            DocumentCommand::OpenAction
+            | DocumentCommand::Jump(_)
+            | DocumentCommand::SetMark(_) => {}
             DocumentCommand::ClearSelection => {
                 self.clear_selection_anchor();
                 self.text_state_mut().drag_endpoint = None;
@@ -1417,7 +1440,7 @@ impl DocumentViewExecutor {
             }
             DocumentCommand::YankTextObject(object) => {
                 if let Some(selection) =
-                    document_text_object_range(document, *state, current, object.spec())
+                    document_text_object_range(document, total_rows, current, None, object)
                 {
                     let range = if selection.linewise {
                         DocRange {
@@ -1448,8 +1471,11 @@ impl DocumentViewExecutor {
                 }
             }
             DocumentCommand::TextObject(object) => {
+                let visual = state
+                    .selection_anchor
+                    .map(|anchor| (anchor, *vim_mode == VimMode::VisualLine));
                 if let Some(selection) =
-                    document_text_object_range(document, *state, current, object.spec())
+                    document_text_object_range(document, total_rows, current, visual, object)
                 {
                     state.selection_anchor = Some(selection.start);
                     state.cursor = selection.cursor;
@@ -1475,7 +1501,9 @@ impl DocumentViewExecutor {
                 *scroll_left =
                     pan_document_columns(document, *state, *scroll_left, delta, viewport_cols);
             }
-            DocumentCommand::OpenAction | DocumentCommand::Jump(_) => {}
+            DocumentCommand::OpenAction
+            | DocumentCommand::Jump(_)
+            | DocumentCommand::SetMark(_) => {}
             DocumentCommand::ClearSelection => {
                 state.selection_anchor = None;
                 state.drag_endpoint = None;
@@ -1987,37 +2015,59 @@ fn advance_document_position_if_on_char<D: DisplayDocument + ?Sized>(
     pos
 }
 
+/// `object` around `cursor`, over the rows on either side, or grown from a
+/// Visual selection at `visual` (its anchor, and whether it is linewise), as the
+/// prompt selects it.
 fn document_text_object_range<D: DisplayDocument + ?Sized>(
     document: &mut D,
-    state: DocumentViewState,
+    total_rows: RowIndex,
     cursor: DocPosition,
-    spec: crate::text_objects::TextObjectSpec,
+    visual: Option<(DocPosition, bool)>,
+    object: DocumentTextObject,
 ) -> Option<RowTextObjectSelection> {
-    if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
-        return document_paragraph_text_object(document, state, cursor, spec.inner);
-    }
-    if spec.kind == crate::text_objects::TextObjectKind::CodeBlock {
+    let spec = object.spec;
+    if spec.kind == TextObjectKind::CodeBlock {
         return document_code_block_text_object(document, cursor.row, spec.inner);
     }
-
-    let row = document
-        .materialize(cursor.row..cursor.row.saturating_add(1))
-        .rows
-        .into_iter()
-        .next()?;
-    let col = text::snap_grapheme(&row.text, cursor.byte_col.min(row.text.len()));
-    let (start, end) = crate::text_objects::text_object_for_spec(&row.text, col, spec)?;
-    Some(RowTextObjectSelection {
-        start: DocPosition {
-            row: cursor.row,
-            byte_col: start,
-        },
-        cursor: DocPosition {
-            row: cursor.row,
-            byte_col: end,
-        },
-        include_cursor_cell: false,
-        linewise: false,
+    // Objects held to a line fail for good; the rest may lie past the rows loaded.
+    let failed = match spec.kind {
+        TextObjectKind::Quote(_) | TextObjectKind::AnyQuote | TextObjectKind::Line => {
+            Edges::default()
+        }
+        _ => Edges::BOTH,
+    };
+    let anchor_row = visual.map_or(cursor.row, |(anchor, _)| anchor.row);
+    let around = cursor.row.min(anchor_row)..cursor.row.max(anchor_row).saturating_add(1);
+    over_rows(document, around, total_rows, ScanBound::Block, |window| {
+        let place = || {
+            let area = match visual {
+                Some((anchor, linewise)) => Some(VisualArea {
+                    anchor: window.offset(anchor)?,
+                    linewise,
+                }),
+                None => None,
+            };
+            Some((window.offset(cursor)?, area))
+        };
+        let Some((at, area)) = place() else {
+            return (None, Edges::default());
+        };
+        match select_object(&window.text, at, area, spec, object.count) {
+            Ok(selection) => {
+                let low = selection.start.min(selection.end);
+                let high = selection.start.max(selection.end);
+                (
+                    Some(RowTextObjectSelection {
+                        start: window.position(selection.start),
+                        cursor: window.position(selection.end),
+                        include_cursor_cell: selection.inclusive,
+                        linewise: selection.linewise,
+                    }),
+                    window.edges(low..high),
+                )
+            }
+            Err(_) => (None, failed),
+        }
     })
 }
 
@@ -2084,53 +2134,6 @@ fn document_code_block_text_object<D: DisplayDocument + ?Sized>(
         cursor: end,
         include_cursor_cell: false,
         linewise: !inner,
-    })
-}
-
-fn document_paragraph_text_object<D: DisplayDocument + ?Sized>(
-    document: &mut D,
-    state: DocumentViewState,
-    cursor: DocPosition,
-    inner: bool,
-) -> Option<RowTextObjectSelection> {
-    let range = state.materialized.materialized_range();
-    if range.is_empty() || !range.contains(&cursor.row) {
-        return None;
-    }
-    let rows = document.materialize(range.clone()).rows;
-    if rows.is_empty() {
-        return None;
-    }
-    let local = row_to_usize(cursor.row.saturating_sub(range.start)).min(rows.len() - 1);
-    let lines: Vec<crate::text_objects::ParagraphLine> = rows
-        .iter()
-        .map(|row| crate::text_objects::ParagraphLine {
-            is_blank: row.text.bytes().all(|b| matches!(b, b' ' | b'\t')),
-        })
-        .collect();
-    let range = crate::text_objects::paragraph_line_range(&lines, local, inner)?;
-    let last = range.end.saturating_sub(1) as RowIndex;
-    let start = DocPosition {
-        row: state
-            .materialized
-            .materialized_range()
-            .start
-            .saturating_add(range.start as RowIndex),
-        byte_col: 0,
-    };
-    let cursor = DocPosition {
-        row: state
-            .materialized
-            .materialized_range()
-            .start
-            .saturating_add(last),
-        byte_col: 0,
-    };
-    Some(RowTextObjectSelection {
-        start,
-        cursor,
-        include_cursor_cell: false,
-        linewise: true,
     })
 }
 

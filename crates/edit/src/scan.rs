@@ -1403,6 +1403,290 @@ impl<'a> Scan<'a> {
         }
         true
     }
+
+    // ── Tags ─────────────────────────────────────────────────────────
+
+    /// Whether the cursor is on an end tag `</aaa>` (`end_tag`), or on a start
+    /// tag `<aaa>` that does not close itself.
+    fn in_html_tag(&self, end_tag: bool) -> bool {
+        let line = self.line(self.cur.line);
+        let bytes = line.as_bytes();
+        let mut p = self.cur.col.min(line.len());
+        while p > 0 {
+            if bytes.get(p) == Some(&b'<') {
+                break;
+            }
+            p = prev_grapheme_boundary(line, p);
+            if bytes[p] == b'>' {
+                break;
+            }
+        }
+        if bytes.get(p) != Some(&b'<') {
+            return false;
+        }
+        let slash = bytes.get(p + 1) == Some(&b'/');
+        if end_tag || slash {
+            return end_tag && slash;
+        }
+        let mut pos = Pos {
+            line: self.cur.line,
+            col: p,
+        };
+        let mut last = '\0';
+        loop {
+            if self.inc(&mut pos) < 0 {
+                return false;
+            }
+            match self.gchar(pos) {
+                '>' => return last != '/',
+                c => last = c,
+            }
+        }
+    }
+
+    /// The `<` of the nearest start tag before `before` that no end tag after
+    /// it closes, as vim's `searchpair()` finds it.
+    fn unclosed_start_tag(&self, before: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (at, _) in self.buf[..before].rmatch_indices('<') {
+            if end_tag_at(self.buf, at, None) {
+                depth += 1;
+            } else if start_tag_at(self.buf, at, None) {
+                if depth == 0 {
+                    return Some(at);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    /// The `<` of the end tag closing a `name` tag whose name starts at `after`.
+    fn matching_end_tag(&self, after: usize, name: &str) -> Option<usize> {
+        let mut depth = 0usize;
+        for (at, _) in self.buf[after..].match_indices('<') {
+            let at = after + at;
+            if end_tag_at(self.buf, at, Some(name)) {
+                if depth == 0 {
+                    return Some(at);
+                }
+                depth -= 1;
+            } else if start_tag_at(self.buf, at, Some(name)) {
+                depth += 1;
+            }
+        }
+        None
+    }
+
+    /// `it`, `at`.
+    pub fn current_tagblock(&mut self, count_arg: usize, include: bool) -> bool {
+        let mut count = count_arg;
+        let mut do_include = include;
+        let mut is_inclusive = true;
+        let old_pos = self.cur;
+        let mut old_end = self.cur;
+        let mut old_start = old_end;
+        if self.vis.is_none() {
+            self.decl(&mut old_end);
+        }
+
+        // Starting on a tag selects that tag's block.
+        match self.vis {
+            Some(vis) if vis.start != self.cur => {
+                if vis.start < self.cur {
+                    old_start = vis.start;
+                    self.cur = vis.start;
+                } else {
+                    old_end = vis.start;
+                }
+            }
+            _ => {
+                while self.inindent(1) {
+                    if self.inc_cur() != 0 {
+                        break;
+                    }
+                }
+                if self.in_html_tag(false) {
+                    while self.gchar(self.cur) != '>' {
+                        if self.inc_cur() < 0 {
+                            break;
+                        }
+                    }
+                } else if self.in_html_tag(true) {
+                    while self.gchar(self.cur) != '<' {
+                        if self.dec_cur() < 0 {
+                            break;
+                        }
+                    }
+                    self.dec_cur();
+                    old_end = self.cur;
+                }
+            }
+        }
+
+        loop {
+            for _ in 0..count {
+                match self.unclosed_start_tag(self.offset(self.cur)) {
+                    Some(at) => self.cur = self.pos_at(at),
+                    None => {
+                        self.cur = old_pos;
+                        return false;
+                    }
+                }
+            }
+            let tag_pos = self.cur;
+
+            self.inc_cur();
+            let from = self.offset(self.cur);
+            let len = self.buf[from..]
+                .find(|c: char| c == '>' || c == '\n' || is_white(c))
+                .unwrap_or(self.buf.len() - from);
+            if len == 0 {
+                self.cur = old_pos;
+                return false;
+            }
+            let end = self.matching_end_tag(from, &self.buf[from..from + len]);
+            match end.map(|at| self.pos_at(at)) {
+                Some(end) if end >= old_end => self.cur = end,
+                // An open tag without its end tag: try the one around it.
+                _ => {
+                    count = 1;
+                    self.cur = tag_pos;
+                    continue;
+                }
+            }
+
+            if do_include {
+                while self.gchar(self.cur) != '>' {
+                    if self.inc_cur() < 0 {
+                        break;
+                    }
+                }
+            } else if self.gchar(self.cur) == '<' {
+                // An end tag starting its line keeps the line break, made
+                // exclusive instead of stepping back over it.
+                if self.vis.is_none() && self.cur.col == 0 {
+                    is_inclusive = false;
+                } else {
+                    self.dec_cur();
+                }
+            }
+            let end_pos = self.cur;
+
+            let mut start_pos = tag_pos;
+            if !do_include {
+                // Leave out the start tag, past a `>` in quotes.
+                let mut in_quotes = false;
+                self.cur = tag_pos;
+                while self.inc_cur() >= 0 {
+                    match self.gchar(self.cur) {
+                        '>' if !in_quotes => {
+                            self.inc_cur();
+                            start_pos = self.cur;
+                            break;
+                        }
+                        '"' | '\'' => in_quotes = !in_quotes,
+                        _ => {}
+                    }
+                }
+                self.cur = end_pos;
+                // The same text as the Visual area: take the tags too.
+                if self.vis.is_some() && start_pos == old_start && end_pos == old_end {
+                    do_include = true;
+                    self.cur = old_start;
+                    count = count_arg;
+                    continue;
+                }
+            }
+
+            // An end before the start leaves nothing between the tags.
+            let empty = end_pos < start_pos;
+            match &mut self.vis {
+                Some(vis) => {
+                    if empty {
+                        self.cur = start_pos;
+                    }
+                    vis.start = start_pos;
+                    vis.linewise = false;
+                }
+                None => {
+                    self.oap = Oap {
+                        start: start_pos,
+                        inclusive: is_inclusive && !empty,
+                        linewise: false,
+                    };
+                    if empty {
+                        self.cur = start_pos;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+}
+
+/// Whether a start tag that does not close itself begins at `at`. Without a
+/// `name` any tag counts, as `<[^ \t>/!]\+\%(\_s\_[^>]\{-}[^/]>\|$\|\_s\=>\)`
+/// matches; with one only that tag, ignoring case, as
+/// `<name\>\%(\_s\_[^>]\{-}\_[^/]>\|\_s\?>\)` does.
+fn start_tag_at(buf: &str, at: usize, name: Option<&str>) -> bool {
+    let bytes = buf.as_bytes();
+    let from = at + 1;
+    let after = match name {
+        Some(name) => {
+            let end = from + name.len();
+            match buf.get(from..end) {
+                Some(found) if found.eq_ignore_ascii_case(name) => end,
+                _ => return false,
+            }
+        }
+        None => {
+            from + buf[from..]
+                .find([' ', '\t', '>', '/', '!', '\n'])
+                .unwrap_or(buf.len() - from)
+        }
+    };
+    if after == from {
+        return false;
+    }
+    let space = |i: usize| matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n'));
+    match bytes.get(after) {
+        Some(b'>') => return true,
+        None | Some(b'\n') if name.is_none() => return true,
+        _ if !space(after) => return false,
+        _ => {}
+    }
+    if bytes.get(after + 1) == Some(&b'>') {
+        return true;
+    }
+    // White space, then up to the first `>` with no `/` right before it.
+    let mut i = after + 1;
+    while let Some(&b) = bytes.get(i) {
+        if bytes.get(i + 1) == Some(&b'>') && b != b'/' && (b != b'\n' || name.is_some()) {
+            return true;
+        }
+        if b == b'>' {
+            return false;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether an end tag begins at `at`: any, as `</[^>]*>` matches, or only
+/// `</name>`, ignoring case.
+fn end_tag_at(buf: &str, at: usize, name: Option<&str>) -> bool {
+    let Some(rest) = buf.get(at..).and_then(|rest| rest.strip_prefix("</")) else {
+        return false;
+    };
+    match name {
+        Some(name) => rest
+            .get(..name.len() + 1)
+            .is_some_and(|tag| tag.ends_with('>') && tag[..name.len()].eq_ignore_ascii_case(name)),
+        None => rest
+            .find(['>', '\n'])
+            .is_some_and(|end| rest.as_bytes()[end] == b'>'),
+    }
 }
 
 /// The next unescaped `quote` at or after `col`. With `escape` a backslash

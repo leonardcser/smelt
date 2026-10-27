@@ -8,6 +8,7 @@
 //! that would desync source from the id list.
 
 use crate::attachment::ATTACHMENT_MARKER;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 fn strip_markers(text: String) -> String {
@@ -47,6 +48,9 @@ pub struct KillRing {
     /// Text typed during the last insert session (vim's `".` register), which
     /// `.` types again.
     last_insert: Option<String>,
+    /// Vim's named registers `a`-`z` and the yank register `0`, each with its
+    /// linewise flag.
+    registers: HashMap<char, (String, bool)>,
 }
 
 impl Default for KillRing {
@@ -68,7 +72,33 @@ impl KillRing {
             last_yank_at: None,
             last_clipboard_write: None,
             last_insert: None,
+            registers: HashMap::new(),
         }
+    }
+
+    /// Write `text` to vim register `name`. `a`-`z` and `0` replace it; `A`-`Z`
+    /// append to the lowercase register, on a line of its own when either
+    /// side is linewise.
+    pub fn store(&mut self, name: char, text: String, linewise: bool) {
+        let text = strip_markers(text);
+        if !name.is_ascii_uppercase() {
+            self.registers.insert(name, (text, linewise));
+            return;
+        }
+        let (held, held_linewise) = self.registers.entry(name.to_ascii_lowercase()).or_default();
+        if (*held_linewise || linewise) && !held.is_empty() {
+            held.push('\n');
+        }
+        held.push_str(&text);
+        *held_linewise |= linewise;
+    }
+
+    /// The text of vim register `name` and whether it is linewise; `A`-`Z`
+    /// read their lowercase register.
+    pub fn register(&self, name: char) -> Option<(&str, bool)> {
+        self.registers
+            .get(&name.to_ascii_lowercase())
+            .map(|(text, linewise)| (text.as_str(), *linewise))
     }
 
     /// The text typed during the last insert session, when it was plain typing.
@@ -163,10 +193,16 @@ impl KillRing {
     /// so hosts can detect that a yank happened. Clears `last_yank_at` so
     /// deletes don't inherit a prior yank's flash; call `mark_yanked` after for yanks.
     pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
+        self.set_quietly(text, linewise, start, end);
+        self.yank_tick = self.yank_tick.wrapping_add(1);
+    }
+
+    /// `set_with_source` without bumping `yank_tick`, so hosts leave the system
+    /// clipboard alone: a write to a named register also sets the unnamed one.
+    pub fn set_quietly(&mut self, text: String, linewise: bool, start: usize, end: usize) {
         self.current = strip_markers(text);
         self.linewise = linewise;
         self.source_range = Some((start, end));
-        self.yank_tick = self.yank_tick.wrapping_add(1);
         self.last_yank_at = None;
     }
 

@@ -627,29 +627,32 @@ pub(crate) fn find_reach(kind: FindKind) -> Reach {
 
 // ── Match bracket ───────────────────────────────────────────────────────────
 
-pub(crate) fn find_matching_bracket(buf: &str, cpos: usize) -> Option<usize> {
+/// The first bracket on the cursor line at or after `cpos`, with its pair and
+/// whether its match lies forward.
+fn bracket_at(buf: &str, cpos: usize) -> Option<(usize, char, char, bool)> {
     let eol = line_end(buf, cpos);
-    let mut start = cpos;
-    while start < eol {
-        let c = buf[start..].chars().next()?;
-        if matches!(c, '(' | ')' | '[' | ']' | '{' | '}') {
-            break;
-        }
-        start += c.len_utf8();
-    }
-    if start >= eol && (start >= buf.len() || buf.as_bytes()[start] == b'\n') {
-        return None;
-    }
-    let bracket = buf[start..].chars().next()?;
+    let (i, bracket) = buf[cpos..eol]
+        .char_indices()
+        .find(|(_, c)| matches!(c, '(' | ')' | '[' | ']' | '{' | '}'))?;
     let (open, close, forward) = match bracket {
         '(' => ('(', ')', true),
         ')' => ('(', ')', false),
         '[' => ('[', ']', true),
         ']' => ('[', ']', false),
         '{' => ('{', '}', true),
-        '}' => ('{', '}', false),
-        _ => return None,
+        _ => ('{', '}', false),
     };
+    Some((cpos + i, open, close, forward))
+}
+
+/// Which way `%` from `cpos` searches: `None` when the line has no bracket
+/// at or after the cursor, so there is nothing to search for.
+pub(crate) fn bracket_search_forward(buf: &str, cpos: usize) -> Option<bool> {
+    bracket_at(buf, cpos).map(|(_, _, _, forward)| forward)
+}
+
+pub(crate) fn find_matching_bracket(buf: &str, cpos: usize) -> Option<usize> {
+    let (start, open, close, forward) = bracket_at(buf, cpos)?;
     let mut depth = 0i32;
     if forward {
         for (i, c) in buf[start..].char_indices() {

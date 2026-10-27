@@ -5,9 +5,11 @@ use super::document_view::{
     document_byte_col_at_cell, document_position_cell, document_row_string, BlockMotion,
 };
 use super::*;
-use crate::motions::{find_counted, find_reach, scan_motion, LineTo, Motion, Reach, Use};
+use crate::motions::{
+    bracket_search_forward, find_counted, find_reach, resolve, LineTo, Motion, Reach, Use, WordTo,
+};
 use crate::row::{BlockBoundary, DisplayDocument};
-use crate::scan::Scan;
+use std::ops::Range;
 
 /// What a row motion needs to know besides the motion itself.
 #[derive(Clone, Copy)]
@@ -20,8 +22,10 @@ pub(super) struct RowEnv {
     pub viewport_rows: u16,
 }
 
-/// Rows `scan_brackets` looks through before giving up on a match.
-const BRACKET_SCAN_ROWS: RowIndex = 10_000;
+/// Rows a scan held to a block (`%`, a text object) loads on each side of the
+/// cursor at most, which bounds how long one that finds nothing in a huge
+/// block takes.
+const SCAN_LIMIT_ROWS: RowIndex = 1024;
 
 /// How many rows a block may open with before its text, such as the padding
 /// around a user message.
@@ -81,7 +85,7 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             (at(row, same_cell(doc, row)), Reach::Linewise)
         }
         Motion::Word(..) | Motion::Sentence { .. } | Motion::Paragraph { .. } => {
-            scan_rows(doc, from, motion, n, env)?
+            scan_rows(doc, from, motion, count, env)?
         }
         Motion::LineStart => (at(from.row, 0), Reach::Exclusive),
         Motion::FirstNonBlank => {
@@ -139,10 +143,7 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
                 )
             }
             Some(_) => return None,
-            None => (
-                matching_bracket(doc, from, env.total_rows)?,
-                Reach::Inclusive,
-            ),
+            None => scan_rows(doc, from, motion, None, env)?,
         },
         Motion::Find { kind, ch, repeat } => {
             let line = row_text(doc, from.row)?;
@@ -195,124 +196,211 @@ fn first_non_blank(line: &str) -> usize {
     line.len() - line.trim_start_matches([' ', '\t']).len()
 }
 
-/// Rows a scan starts with on each side of the cursor; it widens while the
-/// scan reaches the edge of what was loaded.
-const SCAN_ROWS: RowIndex = 128;
+/// Rows a scan starts with on each side of the cursor; it widens while it
+/// runs into an edge of what was loaded.
+const SCAN_ROWS: RowIndex = 16;
 
-/// Run a word, sentence or paragraph motion over the rows around `from`, each
-/// row a line, as `motions::resolve` does over plain text.
+/// Consecutive rows joined into one text, a row per line, so the scans that walk
+/// the prompt walk them too.
+pub(super) struct RowWindow {
+    pub text: String,
+    starts: Vec<usize>,
+    first: RowIndex,
+}
+
+impl RowWindow {
+    /// Load `rows`, or `None` when the document returns another number of
+    /// them. With `block` set, keep only the rows of the document blocks that
+    /// hold those rows, and say which sides end at a block's edge.
+    fn load<D: DisplayDocument + ?Sized>(
+        doc: &mut D,
+        rows: Range<RowIndex>,
+        block: Option<Range<RowIndex>>,
+    ) -> Option<(Self, Edges)> {
+        let loaded = doc.materialize(rows.clone()).rows;
+        if loaded.len() as RowIndex != rows.end - rows.start {
+            return None;
+        }
+        let (mut keep, mut ends) = (0..loaded.len(), Edges::default());
+        if let Some(block) = block.filter(|_| !loaded.is_empty()) {
+            let first = row_to_usize(block.start.saturating_sub(rows.start)).min(loaded.len() - 1);
+            let last = row_to_usize(block.end.saturating_sub(rows.start)).max(first + 1);
+            if let Some(start) = (0..=first).rev().find(|&i| loaded[i].block_start) {
+                keep.start = start;
+                ends.before = true;
+            }
+            if let Some(end) = (last..loaded.len()).find(|&i| loaded[i].block_start) {
+                keep.end = end;
+                ends.after = true;
+            }
+        }
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        for row in &loaded[keep.clone()] {
+            if !starts.is_empty() {
+                text.push('\n');
+            }
+            starts.push(text.len());
+            text.push_str(&row.text);
+        }
+        let first = rows.start + keep.start as RowIndex;
+        Some((
+            Self {
+                text,
+                starts,
+                first,
+            },
+            ends,
+        ))
+    }
+
+    /// The byte of `pos`, held inside its row; `None` outside the window.
+    pub fn offset(&self, pos: DocPosition) -> Option<usize> {
+        let line = row_to_usize(pos.row.checked_sub(self.first)?);
+        let start = *self.starts.get(line)?;
+        let end = self
+            .starts
+            .get(line + 1)
+            .map_or(self.text.len(), |next| next - 1);
+        Some(start + pos.byte_col.min(end - start))
+    }
+
+    pub fn position(&self, offset: usize) -> DocPosition {
+        let line = self.line(offset);
+        DocPosition {
+            row: self.first + line as RowIndex,
+            byte_col: offset - self.starts[line],
+        }
+    }
+
+    fn line(&self, offset: usize) -> usize {
+        self.starts.partition_point(|&start| start <= offset).max(1) - 1
+    }
+
+    /// Which edges of the window the bytes `range` touch.
+    pub fn edges(&self, range: Range<usize>) -> Edges {
+        Edges {
+            before: self.line(range.start) == 0,
+            after: self.line(range.end) + 1 == self.starts.len(),
+        }
+    }
+}
+
+/// The edges of a window a scan ran into, where more rows may change its result.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Edges {
+    pub before: bool,
+    pub after: bool,
+}
+
+impl Edges {
+    pub const BOTH: Self = Self {
+        before: true,
+        after: true,
+    };
+}
+
+/// How far a scan over rows may reach.
+#[derive(Clone, Copy)]
+pub(super) enum ScanBound {
+    /// Across blocks, to the document's ends.
+    Document,
+    /// Inside the blocks that hold the starting rows, and at most
+    /// `SCAN_LIMIT_ROWS` on either side.
+    Block,
+}
+
+/// Run `attempt` over a window of the rows `around` and some on either side,
+/// loading more rows on each side whose edge it ran into, until the document
+/// or, for `ScanBound::Block`, the block ends.
+pub(super) fn over_rows<D: DisplayDocument + ?Sized, T>(
+    doc: &mut D,
+    around: Range<RowIndex>,
+    total_rows: RowIndex,
+    bound: ScanBound,
+    mut attempt: impl FnMut(&RowWindow) -> (Option<T>, Edges),
+) -> Option<T> {
+    let (block, limit) = match bound {
+        ScanBound::Document => (None, RowIndex::MAX),
+        ScanBound::Block => (Some(around.clone()), SCAN_LIMIT_ROWS),
+    };
+    let (mut before, mut after) = (SCAN_ROWS, SCAN_ROWS);
+    loop {
+        let first = around.start.saturating_sub(before);
+        let end = around.end.saturating_add(after).min(total_rows);
+        let Some((window, ends)) = RowWindow::load(doc, first..end, block.clone()) else {
+            // Rows the document cannot load around the start, such as records
+            // that fail to hydrate, leave the scan to the starting rows.
+            let (window, _) = RowWindow::load(doc, around.clone(), block)?;
+            return attempt(&window).0;
+        };
+        let (result, edges) = attempt(&window);
+        let more_before = edges.before && !ends.before && first > 0 && before < limit;
+        let more_after = edges.after && !ends.after && end < total_rows && after < limit;
+        if !more_before && !more_after {
+            return result;
+        }
+        if more_before {
+            before = before.saturating_mul(2);
+        }
+        if more_after {
+            after = after.saturating_mul(2);
+        }
+    }
+}
+
+/// Run a word, sentence, paragraph or bracket motion over the rows around
+/// `from`, as `motions::resolve` does over plain text.
 fn scan_rows<D: DisplayDocument + ?Sized>(
     doc: &mut D,
     from: DocPosition,
     motion: Motion,
-    n: usize,
+    count: Option<usize>,
     env: RowEnv,
 ) -> Option<(DocPosition, Reach)> {
-    let last = env.total_rows.saturating_sub(1);
-    let mut radius = SCAN_ROWS;
-    loop {
-        let first_row = from.row.saturating_sub(radius);
-        let last_row = from.row.saturating_add(radius).min(last);
-        let mut window = String::new();
-        let mut starts = Vec::new();
-        for row in first_row..=last_row {
-            if row > first_row {
-                window.push('\n');
-            }
-            starts.push(window.len());
-            // A row the document cannot supply reads as an empty line.
-            window.push_str(&document_row_string(doc, row).unwrap_or_default());
-        }
-        let line = usize::try_from(from.row - first_row).ok()?;
-        let col = from.byte_col.min(window.len() - starts[line]);
-        let mut scan = Scan::new(&window, starts[line] + col);
-        let result = scan_motion(&mut scan, motion, n, env.usage);
-        let cut_before = first_row > 0 && scan.cur.line == 0;
-        let cut_after = last_row < last && scan.cur.line == starts.len() - 1;
-        let whole_document = first_row == 0 && last_row == last;
-        if (result.is_none() || cut_before || cut_after) && !whole_document {
-            radius = radius.saturating_mul(2);
-            continue;
-        }
-        let reach = result?;
-        return Some((
-            DocPosition {
-                row: first_row + scan.cur.line as RowIndex,
-                byte_col: scan.cur.col,
+    // Where a motion that found nothing would have gone on looking.
+    let failed = |text: &str, start: usize| {
+        let forward = match motion {
+            Motion::Word(WordTo::Next | WordTo::End, _)
+            | Motion::Paragraph { forward: true }
+            | Motion::Sentence { forward: true } => true,
+            Motion::MatchBracket => match bracket_search_forward(text, start) {
+                Some(forward) => forward,
+                None => return Edges::default(),
             },
-            reach,
-        ));
-    }
+            _ => false,
+        };
+        Edges {
+            before: !forward,
+            after: forward,
+        }
+    };
+    // Brackets pair inside a block; words, sentences and paragraphs go on
+    // into the next one.
+    let bound = if motion == Motion::MatchBracket {
+        ScanBound::Block
+    } else {
+        ScanBound::Document
+    };
+    over_rows(
+        doc,
+        from.row..from.row.saturating_add(1),
+        env.total_rows,
+        bound,
+        |window| {
+            let Some(start) = window.offset(from) else {
+                return (None, Edges::default());
+            };
+            match resolve(&window.text, start, motion, count, env.usage) {
+                Some((at, reach)) => (Some((window.position(at), reach)), window.edges(at..at)),
+                None => (None, failed(&window.text, start)),
+            }
+        },
+    )
 }
 
 fn document_row_is_blank<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<bool> {
     Some(document_row_string(doc, row)?.trim().is_empty())
-}
-
-/// The bracket matching the first one at or after `from` on its row (vim `%`),
-/// looking through rows on either side.
-fn matching_bracket<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    from: DocPosition,
-    total_rows: RowIndex,
-) -> Option<DocPosition> {
-    let line = document_row_string(doc, from.row)?;
-    let col = text::snap_grapheme(&line, from.byte_col.min(line.len()));
-    let (start, bracket) = line[col..]
-        .char_indices()
-        .map(|(i, c)| (col + i, c))
-        .find(|&(_, c)| "()[]{}".contains(c))?;
-    let (open, close, forward) = match bracket {
-        '(' => ('(', ')', true),
-        ')' => ('(', ')', false),
-        '[' => ('[', ']', true),
-        ']' => ('[', ']', false),
-        '{' => ('{', '}', true),
-        '}' => ('{', '}', false),
-        _ => return None,
-    };
-    let (this, other) = if forward {
-        (open, close)
-    } else {
-        (close, open)
-    };
-    let mut depth = 0i32;
-    let rows: Box<dyn Iterator<Item = RowIndex>> = if forward {
-        Box::new(from.row..from.row.saturating_add(BRACKET_SCAN_ROWS).min(total_rows))
-    } else {
-        Box::new((from.row.saturating_sub(BRACKET_SCAN_ROWS)..=from.row).rev())
-    };
-    for row in rows {
-        let line = document_row_string(doc, row)?;
-        let chars: Vec<(usize, char)> = line.char_indices().collect();
-        let mut visit = |byte_col: usize, c: char| {
-            if c == this {
-                depth += 1;
-            } else if c == other {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(DocPosition { row, byte_col });
-                }
-            }
-            None
-        };
-        let found = if forward {
-            chars
-                .iter()
-                .filter(|&&(i, _)| row != from.row || i >= start)
-                .find_map(|&(i, c)| visit(i, c))
-        } else {
-            chars
-                .iter()
-                .rev()
-                .filter(|&&(i, _)| row != from.row || i <= start)
-                .find_map(|&(i, c)| visit(i, c))
-        };
-        if found.is_some() {
-            return found;
-        }
-    }
-    None
 }
 
 /// The first row with text in the block starting at `start`.
