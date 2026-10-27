@@ -2,14 +2,14 @@ use super::jumplist::JumpMove;
 use super::motions::{
     advance_chars, clamp_normal, current_line_content_range, first_non_blank, first_non_blank_at,
     line_end_normal, move_down, move_down_col, move_left, move_right_normal, move_up, move_up_col,
-    operator_span, resolve, FindKind, Motion, Span, Use,
+    operator_span, resolve, FindKind, Motion, Reach, Span, Use,
 };
 use super::text::{
     byte_to_cell, cell_to_byte, line_end, line_start, next_grapheme_boundary,
     prev_grapheme_boundary,
 };
 use super::text_objects::{
-    surrounding_delimiters, text_object, text_object_for_spec, TextObjectKind, TextObjectSpec,
+    select_object, surrounding_delimiters, text_object, TextObjectKind, TextObjectSpec, VisualArea,
 };
 use super::window::{
     BlockMotion, DocumentCommand, DocumentKeyResult, DocumentTextObject, ScrollTo,
@@ -401,6 +401,10 @@ enum RepeatCommand {
     ChangeSurround {
         target: char,
         replacement: char,
+    },
+    Visual {
+        action: VisualAction,
+        shape: VisualShape,
     },
 }
 
@@ -1266,6 +1270,10 @@ fn repeat_last_change(ctx: &mut VimContext<'_>) -> Action {
             ctx.vim_state.count1 = Some(n);
             handle_waiting_textobj(RepeatKey::Char(object).key_event(), op, inner, ctx)
         }
+        RepeatCommand::Visual { action, shape } => {
+            shape.select(ctx);
+            visual_command(action, false, ctx)
+        }
         RepeatCommand::DeleteSurround { target } => {
             delete_surround(ctx, target);
             ctx.vim_state.reset_pending();
@@ -1522,10 +1530,28 @@ fn handle_normal_char(c: char, ctx: &mut VimContext<'_>) -> Action {
 /// count. A motion that cannot move leaves the cursor in place.
 fn move_cursor(ctx: &mut VimContext<'_>, motion: Motion) {
     let count = ctx.vim_state.take_typed_count();
-    *ctx.curswant = None;
-    if let Some((pos, _)) = resolve(ctx.buf.as_str(), *ctx.cpos, motion, count, Use::Move) {
-        *ctx.cpos = pos;
-        clamp_normal(ctx.buf.as_str(), ctx.cpos);
+    let column = (motion.keeps_column(count) && !matches!(motion, Motion::Up | Motion::Down))
+        .then(|| cursor_cell(ctx));
+    *ctx.curswant = if motion == Motion::LineEnd {
+        Some(LINE_END_COLUMN)
+    } else {
+        column
+    };
+    // Visual `l` may step onto the line break, as an operator's `l` reaches it.
+    let usage =
+        if matches!(*ctx.mode, VimMode::Visual | VimMode::VisualLine) && motion == Motion::Right {
+            Use::Operator
+        } else {
+            Use::Move
+        };
+    if let Some((pos, _)) = resolve(ctx.buf.as_str(), *ctx.cpos, motion, count, usage) {
+        match column {
+            Some(cell) => place_on_line(ctx, pos, cell),
+            None => {
+                *ctx.cpos = pos;
+                clamp_cursor(ctx);
+            }
+        }
     }
 }
 
@@ -1572,13 +1598,18 @@ fn paste(ctx: &mut VimContext<'_>, after: bool, count: usize) {
     }
     let text = text.repeat(count);
     let at = if after {
-        advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(ctx.buf.len())
+        advance_chars(ctx.buf.as_str(), *ctx.cpos, 1).min(line_end(ctx.buf.as_str(), *ctx.cpos))
     } else {
         *ctx.cpos
     };
     let start = ctx.insert_str(at, &text);
-    let paste_end = start + text.len();
-    *ctx.cpos = prev_grapheme_boundary(ctx.buf.as_str(), paste_end).max(start);
+    // The cursor ends on the last pasted character, or at the start of text
+    // that spans lines.
+    *ctx.cpos = if text.contains('\n') {
+        start
+    } else {
+        prev_grapheme_boundary(ctx.buf.as_str(), start + text.len()).max(start)
+    };
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }
 
@@ -1590,6 +1621,10 @@ fn join_lines(ctx: &mut VimContext<'_>, count: usize, spaces: bool) {
     let count = count.max(2);
     let mut eol = line_end(ctx.buf.as_str(), *ctx.cpos);
     if eol >= ctx.buf.len() {
+        // A count past the last line still "joins" it, which moves to its start.
+        if count > 2 {
+            *ctx.cpos = line_start(ctx.buf.as_str(), *ctx.cpos);
+        }
         return;
     }
     ctx.save_undo();
@@ -1649,29 +1684,38 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.remember_visual(*ctx.mode, *ctx.cpos);
     if let SubState::WaitingVisualTextObj(inner) = ctx.vim_state.sub {
         ctx.vim_state.sub = SubState::Ready;
-        if let KeyCode::Char(c) = key.code {
-            if let Some(spec) = TextObjectSpec::new(inner, c) {
-                if let Some((start, end)) = text_object_for_spec(ctx.buf.as_str(), *ctx.cpos, spec)
-                {
-                    ctx.vim_state.visual_anchor = start;
-                    *ctx.cpos = if spec.kind == TextObjectKind::Paragraph {
-                        *ctx.mode = VimMode::VisualLine;
-                        if end > start {
-                            line_start(
-                                ctx.buf.as_str(),
-                                prev_grapheme_boundary(ctx.buf.as_str(), end),
-                            )
-                        } else {
-                            start
-                        }
-                    } else if end > 0 {
-                        prev_grapheme_boundary(ctx.buf.as_str(), end)
+        let count = ctx.vim_state.take_count();
+        if let Some(spec) = text_object_spec(key, inner) {
+            let area = VisualArea {
+                anchor: ctx.vim_state.visual_anchor,
+                linewise: *ctx.mode == VimMode::VisualLine,
+            };
+            match select_object(ctx.buf.as_str(), *ctx.cpos, Some(area), spec, count) {
+                Ok(sel) => {
+                    ctx.vim_state.visual_anchor = sel.start;
+                    *ctx.cpos = sel.end;
+                    *ctx.mode = if sel.linewise {
+                        VimMode::VisualLine
                     } else {
-                        end
+                        VimMode::Visual
                     };
+                }
+                Err(stranded) => {
+                    ctx.vim_state.visual_anchor = stranded.anchor.unwrap_or(area.anchor);
+                    *ctx.cpos = stranded.cursor;
                 }
             }
         }
+        return Action::Consumed;
+    }
+    if let SubState::WaitingR = ctx.vim_state.sub {
+        ctx.vim_state.sub = SubState::Ready;
+        if let KeyCode::Char(c) = key.code {
+            if c != ATTACHMENT_MARKER {
+                return visual_command(VisualAction::Replace(c), false, ctx);
+            }
+        }
+        exit_visual(ctx);
         return Action::Consumed;
     }
     if let SubState::WaitingFind(kind) = ctx.vim_state.sub {
@@ -1739,10 +1783,254 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     }
 }
 
-fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
-    if c != 'j' && c != 'k' && !c.is_ascii_digit() {
-        *ctx.curswant = None;
+/// The column `$` wants, which every line is shorter than.
+const LINE_END_COLUMN: usize = u16::MAX as usize;
+
+/// What a Visual command does to the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisualAction {
+    Operator(Op),
+    Replace(char),
+    Join { spaces: bool },
+}
+
+/// The size of a selection, which `.` selects again from the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisualShape {
+    linewise: bool,
+    lines: usize,
+    /// The display width of a one-line selection, or the column the last line
+    /// of a longer one reaches; `usize::MAX` after `$`.
+    width: usize,
+    /// Whether the selection ends on the line break.
+    to_break: bool,
+}
+
+impl VisualShape {
+    fn of(ctx: &VimContext<'_>) -> Option<Self> {
+        let (start, end) = visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)?;
+        let buf = ctx.buf.as_str();
+        let end = end.min(buf.len());
+        let linewise = *ctx.mode == VimMode::VisualLine;
+        let last = prev_grapheme_boundary(buf, end).max(start);
+        let to_break = !linewise && end > start && buf[last..].starts_with('\n');
+        let body_end = if to_break { last } else { end };
+        let lines = buf[start..body_end].matches('\n').count() + 1;
+        let width = if to_break && *ctx.curswant == Some(LINE_END_COLUMN) {
+            usize::MAX
+        } else if lines == 1 {
+            byte_to_cell(&buf[start..body_end], body_end - start) + usize::from(to_break)
+        } else {
+            let sol = line_start(buf, last);
+            byte_to_cell(&buf[sol..line_end(buf, last)], last - sol)
+        };
+        Some(Self {
+            linewise,
+            lines,
+            width,
+            to_break,
+        })
     }
+
+    /// Select this much text starting at the cursor.
+    fn select(self, ctx: &mut VimContext<'_>) {
+        let buf = ctx.buf.as_str();
+        let anchor = *ctx.cpos;
+        let mut last_line = anchor;
+        for _ in 1..self.lines {
+            let eol = line_end(buf, last_line);
+            if eol >= buf.len() {
+                break;
+            }
+            last_line = eol + 1;
+        }
+        let sol = line_start(buf, last_line);
+        let eol = line_end(buf, last_line);
+        let line = &buf[sol..eol];
+        let anchor_sol = line_start(buf, anchor);
+        let anchor_cell = byte_to_cell(&buf[anchor_sol..anchor], anchor - anchor_sol);
+        let cell = if self.lines == 1 {
+            anchor_cell.saturating_add(self.width.saturating_sub(1))
+        } else {
+            self.width
+        };
+        let end = if self.linewise {
+            sol
+        } else if self.width == usize::MAX {
+            eol
+        } else {
+            let at = sol + cell_to_byte(line, cell);
+            if at < eol {
+                at
+            } else if self.to_break {
+                eol
+            } else {
+                prev_grapheme_boundary(buf, eol).max(sol)
+            }
+        };
+        // Linewise commands keep the column the cursor started in.
+        *ctx.curswant = Some(anchor_cell);
+        ctx.vim_state.visual_anchor = anchor;
+        *ctx.cpos = end;
+        *ctx.mode = if self.linewise {
+            VimMode::VisualLine
+        } else {
+            VimMode::Visual
+        };
+    }
+}
+
+/// Run `action` over the selection and leave Visual mode, remembering it for
+/// `.`. `whole_lines` widens a charwise selection to its lines first (`D`,
+/// `X`, `C`, `S`, `R`, `Y`).
+fn visual_command(action: VisualAction, whole_lines: bool, ctx: &mut VimContext<'_>) -> Action {
+    if whole_lines {
+        *ctx.mode = VimMode::VisualLine;
+    }
+    if action != VisualAction::Operator(Op::Yank) {
+        if let Some(shape) = VisualShape::of(ctx) {
+            ctx.vim_state
+                .record_change(RepeatCommand::Visual { action, shape });
+        }
+    }
+    match action {
+        VisualAction::Operator(op) => visual_operator(op, ctx),
+        VisualAction::Replace(c) => {
+            visual_replace(c, ctx);
+            exit_visual(ctx);
+            Action::Consumed
+        }
+        VisualAction::Join { spaces } => visual_join(ctx, spaces),
+    }
+}
+
+/// The selection as the span an operator takes.
+fn visual_span(ctx: &VimContext<'_>) -> Option<Span> {
+    let (start, end) = visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)?;
+    Some(if *ctx.mode == VimMode::VisualLine {
+        Span::Lines(start, end)
+    } else {
+        Span::Chars(start, end)
+    })
+}
+
+fn visual_operator(op: Op, ctx: &mut VimContext<'_>) -> Action {
+    let span = visual_span(ctx);
+    exit_visual(ctx);
+    // Deleting from an empty buffer leaves the register alone.
+    if op == Op::Delete && ctx.buf.is_empty() {
+        return Action::Consumed;
+    }
+    match span {
+        Some(
+            Span::Chars(start, end) | Span::Lines(start, end) | Span::AdjustedLines(start, end),
+        ) if op.recase("").is_some() => {
+            recase_range(op, ctx, start, end, start);
+            Action::Consumed
+        }
+        Some(Span::Chars(start, end)) => {
+            // The change starts at the selection's start, which undo returns to.
+            *ctx.cpos = start;
+            apply_charwise_op(op, ctx, start, end)
+        }
+        Some(Span::Lines(start, end) | Span::AdjustedLines(start, end)) => {
+            if op == Op::Yank {
+                *ctx.cpos = start;
+            }
+            apply_linewise_op(op, ctx, start, end, true)
+        }
+        None => Action::Consumed,
+    }
+}
+
+/// Visual `J` and `gJ`: join the selected lines, or the line and the next
+/// one when the selection is on a single line.
+fn visual_join(ctx: &mut VimContext<'_>, spaces: bool) -> Action {
+    if let (Some(shape), Some((start, _))) = (
+        VisualShape::of(ctx),
+        visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode),
+    ) {
+        *ctx.cpos = start;
+        exit_visual(ctx);
+        join_lines(ctx, shape.lines, spaces);
+    } else {
+        exit_visual(ctx);
+    }
+    Action::Consumed
+}
+
+/// Visual `r{char}`: every character of the selection becomes `c`, line
+/// breaks stay.
+fn visual_replace(c: char, ctx: &mut VimContext<'_>) {
+    let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
+    else {
+        return;
+    };
+    let end = end.min(ctx.buf.len());
+    let buf = ctx.buf.as_str();
+    let mut replaced = String::new();
+    let mut pos = start;
+    while pos < end {
+        let next = next_grapheme_boundary(buf, pos).min(end);
+        replaced.push(if &buf[pos..next] == "\n" { '\n' } else { c });
+        pos = next;
+    }
+    *ctx.cpos = start;
+    ctx.save_undo();
+    ctx.replace_range(start, end, &replaced);
+}
+
+/// Visual `p` and `P`: replace the selection with the register. `p` leaves
+/// the replaced text in the register.
+fn visual_put(keep_register: bool, ctx: &mut VimContext<'_>) -> Action {
+    ctx.sync_paste_from_clipboard();
+    let text = ctx.register().to_string();
+    let put_lines = ctx.register_linewise();
+    let span = visual_span(ctx);
+    exit_visual(ctx);
+    let Some(span) = span.filter(|_| !text.is_empty() || put_lines) else {
+        return Action::Consumed;
+    };
+    let (Span::Chars(start, end) | Span::Lines(start, end) | Span::AdjustedLines(start, end)) =
+        span;
+    let selected_lines = matches!(span, Span::Lines(..));
+    let end = end.min(ctx.buf.len());
+    let replaced = ctx.buf.as_str()[start..end].to_string();
+    // Lines put into a charwise selection split it; text put into whole lines
+    // takes their place.
+    let put = if put_lines && !selected_lines {
+        format!("\n{text}\n")
+    } else {
+        text
+    };
+    *ctx.cpos = start;
+    ctx.save_undo();
+    ctx.replace_range(start, end, &put);
+    let first = if put_lines && !selected_lines {
+        start + 1
+    } else {
+        start
+    };
+    *ctx.cpos = if put_lines || selected_lines {
+        first_non_blank_at(ctx.buf.as_str(), first)
+    } else if put.contains('\n') {
+        start
+    } else {
+        prev_grapheme_boundary(ctx.buf.as_str(), start + put.len()).max(start)
+    };
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+    if !keep_register {
+        ctx.clipboard
+            .kill_ring
+            .set_with_linewise(replaced.clone(), selected_lines);
+        if ctx.clipboard.write(&replaced).is_ok() {
+            ctx.clipboard.kill_ring.record_clipboard_write(replaced);
+        }
+    }
+    Action::Consumed
+}
+
+fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
     match c {
         // ── Escape visual mode ─────────────────────────────────────
         'v' if *ctx.mode == VimMode::Visual => {
@@ -1763,143 +2051,25 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
 
-        // ── Substitute (s → change, S → linewise change) ────────
-        's' => handle_visual_char('c', ctx),
-        'S' => {
-            *ctx.mode = VimMode::VisualLine;
-            handle_visual_char('c', ctx)
-        }
-
         // ── Operators on selection ──────────────────────────────────
-        'd' | 'x' => {
-            if let Some((start, end)) =
-                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-            {
-                let linewise = *ctx.mode == VimMode::VisualLine;
-                ctx.save_undo();
-                ctx.yank_range(start, end, linewise);
-                if linewise {
-                    let drain_end = if end < ctx.buf.len() && ctx.buf.as_bytes()[end] == b'\n' {
-                        end + 1
-                    } else if start > 0 && ctx.buf.as_bytes()[start - 1] == b'\n' {
-                        let s = start - 1;
-                        ctx.delete_range(s, end);
-                        *ctx.cpos = s.min(ctx.buf.len());
-                        clamp_normal(ctx.buf.as_str(), ctx.cpos);
-                        if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                            *ctx.cpos = first_non_blank_at(
-                                ctx.buf.as_str(),
-                                line_start(ctx.buf.as_str(), *ctx.cpos),
-                            );
-                        }
-                        exit_visual(ctx);
-                        return Action::Consumed;
-                    } else {
-                        end
-                    };
-                    ctx.delete_range(start, drain_end);
-                } else {
-                    ctx.delete_range(start, end);
-                }
-                *ctx.cpos = start.min(ctx.buf.len());
-                clamp_normal(ctx.buf.as_str(), ctx.cpos);
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
-        'c' => {
-            if let Some((start, end)) =
-                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-            {
-                let linewise = *ctx.mode == VimMode::VisualLine;
-                ctx.save_undo();
-                ctx.yank_range(start, end, linewise);
-                if linewise {
-                    let content_start = first_non_blank_at(ctx.buf.as_str(), start);
-                    ctx.delete_range(content_start, end);
-                    *ctx.cpos = content_start;
-                } else {
-                    ctx.delete_range(start, end);
-                    *ctx.cpos = start;
-                }
-                *ctx.mode = VimMode::Insert;
-                ctx.vim_state.sub = SubState::Ready;
-                ctx.vim_state.reset_counts();
-                return Action::Consumed;
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
-        'y' => {
-            if let Some((start, end)) =
-                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-            {
-                let linewise = *ctx.mode == VimMode::VisualLine;
-                ctx.yank_range(start, end, linewise);
-                ctx.clipboard.kill_ring.mark_yanked(ctx.now);
-                *ctx.cpos = start;
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
+        'd' | 'x' => visual_command(VisualAction::Operator(Op::Delete), false, ctx),
+        'D' | 'X' => visual_command(VisualAction::Operator(Op::Delete), true, ctx),
+        'c' | 's' => visual_command(VisualAction::Operator(Op::Change), false, ctx),
+        'C' | 'S' | 'R' => visual_command(VisualAction::Operator(Op::Change), true, ctx),
+        'y' => visual_command(VisualAction::Operator(Op::Yank), false, ctx),
+        'Y' => visual_command(VisualAction::Operator(Op::Yank), true, ctx),
 
         // ── Case change on selection ───────────────────────────────
-        '~' => recase_selection(Op::Toggle, ctx),
-        'U' => recase_selection(Op::Upper, ctx),
-        'u' => recase_selection(Op::Lower, ctx),
+        '~' => visual_command(VisualAction::Operator(Op::Toggle), false, ctx),
+        'U' => visual_command(VisualAction::Operator(Op::Upper), false, ctx),
+        'u' => visual_command(VisualAction::Operator(Op::Lower), false, ctx),
 
         // ── Join lines ─────────────────────────────────────────────
-        'J' => {
-            if let Some((start, end)) =
-                visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-            {
-                ctx.save_undo();
-                let mut pos = start;
-                let mut remaining = end;
-                while pos < remaining.min(ctx.buf.len()) {
-                    if let Some(nl) = ctx.buf.as_str()[pos..remaining.min(ctx.buf.len())].find('\n')
-                    {
-                        let abs = pos + nl;
-                        let ws_end = first_non_blank_at(ctx.buf.as_str(), abs + 1);
-                        let removed = ws_end - abs;
-                        ctx.replace_range(abs, ws_end, " ");
-                        remaining -= removed - 1; // replaced N chars with 1
-                        pos = abs + 1;
-                    } else {
-                        break;
-                    }
-                }
-                *ctx.cpos = start;
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
+        'J' => visual_command(VisualAction::Join { spaces: true }, false, ctx),
 
         // ── Paste over selection ───────────────────────────────────
-        'p' | 'P' => {
-            ctx.sync_paste_from_clipboard();
-            if !ctx.register().is_empty() {
-                if let Some((start, end)) =
-                    visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-                {
-                    ctx.save_undo();
-                    let old = ctx.buf.as_str()[start..end].to_string();
-                    let text = ctx.register().to_string();
-                    ctx.replace_range(start, end, &text);
-                    *ctx.cpos = start;
-                    clamp_normal(ctx.buf.as_str(), ctx.cpos);
-                    // Replaced text goes into register; mirror to clipboard.
-                    ctx.clipboard
-                        .kill_ring
-                        .set_with_linewise(old.clone(), false);
-                    if ctx.clipboard.write(&old).is_ok() {
-                        ctx.clipboard.kill_ring.record_clipboard_write(old);
-                    }
-                }
-            }
-            exit_visual(ctx);
-            Action::Consumed
-        }
+        'p' => visual_put(false, ctx),
+        'P' => visual_put(true, ctx),
 
         // ── Motions (move cursor, anchor stays) ────────────────────
         // ── Motions (move cursor, anchor stays) ────────────────────
@@ -1910,7 +2080,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 (*ctx.cpos, col) = move_down_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 *ctx.curswant = Some(col);
             }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
+            clamp_cursor(ctx);
             Action::Consumed
         }
         'k' => {
@@ -1920,7 +2090,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
                 (*ctx.cpos, col) = move_up_col(ctx.buf.as_str(), *ctx.cpos, *ctx.curswant);
                 *ctx.curswant = Some(col);
             }
-            clamp_normal(ctx.buf.as_str(), ctx.cpos);
+            clamp_cursor(ctx);
             Action::Consumed
         }
         'g' => {
@@ -1957,6 +2127,11 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             Action::Consumed
         }
 
+        'r' => {
+            ctx.vim_state.sub = SubState::WaitingR;
+            Action::Consumed
+        }
+
         // ── Swap anchor and cursor ─────────────────────────────────
         'o' => {
             // Snap through `visual_anchor_at` first: the raw field outlives
@@ -1966,6 +2141,7 @@ fn handle_visual_char(c: char, ctx: &mut VimContext<'_>) -> Action {
             let anchor = ctx.vim_state.visual_anchor_at(ctx.buf.as_str());
             ctx.vim_state.visual_anchor = *ctx.cpos;
             *ctx.cpos = anchor;
+            *ctx.curswant = None;
             Action::Consumed
         }
 
@@ -2003,7 +2179,7 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         let eol = line_end(ctx.buf.as_str(), start);
         let end = advance_chars(ctx.buf.as_str(), start, n);
         // The count must fit on the line, or nothing is replaced.
-        if start < eol && end <= eol {
+        if ctx.buf.as_str()[start..eol].chars().count() >= n {
             ctx.vim_state.record_change(RepeatCommand::Replace {
                 count: n,
                 replacement: c,
@@ -2011,11 +2187,16 @@ fn handle_waiting_r(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             ctx.save_undo();
             if c == '\n' {
                 // `r<CR>` replaces all the characters with one line break. The
-                // new line keeps the indent and drops the blanks it starts with.
+                // new line drops the blanks it starts with and keeps the indent
+                // only when text follows.
                 let sol = line_start(ctx.buf.as_str(), start);
-                let indent_end = first_non_blank_at(ctx.buf.as_str(), sol).min(start);
-                let indent = ctx.buf.as_str()[sol..indent_end].to_string();
                 let rest = first_non_blank_at(ctx.buf.as_str(), end);
+                let indent_end = if rest < eol {
+                    first_non_blank_at(ctx.buf.as_str(), sol).min(start)
+                } else {
+                    sol
+                };
+                let indent = ctx.buf.as_str()[sol..indent_end].to_string();
                 ctx.replace_range(start, rest, &format!("\n{indent}"));
                 *ctx.cpos = start + 1 + indent.len();
             } else {
@@ -2063,7 +2244,7 @@ fn handle_waiting_op_find(
             ch,
             repeat: false,
         };
-        if let Some(span) = op_span(ctx, op, motion) {
+        if let Some(span) = motion_span(ctx, Some(op), motion) {
             if op != Op::Yank {
                 ctx.vim_state.record_change(RepeatCommand::OpFind {
                     op,
@@ -2104,6 +2285,9 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         enter_insert_mode(ctx);
         return Action::Consumed;
     }
+    if key.code == KeyCode::Char('J') && *ctx.mode != VimMode::Normal {
+        return visual_command(VisualAction::Join { spaces: false }, false, ctx);
+    }
     if key.code == KeyCode::Char('J') && *ctx.mode == VimMode::Normal {
         let count = ctx.vim_state.take_count();
         join_lines(ctx, count, false);
@@ -2118,7 +2302,7 @@ fn handle_waiting_g(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                 ctx.vim_state.sub = SubState::WaitingOp(op);
                 return Action::Consumed;
             }
-            return recase_selection(op, ctx);
+            return visual_command(VisualAction::Operator(op), false, ctx);
         }
     }
     if let Some(motion) = motion_after_g(key) {
@@ -2137,7 +2321,7 @@ fn handle_waiting_op_g(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Actio
             .record_change(RepeatCommand::Linewise { op, count });
         return action;
     }
-    if let Some(span) = motion_after_g(key).and_then(|motion| op_span(ctx, op, motion)) {
+    if let Some(span) = motion_after_g(key).and_then(|motion| motion_span(ctx, Some(op), motion)) {
         return apply_span(op, ctx, span);
     }
     ctx.vim_state.reset_pending();
@@ -2151,23 +2335,51 @@ fn motion_after_g(key: KeyEvent) -> Option<Motion> {
     }
 }
 
+/// The text object a key names, for `inner` (`i`) or around (`a`).
+fn text_object_spec(key: KeyEvent, inner: bool) -> Option<TextObjectSpec> {
+    match key.code {
+        KeyCode::Char(c) => TextObjectSpec::new(inner, c),
+        _ => None,
+    }
+}
+
 fn handle_waiting_textobj(key: KeyEvent, op: Op, inner: bool, ctx: &mut VimContext<'_>) -> Action {
     ctx.vim_state.sub = SubState::Ready;
-    if let KeyCode::Char(c) = key.code {
-        if let Some((start, end)) = text_object(ctx.buf.as_str(), *ctx.cpos, inner, c) {
-            let count = ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
-            let n = ctx.vim_state.effective_count();
-            let _ = n;
-            if op != Op::Yank {
-                ctx.vim_state.record_change(RepeatCommand::TextObject {
-                    op,
-                    inner,
-                    object: c,
-                    count,
-                });
+    let count = ctx.vim_state.count1.unwrap_or(1) * ctx.vim_state.count2.unwrap_or(1);
+    let span = text_object_spec(key, inner).and_then(|spec| {
+        let buf = ctx.buf.as_str();
+        let sel = match select_object(buf, *ctx.cpos, None, spec, count) {
+            Ok(sel) => sel,
+            Err(stranded) => {
+                *ctx.cpos = stranded.cursor;
+                clamp_normal(buf, ctx.cpos);
+                return None;
             }
-            return apply_charwise_op(op, ctx, start, end);
+        };
+        if op == Op::Yank || op.recase("").is_some() {
+            *ctx.cpos = sel.start;
         }
+        // A tag block keeps a closing tag in column 0 out of the end adjustment.
+        if spec.kind == TextObjectKind::Tag {
+            return Some(Span::Chars(sel.start, sel.end));
+        }
+        let reach = match (sel.linewise, sel.inclusive) {
+            (true, _) => Reach::Linewise,
+            (false, true) => Reach::Inclusive,
+            (false, false) => Reach::Exclusive,
+        };
+        operator_span(buf, sel.start, sel.end, reach)
+    });
+    if let (Some(span), KeyCode::Char(object)) = (span, key.code) {
+        if op != Op::Yank {
+            ctx.vim_state.record_change(RepeatCommand::TextObject {
+                op,
+                inner,
+                object,
+                count,
+            });
+        }
+        return apply_span(op, ctx, span);
     }
     ctx.vim_state.reset_pending();
     Action::Consumed
@@ -2188,7 +2400,9 @@ fn handle_waiting_surround_motion(key: KeyEvent, ctx: &mut VimContext<'_>) -> Ac
     }
 
     match resolve_motion_range(key, ctx, None) {
-        MotionRange::Charwise(start, end) | MotionRange::Linewise(start, end) => {
+        MotionRange::Span(
+            Span::Chars(start, end) | Span::Lines(start, end) | Span::AdjustedLines(start, end),
+        ) => {
             ctx.vim_state.sub = SubState::WaitingSurroundChar(start, end);
             Action::Consumed
         }
@@ -2328,8 +2542,7 @@ fn change_surround(ctx: &mut VimContext<'_>, target: char, replacement: char) ->
 
 #[derive(Clone, Copy, Debug)]
 enum MotionRange {
-    Charwise(usize, usize),
-    Linewise(usize, usize),
+    Span(Span),
     Pending(SubState),
     None,
 }
@@ -2354,47 +2567,73 @@ fn resolve_motion_range(key: KeyEvent, ctx: &mut VimContext<'_>, op: Option<Op>)
         KeyCode::Char(c @ (';' | ',')) => Motion::repeat_find(ctx.vim_state.last_find, c == ','),
         code => Motion::from_key(code),
     };
-    let usage = if op == Some(Op::Change) {
-        Use::Change
-    } else {
-        Use::Operator
-    };
-    match motion.and_then(|motion| motion_span(ctx, usage, motion)) {
-        Some(Span::Chars(start, end)) => MotionRange::Charwise(start, end),
-        Some(Span::Lines(start, end)) => MotionRange::Linewise(start, end),
+    match motion.and_then(|motion| motion_span(ctx, op, motion)) {
+        Some(span) => MotionRange::Span(span),
         None => MotionRange::None,
     }
 }
 
 /// The span `motion` covers from the cursor, consuming the typed count.
-fn motion_span(ctx: &mut VimContext<'_>, usage: Use, motion: Motion) -> Option<Span> {
-    let count = ctx.vim_state.take_typed_count();
-    let from = *ctx.cpos;
-    let (pos, reach) = resolve(ctx.buf.as_str(), from, motion, count, usage)?;
-    operator_span(ctx.buf.as_str(), from, pos, reach)
-}
-
-fn op_span(ctx: &mut VimContext<'_>, op: Op, motion: Motion) -> Option<Span> {
-    let usage = if op == Op::Change {
+fn motion_span(ctx: &mut VimContext<'_>, op: Option<Op>, motion: Motion) -> Option<Span> {
+    let usage = if op == Some(Op::Change) {
         Use::Change
     } else {
         Use::Operator
     };
-    motion_span(ctx, usage, motion)
+    let count = ctx.vim_state.take_typed_count();
+    let from = *ctx.cpos;
+    let (pos, reach) = resolve(ctx.buf.as_str(), from, motion, count, usage)?;
+    let span = operator_span(ctx.buf.as_str(), from, pos, reach)?;
+    // A yank leaves the cursor where the motion ended when that is on a line above.
+    if op == Some(Op::Yank)
+        && matches!(span, Span::Lines(..) | Span::AdjustedLines(..))
+        && line_start(ctx.buf.as_str(), pos) < line_start(ctx.buf.as_str(), from)
+    {
+        if motion.keeps_column(count) {
+            let cell = cursor_cell(ctx);
+            place_on_line(ctx, pos, cell);
+        } else {
+            *ctx.cpos = pos;
+            clamp_normal(ctx.buf.as_str(), ctx.cpos);
+        }
+    }
+    Some(span)
+}
+
+/// Vim deletes whole lines when a multi-line charwise `d` starts in the indent
+/// and ends where only blanks remain on its line.
+fn whole_lines(buf: &str, span: Span) -> Span {
+    let Span::Chars(start, end) = span else {
+        return span;
+    };
+    let blank = |text: &str| text.trim_matches([' ', '\t']).is_empty();
+    let covers_lines = buf[start..end].contains('\n')
+        && blank(&buf[line_start(buf, start)..start])
+        && blank(&buf[end..line_end(buf, end)]);
+    if covers_lines {
+        Span::Lines(line_start(buf, start), line_end(buf, end))
+    } else {
+        span
+    }
 }
 
 fn apply_span(op: Op, ctx: &mut VimContext<'_>, span: Span) -> Action {
+    let span = if op == Op::Delete {
+        whole_lines(ctx.buf.as_str(), span)
+    } else {
+        span
+    };
     match span {
         Span::Chars(start, end) => apply_charwise_op(op, ctx, start, end),
-        Span::Lines(start, end) => apply_linewise_op(op, ctx, start, end),
+        Span::Lines(start, end) => apply_linewise_op(op, ctx, start, end, true),
+        Span::AdjustedLines(start, end) => apply_linewise_op(op, ctx, start, end, false),
     }
 }
 
 /// Operator-pending motion dispatch.
 fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
     match resolve_motion_range(key, ctx, Some(op)) {
-        MotionRange::Charwise(start, end) => apply_charwise_op(op, ctx, start, end),
-        MotionRange::Linewise(start, end) => apply_linewise_op(op, ctx, start, end),
+        MotionRange::Span(span) => apply_span(op, ctx, span),
         MotionRange::Pending(sub) => {
             ctx.vim_state.sub = sub;
             Action::Consumed
@@ -2411,6 +2650,10 @@ fn execute_linewise_op(op: Op, ctx: &mut VimContext<'_>) -> Action {
     if n > 1 && line_end(ctx.buf.as_str(), *ctx.cpos) >= ctx.buf.len() {
         return Action::Consumed;
     }
+    // Deleting from an empty buffer leaves the register alone.
+    if op == Op::Delete && ctx.buf.is_empty() {
+        return Action::Consumed;
+    }
 
     let start = line_start(ctx.buf.as_str(), *ctx.cpos);
     let mut end_pos = *ctx.cpos;
@@ -2424,7 +2667,7 @@ fn execute_linewise_op(op: Op, ctx: &mut VimContext<'_>) -> Action {
     if op.recase("").is_some() && n == 1 {
         *ctx.cpos = start;
     }
-    apply_linewise_op(op, ctx, start, end)
+    apply_linewise_op(op, ctx, start, end, true)
 }
 
 /// Apply a charwise operator over the byte range [start..end).
@@ -2481,18 +2724,16 @@ fn recase_range(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize, curs
     clamp_normal(ctx.buf.as_str(), ctx.cpos);
 }
 
-/// Visual `U`, `u`, `~` (and `gU`, `gu`, `g~`): recase the selection and leave Visual mode.
-fn recase_selection(op: Op, ctx: &mut VimContext<'_>) -> Action {
-    if let Some((start, end)) = visual_range(ctx.vim_state, ctx.buf.as_str(), *ctx.cpos, *ctx.mode)
-    {
-        recase_range(op, ctx, start, end, start);
-    }
-    exit_visual(ctx);
-    Action::Consumed
-}
-
-/// Apply linewise operator over [start..end] (line boundaries).
-fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize) -> Action {
+/// Apply linewise operator over [start..end] (line boundaries). A delete
+/// leaves the cursor in its column, or on the first non-blank when `keep_column`
+/// is false.
+fn apply_linewise_op(
+    op: Op,
+    ctx: &mut VimContext<'_>,
+    start: usize,
+    end: usize,
+    keep_column: bool,
+) -> Action {
     match op {
         Op::Delete => {
             ctx.save_undo();
@@ -2500,7 +2741,13 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
             let column = cursor_cell(ctx);
             let removed = linewise_delete_range(ctx.buf.as_str(), start..end);
             ctx.delete_range(removed.start, removed.end);
-            place_on_line(ctx, removed.start, column);
+            if keep_column {
+                place_on_line(ctx, removed.start, column);
+            } else {
+                let line = line_start(ctx.buf.as_str(), removed.start.min(ctx.buf.len()));
+                *ctx.cpos = first_non_blank_at(ctx.buf.as_str(), line);
+                clamp_normal(ctx.buf.as_str(), ctx.cpos);
+            }
         }
         Op::Change => {
             ctx.save_undo();
@@ -2530,10 +2777,12 @@ fn apply_linewise_op(op: Op, ctx: &mut VimContext<'_>, start: usize, end: usize)
     Action::Consumed
 }
 
-/// The display column of the cursor within its line.
+/// The display column the cursor wants within its line.
 fn cursor_cell(ctx: &VimContext<'_>) -> usize {
-    let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
-    byte_to_cell(&ctx.buf.as_str()[sol..*ctx.cpos], *ctx.cpos - sol)
+    ctx.curswant.unwrap_or_else(|| {
+        let sol = line_start(ctx.buf.as_str(), *ctx.cpos);
+        byte_to_cell(&ctx.buf.as_str()[sol..*ctx.cpos], *ctx.cpos - sol)
+    })
 }
 
 /// Put the cursor on the line holding `pos` at display column `cell`, or on
@@ -2543,7 +2792,7 @@ fn place_on_line(ctx: &mut VimContext<'_>, pos: usize, cell: usize) {
     let sol = line_start(ctx.buf.as_str(), pos);
     let eol = line_end(ctx.buf.as_str(), pos);
     *ctx.cpos = sol + cell_to_byte(&ctx.buf.as_str()[sol..eol], cell);
-    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+    clamp_cursor(ctx);
 }
 
 // ── Mode transitions ────────────────────────────────────────────────
@@ -2564,6 +2813,15 @@ fn enter_insert_mode(ctx: &mut VimContext<'_>) {
 fn exit_visual(ctx: &mut VimContext<'_>) {
     *ctx.mode = VimMode::Normal;
     ctx.vim_state.reset_pending();
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+/// Normal mode keeps the cursor on a character. Visual mode lets it rest on
+/// the line break so the selection can take it.
+fn clamp_cursor(ctx: &mut VimContext<'_>) {
+    if !matches!(*ctx.mode, VimMode::Visual | VimMode::VisualLine) {
+        clamp_normal(ctx.buf.as_str(), ctx.cpos);
+    }
 }
 
 /// Leave Insert mode for Normal: finish the insert session, then step the
@@ -3365,12 +3623,12 @@ mod tests {
     }
 
     #[test]
-    fn dis_deletes_inner_string_alias() {
+    fn diq_deletes_inner_string_alias() {
         let mut h = TestHarness::new("say \"hello\" now");
         h.cpos = 6;
         h.handle(key('d'));
         h.handle(key('i'));
-        h.handle(key('s'));
+        h.handle(key('q'));
         assert_eq!(h.buf, "say \"\" now");
     }
 
@@ -4292,7 +4550,7 @@ mod tests {
         h.handle(key('v'));
         h.handle(key('G'));
         h.handle(key('d'));
-        assert_eq!(h.buf, "");
+        assert_eq!(h.buf, "cc");
     }
 
     #[test]
@@ -4390,16 +4648,6 @@ mod tests {
     fn test_iw_on_whitespace() {
         let mut h = TestHarness::new("hello   world");
         h.cpos = 6;
-        h.handle(key('d'));
-        h.handle(key('i'));
-        h.handle(key('w'));
-        assert_eq!(h.buf, "helloworld");
-    }
-
-    #[test]
-    fn test_iw_on_newline() {
-        let mut h = TestHarness::new("hello\nworld");
-        h.cpos = 5;
         h.handle(key('d'));
         h.handle(key('i'));
         h.handle(key('w'));
@@ -4612,7 +4860,7 @@ mod tests {
     fn test_g_without_count_goes_to_end() {
         let mut h = TestHarness::new("aaa\nbbb\nccc");
         h.handle(key('G'));
-        assert_eq!(h.cpos, 10);
+        assert_eq!(h.cpos, 8);
     }
 
     #[test]

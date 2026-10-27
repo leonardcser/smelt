@@ -1931,7 +1931,7 @@ fn buffer_operator_range(
     let (target, reach) = resolve(source, cpos, motion, count, Use::Operator)?;
     match operator_span(source, cpos, target, reach)? {
         Span::Chars(start, end) => Some((start..end, start)),
-        Span::Lines(start, end) => Some((
+        Span::Lines(start, end) | Span::AdjustedLines(start, end) => Some((
             start..(end + 1).min(source.len()),
             text::line_start(source, cpos.min(target)),
         )),
@@ -2599,7 +2599,7 @@ mod tests {
             state.cursor,
             DocPosition {
                 row: 0,
-                byte_col: 0
+                byte_col: 5
             }
         );
 

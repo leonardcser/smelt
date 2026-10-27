@@ -1,8 +1,7 @@
 //! Vim text-object selection (iw/aw, i"/a", i(/a(, ip/ap, etc.) over `&str` buffers.
 
-use super::text::{
-    char_class, line_end, line_start, next_grapheme_boundary, prev_grapheme_boundary, CharClass,
-};
+use super::scan::{Scan, Visual};
+use super::text::{line_end, line_start, next_grapheme_boundary, prev_grapheme_boundary};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,11 +41,13 @@ impl TextObjectSpec {
 pub(crate) enum TextObjectKind {
     Word,
     BigWord,
+    Sentence,
     Quote(char),
     AnyQuote,
     Pair { open: char, close: char },
     Tag,
     Paragraph,
+    Line,
 }
 
 impl TextObjectKind {
@@ -55,7 +56,9 @@ impl TextObjectKind {
             'w' => Some(Self::Word),
             'W' => Some(Self::BigWord),
             '"' | '\'' | '`' => Some(Self::Quote(kind)),
-            'q' | 's' => Some(Self::AnyQuote),
+            'q' => Some(Self::AnyQuote),
+            's' => Some(Self::Sentence),
+            'l' => Some(Self::Line),
             '(' | ')' | 'b' => Some(Self::Pair {
                 open: '(',
                 close: ')',
@@ -79,6 +82,42 @@ impl TextObjectKind {
     }
 }
 
+/// The Visual area a text object extends, when there is one.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VisualArea {
+    pub anchor: usize,
+    pub linewise: bool,
+}
+
+/// What a text object selects: from `start` to `end`, the cursor after the
+/// object. `inclusive` says whether the character at `end` is part of it. In
+/// Visual mode `start` is the new anchor and `end` the new cursor, both
+/// inclusive, and `linewise` the mode to continue in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ObjectSelection {
+    pub start: usize,
+    pub end: usize,
+    pub inclusive: bool,
+    pub linewise: bool,
+}
+
+impl ObjectSelection {
+    /// The bytes it covers, with the line break after a linewise object.
+    fn range(self, buf: &str) -> (usize, usize) {
+        let (lo, hi) = (self.start.min(self.end), self.start.max(self.end));
+        if self.linewise {
+            return (line_start(buf, lo), (line_end(buf, hi) + 1).min(buf.len()));
+        }
+        let end = match buf[hi.min(buf.len())..].chars().next() {
+            Some(c) if self.inclusive && c != '\n' => {
+                smelt_buffer::text::ceil_grapheme(buf, hi + c.len_utf8())
+            }
+            _ => hi,
+        };
+        (smelt_buffer::text::snap_grapheme(buf, lo), end)
+    }
+}
+
 pub(crate) fn text_object(
     buf: &str,
     cpos: usize,
@@ -89,141 +128,107 @@ pub(crate) fn text_object(
     text_object_for_spec(buf, cpos, spec)
 }
 
+/// The bytes the object covers from `cpos`.
 pub(crate) fn text_object_for_spec(
     buf: &str,
     cpos: usize,
     spec: TextObjectSpec,
 ) -> Option<(usize, usize)> {
-    match spec.kind {
-        TextObjectKind::Word => text_object_word(buf, cpos, spec.inner, CharClass::Word),
-        TextObjectKind::BigWord => text_object_word(buf, cpos, spec.inner, CharClass::WORD),
-        TextObjectKind::Quote(quote) => text_object_quote(buf, cpos, spec.inner, quote),
-        TextObjectKind::AnyQuote => text_object_any_quote(buf, cpos, spec.inner),
-        TextObjectKind::Pair { open, close } => {
-            text_object_pair(buf, cpos, spec.inner, open, close)
-        }
-        TextObjectKind::Tag => surrounding_delimiters(buf, cpos, 't').map(|d| {
-            if spec.inner {
-                d.inner_range()
-            } else {
-                d.outer_range()
-            }
-        }),
-        TextObjectKind::Paragraph => text_object_paragraph(buf, cpos, spec.inner),
-    }
+    Some(select_object(buf, cpos, None, spec, 1).ok()?.range(buf))
 }
 
-fn is_horizontal_space(grapheme: &str) -> bool {
-    grapheme
-        .chars()
-        .next()
-        .is_some_and(|ch| matches!(ch, ' ' | '\t'))
+/// Where a failed object left the cursor and, in Visual mode, the anchor. A
+/// count that runs out of text fails after the object has already moved them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stranded {
+    pub cursor: usize,
+    pub anchor: Option<usize>,
 }
 
-fn following_horizontal_space_end(buf: &str, mut pos: usize, limit: usize) -> usize {
-    while pos < limit {
-        let next = next_grapheme_boundary(buf, pos);
-        if next > limit || !is_horizontal_space(&buf[pos..next]) {
-            break;
-        }
-        pos = next;
-    }
-    pos
-}
-
-fn preceding_horizontal_space_start(buf: &str, mut pos: usize, limit: usize) -> usize {
-    while pos > limit {
-        let previous = prev_grapheme_boundary(buf, pos);
-        if previous < limit || !is_horizontal_space(&buf[previous..pos]) {
-            break;
-        }
-        pos = previous;
-    }
-    pos
-}
-
-fn text_object_word(
+/// Select `count` objects of `spec` around `cursor`, or extend `visual`.
+pub(crate) fn select_object(
     buf: &str,
-    cpos: usize,
-    inner: bool,
-    mode: CharClass,
-) -> Option<(usize, usize)> {
-    if buf.is_empty() || cpos >= buf.len() {
-        return None;
-    }
-    let cpos = smelt_buffer::text::snap_grapheme(buf, cpos);
-    let graphemes: Vec<(usize, &str)> = smelt_buffer::cell_width::grapheme_indices(buf).collect();
-    let ci = graphemes.iter().position(|(byte, _)| *byte >= cpos)?;
-    let cur_grapheme = graphemes[ci].1;
-    let cur_char = cur_grapheme.chars().next()?;
-    let cur_class = char_class(cur_char, mode);
-
-    if cur_grapheme == "\n" {
-        let byte_pos = graphemes[ci].0;
-        return Some((byte_pos, byte_pos + 1));
-    }
-
-    let mut start = ci;
-    while start > 0 {
-        let prev = graphemes[start - 1].1;
-        let prev_char = prev.chars().next()?;
-        if prev == "\n" || char_class(prev_char, mode) != cur_class {
-            break;
+    cursor: usize,
+    visual: Option<VisualArea>,
+    spec: TextObjectSpec,
+    count: usize,
+) -> Result<ObjectSelection, Stranded> {
+    let mut scan = Scan::new(buf, cursor);
+    scan.vis = visual.map(|v| Visual {
+        start: scan.pos_at(v.anchor),
+        linewise: v.linewise,
+    });
+    let include = !spec.inner;
+    let count = count.max(1);
+    let found = match spec.kind {
+        TextObjectKind::Word => scan.current_word(count, include, false),
+        TextObjectKind::BigWord => scan.current_word(count, include, true),
+        TextObjectKind::Sentence => scan.current_sent(count, include),
+        TextObjectKind::Paragraph => scan.current_par(count, include),
+        TextObjectKind::Line => scan.current_line(include),
+        TextObjectKind::Quote(quote) => scan.current_quote(count, include, quote),
+        TextObjectKind::Pair { open, close } => scan.current_block(count, include, open, close),
+        TextObjectKind::AnyQuote | TextObjectKind::Tag => {
+            let (start, end) = match spec.kind {
+                TextObjectKind::Tag => surrounding_delimiters(buf, cursor, 't'),
+                _ => nearest_quote_delimiters(buf, cursor),
+            }
+            .map(|d| {
+                if spec.inner {
+                    d.inner_range()
+                } else {
+                    d.outer_range()
+                }
+            })
+            .ok_or(Stranded {
+                cursor,
+                anchor: visual.map(|v| v.anchor),
+            })?;
+            return Ok(if visual.is_some() {
+                ObjectSelection {
+                    start,
+                    end: prev_grapheme_boundary(buf, end).max(start),
+                    inclusive: true,
+                    linewise: false,
+                }
+            } else {
+                ObjectSelection {
+                    start,
+                    end,
+                    inclusive: false,
+                    linewise: false,
+                }
+            });
         }
-        start -= 1;
-    }
-    let mut end = ci;
-    while end + 1 < graphemes.len() {
-        let next = graphemes[end + 1].1;
-        let next_char = next.chars().next()?;
-        if next == "\n" || char_class(next_char, mode) != cur_class {
-            break;
-        }
-        end += 1;
-    }
-
-    let byte_start = graphemes[start].0;
-    let byte_end = if end + 1 < graphemes.len() {
-        graphemes[end + 1].0
-    } else {
-        buf.len()
     };
-
-    if inner {
-        Some((byte_start, byte_end))
-    } else {
-        // "a word" includes trailing whitespace, or leading if none trailing.
-        let a_end = following_horizontal_space_end(buf, byte_end, buf.len());
-        if a_end > byte_end {
-            Some((byte_start, a_end))
-        } else {
-            Some((
-                preceding_horizontal_space_start(buf, byte_start, 0),
-                byte_end,
-            ))
-        }
+    let end = scan.offset(scan.cur);
+    if !found {
+        return Err(Stranded {
+            cursor: end,
+            anchor: scan.vis.map(|vis| scan.offset(vis.start)),
+        });
     }
-}
-
-fn text_object_quote(buf: &str, cpos: usize, inner: bool, quote: char) -> Option<(usize, usize)> {
-    // Mirrors vim's `current_quote` (textobject.c): scan backward for an
-    // opening quote, then forward for a closing one. `\` escapes the next
-    // char (vim's default `'quoteescape'`).
-    let delims = quote_delimiters(buf, cpos, quote)?;
-    if inner {
-        return Some(delims.inner_range());
-    }
-
-    let line_s = line_start(buf, cpos);
-    let line_e = line_end(buf, cpos);
-    let a_end = following_horizontal_space_end(buf, delims.close_end, line_e);
-    if a_end > delims.close_end {
-        return Some((delims.open_start, a_end));
-    }
-    Some((
-        preceding_horizontal_space_start(buf, delims.open_start, line_s),
-        delims.close_end,
-    ))
+    // A bracket or quote followed by a combining mark ends inside a grapheme:
+    // an inner object starts after it, an outer one before it.
+    let whole = |pos: usize, linewise: bool| match (linewise, spec.inner) {
+        (true, _) => pos,
+        (false, true) => smelt_buffer::text::ceil_grapheme(buf, pos),
+        (false, false) => smelt_buffer::text::snap_grapheme(buf, pos),
+    };
+    Ok(match scan.vis {
+        Some(vis) => ObjectSelection {
+            start: whole(scan.offset(vis.start), vis.linewise),
+            end,
+            inclusive: true,
+            linewise: vis.linewise,
+        },
+        None => ObjectSelection {
+            start: whole(scan.offset(scan.oap.start), scan.oap.linewise),
+            end,
+            inclusive: scan.oap.inclusive,
+            linewise: scan.oap.linewise,
+        },
+    })
 }
 
 fn find_next_quote(line: &str, from: usize, quote: char, respect_escape: bool) -> Option<usize> {
@@ -272,16 +277,6 @@ fn find_prev_quote(line: &str, from: usize, quote: char, respect_escape: bool) -
         }
     }
     None
-}
-
-fn text_object_any_quote(buf: &str, cpos: usize, inner: bool) -> Option<(usize, usize)> {
-    nearest_quote_delimiters(buf, cpos).map(|d| {
-        if inner {
-            d.inner_range()
-        } else {
-            d.outer_range()
-        }
-    })
 }
 
 fn nearest_quote_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
@@ -481,78 +476,21 @@ pub(crate) fn paragraph_line_range(
     if lines.is_empty() {
         return None;
     }
-    let li = cursor_line.min(lines.len().saturating_sub(1));
-    let blank = lines[li].is_blank;
-
-    let mut lo = li;
-    while lo > 0 && lines[lo - 1].is_blank == blank {
-        lo -= 1;
-    }
-    let mut hi = li;
-    while hi + 1 < lines.len() && lines[hi + 1].is_blank == blank {
-        hi += 1;
-    }
-
-    if inner {
-        return Some(lo..hi + 1);
-    }
-
-    // Mirrors vim's `current_par`:
-    // - With a trailing run of opposite-status lines, extend through it.
-    // - With no trailing run but cursor in a non-blank paragraph, fall back
-    //   to leading blank lines (the "no white in front, none in back" branch).
-    // - With cursor in a trailing blank run at EOF, `ap` fails - return None.
-    if hi + 1 < lines.len() {
-        let other = lines[hi + 1].is_blank;
-        let mut hi2 = hi + 1;
-        while hi2 + 1 < lines.len() && lines[hi2 + 1].is_blank == other {
-            hi2 += 1;
-        }
-        Some(lo..hi2 + 1)
-    } else if !blank && lo > 0 && lines[lo - 1].is_blank {
-        let mut lo2 = lo - 1;
-        while lo2 > 0 && lines[lo2 - 1].is_blank {
-            lo2 -= 1;
-        }
-        Some(lo2..hi + 1)
-    } else if !blank {
-        Some(lo..hi + 1)
-    } else {
-        None
-    }
-}
-
-fn text_object_paragraph(buf: &str, cpos: usize, inner: bool) -> Option<(usize, usize)> {
-    if buf.is_empty() {
-        return None;
-    }
-
-    // Build line table: (start_byte, end_byte_exclusive_including_newline, is_blank).
-    let mut lines: Vec<(usize, usize, ParagraphLine)> = Vec::new();
-    let bytes = buf.as_bytes();
-    let mut start = 0usize;
-    for i in 0..bytes.len() {
-        if bytes[i] == b'\n' {
-            let line = &buf[start..i];
-            let is_blank = line.bytes().all(|b| b == b' ' || b == b'\t');
-            lines.push((start, i + 1, ParagraphLine { is_blank }));
-            start = i + 1;
-        }
-    }
-    if start < bytes.len() {
-        let line = &buf[start..];
-        let is_blank = line.bytes().all(|b| b == b' ' || b == b'\t');
-        lines.push((start, bytes.len(), ParagraphLine { is_blank }));
-    }
-
-    let clamped = cpos.min(buf.len());
-    let li = lines
+    // The scan only needs to know which lines are blank.
+    let text = lines
         .iter()
-        .position(|(s, e, _)| clamped >= *s && clamped < *e)
-        .unwrap_or(lines.len().saturating_sub(1));
-    let paragraph_lines: Vec<ParagraphLine> = lines.iter().map(|(_, _, line)| *line).collect();
-    let range = paragraph_line_range(&paragraph_lines, li, inner)?;
-    Some((lines[range.start].0, lines[range.end - 1].1))
+        .map(|line| if line.is_blank { "" } else { "x" })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cursor = cursor_line.min(lines.len() - 1);
+    let cursor = text
+        .split('\n')
+        .take(cursor)
+        .map(|line| line.len() + 1)
+        .sum::<usize>();
+    let mut scan = Scan::new(&text, cursor);
+    scan.current_par(1, !inner)
+        .then(|| scan.oap.start.line..scan.cur.line + 1)
 }
 
 fn find_pair_delimiters(
@@ -598,21 +536,6 @@ fn find_pair_delimiters(
         }
     }
     None
-}
-
-fn text_object_pair(
-    buf: &str,
-    cpos: usize,
-    inner: bool,
-    open: char,
-    close: char,
-) -> Option<(usize, usize)> {
-    let delimiters = pair_delimiters(buf, cpos, open, close)?;
-    Some(if inner {
-        delimiters.inner_range()
-    } else {
-        delimiters.outer_range()
-    })
 }
 
 #[cfg(test)]
@@ -687,11 +610,11 @@ mod tests {
 
     #[test]
     fn aw_whitespace_extension_keeps_graphemes_atomic() {
-        for text in ["\u{600} word", " \u{301}word"] {
+        for text in ["\u{600} word", "x \u{301}word"] {
             let range = text_object(text, text.find("word").unwrap(), false, 'w').unwrap();
             assert_grapheme_range(text, range);
         }
-        let combining_space = " \u{301}word";
+        let combining_space = "x \u{301}word";
         let range = text_object(
             combining_space,
             combining_space.find("word").unwrap(),
@@ -699,7 +622,7 @@ mod tests {
             'w',
         )
         .unwrap();
-        assert_eq!(slice(combining_space, range), combining_space);
+        assert_eq!(slice(combining_space, range), " \u{301}word");
     }
 
     #[test]
@@ -718,16 +641,15 @@ mod tests {
     }
 
     #[test]
-    fn iw_on_a_newline_selects_just_the_newline() {
-        let s = "ab\ncd";
-        let r = text_object(s, 2, true, 'w').unwrap();
-        assert_eq!(slice(s, r), "\n");
+    fn iw_on_an_empty_buffer_selects_nothing() {
+        assert_eq!(text_object("", 0, true, 'w'), Some((0, 0)));
     }
 
     #[test]
-    fn iw_on_empty_or_past_end_buffer_returns_none() {
-        assert_eq!(text_object("", 0, true, 'w'), None);
-        assert_eq!(text_object("ab", 2, true, 'w'), None);
+    fn aw_leaves_the_indent_alone() {
+        let s = "  word";
+        let r = text_object(s, 2, false, 'w').unwrap();
+        assert_eq!(slice(s, r), "word");
     }
 
     // ── quote: i" / a" ───────────────────────────────────────────────────
@@ -800,12 +722,12 @@ mod tests {
     }
 
     #[test]
-    fn s_alias_selects_the_nearest_quoted_string() {
-        let s = r#"call("hello")"#;
-        let r = text_object(s, 7, true, 's').unwrap();
-        assert_eq!(slice(s, r), "hello");
-        let r = text_object(s, 7, false, 's').unwrap();
-        assert_eq!(slice(s, r), "\"hello\"");
+    fn is_and_as_select_sentences() {
+        let s = "One two.  Three four.  Five.";
+        let r = text_object(s, 12, true, 's').unwrap();
+        assert_eq!(slice(s, r), "Three four.");
+        let r = text_object(s, 12, false, 's').unwrap();
+        assert_eq!(slice(s, r), "Three four.  ");
     }
 
     #[test]
@@ -958,9 +880,9 @@ mod tests {
     fn ap_on_nonblank_with_only_leading_blanks_extends_backward() {
         // vim: when there are no trailing blanks but leading ones exist,
         // `ap` includes the leading blank run.
-        let s = "\n\na\nb\n";
+        let s = "\n\na\nb";
         let r = text_object(s, 2, false, 'p').unwrap();
-        assert_eq!(slice(s, r), "\n\na\nb\n");
+        assert_eq!(slice(s, r), "\n\na\nb");
     }
 
     #[test]
@@ -971,9 +893,8 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_on_empty_buffer_returns_none() {
-        assert_eq!(text_object("", 0, true, 'p'), None);
-        assert_eq!(text_object("", 0, false, 'p'), None);
+    fn paragraph_on_empty_buffer_selects_its_only_line() {
+        assert_eq!(text_object("", 0, true, 'p'), Some((0, 0)));
     }
 
     #[test]

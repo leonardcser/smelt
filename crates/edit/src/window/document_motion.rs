@@ -5,7 +5,7 @@ use super::document_view::{
     document_byte_col_at_cell, document_position_cell, document_row_string, BlockMotion,
 };
 use super::*;
-use crate::motions::{find_reach, find_step, Motion, Reach, Use, WordTo};
+use crate::motions::{find_counted, find_reach, LineTo, Motion, Reach, Use, WordTo};
 use crate::row::{BlockBoundary, DisplayDocument};
 
 /// What a row motion needs to know besides the motion itself.
@@ -85,6 +85,32 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             let line = row_text(doc, from.row)?;
             (at(from.row, first_non_blank(&line)), Reach::Exclusive)
         }
+        Motion::Line(to) => {
+            let delta = match to {
+                LineTo::Next => n as isize,
+                LineTo::Prev => -(n as isize),
+                LineTo::Current => n as isize - 1,
+            };
+            let row = add_signed_row(from.row, delta).min(last);
+            let line = row_text(doc, row)?;
+            (at(row, first_non_blank(&line)), Reach::Linewise)
+        }
+        Motion::LastNonBlank => {
+            let row = from.row.saturating_add(n as RowIndex - 1).min(last);
+            let line = row_text(doc, row)?;
+            let end = line.trim_end_matches([' ', '\t']).len();
+            (
+                at(row, text::prev_grapheme_boundary(&line, end)),
+                Reach::Inclusive,
+            )
+        }
+        Motion::Column => {
+            let line = row_text(doc, from.row)?;
+            (
+                at(from.row, text::cell_to_byte(&line, n - 1)),
+                Reach::Exclusive,
+            )
+        }
         Motion::LineEnd => {
             let row = from.row.saturating_add(n as RowIndex - 1).min(last);
             let len = row_text(doc, row)?.len();
@@ -95,7 +121,7 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
                 let row = (c as RowIndex).saturating_sub(1).min(last);
                 (at(row, same_cell(doc, row)), Reach::Linewise)
             }
-            None => (at(0, 0), Reach::Linewise),
+            None => (at(0, same_cell(doc, 0)), Reach::Linewise),
         },
         Motion::BufferEnd => {
             let row = count.map_or(last, |c| (c as RowIndex).saturating_sub(1).min(last));
@@ -108,22 +134,31 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             }
             (pos, Reach::Exclusive)
         }
-        Motion::MatchBracket => (
-            matching_bracket(doc, from, env.total_rows)?,
-            Reach::Inclusive,
-        ),
+        Motion::MatchBracket => match count {
+            Some(percent) if percent <= 100 => {
+                let row = (percent as RowIndex * env.total_rows).div_ceil(100).max(1) - 1;
+                (
+                    at(row.min(last), same_cell(doc, row.min(last))),
+                    Reach::Linewise,
+                )
+            }
+            Some(_) => return None,
+            None => (
+                matching_bracket(doc, from, env.total_rows)?,
+                Reach::Inclusive,
+            ),
+        },
         Motion::Find { kind, ch, repeat } => {
             let line = row_text(doc, from.row)?;
-            let mut col = text::snap_grapheme(&line, from.byte_col.min(line.len()));
-            for _ in 0..n {
-                col = find_step(&line, col, kind, ch, repeat)?;
-            }
+            let col = text::snap_grapheme(&line, from.byte_col.min(line.len()));
+            let col = find_counted(&line, col, kind, ch, repeat, n)?;
             (at(from.row, col), find_reach(kind))
         }
         Motion::Block(block) => (
             block_position(doc, env.total_rows, from, block, n)?,
             Reach::Exclusive,
         ),
+        Motion::Sentence { .. } | Motion::ByteOffset => return None,
         Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom => {
             let visible = env
                 .total_rows
@@ -291,7 +326,7 @@ fn matching_bracket<D: DisplayDocument + ?Sized>(
     let (start, bracket) = line[col..]
         .char_indices()
         .map(|(i, c)| (col + i, c))
-        .find(|&(_, c)| "()[]{}<>".contains(c))?;
+        .find(|&(_, c)| "()[]{}".contains(c))?;
     let (open, close, forward) = match bracket {
         '(' => ('(', ')', true),
         ')' => ('(', ')', false),
@@ -299,8 +334,7 @@ fn matching_bracket<D: DisplayDocument + ?Sized>(
         ']' => ('[', ']', false),
         '{' => ('{', '}', true),
         '}' => ('{', '}', false),
-        '<' => ('<', '>', true),
-        _ => ('<', '>', false),
+        _ => return None,
     };
     let (this, other) = if forward {
         (open, close)

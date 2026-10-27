@@ -12,6 +12,7 @@ pub(crate) mod motions;
 pub mod named;
 pub(crate) mod overlay;
 mod resize;
+pub(crate) mod scan;
 use resize::{ResolvedDecoration, ResolvedUiLayout};
 pub mod row;
 pub mod text;
@@ -68,7 +69,7 @@ pub use callback::{
 use callback::{Callbacks, KeymapScope};
 pub use event::{Event, Status};
 pub use modal::{ModalId, ModalOwner};
-pub use motions::{FindKind, Motion, WordTo};
+pub use motions::{FindKind, LineTo, Motion, WordTo};
 pub use overlay::{
     BodyDrag, ChromeAction, ChromeOwner, Decoration, DecorationId, DragConfig, HitTarget, Overlay,
     OverlayId, ResizeConfig, ResizeEdges,

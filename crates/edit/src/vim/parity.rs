@@ -261,4 +261,119 @@ mod pinned {
     fn replace_with_newline_keeps_the_indent() {
         assert_eq!(text_after("  ab  cd", "4lr<CR>"), "  ab\n  cd");
     }
+
+    /// Word, bracket and quote objects take counts, search forward on the line and extend Visual selections.
+    #[test]
+    fn word_and_bracket_objects_take_counts_and_search_forward() {
+        for (text, keys, expected) in [
+            ("one two three", "daw", "two three"),
+            ("one two three", "wdaw", "one three"),
+            ("one two three", "wwdaw", "one two"),
+            ("one two three", "wdiw", "one  three"),
+            ("one two three", "d2aw", "three"),
+            ("one two three", "d2iw", "two three"),
+            ("one two three", "wviwiwd", "one three"),
+            ("one two three", "vawawd", "three"),
+            ("foo (bar) baz", "di(", "foo () baz"),
+            ("foo (bar) baz", "da(", "foo  baz"),
+            ("f(a (b) c) g", "fbd2i(", "f() g"),
+            ("f(a (b) c) g", "fbd2a(", "f g"),
+            ("f(a (b) c) g", "fbdi(", "f(a () c) g"),
+            ("f(a (b) c) g", "fbvi(i(d", "f(a () c) g"),
+            ("x \"a b\" y", "di\"", "x \"\" y"),
+            ("x \"a b\" y", "da\"", "x y"),
+            ("x \"a b\" y", "fad2i\"", "x  y"),
+            ("x 'a b' y", "ci'z<Esc>", "x 'z' y"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
+    }
+
+    /// Quote, sentence and paragraph objects and motions.
+    #[test]
+    fn quote_sentence_and_paragraph_objects() {
+        for (text, keys, expected) in [
+            ("One. Two. Three.", "das", "Two. Three."),
+            ("One. Two. Three.", "wwdas", "One. Three."),
+            ("One. Two. Three.", "wdis", " Two. Three."),
+            ("One. Two. Three.", "d)", "Two. Three."),
+            ("One. Two. Three.", "$d(", "One. Two. ."),
+            ("One. Two. Three.", "2d)", "Three."),
+            ("One. Two. Three.", "))", "One. Two. Three."),
+            ("a\nb\n\nc", "dap", "c"),
+            ("a\nb\n\nc", "dip", "\nc"),
+            ("a\nb\n\nc\nd", "jjjdap", "a\nb"),
+            ("a\nb\n\nc\nd", "d}", "\nc\nd"),
+            ("a\nb\n\nc\nd", "2d}", ""),
+            ("a\nb\n\nc\nd", "3d}", "a\nb\n\nc\nd"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
+    }
+
+    /// Word motions on line ends, empty lines and the buffer's last line.
+    #[test]
+    fn word_motions_stop_where_vim_does() {
+        for (text, keys, expected) in [
+            ("a\nb\n\nc\nd", "Gd{", "a\nb\nd"),
+            ("one two\nthree", "dw", "two\nthree"),
+            ("one two\nthree", "wdw", "one \nthree"),
+            ("one two\nthree", "wcwx<Esc>", "one x\nthree"),
+            ("one two\nthree", "de", " two\nthree"),
+            ("one two\nthree", "wde", "one \nthree"),
+            ("one two\nthree", "wwdb", "one \nthree"),
+            ("a\n\nb", "dw", "\n\nb"),
+            ("a\n\nb", "jdw", "a\nb"),
+            ("a b\n", "wdw", "a \n"),
+            ("a b\n", "wde", "a "),
+            ("a b\n", "3e", "a b\n"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
+    }
+
+    /// `.` after a Visual command selects the same amount of text from the cursor.
+    #[test]
+    fn visual_commands_repeat_over_the_same_amount_of_text() {
+        for (text, keys, expected) in [
+            ("a b\n", "3ex", "a b\n"),
+            ("one two three", "vld.", "two three"),
+            ("one two three", "vlld..", "hree"),
+            ("one\ntwo\nthree\nfour", "Vd.", "three\nfour"),
+            ("one\ntwo\nthree\nfour", "vjd.", "hree\nfour"),
+            ("one two\nthree four", "vjd.", "ree four"),
+            ("one two three", "vlU.", "ONe two three"),
+            ("one two three", "vlr.w.", "....two three"),
+            ("one two three", "vlcab<Esc>w.", "abe abo three"),
+            ("one\ntwo\nthree", "VjJ", "one two\nthree"),
+            ("one\ntwo\nthree", "VjgJ", "onetwo\nthree"),
+            ("one\n  two\nthree", "vjJ", "one two\nthree"),
+            ("one\ntwo", "vJ", "one two"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
+    }
+
+    /// Visual `$` and `l` can take the line break, `p` and `J` work on the selection.
+    #[test]
+    fn visual_commands_reach_the_line_break() {
+        for (text, keys, expected) in [
+            ("one\ntwo", "vgJ", "onetwo"),
+            ("one two", "v$d", ""),
+            ("one\ntwo", "v$d", "two"),
+            ("one\ntwo", "vld", "e\ntwo"),
+            ("one\ntwo", "v$y$p", "oneone\n\ntwo"),
+            ("ab\ncd", "vj$d", ""),
+            ("one two", "wv$hd", "one "),
+            ("one two three", "ywwvep", "one one  three"),
+            ("one two three", "ywwvlp", "one one o three"),
+            ("one\ntwo", "yyjvp", "one\n\none\nwo"),
+            ("one\ntwo", "yyjVp", "one\none"),
+            ("one two", "ywVp", "one "),
+            ("one two", "ywwVP", "one "),
+            ("one two", "ywvepa<Esc>", "one  two"),
+        ] {
+            assert_eq!(text_after(text, keys), expected, "{keys}");
+        }
+    }
 }

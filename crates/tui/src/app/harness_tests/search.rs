@@ -1196,7 +1196,7 @@ fn vim_prompt_app(text: &str) -> TestApp {
     app.set_terminal_size(80, 16);
     app.type_text(text);
     app.press(KeyCode::Esc);
-    app.type_text("gg");
+    app.type_text("gg0");
     app.render_silent();
     app
 }

@@ -185,60 +185,6 @@ pub fn line_end(buf: &str, cpos: usize) -> usize {
     cpos + buf[cpos..].find('\n').unwrap_or(buf.len() - cpos)
 }
 
-/// Paragraphs are separated by empty lines only, as in vim; a line holding
-/// whitespace belongs to the paragraph.
-fn is_blank_line(buf: &str, pos: usize) -> bool {
-    line_start(buf, pos) == line_end(buf, pos)
-}
-
-fn next_line_start(buf: &str, pos: usize) -> Option<usize> {
-    let end = line_end(buf, pos);
-    (end < buf.len()).then_some(end + 1)
-}
-
-fn prev_line_start(buf: &str, pos: usize) -> Option<usize> {
-    let start = line_start(buf, pos);
-    (start > 0).then(|| line_start(buf, start - 1))
-}
-
-/// Start of the next blank line after the paragraph at `cpos` (vim `}`), or
-/// the end of the buffer when no blank line follows.
-pub fn paragraph_forward_pos(buf: &str, cpos: usize) -> usize {
-    let mut pos = line_start(buf, cpos);
-    while is_blank_line(buf, pos) {
-        match next_line_start(buf, pos) {
-            Some(next) => pos = next,
-            None => return buf.len(),
-        }
-    }
-    while !is_blank_line(buf, pos) {
-        match next_line_start(buf, pos) {
-            Some(next) => pos = next,
-            None => return buf.len(),
-        }
-    }
-    pos
-}
-
-/// Start of the previous blank line before the paragraph at `cpos` (vim `{`),
-/// or the start of the buffer when no blank line precedes.
-pub fn paragraph_backward_pos(buf: &str, cpos: usize) -> usize {
-    let mut pos = line_start(buf, cpos);
-    while is_blank_line(buf, pos) {
-        match prev_line_start(buf, pos) {
-            Some(prev) => pos = prev,
-            None => return 0,
-        }
-    }
-    while !is_blank_line(buf, pos) {
-        match prev_line_start(buf, pos) {
-            Some(prev) => pos = prev,
-            None => return 0,
-        }
-    }
-    pos
-}
-
 /// Word boundaries around `pos` (`[a-zA-Z0-9_]` runs).
 /// `transparent` byte positions (sorted) are crossed as if they were word chars
 /// (for soft-wrap `\n` so a wrapped word selects as one unit). Leading/trailing
@@ -453,30 +399,5 @@ mod tests {
         let hard = [1usize, 2];
         assert_eq!(line_range_at(b, 1, &hard), None);
         assert_eq!(line_range_at(b, 2, &hard), None);
-    }
-
-    #[test]
-    fn paragraph_forward_lands_on_the_next_blank_line() {
-        let b = "one\ntwo\n\nthree\n\n\nfour";
-        assert_eq!(paragraph_forward_pos(b, 0), 8);
-        assert_eq!(paragraph_forward_pos(b, 5), 8);
-        assert_eq!(paragraph_forward_pos(b, 8), 15);
-        assert_eq!(paragraph_forward_pos(b, 15), b.len());
-        assert_eq!(paragraph_forward_pos(b, b.len()), b.len());
-    }
-
-    #[test]
-    fn paragraph_forward_keeps_whitespace_only_lines_in_the_paragraph() {
-        assert_eq!(paragraph_forward_pos("one\n  \ntwo\n\nthree", 0), 11);
-    }
-
-    #[test]
-    fn paragraph_backward_lands_on_the_previous_blank_line() {
-        let b = "one\ntwo\n\nthree\n\n\nfour";
-        assert_eq!(paragraph_backward_pos(b, b.len()), 16);
-        assert_eq!(paragraph_backward_pos(b, 16), 8);
-        assert_eq!(paragraph_backward_pos(b, 10), 8);
-        assert_eq!(paragraph_backward_pos(b, 5), 0);
-        assert_eq!(paragraph_backward_pos(b, 0), 0);
     }
 }
