@@ -183,6 +183,7 @@ fn transcript_search_worker_loop(
     shared: Arc<TranscriptSearchWorkerShared>,
     event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
 ) {
+    let mut store: Option<TranscriptSearchStore> = None;
     loop {
         let request = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -215,10 +216,19 @@ fn transcript_search_worker_loop(
         }
 
         let cancelled = || shared.latest_generation.load(Ordering::Acquire) != request.generation;
-        let candidates = match persistent_transcript_candidate_blocks(&request, &cancelled) {
-            Ok(candidates) => candidates,
-            Err(smelt_store::StoreError::Cancelled) => continue,
-            Err(_) => SqliteTranscriptCandidateBlocks::default(),
+        if store
+            .as_ref()
+            .is_none_or(|store| store.store_address != request.store_address)
+        {
+            store = TranscriptSearchStore::open(request.store_address.clone()).ok();
+        }
+        let candidates = match store
+            .as_ref()
+            .map(|store| persistent_transcript_candidate_blocks(store, &request, &cancelled))
+        {
+            Some(Ok(candidates)) => candidates,
+            Some(Err(smelt_store::StoreError::Cancelled)) => continue,
+            Some(Err(_)) | None => SqliteTranscriptCandidateBlocks::default(),
         };
         if cancelled() {
             continue;
@@ -241,10 +251,10 @@ fn transcript_search_worker_loop(
 }
 
 fn persistent_transcript_candidate_blocks(
+    store: &TranscriptSearchStore,
     request: &TranscriptSearchWorkerRequest,
     cancelled: &dyn Fn() -> bool,
 ) -> smelt_store::Result<SqliteTranscriptCandidateBlocks> {
-    let store = TranscriptSearchStore::open(request.store_address.clone())?;
     let store_direction = match request.direction {
         SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
         SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,

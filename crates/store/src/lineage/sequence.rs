@@ -543,19 +543,18 @@ pub(crate) fn load_payload_ref(
     id: &PayloadId,
 ) -> Result<PayloadRef> {
     let row = conn
-        .query_row(
+        .prepare_cached(
             "SELECT payload_kind, object_hash, byte_count
              FROM lineage_payload_object_refs
              WHERE lineage_id = ?1 AND payload_id = ?2",
-            (lineage.as_str(), id.as_str()),
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
+        )?
+        .query_row((lineage.as_str(), id.as_str()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
         .optional()?
         .ok_or_else(|| StoreError::MissingObject {
             reference: format!("lineage payload {}", id.as_str()),

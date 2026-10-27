@@ -142,24 +142,23 @@ fn object_meta_from_parts(
 }
 
 pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<ObjectMeta>> {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT hash, codec, raw_size, stored_size, length(bytes)
          FROM objects
          WHERE hash = ?1",
-        [hash],
-        |row| {
-            let codec: String = row.get(1)?;
-            let raw_size: i64 = row.get(2)?;
-            let stored_size: i64 = row.get(3)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                codec,
-                raw_size,
-                stored_size,
-                row.get::<_, i64>(4)?,
-            ))
-        },
-    )
+    )?
+    .query_row([hash], |row| {
+        let codec: String = row.get(1)?;
+        let raw_size: i64 = row.get(2)?;
+        let stored_size: i64 = row.get(3)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            codec,
+            raw_size,
+            stored_size,
+            row.get::<_, i64>(4)?,
+        ))
+    })
     .optional()?
     .map(|(hash, codec, raw_size, stored_size, actual_stored_size)| {
         let meta = object_meta_from_parts(hash, codec, raw_size, stored_size)?;
@@ -180,11 +179,8 @@ pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<Object
 
 pub(crate) fn object_bytes(conn: &Connection, meta: &ObjectMeta) -> Result<Vec<u8>> {
     let stored_bytes: Vec<u8> = conn
-        .query_row(
-            "SELECT bytes FROM objects WHERE hash = ?1",
-            [&meta.hash],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT bytes FROM objects WHERE hash = ?1")?
+        .query_row([&meta.hash], |row| row.get(0))
         .optional()?
         .ok_or_else(|| StoreError::MissingObject {
             reference: format!("object {}", meta.hash),
