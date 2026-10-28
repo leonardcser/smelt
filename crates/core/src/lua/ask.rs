@@ -30,9 +30,13 @@ pub struct AskRequest {
 
 pub fn select_model(config: &RuntimeState, reference: Option<&str>) -> Result<ActiveModel, String> {
     match reference {
-        Some(reference) => crate::config::resolve_model_ref(&config.available_models, reference)
-            .map(ActiveModel::from_resolved)
-            .map_err(|error| error.to_string()),
+        // The active model survives reloads that drop its provider entry.
+        Some(reference) => match config.active_model().filter(|m| m.key == reference) {
+            Some(active) => Ok(active.clone()),
+            None => crate::config::resolve_model_ref(&config.available_models, reference)
+                .map(ActiveModel::from_resolved)
+                .map_err(|error| error.to_string()),
+        },
         None => config
             .active_model()
             .map(ActiveModel::auxiliary)

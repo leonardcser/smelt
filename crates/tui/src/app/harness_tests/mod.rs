@@ -413,6 +413,16 @@ async fn compaction_prepare_probe_completes_and_preserves_turn() {
     app.probe_compaction_prepare_request(1);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_prepare_probe_compacts_after_lua_reload() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    // The harness provider is not replayed by reloads, so the active model
+    // outlives its provider entry like a provider removed from init.lua.
+    app.reload_lua();
+    app.probe_compaction_prepare_request(0);
+    app.reload_lua();
+}
+
 // ── Original picker suite continues ─────────────────────────────
 
 // ── Named-resource hot-reload refresh ───────────────────────────
