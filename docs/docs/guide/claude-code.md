@@ -247,10 +247,11 @@ background shell commands and background subagents keep running, and the next
 turn continues on the same process. smelt declares that it stops background
 tasks one by one, so Claude Code's interrupt spares them. Queued messages go
 back to the prompt instead of reaching Claude Code. Resetting, loading,
-rewinding, or switching the session ends the process with all its work. Claude
-Code runs each shell command in a process session of its own, which outlives
-its process, so smelt stops the shell commands first whenever it releases the
-process, and bounds process shutdown.
+rewinding, or switching the session ends the process with all its work, so while
+background work runs, **Esc Esc** cancels a turn Claude Code has not answered
+yet instead of rewinding it. Claude Code runs each shell command in a process
+session of its own, which outlives its process, so smelt stops the shell
+commands first whenever it releases the process, and bounds process shutdown.
 When Claude Code cancels an individual request, smelt cancels its host evaluation
 and execution tasks, including child tasks, and closes its question or permission
 dialog. Cancelled requests cannot receive a late approval or tool reply.
@@ -267,10 +268,16 @@ commands to the background, so the turn continues without waiting for them.
 Once Claude Code registers a foreground command, a few seconds in, its output
 streams into the `bash` block as it runs.
 
-When a background command ends, Claude Code wakes on its own to report it. The
-work indicator shows the wake reply as it runs, and the reply is appended to the
-session history like any answer. In headless mode smelt waits for running
-background commands and their wake replies before reporting completion.
+When a background command ends, or a monitor reports an event, Claude Code wakes
+on its own to report it. The work indicator shows the wake reply as it runs, and
+the reply is appended to the session history like any answer. A prompt sent
+meanwhile starts its turn at once: Claude Code queues it and takes it once the
+reply ends, and only its own answer completes the turn. Events that arrive during
+an answer wait for its end, so Claude Code wakes for them right after an
+interrupt too. Cancelling withdraws a prompt Claude Code has not started; one it
+started stays in its conversation, and a later wake reply may still answer it.
+In headless mode smelt waits for running background commands and their wake
+replies before reporting completion.
 
 ## Native subagents
 
@@ -293,15 +300,16 @@ parent's usage, because native model totals can already include child work.
 Background subagents outlive the parent's result. In the TUI the parent turn
 completes normally, and the prompt stays free while children run, as it does
 for background shell commands. When a child ends, Claude Code wakes to report
-it; the work indicator shows the wake reply, and a prompt sent meanwhile is
-queued until the reply ends, so a turn never races it. Late child permission
-requests, wake replies, and usage are routed to the same session. A wake reply
-is appended to the canonical history exactly once. In headless mode smelt waits
+it; the work indicator shows the wake reply, and a prompt sent meanwhile waits
+in Claude Code's queue until the reply ends. Late child permission requests,
+wake replies, and usage are routed to the same session. A wake reply is
+appended to the canonical history exactly once. In headless mode smelt waits
 for all background work and the wake reply before reporting completion.
 
-**Ctrl-C** interrupts a running answer or wake reply and leaves background work
-running: **Alt-S** in `/subagents` stops one child, and **Alt-D** in `/ps` stops
-one shell command. Resetting, loading, or rewinding the session ends all of it.
+**Esc Esc** or **Ctrl-C** interrupts a running answer or wake reply and leaves
+background work running: **Alt-S** in `/subagents` stops one child, and
+**Alt-D** in `/ps` stops one shell command. Resetting, loading, or rewinding the
+session ends all of it.
 
 ## Boundaries
 

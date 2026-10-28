@@ -997,11 +997,24 @@ impl TuiApp {
             Some(_) => None,
             None => self.pending_turn_rewind_history_index(),
         };
-        let Some(history_idx) = history_idx else {
+        // A rewind ends the native session with its background work, which a
+        // cancel spares.
+        let Some(history_idx) = history_idx.filter(|_| !self.native_session_has_background_work())
+        else {
             return false;
         };
         self.rewind_to_history_index(Some(history_idx), restore_vim_insert);
         true
+    }
+
+    /// Whether the native session runs work of its own, such as a monitor or
+    /// a background agent.
+    fn native_session_has_background_work(&self) -> bool {
+        let Some(session) = self.core.native_session.as_deref() else {
+            return false;
+        };
+        !self.core.native_processes.is_empty()
+            || (self.core.agents.runs(session)).any(|agent| !agent.info.status.is_terminal())
     }
 
     fn restore_vim_insert_after_rewind(&mut self) {

@@ -2,8 +2,9 @@
 """Deterministic Claude Code subprocess contract fixture. No network or credentials."""
 import json
 import os
-import select
+import queue
 import sys
+import threading
 import time
 
 SESSION = "12345678-1234-4234-8234-123456789abc"
@@ -12,6 +13,17 @@ LOG = os.environ.get("SMELT_CLAUDE_FIXTURE_LOG")
 TOOLS_ENABLED = sys.argv[sys.argv.index("--tools") + 1] == "default"
 # Messages read early that the main loop takes next.
 PENDING = []
+# Lines from stdin, read on a thread so a wait for the next one can time out.
+INBOX = queue.Queue()
+
+
+def read_stdin():
+    for line in iter(sys.stdin.readline, ""):
+        INBOX.put(line)
+    INBOX.put("")
+
+
+threading.Thread(target=read_stdin, daemon=True).start()
 
 
 def log(value):
@@ -32,8 +44,9 @@ def send(value):
         print(data, end="", flush=True)
 
 
-def receive():
-    line = sys.stdin.readline()
+def receive(timeout=None):
+    """The next message. Raises queue.Empty when none arrives within the timeout."""
+    line = INBOX.get(timeout=timeout)
     if not line:
         sys.exit(0)
     value = json.loads(line)
@@ -118,8 +131,12 @@ while True:
             }}})
         continue
     if prompt.get("uuid"):
-        # --replay-user-messages echoes a message when Claude Code takes it.
-        send({"type": "user", "isReplay": True, "uuid": prompt["uuid"], "message": prompt["message"], "parent_tool_use_id": None})
+        # Claude Code says when it starts on a message, and with
+        # --replay-user-messages echoes it later. A wake test leaves the echo
+        # out, so only the start can start the turn.
+        send({"type": "command_lifecycle", "command_uuid": prompt["uuid"], "state": "started"})
+        if not SCENARIO.startswith("monitor-wake"):
+            send({"type": "user", "isReplay": True, "uuid": prompt["uuid"], "message": prompt["message"], "parent_tool_use_id": None})
     send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
     if SCENARIO == "hang":
         while True:
@@ -352,18 +369,30 @@ while True:
         send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
         assistant([{"type": "text", "text": "SHELL_WAKE_REPLY"}], "shell-wake")
         send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "SHELL_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
-    if SCENARIO == "monitor-wake":
-        # A monitor event wakes Claude Code, which thinks a while before it
-        # answers. A prompt that arrives meanwhile waits behind the wake.
+    if SCENARIO in ("monitor-wake", "monitor-wake-held"):
+        # A monitor event wakes Claude Code, which thinks until it is
+        # interrupted or, unless held, a prompt arrives. The prompt waits in its
+        # queue until the wake reply ends, and can be withdrawn until then.
         send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
         send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
         log({"wake": "started"})
-        deadline = time.monotonic() + 0.5
-        while deadline > time.monotonic() and select.select([sys.stdin], [], [], deadline - time.monotonic())[0]:
-            message = receive()
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                message = receive(max(0, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            request = message.get("request", {})
+            if request.get("subtype") == "cancel_async_message":
+                PENDING[:] = [queued for queued in PENDING if queued.get("uuid") != request["message_uuid"]]
+                continue
+            PENDING.append(message)
             if message.get("type") == "user":
                 log({"wake": "prompted"})
-            PENDING.append(message)
+                if SCENARIO == "monitor-wake":
+                    break
+            if request.get("subtype") == "interrupt":
+                break
         assistant([{"type": "text", "text": "MONITOR_WAKE_REPLY"}], "monitor-wake")
         send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "MONITOR_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
     send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})

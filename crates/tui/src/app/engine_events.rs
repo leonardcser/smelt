@@ -517,6 +517,11 @@ impl TuiApp {
         }
     }
 
+    /// Whether the native session's own work is all that is busy.
+    pub(super) fn only_native_session_busy(&self) -> bool {
+        (self.native_ui.busy.as_ref()).is_some_and(|busy| self.busy_stack.is_only(busy))
+    }
+
     /// Forgets the native session's work state. The session outlives a
     /// cancelled turn and reports its work again.
     pub(super) fn forget_native_work(&mut self) {

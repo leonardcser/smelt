@@ -85,8 +85,11 @@ struct OpenTurn {
 enum Stage {
     /// Its model history is loading.
     Preparing,
-    /// Its prompt waits for Claude Code to be initialized and its root agent idle.
+    /// Its prompt waits for Claude Code to be initialized.
     Queued(Vec<Value>),
+    /// Claude Code has the prompt with this uuid and takes it once it finishes
+    /// what it works on, such as a reply to a monitor event.
+    Taking(String),
     Sent,
     /// Claude Code answered with steers still queued, which it answers next.
     Steering,
@@ -97,6 +100,14 @@ enum Stage {
 impl Stage {
     /// Whether Claude Code has the turn's prompt.
     fn prompted(&self) -> bool {
+        matches!(
+            self,
+            Self::Taking(_) | Self::Sent | Self::Steering | Self::Answered
+        )
+    }
+
+    /// Whether Claude Code works on the turn's prompt, or answered it.
+    fn taken(&self) -> bool {
         matches!(self, Self::Sent | Self::Steering | Self::Answered)
     }
 }
@@ -295,7 +306,7 @@ impl Runtime<'_> {
 
     /// Whether Claude Code's main agent is working, or owes a wake. It also
     /// works on its own, such as when a monitor event wakes it, and says so
-    /// before its first frame.
+    /// before its first frame. A prompt sent meanwhile waits in its queue.
     fn root_busy(&self) -> bool {
         self.native.root_in_progress
             || self.native.awaiting_wake
@@ -597,21 +608,41 @@ impl Runtime<'_> {
         if !matches!(turn.stage, Stage::Queued(_)) {
             return Ok(());
         }
-        let Stage::Queued(content) = std::mem::replace(&mut turn.stage, Stage::Sent) else {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let Stage::Queued(content) =
+            std::mem::replace(&mut turn.stage, Stage::Taking(uuid.clone()))
+        else {
             unreachable!()
         };
         self.transcript.append(input_history(&self.payload.input));
-        self.write(user_message(content)).await?;
+        let mut message = user_message(content);
+        message["uuid"] = json!(uuid);
+        self.write(message).await
+    }
+
+    /// Whether the turn's prompt has this uuid and waits to be taken.
+    fn taking(&self, uuid: &Value) -> bool {
+        self.turn.as_ref().is_some_and(
+            |turn| matches!(&turn.stage, Stage::Taking(taking) if uuid == taking.as_str()),
+        )
+    }
+
+    /// Follows Claude Code taking the prompt. What it did before, such as its
+    /// reply to a monitor event, does not answer the turn.
+    async fn take(&mut self) -> Result<(), String> {
+        if let Some(turn) = &mut self.turn {
+            turn.stage = Stage::Sent;
+        }
         self.send_steers().await
     }
 
-    /// Sends steers once Claude Code has the prompt. It takes each at its next
+    /// Sends steers once Claude Code took the prompt. It takes each at its next
     /// step boundary, as smelt's own loop does, and echoes it back then.
     async fn send_steers(&mut self) -> Result<(), String> {
         let Some(turn) = &mut self.turn else {
             return Ok(());
         };
-        if self.deferred.is_empty() || !turn.stage.prompted() || self.native.moving.is_some() {
+        if self.deferred.is_empty() || !turn.stage.taken() || self.native.moving.is_some() {
             return Ok(());
         }
         // An answered turn continues with Claude Code's answer to the steers.
@@ -631,24 +662,35 @@ impl Runtime<'_> {
     /// keeps running, with its shells and background agents, and keeps the
     /// conversation smelt has: the steps it already recorded.
     async fn cancel(&mut self) -> Result<(), String> {
-        let answering = self.native.root_in_progress
-            || self
-                .turn
-                .as_ref()
-                .is_some_and(|turn| matches!(turn.stage, Stage::Sent | Stage::Steering));
-        if answering && !self.native.interrupting {
-            self.write(control("smelt-interrupt", json!({"subtype":"interrupt"})))
-                .await?;
-            self.native.interrupting = true;
-        }
-        // Queued messages go back to the prompt, so Claude Code must not take them.
+        let answering = self.root_busy()
+            || self.turn.as_ref().is_some_and(|turn| {
+                matches!(turn.stage, Stage::Taking(_) | Stage::Sent | Stage::Steering)
+            });
+        // Queued messages go back to the prompt, so Claude Code must not take
+        // them, as it would once the interrupt ends what it answers.
         self.deferred.clear();
+        if let Some(OpenTurn {
+            stage: Stage::Taking(uuid),
+            ..
+        }) = &self.turn
+        {
+            let request = control(
+                &format!("smelt-untake-{uuid}"),
+                json!({"subtype":"cancel_async_message", "message_uuid":uuid}),
+            );
+            self.write(request).await?;
+        }
         for (uuid, _) in std::mem::take(&mut self.steers) {
             self.write(control(
                 &format!("smelt-unsteer-{uuid}"),
                 json!({"subtype":"cancel_async_message", "message_uuid":uuid}),
             ))
             .await?;
+        }
+        if answering && !self.native.interrupting {
+            self.write(control("smelt-interrupt", json!({"subtype":"interrupt"})))
+                .await?;
+            self.native.interrupting = true;
         }
         if let Some(Move::Sent { resume, .. }) = &mut self.native.moving {
             *resume = false;
@@ -861,7 +903,6 @@ impl Runtime<'_> {
                 return Ok(());
             }
             if self.native.init_deadline.is_none()
-                && !self.root_busy()
                 && !self.native.interrupting
                 && self.native.moving.is_none()
             {
@@ -1090,7 +1131,17 @@ impl Runtime<'_> {
                     _ => self.commit(),
                 }
             }
+            // Claude Code says when it starts on a queued message, before it
+            // echoes the message.
+            Some("command_lifecycle") => {
+                if frame["state"] == "started" && self.taking(&frame["command_uuid"]) {
+                    return self.take().await;
+                }
+            }
             Some("user") if frame["isReplay"] == true => {
+                if self.taking(&frame["uuid"]) {
+                    return self.take().await;
+                }
                 let Some(at) = self
                     .steers
                     .iter()

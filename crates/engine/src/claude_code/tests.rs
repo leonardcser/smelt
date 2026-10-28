@@ -55,6 +55,15 @@ impl Fixture {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
+
+    /// Waits for Claude Code to log a call that matches, which it does on its own time.
+    async fn wait_for(&self, expected: &str, matches: impl Fn(&Value) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !self.calls().iter().any(&matches) {
+            assert!(std::time::Instant::now() < deadline, "{expected}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 impl Drop for Fixture {
@@ -730,30 +739,106 @@ async fn a_turn_after_cancellation_continues_on_the_same_process() {
 
 #[tokio::test]
 #[serial(claude_code)]
-async fn a_prompt_waits_while_claude_code_works_on_its_own() {
+async fn a_prompt_sent_while_claude_code_works_on_its_own_starts_once_taken() {
     let fixture = Fixture::new("monitor-wake");
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, Vec::new()));
     let mut history = Vec::new();
     finish(&mut handle, &mut history).await;
-    while !fixture.calls().iter().any(|call| call["wake"] == "started") {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    fixture
+        .wait_for("Claude Code never woke", |call| call["wake"] == "started")
+        .await;
 
     handle.send(payload(fixture.root.path(), 2, history.clone()));
-    finish(&mut handle, &mut history).await;
+    let meta = finish(&mut handle, &mut history).await;
+    assert!(!meta.interrupted);
     assert!(
-        !fixture
+        fixture
             .calls()
             .iter()
             .any(|call| call["wake"] == "prompted"),
-        "the prompt reached Claude Code while it was still working"
+        "the prompt waited for Claude Code instead of its queue"
     );
     let history = serde_json::to_string(&history).unwrap();
-    let wake = history.find("MONITOR_WAKE_REPLY").expect("wake reply");
     let prompt = history.find("turn 2").expect("second prompt");
-    assert!(wake < prompt, "the wake reply comes before the prompt");
-    assert!(history[prompt..].contains("fixture answer"));
+    let wake = prompt
+        + history[prompt..]
+            .find("MONITOR_WAKE_REPLY")
+            .expect("wake reply");
+    assert!(
+        history[wake..].contains("fixture answer"),
+        "the wake reply ended the turn"
+    );
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn cancelling_interrupts_claude_code_thinking_on_its_own() {
+    let fixture = Fixture::new("monitor-wake");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    finish(&mut handle, &mut Vec::new()).await;
+    // The engine sees the wake before the cancel.
+    while !matches!(
+        output(&mut handle).await,
+        EngineOutput::Event(EngineEvent::NativeSessionState { working: true, .. })
+    ) {}
+
+    handle.send(UiCommand::Cancel);
+    fixture
+        .wait_for("no interrupt reached Claude Code", |call| {
+            call["request"]["subtype"] == "interrupt"
+        })
+        .await;
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn cancelling_a_prompt_claude_code_has_not_taken_withdraws_it() {
+    let fixture = Fixture::new("monitor-wake-held");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut history = Vec::new();
+    finish(&mut handle, &mut history).await;
+    fixture
+        .wait_for("Claude Code never woke", |call| call["wake"] == "started")
+        .await;
+    handle.send(payload(fixture.root.path(), 2, history));
+    fixture
+        .wait_for("the prompt never reached Claude Code", |call| {
+            call["wake"] == "prompted"
+        })
+        .await;
+
+    handle.send(UiCommand::Cancel);
+    let meta = loop {
+        if let EngineOutput::Event(EngineEvent::TurnComplete { meta, .. }) =
+            output(&mut handle).await
+        {
+            break meta.unwrap();
+        }
+    };
+    assert!(meta.interrupted);
+    let prompt = fixture
+        .calls()
+        .into_iter()
+        .find(|call| call["type"] == "user" && call["message"].to_string().contains("turn 2"))
+        .unwrap();
+    fixture
+        .wait_for("no interrupt reached Claude Code", |call| {
+            call["request"]["subtype"] == "interrupt"
+        })
+        .await;
+    // Withdrawn first, it cannot be taken once the interrupt ends the wake.
+    let calls = fixture.calls();
+    let withdrawn = calls.iter().position(|call| {
+        call["request"]["subtype"] == "cancel_async_message"
+            && call["request"]["message_uuid"] == prompt["uuid"]
+    });
+    let interrupted = calls
+        .iter()
+        .position(|call| call["request"]["subtype"] == "interrupt");
+    assert!(withdrawn.is_some_and(|withdrawn| Some(withdrawn) < interrupted));
 }
 
 #[tokio::test]

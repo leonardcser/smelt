@@ -219,55 +219,44 @@ fn native_turn_keeps_working_until_its_background_agents_settle() {
 }
 
 #[test]
-fn native_background_work_queues_input_until_the_session_settles() {
+fn a_prompt_starts_a_turn_while_the_native_session_works_on_its_own() {
     let mut app = TestApp::builder().build();
-    let session_id = native_background_session(&mut app);
+    native_background_session(&mut app);
+    assert_eq!(work_label(&mut app), "working");
     app.type_text("next question");
     app.press(KeyCode::Enter);
-    assert_eq!(
-        app.app.prompt.queued_texts(),
-        vec!["next question".to_owned()]
-    );
-    app.wait_for_turn_persistence();
-    app.feed_one(SourceEvent::Tick(0));
-    assert!(!started_turn(&app));
-
-    app.feed_one(SourceEvent::engine(EngineEvent::NativeSessionEvent {
-        session_id: session_id.clone(),
-        event: Box::new(EngineEvent::TextDelta {
-            delta: "BACKGROUND_WAKE_REPLY".into(),
-        }),
-    }));
-    app.feed_one(SourceEvent::engine(EngineEvent::NativeSessionEvent {
-        session_id: session_id.clone(),
-        event: Box::new(EngineEvent::HistoryAppended {
-            turn_id: 1,
-            delta: protocol::CanonicalHistoryDelta::new(
-                0,
-                vec![protocol::HistoryItem::Assistant(
-                    protocol::AssistantStep::terminal(
-                        Some(protocol::Content::text("BACKGROUND_WAKE_REPLY")),
-                        None,
-                        Vec::new(),
-                    ),
-                )],
-            ),
-        }),
-    }));
-    assert_eq!(app.session_history().len(), 1);
-    assert_eq!(
-        app.render_to_frame()
-            .text()
-            .matches("BACKGROUND_WAKE_REPLY")
-            .count(),
-        1
-    );
-
-    native_session(&mut app, true, false);
     app.wait_for_turn_persistence();
     app.feed_one(SourceEvent::Tick(0));
     assert!(app.app.prompt.queued_texts().is_empty());
+    assert!(
+        started_turn(&app),
+        "Claude Code queues the prompt and takes it next"
+    );
+}
+
+#[test]
+fn esc_esc_on_a_clean_turn_interrupts_and_spares_native_background_work() {
+    let mut app = TestApp::builder().build();
+    let session_id = native_background_session(&mut app);
+    let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+    app.feed_one(SourceEvent::engine(native_shell(now, true)));
+    app.type_text("next question");
+    app.press(KeyCode::Enter);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
     assert!(started_turn(&app));
+    app.clear_actions();
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+    assert!(app.actions().iter().any(|action| matches!(action,
+        Action::EngineSend(command) if matches!(command.as_ref(), protocol::UiCommand::Cancel))));
+    assert!(!sent(&mut app, |command| matches!(
+        command,
+        protocol::UiCommand::EndNativeSession
+    )));
+    assert_eq!(app.app.core.native_session, Some(session_id));
 }
 
 #[test]

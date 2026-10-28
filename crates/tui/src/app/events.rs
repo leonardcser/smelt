@@ -192,7 +192,9 @@ impl TuiApp {
 
         let outcome = if matches!(
             self.prompt_work_state(),
-            PromptWorkState::TurnActive | PromptWorkState::BackgroundBusy
+            PromptWorkState::TurnActive
+                | PromptWorkState::BackgroundBusy
+                | PromptWorkState::NativeBusy
         ) {
             self.handle_event_running(ev)
         } else {
@@ -266,7 +268,7 @@ impl TuiApp {
                             accepted
                         }
                     }
-                    PromptWorkState::Idle => {
+                    PromptWorkState::Idle | PromptWorkState::NativeBusy => {
                         let text = submission.content.text_content().into_owned();
                         let has_images = submission.content.image_count() > 0;
                         if !text.is_empty() || has_images {
@@ -853,6 +855,9 @@ impl TuiApp {
         edit: crate::input::SubmitEdit,
         target: QueueStage,
     ) -> EventOutcome {
+        if self.prompt_work_state() == PromptWorkState::NativeBusy {
+            return EventOutcome::Submit { submission, edit };
+        }
         let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
         self.clear_prompt_prediction();
         self.redact_prompt_submission(&mut submission);
@@ -917,7 +922,7 @@ impl TuiApp {
                 self.resume_paused_turn(None);
                 return EventOutcome::Noop;
             }
-            PromptWorkState::Idle => {}
+            PromptWorkState::Idle | PromptWorkState::NativeBusy => {}
         }
 
         if !self.prompt.queue_is_empty() {
