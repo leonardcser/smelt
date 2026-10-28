@@ -197,6 +197,17 @@ CREATE TABLE "lineage_payload_object_refs" (
     FOREIGN KEY (object_hash) REFERENCES objects(hash)
 ) STRICT;
 
+-- Rows that may be unreferenced: every row is queued when it is created and
+-- whenever it loses a reference. Reclamation deletes those nothing references.
+CREATE TABLE lineage_reclamation_queue (
+    lineage_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN (
+        'branch', 'revision', 'root', 'history_index', 'node', 'payload', 'object'
+    )),
+    id TEXT NOT NULL,
+    PRIMARY KEY (lineage_id, kind, id)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE lineage_request_attempts (
     lineage_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -618,6 +629,9 @@ CREATE INDEX lineage_session_receipt_results_revision_idx
 CREATE INDEX lineage_session_receipts_created_idx
     ON lineage_session_receipts(lineage_id, session_id, created_at DESC);
 
+CREATE INDEX lineage_session_receipts_turn_idx
+    ON lineage_session_receipts(lineage_id, session_id, turn_id) WHERE turn_id IS NOT NULL;
+
 CREATE INDEX lineage_transcript_profiles_block_idx
     ON lineage_transcript_record_profiles(lineage_id, block_idx, payload_id);
 
@@ -710,6 +724,17 @@ BEFORE UPDATE OF lineage_id, session_id, fork_parent_session_id, parent_session_
 ON lineage_branches
 BEGIN
     SELECT RAISE(ABORT, 'lineage branch identity is immutable');
+END;
+
+CREATE TRIGGER lineage_branch_reclaim
+AFTER UPDATE OF head_revision_id, deleted_at ON lineage_branches
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    SELECT OLD.lineage_id, 'revision', OLD.head_revision_id
+    WHERE OLD.head_revision_id IS NOT NULL AND OLD.head_revision_id IS NOT NEW.head_revision_id
+    UNION ALL
+    SELECT OLD.lineage_id, 'branch', OLD.session_id
+    WHERE OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL;
 END;
 
 CREATE TRIGGER lineage_branch_revision_update
@@ -829,8 +854,12 @@ END;
 
 CREATE TRIGGER lineage_history_index_delete
 BEFORE DELETE ON lineage_history_semantic_roots
+WHEN EXISTS (
+    SELECT 1 FROM lineage_revisions
+    WHERE lineage_id = OLD.lineage_id AND history_root_id = OLD.history_root_id
+)
 BEGIN
-    SELECT RAISE(ABORT, 'history semantic indexes are immutable');
+    SELECT RAISE(ABORT, 'history semantic indexes belong to their revisions');
 END;
 
 CREATE TRIGGER lineage_history_index_insert
@@ -848,10 +877,11 @@ BEGIN
     ) THEN RAISE(ABORT, 'semantic indexes require a history root') END;
 END;
 
-CREATE TRIGGER lineage_history_index_node_delete
-BEFORE DELETE ON lineage_history_index_nodes
+CREATE TRIGGER lineage_history_index_node_created
+AFTER INSERT ON lineage_history_index_nodes
 BEGIN
-    SELECT RAISE(ABORT, 'history semantic index nodes are immutable');
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (NEW.lineage_id, 'history_index', NEW.node_id);
 END;
 
 CREATE TRIGGER lineage_history_index_node_insert
@@ -873,6 +903,15 @@ BEGIN
     ) THEN RAISE(ABORT, 'invalid history semantic children') END;
 END;
 
+CREATE TRIGGER lineage_history_index_node_reclaim
+AFTER DELETE ON lineage_history_index_nodes
+WHEN OLD.split_bit >= 0
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'history_index', OLD.left_node_id),
+           (OLD.lineage_id, 'history_index', OLD.right_node_id);
+END;
+
 CREATE TRIGGER lineage_history_index_node_replace
 BEFORE INSERT ON lineage_history_index_nodes
 WHEN EXISTS (
@@ -887,6 +926,14 @@ CREATE TRIGGER lineage_history_index_node_update
 BEFORE UPDATE ON lineage_history_index_nodes
 BEGIN
     SELECT RAISE(ABORT, 'history semantic index nodes are immutable');
+END;
+
+CREATE TRIGGER lineage_history_index_reclaim
+AFTER DELETE ON lineage_history_semantic_roots
+WHEN OLD.index_node_id IS NOT NULL
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'history_index', OLD.index_node_id);
 END;
 
 CREATE TRIGGER lineage_history_index_replace
@@ -905,10 +952,31 @@ BEGIN
     SELECT RAISE(ABORT, 'history semantic indexes are immutable');
 END;
 
+CREATE TRIGGER lineage_payload_nested_object_ref_reclaim
+AFTER DELETE ON lineage_payload_nested_object_refs
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'object', OLD.object_hash);
+END;
+
 CREATE TRIGGER lineage_payload_nested_object_ref_update
 BEFORE UPDATE ON lineage_payload_nested_object_refs
 BEGIN
     SELECT RAISE(ABORT, 'lineage nested payload references are immutable');
+END;
+
+CREATE TRIGGER lineage_payload_object_ref_created
+AFTER INSERT ON lineage_payload_object_refs
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (NEW.lineage_id, 'payload', NEW.payload_id);
+END;
+
+CREATE TRIGGER lineage_payload_object_ref_reclaim
+AFTER DELETE ON lineage_payload_object_refs
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'object', OLD.object_hash);
 END;
 
 CREATE TRIGGER lineage_payload_object_ref_update
@@ -921,6 +989,20 @@ CREATE TRIGGER lineage_request_attempt_update
 BEFORE UPDATE ON lineage_request_attempts
 BEGIN
     SELECT RAISE(ABORT, 'lineage request attempts are immutable');
+END;
+
+CREATE TRIGGER lineage_retained_revision_reclaim
+AFTER DELETE ON lineage_retained_revisions
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'revision', OLD.revision_id);
+END;
+
+CREATE TRIGGER lineage_revision_created
+AFTER INSERT ON lineage_revisions
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (NEW.lineage_id, 'revision', NEW.revision_id);
 END;
 
 CREATE TRIGGER lineage_revision_insert
@@ -947,6 +1029,28 @@ BEGIN
         WHERE payload.lineage_id = NEW.lineage_id AND payload.payload_id = NEW.state_payload_id
           AND payload.payload_kind = 'revision_state'
     ) THEN RAISE(ABORT, 'revision state has the wrong payload kind') END;
+END;
+
+CREATE TRIGGER lineage_revision_reclaim
+AFTER DELETE ON lineage_revisions
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    SELECT OLD.lineage_id, kind, id FROM (
+        SELECT 'revision' AS kind, OLD.parent_revision_id AS id
+        UNION ALL SELECT 'root', OLD.history_root_id
+        UNION ALL SELECT 'root', OLD.transcript_root_id
+        UNION ALL SELECT 'payload', OLD.state_payload_id
+    ) WHERE id IS NOT NULL;
+END;
+
+CREATE TRIGGER lineage_revision_release
+AFTER UPDATE OF state_payload_id ON lineage_revisions
+WHEN OLD.state_payload_id IS NOT NULL AND NEW.state_payload_id IS NULL
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'root', OLD.history_root_id),
+           (OLD.lineage_id, 'root', OLD.transcript_root_id),
+           (OLD.lineage_id, 'payload', OLD.state_payload_id);
 END;
 
 CREATE TRIGGER lineage_revision_state_root_delete
@@ -976,6 +1080,13 @@ BEGIN
                   AND (NEW.role <> 'checkpoint' OR root.item_count = 2))
           )
     ) THEN RAISE(ABORT, 'invalid revision archive root') END;
+END;
+
+CREATE TRIGGER lineage_revision_state_root_reclaim
+AFTER DELETE ON lineage_revision_state_roots
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'root', OLD.root_id);
 END;
 
 CREATE TRIGGER lineage_revision_state_root_update
@@ -1107,10 +1218,28 @@ BEGIN
     ) THEN RAISE(ABORT, 'final sequence extent does not match node') END;
 END;
 
+CREATE TRIGGER lineage_sequence_entry_reclaim
+AFTER DELETE ON lineage_sequence_entries
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (
+        OLD.lineage_id,
+        CASE OLD.entry_kind WHEN 'child' THEN 'node' ELSE 'payload' END,
+        coalesce(OLD.child_node_id, OLD.payload_id)
+    );
+END;
+
 CREATE TRIGGER lineage_sequence_entry_update
 BEFORE UPDATE ON lineage_sequence_entries
 BEGIN
     SELECT RAISE(ABORT, 'lineage sequence entries are immutable');
+END;
+
+CREATE TRIGGER lineage_sequence_node_created
+AFTER INSERT ON lineage_sequence_nodes
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (NEW.lineage_id, 'node', NEW.node_id);
 END;
 
 CREATE TRIGGER lineage_sequence_node_insert_guard
@@ -1129,6 +1258,13 @@ BEGIN
     SELECT RAISE(ABORT, 'lineage sequence nodes are immutable');
 END;
 
+CREATE TRIGGER lineage_sequence_root_created
+AFTER INSERT ON lineage_sequence_roots
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (NEW.lineage_id, 'root', NEW.root_id);
+END;
+
 CREATE TRIGGER lineage_sequence_root_insert
 BEFORE INSERT ON lineage_sequence_roots
 WHEN NEW.root_node_id IS NOT NULL
@@ -1145,6 +1281,14 @@ BEGIN
         SELECT 1 FROM lineage_completed_sequence_nodes complete
         WHERE complete.lineage_id = NEW.lineage_id AND complete.node_id = NEW.root_node_id
     ) THEN RAISE(ABORT, 'sequence root reaches an incomplete node') END;
+END;
+
+CREATE TRIGGER lineage_sequence_root_reclaim
+AFTER DELETE ON lineage_sequence_roots
+WHEN OLD.root_node_id IS NOT NULL
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'node', OLD.root_node_id);
 END;
 
 CREATE TRIGGER lineage_sequence_root_update
@@ -1201,6 +1345,13 @@ BEGIN
     ) THEN RAISE(ABORT, 'receipt result does not match its exact saved revision') END;
 END;
 
+CREATE TRIGGER lineage_session_receipt_result_reclaim
+AFTER DELETE ON lineage_session_receipt_results
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    VALUES (OLD.lineage_id, 'revision', OLD.result_revision_id);
+END;
+
 CREATE TRIGGER lineage_session_receipt_result_update
 BEFORE UPDATE ON lineage_session_receipt_results
 BEGIN
@@ -1246,3 +1397,16 @@ BEGIN
     SELECT RAISE(ABORT, 'lineage turn transitions are immutable');
 END;
 
+CREATE TRIGGER objects_created
+AFTER INSERT ON objects
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    SELECT lineage_id, 'object', NEW.hash FROM lineage_identity;
+END;
+
+CREATE TRIGGER request_object_ref_reclaim
+AFTER DELETE ON request_object_refs
+BEGIN
+    INSERT OR IGNORE INTO lineage_reclamation_queue (lineage_id, kind, id)
+    SELECT lineage_id, 'object', OLD.object_hash FROM lineage_identity;
+END;

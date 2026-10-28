@@ -68,7 +68,6 @@ fn session_storage_commands_doctor_backup_and_compact() {
         String::from_utf8_lossy(&gc.stderr)
     );
     let gc = String::from_utf8(gc.stdout).unwrap();
-    assert!(gc.contains("deleted_canonical_rows:"), "{gc}");
     assert!(gc.contains("deleted_search_segments: 0"), "{gc}");
     let repeated_backup = smelt(
         state.path(),
@@ -324,13 +323,7 @@ fn session_compact_prunes_ready_search_and_reports_writer_contention() {
         String::from_utf8_lossy(&repeated.stderr)
     );
     let output = String::from_utf8_lossy(&repeated.stdout);
-    for counter in [
-        "deleted_search_segments: 0",
-        "deleted_canonical_rows: 0",
-        "deleted_objects: 0",
-    ] {
-        assert!(output.contains(counter), "{output}");
-    }
+    assert!(output.contains("deleted_search_segments: 0"), "{output}");
     assert_eq!(
         reader.search_projection_status().unwrap().state,
         smelt_store::SearchProjectionState::Current
@@ -397,15 +390,29 @@ fn session_compact_reclaims_abandoned_suffix_and_preserves_shared_fork() {
     writer.refresh_catalog().unwrap();
     writer.release().unwrap();
 
+    let database = smelt_store::LineageSessionReader::open_existing(&sessions_root, &session.id)
+        .unwrap()
+        .database_path()
+        .to_path_buf();
+    let revisions = || -> i64 {
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .query_row("SELECT count(*) FROM lineage_revisions", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let before = revisions();
     let gc = smelt(state.path(), &["session", "compact", &session.id]);
     assert!(
         gc.status.success(),
         "{}",
         String::from_utf8_lossy(&gc.stderr)
     );
-    let output = String::from_utf8(gc.stdout).unwrap();
-    assert!(output.contains("deleted_canonical_rows:"), "{output}");
-    assert!(!output.contains("deleted_canonical_rows: 0"), "{output}");
+    assert!(
+        revisions() < before,
+        "the abandoned suffix was not reclaimed"
+    );
 
     for branch in [&session.id, &target_id] {
         let reader =
@@ -426,8 +433,7 @@ fn session_compact_reclaims_abandoned_suffix_and_preserves_shared_fork() {
         String::from_utf8_lossy(&repeated.stderr)
     );
     let repeated = String::from_utf8(repeated.stdout).unwrap();
-    assert!(repeated.contains("deleted_canonical_rows: 0"), "{repeated}");
-    assert!(repeated.contains("deleted_objects: 0"), "{repeated}");
+    assert!(repeated.contains("transactions: 1"), "{repeated}");
     assert!(
         repeated.contains("deleted_search_segments: 0"),
         "{repeated}"

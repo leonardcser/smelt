@@ -238,7 +238,7 @@ fn positive_u64(value: i64, field: &str) -> Result<u64> {
     Ok(value)
 }
 
-/// Canonical rows examined per background reclamation transaction.
+/// Queued rows examined per background reclamation transaction.
 pub const RECLAMATION_STEP_ROWS: usize = 256;
 /// Free space kept for reuse instead of being returned to the filesystem.
 const COMPACTION_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
@@ -334,7 +334,7 @@ fn maintain_idle_lineage(
 ) -> Result<bool> {
     let path = lineage_database_path(root, lineage);
     reject_symlink(&path)?;
-    if !path.is_file() || !idle_maintenance_due(&path)? {
+    if !path.is_file() || !idle_maintenance_due(&path, lineage)? {
         return Ok(false);
     }
     let maintenance_name = format!("{}.maintenance", lineage.as_str());
@@ -376,7 +376,7 @@ fn maintain_idle_lineage(
     Ok(true)
 }
 
-fn idle_maintenance_due(path: &Path) -> Result<bool> {
+fn idle_maintenance_due(path: &Path, lineage: &LineageId) -> Result<bool> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -384,8 +384,5 @@ fn idle_maintenance_due(path: &Path) -> Result<bool> {
     if crate::schema::user_version(&conn)? != crate::schema::LINEAGE_SCHEMA_VERSION {
         return Ok(false);
     }
-    Ok(
-        lineage::reclaimed_marker(&conn)? != Some(lineage::reclaimed_fingerprint(&conn)?)
-            || excess_free_pages(&conn)? > 0,
-    )
+    Ok(lineage::reclamation_pending(&conn, lineage)? || excess_free_pages(&conn)? > 0)
 }

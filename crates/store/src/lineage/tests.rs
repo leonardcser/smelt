@@ -626,26 +626,22 @@ fn commit_session_result(
     Ok(result)
 }
 
+/// Drains the queue one row per step and returns the rows it removed.
 pub(super) fn reclaim_fixture(conn: &mut Connection, lineage: &LineageId) -> usize {
-    let mut mutated = 0;
+    let before = reclamation_work_units(conn, lineage);
     for _ in 0..reclamation_step_limit(conn, lineage) {
         let step = reclaim_step(conn, lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
-        mutated += reclamation_mutations(step);
+        assert!(step.rows_examined <= 1);
         if step.complete {
-            return mutated;
+            return before - reclamation_work_units(conn, lineage);
         }
     }
     panic!("budget-one fixture reclamation did not complete");
 }
 
-fn reclamation_mutations(step: ReclamationStep) -> usize {
-    step.branch_heads_cleared + step.canonical_rows_deleted + step.objects_deleted
-}
-
 pub(crate) fn reclamation_step_limit(conn: &Connection, lineage: &LineageId) -> usize {
-    // Fixture settlement includes seed/frontier visits, stale-mark cleanup and
-    // owner-release passes as well as canonical mutations. Each step stays budget one.
+    // A budget-one step examines one queued row, and reclaiming a row queues
+    // what it referenced, so a row can pass through the queue a few times.
     reclamation_work_units(conn, lineage)
         .saturating_mul(8)
         .saturating_add(256)
@@ -1299,7 +1295,7 @@ fn archive_coordinates_follow_shared_header_owners_through_budget_one_reclamatio
     let mut complete = false;
     for _ in 0..1000 {
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
+        assert!(step.rows_examined <= 1);
         assert_eq!(
             inspect_reachability(&conn, &lineage)
                 .unwrap()
@@ -1330,7 +1326,7 @@ fn archive_coordinates_follow_shared_header_owners_through_budget_one_reclamatio
     complete = false;
     for _ in 0..1000 {
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
+        assert!(step.rows_examined <= 1);
         inspect_reachability(&conn, &lineage).unwrap();
         verify_archive_coordinates(&conn, &lineage).unwrap();
         if step.complete {
@@ -1700,7 +1696,7 @@ fn compact_revision_archives_survive_forks_historical_reads_and_reclamation() {
     let mut completed = false;
     for _ in 0..1000 {
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
+        assert!(step.rows_examined <= 1);
         if step.complete {
             completed = true;
             break;
@@ -2337,7 +2333,7 @@ fn receipt_revision_lookup_is_exact_and_missing_results_do_not_fall_back_to_head
     let mut complete = false;
     for _ in 0..1000 {
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
+        assert!(step.rows_examined <= 1);
         assert_eq!(receipt_envelope(&conn, &lineage, &first), first_envelope);
         assert_eq!(
             receipt_envelope(&conn, &lineage, &fork_receipt),
@@ -2936,16 +2932,6 @@ fn reclamation_work_units(conn: &Connection, lineage: &LineageId) -> usize {
         .unwrap()
     })
     .sum::<usize>();
-    let uncleared_deleted_branch_heads = usize::try_from(
-        conn.query_row(
-            "SELECT count(*) FROM lineage_branches
-             WHERE lineage_id = ?1 AND deleted_at IS NOT NULL AND head_revision_id IS NOT NULL",
-            [lineage.as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap(),
-    )
-    .unwrap();
     let objects = usize::try_from(
         conn.query_row("SELECT count(*) FROM objects", [], |row| {
             row.get::<_, i64>(0)
@@ -2953,9 +2939,7 @@ fn reclamation_work_units(conn: &Connection, lineage: &LineageId) -> usize {
         .unwrap(),
     )
     .unwrap();
-    canonical_rows
-        .saturating_add(uncleared_deleted_branch_heads)
-        .saturating_add(objects)
+    canonical_rows + objects
 }
 
 fn install_publication_abort(conn: &Connection, table: &str) {
@@ -3361,9 +3345,9 @@ fn sqlite_full_rolls_back_lineage_revision_publication() {
 }
 
 #[test]
-fn append_reuses_sequence_nodes_between_bounded_reclamation_steps() {
+fn append_reinserts_sequence_nodes_reclaimed_between_bounded_steps() {
     for item_count in [2, 33] {
-        for remaining_entries in [2, 1] {
+        {
             let (mut conn, lineage) = setup();
             let source = branch_id('4');
             let (initial, _) = create_initial_branch(
@@ -3402,25 +3386,21 @@ fn append_reuses_sequence_nodes_between_bounded_reclamation_steps() {
             let mut found = false;
             for _ in 0..reclamation_step_limit(&conn, &lineage) {
                 let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-                let (entries, completed) = conn.query_row(
-                "SELECT (SELECT count(*) FROM lineage_sequence_entries WHERE lineage_id = ?1 AND node_id = ?2),
+                let (nodes, entries, completed) = conn.query_row(
+                "SELECT (SELECT count(*) FROM lineage_sequence_nodes WHERE lineage_id = ?1 AND node_id = ?2),
+                        (SELECT count(*) FROM lineage_sequence_entries WHERE lineage_id = ?1 AND node_id = ?2),
                         (SELECT count(*) FROM lineage_completed_sequence_nodes WHERE lineage_id = ?1 AND node_id = ?2)",
                 (lineage.as_str(), node.as_str()),
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             ).unwrap();
-                if entries == remaining_entries && completed == 0 {
+                if nodes == 0 {
+                    assert_eq!((entries, completed), (0, 0));
                     found = true;
                     break;
                 }
-                assert!(
-                    !step.complete,
-                    "reclamation skipped the expected intermediate state"
-                );
+                assert!(!step.complete, "reclamation kept the abandoned node");
             }
-            assert!(
-                found,
-                "did not reach an unsealed node with {remaining_entries} entries"
-            );
+            assert!(found, "did not reclaim the abandoned node");
             let head = branch_head(&conn, &lineage, &source).unwrap();
             let (restored, _, _) = append_revision(
                 &mut conn,
@@ -3434,7 +3414,7 @@ fn append_reuses_sequence_nodes_between_bounded_reclamation_steps() {
                 ObjectCompression::none(),
                 4,
             )
-            .expect("identical history must remain appendable during bounded reclamation");
+            .expect("identical history must remain appendable after bounded reclamation");
             assert_eq!(restored.history_root, abandoned.history_root);
             assert_eq!(
                 sequence_range(
@@ -3600,13 +3580,8 @@ fn bounded_reclamation_preserves_shared_and_retained_roots() {
         let work_before = reclamation_work_units(&conn, &lineage);
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
         let work_after = reclamation_work_units(&conn, &lineage);
-        assert!(step.work_rows() <= 1);
-        assert_eq!(
-            work_before.saturating_sub(work_after),
-            reclamation_mutations(step),
-            "reclamation accounting must include every cascaded profile and extent row"
-        );
-        reclaimed_rows = reclaimed_rows.saturating_add(reclamation_mutations(step));
+        assert!(step.rows_examined <= 1);
+        reclaimed_rows += work_before - work_after;
         if step.complete {
             break;
         }
@@ -3823,13 +3798,8 @@ fn bounded_reclamation_removes_receipts_and_continuation_turns_bottom_up() {
         let work_before = reclamation_work_units(&conn, &lineage);
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
         let work_after = reclamation_work_units(&conn, &lineage);
-        assert!(step.work_rows() <= 1);
-        assert_eq!(
-            work_before.saturating_sub(work_after),
-            reclamation_mutations(step),
-            "reclamation accounting must include every cascaded profile and extent row"
-        );
-        reclaimed_rows = reclaimed_rows.saturating_add(reclamation_mutations(step));
+        assert!(step.rows_examined <= 1);
+        reclaimed_rows += work_before - work_after;
         if step.complete {
             break;
         }
@@ -4470,7 +4440,7 @@ fn reclamation_crash_restores_guards_and_resumes_from_a_valid_state() {
 }
 
 #[test]
-fn reclamation_guard_restore_error_rolls_back_deletion_and_restarts_the_pass() {
+fn reclamation_guard_restore_error_rolls_back_the_step() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     for foreign_keys in [false, true] {
         for budget in [1, 7] {
@@ -4529,7 +4499,7 @@ fn reclamation_guard_restore_error_rolls_back_deletion_and_restarts_the_pass() {
                 match reclaim_step(&mut conn, &lineage, budget) {
                     Ok(step) => {
                         assert!(!step.complete);
-                        assert!(step.work_rows() <= budget);
+                        assert!(step.rows_examined <= budget);
                     }
                     Err(_) => {
                         rejected = true;
@@ -4548,21 +4518,6 @@ fn reclamation_guard_restore_error_rolls_back_deletion_and_restarts_the_pass() {
                     .unwrap(),
                 foreign_keys
             );
-            let epoch: i64 = conn
-                .query_row("SELECT epoch FROM smelt_gc_pass", [], |row| row.get(0))
-                .unwrap();
-            let step = reclaim_step(&mut conn, &lineage, budget).unwrap();
-            assert_eq!(
-                step.canonical_rows_deleted + step.objects_deleted + step.branch_heads_cleared,
-                0
-            );
-            assert!(step.work_rows() <= budget);
-            assert_eq!(
-                conn.query_row("SELECT epoch FROM smelt_gc_pass", [], |row| row
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                epoch + 1
-            );
             assert!(reclaim_fixture(&mut conn, &lineage) > 0);
             assert_eq!(branch_head(&conn, &lineage, &branch).unwrap(), initial);
             assert!(load_revision(&conn, &lineage, abandoned.id()).is_err());
@@ -4574,7 +4529,7 @@ fn reclamation_guard_restore_error_rolls_back_deletion_and_restarts_the_pass() {
 #[test]
 fn reclamation_restores_exact_installed_delete_guards() {
     let (mut conn, lineage) = setup();
-    let name = "lineage_history_index_delete";
+    let name = "lineage_commit_receipt_delete";
     let sql: String = conn
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?1",
@@ -4596,15 +4551,44 @@ fn reclamation_restores_exact_installed_delete_guards() {
             .unwrap()
     };
     let before = definitions(&conn);
-    let history = empty_sequence(&conn, &lineage, SequenceKind::History).unwrap();
-    ensure_history_index(&conn, &lineage, &history, None).unwrap();
-    crate::object::put_object(&conn, b"unreferenced", ObjectCompression::none()).unwrap();
-    let mut objects_deleted = 0;
+    let branch = branch_id('f');
+    let (initial, _) = create_initial_branch(
+        &mut conn,
+        &lineage,
+        &branch,
+        &branch_metadata(),
+        b"initial",
+        1,
+    )
+    .unwrap();
+    let (abandoned, _, _) = append_revision(
+        &mut conn,
+        &lineage,
+        &branch,
+        initial.id(),
+        &[history_bytes("abandoned")],
+        &[],
+        b"abandoned",
+        LineageOperation::Append,
+        ObjectCompression::none(),
+        2,
+    )
+    .unwrap();
+    rewind_branch(
+        &mut conn,
+        &lineage,
+        &branch,
+        abandoned.id(),
+        initial.id(),
+        3,
+    )
+    .unwrap();
+    let object =
+        crate::object::put_object(&conn, b"unreferenced", ObjectCompression::none()).unwrap();
     let mut complete = false;
     for _ in 0..reclamation_step_limit(&conn, &lineage) {
         let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-        assert!(step.work_rows() <= 1);
-        objects_deleted += step.objects_deleted;
+        assert!(step.rows_examined <= 1);
         assert_eq!(definitions(&conn), before);
         if step.complete {
             complete = true;
@@ -4612,7 +4596,16 @@ fn reclamation_restores_exact_installed_delete_guards() {
         }
     }
     assert!(complete);
-    assert_eq!(objects_deleted, 1);
+    assert!(load_revision(&conn, &lineage, abandoned.id()).is_err());
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM objects WHERE hash = ?1",
+            [object.hash()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
     assert_eq!(reclaim_fixture(&mut conn, &lineage), 0);
     assert_eq!(definitions(&conn), before);
 }

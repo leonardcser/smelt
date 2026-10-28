@@ -22,3 +22,14 @@ preserves literal POSIX argv and output paths and passes that integration lane.
 Switch both dependencies together using Cargo, update both lockfiles, and retain
 a resolved-runtime parity check. See `fuzz/README.md` for source provenance and
 update instructions.
+
+## `lineage-schema-v7`
+
+`initialize_lineage_schema` upgrades v7 lineage databases to v8 in place. v7
+reclaimed by tracing the whole graph after every change and had no reclamation
+queue. The migration installs the queue and its triggers, lets history semantic
+indexes be deleted once no revision uses them, and queues every row once so
+whatever v7 left unreclaimed is still found.
+
+Remove the `7` arm and `migrate_reclamation_queue` once alpha users have opened
+their sessions with a v8 build, or when a later schema drops v7 support.

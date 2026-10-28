@@ -48,28 +48,9 @@ pub struct LineageSessionState {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct LineageReclamation {
-    pub branch_heads_cleared: usize,
-    pub canonical_rows_deleted: usize,
-    pub objects_deleted: usize,
-    /// Seed rows, frontier nodes and sweep candidates examined in this step.
+    /// Queued rows examined in this step.
     pub rows_examined: usize,
-    /// An exhausted bounded scan advanced the pass, without requiring a deletion.
-    pub phase_advanced: bool,
     pub complete: bool,
-}
-
-impl LineageReclamation {
-    pub fn work_rows(self) -> usize {
-        self.rows_examined.max(
-            self.branch_heads_cleared
-                .saturating_add(self.canonical_rows_deleted)
-                .saturating_add(self.objects_deleted),
-        )
-    }
-
-    pub fn made_progress(self) -> bool {
-        self.work_rows() > 0 || self.phase_advanced
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
@@ -876,17 +857,13 @@ impl OwnedLineageWriter {
         Ok(())
     }
 
-    /// Advance canonical reclamation within the supplied row budget. Derived
+    /// Reclaim up to `max_rows` queued rows in one transaction. Derived
     /// search-cache pruning and physical file compaction are separate cold operations.
     pub fn reclaim_step(&mut self, max_rows: usize) -> Result<LineageReclamation> {
         let step = lineage::reclaim_step(&mut self.conn, &self.lineage, max_rows)?;
-        debug_assert!(step.work_rows() <= max_rows);
+        debug_assert!(step.rows_examined <= max_rows);
         Ok(LineageReclamation {
-            branch_heads_cleared: step.branch_heads_cleared,
-            canonical_rows_deleted: step.canonical_rows_deleted,
-            objects_deleted: step.objects_deleted,
             rows_examined: step.rows_examined,
-            phase_advanced: step.phase_advanced,
             complete: step.complete,
         })
     }
@@ -2210,8 +2187,8 @@ mod tests {
                 let measured = vm_steps.load(Ordering::Relaxed);
                 peak = peak.max(measured);
                 calls += 1;
-                assert!(step.work_rows() <= 1);
-                assert!(step.complete || step.made_progress());
+                assert!(step.rows_examined <= 1);
+                assert!(step.complete || step.rows_examined > 0);
                 assert!(calls < history_len * 64 + 1024, "public GC did not settle");
                 if step.complete || measured >= 16_384 {
                     break (step.complete, measured);
@@ -2285,8 +2262,8 @@ mod tests {
                 let measured = vm_steps.load(Ordering::Relaxed);
                 peak = peak.max(measured);
                 calls += 1;
-                assert!(step.work_rows() <= 1);
-                assert!(step.complete || step.made_progress());
+                assert!(step.rows_examined <= 1);
+                assert!(step.complete || step.rows_examined > 0);
                 assert!(
                     calls < record_count * 64 + 1024,
                     "projected public GC did not settle"
@@ -2324,8 +2301,7 @@ mod tests {
     }
 
     #[test]
-    fn public_reclamation_marking_matches_retained_graph_with_bounded_steps() {
-        use std::collections::BTreeSet;
+    fn public_reclamation_keeps_the_retained_graph_with_bounded_steps() {
         use std::sync::atomic::{AtomicU64, Ordering};
         for history_len in [16, 4096] {
             let root = tempfile::tempdir().unwrap();
@@ -2364,55 +2340,30 @@ mod tests {
                 peak = peak.max(measured);
                 assert!(
                     measured < 16_384,
-                    "marking traversed retained history: {measured}"
+                    "one-row reclamation traversed retained history: {measured}"
                 );
-                assert!(step.work_rows() <= 1);
-                assert!(step.made_progress());
-                assert_eq!(
-                    step.canonical_rows_deleted + step.objects_deleted + step.branch_heads_cleared,
-                    0
-                );
-                let phase: i64 = writer
-                    .conn
-                    .query_row(
-                        "SELECT phase FROM smelt_gc_pass WHERE singleton = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                if phase == 10 {
+                assert!(step.rows_examined <= 1);
+                if step.complete {
                     complete = true;
                     break;
                 }
+                assert!(step.rows_examined > 0);
             }
-            assert!(complete, "marking did not settle");
-            for (view, column, expected) in [
-                (
-                    "smelt_reachable_revisions",
-                    "revision_id",
-                    expected.reachable_revisions,
-                ),
-                ("smelt_reachable_roots", "root_id", expected.reachable_roots),
-                ("smelt_reachable_nodes", "node_id", expected.reachable_nodes),
-                (
-                    "smelt_reachable_payloads",
-                    "payload_id",
-                    expected.reachable_payloads,
-                ),
-            ] {
-                let actual = writer
-                    .conn
-                    .prepare(&format!("SELECT {column} FROM {view}"))
-                    .unwrap()
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .unwrap()
-                    .collect::<rusqlite::Result<BTreeSet<_>>>()
-                    .unwrap();
-                assert_eq!(actual, expected, "marking differs for {view}");
-            }
+            assert!(complete, "reclamation did not settle");
+            let actual = lineage::inspect_reachability(&writer.conn, &writer.lineage).unwrap();
+            assert_eq!(actual.reachable_revisions, expected.reachable_revisions);
+            assert_eq!(actual.reachable_roots, expected.reachable_roots);
+            assert_eq!(actual.reachable_nodes, expected.reachable_nodes);
+            assert_eq!(actual.reachable_payloads, expected.reachable_payloads);
+            assert_eq!(actual.reachable_objects, expected.reachable_objects);
+            assert!(actual.unreachable_revisions.is_empty());
+            assert!(actual.unreachable_roots.is_empty());
+            assert!(actual.unreachable_nodes.is_empty());
+            assert!(actual.unreachable_payloads.is_empty());
+            assert!(actual.unreachable_objects.is_empty());
             assert_eq!(writer.snapshot().unwrap(), snapshot);
             assert_eq!(writer.commit_session(&command).unwrap(), receipt);
-            println!("public GC marking: history_len={history_len} peak_vm_steps={peak}");
+            println!("public GC: history_len={history_len} peak_vm_steps={peak}");
         }
     }
 
@@ -2456,6 +2407,36 @@ mod tests {
             }
         }
         current
+    }
+
+    #[test]
+    fn reclamation_after_a_turn_examines_its_garbage_not_the_session() {
+        let examined_after_one_more_turn = |turns: usize| {
+            let root = tempfile::tempdir().unwrap();
+            let id = session_id('7');
+            let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+            let initial = writer.commit_session(&initial_commit(&id)).unwrap().current;
+            let current = commit_turns(&mut writer, &id, initial, turns);
+            while !writer.reclaim_step(256).unwrap().complete {}
+            commit_turns(&mut writer, &id, current, 1);
+            let mut examined = 0;
+            loop {
+                let step = writer.reclaim_step(256).unwrap();
+                examined += step.rows_examined;
+                if step.complete {
+                    break;
+                }
+            }
+            examined
+        };
+        let short = examined_after_one_more_turn(lineage::RECENT_TURNS as usize + 4);
+        let long = examined_after_one_more_turn(lineage::RECENT_TURNS as usize * 10);
+        println!("one more turn examined {short} rows in a short session and {long} in a long one");
+        assert!(short > 0);
+        assert!(
+            long <= short * 2,
+            "one turn examined {long} rows in a long session and {short} in a short one"
+        );
     }
 
     #[test]
@@ -2680,28 +2661,18 @@ mod tests {
         let snapshot = writer.snapshot().unwrap();
         for _ in 0..13 {
             let step = writer.reclaim_step(1).unwrap();
-            assert!(step.made_progress());
-            assert!(step.work_rows() <= 1);
+            assert!(step.rows_examined > 0);
+            assert!(step.rows_examined <= 1);
             assert!(!step.complete);
         }
         drop(writer);
         let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
-        assert_eq!(
-            writer
-                .conn
-                .query_row(
-                    "SELECT count(*) FROM temp.sqlite_schema WHERE name = 'smelt_gc_pass'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
+        assert!(lineage::reclamation_pending(&writer.conn, &writer.lineage).unwrap());
         let mut complete = false;
         for (index, budget) in [1, 7, 3, 16].into_iter().cycle().take(128 * 64).enumerate() {
             let step = writer.reclaim_step(budget).unwrap();
-            assert!(step.work_rows() <= budget);
-            assert!(step.complete || step.made_progress());
+            assert!(step.rows_examined <= budget);
+            assert!(step.complete || step.rows_examined > 0);
             if step.complete {
                 complete = true;
                 break;
@@ -2713,105 +2684,6 @@ mod tests {
         assert!(complete);
         assert_eq!(writer.snapshot().unwrap(), snapshot);
         assert_eq!(writer.commit_session(&command).unwrap(), receipt);
-    }
-
-    #[test]
-    fn public_reclamation_marking_restarts_after_own_foreign_rolled_back_and_schema_writes() {
-        for phase in [2, 8, 9, -1] {
-            for mutation in ["own", "foreign", "rollback", "vacuum"] {
-                let root = tempfile::tempdir().unwrap();
-                let id = session_id('1');
-                let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
-                let initial = initial_commit(&id);
-                let result = writer.commit_session_with_result(&initial).unwrap();
-                let mut settled = false;
-                for _ in 0..1024 {
-                    let step = writer.reclaim_step(1).unwrap();
-                    let current: i64 = writer
-                        .conn
-                        .query_row(
-                            "SELECT phase FROM smelt_gc_pass WHERE singleton = 1",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .unwrap();
-                    if (phase == -1 && step.complete) || current == phase {
-                        settled = true;
-                        break;
-                    }
-                }
-                assert!(settled, "phase not reached: {phase}");
-                let epoch: i64 = writer
-                    .conn
-                    .query_row(
-                        "SELECT epoch FROM smelt_gc_pass WHERE singleton = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                match mutation {
-                    "own" => {
-                        writer
-                            .commit_compact_session(&retaining_title_commit(
-                                &initial, &result, "new head",
-                            ))
-                            .unwrap();
-                    }
-                    "foreign" => {
-                        let other = Connection::open(writer.conn.path().unwrap()).unwrap();
-                        other
-                            .execute("UPDATE store_meta SET updated_at = updated_at + 1", [])
-                            .unwrap();
-                    }
-                    "rollback" => {
-                        let tx = writer.conn.transaction().unwrap();
-                        tx.execute("UPDATE store_meta SET updated_at = updated_at + 1", [])
-                            .unwrap();
-                        tx.rollback().unwrap();
-                    }
-                    "vacuum" => {
-                        writer.conn.execute_batch("VACUUM").unwrap();
-                    }
-                    _ => unreachable!(),
-                }
-                let snapshot = writer.snapshot().unwrap();
-                let step = writer.reclaim_step(1).unwrap();
-                // A completed pass still covers writes that leave the reclaimed
-                // fingerprint unchanged.
-                let covered = phase == -1 && mutation != "own";
-                assert_eq!(step.made_progress(), !covered);
-                assert_eq!(step.complete, covered);
-                assert!(step.work_rows() <= 1);
-                assert_eq!(
-                    step.canonical_rows_deleted + step.objects_deleted + step.branch_heads_cleared,
-                    0
-                );
-                let restarted: i64 = writer
-                    .conn
-                    .query_row(
-                        "SELECT epoch FROM smelt_gc_pass WHERE singleton = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(
-                    restarted,
-                    epoch + 1,
-                    "stale pass survived {mutation} at phase {phase}"
-                );
-                assert_eq!(writer.snapshot().unwrap(), snapshot);
-                let mut complete = false;
-                for _ in 0..1024 {
-                    if writer.reclaim_step(7).unwrap().complete {
-                        complete = true;
-                        break;
-                    }
-                }
-                assert!(complete);
-                assert_eq!(writer.snapshot().unwrap(), snapshot);
-                assert_eq!(writer.commit_session(&initial).unwrap(), result.receipt);
-            }
-        }
     }
 
     #[test]
@@ -4323,7 +4195,7 @@ mod tests {
                 .progress_handler(0, None::<fn() -> bool>)
                 .unwrap();
             peak_vm_steps = peak_vm_steps.max(vm_steps.load(std::sync::atomic::Ordering::Relaxed));
-            assert!(reclamation.work_rows() <= 1);
+            assert!(reclamation.rows_examined <= 1);
             let remaining_nodes = row_count(&writer.conn, "lineage_transcript_extent_nodes");
             let remaining_records = row_count(&writer.conn, "lineage_transcript_record_profiles");
             assert!(node_profiles.saturating_sub(remaining_nodes) <= 1);
@@ -5201,7 +5073,7 @@ mod tests {
         let mut complete = false;
         for _ in 0..lineage::reclamation_step_limit(&writer.conn, &writer.lineage) {
             let step = writer.reclaim_step(1).unwrap();
-            assert!(step.work_rows() <= 1);
+            assert!(step.rows_examined <= 1);
             if step.complete {
                 complete = true;
                 break;
@@ -5388,7 +5260,7 @@ mod tests {
         assert_eq!(writer.prune_search_projection().unwrap(), 0);
         loop {
             let reclamation = writer.reclaim_step(1).unwrap();
-            assert!(reclamation.work_rows() <= 1);
+            assert!(reclamation.rows_examined <= 1);
             if reclamation.complete {
                 break;
             }
@@ -5416,7 +5288,7 @@ mod tests {
         );
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
-        assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(reclamation.rows_examined, 0);
         assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
@@ -5449,7 +5321,7 @@ mod tests {
         );
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
-        assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(reclamation.rows_examined, 0);
         assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
@@ -5486,7 +5358,7 @@ mod tests {
         );
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
-        assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(reclamation.rows_examined, 0);
         assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
@@ -5558,7 +5430,7 @@ mod tests {
         );
         let reclamation = writer.reclaim_step(1).unwrap();
         assert!(reclamation.complete);
-        assert_eq!(reclamation.work_rows(), 0);
+        assert_eq!(reclamation.rows_examined, 0);
         assert_eq!(writer.prune_search_projection().unwrap(), 0);
         assert_eq!(
             reader.search_projection_status().unwrap().state,
@@ -5750,8 +5622,8 @@ mod tests {
         for _ in 0..step_limit {
             let step = writer.reclaim_step(1).unwrap();
             calls += 1;
-            assert!(step.work_rows() <= 1);
-            assert!(step.complete || step.made_progress());
+            assert!(step.rows_examined <= 1);
+            assert!(step.complete || step.rows_examined > 0);
             if step.complete {
                 complete = true;
                 break;
@@ -5779,7 +5651,7 @@ mod tests {
         assert!(docs > 0);
         assert_eq!(obsolete_fts_hits, 0);
         assert_eq!(root_manifests, 1);
-        assert_eq!(writer.reclaim_step(1).unwrap().work_rows(), 0);
+        assert_eq!(writer.reclaim_step(1).unwrap().rows_examined, 0);
         assert_eq!(
             source
                 .search_transcript_candidate_page(
@@ -6096,7 +5968,7 @@ mod tests {
         let mut complete = false;
         for _ in 0..1000 {
             let step = writer.reclaim_step(1).unwrap();
-            assert!(step.work_rows() <= 1);
+            assert!(step.rows_examined <= 1);
             if step.complete {
                 complete = true;
                 break;

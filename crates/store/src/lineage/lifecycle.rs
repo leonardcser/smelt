@@ -1019,6 +1019,7 @@ fn publish_turn_submission_in(
             message: "turn insertion did not write one lineage row".into(),
         });
     }
+    queue_retention_window(conn, lineage, branch).map_err(store_failure)?;
     insert_session_receipt(
         conn,
         lineage,

@@ -1137,9 +1137,6 @@ mod tests {
         assert!(conn
             .execute("UPDATE lineage_history_index_nodes SET value = 'wrong'", [])
             .is_err());
-        assert!(conn
-            .execute("DELETE FROM lineage_history_index_nodes", [])
-            .is_err());
         conn.execute("INSERT OR REPLACE INTO lineage_history_index_nodes SELECT lineage_id, node_id, min_key, max_key, min_history_idx, max_history_idx, split_bit, left_node_id, right_node_id, 'wrong' FROM lineage_history_index_nodes", []).unwrap();
         assert_eq!(
             load_index_node(&conn, &lineage, &leaf.id, &mut stats).unwrap(),

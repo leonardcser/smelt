@@ -907,9 +907,6 @@ fn run_session_command(args: SessionArgs) {
             result
         }
         SessionCommand::Compact(args) => with_lineage_writer(&args.session, |writer| {
-            let mut branch_heads_cleared = 0usize;
-            let mut canonical_rows_deleted = 0usize;
-            let mut objects_deleted = 0usize;
             let search_segments_deleted = writer
                 .prune_search_projection()
                 .map_err(|err| format!("failed to prune derived search data: {err}"))?;
@@ -919,24 +916,16 @@ fn run_session_command(args: SessionArgs) {
                     .reclaim_step(smelt_store::RECLAMATION_STEP_ROWS)
                     .map_err(|err| format!("failed to reclaim lineage data: {err}"))?;
                 transactions = transactions.saturating_add(1);
-                branch_heads_cleared =
-                    branch_heads_cleared.saturating_add(step.branch_heads_cleared);
-                canonical_rows_deleted =
-                    canonical_rows_deleted.saturating_add(step.canonical_rows_deleted);
-                objects_deleted = objects_deleted.saturating_add(step.objects_deleted);
                 if step.complete {
                     break;
                 }
-                if !step.made_progress() {
+                if step.rows_examined == 0 {
                     return Err("lineage reclamation made no bounded progress".into());
                 }
             }
             let vacuum = writer
                 .vacuum()
                 .map_err(|err| format!("failed to release free lineage pages: {err}"))?;
-            println!("cleared_branch_heads: {branch_heads_cleared}");
-            println!("deleted_canonical_rows: {canonical_rows_deleted}");
-            println!("deleted_objects: {objects_deleted}");
             println!("deleted_search_segments: {search_segments_deleted}");
             println!("free_pages_before: {}", vacuum.free_pages_before);
             println!("free_pages_after: {}", vacuum.free_pages_after);

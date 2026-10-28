@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{Result, StoreError};
 
-pub const LINEAGE_SCHEMA_VERSION: i32 = 7;
+pub const LINEAGE_SCHEMA_VERSION: i32 = 8;
 
 const LINEAGE_SCHEMA: &str = include_str!("lineage_schema.sql");
 
@@ -20,6 +20,12 @@ pub(crate) fn initialize_lineage_schema(conn: &mut Connection) -> Result<()> {
             set_user_version(&tx, LINEAGE_SCHEMA_VERSION)?;
             write_store_meta(&tx)?;
         }
+        // COMPAT(lineage-schema-v7): v7 stores reclaimed by tracing the whole graph.
+        7 => {
+            migrate_reclamation_queue(&tx)?;
+            set_user_version(&tx, LINEAGE_SCHEMA_VERSION)?;
+            write_store_meta(&tx)?;
+        }
         LINEAGE_SCHEMA_VERSION => {}
         found => {
             return Err(StoreError::UnsupportedSchema {
@@ -30,6 +36,43 @@ pub(crate) fn initialize_lineage_schema(conn: &mut Connection) -> Result<()> {
     }
     validate_lineage_schema(&tx)?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Installs the reclamation queue and its triggers, then queues every canonical
+/// row once so whatever v7 left unreclaimed is found without tracing the graph.
+fn migrate_reclamation_queue(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER lineage_history_index_delete;
+         DROP TRIGGER lineage_history_index_node_delete;
+         DELETE FROM store_meta WHERE key = 'reclaimed_through';",
+    )?;
+    let shape = lineage_schema_shape()?;
+    let tables = shape
+        .tables
+        .iter()
+        .map(|table| ("table", &table.name, &table.sql));
+    let objects = shape
+        .objects
+        .iter()
+        .map(|object| (object.kind.as_str(), &object.name, &object.sql));
+    for (kind, name, sql) in tables.chain(objects) {
+        if schema_object_sql(conn, kind, name)?.is_none() {
+            conn.execute_batch(sql)?;
+        }
+    }
+    conn.execute_batch(
+        "INSERT INTO lineage_reclamation_queue (lineage_id, kind, id)
+         SELECT lineage_id, 'branch', session_id FROM lineage_branches
+         WHERE deleted_at IS NOT NULL
+         UNION ALL SELECT lineage_id, 'revision', revision_id FROM lineage_revisions
+         UNION ALL SELECT lineage_id, 'root', root_id FROM lineage_sequence_roots
+         UNION ALL SELECT lineage_id, 'history_index', node_id FROM lineage_history_index_nodes
+         UNION ALL SELECT lineage_id, 'node', node_id FROM lineage_sequence_nodes
+         UNION ALL SELECT lineage_id, 'payload', payload_id FROM lineage_payload_object_refs
+         UNION ALL SELECT identity.lineage_id, 'object', object.hash
+         FROM objects object, lineage_identity identity;",
+    )?;
     Ok(())
 }
 
@@ -410,6 +453,85 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v7_stores_migrate_and_reclaim_what_they_left_behind() {
+        use crate::compression::ObjectCompression;
+        use crate::lineage::{self, BranchId, LineageId};
+        let mut conn = current_connection();
+        let lineage = LineageId::from_hex("1".repeat(32)).unwrap();
+        let branch = BranchId::new("a".repeat(64)).unwrap();
+        lineage::create_lineage(&conn, &lineage, 1).unwrap();
+        lineage::apply_lineage_session_commit(
+            &mut conn,
+            &lineage,
+            &branch,
+            &archived_commit(&branch),
+            ObjectCompression::none(),
+        )
+        .unwrap();
+        let snapshot = lineage::lineage_session_snapshot(&conn, &lineage, &branch).unwrap();
+        let definitions = schema_definitions(&conn);
+        // Rebuild the v7 surface: no queue and immutable history indexes.
+        let added = conn
+            .prepare(
+                "SELECT type, name FROM sqlite_schema
+                 WHERE name IN ('lineage_reclamation_queue', 'lineage_session_receipts_turn_idx',
+                                'lineage_revision_release')
+                    OR (type = 'trigger' AND (name LIKE '%reclaim' OR name LIKE '%created'))
+                 ORDER BY type = 'table'",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        for (kind, name) in added {
+            conn.execute_batch(&format!("DROP {kind} {name}")).unwrap();
+        }
+        conn.execute_batch(
+            "DROP TRIGGER lineage_history_index_delete;
+             CREATE TRIGGER lineage_history_index_delete
+             BEFORE DELETE ON lineage_history_semantic_roots
+             BEGIN
+                 SELECT RAISE(ABORT, 'history semantic indexes are immutable');
+             END;
+             CREATE TRIGGER lineage_history_index_node_delete
+             BEFORE DELETE ON lineage_history_index_nodes
+             BEGIN
+                 SELECT RAISE(ABORT, 'history semantic index nodes are immutable');
+             END;
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        let leaked =
+            crate::object::put_object(&conn, b"left behind by v7", ObjectCompression::none())
+                .unwrap();
+
+        initialize_lineage_schema(&mut conn).unwrap();
+
+        assert_eq!(user_version(&conn).unwrap(), LINEAGE_SCHEMA_VERSION);
+        assert_eq!(schema_definitions(&conn), definitions);
+        while !lineage::reclaim_step(&mut conn, &lineage, 64)
+            .unwrap()
+            .complete
+        {}
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM objects WHERE hash = ?1",
+                [leaked.hash()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            lineage::lineage_session_snapshot(&conn, &lineage, &branch).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
     fn reverse_reference_lookups_use_indexed_searches() {
         let conn = current_connection();
         for (table, predicate, index) in [
@@ -675,7 +797,7 @@ pub(crate) mod tests {
             )
             .chain(["published".into(), "store_meta".into(), "commit".into()])
             .collect::<Vec<_>>();
-        assert_eq!(stages.len(), 128);
+        assert_eq!(stages.len(), 148);
         for foreign_keys in [false, true] {
             for stage in &stages {
                 let mut conn = Connection::open_in_memory().unwrap();

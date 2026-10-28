@@ -1935,7 +1935,7 @@ mod tests {
         let mut completed = false;
         for _ in 0..1000 {
             let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-            assert!(step.work_rows() <= 1);
+            assert!(step.rows_examined <= 1);
             assert_eq!(
                 sequence_range(&conn, &lineage, &root, 0, 1)
                     .unwrap()
@@ -1962,7 +1962,7 @@ mod tests {
         let mut completed = false;
         for _ in 0..1000 {
             let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-            assert!(step.work_rows() <= 1);
+            assert!(step.rows_examined <= 1);
             if step.complete {
                 completed = true;
                 break;
@@ -2109,7 +2109,7 @@ mod tests {
         let mut completed = false;
         for _ in 0..1000 {
             let step = reclaim_step(&mut conn, &lineage, 1).unwrap();
-            assert!(step.work_rows() <= 1);
+            assert!(step.rows_examined <= 1);
             if step.complete {
                 completed = true;
                 break;

@@ -2470,7 +2470,7 @@ impl PersistenceActor {
                 step.rows_examined as u64,
             );
             if !step.complete {
-                return Ok(step.made_progress());
+                return Ok(true);
             }
             let released = lineage.release_free_pages()?;
             smelt_perf::perf::record_value("persist:reclamation:pages_released", released);

@@ -226,9 +226,10 @@ changed batches are cheap.
 
 ## Supported schemas
 
-Databases use schema v7, defined by `crates/store/src/lineage_schema.sql`. Schema
-validation checks the exact layout, not just its version marker, and any other
-version is refused without writing. Earlier layouts are not migrated.
+Databases use schema v8, defined by `crates/store/src/lineage_schema.sql`. Schema
+validation checks the exact layout, not just its version marker. A v7 database
+gains the reclamation queue on first write and queues every row once; any other
+version is refused without writing.
 
 Every new revision must reference a completed history semantic mapping, and every
 revision state is a format-2 shared state whose archives live in sequence roots.
@@ -238,12 +239,20 @@ retained.
 
 ## Retention and maintenance
 
-One epoch-fenced, resumable canonical collector releases, marks and sweeps in
-bounded transactions. Each pass first releases the content of revisions the
-retention policy no longer needs: their history root, transcript root and state
-references become NULL together, and their session receipt results are dropped
-because they can no longer replay. The revision row stays as a chain link, so
-revision identities, parents, extents, commit receipts and turns are unchanged.
+Reclamation is driven by `lineage_reclamation_queue`, which lists rows that may
+be unreferenced. Triggers queue every row when it is created and its target
+whenever a reference goes away: a branch head moves, a revision's content is
+released, or a referencing row is deleted. A bounded step pops queued rows and
+deletes those nothing references any more, and each deletion queues what the
+deleted row referenced. A queued row that is still referenced simply leaves the
+queue until it loses another reference. The work after a turn follows the
+garbage it made, not the size of the session.
+
+Releasing a revision clears its history root, transcript root and state
+references together and drops its session receipt results, because they can no
+longer replay. The revision row stays as a chain link, so revision identities,
+parents, extents, commit receipts and turns are unchanged. Submitting a turn
+queues the revisions it moved out of the retention window.
 
 Content is kept for:
 
@@ -258,25 +267,21 @@ endpoints, retained revisions and submitted turns, and only allow dropping a
 receipt result once its revision is released. Loading a released revision
 reports its content as missing; ancestry checks walk chain links only.
 
-Reachability then protects revision chains, the content of unreleased revisions,
-fork roots, receipt results, journal recovery and request objects, and the sweep
-reclaims sequence trees, states and objects that only released revisions used.
-Deleted branches retain their initial revision for creation replay.
-
-A completed pass records a fingerprint of the reachability roots (row counts and
-highest rowids of the root tables, plus branch heads) in `store_meta` under
-`reclaimed_through`. A pass that restarts over the same fingerprint completes
-immediately. A fingerprint collision can only defer reclamation to the next
-change, never reclaim reachable data.
+A revision stays while a branch head, an initial revision, a retained revision,
+a receipt result or a child revision references it. An unreferenced revision is
+deleted with the turns, branch associations and receipts it owns, which queues
+its parent and its content. Sequence trees, states and objects go once no
+revision, entry or request references them. Deleted branches retain their
+initial revision for creation replay.
 
 Maintenance runs automatically in bounded steps of 256 rows:
 
 - The persistence actor of an open session waits until its head has been stable
-  for 5 seconds, completes a pass, then returns free pages beyond a 4 MiB reuse
+  for 5 seconds, drains the queue, then returns free pages beyond a 4 MiB reuse
   reserve to the filesystem with incremental vacuum.
 - Thirty seconds after an interactive launch, a background worker removes
-  abandoned lineages, then visits every lineage whose fingerprint changed or
-  whose free pages exceed the reserve. It reclaims and compacts under shared ownership at half duty cycle, so opening a
+  abandoned lineages, then visits every lineage with queued rows or free pages
+  beyond the reserve. It reclaims and compacts under shared ownership at half duty cycle, so opening a
   session is never blocked, and it leaves a lineage to its owner as soon as
   another connection commits. Exiting cancels it between steps.
 
