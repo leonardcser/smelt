@@ -386,6 +386,9 @@ struct TranscriptContentAnchor {
     block_id: BlockId,
     /// Durable offset within `block_id`; grouped rows use the representative block's start.
     block_row_offset: RowIndex,
+    /// Text position of `block_row_offset`, taken at the first reflow so later
+    /// reflows place the same text instead of the same row index.
+    display_offset: Option<usize>,
     bias: TranscriptAnchorBias,
     /// Exact projected position while its render node remains present.
     row_anchor: TranscriptRowAnchor,
@@ -2530,9 +2533,6 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => TranscriptProjectionTargetTrace::ExactRow(row),
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
-            ) => TranscriptProjectionTargetTrace::ReflowStableRow(row),
-            crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
             ) => TranscriptProjectionTargetTrace::StableRowDelta { row, delta },
         }
@@ -3209,6 +3209,7 @@ impl TranscriptDocument {
             record_index,
             block_id,
             block_row_offset,
+            display_offset: None,
             bias,
             row_anchor,
             fallback_row,
@@ -4219,8 +4220,7 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => TranscriptScrollAnchor::Tail,
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
-                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => TranscriptScrollAnchor::EstimatedRow(row),
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::StableRowDelta { row, delta, .. },
@@ -4270,6 +4270,42 @@ impl TranscriptDocument {
                 anchor.block_row_offset,
             )
             .map(Into::into)
+    }
+
+    /// Moves the viewport's content anchor to the row that holds its text at
+    /// `width`. The anchor keeps its text position, so consecutive reflows
+    /// never re-derive it from a wrapped row start.
+    fn reflow_viewport_anchor(&mut self, lua: &LuaRuntime, width: u16, previous_width: u16) {
+        let Some(TranscriptResolvedViewportAnchor {
+            top: TranscriptScrollAnchor::Content(mut anchor),
+            ..
+        }) = self.viewport.state.resolved_anchor
+        else {
+            return;
+        };
+        let block_id = self.current_block_id_for_content_anchor(anchor);
+        anchor.display_offset = anchor.display_offset.or_else(|| {
+            self.content.projection.block_display_offset(
+                &self.content.transcript.history,
+                previous_width,
+                block_id,
+                anchor.block_row_offset,
+            )
+        });
+        if let Some(row) = anchor.display_offset.and_then(|display_offset| {
+            self.content.projection.block_row_for_display_offset(
+                lua,
+                &mut self.content.transcript.history,
+                width,
+                block_id,
+                display_offset,
+            )
+        }) {
+            anchor.block_row_offset = row;
+        }
+        if let Some(resolved) = self.viewport.state.resolved_anchor.as_mut() {
+            resolved.top = TranscriptScrollAnchor::Content(anchor);
+        }
     }
 
     fn capture_fallback_content_anchor_with_offset(
@@ -4933,39 +4969,27 @@ impl TranscriptDocument {
             TranscriptScrollIntent::ResizeReflow { .. } => {
                 let target = match self.viewport.state.resolved_anchor {
                     Some(TranscriptResolvedViewportAnchor {
-                        top: TranscriptScrollAnchor::Content(_),
-                        scroll_top,
-                        ..
-                    }) if self.records.total_count().is_none() => {
-                        crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
-                            scroll_top,
-                        )
-                    }
-                    Some(TranscriptResolvedViewportAnchor {
                         top: TranscriptScrollAnchor::Content(anchor),
                         offset_rows,
                         ..
-                    }) if self.records.total_count().is_some() => {
-                        match self.row_for_preserved_content_anchor(
+                    }) => {
+                        let row = self.row_for_preserved_content_anchor(
                             lua,
                             width,
                             viewport_rows,
                             anchor,
-                        ) {
-                            Some(row) => match self.stable_row_anchor_for_content_anchor(
-                                lua,
-                                width,
-                                anchor,
-                            ) {
-                                Some(stable_anchor) => {
-                                    crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
-                                        row,
-                                        Some(stable_anchor),
-                                        Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
-                                    )
-                                }
-                                None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
-                            },
+                        );
+                        let stable_anchor = row.and_then(|_| {
+                            self.stable_row_anchor_for_content_anchor(lua, width, anchor)
+                        });
+                        match row.zip(stable_anchor) {
+                            Some((row, stable_anchor)) => {
+                                crate::content::transcript_buf::ScrollTarget::visible_stable_anchor_delta(
+                                    row,
+                                    Some(stable_anchor),
+                                    Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
+                                )
+                            }
                             None => crate::content::transcript_buf::ScrollTarget::visible_tail(),
                         }
                     }
@@ -4973,7 +4997,7 @@ impl TranscriptDocument {
                         top: TranscriptScrollAnchor::EstimatedRow(row),
                         offset_rows,
                         ..
-                    }) if self.records.total_count().is_some() => {
+                    }) => {
                         crate::content::transcript_buf::ScrollTarget::visible_row(add_signed_row(
                             row,
                             Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
@@ -4983,18 +5007,13 @@ impl TranscriptDocument {
                         top: TranscriptScrollAnchor::Tail,
                         offset_rows,
                         ..
-                    }) if self.records.total_count().is_some() => {
+                    }) => {
                         crate::content::transcript_buf::ScrollTarget::visible_row(add_signed_row(
                             fallback_scroll_top,
                             Self::clamp_viewport_anchor_offset(offset_rows, viewport_rows),
                         ))
                     }
-                    None if self.records.total_count().is_some() => {
-                        crate::content::transcript_buf::ScrollTarget::visible_row(
-                            fallback_scroll_top,
-                        )
-                    }
-                    _ => crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
+                    None => crate::content::transcript_buf::ScrollTarget::visible_row(
                         fallback_scroll_top,
                     ),
                 };
@@ -5040,7 +5059,9 @@ impl TranscriptDocument {
                     );
                 }
                 (
-                    crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(row),
+                    crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                        row, None, 0,
+                    ),
                     None,
                 )
             }
@@ -5376,6 +5397,9 @@ impl TranscriptDocument {
             .unwrap_or_else(|| Self::trace_record_range(self.records.active_range()));
         let pending_intent = self.take_viewport_intent(input);
         let mut intent = pending_intent.intent;
+        if let TranscriptScrollIntent::ResizeReflow { previous_width } = &intent {
+            self.reflow_viewport_anchor(lua, width, *previous_width);
+        }
         if let TranscriptScrollIntent::RevealFirstRecord {
             screen_padding_top,
             cursor_byte_col,
@@ -5449,7 +5473,7 @@ impl TranscriptDocument {
                 projection_fallback_scroll_top,
                 rows,
             ) {
-                if preserve_anchor_intent && self.records.total_count().is_some() {
+                if preserve_anchor_intent {
                     if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = self
                         .viewport
                         .state
@@ -5570,7 +5594,7 @@ impl TranscriptDocument {
                 return Err(error);
             }
         };
-        if preserve_previous_content_anchor && self.records.total_count().is_some() {
+        if preserve_previous_content_anchor {
             if let Some(anchor @ TranscriptScrollAnchor::Content(_)) = self
                 .viewport
                 .state
@@ -5634,8 +5658,7 @@ impl TranscriptDocument {
                 );
             }
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
-                | crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
+                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },
             ) => {}
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
@@ -5660,8 +5683,7 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => Some(row),
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(_)
-                | crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
+                crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. }
                 | crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => None,
         };
@@ -5669,11 +5691,6 @@ impl TranscriptDocument {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => crate::content::transcript_buf::ScrollTarget::visible_row(
-                row.saturating_sub(row_offset),
-            ),
-            crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
-            ) => crate::content::transcript_buf::ScrollTarget::visible_reflow_stable_row(
                 row.saturating_sub(row_offset),
             ),
             crate::content::transcript_buf::ScrollTarget::Visible(
@@ -5712,8 +5729,7 @@ impl TranscriptDocument {
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => true,
             crate::content::transcript_buf::ScrollTarget::Visible(
-                crate::content::transcript_buf::ScrollAnchor::ExactRow(row)
-                | crate::content::transcript_buf::ScrollAnchor::ReflowStableRow(row),
+                crate::content::transcript_buf::ScrollAnchor::ExactRow(row),
             ) => row >= total_rows.saturating_sub(viewport_row_count),
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::StableRowDelta { .. },

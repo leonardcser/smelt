@@ -171,7 +171,6 @@ pub(crate) enum TranscriptProjectionTargetTrace {
     Tail,
     ExactRow(RowIndex),
     StableRowDelta { row: RowIndex, delta: isize },
-    ReflowStableRow(RowIndex),
 }
 
 impl TranscriptProjectionTargetTrace {
@@ -180,7 +179,7 @@ impl TranscriptProjectionTargetTrace {
         match self {
             Self::ExactRow(row) => Some(row),
             Self::StableRowDelta { row, delta } => Some(add_signed_row(row, delta)),
-            Self::Tail | Self::ReflowStableRow(_) => None,
+            Self::Tail => None,
         }
     }
 }
@@ -391,8 +390,7 @@ impl TranscriptScrollTrace {
         self.pending_input.take().unwrap_or_else(|| {
             let row = match projection_target {
                 TranscriptProjectionTargetTrace::Tail => 0,
-                TranscriptProjectionTargetTrace::ExactRow(row)
-                | TranscriptProjectionTargetTrace::ReflowStableRow(row) => row,
+                TranscriptProjectionTargetTrace::ExactRow(row) => row,
                 TranscriptProjectionTargetTrace::StableRowDelta { row, delta } => {
                     add_signed_row(row, delta)
                 }
@@ -404,8 +402,7 @@ impl TranscriptScrollTrace {
                     TranscriptProjectionTargetTrace::ExactRow(row) => {
                         TranscriptScrollIntent::ApproximateRowSeek(row)
                     }
-                    TranscriptProjectionTargetTrace::StableRowDelta { .. }
-                    | TranscriptProjectionTargetTrace::ReflowStableRow(_) => {
+                    TranscriptProjectionTargetTrace::StableRowDelta { .. } => {
                         TranscriptScrollIntent::PreserveViewport
                     }
                 },

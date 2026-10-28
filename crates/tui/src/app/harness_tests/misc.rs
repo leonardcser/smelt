@@ -3148,6 +3148,92 @@ fn transcript_width_resize_keeps_top_when_cursor_is_lower_in_viewport() {
     );
 }
 
+fn wrapped_prose_transcript_scrolled_into_the_middle() -> TestApp {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(120, 40);
+    let words = |idx: usize, part: &str, count: usize| {
+        (0..count)
+            .map(|word| format!("b{idx:03}{part}{word:03}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for idx in 0..120 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!(
+                "{}\n\n- {}\n- item\n\n{}",
+                words(idx, "p", 60),
+                words(idx, "l", 40),
+                words(idx, "m", 80),
+            )
+            .into(),
+        });
+    }
+    app.follow_transcript_tail();
+    app.render_silent();
+    for _ in 0..200 {
+        wheel_and_render(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    }
+    app
+}
+
+fn resize_and_render(app: &mut TestApp, width: u16, height: u16) {
+    app.feed_one(SourceEvent::Resize { width, height });
+    app.render_silent();
+}
+
+const ZOOM_STEPS: [(u16, u16); 5] = [(110, 37), (100, 34), (90, 30), (80, 27), (70, 24)];
+
+#[test]
+fn transcript_zoom_round_trip_restores_the_viewport() {
+    let mut app = wrapped_prose_transcript_scrolled_into_the_middle();
+    let before = transcript_viewport_lines(&app);
+    let scroll_before = app.transcript_window().scroll_top;
+    assert!(
+        !app.transcript_window().is_following_tail(),
+        "test needs an unpinned viewport"
+    );
+
+    let top_word = before
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .next()
+        .expect("viewport shows text")
+        .to_string();
+
+    for (width, height) in ZOOM_STEPS.into_iter().chain(ZOOM_STEPS.into_iter().rev()) {
+        resize_and_render(&mut app, width, height);
+        let lines = transcript_viewport_lines(&app);
+        assert!(
+            lines
+                .iter()
+                .find(|line| !line.trim().is_empty())
+                .is_some_and(|line| line.contains(&top_word)),
+            "{width}x{height} moved {top_word} off the top row: {lines:?}"
+        );
+    }
+    resize_and_render(&mut app, 120, 40);
+
+    assert_eq!(app.transcript_window().scroll_top, scroll_before);
+    assert_eq!(transcript_viewport_lines(&app), before);
+}
+
+#[test]
+fn transcript_resize_after_scrolling_anchors_the_new_position() {
+    let mut app = wrapped_prose_transcript_scrolled_into_the_middle();
+    resize_and_render(&mut app, 90, 30);
+    for _ in 0..20 {
+        wheel_and_render(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    }
+    let before = transcript_viewport_lines(&app);
+    let scroll_before = app.transcript_window().scroll_top;
+
+    resize_and_render(&mut app, 70, 24);
+    resize_and_render(&mut app, 90, 30);
+
+    assert_eq!(app.transcript_window().scroll_top, scroll_before);
+    assert_eq!(transcript_viewport_lines(&app), before);
+}
+
 #[test]
 fn transcript_pinned_bottom_resize_click_selects_clicked_row_without_tail_snap() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
