@@ -431,10 +431,13 @@ local function open_splash()
 	if state.decoration then
 		return
 	end
-	state.fire_pixels = nil
-	state.paint = smelt.paint.register(paint_logo, { name = "smelt.banner.splash.paint" })
-	state.paint:on("press", on_press)
-	state.paint:on("release", on_release)
+	-- A relayout keeps the paint, so a running animation carries on.
+	if not state.paint then
+		state.fire_pixels = nil
+		state.paint = smelt.paint.register(paint_logo, { name = "smelt.banner.splash.paint" })
+		state.paint:on("press", on_press)
+		state.paint:on("release", on_release)
+	end
 	local logo_w, logo_h = banner.logo_mark_size()
 	local label_lines = { { text = smelt.build.display or "", dim = true } }
 	for _, sub in ipairs(banner.collect_subtitles()) do
@@ -495,16 +498,24 @@ local function turn_active()
 	return work_state == "working" or work_state == "retrying" or work_state == "paused"
 end
 
-local function refresh(force_reopen)
-	if not turn_active() and smelt.transcript.is_empty() and transcript_fits_banner() then
-		if force_reopen == true and state.decoration then
-			teardown()
-		end
-		open_splash()
-	else
+-- Show the splash when the session is idle and empty, hide it otherwise.
+-- `rebuild == true` reopens an open splash with the current subtitle lines;
+-- event handlers pass their context table instead and keep it as is.
+local function refresh(rebuild)
+	if turn_active() or not smelt.transcript.is_empty() or not transcript_fits_banner() then
 		teardown()
+		return
 	end
+	if rebuild == true and state.decoration then
+		state.decoration:close()
+		state.decoration = nil
+	end
+	open_splash()
 end
+
+banner.on_subtitles_changed(function()
+	refresh(true)
+end)
 
 -- session_started covers /reset, /fork, /resume; input_submit covers
 -- shell escapes (`!cmd`) and any input the user submits; turn_start

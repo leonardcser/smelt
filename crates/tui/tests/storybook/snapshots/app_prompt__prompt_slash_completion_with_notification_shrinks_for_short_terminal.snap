@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- /changelog    show release notes for the latest s
+ /changelog    show release notes of recent smelt
  /btw          ask a side question
  /brief        summarize planned or completed chan
  /branch       fork current session

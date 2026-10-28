@@ -41,7 +41,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.terminal_title` | Keeps the terminal window/tab title in sync with smelt. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.turn_notifications` | Optional terminal desktop notification when an agent turn ends. |
-| `smelt.plugins.upgrade` | Autoupgrade plugin. |
+| `smelt.plugins.upgrade` | Upgrade plugin: when to run `smelt upgrade`, and what to show. |
 | `smelt.plugins.version` | /version - surface the running smelt build identity as a notification. |
 
 ### Opt-in

@@ -9,5 +9,5 @@ description: "Startup banner extension point. Lua API reference for smelt.banner
 
 **Availability:** Everywhere, including headless mode.
 
-Startup banner extension point. `smelt.banner.source(name, fn)` adds subtitle lines under the logo and returns a `Reg` that removes them. UiHost-only.
+Startup banner extension point. `smelt.banner.source(name, fn, opts?)` adds subtitle lines under the logo, ordered by `opts.order`, and returns a `Reg` that removes them. `smelt.banner.refresh()` rebuilds the banner after a source's lines change. UiHost-only.
 

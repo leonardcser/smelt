@@ -501,7 +501,8 @@ end
 
 local ok, banner = pcall(require, "smelt.banner")
 if ok and banner and smelt.banner and smelt.banner.source then
-  smelt.banner.source("tips", M.banner_lines)
+  -- Tips close the banner, after lines about the build.
+  smelt.banner.source("tips", M.banner_lines, { order = 100 })
 end
 
 return M

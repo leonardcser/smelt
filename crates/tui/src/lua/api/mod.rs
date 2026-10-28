@@ -51,10 +51,18 @@ pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_SHA: &str = env!("SMELT_BUILD_SHA");
 pub(crate) const BUILD_DATE: &str = env!("SMELT_BUILD_DATE");
 pub const BUILD_TARGET: &str = env!("SMELT_TARGET");
-pub(crate) const BUILD_TAG: &str = env!("SMELT_BUILD_TAG");
+pub const BUILD_TAG: &str = env!("SMELT_BUILD_TAG");
 pub(crate) const BUILD_COMMITS: &str = env!("SMELT_BUILD_COMMITS");
 pub(crate) const BUILD_DIRTY: &str = env!("SMELT_BUILD_DIRTY");
 pub const DISPLAY: &str = env!("SMELT_DISPLAY");
+/// Package version committed in manifests. Release runners replace it with
+/// the tag version, so any other value marks a release build.
+pub const SOURCE_BUILD_VERSION: &str = "0.0.0-dev";
+
+/// True when this binary was built by the release pipeline.
+pub fn is_release_build() -> bool {
+    APP_VERSION != SOURCE_BUILD_VERSION
+}
 
 /// `"unknown"` collapses to Lua nil so plugins can branch on `smelt.build.sha == nil`
 /// rather than string-matching a sentinel.
@@ -89,6 +97,7 @@ impl LuaRuntime {
         build.set("commits", BUILD_COMMITS.parse::<u32>().unwrap_or(0))?;
         build.set("dirty", BUILD_DIRTY == "1")?;
         build.set("display", DISPLAY)?;
+        build.set("release", is_release_build())?;
         smelt.set("build", build)?;
         smelt.set("api_version", API_VERSION)?;
         record_module_doc(
@@ -98,7 +107,7 @@ impl LuaRuntime {
         );
         record_module_doc(
             "smelt.build",
-            "Compile-time build identity and version metadata for plugins. Fields: `version` (CARGO_PKG_VERSION, for semver comparison), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), and `display` (canonical user-facing identity). `display` is `v0.5.0-alpha.2` for a clean tagged build or `v0.5.0-alpha.2-122-97dce0e8-dirty` for a dev build. Shared by the banner, `/version`, `/upgrade`, and `smelt --version`.",
+            "Compile-time build identity and version metadata for plugins. Fields: `version` (CARGO_PKG_VERSION, for semver comparison), `sha` (short git commit or nil), `date` (committer ISO timestamp or nil), `target` (Rust target triple), `tag` (most recent reachable git tag or nil), `commits` (number of commits since that tag), `dirty` (true when the working tree had uncommitted changes at build time), `display` (canonical user-facing identity), and `release` (true for builds from the release pipeline, false for source builds). `display` is `v0.5.0-alpha.2` for a clean tagged build or `v0.5.0-alpha.2-122-97dce0e8-dirty` for a dev build. Shared by the banner, `/version`, `/upgrade`, and `smelt --version`.",
             ApiClassification::Supported,
         );
         record_module_doc(
@@ -118,7 +127,7 @@ impl LuaRuntime {
         );
         record_module_doc(
             "smelt.banner",
-            "Startup banner extension point. `smelt.banner.source(name, fn)` adds subtitle lines under the logo and returns a `Reg` that removes them. UiHost-only.",
+            "Startup banner extension point. `smelt.banner.source(name, fn, opts?)` adds subtitle lines under the logo, ordered by `opts.order`, and returns a `Reg` that removes them. `smelt.banner.refresh()` rebuilds the banner after a source's lines change. UiHost-only.",
             ApiClassification::Supported,
         );
         record_module_doc(

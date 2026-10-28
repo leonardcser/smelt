@@ -189,7 +189,6 @@ macro_rules! settings {
     (@effect web_fetch_renderer_command) => { SettingEffect::FutureRequests };
     (@effect autoupgrade) => { SettingEffect::Upgrade };
     (@effect autoupgrade_channel) => { SettingEffect::Upgrade };
-    (@effect autoupgrade_interval) => { SettingEffect::Upgrade };
 }
 
 settings! {
@@ -260,16 +259,14 @@ settings! {
     /// external roots and get a per-repository bucket. Supports leading `~`,
     /// `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo.
     worktree_root:         String = ".worktrees";
-    /// Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a
-    /// pill when an update is available; `"auto"` installs in
-    /// background on detection.
-    autoupgrade:           String = "notify", choices: ["off", "notify", "auto"];
+    /// Autoupgrade behavior. `"off"` skips checks; `"notify"` announces
+    /// updates for `/upgrade`; `"auto"` installs stable releases in the
+    /// background, and the next launch uses them. Source builds, the
+    /// unstable channel, and unwritable install directories only notify.
+    autoupgrade:           String = "auto", choices: ["off", "notify", "auto"];
     /// Release channel autoupgrade tracks: `"stable"` (published GitHub
     /// releases) or `"unstable"` (`main` HEAD).
     autoupgrade_channel:   String = "stable", choices: ["stable", "unstable"];
-    /// Seconds between background autoupgrade checks. The upgrade
-    /// plugin clamps to a 60-second minimum to avoid hammering GitHub.
-    autoupgrade_interval:  Number = 3600.0;
 }
 
 pub fn setting_decl(key: &str) -> Option<&'static SettingDecl> {
@@ -979,7 +976,6 @@ mod tests {
             ("web_fetch_renderer_command", SettingEffect::FutureRequests),
             ("autoupgrade", SettingEffect::Upgrade),
             ("autoupgrade_channel", SettingEffect::Upgrade),
-            ("autoupgrade_interval", SettingEffect::Upgrade),
         ];
 
         assert_eq!(classified.len(), expected.len());

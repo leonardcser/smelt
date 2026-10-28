@@ -880,7 +880,7 @@ mod tests {
 
         assert!(lua.contains("smelt.settings.vim = false"));
         assert!(lua.contains("smelt.settings.auto_compact = true"));
-        assert!(lua.contains("smelt.settings.autoupgrade = \"notify\""));
+        assert!(lua.contains("smelt.settings.autoupgrade = \"auto\""));
         assert!(lua.contains("model = true,"));
         assert!(lua.contains("-- smelt.provider.register(\"openai\""));
         assert!(lua.contains("-- smelt.mcp.register(\"filesystem\""));

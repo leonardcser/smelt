@@ -87,7 +87,7 @@ smelt-engine = { workspace = true }
 smelt-core = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-tui = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "signal", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "signal", "time", "process"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { workspace = true }
 reqwest = { workspace = true }
@@ -95,6 +95,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
 smelt-store = { workspace = true }
+semver = "1.0.28"
+sha2.workspace = true
 
 [profile.release]
 strip = true

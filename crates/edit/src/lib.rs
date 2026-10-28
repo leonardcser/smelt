@@ -1109,12 +1109,32 @@ impl Ui {
             .map(|surface| surface.layout.clone().with_container(id))
     }
 
+    /// Render the surface's parser-backed leaves at their current content
+    /// widths, so line counts reflect the latest source before anyone samples.
+    fn render_docked_surface_leaves(&mut self, id: ContainerId) -> Option<Vec<WinId>> {
+        let surface = self.docked_surface(id)?;
+        let leaves = self.modal_leaves(surface.modal)?.to_vec();
+        let term_width = self.surface.terminal_size().0;
+        for leaf in &leaves {
+            let width = self.win_content_width(*leaf).unwrap_or(term_width);
+            if let Some(buf) = self.win(*leaf).map(|window| window.buf) {
+                if let Some(buf) = self.buf_mut(buf) {
+                    buf.ensure_rendered_at(width);
+                }
+            }
+        }
+        Some(leaves)
+    }
+
     /// Return the buffer revisions that can affect a docked surface's natural size.
     /// Root layout retention uses this payload-independent key to remeasure a fit
-    /// dialog only after one of its mounted leaves changes.
-    pub fn docked_surface_buffer_revisions(&self, id: ContainerId) -> Option<Vec<(BufId, u64)>> {
-        let surface = self.docked_surface(id)?;
-        let leaves = self.modal_leaves(surface.modal)?;
+    /// dialog only after one of its mounted leaves changes. Parser-backed leaves
+    /// render first, so a new source counts as a change.
+    pub fn docked_surface_buffer_revisions(
+        &mut self,
+        id: ContainerId,
+    ) -> Option<Vec<(BufId, u64)>> {
+        let leaves = self.render_docked_surface_leaves(id)?;
         Some(
             leaves
                 .iter()
@@ -1134,15 +1154,7 @@ impl Ui {
             return Some(Constraint::Fill);
         }
         let term = self.surface.terminal_size();
-        let leaves = self.modal_leaves(surface.modal)?.to_vec();
-        for leaf in leaves {
-            let width = self.win_content_width(leaf).unwrap_or(term.0);
-            if let Some(buf) = self.win(leaf).map(|window| window.buf) {
-                if let Some(buf) = self.buf_mut(buf) {
-                    buf.ensure_rendered_at(width);
-                }
-            }
-        }
+        self.render_docked_surface_leaves(id)?;
         let sizer = UiLeafSizer {
             wins: &self.wins,
             bufs: &self.bufs,

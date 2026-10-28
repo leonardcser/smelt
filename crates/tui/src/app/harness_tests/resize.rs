@@ -522,6 +522,30 @@ fn composed_dialog_fits_its_body_and_resizes_without_a_matching_split() {
 }
 
 #[test]
+fn fit_dialog_remeasures_when_a_parser_backed_buffer_gets_new_source() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(140, 44);
+    app.run_lua_result(
+        r#"
+        notes = smelt.buf.new({mode = 'markdown', readonly = true})
+        notes:source('loading')
+        local leaf = smelt.win.new(notes, {name = 'resize.notes', surface = 'readonly_text'})
+        smelt.dialog.new({panels = {{leaf = leaf}}, focus = leaf})
+    "#,
+    )
+    .unwrap();
+    drive_lua_tasks(&mut app);
+    paint(&mut app);
+    assert_eq!(rect(&app, "resize.notes").height, 1);
+
+    app.run_lua_result("notes:source('- one\\n- two\\n- three\\n- four')")
+        .unwrap();
+    // The app renders one frame per change; it must already be sized right.
+    app.render_silent();
+    assert_eq!(rect(&app, "resize.notes").height, 4);
+}
+
+#[test]
 fn frames_preserve_child_chrome_and_natural_size_while_stretching() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(140, 44);

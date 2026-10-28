@@ -18,8 +18,8 @@ smelt session compact <SESSION>
 smelt status (--pid <PID> | --all) [--json]
 smelt status --pid <PID> --file
 smelt status --dir
-smelt upgrade [--channel stable|unstable]
-smelt upgrade check [--channel stable|unstable]
+smelt upgrade [--channel stable|unstable] [--json]
+smelt upgrade check [--channel stable|unstable] [--json]
 ```
 
 When a message is provided, it auto-submits on startup. Running with no
@@ -135,10 +135,17 @@ dead-process records are ignored. Files live under `$XDG_RUNTIME_DIR/smelt/statu
 
 | Flag                 | Description                                                                               |
 | -------------------- | ----------------------------------------------------------------------------------------- |
-| `--channel stable`   | Use the newest tagged GitHub release and prebuilt artifact (default)                      |
+| `--channel stable`   | Use the newest stable GitHub release and its prebuilt archive (default)                   |
 | `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main --package smelt-agent` |
+| `--json`             | Print one JSON status line on stdout instead of text                                      |
 
-`smelt upgrade check` accepts the same `--channel` flag and never installs.
+`smelt upgrade check` accepts the same flags and never installs.
+
+A stable install verifies the archive against the release's `SHA256SUMS`, runs
+the new binary once, then atomically replaces the running executable. If any
+step fails, the installed binary stays unchanged. Running sessions keep their
+version until you restart them. The directory that holds `smelt` must be
+writable.
 
 ## Connection
 

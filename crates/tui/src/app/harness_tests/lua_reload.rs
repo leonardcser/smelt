@@ -1329,7 +1329,6 @@ fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
             (_, SettingKind::Bool, SettingValue::Bool(value)) => SettingValue::Bool(!value),
             ("compact_threshold", SettingKind::Number, _) => SettingValue::Number(0.65),
             ("compact_keep_recent_groups", SettingKind::Number, _) => SettingValue::Number(2.0),
-            ("autoupgrade_interval", SettingKind::Number, _) => SettingValue::Number(120.0),
             (_, SettingKind::String, SettingValue::String(value)) => {
                 let value = declaration
                     .choices

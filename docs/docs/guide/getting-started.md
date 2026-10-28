@@ -49,6 +49,17 @@ description: "Install smelt on Linux, macOS or Windows, log in with ChatGPT, Git
     cargo install --locked --git https://github.com/leonardcser/smelt.git smelt-agent
     ```
 
+### Updates
+
+smelt checks for a new release at startup and every hour. It installs the
+release in the background, and your next launch uses it. Sessions that are
+already running keep their version. Set `smelt.settings.autoupgrade = "notify"`
+to install only with `/upgrade`, or `"off"` to stop checking.
+
+Automatic installs need write access to the directory that holds `smelt`.
+`~/.local/bin` from the install script works. For `/usr/local/bin`, run
+`sudo smelt upgrade`. Source builds only notify.
+
 ## Run
 
 Just run `smelt`. The first launch opens a provider wizard. Subscription

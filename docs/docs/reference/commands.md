@@ -52,8 +52,8 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/trust`                                 | Trust the current project's `.smelt/` content |
 | `/reload`                                | Reload Lua config, prompt inputs, and the active model's context-window limit without restarting (also `F5`) |
 | `/version`                               | Show the running build identity as a notification |
-| `/changelog`                             | Open the release notes for the latest cached build |
-| `/upgrade [check]`                       | Install the newest smelt build (or refresh the cache with `check`) |
+| `/changelog`                             | Open the release notes of recent smelt releases |
+| `/upgrade [check]`                       | Install the newest smelt build in the background (or only check with `check`) |
 | `/exit`, `/quit`                         | Exit (also `:q`, `:qa`, `:wq`, `:wqa`) |
 
 ### Goals

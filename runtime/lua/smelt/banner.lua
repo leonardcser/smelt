@@ -134,20 +134,35 @@ end
 -- Named-source registry for the splash banner. Mirrors
 -- `require("smelt.statusline").add`: each call by `name` replaces any prior
 -- registration with the same name; the bundled banner plugin queries
--- every source each time it opens the splash. Each source returns one
--- of:
+-- every source each time it opens the splash, by ascending `order` and then
+-- registration order. Each source returns one of:
 --   * nil                                - contribute nothing
 --   * string                             - one dim line
 --   * { text, dim?, style_group? }       - one styled entry
 --   * { entry, entry, ... }              - multiple styled entries
 -- Returns a `Reg` whose `:remove()` drops the source.
 
-local banner_sources = {}
+local banner_sources = {} -- name -> { fn, order, seq }
+local next_seq = 0
+local subtitles_changed = function() end
+
+-- Set by the splash plugin to rebuild itself when subtitle lines change.
+function M.on_subtitles_changed(fn)
+	subtitles_changed = fn
+end
 
 function M.collect_subtitles()
+	local sources = {}
+	for _, source in pairs(banner_sources) do
+		sources[#sources + 1] = source
+	end
+	table.sort(sources, function(a, b)
+		if a.order ~= b.order then return a.order < b.order end
+		return a.seq < b.seq
+	end)
 	local lines = {}
-	for _, fn in pairs(banner_sources) do
-		local ok, result = pcall(fn)
+	for _, source in ipairs(sources) do
+		local ok, result = pcall(source.fn)
 		if not ok then
 			smelt.notify.error("banner.source: " .. tostring(result))
 		elseif result == nil then
@@ -189,24 +204,35 @@ smelt.banner = smelt.banner or {}
 
 --- Add a named source of banner subtitle lines. `fn` runs whenever the banner is
 --- built and returns nil, a string (one dim line), a `smelt.banner.Subtitle`, or
---- a list of them. Errors in `fn` are reported as notifications. Adding a name
---- that already exists replaces that source. Returns a `Reg` that removes this
---- source, unless a later `source` with the same name has replaced it.
+--- a list of them. Sources render by ascending `opts.order` (default 0), then
+--- in registration order. Errors in `fn` are reported as notifications. Adding a
+--- name that already exists replaces that source. Returns a `Reg` that removes
+--- this source, unless a later `source` with the same name has replaced it.
 ---@tier ui_host
----@type fun(name: string, fn: fun(): string|smelt.banner.Subtitle|smelt.banner.Subtitle[]|nil): smelt.Reg
-function smelt.banner.source(name, fn)
+---@type fun(name: string, fn: fun(): string|smelt.banner.Subtitle|smelt.banner.Subtitle[]|nil, opts: { order: number? }?): smelt.Reg
+function smelt.banner.source(name, fn, opts)
 	if type(name) ~= "string" or name == "" then
 		error("smelt.banner.source: name must be a non-empty string", 2)
 	end
 	if type(fn) ~= "function" then
 		error("smelt.banner.source: fn must be a function", 2)
 	end
-	banner_sources[name] = fn
+	next_seq = next_seq + 1
+	local source = { fn = fn, order = tonumber(opts and opts.order) or 0, seq = next_seq }
+	banner_sources[name] = source
 	return smelt.reg.new(function()
-		if banner_sources[name] == fn then
+		if banner_sources[name] == source then
 			banner_sources[name] = nil
 		end
 	end)
+end
+
+--- Rebuild the banner after a source's lines changed, for sources whose lines
+--- depend on asynchronous work.
+---@tier ui_host
+---@type fun()
+function smelt.banner.refresh()
+	subtitles_changed()
 end
 
 return M

@@ -56,9 +56,8 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Saved Lua config reloa
 | `web_fetch_render` | `"http"` \| `"auto"` \| `"browser"` | `"auto"` | JavaScript rendering policy for `web_fetch`: `http` never launches a browser, `auto` renders challenge and SPA-shell responses, and `browser` always renders. |
 | `web_fetch_renderer_command` | string | `""` | Renderer executable used by `web_fetch`. It reads a JSON request from stdin and writes rendered HTML, status, and final URL as JSON to stdout. |
 | `worktree_root` | string | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo. |
-| `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"notify"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a pill when an update is available; `"auto"` installs in background on detection. |
+| `autoupgrade` | `"off"` \| `"notify"` \| `"auto"` | `"auto"` | Autoupgrade behavior. `"off"` skips checks; `"notify"` announces updates for `/upgrade`; `"auto"` installs stable releases in the background, and the next launch uses them. Source builds, the unstable channel, and unwritable install directories only notify. |
 | `autoupgrade_channel` | `"stable"` \| `"unstable"` | `"stable"` | Release channel autoupgrade tracks: `"stable"` (published GitHub releases) or `"unstable"` (`main` HEAD). |
-| `autoupgrade_interval` | `number` | `3600` | Seconds between background autoupgrade checks. The upgrade plugin clamps to a 60-second minimum to avoid hammering GitHub. |
 
 <!-- SETTINGS_REFERENCE_END -->
 

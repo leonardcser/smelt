@@ -133,16 +133,13 @@ smelt.settings.web_fetch_renderer_command = ""
 -- Root directory for managed git worktrees. Relative paths are resolved inside the git root and contain worktrees directly; absolute paths are external roots and get a per-repository bucket. Supports leading `~`, `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo.
 smelt.settings.worktree_root = ".worktrees"
 
--- Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a pill when an update is available; `"auto"` installs in background on detection.
+-- Autoupgrade behavior. `"off"` skips checks; `"notify"` announces updates for `/upgrade`; `"auto"` installs stable releases in the background, and the next launch uses them. Source builds, the unstable channel, and unwritable install directories only notify.
 -- possible values: off, notify, auto
-smelt.settings.autoupgrade = "notify"
+smelt.settings.autoupgrade = "auto"
 
 -- Release channel autoupgrade tracks: `"stable"` (published GitHub releases) or `"unstable"` (`main` HEAD).
 -- possible values: stable, unstable
 smelt.settings.autoupgrade_channel = "stable"
-
--- Seconds between background autoupgrade checks. The upgrade plugin clamps to a 60-second minimum to avoid hammering GitHub.
-smelt.settings.autoupgrade_interval = 3600
 
 -- Terminal notification preferences. Use /notify for temporary turn-end alerts.
 smelt.settings.notifications = {
