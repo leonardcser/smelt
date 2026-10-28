@@ -37,6 +37,10 @@ impl EngineClient {
         self.handle.try_send(cmd)
     }
 
+    pub async fn shutdown(&mut self) {
+        self.handle.shutdown().await;
+    }
+
     fn output_paused(&self) -> bool {
         !self.native_agent.load(Ordering::Relaxed) && !self.confirms_clear.load(Ordering::Relaxed)
     }

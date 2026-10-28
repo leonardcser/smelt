@@ -15,6 +15,7 @@ pub use plans::directory as plan_directory;
 pub use transport::installed;
 pub use usage::usage;
 mod session;
+mod shells;
 #[cfg(all(test, unix))]
 mod tests;
 mod transcript;
@@ -29,12 +30,23 @@ use protocol::{
 };
 use serde_json::{json, Value};
 use smelt_provider::CancellationToken;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use transcript::Transcript;
 use transport::{control, reply, Process};
+
+/// How often running shells' output is read while they run.
+const SHELL_READ_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Sleeps until `deadline`, or forever without one.
+async fn until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
 
 struct Gate {
     policy_revision: u64,
@@ -104,7 +116,8 @@ enum Move {
 
 enum Preparation {
     Ready(agent::LoadedModelHistory),
-    Failed,
+    /// The turn failed or was cancelled before its prompt.
+    Dropped,
     Ended,
 }
 
@@ -122,6 +135,9 @@ struct Native<'a> {
     init_deadline: Option<tokio::time::Instant>,
     usage: UsageTracker,
     agents: agents::Agents,
+    shells: shells::Shells,
+    /// When the shells' output is read next.
+    next_read: Option<tokio::time::Instant>,
     gates: FuturesUnordered<BoxFuture<'static, (Gate, ToolEvaluation)>>,
     approvals: HashMap<u64, Gate>,
     evaluations: HashMap<u64, ToolCall>,
@@ -131,8 +147,14 @@ struct Native<'a> {
     active_controls: HashMap<String, Option<protocol::InvocationId>>,
     moving: Option<Move>,
     session_state: Option<String>,
+    /// Tasks Claude Code runs in the background. When one ends, it wakes to
+    /// report it, or goes idle when the task was stopped.
+    background: HashSet<String>,
     awaiting_wake: bool,
     root_in_progress: bool,
+    /// The turn was interrupted and Claude Code still owes its result. Root
+    /// frames before it belong to the cancelled turn.
+    interrupting: bool,
     /// The `working` state last reported to the host, if the process was announced.
     reported: Option<bool>,
 }
@@ -154,6 +176,8 @@ impl Native<'_> {
                 &payload.model_target.provider,
                 payload.ephemeral,
             ),
+            shells: shells::Shells::new(&payload.model_target.provider),
+            next_read: None,
             gates: FuturesUnordered::new(),
             approvals: HashMap::new(),
             evaluations: HashMap::new(),
@@ -163,8 +187,10 @@ impl Native<'_> {
             active_controls: HashMap::new(),
             moving: None,
             session_state: None,
+            background: HashSet::new(),
             awaiting_wake: false,
             root_in_progress: false,
+            interrupting: false,
             reported: None,
         }
     }
@@ -271,14 +297,26 @@ impl Runtime<'_> {
         self.native.root_in_progress || self.native.awaiting_wake
     }
 
+    /// Whether nothing holds the next prompt back. Background tasks don't.
     fn quiet(&self) -> bool {
         !self.root_busy()
-            && !self.native.agents.has_live()
             && self.native.active_controls.is_empty()
             && self.native.gates.is_empty()
             && self.native.tool_results.is_empty()
             && self.native.plan_inputs.is_empty()
             && self.side_results.is_empty()
+    }
+
+    /// Whether nothing native runs, background tasks included, which need
+    /// the process.
+    fn settled(&self) -> bool {
+        self.quiet() && !self.native.agents.has_live() && self.native.shells.is_empty()
+    }
+
+    fn publish_shells(&mut self) {
+        if let Some(processes) = self.native.shells.changed() {
+            let _ = self.tx.send(EngineEvent::NativeProcesses { processes });
+        }
     }
 
     fn report(&mut self) {
@@ -318,7 +356,7 @@ impl Runtime<'_> {
         });
         let loaded = match self.prepare().await? {
             Preparation::Ready(loaded) => loaded,
-            Preparation::Failed => {
+            Preparation::Dropped => {
                 self.turn = None;
                 return Ok(self.native.process.is_some());
             }
@@ -419,7 +457,9 @@ impl Runtime<'_> {
             self.native.init_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(60));
             self.write(control(
                 "smelt-init",
-                json!({"subtype":"initialize", "forwardSubagentText":true, "hooks":{
+                json!({"subtype":"initialize", "forwardSubagentText":true,
+                    // smelt stops background tasks one by one, so an interrupt spares them.
+                    "perTaskStopAffordance":true, "hooks":{
                     "PreToolUse":[{"hookCallbackIds":["smelt-permission"]}]
                 }}),
             ))
@@ -456,14 +496,18 @@ impl Runtime<'_> {
                                 persistence: self.payload.persistence,
                                 message,
                             });
-                            Preparation::Failed
+                            Preparation::Dropped
                         }
                     });
                 }
                 command = self.commands.recv() => {
-                    if !self.command(command.unwrap_or(UiCommand::Cancel)).await? {
+                    if !self.command(command.unwrap_or(UiCommand::EndNativeSession)).await? {
                         cancel.cancel();
                         return Ok(Preparation::Ended);
+                    }
+                    if self.turn.is_none() {
+                        cancel.cancel();
+                        return Ok(Preparation::Dropped);
                     }
                 }
             }
@@ -571,6 +615,47 @@ impl Runtime<'_> {
             self.write(message).await?;
             self.steers.push((uuid, input_history(&input)));
         }
+        Ok(())
+    }
+
+    /// Cancels the open turn and what Claude Code is answering. The process
+    /// keeps running, with its shells and background agents, and keeps the
+    /// conversation smelt has: the steps it already recorded.
+    async fn cancel(&mut self) -> Result<(), String> {
+        let answering = self.native.root_in_progress
+            || self
+                .turn
+                .as_ref()
+                .is_some_and(|turn| matches!(turn.stage, Stage::Sent | Stage::Steering));
+        if answering && !self.native.interrupting {
+            self.write(control("smelt-interrupt", json!({"subtype":"interrupt"})))
+                .await?;
+            self.native.interrupting = true;
+        }
+        // Queued messages go back to the prompt, so Claude Code must not take them.
+        self.deferred.clear();
+        for (uuid, _) in std::mem::take(&mut self.steers) {
+            self.write(control(
+                &format!("smelt-unsteer-{uuid}"),
+                json!({"subtype":"cancel_async_message", "message_uuid":uuid}),
+            ))
+            .await?;
+        }
+        if let Some(Move::Sent { resume, .. }) = &mut self.native.moving {
+            *resume = false;
+        }
+        self.transcript.abandon();
+        self.history.append(&mut self.transcript.committed);
+        if self.turn.as_ref().is_some_and(|turn| turn.stage.prompted()) && !self.payload.ephemeral {
+            // It may have done more than smelt saw, so it is never resumed past.
+            session::invalidate(&self.payload.sessions_root, &self.payload.session_id);
+        }
+        if let Some(turn) = self.turn.take() {
+            emit_complete(self.tx, turn.id, turn.started.elapsed(), true);
+            self.transcript.route(self.session_tx());
+        }
+        // The host forgot the session's work state with the turn.
+        self.native.reported = None;
         Ok(())
     }
 
@@ -718,7 +803,17 @@ impl Runtime<'_> {
                 invocation_id: *invocation_id,
             });
         }
+        // Claude Code starts each shell in a session of its own, which closing
+        // the process does not reach, so it stops them first.
+        for stop in self.native.shells.stop_all() {
+            let _ = process.write(stop).await;
+        }
         process.close().await;
+        if !self.native.shells.is_empty() {
+            let _ = self.tx.send(EngineEvent::NativeProcesses {
+                processes: Vec::new(),
+            });
+        }
         self.native = Native::new(self.tx, &self.payload);
         let _ = self.tx.send(EngineEvent::NativeSessionState {
             session_id: self.payload.session_id.clone(),
@@ -749,7 +844,7 @@ impl Runtime<'_> {
             self.send_steers().await?;
             let interactive = self.payload.tool_visibility == protocol::ToolVisibility::Interactive;
             if self.turn.as_ref().is_some_and(|turn| {
-                matches!(turn.stage, Stage::Answered) && (interactive || self.quiet())
+                matches!(turn.stage, Stage::Answered) && (interactive || self.settled())
             }) {
                 self.complete();
             }
@@ -758,23 +853,39 @@ impl Runtime<'_> {
             }
             if self.native.init_deadline.is_none()
                 && !self.root_busy()
+                && !self.native.interrupting
                 && self.native.moving.is_none()
             {
                 self.send_prompt().await?;
             }
             self.report();
+            self.publish_shells();
             let stop_deadline = self.native.agents.stop_deadline();
             let init_deadline = self.native.init_deadline;
+            if self.native.shells.is_empty() {
+                self.native.next_read = None;
+            } else if self.native.init_deadline.is_none() {
+                self.native
+                    .next_read
+                    .get_or_insert_with(|| tokio::time::Instant::now() + SHELL_READ_INTERVAL);
+            }
+            let next_read = self.native.next_read;
             // An idle process is released only when its conversation can be
             // resumed; the next turn relaunches it.
-            let idle = (self.turn.is_none() && self.quiet() && !self.payload.ephemeral)
+            let idle = (self.turn.is_none() && self.settled() && !self.payload.ephemeral)
                 .then(|| tokio::time::Instant::now() + self.config.native_idle_timeout);
             tokio::select! {
                 biased;
-                _ = async { if let Some(at) = stop_deadline { tokio::time::sleep_until(at).await } else { std::future::pending().await } } => {
+                _ = until(stop_deadline) => {
                     self.native.agents.expire_stops();
                 }
-                command = self.commands.recv() => match command.unwrap_or(UiCommand::Cancel) {
+                _ = until(next_read) => {
+                    self.native.next_read = None;
+                    for read in self.native.shells.reads() {
+                        self.write(read).await?;
+                    }
+                }
+                command = self.commands.recv() => match command.unwrap_or(UiCommand::EndNativeSession) {
                     UiCommand::StartTurn(payload)
                         if self.turn.is_none()
                             && payload.session_id == self.payload.session_id
@@ -801,10 +912,10 @@ impl Runtime<'_> {
                 Some((request_id, result)) = self.side_results.next(), if !self.side_results.is_empty() => {
                     let _ = self.live_tx().send(EngineEvent::CoreToolResult { request_id, content: result.content, is_error: result.is_error, metadata: result.metadata });
                 }
-                _ = async { if let Some(at) = init_deadline { tokio::time::sleep_until(at).await } else { std::future::pending().await } } => {
+                _ = until(init_deadline) => {
                     return Err("Claude Code initialization timed out. Check `claude --version` and `claude auth login`.".into());
                 }
-                _ = async { if let Some(at) = idle { tokio::time::sleep_until(at).await } else { std::future::pending().await } } => {
+                _ = until(idle) => {
                     self.retire(None).await;
                 }
                 frame = read(&mut self.native.process) => match frame? {
@@ -812,6 +923,35 @@ impl Runtime<'_> {
                     None => return Err(exited(&mut self.native.process).await),
                 }
             }
+        }
+    }
+
+    fn track_background(&mut self, frame: &Value) {
+        if frame["type"] != "system" {
+            return;
+        }
+        let task = frame["task_id"].as_str().unwrap_or_default();
+        let background = &mut self.native.background;
+        match frame["subtype"].as_str() {
+            // The full set, so a missed start or end doesn't linger.
+            Some("background_tasks_changed") => {
+                *background = frame["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|task| task["task_id"].as_str().map(str::to_owned))
+                    .collect();
+            }
+            Some("task_started") if frame["is_backgrounded"] == true => {
+                background.insert(task.into());
+            }
+            Some("task_updated") if frame["patch"]["is_backgrounded"] == true => {
+                background.insert(task.into());
+            }
+            Some("task_notification") if background.remove(task) => {
+                self.native.awaiting_wake = true;
+            }
+            _ => {}
         }
     }
 
@@ -824,11 +964,15 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
-        if self.native.agents.frame(&frame, now_ms)? {
+        self.track_background(&frame);
+        if self.native.shells.frame(&frame, now_ms) || self.native.agents.frame(&frame, now_ms)? {
             return Ok(());
         }
         match frame["type"].as_str() {
             Some("control_response") => {
+                if let Some(printed) = self.native.shells.output(&frame["response"]) {
+                    self.transcript.printed(&printed.tool_use_id, printed.lines);
+                }
                 if self.native.init_deadline.is_some()
                     && frame["response"]["request_id"].as_str() == Some("smelt-init")
                 {
@@ -897,7 +1041,9 @@ impl Runtime<'_> {
                 );
                 let interrupted = matches!(self.native.moving, Some(Move::Interrupted));
                 let aborted = interrupted && frame["terminal_reason"] == "aborted_streaming";
+                let cancelled = std::mem::take(&mut self.native.interrupting);
                 if !aborted
+                    && !cancelled
                     && (frame["is_error"].as_bool().unwrap_or(false)
                         || frame["subtype"].as_str() != Some("success"))
                 {
@@ -917,20 +1063,22 @@ impl Runtime<'_> {
                         .ok_or("Claude Code result has no session ID")?
                         .to_owned(),
                 );
-                self.native.awaiting_wake = self.native.agents.has_live()
-                    || self
-                        .native
-                        .session_state
-                        .as_deref()
-                        .is_some_and(|state| state != "idle");
+                self.native.awaiting_wake = self
+                    .native
+                    .session_state
+                    .as_deref()
+                    .is_some_and(|state| state != "idle");
                 self.transcript.finish();
                 if interrupted {
-                    // A turn that ended before the interrupt reached it has
-                    // nothing to continue.
-                    self.send_cwd(aborted).await?;
+                    // A turn that ended before the interrupt reached it, or
+                    // that the user cancelled, has nothing to continue.
+                    self.send_cwd(aborted && !cancelled).await?;
                     if aborted {
                         return Ok(());
                     }
+                }
+                if cancelled {
+                    return Ok(());
                 }
                 match &mut self.turn {
                     Some(turn) if sent && !self.steers.is_empty() => turn.stage = Stage::Steering,
@@ -952,6 +1100,7 @@ impl Runtime<'_> {
                     turn.stage = Stage::Sent;
                 }
             }
+            Some("assistant" | "user" | "stream_event") if self.native.interrupting => {}
             _ => {
                 if matches!(frame["type"].as_str(), Some("assistant" | "stream_event")) {
                     self.native.root_in_progress = true;
@@ -972,7 +1121,8 @@ impl Runtime<'_> {
     /// session should end.
     async fn command(&mut self, command: UiCommand) -> Result<bool, String> {
         match command {
-            UiCommand::Cancel => {
+            UiCommand::Cancel => self.cancel().await?,
+            UiCommand::EndNativeSession => {
                 let _ = self
                     .write(control("smelt-interrupt", json!({"subtype":"interrupt"})))
                     .await;
@@ -987,6 +1137,27 @@ impl Runtime<'_> {
                 agent_id,
             } => {
                 if let Some(request) = self.native.agents.stop_request(&session_id, &agent_id) {
+                    self.write(request).await?;
+                }
+            }
+            UiCommand::StopNativeProcess { session_id, id }
+                if session_id == self.payload.session_id =>
+            {
+                if let Some(request) = self.native.shells.stop_request(&id) {
+                    self.write(request).await?;
+                }
+            }
+            UiCommand::ReadNativeProcess { session_id, id }
+                if session_id == self.payload.session_id =>
+            {
+                if let Some(request) = self.native.shells.read_request(&id) {
+                    self.write(request).await?;
+                }
+            }
+            UiCommand::BackgroundNativeProcesses { session_id }
+                if session_id == self.payload.session_id =>
+            {
+                for request in self.native.shells.background_requests() {
                     self.write(request).await?;
                 }
             }

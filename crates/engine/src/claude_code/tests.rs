@@ -283,6 +283,7 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
     let mut child_completed = false;
     let mut child_history = String::new();
     let mut late_evaluation = false;
+    let mut idle_beside_child = false;
     let mut history = Vec::new();
     let (mut prompt_tokens, mut completion_tokens) = (0, 0);
     loop {
@@ -325,13 +326,19 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
                     metadata: Default::default(),
                 });
             }
-            EngineOutput::Event(EngineEvent::NativeSessionState { working: false, .. }) => break,
+            // A running child does not hold the next prompt back; its wake does.
+            EngineOutput::Event(EngineEvent::NativeSessionState { working: false, .. }) => {
+                if child_completed {
+                    break;
+                }
+                idle_beside_child |= completions == 1;
+            }
             EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
             _ => {}
         }
     }
     assert_eq!(completions, 1, "parent completes exactly once");
-    assert!(child_completed && late_evaluation);
+    assert!(child_completed && late_evaluation && idle_beside_child);
     assert!(child_history.contains("CHILD_READ_DENIED"));
     assert!(child_history.contains("CHILD_REPORT_ONLY"));
     let parent = serde_json::to_string(&history).unwrap();
@@ -623,7 +630,7 @@ async fn idle_native_processes_are_released_and_resumed_on_the_next_turn() {
 
 #[tokio::test]
 #[serial(claude_code)]
-async fn cancellation_interrupts_and_reaps_native_process() {
+async fn cancellation_ends_the_turn_and_the_session_end_reaps_claude_code() {
     let fixture = Fixture::new("hang");
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, Vec::new()));
@@ -638,13 +645,87 @@ async fn cancellation_interrupts_and_reaps_native_process() {
     }
     handle.send(UiCommand::Cancel);
     assert!(finish(&mut handle, &mut history).await.interrupted);
-    let launch = &fixture.calls()[0];
-    let pid = launch["pid"].as_u64().unwrap() as i32;
+    let pid = fixture.calls()[0]["pid"].as_u64().unwrap() as i32;
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "a cancelled turn ended Claude Code"
+    );
+    // Claude Code reads the interrupt on its own time.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !fixture
+        .calls()
+        .iter()
+        .any(|call| call["request"]["subtype"] == "interrupt")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no interrupt reached Claude Code"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    handle.send(UiCommand::EndNativeSession);
+    while !matches!(
+        output(&mut handle).await,
+        EngineOutput::Event(EngineEvent::NativeSessionState { active: false, .. })
+    ) {}
     assert_eq!(
         unsafe { libc::kill(pid, 0) },
         -1,
-        "native process remained alive after cancellation"
+        "native process remained alive after the session ended"
     );
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn a_turn_after_cancellation_continues_on_the_same_process() {
+    let fixture = Fixture::new("cancel-continue");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut history = Vec::new();
+    let mut shells = Vec::new();
+    while !serde_json::to_string(&history)
+        .unwrap()
+        .contains("KEPT_STEP")
+    {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
+                history.extend(delta.items)
+            }
+            EngineOutput::Event(EngineEvent::NativeProcesses { processes }) => shells = processes,
+            _ => {}
+        }
+    }
+    handle.send(UiCommand::Cancel);
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::NativeProcesses { processes }) => shells = processes,
+            EngineOutput::Event(EngineEvent::TurnComplete { meta, .. }) => {
+                assert!(meta.unwrap().interrupted);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    handle.send(payload(fixture.root.path(), 2, history.clone()));
+    finish(&mut handle, &mut history).await;
+    assert_eq!(shells.len(), 1, "the background shell outlives the cancel");
+    assert!(!fixture
+        .calls()
+        .iter()
+        .any(|call| call["request"]["subtype"] == "stop_task"));
+    let history = serde_json::to_string(&history).unwrap();
+    assert!(history.contains("KEPT_STEP"));
+    assert!(history.contains("fixture answer"));
+    assert!(!history.contains("LATE_FRAME") && !history.contains("LATE_RESULT"));
+    let launches = fixture
+        .calls()
+        .iter()
+        .filter(|call| call.get("argv").is_some())
+        .count();
+    assert_eq!(launches, 1, "the next turn relaunched Claude Code");
 }
 
 #[tokio::test]
@@ -1632,4 +1713,182 @@ async fn rewinding_to_an_earlier_answer_forks_the_native_session_there() {
     assert!(has("--resume-session-at=final") && has("--fork-session"));
     let prompt = calls.iter().rfind(|call| call["type"] == "user").unwrap();
     assert_eq!(prompt["message"]["content"][0]["text"], "turn 3");
+}
+
+fn allow(reply: oneshot::Sender<ToolEvaluation>) {
+    let _ = reply.send(ToolEvaluation {
+        decision: Decision::Allow,
+        metadata: Default::default(),
+    });
+}
+
+fn read_shell() -> UiCommand {
+    UiCommand::ReadNativeProcess {
+        session_id: "test-session".into(),
+        id: "claude-code:shell-task".into(),
+    }
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn background_shell_keeps_claude_code_until_it_wakes_smelt() {
+    let fixture = Fixture::new("shell-background");
+    let mut config = EngineConfig::new(
+        fixture.root.path().into(),
+        Arc::new(crate::clock::RealClock),
+    );
+    config.host_callbacks = HostCallbacks::Enabled;
+    // Shorter than the first output read, which needs the process.
+    config.native_idle_timeout = Duration::from_millis(200);
+    let mut handle = crate::start(config, Box::new(crate::tools::EmptyDispatcher));
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut lists = Vec::new();
+    let mut history = Vec::new();
+    let mut completions = 0;
+    let mut woken = false;
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::NativeProcesses { processes }) => {
+                lists.push(processes)
+            }
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
+                history.extend(delta.items)
+            }
+            EngineOutput::Event(EngineEvent::TurnComplete { .. }) => {
+                completions += 1;
+                // Outlast the idle timeout before looking at the output.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                handle.send(read_shell());
+            }
+            EngineOutput::Event(EngineEvent::NativeSessionState { active: false, .. }) => {
+                panic!("Claude Code was released while its shell ran")
+            }
+            EngineOutput::Event(EngineEvent::NativeSessionState { working, .. }) => {
+                if working && completions == 1 {
+                    woken = true;
+                } else if !working && woken {
+                    break;
+                }
+            }
+            EngineOutput::HostCall(HostCall::NativeToolEvaluation { reply, .. }) => allow(reply),
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(completions, 1);
+    // The level lists the shell by its description before it starts.
+    let started = &lists.iter().rev().find(|list| !list.is_empty()).unwrap()[0];
+    assert_eq!(started.id, "claude-code:shell-task");
+    assert_eq!(started.command, "make serve");
+    assert!(started.background);
+    assert!(lists
+        .iter()
+        .any(|list| list.first().is_some_and(|shell| shell.output == "tick 1\n")));
+    assert_eq!(lists.last().unwrap(), &Vec::new());
+    let history = serde_json::to_string(&history).unwrap();
+    assert_eq!(history.matches("SHELL_WAKE_REPLY").count(), 1);
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn headless_turns_wait_for_background_shells_and_their_wake() {
+    let fixture = Fixture::new("shell-background");
+    let mut handle = fixture.handle();
+    let UiCommand::StartTurn(mut turn) = payload(fixture.root.path(), 1, Vec::new()) else {
+        unreachable!()
+    };
+    turn.tool_visibility = protocol::ToolVisibility::Headless;
+    handle.send(UiCommand::StartTurn(turn));
+    let mut history = Vec::new();
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
+                history.extend(delta.items)
+            }
+            EngineOutput::Event(EngineEvent::NativeProcesses { processes })
+                if !processes.is_empty() =>
+            {
+                handle.send(read_shell())
+            }
+            EngineOutput::HostCall(HostCall::NativeToolEvaluation { reply, .. }) => allow(reply),
+            EngineOutput::Event(EngineEvent::TurnComplete { .. }) => break,
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
+    let history = serde_json::to_string(&history).unwrap();
+    assert_eq!(history.matches("SHELL_WAKE_REPLY").count(), 1);
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn foreground_shell_output_streams_into_its_tool_block() {
+    let fixture = Fixture::new("shell-foreground");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut lines = Vec::new();
+    let mut foreground = false;
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::ToolOutput { call_id, line, .. }) => {
+                assert_eq!(call_id, "shell-call");
+                lines.push(line);
+            }
+            EngineOutput::Event(EngineEvent::NativeProcesses { processes }) => {
+                foreground |= processes.first().is_some_and(|shell| !shell.background);
+            }
+            EngineOutput::HostCall(HostCall::NativeToolEvaluation { reply, .. }) => allow(reply),
+            EngineOutput::Event(EngineEvent::TurnComplete { .. }) => break,
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert!(foreground);
+    assert_eq!(lines, ["building", "halfway", "done"]);
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn retiring_claude_code_stops_its_shells_instead_of_orphaning_them() {
+    let fixture = Fixture::new("shell-retire");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut history = Vec::new();
+    finish(&mut handle, &mut history).await;
+    // Another session needs its own process, so this one is retired.
+    let UiCommand::StartTurn(mut other) = payload(fixture.root.path(), 1, Vec::new()) else {
+        unreachable!()
+    };
+    other.session_id = "other-session".into();
+    handle.send(UiCommand::StartTurn(other));
+    let mut cleared = false;
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::NativeProcesses { processes }) => {
+                cleared = processes.is_empty()
+            }
+            EngineOutput::Event(EngineEvent::NativeSessionState { active: false, .. }) => break,
+            _ => {}
+        }
+    }
+    assert!(cleared);
+    assert!(fixture
+        .calls()
+        .iter()
+        .any(|call| call["request"] == json!({"subtype":"stop_task", "task_id":"shell-task"})));
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn shutting_the_engine_down_stops_claude_code_shells_before_it_returns() {
+    let fixture = Fixture::new("shell-retire");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut history = Vec::new();
+    finish(&mut handle, &mut history).await;
+    handle.shutdown().await;
+    assert!(fixture
+        .calls()
+        .iter()
+        .any(|call| call["request"] == json!({"subtype":"stop_task", "task_id":"shell-task"})));
 }

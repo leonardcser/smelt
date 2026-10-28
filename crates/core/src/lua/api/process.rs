@@ -60,11 +60,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "list",
-        "Return running shell jobs as rows of `{ id, pid?, command, elapsed_secs }`. `id` is an opaque stable job ID; `pid` is present when the OS exposes the top-level child PID.",
+        "Return running shell jobs as rows of `{ id, pid?, command, elapsed_secs }`, followed by the shell commands a native agent such as Claude Code runs inside its own process. `id` is an opaque stable job ID; `pid` is present when the OS exposes the top-level child PID.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let procs =
-                crate::host::try_with_core(|core| core.jobs.list()).unwrap_or_default();
+            let procs = crate::host::try_with_core(|core| core.processes()).unwrap_or_default();
             let out = lua.create_table()?;
             for (i, p) in procs.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -81,25 +80,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.live_only_fn(
         "kill",
-        "Stop the supervised shell job with `id`. Schedules containment termination asynchronously; no-op when no host is installed.",
+        "Stop the supervised shell job with `id`, or ask the native agent to stop its shell command `id`. Schedules termination asynchronously; no-op when no host is installed.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
-            crate::host::with_core(|core| {
-                let supervisor = core.jobs.clone();
-                tokio::spawn(async move {
-                    let _ = supervisor.stop(&id).await;
-                });
-            });
+            crate::host::with_core(|core| core.stop_process(id));
             Ok(())
         },
     )?;
     m.live_only_fn(
         "detach_foreground",
-        "Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Returns true when a detach request was sent.",
+        "Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Without one, moves the native agent's foreground shell commands to the background. Returns true when a detach request was sent.",
         &[],
         |_, ()| -> LuaResult<bool> {
-            Ok(crate::host::try_with_core(|core| core.jobs.detach_latest_foreground().requested())
-                .unwrap_or(false))
+            Ok(crate::host::try_with_core(|core| core.detach_foreground_process()).unwrap_or(false))
         },
     )?;
     {
@@ -134,10 +127,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "output",
-        "Return the bounded output snapshot for supervised job `id` without draining it. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted.",
+        "Return the bounded output snapshot for supervised job `id` without draining it. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted. A native agent's shell command shows the end of its output while it runs.",
         &["id"],
         |lua, id: String| -> LuaResult<mlua::Table> {
-            output_table(lua, crate::host::try_with_core(|core| core.jobs.snapshot_output(&id)))
+            output_table(lua, crate::host::try_with_core(|core| core.process_output(&id)))
         },
     )?;
     {

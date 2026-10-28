@@ -430,7 +430,7 @@ impl TuiApp {
                     return true;
                 }
                 if session_id != self.conversation.session().id {
-                    self.core.engine.send(protocol::UiCommand::Cancel);
+                    self.core.engine.send(protocol::UiCommand::EndNativeSession);
                     return true;
                 }
                 self.core.native_session = Some(session_id);
@@ -440,8 +440,9 @@ impl TuiApp {
                     }
                     self.start_next_queued_input_if_idle();
                 } else if self.native_ui.busy.is_none() {
-                    // Native background agents can outlive the turn; the indicator
-                    // keeps working, on the turn's timer, until they settle.
+                    // Claude Code works outside a turn too, such as when it wakes
+                    // to report a background task; the indicator continues the
+                    // turn's timer.
                     let elapsed = self.working.elapsed().unwrap_or_default();
                     let since = std::time::Instant::now()
                         .checked_sub(elapsed)
@@ -449,6 +450,10 @@ impl TuiApp {
                     self.native_ui.busy =
                         Some(self.busy_stack.push_token_since("working".into(), since));
                 }
+                return true;
+            }
+            EngineEvent::NativeProcesses { processes } => {
+                self.core.native_processes = processes;
                 return true;
             }
             EngineEvent::NativeSessionEvent { session_id, event } => {
@@ -510,6 +515,12 @@ impl TuiApp {
                 false
             }
         }
+    }
+
+    /// Forgets the native session's work state. The session outlives a
+    /// cancelled turn and reports its work again.
+    pub(super) fn forget_native_work(&mut self) {
+        self.native_ui.busy = None;
     }
 
     /// Forgets the retained native session and releases everything scoped to it.
@@ -619,6 +630,7 @@ impl TuiApp {
             EngineEvent::Ready
             | EngineEvent::NativeSessionState { .. }
             | EngineEvent::NativeSessionEvent { .. }
+            | EngineEvent::NativeProcesses { .. }
             | EngineEvent::AgentUpdated { .. }
             | EngineEvent::AgentOutput { .. } => SessionControl::Continue,
             EngineEvent::TokenUsage {

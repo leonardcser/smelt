@@ -8,7 +8,7 @@
 ---@class smelt.process
 local process = {}
 
---- Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Returns true when a detach request was sent.
+--- Stop following the most recently started detachable foreground job and leave the same supervisor-owned job running in the background. Without one, moves the native agent's foreground shell commands to the background. Returns true when a detach request was sent.
 ---@type fun(): boolean
 process.detach_foreground = nil
 
@@ -16,15 +16,15 @@ process.detach_foreground = nil
 ---@type fun(): any
 process.get_default_shell = nil
 
---- Stop the supervised shell job with `id`. Schedules containment termination asynchronously; no-op when no host is installed.
+--- Stop the supervised shell job with `id`, or ask the native agent to stop its shell command `id`. Schedules termination asynchronously; no-op when no host is installed.
 ---@type fun(id: string): nil
 process.kill = nil
 
---- Return running shell jobs as rows of `{ id, pid?, command, elapsed_secs }`. `id` is an opaque stable job ID; `pid` is present when the OS exposes the top-level child PID.
+--- Return running shell jobs as rows of `{ id, pid?, command, elapsed_secs }`, followed by the shell commands a native agent such as Claude Code runs inside its own process. `id` is an opaque stable job ID; `pid` is present when the OS exposes the top-level child PID.
 ---@type fun(): table
 process.list = nil
 
---- Return the bounded output snapshot for supervised job `id` without draining it. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted.
+--- Return the bounded output snapshot for supervised job `id` without draining it. Returns `{ text, running, exit_code?, termination?, elapsed_secs, pid? }`, or an empty table when the job does not exist or its completed snapshot has been evicted. A native agent's shell command shows the end of its output while it runs.
 ---@type fun(id: string): table
 process.output = nil
 

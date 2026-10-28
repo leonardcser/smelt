@@ -294,30 +294,17 @@ fn native_session_events_for_another_session_are_ignored() {
 }
 
 #[test]
-fn ctrl_c_cancels_idle_native_background_work_and_ignores_its_late_events() {
+fn ctrl_c_interrupts_idle_native_background_work_and_keeps_its_session() {
     let mut app = TestApp::builder().build();
     let session_id = native_background_session(&mut app);
     app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert!(app.actions().iter().any(|action| matches!(action,
         Action::EngineSend(command) if matches!(command.as_ref(), protocol::UiCommand::Cancel))));
-
-    app.feed_one(SourceEvent::engine(EngineEvent::NativeSessionEvent {
-        session_id,
-        event: Box::new(EngineEvent::HistoryAppended {
-            turn_id: 1,
-            delta: protocol::CanonicalHistoryDelta::new(
-                0,
-                vec![protocol::HistoryItem::Assistant(
-                    protocol::AssistantStep::terminal(
-                        Some(protocol::Content::text("LATE_REPLY")),
-                        None,
-                        Vec::new(),
-                    ),
-                )],
-            ),
-        }),
-    }));
-    assert!(app.session_history().is_empty());
+    assert!(!sent(&mut app, |command| matches!(
+        command,
+        protocol::UiCommand::EndNativeSession
+    )));
+    assert_eq!(app.app.core.native_session, Some(session_id));
 
     app.type_text("fresh prompt");
     app.press(KeyCode::Enter);
@@ -325,19 +312,19 @@ fn ctrl_c_cancels_idle_native_background_work_and_ignores_its_late_events() {
     app.feed_one(SourceEvent::Tick(0));
     assert!(
         started_turn(&app),
-        "cancelled native work must not block input"
+        "interrupted native work must not block input"
     );
 }
 
 #[test]
-fn rewinding_cancels_idle_native_background_work() {
+fn rewinding_ends_the_native_session() {
     let mut app = TestApp::builder().build();
     native_background_session(&mut app);
     app.app.rewind_to_history_index(None, false);
-    assert!(app
-        .drain_engine_sends()
-        .iter()
-        .any(|command| matches!(command, protocol::UiCommand::Cancel)));
+    assert!(sent(&mut app, |command| matches!(
+        command,
+        protocol::UiCommand::EndNativeSession
+    )));
     assert!(app.app.core.native_session.is_none());
 }
 
@@ -357,4 +344,61 @@ fn native_background_work_keeps_the_working_dot_breathing() {
         styles.len() > 1,
         "the dot must animate after the turn: {styles:?}"
     );
+}
+
+fn native_shell(started_at_ms: u64, background: bool) -> EngineEvent {
+    EngineEvent::NativeProcesses {
+        processes: vec![protocol::NativeProcess {
+            id: "claude-code:task".into(),
+            command: "npm run dev".into(),
+            started_at_ms,
+            background,
+            output: "ready\n".into(),
+        }],
+    }
+}
+
+fn sent(app: &mut TestApp, expected: impl Fn(&protocol::UiCommand) -> bool) -> bool {
+    app.drain_engine_sends().iter().any(expected)
+}
+
+#[test]
+fn native_shells_join_the_process_list_and_stop_through_their_agent() {
+    let mut app = TestApp::builder().build();
+    let session_id = native_background_session(&mut app);
+    let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+    app.feed_one(SourceEvent::engine(native_shell(now - 65_000, true)));
+    let (id, command, elapsed, text, running): (String, String, u64, String, bool) = app
+        .eval_lua(
+            r#"
+            local row = smelt.process.list()[1]
+            local out = smelt.process.output(row.id)
+            return row.id, row.command, row.elapsed_secs, out.text, out.running
+            "#,
+        )
+        .expect("native shell row");
+    assert_eq!(
+        (id.as_str(), command.as_str(), text.as_str(), running),
+        ("claude-code:task", "npm run dev", "ready\n", true)
+    );
+    assert!(elapsed >= 65);
+    // Looking at its output asks for the latest.
+    assert!(sent(&mut app, |command| matches!(command,
+        protocol::UiCommand::ReadNativeProcess { session_id: to, id } if *to == session_id && id == "claude-code:task")));
+
+    assert!(app.run_lua("smelt.process.kill('claude-code:task')"));
+    assert!(sent(&mut app, |command| matches!(command,
+        protocol::UiCommand::StopNativeProcess { session_id: to, id } if *to == session_id && id == "claude-code:task")));
+    assert!(app.run_lua("assert(not smelt.process.detach_foreground())"));
+
+    app.feed_one(SourceEvent::engine(native_shell(now, false)));
+    assert!(app.run_lua("assert(smelt.process.detach_foreground())"));
+    assert!(sent(&mut app, |command| matches!(command,
+        protocol::UiCommand::BackgroundNativeProcesses { session_id: to } if *to == session_id)));
+
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
+        processes: Vec::new(),
+    }));
+    let rows: i64 = app.eval_lua("return #smelt.process.list()").unwrap();
+    assert_eq!(rows, 0);
 }

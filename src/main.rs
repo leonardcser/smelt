@@ -1487,6 +1487,7 @@ async fn async_main() {
         let exit = headless
             .run_oneshot(initial_message.unwrap(), headless_cancel)
             .await;
+        headless.core.engine.shutdown().await;
         if exit != smelt_core::HeadlessExit::Success {
             std::process::exit(exit.code());
         }

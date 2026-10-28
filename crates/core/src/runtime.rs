@@ -32,6 +32,8 @@ impl FrontendKind {
 
 pub struct Core {
     pub native_session: Option<String>,
+    /// The shell commands the native session runs inside its own process.
+    pub native_processes: Vec<protocol::NativeProcess>,
     pub agents: crate::agents::Agents,
     pub config: RuntimeState,
     pub startup_overrides: StartupOverrides,
@@ -102,6 +104,7 @@ impl Core {
             crate::Clipboard::new(clipboard_sink(frontend, config.settings.system_clipboard));
         Self {
             native_session: None,
+            native_processes: Vec::new(),
             agents: crate::agents::Agents::default(),
             config,
             startup_overrides,

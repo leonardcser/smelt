@@ -385,7 +385,12 @@ pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: EngineEventSender,
     output_rx: mpsc::UnboundedReceiver<EngineOutput>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// How long [`EngineHandle::shutdown`] waits: Claude Code has two seconds to
+/// exit once its shell commands are stopped.
+const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl EngineHandle {
     pub fn send(&self, cmd: UiCommand) {
@@ -394,6 +399,16 @@ impl EngineHandle {
 
     pub fn try_send(&self, cmd: UiCommand) -> Result<(), EngineDisconnected> {
         self.cmd_tx.send(cmd).map_err(|_| EngineDisconnected)
+    }
+
+    /// Disconnects the engine and waits, within a deadline, for it to end, so
+    /// a native agent stops the processes it runs instead of orphaning them.
+    pub async fn shutdown(&mut self) {
+        // Every engine loop ends when its command channel closes.
+        self.cmd_tx = mpsc::unbounded_channel().0;
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(SHUTDOWN_DEADLINE, task).await;
+        }
     }
 
     /// Receive the next ordered engine output. Returns `None` when the engine's
@@ -454,6 +469,7 @@ impl EngineHandle {
             cmd_tx,
             event_tx: event_tx.clone(),
             output_rx,
+            task: None,
         };
         (handle, cmd_rx, EngineOutputInjector { event_tx, host_tx })
     }
@@ -499,17 +515,19 @@ impl EventInjector {
 pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, host_tx, output_rx) = output_channel(config.host_callbacks);
-    let handle = EngineHandle {
-        cmd_tx,
-        event_tx: event_tx.clone(),
-        output_rx,
-    };
-
-    tokio::spawn(agent::engine_task(
-        config, dispatcher, cmd_rx, event_tx, host_tx,
+    let task = tokio::spawn(agent::engine_task(
+        config,
+        dispatcher,
+        cmd_rx,
+        event_tx.clone(),
+        host_tx,
     ));
-
-    handle
+    EngineHandle {
+        cmd_tx,
+        event_tx,
+        output_rx,
+        task: Some(task),
+    }
 }
 
 #[cfg(test)]

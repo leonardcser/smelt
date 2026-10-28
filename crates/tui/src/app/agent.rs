@@ -1826,10 +1826,11 @@ impl TuiApp {
         }
     }
 
-    /// Stops a native session that outlived its parent turn.
+    /// Ends the native session with everything it runs, for history it no
+    /// longer matches.
     pub(crate) fn cancel_native_session(&mut self) {
         if self.core.native_session.is_some() {
-            self.core.engine.send(UiCommand::Cancel);
+            self.core.engine.send(UiCommand::EndNativeSession);
             self.end_native_session();
         }
     }
@@ -1840,7 +1841,7 @@ impl TuiApp {
         self.cancel_pending_rewind();
         self.platform.set_sleep_inhibited(false);
         self.core.engine.send(UiCommand::Cancel);
-        self.end_native_session();
+        self.forget_native_work();
         self.cancel_turn_lua_tasks();
         self.conversation.invalidate_turn_callbacks();
         self.busy_stack.clear();

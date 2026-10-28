@@ -4117,6 +4117,7 @@ impl TuiApp {
         .unwrap_or_else(|_| Err("agent archive flush deadline elapsed".into()))
         .err();
         let persistence_error = persistence_error.or(archive_error);
+        self.core.engine.shutdown().await;
 
         // Stop the stdin reader before releasing terminal modes so no background
         // thread can keep consuming bytes after the TUI gives the terminal back.

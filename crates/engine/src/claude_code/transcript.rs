@@ -90,6 +90,23 @@ impl Transcript {
             .or_insert_with(crate::agent::next_invocation_id)
     }
 
+    /// Shows lines a running tool printed in its block.
+    pub(super) fn printed(&self, id: &str, lines: Vec<String>) {
+        let Some(invocation_id) = self.calls.get(id).copied() else {
+            return;
+        };
+        if !self.pending.iter().any(|step| step.remaining.contains(id)) {
+            return;
+        }
+        for line in lines {
+            self.emit(EngineEvent::ToolOutput {
+                invocation_id,
+                call_id: id.into(),
+                line,
+            });
+        }
+    }
+
     pub(super) fn retain_result(&mut self, id: &str, result: ToolOutcome) {
         self.retained_results.insert(id.to_owned(), result);
     }
@@ -429,6 +446,16 @@ impl Transcript {
             self.next_index += items.len();
             self.committed.extend(items);
         }
+    }
+
+    /// Forgets what the turn had not finished, without recording it.
+    pub(super) fn abandon(&mut self) {
+        self.pending.clear();
+        self.thinking.clear();
+        self.drafts.clear();
+        self.steers.clear();
+        self.partial_text.clear();
+        self.partial_reasoning.clear();
     }
 
     pub(super) fn finish(&mut self) {

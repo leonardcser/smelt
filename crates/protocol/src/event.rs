@@ -382,6 +382,8 @@ pub enum EngineEvent {
         session_id: String,
         agent: Box<crate::AgentInfo>,
     },
+    /// The shell commands the native session runs, replacing the previous list.
+    NativeProcesses { processes: Vec<NativeProcess> },
     AgentOutput {
         session_id: String,
         agent_id: String,
@@ -926,6 +928,18 @@ pub struct AgentProjectContext {
     pub tools: Vec<ToolDef>,
 }
 
+/// A shell command a native agent runs inside its own process.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NativeProcess {
+    pub id: String,
+    pub command: String,
+    pub started_at_ms: u64,
+    /// Whether the agent left it running rather than waiting for it.
+    pub background: bool,
+    /// The end of what it printed so far.
+    pub output: String,
+}
+
 /// Commands sent from the UI to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UiCommand {
@@ -933,6 +947,16 @@ pub enum UiCommand {
         session_id: String,
         agent_id: String,
     },
+    /// End the native session: stop its agent process and everything it runs.
+    /// `Cancel` only cancels the turn.
+    EndNativeSession,
+    /// Read the latest output of a shell command of the native session.
+    ReadNativeProcess { session_id: String, id: String },
+    /// Stop a shell command of the native session.
+    StopNativeProcess { session_id: String, id: String },
+    /// Leave the native session's foreground shell commands running in the
+    /// background, so its turn continues without them.
+    BackgroundNativeProcesses { session_id: String },
     /// Start a new agent turn.
     StartTurn(Box<StartTurnPayload>),
 

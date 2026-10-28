@@ -65,6 +65,17 @@ def assistant(blocks, uuid="assistant"):
     send({"type": "assistant", "uuid": uuid, "message": {"id": uuid, "content": blocks}, "parent_tool_use_id": None})
 
 
+def task_output(task_id, output):
+    """Answers smelt's next read of a shell task's output."""
+    while True:
+        request = receive()
+        if request.get("request", {}) == {"subtype": "get_task_output", "task_id": task_id}:
+            break
+    send({"type": "control_response", "response": {"subtype": "success", "request_id": request["request_id"], "response": {
+        "output": output, "total_bytes": len(output.encode()), "truncated": False,
+    }}})
+
+
 def tool_result(call_id, content, is_error=False):
     send({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call_id, "content": content, "is_error": is_error}]}})
 
@@ -91,7 +102,8 @@ while True:
     prompt = receive()
     if prompt.get("type") != "user":
         if prompt.get("request", {}).get("subtype") == "interrupt":
-            sys.exit(0)
+            # An idle Claude Code has nothing to interrupt.
+            send({"type": "control_response", "response": {"subtype": "success", "request_id": prompt["request_id"], "response": {"still_queued": []}}})
         if prompt.get("request", {}).get("subtype") == "get_usage":
             send({"type": "control_response", "response": {"subtype": "success", "request_id": prompt["request_id"], "response": {
                 "rate_limits_available": True,
@@ -262,6 +274,37 @@ while True:
             send({"type": "user", "parent_tool_use_id": "agent-launch", "message": {"content": [{"type": "tool_result", "tool_use_id": "child-read", "content": "CHILD_READ_DENIED" if denied else "CHILD_READ_ALLOWED", "is_error": denied}]}})
             send({"type": "system", "subtype": "task_notification", "task_id": "child-task", "tool_use_id": "agent-launch", "status": "completed", "summary": "Fixture child complete"})
         tool_result("agent-launch", "async_launched: child-task" if background else "Fixture child complete")
+    if SCENARIO.startswith("shell-") and TOOLS_ENABLED:
+        background = SCENARIO != "shell-foreground"
+        args = {"command": "make serve", "run_in_background": background}
+        assistant([{"type": "tool_use", "id": "shell-call", "name": "Bash", "input": args}], "shell-call")
+        gate = control("shell-gate", {"subtype": "hook_callback", "callback_id": "smelt-permission", "tool_use_id": "shell-call", "input": {"tool_name": "Bash", "tool_input": args}})
+        assert gate["hookSpecificOutput"]["permissionDecision"] == "allow", gate
+        if background:
+            send({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "shell-task", "task_type": "local_bash", "description": "Serve"}]})
+        send({"type": "system", "subtype": "task_started", "task_id": "shell-task", "task_type": "local_bash", "tool_use_id": "shell-call", "description": "Serve", "is_backgrounded": background})
+        if background:
+            tool_result("shell-call", "Command running in background with ID: shell-task.")
+        else:
+            task_output("shell-task", "building\nhalf")
+            task_output("shell-task", "building\nhalfway\ndone\n")
+            send({"type": "system", "subtype": "task_notification", "task_id": "shell-task", "tool_use_id": "shell-call", "status": "completed", "output_file": "", "summary": "Serve"})
+            tool_result("shell-call", "building\nhalfway\ndone")
+    if SCENARIO == "cancel-continue":
+        send({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "kept-shell", "task_type": "local_bash", "description": "Serve"}]})
+        send({"type": "system", "subtype": "task_started", "task_id": "kept-shell", "task_type": "local_bash", "description": "Serve", "is_backgrounded": True})
+        assistant([{"type": "text", "text": "KEPT_STEP"}], "kept")
+        assistant([{"type": "tool_use", "id": "cut-tool", "name": "ToolSearch", "input": {"query": "x"}}], "cut")
+        interrupt = receive()
+        while interrupt.get("request", {}).get("subtype") != "interrupt":
+            interrupt = receive()
+        # Claude Code finishes the step it was in before it stops.
+        tool_result("cut-tool", "LATE_RESULT")
+        assistant([{"type": "text", "text": "LATE_FRAME"}], "late")
+        send({"type": "result", "subtype": "error_during_execution", "is_error": True, "terminal_reason": "aborted_tools", "session_id": SESSION, "usage": {"input_tokens": 1, "output_tokens": 1}})
+        send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
+        SCENARIO = "text"
+        continue
     if SCENARIO in ("steer", "steer-cancel"):
         assistant([{"type": "tool_use", "id": "steer-tool", "name": "ToolSearch", "input": {"query": "x"}}], "steer-tool")
         steer = receive()
@@ -282,6 +325,8 @@ while True:
     assistant([{"type": "text", "text": text}], "final")
     send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": text, "total_cost_usd": 0.01, "usage": {"input_tokens": 5, "output_tokens": 8, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2}, "structured_output": {"title": "fixture title"}})
     if SCENARIO == "subagent-background" and TOOLS_ENABLED:
+        # The child outlives the parent's answer; Claude Code goes idle meanwhile.
+        send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
         time.sleep(0.05)
         child_args = {"file_path": "probe.txt"}
         send({"type": "assistant", "uuid": "late-child-read", "parent_tool_use_id": "agent-launch", "agent_id": "child-task", "message": {"content": [{"type": "tool_use", "id": "late-child-read", "name": "Read", "input": child_args}]}})
@@ -290,8 +335,20 @@ while True:
         send({"type": "user", "parent_tool_use_id": "agent-launch", "message": {"content": [{"type": "tool_result", "tool_use_id": "late-child-read", "content": "CHILD_READ_DENIED" if denied else "CHILD_READ_ALLOWED", "is_error": denied}]}})
         send({"type": "assistant", "uuid": "child-report", "parent_tool_use_id": "agent-launch", "agent_id": "child-task", "message": {"content": [{"type": "text", "text": "CHILD_REPORT_ONLY"}]}})
         send({"type": "system", "subtype": "task_notification", "task_id": "child-task", "tool_use_id": "agent-launch", "status": "completed", "summary": "CHILD_REPORT_ONLY", "usage": {"total_tokens": 7300}})
+        send({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
         assistant([{"type": "text", "text": "BACKGROUND_WAKE_REPLY"}], "wake-reply")
         send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "BACKGROUND_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
+    if SCENARIO == "shell-background" and TOOLS_ENABLED:
+        send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
+        task_output("shell-task", "tick 1\n")
+        # Claude Code wakes to report a background shell that ended.
+        send({"type": "system", "subtype": "task_updated", "task_id": "shell-task", "patch": {"status": "completed"}})
+        send({"type": "system", "subtype": "task_notification", "task_id": "shell-task", "tool_use_id": "shell-call", "status": "completed", "output_file": "", "summary": "Serve"})
+        send({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
+        assistant([{"type": "text", "text": "SHELL_WAKE_REPLY"}], "shell-wake")
+        send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "SHELL_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
     send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
     # The process persists across turns; later prompts are plain questions.
     SCENARIO = "text"

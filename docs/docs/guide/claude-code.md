@@ -203,8 +203,8 @@ it, since the move went through smelt's own tools and permissions. If Claude
 Code cannot move, the turn ends with the reason, and the next turn launches it
 in the new workspace.
 
-A process that has had no turn or native background work for five minutes is
-released, so idle sessions don't hold memory. The next turn relaunches it and
+A process that has had no turn, native background work, or running shell
+command for five minutes is released, so idle sessions don't hold memory. The next turn relaunches it and
 resumes the native session, which adds Claude Code's startup to that turn. Each
 session needs its own process, since Claude Code serves one conversation per
 process. With `--ephemeral`, the native session cannot be resumed, so the
@@ -242,12 +242,35 @@ rules and dialogs. Native tools without a smelt counterpart are shown under the
 provider's name, such as `claude-code/ToolSearch`, while permission rules match
 their native name, `ToolSearch`.
 
-Cancellation sends an interrupt control request and bounds process shutdown.
+Cancelling a turn (**Esc** or **Ctrl-C**) interrupts it and keeps the process:
+background shell commands and background subagents keep running, and the next
+turn continues on the same process. smelt declares that it stops background
+tasks one by one, so Claude Code's interrupt spares them. Queued messages go
+back to the prompt instead of reaching Claude Code. Resetting, loading,
+rewinding, or switching the session ends the process with all its work. Claude
+Code runs each shell command in a process session of its own, which outlives
+its process, so smelt stops the shell commands first whenever it releases the
+process, and bounds process shutdown.
 When Claude Code cancels an individual request, smelt cancels its host evaluation
 and execution tasks, including child tasks, and closes its question or permission
 dialog. Cancelled requests cannot receive a late approval or tool reply.
 On Unix, the backend contains the subprocess in its own process group and
 terminates that group during cleanup.
+
+## Shell commands
+
+Claude Code runs `Bash` inside its own process, in the foreground or in the
+background. `/ps` lists these commands next to smelt's own jobs, by their
+command line, with the end of their output (the last 8 KiB Claude Code keeps).
+**Alt-D** stops one with `stop_task`, and **Ctrl-G** moves the running foreground
+commands to the background, so the turn continues without waiting for them.
+Once Claude Code registers a foreground command, a few seconds in, its output
+streams into the `bash` block as it runs.
+
+When a background command ends, Claude Code wakes on its own to report it. The
+work indicator shows the wake reply as it runs, and the reply is appended to the
+session history like any answer. In headless mode smelt waits for running
+background commands and their wake replies before reporting completion.
 
 ## Native subagents
 
@@ -268,17 +291,17 @@ Task token totals are shown as agent-only telemetry. They are not added to the
 parent's usage, because native model totals can already include child work.
 
 Background subagents outlive the parent's result. In the TUI the parent turn
-completes normally; the work indicator remains busy until every background
-child, automatic wake reply, and pending tool or permission request has settled. Late child permission requests, wake
-replies, and usage are routed to the same session. A wake reply is appended to
-the canonical history exactly once. In headless mode smelt waits for all
-background work and the wake reply before reporting completion.
+completes normally, and the prompt stays free while children run, as it does
+for background shell commands. When a child ends, Claude Code wakes to report
+it; the work indicator shows the wake reply, and a prompt sent meanwhile is
+queued until the reply ends, so a turn never races it. Late child permission
+requests, wake replies, and usage are routed to the same session. A wake reply
+is appended to the canonical history exactly once. In headless mode smelt waits
+for all background work and the wake reply before reporting completion.
 
-While background work is running, new prompts are queued and start when the
-native session settles, so a turn never races a wake reply or a stale history
-snapshot. **Ctrl-C** cancels the whole native session, and **Alt-S** in
-`/subagents` stops one child. Resetting, loading, or rewinding the session
-cancels it too.
+**Ctrl-C** interrupts a running answer or wake reply and leaves background work
+running: **Alt-S** in `/subagents` stops one child, and **Alt-D** in `/ps` stops
+one shell command. Resetting, loading, or rewinding the session ends all of it.
 
 ## Boundaries
 
@@ -296,8 +319,8 @@ smelt tool definitions are captured when the process launches; a registry reload
 relaunches it on the next turn.
 A backend switch requires cancelling the active turn. Native background work is
 scoped to the process rather than managed by smelt's job supervisor. The process
-ends when the session is cancelled, reset, loaded, or rewound, when a turn uses
-another backend, when it has been idle for five minutes, or when smelt exits.
+ends when the session is reset, loaded, or rewound, when a turn uses another
+backend, when it has been idle for five minutes, or when smelt exits.
 
 Anthropic's terms apply to use of Claude Code. This integration does not claim
 Anthropic endorsement or special permission to intermediate subscriptions. Each

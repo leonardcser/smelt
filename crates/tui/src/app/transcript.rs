@@ -6550,17 +6550,16 @@ impl TranscriptDocument {
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {
         let history = &self.content.transcript.history;
-        let record_len = if block_idx < history.len() {
-            self.records.total_count().map(|_| {
-                self.records
-                    .global_record_index(history.record_index_for_order_index(block_idx))
-            })
-        } else {
-            None
-        };
+        if block_idx >= history.len() {
+            return;
+        }
+        let record_len = self.records.total_count().map(|_| {
+            self.records
+                .global_record_index(history.record_index_for_order_index(block_idx))
+        });
         self.content.transcript.truncate_to(block_idx);
+        self.invalidate_hydration_requests();
         if let Some(record_len) = record_len {
-            self.invalidate_hydration_requests();
             self.records.truncate(record_len);
             self.extent.invalidate_from(record_len);
         }
@@ -6946,6 +6945,35 @@ mod document_tests {
         assert!(
             matches!(document.history().block(first_id), Some(Block::Text { content }) if content == "block 0")
         );
+    }
+
+    #[test]
+    fn hydration_finishing_after_truncation_does_not_restore_the_block() {
+        let mut source = fixed_transcript(3);
+        let records = source.history.block_records();
+        let dir = tempfile::tempdir().unwrap();
+        let store_address = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix(&store_address, 0, &records).unwrap();
+        source.history.clear_record_dirty();
+        let last_id = source.history.order[2];
+        let stored = source
+            .history
+            .stored_ref_for_materialized(last_id, 2)
+            .unwrap();
+        let mut document = TranscriptDocument::from_transcript(source);
+        document.set_store_address(Some(store_address));
+        assert!(document.history_mut().dematerialize_live(last_id, stored) > 0);
+        assert!(!document.ensure_hydrated_ids(&[last_id]));
+        let request = document.take_pending_hydration_request().unwrap();
+
+        document.truncate_to(1);
+        let result =
+            super::super::transcript_hydration::execute_hydration_request_for_test(request)
+                .unwrap();
+        document.install_hydration_result(result);
+
+        assert_eq!(document.history().order.len(), 1);
+        assert!(document.history().block(last_id).is_none());
     }
 
     #[test]
