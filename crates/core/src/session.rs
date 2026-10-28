@@ -1294,6 +1294,37 @@ impl SessionStorage {
         create_private_dir_all_in(self.state_root(), path)
     }
 
+    pub(crate) fn read_private_file(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        reject_filesystem_symlink_in(self.state_root(), path)?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "private storage path is not a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            return Err(std::io::Error::other(
+                "private storage file exceeds its size limit",
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub fn write_private_file(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         write_private_file_in(self.state_root(), path, contents)
     }
@@ -3793,6 +3824,7 @@ mod tests {
                 result: ToolOutcome::new("x".repeat(100), false, None),
                 elapsed_ms: None,
                 called_at_ms: None,
+                provider: None,
             }],
         ));
         let history = vec![
@@ -3824,6 +3856,7 @@ mod tests {
                 result: ToolOutcome::new("x".repeat(100), false, None),
                 elapsed_ms: None,
                 called_at_ms: None,
+                provider: None,
             }],
         ));
         let mut s = fixture_session();
@@ -4376,6 +4409,7 @@ mod tests {
             result: ToolOutcome::new("ok".into(), false, None),
             elapsed_ms: None,
             called_at_ms: Some(1_742_573_823_000),
+            provider: None,
         };
         let inv_err = ToolInvocation {
             call_id: "c2".into(),
@@ -4384,6 +4418,7 @@ mod tests {
             result: ToolOutcome::new("denied".into(), true, None),
             elapsed_ms: None,
             called_at_ms: Some(1_742_573_824_000),
+            provider: None,
         };
         let mut original = Session::new(123, std::path::PathBuf::from("/w"));
         original.history.push(user_item("hi"));
@@ -4443,6 +4478,7 @@ mod tests {
                     result: ToolOutcome::new("ok".into(), false, None),
                     elapsed_ms: Some(42),
                     called_at_ms: Some(1_742_573_823_000),
+                    provider: None,
                 }],
             )));
         let round: Session =

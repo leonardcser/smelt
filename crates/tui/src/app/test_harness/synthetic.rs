@@ -526,6 +526,7 @@ impl TestApp {
             invocation_id,
             call_id,
             tool_name,
+            provider: None,
             args,
             approval_patterns,
             called_at_ms,

@@ -398,6 +398,21 @@ fn command_argument_callbacks_refresh_hints_and_allow_empty_choices() {
 }
 
 #[test]
+fn model_completion_offers_models_listed_after_startup() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let current = app.core_probe().config.available_models[0].clone();
+    let mut opus = current.clone();
+    opus.key = "claude-code/claude-opus-4-8".into();
+    opus.provider_name = "claude-code".into();
+    opus.model_name = "claude-opus-4-8".into();
+    app.set_available_models(vec![current, opus]);
+
+    app.type_text("/model ");
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("claude-code/claude-opus-4-8"), "{frame}");
+}
+
+#[test]
 fn budget_reasoning_preserves_max_when_budgets_match() {
     let mut app = TestApp::builder()
         .with_vim(false)
@@ -608,6 +623,30 @@ fn codex_model_accepts_all_advertised_reasoning_efforts() {
 }
 
 #[test]
+fn bundled_title_ask_on_claude_code_uses_the_latest_haiku() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let current = app.core_probe().config.available_models[0].clone();
+    let mut opus = current.clone();
+    opus.key = "claude-code/opus".into();
+    opus.provider_name = "claude-code".into();
+    opus.model_name = "opus".into();
+    opus.provider_type = "claude-code".into();
+    opus.api_base = String::new();
+    opus.api_key_env = String::new();
+    app.set_available_models(vec![current, opus]);
+    app.apply_model("claude-code/opus", false);
+    let _ = app.drain_engine_sends();
+
+    publish_input_submit(&mut app, "Name this session");
+
+    let models: Vec<_> = engine_ask_models_and_efforts(app.drain_engine_sends())
+        .into_iter()
+        .map(|(model, _)| model)
+        .collect();
+    assert_eq!(models, ["haiku"]);
+}
+
+#[test]
 fn bundled_title_ask_on_codex_uses_luna() {
     let mut app = TestApp::builder().with_vim(false).build();
     add_codex_gpt_5_6_sol_model(&mut app);
@@ -643,6 +682,25 @@ fn bundled_prediction_ask_on_codex_uses_luna() {
         vec![("luna".into(), protocol::ReasoningEffort::Off)]
     );
     assert!(!app.lua_messages_contain("reasoning effort"));
+}
+
+#[test]
+fn compaction_on_codex_runs_on_the_main_model() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    add_codex_gpt_5_6_sol_model(&mut app);
+    app.apply_model("codex/gpt-5.6-sol", false);
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.push_assistant_text("a1");
+    app.set_context_token_baseline_for_harness(Some(500));
+    let _ = app.drain_engine_sends();
+
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+
+    let models: Vec<String> = engine_ask_models_and_efforts(app.drain_engine_sends())
+        .into_iter()
+        .map(|(model, _)| model)
+        .collect();
+    assert_eq!(models, ["gpt-5.6-sol"]);
 }
 
 #[test]
@@ -1396,6 +1454,7 @@ fn custom_command_starts_after_replaced_synthetic_history() {
                             ),
                             elapsed_ms: None,
                             called_at_ms: Some(i as u64),
+                            provider: None,
                         };
                         protocol::HistoryItem::Assistant(protocol::AssistantStep::with_invocations(
                             Some(protocol::Content::text(body)),

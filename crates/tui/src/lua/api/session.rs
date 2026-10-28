@@ -215,6 +215,9 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
                         let row = lua.create_table()?;
                         row.set("call_id", inv.call_id.as_str())?;
                         row.set("name", inv.name.as_str())?;
+                        if let Some(provider) = &inv.provider {
+                            row.set("provider", provider.as_str())?;
+                        }
                         row.set("arguments", inv.arguments.as_str())?;
                         if let Some(elapsed_ms) = inv.elapsed_ms {
                             row.set("elapsed_ms", elapsed_ms)?;
@@ -522,13 +525,17 @@ pub(super) fn register(
     )?;
     m.fn_(
         "status",
-        "Return compact live status for prompt/status bars: `{ model, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { state, tokens, window, stale, marker }, cost }`. Context state is `ready` or `recalculating`; tokens are the latest display reading and can remain visible while recalculating. Markers are `*` for pending config and `?` for stale readings.",
+        "Return compact live status for prompt/status bars: `{ model, resolved?, provider, api_base, mode = { name, pending, marker }, reasoning = { effort, pending, marker }, fast = { supported, active }, context = { state, tokens, window, stale, marker }, cost }`. `resolved` names the model an alias currently runs. Context state is `ready` or `recalculating`; tokens are the latest display reading and can remain visible while recalculating. Markers are `*` for pending config and `?` for stale readings.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
             if let Some(status) = crate::lua::try_with_session_host(|host| host.session_status()) {
                 let active = status.active_model.as_ref();
                 out.set("model", active.map(|model| model.key.as_str()))?;
+                out.set(
+                    "resolved",
+                    active.and_then(|model| model.catalog.resolved.as_deref()),
+                )?;
                 out.set(
                     "provider",
                     active.map(|model| model.provider_type.as_str()),

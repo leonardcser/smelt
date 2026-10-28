@@ -87,6 +87,7 @@ mod tests {
             result: ToolOutcome::new(content.into(), is_error, None),
             elapsed_ms: None,
             called_at_ms: None,
+            provider: None,
         }
     }
 

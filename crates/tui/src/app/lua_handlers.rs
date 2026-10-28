@@ -839,7 +839,7 @@ impl TuiApp {
     ) -> Result<(smelt_core::RuntimeState, smelt_core::ManagedModels), String> {
         let mut config = desired.config.clone();
         let mut managed_models = self.managed_models.catalog().clone();
-        managed_models.inject_oauth_providers(&mut config);
+        managed_models.inject_providers(&mut config);
         managed_models.sync_desired(&config, self.core.config.revision.wrapping_add(1));
         let mut available_models = config.resolve_models();
         managed_models.inject(&config, &mut available_models);
@@ -1032,6 +1032,7 @@ impl TuiApp {
                 crate::app::agent::PendingTurnCancellation::Rewound,
             );
         }
+        self.cancel_native_session();
         if let Some(history_idx) = history_idx {
             self.request_rewind(history_idx, restore_vim_insert);
         } else {

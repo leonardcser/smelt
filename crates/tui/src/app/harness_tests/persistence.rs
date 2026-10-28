@@ -1594,6 +1594,7 @@ fn tool_history() -> Vec<HistoryItem> {
                 result: ToolOutcome::new("persisted\n".into(), false, None),
                 elapsed_ms: Some(12),
                 called_at_ms: Some(1_742_573_823_000),
+                provider: None,
             }],
         )),
     ]

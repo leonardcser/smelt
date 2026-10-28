@@ -3,9 +3,9 @@
 -- Ctrl-C dismiss; typing hides it without destroying it, so an undo back to
 -- an empty buffer brings it back.
 --
--- The system prompt carries the stable instruction; messages carry the recent
--- conversation. Consecutive calls share the KV cache prefix up to the last
--- common message.
+-- The system prompt carries the stable instruction. The recent conversation is
+-- quoted in a single user message: a request ending on an assistant message
+-- would have the model continue the assistant instead of predicting the user.
 
 local prompt = smelt.prompt.win()
 
@@ -13,30 +13,34 @@ local function clear_prediction()
   prompt:clear_placeholder()
 end
 
-local SYSTEM = "Task: predict what the user will type next in the conversation below. Keep it short - one sentence max. If you cannot predict, reply with an empty string."
+local SYSTEM = "You predict the next message a developer will type to their coding assistant. "
+  .. "The conversation is quoted below; you are not a participant in it. "
+  .. "Write only that next message, in the developer's own words: a short instruction, answer, or question addressed to the assistant, "
+  .. "such as \"yes, go ahead\" or \"now run the tests\". "
+  .. "Never write as the assistant: never offer help, summarize, or ask the developer anything. "
+  .. "One short line, no quotes. If the next message is unpredictable, reply with nothing."
 
 local function has_queued_messages()
   return #smelt.prompt.queued() > 0
 end
 
--- Accumulated context sent so far. The system prompt is stable,
--- so only the messages array is compared between calls.
-local sent_messages = {}
+-- The conversation last sent, so an unchanged one is not predicted twice.
+local sent_conversation
 
 smelt.signal.subscribe("input_epoch", clear_prediction)
 
 smelt.signal.subscribe("session_epoch", function()
   clear_prediction()
-  sent_messages = {}
+  sent_conversation = nil
 end)
 
 smelt.signal.subscribe("history_epoch", function()
   clear_prediction()
-  sent_messages = {}
+  sent_conversation = nil
 end)
 
 smelt.events.on("turn_end", function(payload)
-  if payload.cancelled then
+  if payload.cancelled or not smelt.settings.show_prediction then
     return
   end
 
@@ -66,38 +70,30 @@ smelt.events.on("turn_end", function(payload)
     return
   end
 
-  -- Build messages from recent semantic conversation context. Internal session
-  -- notes are excluded by smelt.session.conversation().
-  local messages = {}
+  -- Recent semantic conversation context. Internal session notes are
+  -- excluded by smelt.session.conversation().
+  local turns = {}
   for _, msg in ipairs(user_msgs) do
-    local text = msg.content or ""
-    text = smelt.text.truncate(text, 500, { keep = "tail" })
-    table.insert(messages, { role = "user", content = text })
+    table.insert(turns, "Developer: " .. smelt.text.truncate(msg.content or "", 500, { keep = "tail" }))
   end
   if last_assistant then
-    local text = last_assistant.content or ""
-    text = smelt.text.truncate(text, 500, { keep = "tail" })
-    table.insert(messages, { role = "assistant", content = text })
+    table.insert(turns, "Assistant: " .. smelt.text.truncate(last_assistant.content or "", 500, { keep = "tail" }))
   end
 
-  -- Skip if nothing changed since last call.
-  local changed = #messages ~= #sent_messages
-  if not changed then
-    for i = 1, #messages do
-      if messages[i].role ~= sent_messages[i].role or messages[i].content ~= sent_messages[i].content then
-        changed = true
-        break
-      end
-    end
-  end
-  if not changed then return end
-  sent_messages = messages
+  local conversation = table.concat(turns, "\n\n")
+  if conversation == sent_conversation then return end
+  sent_conversation = conversation
 
   local guard = smelt.lifecycle.guard({ "session", "history", "input" }):latest("predict")
 
   smelt.engine.ask({
     system = SYSTEM,
-    messages = messages,
+    messages = {
+      {
+        role = "user",
+        content = "<conversation>\n" .. conversation .. "\n</conversation>\n\nThe developer's next message:",
+      },
+    },
     model = smelt.model.preferred("predict"),
     guard = guard,
     on_response = function(response, err)

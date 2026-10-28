@@ -1,6 +1,6 @@
 ---
 title: "Providers and models"
-description: "Register OpenAI-compatible, Ollama, ChatGPT, GitHub Copilot and other providers in smelt, choose models, set reasoning, helper models and per-model options."
+description: "Register OpenAI-compatible, Ollama, ChatGPT, GitHub Copilot, Claude Code and other providers in smelt, choose models, set reasoning, helper models and per-model options."
 ---
 
 # Providers and models
@@ -14,8 +14,8 @@ you can run plain `smelt` with no flags. For copy-paste setups see
 | ------------- | ----------- |
 | `type`        | One of the types below. Defaults to `openai-compatible`. |
 | `api_base`    | Base URL, without `/chat/completions`, `/responses` or `/messages` |
-| `api_key_env` | Environment variable holding the API key. Omit for OAuth providers (`codex`, `copilot`, `kimi-code`). |
-| `models`      | Model names. Optional for OAuth providers, which list their own models. |
+| `api_key_env` | Environment variable holding the API key. Omit for OAuth providers (`codex`, `copilot`, `kimi-code`) and `claude-code`. |
+| `models`      | Model names. Optional for OAuth providers and `claude-code`, which list their own models. |
 
 Registering the same name again replaces the earlier entry.
 
@@ -26,6 +26,7 @@ Registering the same name again replaces the earlier entry.
 | `openai-compatible`    | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
 | `openai`               | `/v1/responses`                                    | OpenAI, OpenRouter |
 | `codex`                | ChatGPT backend (OAuth)                            | ChatGPT subscription |
+| `claude-code`          | Installed Claude Code executable                   | Claude Code, see the [backend guide](../guide/claude-code.md) |
 | `anthropic-compatible` | `/v1/messages` with thinking                       | Anthropic-compatible APIs |
 | `anthropic`            | `/v1/messages` with thinking                       | Anthropic |
 | `copilot`              | GitHub Copilot (OAuth)                             | GitHub Copilot subscription |
@@ -80,7 +81,9 @@ smelt.remember.set({
 
 Background features can use a cheaper model than your main session:
 `title`, `compact`, `predict`, `btw` and `web_fetch`. When unset they use the
-main model.
+main model, except on Codex, which uses `luna`, and Claude Code, which uses its
+`haiku` alias, the latest Haiku. Compaction always defaults to the main model,
+since its summary carries the whole conversation forward.
 
 ```lua
 smelt.model.preferred("title", "openai/gpt-5-mini")

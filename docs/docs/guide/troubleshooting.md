@@ -26,6 +26,11 @@ background, so a newly authenticated model can appear without restarting. If a
 requested model remains unavailable, `/messages` and `smelt.config.runtime_status()`
 show sanitized refresh state without credential values.
 
+Claude Code's models appear when the `claude` executable is on `PATH`, or
+`SMELT_CLAUDE_CODE_EXECUTABLE` names it. smelt reuses the list from the last
+Claude Code session and asks for it again after Claude Code is updated. Until it
+has a list, the picker offers the `sonnet`, `opus` and `haiku` aliases.
+
 ## Config changes do not load
 
 Run `/reload` or press `F5`, then open `/messages`. If any file has an error, the

@@ -702,7 +702,7 @@
 --- Spec accepted by `smelt.provider.register`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.provider.Config
----@field type? string Provider kind tag (`"openai"`, `"anthropic"`, etc.).
+---@field type? string Provider kind tag (`"openai"`, `"anthropic"`, `"claude-code"`, etc.). `"claude-code"` runs the installed agent with its own authentication; omit `api_base` and `api_key_env`.
 ---@field api_base? string Base URL the engine talks to.
 ---@field api_key_env? string Environment variable that holds the bearer token.
 ---@field models? string|smelt.provider.Model[] Models offered by this provider.
@@ -805,6 +805,12 @@
 ---@field when? "vim_enabled"|"vim_disabled"|fun(): boolean Show the tip only while the condition holds. Defaults to always.
 ---@field placement? string Only `"prompt"` tips are kept for the prompt bar. Defaults to `"prompt"`.
 
+--- Claude Code visibility and native capability ownership for a registered tool.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.tools.ClaudeCodePolicy
+---@field enabled? boolean Set false to hide this tool from Claude Code. Custom tools are visible by default.
+---@field replaces? string[] Native tool names replaced by this tool, for example `{ "Bash" }`. Replaced native tools are disabled, not merely discouraged in the prompt.
+
 --- Per-mode default decisions installed by `smelt.tools.register`. Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.tools.PermissionDefaults
@@ -838,6 +844,7 @@
 ---@field watchdog_grace_ms? integer Extra time added when a tool argument sets the watchdog deadline, in milliseconds.
 ---@field headless? boolean Whether the tool is available when running headless. Defaults to true. Set to false for tools that require a UI surface (dialogs, menus, managed worktree creation, cwd switching).
 ---@field override? boolean Replace a core tool of the same name (advanced).
+---@field claude_code? smelt.tools.ClaudeCodePolicy Claude Code backend policy. Bundled file/shell/search tools are hidden by default; use `replaces` to choose one owner for a native capability. Other backends are unaffected.
 
 --- Opaque top-level string argument passed to transcript renderers. Complete field
 --- content remains in Rust and is available only through `smelt.layout.content`.

@@ -38,11 +38,10 @@ fn has_modality(values: &[String], modality: &str) -> bool {
 }
 
 fn tool_result_capabilities(provider_type: &str, api_base: &str) -> (bool, bool) {
-    let descriptor =
-        smelt_provider::ProviderKind::from_config_and_url(provider_type, api_base).descriptor();
+    let backend = smelt_provider::BackendKind::from_config_and_url(provider_type, api_base);
     (
-        descriptor.supports_image_tool_results(),
-        descriptor.supports_pdf_tool_results(),
+        backend.supports_image_tool_results(),
+        backend.supports_pdf_tool_results(),
     )
 }
 

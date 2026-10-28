@@ -17,6 +17,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task. Any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds. Spawns inherit the current task lifecycle; top-level spawns are app-scoped and survive agent-turn interrupts.",
         &["handler"],
         move |lua, handler: LuaCallback<(), ()>| -> LuaResult<LuaReg> {
+            if crate::lua::current_task_cancel().is_some_and(|cancel| cancel.is_cancelled()) {
+                return Err(LuaError::RuntimeError("cancelled".into()));
+            }
+            let completion = super::super::task::current_invocation_owner()
+                .map(|invocation_id| TaskCompletion::Child {
+                    invocation_id,
+                    invocation: crate::lua::current_tool_invocation(),
+                })
+                .unwrap_or(TaskCompletion::FireAndForget);
             let id = {
                 let mut rt = s.tasks.lock().map_err(|_| {
                     LuaError::RuntimeError("smelt.spawn: task runtime unavailable".into())
@@ -25,7 +34,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     lua,
                     handler.into_inner(),
                     mlua::MultiValue::new(),
-                    TaskCompletion::FireAndForget,
+                    completion,
                 )?
             };
             let s2 = s.clone();

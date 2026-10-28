@@ -11,7 +11,7 @@
 -- Providers
 -- No provider is registered by default. Use `smelt auth` to add one,
 -- or uncomment and edit one of these examples. Provider type values:
--- openai-compatible, openai, codex, anthropic-compatible, anthropic, copilot, kimi-code.
+-- openai-compatible, openai, codex, anthropic-compatible, anthropic, claude-code, copilot, kimi-code.
 --
 -- smelt.provider.register("openai", {
 --   type = "openai",

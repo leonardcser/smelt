@@ -2,6 +2,7 @@
 
 pub(crate) mod approvals;
 pub(crate) mod bash;
+pub mod claude_code;
 pub mod rules;
 mod shell_parse;
 pub mod store;
@@ -1056,6 +1057,18 @@ impl Permissions {
             .unwrap_or_else(|| self.fallback_tool_decision(&mode, tool_name))
     }
 
+    fn granted_write(&self, request: &PermissionRequest<'_>) -> bool {
+        let approvals = self
+            .approvals
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        !request.effects.is_empty() && request.effects.iter().all(|effect| {
+            matches!(effect, ToolEffect::Fs(path) if path.access == PathAccess::Write
+                && path.resolution.resolved().is_some_and(|path|
+                    approvals.session_path_write_exception_approved_for_path(&request.mode, request.tool_name, path)))
+        })
+    }
+
     fn fallback_tool_decision(&self, mode: &AgentMode, tool_name: &str) -> Decision {
         self.effect_decision(mode, self.tool_effect_kind(tool_name))
             .or_else(|| {
@@ -1501,7 +1514,19 @@ fn base_evaluation(permissions: &Permissions, request: &PermissionRequest<'_>) -
             ),
             "web_fetch" => web_fetch_evaluation(permissions, request.mode.clone(), request.args),
             tool => {
-                let decision = permissions.check_tool(request.mode.clone(), tool);
+                // Explicit tool policy wins over a scoped artifact grant. The
+                // grant can replace a default effect restriction, not a hard deny.
+                let decision = permissions
+                    .mode_perms(&request.mode)
+                    .and_then(|perms| perms.tools.get(tool))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if permissions.granted_write(request) {
+                            Decision::Allow
+                        } else {
+                            permissions.fallback_tool_decision(&request.mode, tool)
+                        }
+                    });
                 BaseEvaluation {
                     decision: decision.clone(),
                     missing_requirements: requirements_for_decision(

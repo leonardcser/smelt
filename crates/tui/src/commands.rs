@@ -737,6 +737,12 @@ impl TuiApp {
         self.apply_mode(mode, record, ModeNotePolicy::Append);
     }
 
+    pub(crate) fn sync_native_mode(&mut self, mode: AgentMode) {
+        self.apply_mode(mode, false, ModeNotePolicy::Suppress);
+        self.sync_agent_mode_applied();
+        self.update_session_persist_metadata();
+    }
+
     pub(crate) fn restore_mode_after_rewind(&mut self, mode: AgentMode) {
         self.apply_mode(mode, false, ModeNotePolicy::Suppress);
     }
@@ -771,8 +777,16 @@ impl TuiApp {
                 // its next request boundary; otherwise we apply it locally before
                 // the next turn starts.
                 let mode_name = self.core.config.mode.as_str().to_string();
-                let lua = self.lua.execution();
-                let note_text = crate::lua::scope_app(self, || lua.mode_note(mode_name.as_str()));
+                let native_builtin =
+                    self.core.config.active_model().is_some_and(|model| {
+                        smelt_provider::BackendKind::is_claude_code(&model.provider_type)
+                    }) && matches!(mode_name.as_str(), "normal" | "plan" | "apply" | "yolo");
+                let note_text = if native_builtin {
+                    format!("now in {mode_name} mode. smelt's permission policy applies; continue using Claude Code's native tools and smelt's complementary tools.")
+                } else {
+                    let lua = self.lua.execution();
+                    crate::lua::scope_app(self, || lua.mode_note(mode_name.as_str()))
+                };
                 self.queue_history_append(crate::app::PendingHistoryAppend::mode_change(
                     mode_name, note_text,
                 ));

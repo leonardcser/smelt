@@ -195,6 +195,7 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
         api_base: format!("http://{addr}"),
         api_key: "test-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig::default(),
     };
     let runtime = RequestRuntimeConfig {
@@ -229,8 +230,11 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),
     })));
@@ -452,6 +456,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         api_base: format!("http://{addr}"),
         api_key: "test-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig {
             max_tokens: Some(4096),
             ..ModelConfig::default()
@@ -479,6 +484,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         override_core: false,
         hooks: ToolHookFlags::default(),
         headless: true,
+        claude_code: None,
     };
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
@@ -492,6 +498,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: Some(protocol::PermissionOverrides {
             tools: Some(protocol::RuleSetOverride {
@@ -501,6 +508,8 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
             }),
             subcommands: Default::default(),
         }),
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: vec![tool],
     })));
@@ -695,6 +704,7 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
         api_base: format!("http://{addr}"),
         api_key: "test-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig::default(),
     };
     let mut handle = engine::start(config, Box::new(dispatcher));
@@ -711,8 +721,11 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),
     })));
@@ -843,6 +856,7 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
         api_base: format!("http://{addr}"),
         api_key: "test-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig::default(),
     };
     let mut handle = engine::start(config, Box::new(dispatcher));
@@ -859,8 +873,11 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),
     })));
@@ -977,6 +994,7 @@ async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
             api_base: format!("http://{addr}"),
             api_key: "test-only".into(),
             provider_type: "openai-compatible".into(),
+            provider: "openai-compatible".into(),
             config: ModelConfig::default(),
         };
         let next_target = ModelTarget {
@@ -1002,8 +1020,11 @@ async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
             history: protocol::ModelHistorySource::items(Vec::new()),
             session_id: "sess".into(),
             sessions_root: PathBuf::from("/tmp"),
+            ephemeral: false,
             persistence: protocol::PersistenceScope::default(),
             permission_overrides: None,
+            native_prompt: None,
+            tool_visibility: protocol::ToolVisibility::Interactive,
             system_prompt: Some("test system".into()),
             tools: vec![ToolDef {
                 name: TOOL_NAME.into(),
@@ -1014,6 +1035,7 @@ async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
                 override_core: false,
                 hooks: ToolHookFlags::default(),
                 headless: true,
+                claude_code: None,
             }],
         })));
         let mut dispatched = 0;
@@ -1145,6 +1167,7 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         api_base: format!("http://{addr}"),
         api_key: "original-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig {
             max_tokens: Some(111),
             ..Default::default()
@@ -1177,8 +1200,11 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),
     })));
@@ -1231,6 +1257,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
         api_base: format!("http://{addr}"),
         api_key: "key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig::default(),
     };
     let switched_target = ModelTarget {
@@ -1254,6 +1281,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: Some(protocol::PermissionOverrides {
             tools: Some(protocol::RuleSetOverride {
@@ -1263,6 +1291,8 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
             }),
             subcommands: Default::default(),
         }),
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: vec![ToolDef {
             name: TOOL_NAME.into(),
@@ -1273,6 +1303,7 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
             override_core: false,
             hooks: ToolHookFlags::default(),
             headless: true,
+            claude_code: None,
         }],
     })));
 

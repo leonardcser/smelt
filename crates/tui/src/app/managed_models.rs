@@ -60,6 +60,10 @@ impl ManagedModelState {
             })
     }
 
+    fn set_claude_code_models(&mut self, models: Vec<protocol::ModelMetadata>) -> bool {
+        self.catalog.set_claude_code_models(models)
+    }
+
     fn mark_credentials_changed(&mut self, now: std::time::Instant) {
         self.next_auth_check = now;
     }
@@ -202,6 +206,41 @@ impl TuiApp {
     pub(crate) fn install_http_client(&mut self, client: engine::HttpClient) {
         self.platform.install_http_client(client);
         self.submit_managed_model_refreshes();
+    }
+
+    /// Asks Claude Code for its models in the background when the cached list
+    /// is missing or predates the installed executable; the picker shows the
+    /// cached list meanwhile. Sessions keep the cache current otherwise.
+    pub(crate) fn list_claude_code_models(&self) {
+        if !self.managed_models.catalog().claude_code_installed() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let tx = self.platform.app_event_sender();
+        runtime.spawn(async move {
+            if !engine::claude_code_models_stale() {
+                return;
+            }
+            let models = engine::claude_code_refresh_models().await;
+            let _ = tx.send(AppEvent::ClaudeCodeModelsListed(models));
+        });
+    }
+
+    /// A failed refresh keeps the cached list.
+    pub(crate) fn handle_claude_code_models_listed(
+        &mut self,
+        models: Result<Vec<protocol::ModelMetadata>, String>,
+    ) {
+        let Ok(models) = models else {
+            return;
+        };
+        if self.managed_models.set_claude_code_models(models) {
+            if let Err(error) = self.reconcile_runtime_snapshot() {
+                self.notify_workspace_error_sticky(error);
+            }
+        }
     }
 
     pub(crate) fn submit_managed_model_refreshes(&mut self) {

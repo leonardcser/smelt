@@ -1124,7 +1124,17 @@ impl TuiApp {
         self.conversation
             .record_started_turn(turn_id, mode.clone(), turn.reasoning_effort.clone());
 
+        if smelt_provider::BackendKind::is_claude_code(&turn.model_target.provider_type) {
+            smelt_core::permissions::claude_code::grant_plan_artifacts(
+                &self.core.permissions,
+                &self.core.sessions.sessions_dir(),
+                &self.conversation.session().id,
+            );
+        }
         let permissions = turn.permissions.clone();
+        let native_prompt =
+            (smelt_provider::BackendKind::is_claude_code(&turn.model_target.provider_type))
+                .then(|| self.native_system_prompt());
         let payload = protocol::StartTurnPayload {
             turn_id,
             input: turn.input,
@@ -1136,11 +1146,14 @@ impl TuiApp {
             history,
             session_id: self.conversation.session().id.clone(),
             sessions_root: self.core.sessions.sessions_dir(),
+            ephemeral: self.ephemeral(),
             persistence: self
                 .conversation
                 .persistence_scope_at(required_generation, submitted_revision),
             permission_overrides: turn.permission_overrides,
             system_prompt: Some(system_prompt),
+            native_prompt,
+            tool_visibility: protocol::ToolVisibility::Interactive,
             tools,
         };
         if self
@@ -1813,12 +1826,21 @@ impl TuiApp {
         }
     }
 
+    /// Stops a native session that outlived its parent turn.
+    pub(crate) fn cancel_native_session(&mut self) {
+        if self.core.native_session.is_some() {
+            self.core.engine.send(UiCommand::Cancel);
+            self.end_native_session();
+        }
+    }
+
     /// Cancel tasks and invalidate late callbacks without finalizing the turn again.
     pub(crate) fn cancel_turn_work(&mut self) {
         self.cancel_request_hook();
         self.cancel_pending_rewind();
         self.platform.set_sleep_inhibited(false);
         self.core.engine.send(UiCommand::Cancel);
+        self.end_native_session();
         self.cancel_turn_lua_tasks();
         self.conversation.invalidate_turn_callbacks();
         self.busy_stack.clear();
@@ -2594,6 +2616,15 @@ impl TuiApp {
         ctrl: SessionControl,
         turn: &mut TurnState,
     ) -> SessionControl {
+        self.dispatch_scoped_control(ctrl, &turn.permissions, &mut turn.pending)
+    }
+
+    pub(crate) fn dispatch_scoped_control(
+        &mut self,
+        ctrl: SessionControl,
+        permissions: &smelt_core::permissions::Permissions,
+        pending: &mut Vec<PendingTool>,
+    ) -> SessionControl {
         let should_queue = self
             .timers
             .last_keypress
@@ -2608,21 +2639,16 @@ impl TuiApp {
             }
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
-                    req.tool_name = turn
-                        .pending
-                        .last()
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default();
+                    req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
                 if let Some(error) = req.tool_paths_error.clone() {
                     self.send_permission_decision(req.request_id, false, Some(error));
                     self.finish_tool(req.invocation_id, ToolStatus::Denied, None, None);
-                    turn.pending
-                        .retain(|pending| pending.invocation_id != req.invocation_id);
+                    pending.retain(|pending| pending.invocation_id != req.invocation_id);
                     return SessionControl::Continue;
                 }
 
-                let outcome = turn.permissions.evaluate_tool_with_paths_and_approvals(
+                let outcome = permissions.evaluate_tool_with_paths_and_approvals(
                     self.conversation.applied_mode().clone(),
                     smelt_core::permissions::ToolOrigin::Lua,
                     &req.tool_name,
@@ -2640,7 +2666,7 @@ impl TuiApp {
                             false,
                             None,
                             "auto_deny",
-                            Some(&mut turn.pending),
+                            Some(pending),
                         );
                         return SessionControl::Continue;
                     }
@@ -2656,7 +2682,7 @@ impl TuiApp {
                     return SessionControl::Continue;
                 }
 
-                let options = turn.permissions.approval_options(
+                let options = permissions.approval_options(
                     &req.tool_name,
                     &req.approval_candidates,
                     &outcome,
@@ -2673,7 +2699,10 @@ impl TuiApp {
 
                 let snapshot = smelt_core::signals::ConfirmRequested {
                     handle_id: 0,
-                    tool_name: req.tool_name.clone(),
+                    tool_name: protocol::displayed_tool_name(
+                        req.provider.as_deref(),
+                        &req.tool_name,
+                    ),
                     summary: req.summary.clone(),
                     args: req.args.clone(),
                     grant_options: req.grant_options.clone(),

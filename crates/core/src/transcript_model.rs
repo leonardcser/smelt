@@ -47,7 +47,10 @@ impl ActiveTool {
 pub struct ConfirmRequest {
     pub invocation_id: protocol::InvocationId,
     pub call_id: String,
+    /// The name permission rules match.
     pub tool_name: String,
+    /// The provider that runs this tool natively, when it is not smelt's.
+    pub provider: Option<String>,
     pub args: std::collections::HashMap<String, serde_json::Value>,
     pub tool_paths: Vec<crate::permissions::ToolPath>,
     /// A path callback failure carried to confirmation dispatch so a stale or

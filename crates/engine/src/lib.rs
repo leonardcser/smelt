@@ -1,10 +1,20 @@
 mod agent;
 pub mod auth;
+mod claude_code;
+pub use claude_code::cached_models as claude_code_cached_models;
+pub use claude_code::installed as claude_code_installed;
+pub use claude_code::models_stale as claude_code_models_stale;
+pub use claude_code::plan_directory as claude_code_plan_directory;
+pub use claude_code::refresh_models as claude_code_refresh_models;
+pub use claude_code::smelt_tool as claude_code_smelt_tool;
+pub use claude_code::usage as claude_code_usage;
 pub mod clock;
 pub mod env;
 pub mod host;
 pub mod image;
 pub mod log;
+mod native_prompt;
+pub use native_prompt::build_native_system_prompt;
 pub mod opener;
 
 pub mod paths;
@@ -124,6 +134,10 @@ fn render_builtin_prompt_template(template: &str, ctx: &PromptContext<'_>) -> St
     for line in template.lines() {
         let trimmed = line.trim();
         match trimmed {
+            "{% host_rules %}" if stack.iter().all(|frame| frame.condition) => {
+                out.push_str(native_prompt::HOST_INSTRUCTIONS);
+            }
+            "{% host_rules %}" => {}
             "{% if tools_enabled %}" => {
                 stack.push(Frame {
                     condition: ctx.capabilities.tool_calling,
@@ -225,6 +239,9 @@ pub struct EngineConfig {
     /// unset; deterministic harnesses answer requests in-process, which also
     /// keeps the engine from fetching the model catalog.
     pub transport: Option<Arc<dyn smelt_provider::ChatTransport>>,
+    /// How long a native agent process may sit idle before it is released.
+    /// The session's next turn relaunches it and resumes the conversation.
+    pub native_idle_timeout: std::time::Duration,
 }
 
 impl EngineConfig {
@@ -238,6 +255,7 @@ impl EngineConfig {
             skill_section: None,
             clock,
             transport: None,
+            native_idle_timeout: std::time::Duration::from_secs(5 * 60),
         }
     }
 
@@ -260,10 +278,56 @@ pub enum EngineOutput {
 #[derive(Clone)]
 pub(crate) struct EngineEventSender {
     output_tx: mpsc::UnboundedSender<EngineOutput>,
+    route: Option<EventRoute>,
+}
+
+#[derive(Clone)]
+enum EventRoute {
+    Agent {
+        session_id: String,
+        agent_id: String,
+        generation: u64,
+    },
+    NativeSession(String),
 }
 
 impl EngineEventSender {
+    pub(crate) fn for_agent(&self, session_id: &str, agent_id: &str, generation: u64) -> Self {
+        Self {
+            output_tx: self.output_tx.clone(),
+            route: Some(EventRoute::Agent {
+                session_id: session_id.into(),
+                agent_id: agent_id.into(),
+                generation,
+            }),
+        }
+    }
+
+    pub(crate) fn for_native_session(&self, session_id: &str) -> Self {
+        Self {
+            output_tx: self.output_tx.clone(),
+            route: Some(EventRoute::NativeSession(session_id.into())),
+        }
+    }
+
     pub(crate) fn send(&self, event: EngineEvent) -> Result<(), Box<EngineEvent>> {
+        let event = match &self.route {
+            Some(EventRoute::Agent {
+                session_id,
+                agent_id,
+                generation,
+            }) => EngineEvent::AgentOutput {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+                generation: *generation,
+                event: Box::new(event),
+            },
+            Some(EventRoute::NativeSession(session_id)) => EngineEvent::NativeSessionEvent {
+                session_id: session_id.clone(),
+                event: Box::new(event),
+            },
+            None => event,
+        };
         self.output_tx
             .send(EngineOutput::Event(event))
             .map_err(|error| match error.0 {
@@ -304,6 +368,7 @@ pub(crate) fn output_channel(
     (
         EngineEventSender {
             output_tx: output_tx.clone(),
+            route: None,
         },
         HostCallSender {
             output_tx,

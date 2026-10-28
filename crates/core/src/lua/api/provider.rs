@@ -210,7 +210,7 @@ impl LuaTypeTuple for LuaModelEntry {
 #[derive(Default, Debug, LuaOpts)]
 #[lua(name = "smelt.provider.Config")]
 pub struct LuaProviderConfig {
-    /// Provider kind tag (`"openai"`, `"anthropic"`, etc.).
+    /// Provider kind tag (`"openai"`, `"anthropic"`, `"claude-code"`, etc.). `"claude-code"` runs the installed agent with its own authentication; omit `api_base` and `api_key_env`.
     #[lua(rename = "type", default)]
     pub provider_type: String,
     /// Base URL the engine talks to.

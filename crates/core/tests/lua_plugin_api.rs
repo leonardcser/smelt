@@ -1136,6 +1136,7 @@ fn lsp_plugin_truncates_large_structured_results() {
 }
 fn evaluation_request(id: u64) -> smelt_core::lua::ToolEvaluationRequest {
     smelt_core::lua::ToolEvaluationRequest {
+        scope: smelt_core::lua::TaskScope::Turn,
         request_id: id,
         invocation_id: protocol::InvocationId::new(id),
         tool_name: "prepared_tool".into(),
@@ -1262,6 +1263,54 @@ fn tool_preparation_errors_and_invalid_results_fail_closed() {
             "invalid hook authorized: {hook}"
         );
     }
+}
+
+#[test]
+fn cancelling_one_invocation_unwinds_its_children_without_stopping_other_tasks() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+        cancelled = 0
+        unrelated = false
+        smelt.spawn(function()
+            smelt.sleep(100)
+            unrelated = true
+        end)
+        smelt.tools.register({
+            name = "prepared_tool",
+            prepare = function()
+                smelt.spawn(function()
+                    smelt.spawn(function()
+                        local ok = pcall(smelt.sleep, 10000)
+                        if not ok then cancelled = cancelled + 1 end
+                    end)
+                    local ok = pcall(smelt.sleep, 10000)
+                    if not ok then cancelled = cancelled + 1 end
+                end)
+                return smelt.task.wait(12345)
+            end,
+            execute = function() return "" end,
+        })
+    "#,
+        )
+        .exec()
+        .unwrap();
+    let now = Instant::now();
+    assert!(rt
+        .evaluate_tool_metadata(&evaluation_request(94), now)
+        .unwrap()
+        .is_none());
+    for _ in 0..3 {
+        assert!(rt.drive_tasks(now).is_empty());
+    }
+    rt.cancel_tool_tasks(protocol::InvocationId::new(94));
+    assert!(rt.drive_tasks(now).is_empty());
+    assert_eq!(get_global::<u64>(&rt, "cancelled"), 2);
+    assert!(!get_global::<bool>(&rt, "unrelated"));
+    assert!(!rt.resolve_external(12345, mlua::Value::Nil));
+    assert!(rt.drive_tasks(now + Duration::from_millis(200)).is_empty());
+    assert!(get_global::<bool>(&rt, "unrelated"));
 }
 
 #[test]

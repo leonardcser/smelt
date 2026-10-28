@@ -27,6 +27,7 @@ fn model_target(addr: std::net::SocketAddr) -> ModelTarget {
         api_base: format!("http://{addr}"),
         api_key: "test-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig {
             max_tokens: Some(4096),
             ..ModelConfig::default()
@@ -228,6 +229,7 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
             preflight: true,
         },
         headless: true,
+        claude_code: None,
     };
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
@@ -241,8 +243,11 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: vec![tool],
     })));
@@ -326,6 +331,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 override_core: false,
                 hooks: ToolHookFlags::default(),
                 headless: true,
+                claude_code: None,
             };
 
             handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {
@@ -339,6 +345,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 history: protocol::ModelHistorySource::items(Vec::new()),
                 session_id: "sess".into(),
                 sessions_root: PathBuf::from("/tmp"),
+                ephemeral: false,
                 persistence: protocol::PersistenceScope::default(),
                 permission_overrides: Some(protocol::PermissionOverrides {
                     tools: Some(protocol::RuleSetOverride {
@@ -348,6 +355,8 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                     }),
                     subcommands: Default::default(),
                 }),
+                native_prompt: None,
+                tool_visibility: protocol::ToolVisibility::Interactive,
                 system_prompt: Some("test system".into()),
                 tools: vec![tool],
             })));

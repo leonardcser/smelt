@@ -387,11 +387,13 @@ fn run_logout(kind: AuthProvider, label: &str) {
     println!("\nLogged out of {label}.");
 }
 
+/// Whether a provider is usable without configuration.
 pub fn has_authed_provider() -> bool {
-    PROVIDERS
-        .iter()
-        .filter_map(|provider| provider.oauth)
-        .any(engine::auth::is_logged_in)
+    engine::claude_code_installed()
+        || PROVIDERS
+            .iter()
+            .filter_map(|provider| provider.oauth)
+            .any(engine::auth::is_logged_in)
 }
 
 pub fn print_default_config() {
@@ -415,7 +417,7 @@ fn default_config_lua() -> String {
     lua.push_str("-- Providers\n");
     lua.push_str("-- No provider is registered by default. Use `smelt auth` to add one,\n");
     lua.push_str("-- or uncomment and edit one of these examples. Provider type values:\n");
-    lua.push_str("-- openai-compatible, openai, codex, anthropic-compatible, anthropic, copilot, kimi-code.\n");
+    lua.push_str("-- openai-compatible, openai, codex, anthropic-compatible, anthropic, claude-code, copilot, kimi-code.\n");
     lua.push_str("--\n");
     lua.push_str("-- smelt.provider.register(\"openai\", {\n");
     lua.push_str("--   type = \"openai\",\n");

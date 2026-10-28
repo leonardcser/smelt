@@ -67,6 +67,10 @@ local function is_codex_provider(provider)
   return provider:find("codex", 1, true) ~= nil or provider:find("chatgpt", 1, true) ~= nil
 end
 
+local function is_claude_code_provider(provider)
+  return provider == "claude-code"
+end
+
 local function is_kimi_provider(provider, api_base)
   provider = (provider or ""):lower()
   api_base = (api_base or ""):lower()
@@ -393,11 +397,12 @@ end
 
 -- ── Kimi usage ─────────────────────────────────────────────────────────
 
-local function kimi_usage_lines()
-  local report, err = smelt.auth.managed_usage("kimi-code")
+-- Providers whose usage smelt reads in Rust report provider-neutral rows.
+local function managed_usage_lines(title, provider, fallback_error)
+  local report, err = smelt.auth.managed_usage(provider)
   if not report then
-    log_usage_error("Kimi Code", tostring(err or "usage unavailable"), { kind = "managed_usage" })
-    return { text_row("Kimi Code: " .. tostring(err or ERROR_MESSAGES.kimi.default), DIM) }
+    log_usage_error(title, tostring(err or "usage unavailable"), { kind = "managed_usage" })
+    return { text_row(title .. ": " .. tostring(err or fallback_error), DIM) }
   end
 
   local rows = {}
@@ -406,8 +411,8 @@ local function kimi_usage_lines()
     if type(item) == "table" then rows[#rows + 1] = item end
   end
 
-  local lines = { text_row("Kimi Code", HEAD) }
-  if #rows == 0 then return { text_row("Kimi Code", HEAD), text_row("  no usage data available", DIM) } end
+  local lines = { text_row(title, HEAD) }
+  if #rows == 0 then return { text_row(title, HEAD), text_row("  no usage data available", DIM) } end
   local rendered = {}
   for _, usage in ipairs(rows) do
     local used = tonumber(usage.used) or 0
@@ -428,6 +433,7 @@ end
 
 local function provider_title(provider, model, api_base)
   if is_codex_provider(provider) then return "Codex" end
+  if is_claude_code_provider(provider) then return "Claude Code" end
   if is_kimi_provider(provider, api_base) then return "Kimi Code" end
   return provider ~= "" and provider or "Usage"
 end
@@ -435,8 +441,10 @@ end
 local function fetch_provider_usage(provider, model, api_base)
   if is_codex_provider(provider) then
     return codex_usage_lines()
+  elseif is_claude_code_provider(provider) then
+    return managed_usage_lines("Claude Code", "claude-code", "usage unavailable right now - try again later")
   elseif is_kimi_provider(provider, api_base) then
-    return kimi_usage_lines()
+    return managed_usage_lines("Kimi Code", "kimi-code", ERROR_MESSAGES.kimi.default)
   end
   return { text_row("No subscription usage for active provider: " .. (provider ~= "" and provider or "unknown"), DIM) }
 end
@@ -596,7 +604,8 @@ end
 
 smelt.lifecycle.on_ready(function()
   local provider, model, api_base = active_provider()
-  -- Prefetch only matters for providers with remote usage endpoints.
+  -- Prefetch only matters for providers with remote usage endpoints. Claude
+  -- Code is asked when the dialog opens, so startup never launches it.
   if is_codex_provider(provider) or is_kimi_provider(provider, api_base) then
     local key = cache.key(provider, model)
     cache.prefetch(key, function()

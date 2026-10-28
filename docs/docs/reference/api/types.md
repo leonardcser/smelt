@@ -1059,7 +1059,7 @@ Spec accepted by `smelt.provider.register`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `type` | `string` |  | Provider kind tag (`"openai"`, `"anthropic"`, etc.). |
+| `type` | `string` |  | Provider kind tag (`"openai"`, `"anthropic"`, `"claude-code"`, etc.). `"claude-code"` runs the installed agent with its own authentication; omit `api_base` and `api_key_env`. |
 | `api_base` | `string` |  | Base URL the engine talks to. |
 | `api_key_env` | `string` |  | Environment variable that holds the bearer token. |
 | `models` | `string\|smelt.provider.Model[]` |  | Models offered by this provider. |
@@ -1212,6 +1212,17 @@ A discovery tip shown in the prompt bar.
 | `when` | `"vim_enabled"\|"vim_disabled"\|fun(): boolean` |  | Show the tip only while the condition holds. Defaults to always. |
 | `placement` | `string` |  | Only `"prompt"` tips are kept for the prompt bar. Defaults to `"prompt"`. |
 
+### `smelt.tools.ClaudeCodePolicy`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Claude Code visibility and native capability ownership for a registered tool.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `enabled` | `boolean` |  | Set false to hide this tool from Claude Code. Custom tools are visible by default. |
+| `replaces` | `string[]` |  | Native tool names replaced by this tool, for example `{ "Bash" }`. Replaced native tools are disabled, not merely discouraged in the prompt. |
+
 ### `smelt.tools.PermissionDefaults`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
@@ -1255,6 +1266,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `watchdog_grace_ms` | `integer` |  | Extra time added when a tool argument sets the watchdog deadline, in milliseconds. |
 | `headless` | `boolean` |  | Whether the tool is available when running headless. Defaults to true. Set to false for tools that require a UI surface (dialogs, menus, managed worktree creation, cwd switching). |
 | `override` | `boolean` |  | Replace a core tool of the same name (advanced). |
+| `claude_code` | [smelt.tools.ClaudeCodePolicy](types.md#smelttoolsclaudecodepolicy) |  | Claude Code backend policy. Bundled file/shell/search tools are hidden by default; use `replaces` to choose one owner for a native capability. Other backends are unaffected. |
 
 ### `smelt.transcript.ArgumentField`
 

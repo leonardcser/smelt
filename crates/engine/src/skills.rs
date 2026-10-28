@@ -51,6 +51,7 @@ struct SkillEntry {
     source: SkillSource,
     location: String,
     formatted: String,
+    native_claude: bool,
     shadowed: Vec<SkillShadow>,
 }
 
@@ -88,6 +89,7 @@ static BUILTIN_SKILLS: &[(&str, &str)] = &[
 pub struct SkillLoader {
     skills: HashMap<String, SkillEntry>,
     prompt_section: Option<String>,
+    native_prompt_section: Option<String>,
 }
 
 impl SkillLoader {
@@ -137,13 +139,13 @@ impl SkillLoader {
         scan_dir(&global, &mut skills);
         scan_command_dir(&config_dir.join("commands"), &mut skills);
 
-        scan_dir(&home.join(".claude/skills"), &mut skills);
+        scan_native_dir(&home.join(".claude/skills"), &mut skills);
         scan_dir(&home.join(".agents/skills"), &mut skills);
 
         if let Some(cwd) = cwd {
             scan_dir(&cwd.join(".smelt/skills"), &mut skills);
             scan_command_dir(&cwd.join(".smelt/commands"), &mut skills);
-            scan_dir(&cwd.join(".claude/skills"), &mut skills);
+            scan_native_dir(&cwd.join(".claude/skills"), &mut skills);
             scan_dir(&cwd.join(".agents/skills"), &mut skills);
         }
 
@@ -151,10 +153,12 @@ impl SkillLoader {
             scan_dir(path, &mut skills);
         }
 
-        let prompt_section = build_prompt_section(&skills);
+        let prompt_section = build_prompt_section(&skills, false);
+        let native_prompt_section = build_prompt_section(&skills, true);
         Self {
             skills,
             prompt_section,
+            native_prompt_section,
         }
     }
 
@@ -208,6 +212,10 @@ impl SkillLoader {
     pub fn prompt_section(&self) -> Option<&str> {
         self.prompt_section.as_deref()
     }
+
+    pub fn native_prompt_section(&self) -> Option<&str> {
+        self.native_prompt_section.as_deref()
+    }
 }
 
 fn builtin_skill_path(data_dir: &Path, name: &str) -> PathBuf {
@@ -218,15 +226,23 @@ fn builtin_skill_path(data_dir: &Path, name: &str) -> PathBuf {
         .join("SKILL.md")
 }
 
-fn build_prompt_section(skills: &HashMap<String, SkillEntry>) -> Option<String> {
-    if skills.is_empty() {
+fn build_prompt_section(skills: &HashMap<String, SkillEntry>, native: bool) -> Option<String> {
+    let mut entries: Vec<_> = skills
+        .values()
+        .filter(|skill| !native || !skill.native_claude)
+        .collect();
+    if entries.is_empty() {
         return None;
     }
-    let mut lines = vec!["# Skills\n\nUse the `load_skill` tool to load specialized knowledge on demand.\n\nAvailable skills:".to_string()];
-    let mut names: Vec<&String> = skills.keys().collect();
-    names.sort();
-    for name in names {
-        let skill = &skills[name];
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let tool = if native {
+        "mcp__smelt__load_skill"
+    } else {
+        "load_skill"
+    };
+    let title = if native { "smelt skills" } else { "Skills" };
+    let mut lines = vec![format!("# {title}\n\nUse the `{tool}` tool to load specialized knowledge on demand.\n\nAvailable skills:")];
+    for skill in entries {
         lines.push(format!("  - {}: {}", skill.name, skill.description));
     }
     Some(lines.join("\n"))
@@ -254,6 +270,14 @@ fn sorted_dir_entries(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
+    scan_skill_dir(dir, skills, false);
+}
+
+fn scan_native_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
+    scan_skill_dir(dir, skills, true);
+}
+
+fn scan_skill_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>, native_claude: bool) {
     for path in sorted_dir_entries(dir) {
         if !path.is_dir() {
             continue;
@@ -262,7 +286,8 @@ fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
         if !skill_file.is_file() {
             continue;
         }
-        if let Some(entry) = parse_skill(&skill_file) {
+        if let Some(mut entry) = parse_skill(&skill_file) {
+            entry.native_claude = native_claude;
             insert_skill(skills, entry);
         }
     }
@@ -311,6 +336,7 @@ fn parse_command_skill(path: &Path) -> Option<SkillEntry> {
         source: SkillSource::Command,
         location,
         formatted,
+        native_claude: false,
         shadowed: Vec::new(),
     })
 }
@@ -358,6 +384,7 @@ fn parse_skill_text(
         source,
         location: location.to_string(),
         formatted,
+        native_claude: false,
         shadowed: Vec::new(),
     })
 }
@@ -613,14 +640,17 @@ mod tests {
                     source: SkillSource::Skill,
                     location: format!("/skills/{name}/SKILL.md"),
                     formatted: formatted.into(),
+                    native_claude: false,
                     shadowed: Vec::new(),
                 },
             );
         }
-        let prompt_section = build_prompt_section(&skills);
+        let prompt_section = build_prompt_section(&skills, false);
+        let native_prompt_section = build_prompt_section(&skills, true);
         SkillLoader {
             skills,
             prompt_section,
+            native_prompt_section,
         }
     }
 
@@ -792,6 +822,59 @@ mod tests {
     }
 
     #[test]
+    fn native_catalogue_excludes_claude_skills_and_preserves_host_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("project");
+        let config = root.path().join("config");
+        let data = root.path().join("data");
+        for (path, name, description) in [
+            (
+                home.join(".claude/skills/native/SKILL.md"),
+                "native-only",
+                "Native global skill",
+            ),
+            (
+                cwd.join(".claude/skills/shared/SKILL.md"),
+                "shared",
+                "Native project skill",
+            ),
+            (
+                cwd.join(".agents/skills/shared/SKILL.md"),
+                "shared",
+                "Host override skill",
+            ),
+            (
+                config.join("skills/host/SKILL.md"),
+                "host-only",
+                "Host global skill",
+            ),
+        ] {
+            write(
+                &path,
+                &format!("---\nname: {name}\ndescription: {description}\n---\n\nInstructions"),
+            );
+        }
+        let loader = SkillLoader::load_for_runtime(&[], &home, &config, &data, &cwd);
+        let normal = loader.prompt_section().unwrap();
+        let native = loader.native_prompt_section().unwrap();
+        assert!(normal.contains("native-only"));
+        assert!(normal.contains("`load_skill`"));
+        assert!(!native.contains("native-only"));
+        assert!(!native.contains("Native project skill"));
+        assert!(native.contains("shared: Host override skill"));
+        assert!(native.contains("host-only"));
+        assert!(native.contains("brief"));
+        assert!(native.contains("`mcp__smelt__load_skill`"));
+        let info = loader.info();
+        let shared = info.iter().find(|skill| skill.name == "shared").unwrap();
+        assert_eq!(shared.description, "Host override skill");
+        assert!(shared.location.contains(".agents/skills"));
+        assert_eq!(shared.shadowed.len(), 1);
+        assert!(shared.shadowed[0].location.contains(".claude/skills"));
+    }
+
+    #[test]
     fn scan_dir_skips_directories_without_skill_md() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("bare")).unwrap();
@@ -827,6 +910,7 @@ mod tests {
                 source: SkillSource::Builtin,
                 location: "/builtin/SKILL.md".into(),
                 formatted: "old body".into(),
+                native_claude: false,
                 shadowed: Vec::new(),
             },
         );
@@ -838,6 +922,7 @@ mod tests {
                 source: SkillSource::Skill,
                 location: "/user/SKILL.md".into(),
                 formatted: "new body".into(),
+                native_claude: false,
                 shadowed: Vec::new(),
             },
         );

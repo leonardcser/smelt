@@ -10,6 +10,210 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[test]
+fn claude_code_native_file_tools_honor_policy_and_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let inside_file = root.path().join("inside.txt");
+    let outside_file = outside.path().join("outside.txt");
+    std::fs::write(&inside_file, "inside").unwrap();
+    std::fs::write(&outside_file, "outside").unwrap();
+    let mode = mode_perms(
+        HashMap::from([
+            ("read_file".into(), Decision::Allow),
+            ("write_file".into(), Decision::Deny),
+            ("edit_file".into(), Decision::Deny),
+            ("edit_notebook".into(), Decision::Deny),
+        ]),
+        &[],
+    );
+    let permissions = permissions_from_mode(mode, true, root.path().into());
+    let args = |path: &Path| HashMap::from([("file_path".into(), serde_json::json!(path))]);
+    assert_eq!(
+        super::claude_code::evaluate(
+            &permissions,
+            None,
+            normal(),
+            "Read",
+            &args(&inside_file),
+            None
+        )
+        .decision,
+        Decision::Allow
+    );
+    assert_eq!(
+        super::claude_code::evaluate(
+            &permissions,
+            None,
+            normal(),
+            "Read",
+            &args(&outside_file),
+            None
+        )
+        .decision,
+        Decision::Ask
+    );
+    for name in ["Write", "Edit", "MultiEdit"] {
+        assert_eq!(
+            super::claude_code::evaluate(
+                &permissions,
+                None,
+                plan(),
+                name,
+                &args(&inside_file),
+                None
+            )
+            .decision,
+            Decision::Deny
+        );
+    }
+    let args = HashMap::from([("notebook_path".into(), serde_json::json!(inside_file))]);
+    assert_eq!(
+        super::claude_code::evaluate(&permissions, None, plan(), "NotebookEdit", &args, None)
+            .decision,
+        Decision::Deny
+    );
+}
+
+#[test]
+fn claude_code_plan_grants_do_not_allow_workspace_writes_or_path_escapes() {
+    let root = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut mode = mode_perms(HashMap::new(), &[]);
+    mode.effects.write = Some(Decision::Deny);
+    let permissions = PermissionsHandle::new(permissions_from_mode(mode, true, root.path().into()));
+    super::claude_code::grant_plan_artifacts(&permissions, sessions.path(), "session");
+    let directory = engine::claude_code_plan_directory(sessions.path(), "session").unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    let artifact = directory.join("plan.md");
+    let outside = root.path().join("workspace.txt");
+    std::fs::write(&outside, "workspace").unwrap();
+    for tool in ["Write", "Edit", "MultiEdit"] {
+        for (path, mode, expected) in [
+            (artifact.clone(), plan(), Decision::Allow),
+            (artifact.clone(), normal(), Decision::Deny),
+            (outside.clone(), plan(), Decision::Deny),
+            (directory.join("../../escape.md"), plan(), Decision::Deny),
+        ] {
+            let args = HashMap::from([("file_path".into(), serde_json::json!(path))]);
+            assert_eq!(
+                super::claude_code::evaluate(
+                    &permissions.snapshot(),
+                    None,
+                    mode,
+                    tool,
+                    &args,
+                    None
+                )
+                .decision,
+                expected
+            );
+        }
+    }
+    #[cfg(unix)]
+    {
+        let link = directory.join("link.md");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let args = HashMap::from([("file_path".into(), serde_json::json!(link))]);
+        assert_eq!(
+            super::claude_code::evaluate(
+                &permissions.snapshot(),
+                None,
+                plan(),
+                "Write",
+                &args,
+                None
+            )
+            .decision,
+            Decision::Deny
+        );
+    }
+}
+
+#[test]
+fn scoped_write_grants_use_central_policy_and_preserve_explicit_denies() {
+    let root = tempfile::tempdir().unwrap();
+    let mut mode = mode_perms(HashMap::new(), &[]);
+    mode.effects.write = Some(Decision::Deny);
+    let mut permissions = permissions_from_mode(mode, true, root.path().into());
+    permissions
+        .approvals
+        .write()
+        .unwrap()
+        .add_session_path_grant(plan(), "write_file", PathAccess::Write, root.path().into());
+    let args = HashMap::new();
+    let paths = vec![ToolPath::file(
+        root.path().join("plan.md").to_string_lossy(),
+    )];
+    assert_eq!(
+        permissions
+            .evaluate_tool_with_paths_and_approvals(
+                plan(),
+                ToolOrigin::Lua,
+                "write_file",
+                &args,
+                &paths
+            )
+            .decision,
+        Decision::Allow
+    );
+    let overrides = protocol::PermissionOverrides {
+        tools: Some(protocol::RuleSetOverride {
+            deny: vec!["write_file".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        permissions
+            .with_overrides(&overrides)
+            .evaluate_tool_with_paths_and_approvals(
+                plan(),
+                ToolOrigin::Lua,
+                "write_file",
+                &args,
+                &paths
+            )
+            .decision,
+        Decision::Deny
+    );
+    permissions
+        .modes
+        .get_mut("plan")
+        .unwrap()
+        .tools
+        .insert("write_file".into(), Decision::Deny);
+    assert_eq!(
+        permissions
+            .evaluate_tool_with_paths_and_approvals(
+                plan(),
+                ToolOrigin::Lua,
+                "write_file",
+                &args,
+                &paths
+            )
+            .decision,
+        Decision::Deny
+    );
+}
+
+#[test]
+fn claude_code_native_bash_uses_smelt_command_rules() {
+    let permissions = perms_with_bash(&["git status*"], &[], &["rm *"]);
+    for (command, expected) in [
+        ("git status --short", Decision::Allow),
+        ("rm -rf .", Decision::Deny),
+        ("unknown_command", Decision::Ask),
+    ] {
+        let args = HashMap::from([("command".into(), serde_json::json!(command))]);
+        assert_eq!(
+            super::claude_code::evaluate(&permissions, None, normal(), "Bash", &args, None)
+                .decision,
+            expected
+        );
+    }
+}
+
+#[test]
 fn command_grant_display_only_strips_standalone_space_graphemes() {
     let grant = |pattern: &str| PermissionGrant::Command {
         tool: "bash".to_string(),

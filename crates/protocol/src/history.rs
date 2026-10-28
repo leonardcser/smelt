@@ -576,6 +576,18 @@ pub struct ToolInvocation {
     pub elapsed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub called_at_ms: Option<u64>,
+    /// The provider that ran this tool natively, when it is not smelt's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+/// The name a tool call is shown under: a provider's native tools are
+/// namespaced as `provider/Name`, which no smelt tool name can collide with.
+pub fn displayed_tool_name(provider: Option<&str>, name: &str) -> String {
+    match provider {
+        Some(provider) => format!("{provider}/{name}"),
+        None => name.to_owned(),
+    }
 }
 
 impl ToolInvocation {
@@ -592,7 +604,12 @@ impl ToolInvocation {
             result,
             elapsed_ms,
             called_at_ms,
+            provider: None,
         }
+    }
+
+    pub fn displayed_name(&self) -> String {
+        displayed_tool_name(self.provider.as_deref(), &self.name)
     }
 
     pub fn as_tool_call(&self) -> ToolCall {
@@ -1045,6 +1062,7 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                             result: ToolOutcome::new(content, is_error, metadata),
                             elapsed_ms: None,
                             called_at_ms: None,
+                            provider: None,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1322,6 +1340,7 @@ mod tests {
             result: ToolOutcome::new("ok".into(), false, None),
             elapsed_ms: Some(42),
             called_at_ms: Some(1_700_000_000_123),
+            provider: None,
         };
 
         let json = serde_json::to_value(&invocation).unwrap();
@@ -1363,6 +1382,7 @@ mod tests {
             ),
             elapsed_ms: None,
             called_at_ms: None,
+            provider: None,
         };
         let item = HistoryItem::Assistant(AssistantStep::with_invocations(
             None,

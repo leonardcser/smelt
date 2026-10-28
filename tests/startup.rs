@@ -148,6 +148,248 @@ fn drain_provider_requests(listener: &TcpListener) -> bool {
 }
 
 #[test]
+fn claude_code_backend_renders_streamed_answer_in_terminal() {
+    check_claude_terminal("fragmented", None);
+}
+
+#[test]
+fn claude_code_native_permission_dialog_accepts_and_denies() {
+    check_claude_terminal("permission", Some(true));
+    check_claude_terminal("permission", Some(false));
+}
+
+#[test]
+fn claude_code_native_questions_use_shared_dialogs() {
+    for scenario in [
+        "question",
+        "question-multi",
+        "question-free",
+        "question-cancel",
+    ] {
+        check_claude_terminal(scenario, None);
+    }
+}
+
+#[test]
+fn claude_code_native_cancellation_closes_pending_dialog() {
+    check_claude_terminal("question-native-cancel", None);
+    check_claude_terminal("permission-native-cancel", None);
+}
+
+#[test]
+fn claude_code_native_plans_require_explicit_approval() {
+    for scenario in [
+        "plan",
+        "plan-draft",
+        "plan-apply",
+        "plan-dismiss",
+        "plan-file",
+    ] {
+        check_claude_terminal(scenario, None);
+    }
+}
+
+fn check_claude_terminal(scenario: &str, approve: Option<bool>) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let fixture = root.path().join("claude");
+    std::fs::write(&fixture, include_str!("fixtures/claude_code.py")).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("init.lua");
+    std::fs::write(
+        &config,
+        r#"
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_continue = "off"
+smelt.settings.auto_reload = false
+smelt.settings.show_prediction = false
+smelt.permissions.extend({ default = { patterns = { bash = { ask = { "echo fixture-native-tool" } } } } })
+smelt.tools.register({ name = "fixture_dialog_state", permission_defaults = { normal = "allow" }, execute = function() return smelt.dialog.current() and "open" or "closed" end })
+"#,
+    )
+    .unwrap();
+    let log = root.path().join("claude.jsonl");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
+    command
+        .args([
+            "--type",
+            "claude-code",
+            "--model",
+            "sonnet",
+            "--ephemeral",
+            "hello",
+        ])
+        .arg("--config")
+        .arg(config)
+        .env("SMELT_CLAUDE_CODE_EXECUTABLE", fixture)
+        .env("SMELT_CLAUDE_FIXTURE", scenario)
+        .env("SMELT_CLAUDE_FIXTURE_LOG", &log)
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .env("TERM", "xterm-256color")
+        .current_dir(root.path());
+    if scenario == "plan-file" {
+        command.args(["--mode", "plan"]);
+    }
+    let (mut master, mut process) = spawn_in_pty(command);
+    let mut captured = Vec::new();
+    let mut terminal = vt100::Parser::new(24, 100, 0);
+    let mut decision_sent = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let previous = captured.len();
+        drain_pty(&mut master, &mut captured);
+        terminal.process(&captured[previous..]);
+        let screen = terminal.screen().contents();
+        if let Some(approve) = approve {
+            if !decision_sent && screen.contains("allow once") && screen.contains("deny") {
+                assert!(screen.contains("Allow?"), "{screen}");
+                assert!(screen.contains("fixture-native-tool"), "{screen}");
+                master
+                    .write_all(if approve { b"\r" } else { b"\x1b[B\r" })
+                    .unwrap();
+                decision_sent = true;
+            }
+        }
+        if !decision_sent
+            && scenario.starts_with("question")
+            && scenario != "question-native-cancel"
+            && screen.contains("Choose fixture features")
+            && screen.contains("First feature")
+        {
+            assert!(screen.contains("Second feature"), "{screen}");
+            let keys: &[u8] = match scenario {
+                "question-multi" => {
+                    assert!(
+                        screen.contains("[ ] Alpha") && screen.contains("Space: toggle"),
+                        "{screen}"
+                    );
+                    b" \x1b[B \r"
+                }
+                "question-free" => b"\tcustom feature\r",
+                "question-cancel" => b"\x1b",
+                _ => b"1",
+            };
+            master.write_all(keys).unwrap();
+            decision_sent = true;
+        }
+        if !decision_sent
+            && scenario.starts_with("plan")
+            && screen.contains("save draft")
+            && screen.contains("approve and apply")
+        {
+            assert!(screen.contains("Fixture plan"), "{screen}");
+            assert!(
+                screen.contains("Implement the selected fixture features"),
+                "{screen}"
+            );
+            master
+                .write_all(match scenario {
+                    "plan-draft" => b"1",
+                    "plan-apply" => b"3",
+                    "plan-dismiss" => b"\x1b",
+                    _ => b"2",
+                })
+                .unwrap();
+            decision_sent = true;
+        }
+        if screen.contains("fixture answer café 🌱")
+            || ((approve == Some(false) || scenario == "question-cancel")
+                && screen.contains("interrupted"))
+        {
+            if scenario.ends_with("native-cancel") {
+                assert!(
+                    !screen.contains("First feature") && !screen.contains("allow once"),
+                    "Cancelled dialog remains open: {screen}"
+                );
+                let calls = std::fs::read_to_string(&log).unwrap();
+                assert!(!calls
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .any(|call| call["response"]["request_id"] == "interaction"));
+            } else if scenario.starts_with("question") || scenario.starts_with("plan") {
+                assert!(decision_sent, "Native interaction did not prompt: {screen}");
+                if scenario != "question-cancel" {
+                    let calls = std::fs::read_to_string(&log).unwrap();
+                    let response = calls
+                        .lines()
+                        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                        .find(|call| call["response"]["request_id"] == "interaction")
+                        .unwrap();
+                    let response = &response["response"]["response"];
+                    let allowed = !matches!(scenario, "plan-draft" | "plan-dismiss");
+                    assert_eq!(response["behavior"], if allowed { "allow" } else { "deny" });
+                    if scenario.starts_with("question") {
+                        assert_eq!(
+                            response["updatedInput"]["answers"]["Choose fixture features"],
+                            match scenario {
+                                "question-multi" => "Alpha, Beta",
+                                "question-free" => "custom feature",
+                                _ => "Alpha",
+                            }
+                        );
+                    }
+                }
+            }
+            if let Some(approve) = approve {
+                assert!(decision_sent, "Native permission did not prompt");
+                let calls = std::fs::read_to_string(&log).unwrap();
+                let reply = calls
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .find(|call| call["response"]["request_id"] == "permission")
+                    .unwrap();
+                assert_eq!(
+                    reply["response"]["response"]["hookSpecificOutput"]["permissionDecision"],
+                    if approve { "allow" } else { "deny" }
+                );
+            }
+            if approve != Some(false) && scenario != "question-cancel" {
+                assert_eq!(
+                    screen.matches("fixture answer café 🌱").count(),
+                    1,
+                    "{screen}"
+                );
+            }
+            assert!(!screen.contains('\u{fffd}'), "{screen}");
+            let calls = std::fs::read_to_string(&log).unwrap();
+            for launch in calls
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|call| call.get("argv").is_some())
+            {
+                assert!(
+                    launch["argv"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|arg| arg == "--no-session-persistence"),
+                    "Ephemeral turn persisted a native session: {launch}"
+                );
+            }
+            assert!(!root
+                .path()
+                .join("state/smelt/sessions/claude-code")
+                .exists());
+            master.write_all(b"\x03").unwrap();
+            break;
+        }
+        assert!(
+            process.child.try_wait().unwrap().is_none(),
+            "smelt exited:\n{screen}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "Claude Code answer was not rendered:\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn queued_turn_preserves_previous_assistant_answer() {
     for ephemeral in [false, true] {
         check_queued_answer(false, ephemeral);

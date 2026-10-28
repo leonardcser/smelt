@@ -46,7 +46,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "TYPE",
-        help = "Provider type: openai-compatible, openai, codex, anthropic-compatible, anthropic, copilot, kimi-code"
+        help = "Provider type: openai-compatible, openai, codex, anthropic-compatible, anthropic, claude-code, copilot, kimi-code"
     )]
     r#type: Option<String>,
     #[arg(short, long)]
@@ -90,13 +90,13 @@ pub struct Args {
     #[arg(
         long,
         conflicts_with = "no_system_prompt",
-        help = "Override the system prompt (string or file path)"
+        help = "Override the agent system prompt (string or file path); claude-code keeps host additions"
     )]
     system_prompt: Option<String>,
     #[arg(
         long,
         conflicts_with = "system_prompt",
-        help = "Disable system prompt and AGENTS.md instructions"
+        help = "Disable the agent system prompt and AGENTS.md instructions; claude-code keeps host additions"
     )]
     no_system_prompt: bool,
     #[arg(long, default_value = "info", value_name = "LEVEL")]
@@ -1434,13 +1434,24 @@ async fn async_main() {
         );
         core.skills = Some(Arc::clone(&skill_loader));
         core.mcp = Some(Arc::clone(&mcp_manager));
-        let headless_system_prompt = engine::assemble_system_prompt(
+        let fragments = lua_runtime.system_prompt_fragments();
+        let native_prompt = engine::build_native_system_prompt(
+            prompt_inputs.system_prompt_override.as_deref(),
+            prompt_inputs.instructions.as_deref(),
+            skill_loader.native_prompt_section(),
+            &fragments,
+        );
+        let mut headless_system_prompt = engine::assemble_system_prompt(
             prompt_inputs.system_prompt_override.as_deref(),
             engine::SystemPromptBehavior::Autonomous,
             capabilities,
             prompt_inputs.instructions.as_deref(),
             prompt_inputs.skill_section.as_deref(),
         );
+        if !fragments.is_empty() {
+            headless_system_prompt.push_str("\n\n");
+            headless_system_prompt.push_str(&fragments.join("\n\n"));
+        }
         let headless_lua = Some(lua_runtime.into_core());
         let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = smelt_core::HeadlessApp::new(
@@ -1449,7 +1460,8 @@ async fn async_main() {
             headless_system_prompt,
             capabilities,
             headless_lua,
-        );
+        )
+        .with_native_prompt(native_prompt);
         let mcp_readiness = mcp_manager
             .wait_until_ready(smelt_core::mcp::STARTUP_DISCOVERY_WAIT)
             .await;

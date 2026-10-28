@@ -46,6 +46,20 @@ impl Confirms {
         result
     }
 
+    pub fn cancel_invocation(&mut self, invocation_id: protocol::InvocationId) -> Vec<u64> {
+        let handles: Vec<_> = self
+            .pending
+            .iter()
+            .filter_map(|(handle, entry)| {
+                (entry.req.invocation_id == invocation_id).then_some(*handle)
+            })
+            .collect();
+        for handle in &handles {
+            self.take(*handle);
+        }
+        handles
+    }
+
     /// `true` when no confirm dialog is open.
     pub fn is_clear(&self) -> bool {
         self.is_clear_flag.load(Ordering::Relaxed)
@@ -81,6 +95,7 @@ mod tests {
             invocation_id: protocol::InvocationId::new(id),
             call_id: format!("call-{id}"),
             tool_name: "test".into(),
+            provider: None,
             args: Default::default(),
             tool_paths: vec![],
             tool_paths_error: None,

@@ -260,6 +260,24 @@ base checkout, or remove the worktree unless you explicitly ask. If you ask it t
 land changes without choosing a strategy, the default is commit, rebase onto the
 base branch, validate, and fast-forward the base checkout without a merge commit.
 
+## Watch agents at work
+
+`/subagents` shows observed agents and their live read-only transcripts without
+pausing the parent conversation. The viewer does not enable smelt-owned forks or
+register delegation tools. Execution remains with the agent's owner.
+
+Records distinguish execution owner, parent-agent identity, assignment generation,
+and status. Controls are capability-aware: Alt-S requests cancellation only when
+the owner supports it, never by interrupting the parent as a fallback. Tab switches
+panes, Enter expands the transcript, and Escape closes the viewer. Narrow terminals
+show one pane at a time. Transcript text supports selection and copying.
+
+Non-ephemeral observations use the existing session store. Restored unfinished
+observations are marked cancelled, and archived controls stay disabled until the
+execution owner announces a live assignment. Persistence and restoration errors
+are explicit. Child usage observations must not be added to native parent totals
+that already include descendant work.
+
 ## Run a quick command without the agent
 
 Prefix a line with `!` to run a shell command yourself: `!git status`. The output

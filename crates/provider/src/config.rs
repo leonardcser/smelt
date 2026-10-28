@@ -28,8 +28,14 @@ pub fn reasoning_catalog(
     if !catalog.supported_reasoning_efforts.is_empty() {
         return catalog;
     }
-    let kind = crate::ProviderKind::from_config_and_url(provider_type, api_base);
-    if !kind.wire_api().is_anthropic() && kind != crate::ProviderKind::Copilot {
+    let backend = crate::BackendKind::from_config_and_url(provider_type, api_base);
+    let claude_reasoning = match backend {
+        crate::BackendKind::ClaudeCode => true,
+        crate::BackendKind::Http(kind) => {
+            kind.wire_api().is_anthropic() || kind == crate::ProviderKind::Copilot
+        }
+    };
+    if !claude_reasoning {
         return catalog;
     }
     let Some(version) = crate::parse_claude_model_version(model) else {

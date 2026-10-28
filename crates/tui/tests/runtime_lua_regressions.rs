@@ -129,44 +129,96 @@ fn install_notifications_preload(lua: &mlua::Lua) {
     .expect("install notification module preload");
 }
 
-#[test]
-fn usage_command_renders_codex_reset_times_in_local_time() {
+/// Opens `/usage` with `provider` active and returns the dialog text. `stubs`
+/// is a Lua table constructor with the `auth` and `parse` fields it reads.
+fn render_usage(provider: &str, stubs: &str) -> (mlua::Lua, String) {
     let lua = mlua::Lua::new();
     install_explicit_api_fixtures(&lua);
     lua.globals()
         .set("__USAGE_CACHE_LUA", USAGE_CACHE_LUA)
         .expect("install usage cache source");
-    lua.load(
+    lua.globals()
+        .set("__USAGE_PROVIDER", provider)
+        .expect("install usage provider");
+    lua.load(format!(
         r#"
-        local last_buf = nil
-        local command = nil
         package.preload["smelt.commands.usage.cache"] = function()
           return assert(load(__USAGE_CACHE_LUA, "smelt/commands/usage/cache.lua"))()
         end
-        package.loaded["smelt.bar"] = {
+        package.loaded["smelt.bar"] = {{
           progress = function()
-            return { { text = "[bar]" } }
+            return {{ {{ text = "[bar]" }} }}
           end,
-        }
-        package.loaded["smelt.modal"] = { open = function() end }
+        }}
+        package.loaded["smelt.modal"] = {{ open = function() end }}
 
-        smelt = {
+        local stubs = {stubs}
+        smelt = {{
           __last_buf = nil,
           __command = nil,
-          lifecycle = { on_ready = function() end },
-          cmd = { register = function(name, fn) if name == "usage" then command = fn; smelt.__command = fn end end },
-          log = { warn = function() end },
+          lifecycle = {{ on_ready = function() end }},
+          cmd = {{ register = function(name, fn) if name == "usage" then smelt.__command = fn end end }},
+          log = {{ warn = function() end }},
           notify = __smelt_notify_stub(nil, nil),
           spawn = function(fn) fn() end,
-          task = { external = function(fn) return fn(1) end, resume = function() end },
-          model = {
-            current = function() return "codex-model" end,
-            list = function() return { { key = "codex-model", provider = "codex", api_base = "" } } end,
-            pricing = function() return { source = "none" } end,
-          },
-          session = { cost = function() return 0 end },
-          text = { format_cost = function() return "$0.00" end },
-          time = { format = function(stamp, fmt) return os.date(fmt, stamp) end },
+          task = {{ external = function(fn) return fn(1) end, resume = function() end }},
+          model = {{
+            current = function() return "usage-model" end,
+            list = function() return {{ {{ key = "usage-model", provider = __USAGE_PROVIDER, api_base = "" }} }} end,
+            pricing = function() return {{ source = "none" }} end,
+          }},
+          session = {{ cost = function() return 0 end }},
+          text = {{ format_cost = function() return "$0.00" end }},
+          time = {{ format = function(stamp, fmt) return os.date(fmt, stamp) end }},
+          auth = stubs.auth,
+          parse = stubs.parse,
+          json = {{ encode = function() return "{{}}" end }},
+          buf = {{
+            new = function()
+              local buf = {{ rows = {{}} }}
+              function buf:styled(rows) self.rows = rows end
+              smelt.__last_buf = buf
+              return buf
+            end,
+          }},
+          dialog = {{
+            content = function(opts) return {{ buf = opts.buf, on = function() end }} end,
+            menu = function() return {{ on = function() end }}, {{ set_items = function() end }} end,
+            new = function()
+              return {{ win = {{ on = function() end }} }}
+            end,
+          }},
+        }}
+        "#
+    ))
+    .exec()
+    .expect("install usage command stubs");
+    lua.load(USAGE_LUA).exec().expect("load usage command");
+
+    let rendered: String = lua
+        .load(
+            r#"
+            assert(smelt.__command)()
+            local parts = {}
+            for _, line in ipairs(assert(smelt.__last_buf).rows) do
+              for _, span in ipairs(line) do
+                parts[#parts + 1] = span.text or ""
+              end
+              parts[#parts + 1] = "\n"
+            end
+            return table.concat(parts)
+            "#,
+        )
+        .eval()
+        .expect("render usage dialog");
+    (lua, rendered)
+}
+
+#[test]
+fn usage_command_renders_codex_reset_times_in_local_time() {
+    let (lua, rendered) = render_usage(
+        "codex",
+        r#"{
           auth = {
             request = function(provider, opts)
               assert(provider == "codex")
@@ -187,52 +239,50 @@ fn usage_command_renders_codex_reset_times_in_local_time() {
               }
             end,
           },
-          json = { encode = function() return "{}" end },
-          buf = {
-            new = function()
-              local buf = { rows = {} }
-              function buf:styled(rows) self.rows = rows end
-              last_buf = buf
-              smelt.__last_buf = buf
-              return buf
-            end,
-          },
-          dialog = {
-            content = function(opts) return { buf = opts.buf, on = function() end } end,
-            menu = function() return { on = function() end }, { set_items = function() end } end,
-            new = function()
-              return { win = { on = function() end } }
-            end,
-          },
-        }
-        "#,
-    )
-    .exec()
-    .expect("install usage command stubs");
-    lua.load(USAGE_LUA).exec().expect("load usage command");
-
-    let (rendered, expected): (String, String) = lua
-        .load(
-            r#"
-            assert(smelt.__command)()
-            local parts = {}
-            for _, line in ipairs(assert(smelt.__last_buf).rows) do
-              for _, span in ipairs(line) do
-                parts[#parts + 1] = span.text or ""
-              end
-              parts[#parts + 1] = "\n"
-            end
-            return table.concat(parts), "resets " .. os.date("%b %d %H:%M", 1700000000)
-            "#,
-        )
+        }"#,
+    );
+    let expected: String = lua
+        .load(r#"return "resets " .. os.date("%b %d %H:%M", 1700000000)"#)
         .eval()
-        .expect("render usage dialog");
+        .expect("format expected reset");
 
     assert!(
         rendered.contains(&expected),
         "rendered usage was:\n{rendered}"
     );
     assert!(!USAGE_LUA.contains("os.date(\"!"));
+}
+
+#[test]
+fn usage_command_shows_the_limits_claude_code_reports() {
+    let (_, rendered) = render_usage(
+        "claude-code",
+        r#"{
+          auth = {
+            managed_usage = function(provider)
+              assert(provider == "claude-code")
+              return { limits = {
+                { label = "5h limit", used = 42, limit = 100, resetHint = "resets in 1h 20m" },
+                { label = "Fable 7d limit", used = 3, limit = 100 },
+              } }
+            end,
+          },
+        }"#,
+    );
+
+    for expected in [
+        "Claude Code",
+        "5h limit",
+        "42% used",
+        "resets in 1h 20m",
+        "Fable 7d limit",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "{expected} missing from:\n{rendered}"
+        );
+    }
+    assert!(!rendered.contains("No subscription usage"), "{rendered}");
 }
 
 #[test]

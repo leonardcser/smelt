@@ -137,10 +137,15 @@ impl HeadlessCompaction {
                     spec.get("on_draft_rejected")?,
                 )?;
                 let result = crate::host::with_core(|core| -> mlua::Result<()> {
-                    let model = ask::select_model(
-                        &core.config,
-                        spec.get::<Option<String>>("model")?.as_deref(),
-                    )
+                    // Without a preference, compaction runs on the main model.
+                    let model = match spec.get::<Option<String>>("model")? {
+                        Some(reference) => ask::select_model(&core.config, Some(&reference)),
+                        None => core
+                            .config
+                            .active_model()
+                            .cloned()
+                            .ok_or_else(|| "no usable model is available".into()),
+                    }
                     .map_err(mlua::Error::external)?;
                     let key = std::env::var(&model.api_key_env).unwrap_or_default();
                     let state = s.borrow();
@@ -220,6 +225,26 @@ impl HeadlessCompaction {
         call: HostCall,
     ) -> mlua::Result<()> {
         let (hook, payload, reply) = match call {
+            HostCall::NativeToolEvaluation {
+                cwd,
+                tool_name,
+                args,
+                mode,
+                overrides,
+                reply,
+                ..
+            } => {
+                let evaluation = crate::permissions::claude_code::evaluate(
+                    &core.permissions.snapshot(),
+                    Some(&cwd),
+                    mode,
+                    &tool_name,
+                    &args,
+                    overrides.as_ref(),
+                );
+                let _ = reply.send(evaluation);
+                return Ok(());
+            }
             HostCall::PrepareRequest {
                 messages,
                 estimated_tokens,

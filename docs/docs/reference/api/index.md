@@ -9,7 +9,7 @@ description: "Reference for every namespace of the smelt Lua API: commands, keym
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 95 namespace(s), 463 function(s), 113 class(es), 13 alias(es).
+**Coverage:** 95 namespace(s), 465 function(s), 114 class(es), 13 alias(es).
 
 Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).
 

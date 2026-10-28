@@ -232,6 +232,7 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
         api_base: format!("http://{addr}"),
         api_key: "test-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig {
             max_tokens: Some(4096),
             ..ModelConfig::default()
@@ -261,8 +262,11 @@ async fn replayed_completed_tool_call_is_not_executed_or_committed_again() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),
     })));
@@ -333,6 +337,7 @@ async fn fresh_tool_call_rounds_continue_past_previous_checkpoint() {
         api_base: format!("http://{addr}"),
         api_key: "test-key".into(),
         provider_type: "anthropic-compatible".into(),
+        provider: "anthropic-compatible".into(),
         config: ModelConfig {
             max_tokens: Some(4096),
             ..ModelConfig::default()
@@ -362,8 +367,11 @@ async fn fresh_tool_call_rounds_continue_past_previous_checkpoint() {
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
+        ephemeral: false,
         persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
+        native_prompt: None,
+        tool_visibility: protocol::ToolVisibility::Interactive,
         system_prompt: Some("test system".into()),
         tools: Vec::new(),
     })));

@@ -780,6 +780,7 @@ mod tests {
                     result: protocol::ToolOutcome::new("result".into(), false, None),
                     elapsed_ms: None,
                     called_at_ms: None,
+                    provider: None,
                 })
                 .collect(),
         });

@@ -48,6 +48,38 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
 
+    m.fn_(
+        "runs",
+        "List observed agents for a parent session. Records expose owner, parent_agent_id, typed status, supported controls and the child transcript session_id. Observation does not enable smelt-owned delegation.",
+        &["parent_id"],
+        |lua, parent_id: String| -> LuaResult<mlua::Value> {
+            let records = crate::host::try_with_core(|core| {
+                core.agents.restore(&core.sessions, &parent_id)?;
+                Ok::<_, String>(core.agents.runs(&parent_id).map(|agent| {
+                    let mut record = serde_json::to_value(&agent.info).expect("agent record serializes");
+                    record["session_id"] = serde_json::json!(agent.session.id);
+                    record["persistence_error"] = serde_json::json!(core.agents.archive_error(&parent_id, &agent.info.id));
+                    record
+                }).collect::<Vec<_>>())
+            }).unwrap_or_else(|| Ok(Vec::new())).map_err(LuaError::external)?;
+            crate::lua::serde_to_lua(lua, &records)
+        },
+    )?;
+    m.live_only_fn(
+        "stop",
+        "Request cancellation from an observed agent's execution owner. Returns false for unknown, terminal or unsupported agents; never interrupts the parent as a fallback.",
+        &["parent_id", "id"],
+        |_, (parent_id, id): (String, String)| -> LuaResult<bool> {
+            Ok(crate::host::try_with_core(|core| {
+                let supported = core.agents.runs(&parent_id).any(|agent| agent.info.id == id
+                    && agent.info.capabilities.stop && !agent.info.status.is_terminal());
+                if supported {
+                    core.engine.send(protocol::UiCommand::StopAgent { session_id: parent_id, agent_id: id });
+                }
+                supported
+            }).unwrap_or(false))
+        },
+    )?;
     Ok(())
 }
 

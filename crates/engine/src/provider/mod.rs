@@ -23,8 +23,8 @@ use smelt_provider::WireApi;
 #[cfg(test)]
 use smelt_provider::{api_key_auth, emit_retry, endpoint_url, ApiKeyAuth};
 use smelt_provider::{
-    normalize_api_base, AuthKind, CacheConfig, ChatOptions, ChatRequestOptions, ProviderClient,
-    ProviderKind, ToolDefinition,
+    normalize_api_base, AuthKind, BackendKind, CacheConfig, ChatOptions, ChatRequestOptions,
+    ProviderClient, ProviderKind, ToolDefinition,
 };
 
 #[cfg(test)]
@@ -194,7 +194,7 @@ pub struct EngineProvider {
     api_base: String,
     api_key: String,
     client: ProviderClient,
-    kind: ProviderKind,
+    backend: BackendKind,
     auth: Option<AuthKind>,
     model_config: ModelConfig,
     /// Sticky routing token for Codex: set from the first response, echoed on subsequent requests within the same turn.
@@ -226,7 +226,7 @@ struct EngineChatAttempt<'a, 'opts> {
 
 impl EngineProvider {
     pub(crate) fn supports_mid_turn_reasoning_changes(&self) -> bool {
-        self.kind.descriptor().mid_turn_reasoning_changes
+        self.backend.supports_mid_turn_reasoning_changes()
     }
 
     pub fn new(
@@ -237,13 +237,13 @@ impl EngineProvider {
         _clock: std::sync::Arc<dyn crate::clock::Clock>,
     ) -> Self {
         let api_base = normalize_api_base(&api_base);
-        let kind = ProviderKind::from_config_and_url(provider_type, &api_base);
-        let auth = kind.descriptor().auth;
+        let backend = BackendKind::from_config_and_url(provider_type, &api_base);
+        let auth = backend.http().and_then(|kind| kind.descriptor().auth);
         Self {
             api_base,
             api_key,
             client: ProviderClient::new(client),
-            kind,
+            backend,
             auth,
             model_config: Default::default(),
             turn_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -289,7 +289,9 @@ impl EngineProvider {
     /// Whether this provider speaks the Anthropic wire format and accepts
     /// `cache_control` markers on system, tools, and message content.
     pub fn supports_anthropic_cache(&self) -> bool {
-        self.kind.descriptor().anthropic_cache
+        self.backend
+            .http()
+            .is_some_and(|kind| kind.descriptor().anthropic_cache)
     }
 
     pub fn default_cache_config(&self, ttl_long: bool, session_id: Option<&str>) -> CacheConfig {
@@ -309,7 +311,7 @@ impl EngineProvider {
         request_opts: &ChatRequestOptions,
         opts: &ChatOptions<'_>,
     ) -> Result<EngineChatResponse, ProviderError> {
-        let is_copilot = self.kind == ProviderKind::Copilot;
+        let is_copilot = self.backend.http() == Some(ProviderKind::Copilot);
         let copilot_model = is_copilot.then(|| copilot::cached_model(model)).flatten();
         let config = self
             .resolve_model_config(model, copilot_model.as_ref())
@@ -347,8 +349,8 @@ impl EngineProvider {
         &self,
         messages: &[Message],
     ) -> Result<EngineChatAuth, ProviderError> {
-        let is_codex = self.kind == ProviderKind::Codex;
-        let is_copilot = self.kind == ProviderKind::Copilot;
+        let is_codex = self.backend.http() == Some(ProviderKind::Codex);
+        let is_copilot = self.backend.http() == Some(ProviderKind::Copilot);
         let codex_auth = if is_codex {
             Some(
                 codex::ensure_access_token_full(self.client.http())
@@ -400,6 +402,11 @@ impl EngineProvider {
         attempt: EngineChatAttempt<'_, '_>,
         auth: &EngineChatAuth,
     ) -> Result<EngineChatResponse, ProviderError> {
+        let kind = self.backend.http().ok_or_else(|| {
+            ProviderError::InvalidResponse(
+                "claude-code requires the subprocess agent backend".into(),
+            )
+        })?;
         let turn_state = self.turn_state.lock().unwrap().clone();
         let kimi_headers =
             (self.auth == Some(AuthKind::KimiCodeOAuth)).then(kimi_code::protocol_headers);
@@ -412,7 +419,7 @@ impl EngineProvider {
                 };
                 ChatProvider::kimi_code(&auth.request_api_key, headers)
             }
-            Some(AuthKind::ApiKey) => ChatProvider::api_key(self.kind, &auth.request_api_key),
+            Some(AuthKind::ApiKey) => ChatProvider::api_key(kind, &auth.request_api_key),
             None if auth.is_codex => {
                 let Some(tokens) = auth.codex_auth.as_ref() else {
                     return Err(ProviderError::Auth(
@@ -435,7 +442,7 @@ impl EngineProvider {
                     auth.copilot_has_images,
                 )
             }
-            None => ChatProvider::none(self.kind),
+            None => ChatProvider::none(kind),
         };
         let request = smelt_provider::ChatRequest {
             provider,
@@ -518,7 +525,7 @@ impl EngineProvider {
             return config;
         }
 
-        let copilot_output_tokens = if self.kind == ProviderKind::Copilot {
+        let copilot_output_tokens = if self.backend.http() == Some(ProviderKind::Copilot) {
             copilot_model
                 .and_then(|m| m.max_output_tokens)
                 .or_else(|| copilot::cached_output_tokens(model))
@@ -531,9 +538,11 @@ impl EngineProvider {
         }
 
         self.ensure_catalog_loaded().await;
-        if let Some(tokens) =
-            smelt_provider::catalog::output_tokens(self.kind.as_config_str(), &self.api_base, model)
-        {
+        if let Some(tokens) = smelt_provider::catalog::output_tokens(
+            self.backend.as_config_str(),
+            &self.api_base,
+            model,
+        ) {
             config.max_tokens = Some(tokens);
         }
         config
@@ -550,14 +559,14 @@ impl EngineProvider {
         }
         let supports_reasoning = config.supports_reasoning.or_else(|| {
             smelt_provider::catalog::supports_reasoning(
-                self.kind.as_config_str(),
+                self.backend.as_config_str(),
                 &self.api_base,
                 model,
             )
         });
         smelt_provider::effective_reasoning_effort(
             requested,
-            self.kind.as_config_str(),
+            self.backend.as_config_str(),
             supports_reasoning,
         )
     }
@@ -571,7 +580,7 @@ impl EngineProvider {
     }
 
     pub async fn fetch_context_window(&self, model: &str) -> Result<Option<u32>, String> {
-        let provider_label = self.kind.as_config_str();
+        let provider_label = self.backend.as_config_str();
         if let Some(v) = self.model_config.context_window {
             crate::log::entry(
                 crate::log::Level::Info,
@@ -589,51 +598,54 @@ impl EngineProvider {
         // authoritative source. Fall through to the models.dev catalog
         // if it doesn't expose a window field.
         let http_error = |error: reqwest::Error| error.without_url().to_string();
-        let from_provider = match self.kind {
-            ProviderKind::OpenAiCompatible => self
-                .client
-                .fetch_context_window_openai_compatible(&self.api_base, &self.api_key, model)
-                .await
-                .map_err(http_error)?,
-            ProviderKind::OpenAi => None,
-            ProviderKind::Codex => codex::cached_context_window(model),
-            ProviderKind::KimiCode => match kimi_code::cached_context_window(model) {
-                Some(v) => Some(v),
-                None => kimi_code::fetch_model_info(self.client.http())
+        let from_provider = match self.backend {
+            BackendKind::ClaudeCode => None,
+            BackendKind::Http(kind) => match kind {
+                ProviderKind::OpenAiCompatible => self
+                    .client
+                    .fetch_context_window_openai_compatible(&self.api_base, &self.api_key, model)
                     .await
-                    .map_err(|_| "Kimi Code model discovery failed".to_owned())?
-                    .into_iter()
-                    .find(|info| info.matches_name(model))
-                    .and_then(|info| info.context_length),
-            },
-            ProviderKind::Anthropic => self
-                .client
-                .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
-                .await
-                .map_err(http_error)?,
-            ProviderKind::AnthropicCompatible => {
-                match self
+                    .map_err(http_error)?,
+                ProviderKind::OpenAi => None,
+                ProviderKind::Codex => codex::cached_context_window(model),
+                ProviderKind::KimiCode => match kimi_code::cached_context_window(model) {
+                    Some(v) => Some(v),
+                    None => kimi_code::fetch_model_info(self.client.http())
+                        .await
+                        .map_err(|_| "Kimi Code model discovery failed".to_owned())?
+                        .into_iter()
+                        .find(|info| info.matches_name(model))
+                        .and_then(|info| info.context_length),
+                },
+                ProviderKind::Anthropic => self
                     .client
                     .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
                     .await
-                {
-                    Ok(Some(v)) => Some(v),
-                    primary => match self
+                    .map_err(http_error)?,
+                ProviderKind::AnthropicCompatible => {
+                    match self
                         .client
-                        .fetch_context_window_openai_compatible(
-                            &self.api_base,
-                            &self.api_key,
-                            model,
-                        )
+                        .fetch_context_window_anthropic(&self.api_base, &self.api_key, model)
                         .await
-                        .map_err(http_error)?
                     {
-                        Some(value) => Some(value),
-                        None => primary.map_err(http_error)?,
-                    },
+                        Ok(Some(v)) => Some(v),
+                        primary => match self
+                            .client
+                            .fetch_context_window_openai_compatible(
+                                &self.api_base,
+                                &self.api_key,
+                                model,
+                            )
+                            .await
+                            .map_err(http_error)?
+                        {
+                            Some(value) => Some(value),
+                            None => primary.map_err(http_error)?,
+                        },
+                    }
                 }
-            }
-            ProviderKind::Copilot => copilot::cached_context_window(model),
+                ProviderKind::Copilot => copilot::cached_context_window(model),
+            },
         };
         let result = from_provider.or_else(|| {
             smelt_provider::catalog::context_window(provider_label, &self.api_base, model)
@@ -679,6 +691,10 @@ mod tests {
     use protocol::{Content, FunctionCall, Role, ToolCall};
     use serde_json::json;
 
+    fn http_kind(provider_type: &str) -> ProviderKind {
+        BackendKind::from_config(provider_type).http().unwrap()
+    }
+
     fn user_msg(text: &str) -> Message {
         Message {
             role: Role::User,
@@ -703,8 +719,11 @@ mod tests {
             std::sync::Arc::new(crate::clock::RealClock),
         );
 
-        assert_eq!(provider.kind, ProviderKind::KimiCode);
-        assert_eq!(provider.kind.wire_api(), WireApi::AnthropicMessages);
+        assert_eq!(provider.backend, BackendKind::Http(ProviderKind::KimiCode));
+        assert_eq!(
+            provider.backend.http().unwrap().wire_api(),
+            WireApi::AnthropicMessages
+        );
     }
 
     #[test]
@@ -1143,37 +1162,22 @@ mod tests {
 
     #[test]
     fn provider_kind_from_config_recognizes_known_types() {
-        assert_eq!(ProviderKind::from_config("openai"), ProviderKind::OpenAi);
-        assert_eq!(ProviderKind::from_config("codex"), ProviderKind::Codex);
+        assert_eq!(http_kind("openai"), ProviderKind::OpenAi);
+        assert_eq!(http_kind("codex"), ProviderKind::Codex);
+        assert_eq!(http_kind("anthropic"), ProviderKind::Anthropic);
         assert_eq!(
-            ProviderKind::from_config("anthropic"),
-            ProviderKind::Anthropic
-        );
-        assert_eq!(
-            ProviderKind::from_config("anthropic-compatible"),
+            http_kind("anthropic-compatible"),
             ProviderKind::AnthropicCompatible
         );
-        assert_eq!(ProviderKind::from_config("copilot"), ProviderKind::Copilot);
-        assert_eq!(
-            ProviderKind::from_config("github-copilot"),
-            ProviderKind::Copilot
-        );
-        assert_eq!(
-            ProviderKind::from_config("kimi-code"),
-            ProviderKind::KimiCode
-        );
+        assert_eq!(http_kind("copilot"), ProviderKind::Copilot);
+        assert_eq!(http_kind("github-copilot"), ProviderKind::Copilot);
+        assert_eq!(http_kind("kimi-code"), ProviderKind::KimiCode);
     }
 
     #[test]
     fn provider_kind_from_config_unknown_defaults_to_openai_compatible() {
-        assert_eq!(
-            ProviderKind::from_config("gibberish"),
-            ProviderKind::OpenAiCompatible
-        );
-        assert_eq!(
-            ProviderKind::from_config(""),
-            ProviderKind::OpenAiCompatible
-        );
+        assert_eq!(http_kind("gibberish"), ProviderKind::OpenAiCompatible);
+        assert_eq!(http_kind(""), ProviderKind::OpenAiCompatible);
     }
 
     #[test]
@@ -1216,7 +1220,7 @@ mod tests {
             ProviderKind::OpenAiCompatible,
         ] {
             let s = k.as_config_str();
-            assert_eq!(ProviderKind::from_config(s), k);
+            assert_eq!(http_kind(s), k);
         }
     }
 
@@ -1439,6 +1443,35 @@ mod tests {
         assert_eq!(p.api_base, "https://x");
     }
 
+    #[tokio::test]
+    async fn native_backend_has_no_http_provider_or_wire_capabilities() {
+        let provider = EngineProvider::new(
+            "http://127.0.0.1:1".into(),
+            String::new(),
+            "claude-code",
+            http_client(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
+        assert_eq!(provider.backend, BackendKind::ClaudeCode);
+        assert!(provider.auth.is_none());
+        assert!(!provider.supports_anthropic_cache());
+        assert!(!provider.supports_mid_turn_reasoning_changes());
+        let cancel = CancellationToken::new();
+        let error = provider
+            .chat(
+                &[],
+                &[],
+                "sonnet",
+                ReasoningEffort::Off,
+                &ChatRequestOptions::default(),
+                &ChatOptions::new(&cancel),
+            )
+            .await
+            .err()
+            .expect("native backend must reject HTTP chat");
+        assert!(error.to_string().contains("subprocess agent backend"));
+    }
+
     #[test]
     fn provider_new_resolves_kind_from_provider_type() {
         let p = EngineProvider::new(
@@ -1448,7 +1481,7 @@ mod tests {
             http_client(),
             std::sync::Arc::new(crate::clock::RealClock),
         );
-        assert_eq!(p.kind, ProviderKind::Anthropic);
+        assert_eq!(p.backend, BackendKind::Http(ProviderKind::Anthropic));
     }
 
     #[test]

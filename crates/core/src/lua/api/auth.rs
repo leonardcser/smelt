@@ -34,8 +34,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "__start_managed_usage",
             &["task_id", "provider"],
             move |_, (task_id, provider): (u64, String)| -> LuaResult<()> {
-                let provider = parse_provider(&provider)?;
-                spawn_managed_usage(&shared, task_id, provider);
+                if provider == "claude-code" {
+                    spawn_managed_usage(&shared, task_id, engine::claude_code_usage());
+                } else {
+                    let provider = parse_provider(&provider)?;
+                    spawn_managed_usage(&shared, task_id, async move {
+                        let client = smelt_provider::http_client();
+                        engine::auth::managed_usage(provider, &client).await
+                    });
+                }
                 Ok(())
             },
         )?;
@@ -99,16 +106,17 @@ fn spawn_authenticated_request(shared: &Arc<LuaShared>, task_id: u64, req: AuthR
 fn spawn_managed_usage(
     shared: &Arc<LuaShared>,
     task_id: u64,
-    provider: engine::auth::AuthProvider,
+    usage: impl std::future::Future<Output = Result<smelt_provider::usage::ManagedUsageReport, String>>
+        + Send
+        + 'static,
 ) {
     let cancel = crate::lua::current_task_cancel().unwrap_or_default();
     let sink = shared.resume_sink();
     tokio::spawn(async move {
-        let client = smelt_provider::http_client();
         let payload = tokio::select! {
             biased;
             _ = cancel.cancelled() => serde_json::json!({ "__cancelled": true }),
-            result = engine::auth::managed_usage(provider, &client) => match result {
+            result = usage => match result {
                 Ok(report) => serde_json::to_value(report).unwrap_or_else(|err| serde_json::json!({ "err": err.to_string() })),
                 Err(err) => serde_json::json!({ "err": err }),
             },

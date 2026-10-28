@@ -1,4 +1,5 @@
-//! Thin wrapper around `EngineHandle` that pauses output while a confirm dialog is open.
+//! Pause the HTTP agent's output during confirmation. Independent agents keep
+//! delivering control events, including cancellation of an open confirmation.
 
 use engine::{EngineDisconnected, EngineHandle, EngineOutput};
 use protocol::{EngineEvent, UiCommand};
@@ -9,6 +10,7 @@ use tokio::sync::mpsc;
 pub struct EngineClient {
     handle: EngineHandle,
     confirms_clear: Arc<AtomicBool>,
+    native_agent: AtomicBool,
 }
 
 impl EngineClient {
@@ -16,30 +18,41 @@ impl EngineClient {
         Self {
             handle,
             confirms_clear,
+            native_agent: AtomicBool::new(false),
         }
     }
 
     pub fn send(&self, cmd: UiCommand) {
-        self.handle.send(cmd);
+        let _ = self.try_send(cmd);
     }
 
     pub fn try_send(&self, cmd: UiCommand) -> Result<(), EngineDisconnected> {
+        if let UiCommand::StartTurn(payload) = &cmd {
+            // An independent agent can cancel a permission request while its UI is open.
+            self.native_agent.store(
+                smelt_provider::BackendKind::is_claude_code(&payload.model_target.provider_type),
+                Ordering::Relaxed,
+            );
+        }
         self.handle.try_send(cmd)
     }
 
-    /// Returns `pending()` when a confirm dialog is open, pausing the engine.
+    fn output_paused(&self) -> bool {
+        !self.native_agent.load(Ordering::Relaxed) && !self.confirms_clear.load(Ordering::Relaxed)
+    }
+
+    /// Returns `pending()` while HTTP-agent confirmation pauses output.
     pub async fn recv(&mut self) -> Option<EngineEvent> {
-        if !self.confirms_clear.load(Ordering::Relaxed) {
+        if self.output_paused() {
             std::future::pending().await
         } else {
             self.handle.recv().await
         }
     }
 
-    /// Returns `pending()` when a confirm dialog is open, preserving the
-    /// ordering of protocol events and host callbacks.
+    /// Receives ordered protocol events and host callbacks unless output is paused.
     pub async fn recv_output(&mut self) -> Option<EngineOutput> {
-        if !self.confirms_clear.load(Ordering::Relaxed) {
+        if self.output_paused() {
             std::future::pending().await
         } else {
             self.handle.recv_output().await
@@ -48,7 +61,7 @@ impl EngineClient {
 
     /// Returns `Err(Empty)` when a confirm dialog is open.
     pub fn try_recv(&mut self) -> Result<EngineEvent, mpsc::error::TryRecvError> {
-        if !self.confirms_clear.load(Ordering::Relaxed) {
+        if self.output_paused() {
             Err(mpsc::error::TryRecvError::Empty)
         } else {
             self.handle.try_recv()
@@ -57,7 +70,7 @@ impl EngineClient {
 
     /// Returns `Err(Empty)` when a confirm dialog is open.
     pub fn try_recv_output(&mut self) -> Result<EngineOutput, mpsc::error::TryRecvError> {
-        if !self.confirms_clear.load(Ordering::Relaxed) {
+        if self.output_paused() {
             Err(mpsc::error::TryRecvError::Empty)
         } else {
             self.handle.try_recv_output()

@@ -27,6 +27,7 @@ mod pricing;
 mod response;
 mod sse;
 mod tool;
+pub mod usage;
 
 pub use anthropic_models::{parse_claude_model_version, ClaudeModelFamily, ClaudeModelVersion};
 pub use cache::{clamp_prompt_cache_key, sort_tools_for_cache_stability, CacheConfig};
@@ -62,7 +63,8 @@ pub(crate) use kind::api_key_auth;
 #[cfg(feature = "test-support")]
 pub use kind::api_key_auth;
 pub use kind::{
-    is_kimi_code_api_base, ApiKeyAuth, AuthKind, ProviderDescriptor, ProviderKind, WireApi,
+    is_kimi_code_api_base, ApiKeyAuth, AuthKind, BackendKind, ProviderDescriptor, ProviderKind,
+    WireApi,
 };
 #[cfg(feature = "test-support")]
 pub use openai::parse_stream_events as parse_openai_stream_events;

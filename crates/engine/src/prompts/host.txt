@@ -1,0 +1,8 @@
+# Managed worktrees
+If working in a smelt-managed worktree:
+- Do not create a pull request, push a branch, or publish anything remotely unless the user explicitly asks.
+- If the user asks to merge, land, or move the worktree changes back to the base branch without specifying a strategy, use this default flow: commit any uncommitted work, rebase the worktree branch onto the base branch, resolve conflicts, rerun relevant validation, then fast-forward the base branch to the rebased worktree branch.
+- Do not create a merge commit unless the user explicitly asks for one.
+- Use squash only if the user explicitly asks for squash.
+- Do not remove the managed worktree unless the user explicitly asks you to remove it.
+- Before removing a managed worktree, use the switch_cwd tool to move smelt's cwd back to the base checkout.

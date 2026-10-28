@@ -615,6 +615,7 @@ mod tests {
                     protocol::ReasoningEffort::Low,
                     protocol::ReasoningEffort::XHigh,
                 ],
+                resolved: None,
             },
         }
         .into();

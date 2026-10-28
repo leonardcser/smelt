@@ -4367,6 +4367,7 @@ fn heterogeneous_hot_path_history_item(idx: usize, target_bytes: usize) -> proto
                 ),
                 elapsed_ms: Some(idx as u64),
                 called_at_ms: None,
+                provider: None,
             }],
         )),
         _ => protocol::HistoryItem::note(protocol::HistoryNote::process_status(format!(

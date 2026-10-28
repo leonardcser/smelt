@@ -89,6 +89,8 @@ pub enum ModelAvailability {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveModel {
     pub key: String,
+    /// Configured provider name, or the provider type for a direct model.
+    pub provider_name: String,
     pub model_name: String,
     pub display_name: Option<String>,
     pub api_base: String,
@@ -103,6 +105,7 @@ impl ActiveModel {
     pub fn from_resolved(model: &config::ResolvedModel) -> Self {
         Self {
             key: model.key.clone(),
+            provider_name: model.provider_name.clone(),
             model_name: model.model_name.clone(),
             display_name: model.display_name.clone(),
             api_base: model.api_base.clone(),
@@ -125,20 +128,20 @@ impl ActiveModel {
     }
 
     /// The model for auxiliary requests, such as titles and predictions, that
-    /// name none. On Codex that is `luna`.
+    /// name none.
     pub fn auxiliary(&self) -> Self {
-        if smelt_provider::ProviderKind::from_config(&self.provider_type)
-            != smelt_provider::ProviderKind::Codex
-        {
+        let Some(name) =
+            smelt_provider::BackendKind::from_config(&self.provider_type).auxiliary_model()
+        else {
             return self.clone();
-        }
+        };
         let provider = self.key.strip_suffix(&self.model_name).unwrap_or_default();
         Self {
-            key: format!("{provider}luna"),
-            model_name: "luna".into(),
+            key: format!("{provider}{name}"),
+            model_name: name.into(),
             display_name: None,
             config: ModelConfig {
-                name: Some("luna".into()),
+                name: Some(name.into()),
                 ..Default::default()
             },
             catalog: ModelCatalogMetadata::default(),
@@ -152,6 +155,7 @@ impl ActiveModel {
             api_base: self.api_base.clone(),
             api_key,
             provider_type: self.provider_type.clone(),
+            provider: self.provider_name.clone(),
             config: self.config.clone(),
         }
     }
@@ -396,10 +400,14 @@ fn reconcile_reasoning_effort(
 }
 
 fn direct_model(startup: &StartupOverrides, model_name: &str) -> Result<ActiveModel, ResolveError> {
-    let Some(api_base) = startup.api_base.clone() else {
-        return Err(ResolveError(format!(
-            "unknown model or provider: {model_name}"
-        )));
+    let api_base = match startup.api_base.clone() {
+        Some(base) => base,
+        None if startup.provider_type.as_deref() == Some("claude-code") => String::new(),
+        None => {
+            return Err(ResolveError(format!(
+                "unknown model or provider: {model_name}"
+            )))
+        }
     };
     let provider_type = startup.provider_type.clone().unwrap_or_else(|| {
         smelt_provider::ProviderKind::detect_from_url(&api_base)
@@ -408,6 +416,7 @@ fn direct_model(startup: &StartupOverrides, model_name: &str) -> Result<ActiveMo
     });
     Ok(ActiveModel {
         key: format!("@direct/{model_name}"),
+        provider_name: provider_type.clone(),
         model_name: model_name.to_string(),
         display_name: None,
         api_base,
@@ -436,13 +445,15 @@ pub fn managed_model_selection_is_pending(
     let managed_provider = providers.iter().any(|provider| {
         provider.name.as_deref() == Some(provider_name)
             && matches!(
-                smelt_provider::ProviderKind::from_config_and_url(
+                smelt_provider::BackendKind::from_config_and_url(
                     provider.provider_type.as_deref().unwrap_or_default(),
                     provider.api_base.as_deref().unwrap_or_default(),
                 ),
-                smelt_provider::ProviderKind::Codex
-                    | smelt_provider::ProviderKind::Copilot
-                    | smelt_provider::ProviderKind::KimiCode
+                smelt_provider::BackendKind::Http(
+                    smelt_provider::ProviderKind::Codex
+                        | smelt_provider::ProviderKind::Copilot
+                        | smelt_provider::ProviderKind::KimiCode
+                )
             )
     });
     managed_provider
@@ -504,7 +515,9 @@ fn resolve_requested_selection(
     match config::resolve_model_ref(inputs.available_models, requested) {
         Ok(resolved) => Ok(Some(resolved_selection(inputs, resolved, source))),
         Err(config::ResolveModelRefError::NotFound { .. })
-            if source == ModelSelectionSource::Cli && inputs.startup.api_base.is_some() =>
+            if source == ModelSelectionSource::Cli
+                && (inputs.startup.api_base.is_some()
+                    || inputs.startup.provider_type.as_deref() == Some("claude-code")) =>
         {
             let mut active = direct_model(inputs.startup, requested)?;
             inherit_unavailable_state(inputs, &mut active);
@@ -745,6 +758,7 @@ mod tests {
     fn auxiliary_requests_use_luna_only_on_codex() {
         let mut sol = ActiveModel {
             key: "codex/gpt-5.6-sol".into(),
+            provider_name: "codex".into(),
             model_name: "gpt-5.6-sol".into(),
             display_name: Some("GPT-5.6 Sol".into()),
             api_base: String::new(),
@@ -765,6 +779,33 @@ mod tests {
 
         sol.provider_type = "openai".into();
         assert_eq!(sol.auxiliary(), sol);
+    }
+
+    #[test]
+    fn auxiliary_requests_use_the_latest_haiku_only_on_claude_code() {
+        let mut opus = ActiveModel {
+            key: "claude-code/opus".into(),
+            provider_name: "claude-code".into(),
+            model_name: "opus".into(),
+            display_name: Some("Opus".into()),
+            api_base: String::new(),
+            api_key_env: String::new(),
+            provider_type: "claude-code".into(),
+            config: ModelConfig {
+                name: Some("opus".into()),
+                supports_fast_mode: Some(true),
+                ..Default::default()
+            },
+            catalog: ModelCatalogMetadata::default(),
+            availability: ModelAvailability::Available,
+        };
+        let haiku = opus.auxiliary();
+        assert_eq!(haiku.key, "claude-code/haiku");
+        assert_eq!(haiku.target(String::new()).model, "haiku");
+        assert_eq!(haiku.config.supports_fast_mode, None);
+
+        opus.provider_type = "anthropic".into();
+        assert_eq!(opus.auxiliary(), opus);
     }
 
     fn provider_config() -> config::Config {

@@ -438,6 +438,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 
 | Plugin | Summary |
 | --- | --- |
+| `smelt.plugins.agent_view` | Read-only agent observation. |
 | `smelt.plugins.banner` | Empty-state logo decoration + shutdown logo/resume-hint banner. |
 | `smelt.plugins.block_nav` | Transcript block navigation. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
@@ -446,7 +447,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
 | `smelt.plugins.goal` | Goal lifecycle plugin. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
-| `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
+| `smelt.plugins.plan_mode` | Plan artifacts and approval UI. |
 | `smelt.plugins.predict` | Input prediction plugin. |
 | `smelt.plugins.process_control` | Ctrl-G: stop following a foreground bash job while it keeps running. |
 | `smelt.plugins.scroll_pills` | Clickable scroll-pill overlays navigate the transcript. |

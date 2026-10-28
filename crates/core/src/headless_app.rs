@@ -36,6 +36,7 @@ pub struct HeadlessApp {
     pub(crate) sink: HeadlessSink,
     pub(crate) next_turn_id: u64,
     system_prompt: String,
+    native_prompt: Option<protocol::NativeSystemPrompt>,
     capabilities: engine::SystemPromptCapabilities,
     lua: Option<crate::lua::LuaRuntime>,
     lua_wakeup_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
@@ -64,10 +65,16 @@ impl HeadlessApp {
             sink,
             next_turn_id: 1,
             system_prompt,
+            native_prompt: None,
             capabilities,
             lua,
             lua_wakeup_rx,
         }
+    }
+
+    pub fn with_native_prompt(mut self, prompt: protocol::NativeSystemPrompt) -> Self {
+        self.native_prompt = Some(prompt);
+        self
     }
 
     fn model_target(&self) -> Option<protocol::ModelTarget> {
@@ -122,7 +129,7 @@ impl HeadlessApp {
             .map(|lua| {
                 lua.tool_defs(
                     self.core.config.mode.clone(),
-                    crate::lua::ToolVisibility::Headless,
+                    crate::lua::ToolVisibility::Interactive,
                 )
             })
             .unwrap_or_default()
@@ -156,6 +163,7 @@ impl HeadlessApp {
             return;
         }
         let request = crate::lua::ToolEvaluationRequest {
+            scope: crate::lua::current_task_scope().unwrap_or(crate::lua::TaskScope::Turn),
             request_id,
             invocation_id,
             tool_name,
@@ -348,7 +356,35 @@ impl HeadlessApp {
     }
 
     fn handle_control_event(&mut self, ev: &EngineEvent) -> bool {
+        if let EngineEvent::AgentOutput { event, .. } = ev {
+            if let EngineEvent::ToolFinished { invocation_id, .. }
+            | EngineEvent::ToolRejected { invocation_id, .. } = event.as_ref()
+            {
+                if let Some(lua) = &self.lua {
+                    lua.release_tool_preparation(*invocation_id);
+                }
+            }
+        }
+        if self.core.observe_agent_event(ev) {
+            return true;
+        }
         match ev {
+            EngineEvent::NativeSessionState {
+                session_id, active, ..
+            } => {
+                if session_id == &self.session.id {
+                    self.core.native_session = active.then(|| session_id.clone());
+                }
+                true
+            }
+            EngineEvent::NativeModeChanged { mode, .. } => {
+                self.core.config.revision = self.core.config.revision.wrapping_add(1);
+                self.core.config.mode = mode.clone();
+                self.core
+                    .signals
+                    .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
+                true
+            }
             EngineEvent::ToolFinished { invocation_id, .. }
             | EngineEvent::ToolRejected { invocation_id, .. } => {
                 if let Some(lua) = self.lua.as_ref() {
@@ -383,6 +419,17 @@ impl HeadlessApp {
                     tool_name.clone(),
                     args.clone(),
                 );
+                true
+            }
+            EngineEvent::ToolExecutionCancelled {
+                turn_id,
+                invocation_id,
+            } => {
+                if *turn_id == self.next_turn_id.saturating_sub(1) {
+                    if let Some(lua) = self.lua.as_ref() {
+                        lua.cancel_tool_tasks(*invocation_id);
+                    }
+                }
                 true
             }
             EngineEvent::ToolDispatch {
@@ -529,7 +576,7 @@ impl HeadlessApp {
                     lua,
                     &self.session,
                     self.system_prompt.clone(),
-                    tools.clone(),
+                    tools.iter().filter(|tool| tool.headless).cloned().collect(),
                 )
             }) {
                 Ok(compaction) => Some(compaction),
@@ -545,6 +592,13 @@ impl HeadlessApp {
             eprintln!("error: no model is available for headless dispatch");
             return HeadlessExit::Error;
         };
+        if smelt_provider::BackendKind::is_claude_code(&model_target.provider_type) {
+            crate::permissions::claude_code::grant_plan_artifacts(
+                &self.core.permissions,
+                &self.core.sessions.sessions_dir(),
+                &self.session.id,
+            );
+        }
         let fast_mode = self
             .session
             .fast_mode
@@ -564,9 +618,13 @@ impl HeadlessApp {
                 history: protocol::ModelHistorySource::items(history),
                 session_id: self.session.id.clone(),
                 sessions_root: self.core.sessions.sessions_dir(),
+                // One-shot headless history is not persisted.
+                ephemeral: true,
                 persistence: protocol::PersistenceScope::default(),
                 permission_overrides: None,
                 system_prompt: Some(self.system_prompt.clone()),
+                native_prompt: self.native_prompt.clone(),
+                tool_visibility: protocol::ToolVisibility::Headless,
                 tools,
             })));
 
@@ -634,6 +692,33 @@ impl HeadlessApp {
             };
             let ev = match output {
                 engine::EngineOutput::Event(ev) => ev,
+                engine::EngineOutput::HostCall(engine::HostCall::NativeToolEvaluation {
+                    session_id,
+                    cwd,
+                    tool_name,
+                    args,
+                    mode,
+                    overrides,
+                    reply,
+                    ..
+                }) => {
+                    let evaluation = if session_id == self.session.id
+                        && self.core.native_session.as_deref() == Some(&session_id)
+                    {
+                        crate::permissions::claude_code::evaluate(
+                            &self.core.permissions.snapshot(),
+                            Some(&cwd),
+                            mode,
+                            &tool_name,
+                            &args,
+                            overrides.as_ref(),
+                        )
+                    } else {
+                        protocol::ToolEvaluation::deny()
+                    };
+                    let _ = reply.send(evaluation);
+                    continue;
+                }
                 engine::EngineOutput::HostCall(call) => {
                     if let (Some(compaction), Some(lua)) = (&compaction, &self.lua) {
                         if let Err(error) =
@@ -662,7 +747,24 @@ impl HeadlessApp {
                 }
             }
 
-            if self.handle_control_event(&ev) {
+            let (ev, native) = match ev {
+                EngineEvent::NativeSessionEvent { session_id, event }
+                    if session_id == self.session.id
+                        && self.core.native_session.as_deref() == Some(&session_id) =>
+                {
+                    (*event, true)
+                }
+                EngineEvent::NativeSessionEvent { .. } => continue,
+                event => (event, false),
+            };
+            let handled = if native {
+                crate::lua::with_task_scope(crate::lua::TaskScope::NativeSession, || {
+                    self.handle_control_event(&ev)
+                })
+            } else {
+                self.handle_control_event(&ev)
+            };
+            if handled {
                 continue;
             }
 
@@ -792,6 +894,10 @@ impl HeadlessApp {
         }
         if let Some(lua) = &self.lua {
             lua.cancel_turn_tasks();
+            lua.cancel_native_session_tasks();
+        }
+        if let Err(error) = self.core.agents.flush(&self.session.id).await {
+            self.report_turn_error(&format!("agent archive flush failed: {error}"));
         }
 
         if self.sink.format == OutputFormat::Text {
@@ -1095,9 +1201,19 @@ mod tests {
         let enabled = headless_app(true);
         let disabled = headless_app(false);
 
-        let enabled_names: Vec<_> = enabled.tool_defs().iter().map(|t| t.name.clone()).collect();
-        assert!(enabled_names.contains(&"headless_probe".to_string()));
-        assert!(!enabled_names.contains(&"ui_only_probe".to_string()));
+        let registry = enabled.tool_defs();
+        assert!(registry
+            .iter()
+            .any(|tool| tool.name == "headless_probe" && tool.headless));
+        assert!(registry
+            .iter()
+            .any(|tool| tool.name == "ui_only_probe" && !tool.headless));
+        let available: Vec<_> = registry
+            .iter()
+            .filter(|tool| protocol::ToolVisibility::Headless.includes(tool.headless))
+            .collect();
+        assert!(available.iter().any(|tool| tool.name == "headless_probe"));
+        assert!(!available.iter().any(|tool| tool.name == "ui_only_probe"));
         assert!(disabled.tool_defs().is_empty());
     }
 

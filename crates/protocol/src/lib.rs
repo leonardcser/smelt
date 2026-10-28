@@ -8,6 +8,8 @@
 //! - [`usage`]: token usage, turn metadata, per-turn overrides
 //! - [`event`]: the wire contract - `EngineEvent` and `UiCommand`
 
+pub mod agents;
+pub use agents::{AgentCapabilities, AgentInfo, AgentOwner, AgentStatus};
 pub mod content;
 pub mod event;
 pub mod history;
@@ -21,15 +23,15 @@ pub mod usage;
 
 pub use content::{Content, ContentPart};
 pub use event::{
-    AgentProjectContext, AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex, Decision,
-    EngineAskError, EngineAskErrorKind, EngineEvent, InvocationId, ModelHistoryCoordinates,
-    ModelHistoryIndex, ModelHistorySource, PersistenceScope, ReasoningKind, StartTurnInput,
-    StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
-    UiCommand,
+    AgentProjectContext, AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex,
+    ClaudeCodeToolPolicy, Decision, EngineAskError, EngineAskErrorKind, EngineEvent, InvocationId,
+    ModelHistoryCoordinates, ModelHistoryIndex, ModelHistorySource, NativeSystemPrompt,
+    PersistenceScope, ReasoningKind, StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation,
+    ToolExecutionMode, ToolHookFlags, ToolMetadata, ToolVisibility, UiCommand,
 };
 pub use history::{
     apply_history_append, classify_user_history_content, compaction_summary_content,
-    effective_mode_at, history_from_messages, history_item_from_user_content,
+    displayed_tool_name, effective_mode_at, history_from_messages, history_item_from_user_content,
     history_item_message_count, history_to_messages, plan_history_append, replace_last_note_kind,
     transcript_block_kind_matches_history_item, AssistantStep, HistoryAppend, HistoryAppendPlan,
     HistoryAppendPolicy, HistoryAppendResult, HistoryAppendView, HistoryItem, HistoryNote,

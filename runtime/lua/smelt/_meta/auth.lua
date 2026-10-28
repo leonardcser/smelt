@@ -10,7 +10,8 @@ local auth = {}
 
 --- Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
 --- provider-neutral `{ summary, limits }` rows with `{ label, used, limit,
---- resetHint? }`. Only providers with managed quota endpoints support this.
+--- resetHint? }`. Supported for `kimi-code` and `claude-code`, which asks the
+--- installed Claude Code for its account's plan limits.
 ---@type fun(provider: string): { summary: table?, limits: table[] }?, string?
 auth.managed_usage = nil
 

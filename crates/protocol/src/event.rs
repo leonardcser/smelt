@@ -95,6 +95,28 @@ impl InvocationId {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolVisibility {
+    #[default]
+    Interactive,
+    Headless,
+}
+
+impl ToolVisibility {
+    pub fn includes(self, headless_enabled: bool) -> bool {
+        self == Self::Interactive || headless_enabled
+    }
+}
+
+/// Explicit visibility and native-tool replacement for the Claude Code backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeCodeToolPolicy {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub replaces: Vec<String>,
+}
+
 /// A tool defined in Lua. Sent from TUI to engine so the engine
 /// can include it in LLM tool definitions and proxy execution back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +147,8 @@ pub struct ToolDef {
     /// Defaults to true so existing tools remain visible.
     #[serde(default = "default_true")]
     pub headless: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code: Option<ClaudeCodeToolPolicy>,
 }
 
 fn default_true() -> bool {
@@ -197,6 +221,15 @@ pub struct ToolEvaluation {
     pub decision: Decision,
     #[serde(default)]
     pub metadata: ToolMetadata,
+}
+
+impl ToolEvaluation {
+    pub fn deny() -> Self {
+        Self {
+            decision: Decision::Deny,
+            metadata: ToolMetadata::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +366,28 @@ impl CanonicalHistoryDelta {
 ///   ToolStarted → ToolOutput* → ToolFinished
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineEvent {
+    /// A native agent process serving the session across turns. It is
+    /// `working` while a turn is open or native work outlives one; controls
+    /// remain session-scoped while it is `active`.
+    NativeSessionState {
+        session_id: String,
+        active: bool,
+        working: bool,
+    },
+    NativeSessionEvent {
+        session_id: String,
+        event: Box<EngineEvent>,
+    },
+    AgentUpdated {
+        session_id: String,
+        agent: Box<crate::AgentInfo>,
+    },
+    AgentOutput {
+        session_id: String,
+        agent_id: String,
+        generation: u64,
+        event: Box<EngineEvent>,
+    },
     /// Engine has initialized and is ready to accept commands.
     Ready,
 
@@ -410,6 +465,7 @@ pub enum EngineEvent {
     ToolStarted {
         invocation_id: InvocationId,
         call_id: String,
+        /// The name the call is shown under; see `displayed_tool_name`.
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
         called_at_ms: u64,
@@ -450,7 +506,10 @@ pub enum EngineEvent {
         request_id: u64,
         invocation_id: InvocationId,
         call_id: String,
+        /// The name permission rules match.
         tool_name: String,
+        /// The provider that runs this tool natively, when it is not smelt's.
+        provider: Option<String>,
         args: HashMap<String, serde_json::Value>,
         approval_patterns: Vec<String>,
         called_at_ms: u64,
@@ -469,6 +528,9 @@ pub enum EngineEvent {
         #[serde(default)]
         background: bool,
     },
+
+    /// The conversation's context size, counted without an LLM call.
+    ContextTokens { tokens: u32 },
 
     /// LLM call failed, engine is retrying.
     Retrying { delay_ms: u64, attempt: u32 },
@@ -519,6 +581,15 @@ pub enum EngineEvent {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         history: Option<CanonicalHistoryDelta>,
         meta: Option<TurnMeta>,
+    },
+
+    /// A native agent entered a host-visible interaction mode.
+    NativeModeChanged { turn_id: u64, mode: AgentMode },
+
+    /// Cancel host-owned evaluation, execution, and interaction UI for one call.
+    ToolExecutionCancelled {
+        turn_id: u64,
+        invocation_id: InvocationId,
     },
 
     /// Request preparation failed before the provider started.
@@ -787,6 +858,14 @@ pub struct PersistenceScope {
     pub store_revision: u64,
 }
 
+/// Native agent preset (or explicit replacement) and host-owned additions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NativeSystemPrompt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_prompt: Option<String>,
+    pub append: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTurnPayload {
     pub turn_id: u64,
@@ -805,6 +884,9 @@ pub struct StartTurnPayload {
     pub session_id: String,
     /// Root containing canonical lineage databases.
     pub sessions_root: std::path::PathBuf,
+    /// Do not persist agent-backend conversations or session links for this turn.
+    #[serde(default)]
+    pub ephemeral: bool,
     /// Persistence actor coordinates captured when the turn was dispatched.
     #[serde(default)]
     pub persistence: PersistenceScope,
@@ -816,6 +898,13 @@ pub struct StartTurnPayload {
     /// its built-in template.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub system_prompt: Option<String>,
+    /// Backend-specific prompt composition captured with the dispatch snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_prompt: Option<NativeSystemPrompt>,
+    #[serde(default)]
+    pub tool_visibility: ToolVisibility,
+    /// Complete tool registry before frontend availability filtering. Ownership
+    /// is resolved first; execution availability is applied using `tool_visibility`.
     /// Tools registered in Lua. The engine
     /// includes these in the LLM tool definitions and proxies execution
     /// back to the TUI via `ToolDispatch`.
@@ -840,6 +929,10 @@ pub struct AgentProjectContext {
 /// Commands sent from the UI to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UiCommand {
+    StopAgent {
+        session_id: String,
+        agent_id: String,
+    },
     /// Start a new agent turn.
     StartTurn(Box<StartTurnPayload>),
 
@@ -1093,6 +1186,7 @@ mod tests {
             override_core: false,
             hooks: ToolHookFlags::default(),
             headless: true,
+            claude_code: None,
         };
         let v = serde_json::to_value(&t).unwrap();
         assert!(v.get("modes").is_none());
@@ -1150,6 +1244,7 @@ mod tests {
             api_base: "https://example.test".into(),
             api_key: "secret".into(),
             provider_type: "openai".into(),
+            provider: "openai".into(),
             config: crate::ModelConfig {
                 tool_calling: Some(false),
                 input_cost: Some(1.25),
@@ -1172,9 +1267,12 @@ mod tests {
             history: ModelHistorySource::default(),
             session_id: "s".into(),
             sessions_root: std::path::PathBuf::from("/tmp"),
+            ephemeral: false,
             persistence: PersistenceScope::default(),
             permission_overrides: None,
             system_prompt: None,
+            native_prompt: None,
+            tool_visibility: ToolVisibility::Interactive,
             tools: vec![],
         };
         let v = serde_json::to_value(&p).unwrap();
@@ -1194,6 +1292,7 @@ mod tests {
             api_base: "https://ask.example".into(),
             api_key: "ask-secret".into(),
             provider_type: "anthropic".into(),
+            provider: "anthropic".into(),
             config: crate::ModelConfig {
                 max_tokens: Some(2048),
                 supports_reasoning: Some(true),

@@ -35,7 +35,7 @@ function renderAssistant(item, index) {
   const blocks = item.reasoning_blocks || item.reasoning_details || [];
   const invocations = item.invocations || [];
   const toolCalls = item.tool_calls || [];
-  const preview = content || reasoning || invocations.map((tool) => tool.name || "tool").join(", ");
+  const preview = content || reasoning || invocations.map(toolName).join(", ");
   return `<article class="turn role assistant">
     <header><div>${roleTag("assistant")} <span class="turn-index">${turnNumber(index)}</span></div><div class="turn-preview">${escapeHtml(shortText(preview, 120))}</div></header>
     <div class="turn-body">
@@ -73,11 +73,16 @@ function extractReasoningText(value) {
   return "";
 }
 
+function toolName(invocation) {
+  const name = invocation.name || "tool";
+  return invocation.provider ? `${invocation.provider}/${name}` : name;
+}
+
 function renderInvocation(invocation) {
   const result = invocation.result || {};
   const cls = result.is_error ? "error" : "success";
   return `<details class="tool-call ${cls}">
-    <summary>${escapeHtml(invocation.name || "tool")} <span class="muted mono">${escapeHtml(invocation.call_id || "")}</span></summary>
+    <summary>${escapeHtml(toolName(invocation))} <span class="muted mono">${escapeHtml(invocation.call_id || "")}</span></summary>
     <div class="tool-inner">
       <div class="muted">Arguments</div>
       ${renderArgs(invocation.arguments)}

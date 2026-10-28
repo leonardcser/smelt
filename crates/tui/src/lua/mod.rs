@@ -2273,6 +2273,24 @@ mod tests {
     }
 
     #[test]
+    fn default_tool_header_sets_a_provider_namespace_apart() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let (block, state) = tool_block("claude-code/ToolSearch", "found");
+        let BlockLayout::Vbox(items) = render_transcript_block(&rt, &block, Some(&state)) else {
+            panic!("expected tool vbox");
+        };
+        let BlockLayout::RowPrefix { spec, .. } = &items[0] else {
+            panic!("expected prefixed header, got {:?}", items[0]);
+        };
+        let name: Vec<_> = spec.first[1..3]
+            .iter()
+            .map(|span| (span.text.as_str(), span.italic))
+            .collect();
+        assert_eq!(name, [(" claude-code/", true), ("ToolSearch", false)]);
+    }
+
+    #[test]
     fn default_tool_header_refreshes_only_while_elapsed_is_active() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);

@@ -178,7 +178,11 @@ function smelt.confirm.open(handle_id)
   -- the reason input.
   local spacer_leaf = smelt.dialog.content({ text = "", wrap = false })
 
+  local resolved_reg
   local handle = smelt.dialog.new({
+    on_close = function()
+      if resolved_reg then resolved_reg:remove() end
+    end,
     blocks_agent = true,
     max_height   = "fill",
     min_height   = 0,
@@ -219,5 +223,11 @@ function smelt.confirm.open(handle_id)
   reason_leaf:key("esc", function() options_leaf:focus() end)
   reason_leaf:key("enter", function() options_ctrl:submit() end)
 
+  resolved_reg = smelt.events.on("confirm_resolved", function(event)
+    if event.handle_id == handle_id then
+      resolved = true
+      handle:close()
+    end
+  end)
   return handle
 end

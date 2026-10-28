@@ -17,6 +17,7 @@ enum TaskWait {
 pub enum TaskScope {
     App,
     Turn,
+    NativeSession,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub struct ToolInvocationContext {
 
 #[derive(Debug, Clone)]
 pub struct ToolEvaluationRequest {
+    pub scope: TaskScope,
     pub request_id: u64,
     pub invocation_id: protocol::InvocationId,
     pub tool_name: String,
@@ -44,6 +46,10 @@ pub struct ToolEvaluationRequest {
 pub enum TaskCompletion {
     ToolEvaluation(Box<ToolEvaluationRequest>),
     FireAndForget,
+    Child {
+        invocation_id: protocol::InvocationId,
+        invocation: Option<ToolInvocationContext>,
+    },
     /// Slash-command dispatch. `name` carries the cmd name so an error
     /// surfaces as `cmd `<name>`: …` instead of the opaque `task <id>: …`.
     Command {
@@ -58,6 +64,15 @@ pub enum TaskCompletion {
 }
 
 impl TaskCompletion {
+    fn invocation_id(&self) -> Option<protocol::InvocationId> {
+        match self {
+            Self::ToolEvaluation(request) => Some(request.invocation_id),
+            Self::ToolResult { invocation, .. } => Some(invocation.invocation_id),
+            Self::Child { invocation_id, .. } => Some(*invocation_id),
+            _ => None,
+        }
+    }
+
     fn notification_label(&self, task_id: u64) -> String {
         match self {
             TaskCompletion::Command { name, .. } => format!("cmd `{name}`"),
@@ -81,7 +96,11 @@ impl TaskCompletion {
 
     fn tool_invocation(&self) -> Option<ToolInvocationContext> {
         match self {
-            TaskCompletion::ToolResult { invocation, .. } => Some(*invocation),
+            TaskCompletion::ToolResult { invocation, .. }
+            | TaskCompletion::Child {
+                invocation: Some(invocation),
+                ..
+            } => Some(*invocation),
             _ => None,
         }
     }
@@ -251,6 +270,12 @@ impl LuaTaskRuntime {
         }
         self.put_back(task);
         true
+    }
+
+    pub fn cancel_invocation(&mut self, lua: &Lua, invocation_id: protocol::InvocationId) {
+        self.cancel_matching(lua, |task| {
+            task.completion.invocation_id() == Some(invocation_id)
+        });
     }
 
     pub fn cancel_scope(&mut self, lua: &Lua, scope: TaskScope) {
@@ -449,6 +474,8 @@ pub(crate) fn step_task_owned(
     let sent_at_ms = task.completion.command_sent_at_ms();
     let tool_invocation = task.completion.tool_invocation();
     let scope = task.scope;
+    let previous_owner =
+        CURRENT_INVOCATION_OWNER.with(|owner| owner.replace(task.completion.invocation_id()));
     let result: LuaResult<LuaValue> = with_task_context(
         cancel,
         queue_target,
@@ -458,11 +485,14 @@ pub(crate) fn step_task_owned(
         || task.thread.resume(resume_args),
     );
 
+    CURRENT_INVOCATION_OWNER.with(|owner| owner.replace(previous_owner));
     match result {
         Ok(v) => {
             if task.thread.is_finished() {
                 match &task.completion {
-                    TaskCompletion::FireAndForget | TaskCompletion::Command { .. } => {}
+                    TaskCompletion::FireAndForget
+                    | TaskCompletion::Child { .. }
+                    | TaskCompletion::Command { .. } => {}
                     TaskCompletion::ToolEvaluation(request) => {
                         let result = match v {
                             LuaValue::Table(table) => Ok(table),
@@ -541,6 +571,7 @@ pub(crate) fn step_task_owned(
 
 // Thread-local context for the executing coroutine; read by async Lua bindings.
 thread_local! {
+    static CURRENT_INVOCATION_OWNER: RefCell<Option<protocol::InvocationId>> = const { RefCell::new(None) };
     static CURRENT_TASK_CANCEL: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
     static CURRENT_COMMAND_QUEUE_TARGET: RefCell<Option<CommandQueueTarget>> = const { RefCell::new(None) };
     static CURRENT_COMMAND_SENT_AT_MS: RefCell<Option<u64>> = const { RefCell::new(None) };
@@ -601,9 +632,22 @@ pub(crate) fn with_tool_invocation_context<R>(
     result
 }
 
+pub(crate) fn current_invocation_owner() -> Option<protocol::InvocationId> {
+    CURRENT_INVOCATION_OWNER
+        .with(|owner| *owner.borrow())
+        .or_else(|| current_tool_invocation().map(|invocation| invocation.invocation_id))
+}
+
 /// Current model tool invocation; `None` outside a tool callback or middleware.
 pub fn current_tool_invocation() -> Option<ToolInvocationContext> {
     CURRENT_TOOL_INVOCATION.with(|current| *current.borrow())
+}
+
+pub fn with_task_scope<R>(scope: TaskScope, f: impl FnOnce() -> R) -> R {
+    let previous = CURRENT_TASK_SCOPE.with(|current| current.replace(Some(scope)));
+    let result = f();
+    CURRENT_TASK_SCOPE.with(|current| current.replace(previous));
+    result
 }
 
 /// Current task scope; `None` outside the Lua task runtime.

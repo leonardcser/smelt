@@ -26,11 +26,11 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 static MODEL_HISTORY_READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-fn next_request_id() -> u64 {
+pub(crate) fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-fn next_invocation_id() -> protocol::InvocationId {
+pub(crate) fn next_invocation_id() -> protocol::InvocationId {
     protocol::InvocationId::new(NEXT_INVOCATION_ID.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -168,6 +168,22 @@ pub(crate) async fn engine_task(
         };
         match cmd {
             UiCommand::StartTurn(payload) => {
+                if smelt_provider::BackendKind::is_claude_code(&payload.model_target.provider_type)
+                {
+                    crate::claude_code::run_session(
+                        &mut config,
+                        dispatcher.as_ref(),
+                        *payload,
+                        &mut cmd_rx,
+                        &event_tx,
+                        &host_tx,
+                        &client,
+                        &bg_cancel,
+                        &mut pending_command,
+                    )
+                    .await;
+                    continue;
+                }
                 let protocol::StartTurnPayload {
                     turn_id,
                     input,
@@ -179,11 +195,18 @@ pub(crate) async fn engine_task(
                     history,
                     session_id,
                     sessions_root,
+                    ephemeral: _,
                     persistence,
                     permission_overrides,
                     system_prompt: tui_system_prompt,
+                    native_prompt: _,
+                    tool_visibility,
                     tools,
                 } = *payload;
+                let tools = tools
+                    .into_iter()
+                    .filter(|tool| tool_visibility.includes(tool.headless))
+                    .collect();
                 let preparation_cancel = CancellationToken::new();
                 let load = prepare_model_history(
                     history,
@@ -304,9 +327,9 @@ pub(crate) async fn engine_task(
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
 }
 
-struct LoadedModelHistory {
-    items: Vec<HistoryItem>,
-    coordinates: protocol::ModelHistoryCoordinates,
+pub(crate) struct LoadedModelHistory {
+    pub(crate) items: Vec<HistoryItem>,
+    pub(crate) coordinates: protocol::ModelHistoryCoordinates,
 }
 
 enum ModelHistoryPreparation {
@@ -323,7 +346,7 @@ fn install_preparation_contexts(config: &mut EngineConfig, commands: Vec<UiComma
     }
 }
 
-async fn prepare_model_history(
+pub(crate) async fn prepare_model_history(
     source: protocol::ModelHistorySource,
     sessions_root: std::path::PathBuf,
     session_id: String,
@@ -606,6 +629,10 @@ fn spawn_engine_ask(
     host_tx: &crate::HostCallSender,
     cancel: CancellationToken,
 ) {
+    if smelt_provider::BackendKind::is_claude_code(&task.target.provider_type) {
+        crate::claude_code::spawn_ask(config, task, event_tx, cancel);
+        return;
+    }
     let AskTask {
         id,
         system,
@@ -956,6 +983,7 @@ fn pair_invocations_in_order(
                 result,
                 elapsed_ms,
                 called_at_ms: Some(call.called_at_ms),
+                provider: None,
             }
         })
         .collect()
@@ -2363,6 +2391,7 @@ impl<'a> Turn<'a> {
                         invocation_id: call.invocation_id,
                         call_id: call.tc.id.clone(),
                         tool_name: call.tc.function.name.clone(),
+                        provider: None,
                         args: call.args.clone(),
                         approval_patterns: metadata.approval_patterns,
                         called_at_ms: call.called_at_ms,
@@ -2597,6 +2626,7 @@ impl<'a> Turn<'a> {
                                             invocation_id: call.invocation_id,
                                             call_id: call.tc.id.clone(),
                                             tool_name: call.tc.function.name.clone(),
+                                            provider: None,
                                             args: call.args.clone(),
                                             approval_patterns: metadata.approval_patterns,
                                             called_at_ms: call.called_at_ms,
@@ -3724,8 +3754,11 @@ mod tests {
                 history,
                 session_id: "preparation-fixture".into(),
                 sessions_root: root.path().to_path_buf(),
+                ephemeral: false,
                 persistence: protocol::PersistenceScope::default(),
                 permission_overrides: None,
+                native_prompt: None,
+                tool_visibility: protocol::ToolVisibility::Interactive,
                 system_prompt: Some("synthetic system".into()),
                 tools: Vec::new(),
             })
@@ -4079,6 +4112,7 @@ mod tests {
             api_base: "https://x/".into(),
             api_key: "k".into(),
             provider_type: "openai".into(),
+            provider: "openai".into(),
             config: ModelConfig::default(),
         }
     }
@@ -4347,6 +4381,7 @@ mod tests {
             override_core: false,
             hooks: protocol::ToolHookFlags::default(),
             headless: true,
+            claude_code: None,
         };
         let mut turn = Turn {
             provider,
@@ -4490,8 +4525,11 @@ mod tests {
             ),
             session_id: "s".into(),
             sessions_root: std::path::PathBuf::from("/tmp"),
+            ephemeral: false,
             persistence: protocol::PersistenceScope::default(),
             permission_overrides: None,
+            native_prompt: None,
+            tool_visibility: protocol::ToolVisibility::Interactive,
             system_prompt: Some("sys".into()),
             tools: Vec::new(),
         })));
@@ -4594,6 +4632,7 @@ mod tests {
         let (tx, mut rx) = test_event_channel();
         let target = ModelTarget {
             provider_type: "openai-compatible".into(),
+            provider: "openai-compatible".into(),
             config: ModelConfig::default(),
             ..model_target()
         };

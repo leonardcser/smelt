@@ -31,6 +31,8 @@ impl FrontendKind {
 }
 
 pub struct Core {
+    pub native_session: Option<String>,
+    pub agents: crate::agents::Agents,
     pub config: RuntimeState,
     pub startup_overrides: StartupOverrides,
     /// Identity of the committed Lua generation. Candidate callbacks compare
@@ -99,6 +101,8 @@ impl Core {
         let clipboard =
             crate::Clipboard::new(clipboard_sink(frontend, config.settings.system_clipboard));
         Self {
+            native_session: None,
+            agents: crate::agents::Agents::default(),
             config,
             startup_overrides,
             lua_generation: 0,

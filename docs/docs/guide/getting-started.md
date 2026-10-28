@@ -1,6 +1,6 @@
 ---
 title: "Install and get started"
-description: "Install smelt on Linux, macOS or Windows, log in with ChatGPT, GitHub Copilot or Kimi Code or use any OpenAI-compatible endpoint, and run your first prompt."
+description: "Install smelt on Linux, macOS or Windows, log in with ChatGPT, GitHub Copilot or Kimi Code, run your installed Claude Code, or use any OpenAI-compatible endpoint, and run your first prompt."
 ---
 
 # Getting started
@@ -54,6 +54,7 @@ description: "Install smelt on Linux, macOS or Windows, log in with ChatGPT, Git
 Just run `smelt`. The first launch opens a provider wizard. Subscription
 providers log in with OAuth and can be used immediately; API-key providers write
 a starter `~/.config/smelt/init.lua` (`%APPDATA%\smelt\init.lua` on Windows).
+With Claude Code installed, there is no wizard: its models are ready to use.
 
 You can also skip the wizard and configure everything from the command line:
 
@@ -69,7 +70,8 @@ See the [CLI Reference](../reference/cli.md) for every flag.
 ### Subscription providers
 
 These use your existing subscription and require no API key. Run `smelt auth`
-once, pick the provider, then start smelt with no extra flags:
+once, pick the provider, then start smelt with no extra flags. Claude Code uses
+its own login instead:
 
 === ":fontawesome-brands-openai: ChatGPT (Codex)"
 
@@ -77,6 +79,19 @@ once, pick the provider, then start smelt with no extra flags:
     smelt auth                # one-time browser or device-code login
     smelt
     ```
+
+=== ":simple-anthropic: Claude Code"
+
+    ```bash
+    claude auth login         # one-time login, in Claude Code
+    smelt
+    ```
+
+    When the `claude` executable is installed, `/model` lists every model it
+    offers, such as `claude-code/opus` or `claude-code/claude-opus-4-8`. smelt
+    runs Claude Code itself as the agent, with its own tools and context
+    management, behind smelt's interface and permissions. See the
+    [Claude Code guide](claude-code.md).
 
 === ":simple-moonshotai: Kimi Code"
 

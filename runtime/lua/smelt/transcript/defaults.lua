@@ -378,10 +378,15 @@ end
 
 function tool_header_prefix(block, hl, tail, has_summary)
   local tool_name = block.name or "tool"
-  local spans = {
-    { text = "*", hl = hl },
-    { text = " " .. tool_name, dim = true },
-  }
+  local spans = { { text = "*", hl = hl } }
+  -- A provider's native tools arrive as `provider/Name`; smelt names never hold `/`.
+  local provider, name = tool_name:match("^([^/]+/)(.+)$")
+  if provider then
+    spans[#spans + 1] = { text = " " .. provider, dim = true, italic = true }
+    spans[#spans + 1] = { text = name, dim = true }
+  else
+    spans[#spans + 1] = { text = " " .. tool_name, dim = true }
+  end
   if tail then spans[#spans + 1] = { text = " ", selectable = has_summary } end
   return spans, display_width("* " .. tool_name .. " ")
 end

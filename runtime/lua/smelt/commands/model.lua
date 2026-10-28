@@ -17,14 +17,18 @@ local function build_items()
   return out
 end
 
-local model_keys = {}
-for _, m in ipairs(models_list()) do
-  model_keys[#model_keys + 1] = m.key
+-- Read on each completion: providers can list their models after startup.
+local function model_keys()
+  local keys = {}
+  for _, m in ipairs(models_list()) do
+    keys[#keys + 1] = m.key
+  end
+  return keys
 end
 
 smelt.cmd.register_picker("model", {
   desc     = "switch model",
-  args     = model_keys,
+  args_fn  = model_keys,
   items    = build_items,
   apply    = function(arg) smelt.model.set(arg) end,
   prepare  = function()

@@ -1428,6 +1428,7 @@ fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
         invocation_id: protocol::InvocationId::new(request_id),
         call_id: format!("call-{request_id}"),
         tool_name: "test_tool".into(),
+        provider: None,
         args: std::collections::HashMap::new(),
         tool_paths: Vec::new(),
         tool_paths_error: None,
@@ -1496,12 +1497,40 @@ fn request_bash_permission(
             request_id,
             call_id: format!("call-{request_id}"),
             tool_name: "bash".into(),
+            provider: None,
             args: bash_permission_args(command),
             approval_patterns: approval_patterns.into_iter().map(str::to_string).collect(),
             called_at_ms: 0,
             summary: protocol::StyledLines::from_plain(command.to_string()),
         },
     ));
+}
+
+#[test]
+fn native_tool_permission_shows_its_provider_and_matches_rules_by_raw_name() {
+    let mut app = TestApp::builder().build();
+    app.start_submitted_turn("search");
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(7),
+            request_id: 7,
+            call_id: "call-7".into(),
+            tool_name: "ToolSearch".into(),
+            provider: Some("claude-code".into()),
+            args: std::collections::HashMap::from([("query".into(), serde_json::json!("x"))]),
+            approval_patterns: Vec::new(),
+            called_at_ms: 0,
+            summary: protocol::StyledLines::from_plain("x"),
+        },
+    ));
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("claude-code/ToolSearch"),
+        "dialog and block show the provider:\n{frame}"
+    );
+    let handle_id = app.first_pending_confirm().expect("permission dialog");
+    let confirm = app.core_probe().confirms.get(handle_id).expect("confirm");
+    assert_eq!(confirm.req.tool_name, "ToolSearch");
 }
 
 struct GitWorktreeFixture {
@@ -2109,6 +2138,7 @@ fn canonical_history_rebuild_waits_for_pending_permission_tool() {
             request_id: 12,
             call_id: "call-12".into(),
             tool_name: "test_tool".into(),
+            provider: None,
             args: std::collections::HashMap::new(),
             approval_patterns: Vec::new(),
             called_at_ms: 0,
@@ -2385,6 +2415,7 @@ fn switch_cwd_outside_workspace_requires_destination_permission() {
             request_id: 91,
             call_id: "switch-cwd".into(),
             tool_name: "switch_cwd".into(),
+            provider: None,
             args: args.clone(),
             approval_patterns: Vec::new(),
             called_at_ms: 0,
@@ -2474,6 +2505,7 @@ fn switch_cwd_outside_repository_offers_repository_scoped_destination_grant() {
             request_id: 99,
             call_id: "switch-outside-repository".into(),
             tool_name: "switch_cwd".into(),
+            provider: None,
             args,
             approval_patterns: Vec::new(),
             called_at_ms: 0,
@@ -2638,6 +2670,7 @@ fn lua_tool_paths_are_scoped_and_preserved_for_permission_rechecks() {
             request_id: 92,
             call_id: "call-91".into(),
             tool_name: "scoped_path_probe".into(),
+            provider: None,
             args: std::collections::HashMap::new(),
             approval_patterns: Vec::new(),
             called_at_ms: 0,
@@ -2711,6 +2744,7 @@ fn tool_path_callback_failure_fails_closed_without_opening_a_dialog() {
             request_id: 96,
             call_id: "broken-path-callback".into(),
             tool_name: "broken_path_callback".into(),
+            provider: None,
             args: std::collections::HashMap::new(),
             approval_patterns: Vec::new(),
             called_at_ms: 0,

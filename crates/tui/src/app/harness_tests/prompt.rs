@@ -1012,6 +1012,98 @@ fn stale_prompt_prediction_response_after_submit_is_ignored() {
     assert_eq!(app.placeholder_text(prompt), None);
 }
 
+#[test]
+fn prompt_bar_names_the_model_the_provider_runs() {
+    let mut app = TestApp::builder().build();
+    let current = app.core_probe().config.available_models[0].clone();
+    let claude_code = |name: &str, resolved: &str| {
+        let mut model = current.clone();
+        model.key = format!("claude-code/{name}");
+        model.provider_name = "claude-code".into();
+        model.model_name = name.into();
+        model.provider_type = "claude-code".into();
+        model.catalog.resolved = Some(resolved.into());
+        model
+    };
+    let haiku = claude_code("haiku", "claude-haiku-5-5");
+    let opus = claude_code("claude-opus-4-8", "claude-opus-4-8");
+    let mut codex = current.clone();
+    codex.key = "codex/gpt-6.1-sol".into();
+    codex.provider_name = "codex".into();
+    codex.model_name = "gpt-6.1-sol".into();
+    codex.display_name = Some("GPT-6.1-Sol".into());
+    codex.provider_type = "codex".into();
+    app.set_available_models(vec![current, haiku, opus, codex]);
+
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("test/test-model"), "{frame}");
+    app.apply_model("claude-code/haiku", false);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("claude-code/haiku-5-5"), "{frame}");
+    app.apply_model("claude-code/claude-opus-4-8", false);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("claude-code/opus-4-8"), "{frame}");
+    app.apply_model("codex/gpt-6.1-sol", false);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("codex/gpt-6.1-sol"), "{frame}");
+}
+
+#[test]
+fn predictions_respect_the_setting() {
+    let mut app = TestApp::builder().build();
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "How should I debug this failing test?",
+    )));
+    let asks_after = |app: &mut TestApp, setup: &str| {
+        assert!(app.run_lua(setup));
+        publish_turn_end(app);
+        engine_ask_ids(app.drain_engine_sends()).len()
+    };
+
+    assert_eq!(
+        asks_after(&mut app, "smelt.settings.show_prediction = false"),
+        0
+    );
+    assert_eq!(
+        asks_after(&mut app, "smelt.settings.show_prediction = true"),
+        1
+    );
+}
+
+#[test]
+fn predictions_quote_the_conversation_to_predict_the_user() {
+    let mut app = TestApp::builder().build();
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+        "add a verbose flag",
+    )));
+    app.session_append_history(protocol::HistoryItem::assistant(
+        protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("Added. Should I document it?")),
+            None,
+            Vec::new(),
+        ),
+    ));
+    publish_turn_end(&mut app);
+    let messages = app
+        .drain_engine_sends()
+        .into_iter()
+        .find_map(|cmd| match cmd {
+            protocol::UiCommand::EngineAsk { messages, .. } => Some(messages),
+            _ => None,
+        })
+        .expect("prediction ask");
+    // A request ending on the assistant would continue the assistant.
+    let [message] = messages.as_slice() else {
+        panic!("{messages:?}")
+    };
+    assert_eq!(message.role, protocol::Role::User);
+    let text = message.content.as_ref().unwrap().text_content();
+    assert!(
+        text.contains("Developer: add a verbose flag\n\nAssistant: Added. Should I document it?"),
+        "{text}"
+    );
+}
+
 fn scrollable_transcript_app() -> TestApp {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 16);

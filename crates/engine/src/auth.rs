@@ -283,7 +283,7 @@ pub async fn authenticated_request(
 pub async fn managed_usage(
     provider: AuthProvider,
     client: &reqwest::Client,
-) -> Result<smelt_provider::kimi_code::ManagedUsageReport, String> {
+) -> Result<smelt_provider::usage::ManagedUsageReport, String> {
     match provider {
         AuthProvider::KimiCode => provider::kimi_code::managed_usage(client).await,
         AuthProvider::Codex | AuthProvider::Copilot => {

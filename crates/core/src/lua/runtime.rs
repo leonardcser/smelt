@@ -226,20 +226,7 @@ impl BootstrapMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolVisibility {
-    Interactive,
-    Headless,
-}
-
-impl ToolVisibility {
-    fn includes(self, headless: bool) -> bool {
-        match self {
-            Self::Interactive => true,
-            Self::Headless => headless,
-        }
-    }
-}
+pub use protocol::ToolVisibility;
 
 #[derive(Clone)]
 struct LuaLaunchInputs {
@@ -1985,16 +1972,33 @@ impl LuaRuntime {
         rt.cancel_all(&self.lua);
     }
 
+    pub fn cancel_tool_tasks(&self, invocation_id: protocol::InvocationId) {
+        self.release_tool_preparation(invocation_id);
+        if let Ok(mut tasks) = self.shared.tasks.lock() {
+            tasks.cancel_invocation(&self.lua, invocation_id);
+        }
+        if let Some(sender) = self.shared.wakeup_tx.get() {
+            let _ = sender.send(());
+        }
+    }
+
     pub fn cancel_turn_tasks(&self) {
+        self.cancel_task_scope(super::TaskScope::Turn);
+    }
+
+    pub fn cancel_native_session_tasks(&self) {
+        self.cancel_task_scope(super::TaskScope::NativeSession);
+    }
+
+    fn cancel_task_scope(&self, scope: super::TaskScope) {
         self.shared
             .tool_preparations
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clear();
-        let Ok(mut rt) = self.shared.tasks.lock() else {
-            return;
-        };
-        rt.cancel_scope(&self.lua, super::task::TaskScope::Turn);
+            .retain(|_, (owner, _)| *owner != scope);
+        if let Ok(mut rt) = self.shared.tasks.lock() {
+            rt.cancel_scope(&self.lua, scope);
+        }
     }
 
     pub fn set_wakeup_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<()>) {
@@ -2153,6 +2157,10 @@ impl LuaRuntime {
                     hooks,
                     override_core,
                     headless,
+                    claude_code: meta_table
+                        .get::<String>("claude_code_json")
+                        .ok()
+                        .and_then(|json| serde_json::from_str(&json).ok()),
                 });
             }
         }
@@ -2541,7 +2549,7 @@ impl LuaRuntime {
                     function,
                     initial,
                     TaskCompletion::ToolEvaluation(Box::new(request.clone())),
-                    super::TaskScope::Turn,
+                    request.scope,
                     deadline,
                 )
                 .map_err(|error| error.to_string())?;
@@ -2605,7 +2613,7 @@ impl LuaRuntime {
                         .tool_preparations
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .insert(request.invocation_id, prepared);
+                        .insert(request.invocation_id, (request.scope, prepared));
                 }
             }
             Err(error) => metadata.preflight_error = Some(format!("tool preparation: {error}")),
@@ -2631,7 +2639,7 @@ impl LuaRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&invocation_id)
-            .cloned()
+            .map(|(_, prepared)| prepared.clone())
     }
 
     pub fn transcript_renderer_generation(&self) -> u64 {
@@ -3009,7 +3017,7 @@ impl LuaRuntime {
                     invocation,
                     call_id: call_id.to_string(),
                 },
-                super::task::TaskScope::Turn,
+                super::current_task_scope().unwrap_or(super::TaskScope::Turn),
                 deadline,
             ) {
                 Ok(id) => id,

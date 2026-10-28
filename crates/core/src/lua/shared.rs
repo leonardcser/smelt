@@ -221,7 +221,8 @@ pub struct LuaShared {
     /// its backing buffer remains authoritative between runs.
     pub win_renderers: Mutex<HashMap<u64, RegisteredWinRenderer>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
-    pub(crate) tool_preparations: Mutex<HashMap<protocol::InvocationId, mlua::Table>>,
+    pub(crate) tool_preparations:
+        Mutex<HashMap<protocol::InvocationId, (super::task::TaskScope, mlua::Table)>>,
     pub transcript_renderer: Mutex<Option<LuaHandle>>,
     pub transcript_renderer_generation: AtomicU64,
     pub transcript_renderer_cache_key: AtomicU64,

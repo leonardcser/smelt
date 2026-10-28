@@ -563,10 +563,23 @@ local function session_status()
   return smelt.session.status and smelt.session.status() or {}
 end
 
+-- Name the model the provider says it runs, so an alias shows its version:
+-- `claude-code/haiku` reads `claude-code/haiku-5-5`. A leading word the
+-- provider name already says is dropped: `claude-code/claude-opus-4-8` reads
+-- `claude-code/opus-4-8`.
+local function model_label(key, resolved)
+  local provider = key:match("^([^/]+)/")
+  if not provider or not resolved or resolved == "" then return key end
+  local word = provider:match("^[^-]+") .. "-"
+  if resolved:sub(1, #word) == word then resolved = resolved:sub(#word + 1) end
+  return provider .. "/" .. resolved
+end
+
 builtin.model = function()
   local status = session_status()
   local model = status.model or smelt.model.current()
   if not model or model == "" then return nil end
+  model = model_label(model, status.resolved)
   local items = {}
   if status.fast and status.fast.active then
     items[#items + 1] = {

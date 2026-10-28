@@ -82,6 +82,19 @@ impl PreparedRequestMessages {
 /// carry their originating turn, which the host validates before running hooks.
 /// They fall back to their default when the host drops `reply` without sending.
 pub enum HostCall {
+    /// Evaluate a native Claude Code tool against the frontend's permission policy.
+    /// The CLI remains responsible for execution; this callback never dispatches it.
+    NativeToolEvaluation {
+        turn_id: u64,
+        session_id: String,
+        cwd: std::path::PathBuf,
+        tool_name: String,
+        args: std::collections::HashMap<String, serde_json::Value>,
+        mode: protocol::AgentMode,
+        overrides: Option<protocol::PermissionOverrides>,
+        reply: oneshot::Sender<protocol::ToolEvaluation>,
+    },
+
     /// Run `smelt.provider.middleware{on_response=...}` hooks against
     /// the assembled assistant message. `Some(msg)` replaces it before
     /// it's pushed to history; `None` keeps the original.

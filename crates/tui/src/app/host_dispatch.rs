@@ -343,6 +343,33 @@ impl TuiApp {
 
     pub(crate) fn dispatch_host_call(&mut self, call: HostCall) {
         match call {
+            HostCall::NativeToolEvaluation {
+                turn_id: _,
+                session_id,
+                cwd,
+                tool_name,
+                args,
+                mode,
+                overrides,
+                reply,
+            } => {
+                let evaluation = if self.core.native_session.as_deref() == Some(&session_id)
+                    && session_id == self.conversation.session().id
+                    && !self.session_is_read_only()
+                {
+                    smelt_core::permissions::claude_code::evaluate(
+                        &self.active_permissions(),
+                        Some(&cwd),
+                        mode,
+                        &tool_name,
+                        &args,
+                        overrides.as_ref(),
+                    )
+                } else {
+                    protocol::ToolEvaluation::deny()
+                };
+                let _ = reply.send(evaluation);
+            }
             HostCall::ProviderResponse {
                 turn_id,
                 message,
@@ -1158,6 +1185,7 @@ mod tests {
                     result: ToolOutcome::new("test output\n".repeat(30_000), false, None),
                     elapsed_ms: None,
                     called_at_ms: None,
+                    provider: None,
                 }],
             )),
             HistoryItem::assistant(AssistantStep::terminal(
@@ -1205,6 +1233,7 @@ mod tests {
                     result: ToolOutcome::new("test output\n".repeat(30_000), false, None),
                     elapsed_ms: None,
                     called_at_ms: None,
+                    provider: None,
                 }],
             )),
         ];
@@ -1239,6 +1268,7 @@ mod tests {
                     result: ToolOutcome::new("hello\n".repeat(100), false, None),
                     elapsed_ms: None,
                     called_at_ms: None,
+                    provider: None,
                 }],
             )),
         ];

@@ -10,6 +10,7 @@ Source: https://github.com/leonardcser/smelt
 
 - [Getting started](https://smeltagent.dev/guide/getting-started/): install, log in with `smelt auth`, first prompt
 - [Common workflows](https://smeltagent.dev/guide/workflows/): attach files, review changes, run hands-off, resume sessions
+- [Claude Code](https://smeltagent.dev/guide/claude-code/): run the installed Claude Code executable as a backend
 - [Headless and CI](https://smeltagent.dev/guide/headless/): run without the TUI in scripts and pipelines
 - [Benchmarks](https://smeltagent.dev/guide/benchmarks/): Terminal-Bench 2.1 resource use against five other agents
 - [Troubleshooting](https://smeltagent.dev/guide/troubleshooting/): common problems and fixes

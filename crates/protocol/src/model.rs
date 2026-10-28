@@ -12,6 +12,8 @@ pub struct ModelTarget {
     pub api_base: String,
     pub api_key: String,
     pub provider_type: String,
+    /// Configured provider name, the prefix of the model's key.
+    pub provider: String,
     pub config: ModelConfig,
 }
 
@@ -22,6 +24,7 @@ impl std::fmt::Debug for ModelTarget {
             .field("api_base", &self.api_base)
             .field("api_key", &"[REDACTED]")
             .field("provider_type", &self.provider_type)
+            .field("provider", &self.provider)
             .field("config", &self.config)
             .finish()
     }
@@ -146,6 +149,10 @@ pub struct ModelCatalogMetadata {
     pub default_reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub supported_reasoning_efforts: Vec<ReasoningEffort>,
+    /// The model this entry currently runs, as the provider names it, when
+    /// the entry is an alias the provider resolves.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub resolved: Option<String>,
 }
 
 impl Default for ModelCatalogMetadata {
@@ -155,6 +162,7 @@ impl Default for ModelCatalogMetadata {
             show_in_picker: true,
             default_reasoning_effort: None,
             supported_reasoning_efforts: Vec::new(),
+            resolved: None,
         }
     }
 }
@@ -215,6 +223,7 @@ mod tests {
             api_base: "https://example.test/v1".into(),
             api_key: "secret-key".into(),
             provider_type: "openai".into(),
+            provider: "openai".into(),
             config: ModelConfig {
                 temperature: Some(0.4),
                 tool_calling: Some(false),
@@ -288,6 +297,7 @@ mod tests {
             api_base: "https://example.test".into(),
             api_key: "do-not-print-this".into(),
             provider_type: "openai".into(),
+            provider: "openai".into(),
             config: ModelConfig::default(),
         };
 

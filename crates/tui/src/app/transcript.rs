@@ -6481,6 +6481,14 @@ impl TranscriptDocument {
         self.content.transcript.push(block);
     }
 
+    pub(crate) fn push_tool_call(
+        &mut self,
+        block: Block,
+        state: smelt_core::transcript_model::ToolState,
+    ) {
+        self.content.transcript.push_tool_call(block, state);
+    }
+
     pub(crate) fn insert_before(&mut self, before: BlockId, block: Block) -> Option<BlockId> {
         self.content.transcript.insert_before(before, block)
     }

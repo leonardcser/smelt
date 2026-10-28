@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 
 use rand::RngExt;
 use smelt_provider::kimi_code::{self as kimi_protocol, KimiHeaders, KimiRequestError};
-use smelt_provider::kimi_code::{KimiCodeModelInfo, KimiCodeTokens, ManagedUsageReport};
+use smelt_provider::kimi_code::{KimiCodeModelInfo, KimiCodeTokens};
+use smelt_provider::usage::ManagedUsageReport;
 
 use smelt_provider::unix_now;
 

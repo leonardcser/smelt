@@ -138,6 +138,10 @@ impl ManagedProviderModels {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedModels {
     providers: BTreeMap<AuthProvider, ManagedProviderModels>,
+    /// Claude Code needs no smelt login; its executable being installed is enough.
+    claude_code_installed: bool,
+    /// The models Claude Code lists, cached between runs.
+    claude_code_models: Vec<ModelMetadata>,
 }
 
 impl ManagedModels {
@@ -152,7 +156,16 @@ impl ManagedModels {
                 )
             })
             .collect();
-        Self { providers }
+        let claude_code_installed = engine::claude_code_installed();
+        Self {
+            providers,
+            claude_code_installed,
+            claude_code_models: if claude_code_installed {
+                engine::claude_code_cached_models()
+            } else {
+                Vec::new()
+            },
+        }
     }
 
     pub fn empty() -> Self {
@@ -180,7 +193,11 @@ impl ManagedModels {
                 )
             })
             .collect();
-        Self { providers }
+        Self {
+            providers,
+            claude_code_installed: false,
+            claude_code_models: Vec::new(),
+        }
     }
 
     pub fn provider(&self, provider: AuthProvider) -> &ManagedProviderModels {
@@ -421,7 +438,29 @@ impl ManagedModels {
         true
     }
 
-    pub fn inject_oauth_providers(&self, config: &mut Config) {
+    /// Adds the providers smelt can use without registration: logged-in OAuth
+    /// providers and an installed Claude Code.
+    pub fn inject_providers(&self, config: &mut Config) {
+        if self.claude_code_installed && !config.has_claude_code_provider() {
+            config.providers.push(crate::config::ProviderConfig {
+                name: Some("claude-code".into()),
+                provider_type: Some("claude-code".into()),
+                api_base: None,
+                api_key_env: None,
+                // Until Claude Code has listed its models, offer its aliases.
+                models: if self.claude_code_models.is_empty() {
+                    ["sonnet", "opus", "haiku"]
+                        .into_iter()
+                        .map(|model| protocol::ModelConfig {
+                            name: Some(model.into()),
+                            ..Default::default()
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            });
+        }
         for provider in Self::provider_kinds() {
             if !self.provider(provider).authenticated || has_provider(config, provider) {
                 continue;
@@ -458,6 +497,7 @@ impl ManagedModels {
     }
 
     pub fn inject(&self, config: &Config, models: &mut Vec<ResolvedModel>) {
+        config.inject_claude_code_models(models, &self.claude_code_models);
         for provider in Self::provider_kinds() {
             let state = self.provider(provider);
             if !state.desired || !state.authenticated {
@@ -469,6 +509,19 @@ impl ManagedModels {
                 AuthProvider::KimiCode => config.inject_kimi_code_models(models, &state.models),
             }
         }
+    }
+
+    pub fn claude_code_installed(&self) -> bool {
+        self.claude_code_installed
+    }
+
+    /// Replaces the Claude Code models. Returns whether they changed.
+    pub fn set_claude_code_models(&mut self, models: Vec<ModelMetadata>) -> bool {
+        if self.claude_code_models == models {
+            return false;
+        }
+        self.claude_code_models = models;
+        true
     }
 
     pub fn provider_kinds() -> [AuthProvider; 3] {
@@ -510,6 +563,67 @@ mod tests {
             input_modalities: None,
             catalog: protocol::ModelCatalogMetadata::default(),
         }
+    }
+
+    #[test]
+    fn installed_claude_code_is_offered_unless_already_registered() {
+        let mut managed = ManagedModels::empty();
+        let mut config = Config::default();
+        managed.inject_providers(&mut config);
+        assert!(!config.has_claude_code_provider());
+
+        managed.claude_code_installed = true;
+        managed.inject_providers(&mut config);
+        let models: Vec<_> = config.resolve_models();
+        let names: Vec<_> = models.iter().map(|model| model.key.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "claude-code/sonnet",
+                "claude-code/opus",
+                "claude-code/haiku"
+            ]
+        );
+
+        managed.inject_providers(&mut config);
+        assert_eq!(config.providers.len(), 1);
+    }
+
+    #[test]
+    fn claude_code_models_replace_its_aliases_once_listed() {
+        let mut managed = ManagedModels::empty();
+        managed.claude_code_installed = true;
+        let mut opus = metadata("opus");
+        opus.display_name = Some("Opus 5.5".into());
+        opus.catalog.resolved = Some("claude-opus-5-5".into());
+        assert!(managed.set_claude_code_models(vec![opus, metadata("claude-opus-4-8")]));
+        assert!(!managed.set_claude_code_models(managed.claude_code_models.clone()));
+
+        let mut config = Config::default();
+        managed.inject_providers(&mut config);
+        let mut models = config.resolve_models();
+        managed.inject(&config, &mut models);
+        let listed: Vec<_> = models
+            .iter()
+            .map(|model| {
+                (
+                    model.key.as_str(),
+                    model.display_name.as_deref(),
+                    model.catalog.resolved.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "claude-code/opus",
+                    Some("Opus 5.5"),
+                    Some("claude-opus-5-5")
+                ),
+                ("claude-code/claude-opus-4-8", None, None),
+            ]
+        );
     }
 
     fn fresh(models: Vec<ModelMetadata>) -> ManagedModelsRefreshOutcome {

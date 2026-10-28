@@ -8,6 +8,12 @@ use std::time::Duration;
 
 use super::stream_animation::StreamKind;
 
+#[derive(Default)]
+pub(super) struct NativeSessionUi {
+    pending: Vec<PendingTool>,
+    busy: Option<super::BusyToken>,
+}
+
 struct EngineEventResult {
     control: SessionControl,
     assistant_output_started: bool,
@@ -142,6 +148,16 @@ impl TuiApp {
         if pending
             .iter()
             .any(|pending| pending.invocation_id == invocation_id)
+            || self
+                .core
+                .agents
+                .runs(&self.conversation.session().id)
+                .any(|agent| {
+                    agent
+                        .live_tools
+                        .iter()
+                        .any(|(id, _, _)| *id == invocation_id)
+                })
         {
             return;
         }
@@ -400,6 +416,67 @@ impl TuiApp {
         ev: EngineEvent,
         arrived_at: std::time::Instant,
     ) -> bool {
+        let ev = match ev {
+            EngineEvent::NativeSessionState {
+                session_id,
+                active,
+                working,
+            } => {
+                if !active {
+                    if self.core.native_session.as_deref() == Some(&session_id) {
+                        self.end_native_session();
+                        self.start_next_queued_input_if_idle();
+                    }
+                    return true;
+                }
+                if session_id != self.conversation.session().id {
+                    self.core.engine.send(protocol::UiCommand::Cancel);
+                    return true;
+                }
+                self.core.native_session = Some(session_id);
+                if !working {
+                    if let Some(busy) = self.native_ui.busy.take() {
+                        busy.release();
+                    }
+                    self.start_next_queued_input_if_idle();
+                } else if self.native_ui.busy.is_none() {
+                    // Native background agents can outlive the turn; the indicator
+                    // keeps working, on the turn's timer, until they settle.
+                    let elapsed = self.working.elapsed().unwrap_or_default();
+                    let since = std::time::Instant::now()
+                        .checked_sub(elapsed)
+                        .unwrap_or_else(std::time::Instant::now);
+                    self.native_ui.busy =
+                        Some(self.busy_stack.push_token_since("working".into(), since));
+                }
+                return true;
+            }
+            EngineEvent::NativeSessionEvent { session_id, event } => {
+                if self.core.native_session.as_deref() == Some(&session_id)
+                    && session_id == self.conversation.session().id
+                    && !self.session_is_read_only()
+                {
+                    smelt_core::lua::with_task_scope(
+                        smelt_core::lua::TaskScope::NativeSession,
+                        || {
+                            self.dispatch_native_session_event(*event, arrived_at);
+                        },
+                    );
+                }
+                return true;
+            }
+            event => event,
+        };
+        if let EngineEvent::AgentOutput { event, .. } = &ev {
+            if let EngineEvent::ToolFinished { invocation_id, .. }
+            | EngineEvent::ToolRejected { invocation_id, .. } = event.as_ref()
+            {
+                self.lua.release_tool_preparation(*invocation_id);
+            }
+        }
+        if self.core.observe_agent_event(&ev) {
+            return true;
+        }
         if !self.conversation.is_active() {
             self.handle_idle_engine_event(ev, arrived_at);
             return true;
@@ -431,6 +508,59 @@ impl TuiApp {
             SessionControl::Error { kind, retry_at_ms } => {
                 self.discard_turn(crate::app::TurnEnd::Errored { kind, retry_at_ms });
                 false
+            }
+        }
+    }
+
+    /// Forgets the retained native session and releases everything scoped to it.
+    pub(super) fn end_native_session(&mut self) {
+        self.core.native_session = None;
+        if let Some(busy) = self.native_ui.busy.take() {
+            busy.release();
+        }
+        self.native_ui.pending.clear();
+        self.lua.cancel_native_session_tasks();
+    }
+
+    fn dispatch_native_session_event(
+        &mut self,
+        event: EngineEvent,
+        arrived_at: std::time::Instant,
+    ) {
+        if self.conversation.is_active()
+            && matches!(
+                event,
+                EngineEvent::RequestPermission { .. }
+                    | EngineEvent::ToolEvaluationRequest { .. }
+                    | EngineEvent::ToolDispatch { .. }
+                    | EngineEvent::ToolExecutionCancelled { .. }
+            )
+        {
+            self.dispatch_engine_event_now_at(event, arrived_at);
+            return;
+        }
+        match event {
+            EngineEvent::HistoryAppended { delta, .. } | EngineEvent::Steered { delta, .. } => {
+                self.flush_streaming_thinking();
+                self.flush_streaming_text();
+                self.append_engine_history_items(delta.first_index.get(), delta.items);
+                self.save_session();
+            }
+            EngineEvent::NativeModeChanged { mode, .. } => self.sync_native_mode(mode),
+            EngineEvent::TurnError { message, .. } => self.notify_turn_error_sticky(message),
+            EngineEvent::TurnComplete { .. }
+            | EngineEvent::NativeSessionState { .. }
+            | EngineEvent::NativeSessionEvent { .. } => {}
+            event => {
+                let turn_id = match &event {
+                    EngineEvent::ToolExecutionCancelled { turn_id, .. } => *turn_id,
+                    _ => 0,
+                };
+                let mut pending = std::mem::take(&mut self.native_ui.pending);
+                let result = self.handle_engine_event(event, turn_id, 0, &mut pending, arrived_at);
+                let permissions = self.active_permissions();
+                self.dispatch_scoped_control(result.control, &permissions, &mut pending);
+                self.native_ui.pending = pending;
             }
         }
     }
@@ -486,7 +616,11 @@ impl TuiApp {
         )
         .then(|| self.conversation.response_draft_boundary());
         let control = match ev {
-            EngineEvent::Ready => SessionControl::Continue,
+            EngineEvent::Ready
+            | EngineEvent::NativeSessionState { .. }
+            | EngineEvent::NativeSessionEvent { .. }
+            | EngineEvent::AgentUpdated { .. }
+            | EngineEvent::AgentOutput { .. } => SessionControl::Continue,
             EngineEvent::TokenUsage {
                 usage,
                 tokens_per_sec,
@@ -529,6 +663,13 @@ impl TuiApp {
                 );
                 SessionControl::Continue
             }
+            EngineEvent::ContextTokens { tokens } => {
+                self.record_visible_token_usage(protocol::TokenUsage {
+                    context_tokens: Some(tokens),
+                    ..Default::default()
+                });
+                SessionControl::Continue
+            }
             EngineEvent::ToolOutput {
                 invocation_id,
                 line,
@@ -554,6 +695,12 @@ impl TuiApp {
                         }
                     }
                     self.save_session();
+                }
+                SessionControl::Continue
+            }
+            EngineEvent::NativeModeChanged { turn_id, mode } => {
+                if self.active_agent_turn_id() == Some(turn_id) {
+                    self.sync_native_mode(mode);
                 }
                 SessionControl::Continue
             }
@@ -794,6 +941,7 @@ impl TuiApp {
                 invocation_id,
                 call_id,
                 tool_name,
+                provider,
                 args,
                 approval_patterns,
                 called_at_ms,
@@ -814,7 +962,7 @@ impl TuiApp {
                     ToolStart {
                         invocation_id,
                         call_id: call_id.clone(),
-                        name: tool_name.clone(),
+                        name: protocol::displayed_tool_name(provider.as_deref(), &tool_name),
                         summary: summary.clone(),
                         args: args.clone(),
                         preview_output: None,
@@ -825,6 +973,7 @@ impl TuiApp {
                     invocation_id,
                     call_id,
                     tool_name,
+                    provider,
                     args,
                     tool_paths,
                     tool_paths_error,
@@ -975,6 +1124,25 @@ impl TuiApp {
                 kind: None,
                 retry_at_ms: None,
             },
+            EngineEvent::ToolExecutionCancelled {
+                turn_id: cancelled_turn,
+                invocation_id,
+            } => {
+                if cancelled_turn == turn_id {
+                    self.lua.cancel_tool_tasks(invocation_id);
+                    self.overlays.cancel_deferred_confirm(invocation_id);
+                    for handle_id in self.core.confirms.cancel_invocation(invocation_id) {
+                        self.core.signals.emit_dyn(
+                            "confirm_resolved",
+                            std::rc::Rc::new(smelt_core::signals::ConfirmResolved {
+                                handle_id,
+                                decision: "cancelled".into(),
+                            }),
+                        );
+                    }
+                }
+                SessionControl::Continue
+            }
             EngineEvent::ToolDispatch {
                 request_id,
                 invocation_id,
@@ -995,6 +1163,8 @@ impl TuiApp {
                 mode,
             } => {
                 let request = smelt_core::lua::ToolEvaluationRequest {
+                    scope: smelt_core::lua::current_task_scope()
+                        .unwrap_or(smelt_core::lua::TaskScope::Turn),
                     request_id,
                     invocation_id,
                     tool_name,

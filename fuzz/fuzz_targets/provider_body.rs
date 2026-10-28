@@ -50,7 +50,10 @@ fn run(input: Input) {
     } else {
         &input.model
     };
-    let provider = ProviderKind::from_config(&input.provider_type);
+    let Some(provider) = smelt_provider::BackendKind::from_config(&input.provider_type).http()
+    else {
+        return;
+    };
     let origin = fuzz_chat_reasoning_origin(provider, &input.api_base, model);
     let fields = [
         "reasoning_content",
@@ -345,21 +348,25 @@ fn assert_provider_helpers(input: &Input) {
         "API base normalization is not idempotent"
     );
 
-    let configured = ProviderKind::from_config_and_url(&input.provider_type, &input.api_base);
-    let normalized_kind = ProviderKind::from_config_and_url(&input.provider_type, &normalized);
+    let configured =
+        smelt_provider::BackendKind::from_config_and_url(&input.provider_type, &input.api_base);
+    let normalized_kind =
+        smelt_provider::BackendKind::from_config_and_url(&input.provider_type, &normalized);
     assert_eq!(
         configured, normalized_kind,
         "API normalization changed provider routing"
     );
-    let auth = fuzz_api_key_auth(configured, &input.api_key);
-    if input.api_key.is_empty() {
-        assert!(auth.is_none(), "empty API key produced auth configuration");
-    } else {
-        assert_eq!(
-            auth,
-            configured.descriptor().api_key_auth,
-            "API key auth diverged from provider descriptor"
-        );
+    if let Some(configured) = configured.http() {
+        let auth = fuzz_api_key_auth(configured, &input.api_key);
+        if input.api_key.is_empty() {
+            assert!(auth.is_none(), "empty API key produced auth configuration");
+        } else {
+            assert_eq!(
+                auth,
+                configured.descriptor().api_key_auth,
+                "API key auth diverged from provider descriptor"
+            );
+        }
     }
 
     let _ = fuzz_parse_catalog(&input.catalog_json);

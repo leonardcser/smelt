@@ -4461,6 +4461,7 @@ mod tests {
                 ),
                 elapsed_ms: None,
                 called_at_ms: None,
+                provider: None,
             }],
         ));
         let mut command = initial_commit(&session_id);

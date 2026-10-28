@@ -3,6 +3,74 @@ use crate::{
     ProviderStreamEvent,
 };
 
+/// Execution owner. Only HTTP backends have a wire protocol and host authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Http(ProviderKind),
+    ClaudeCode,
+}
+
+impl BackendKind {
+    pub fn from_config(provider_type: &str) -> Self {
+        Self::from_config_and_url(provider_type, "")
+    }
+
+    /// Whether a provider type is driven by the installed Claude Code agent.
+    pub fn is_claude_code(provider_type: &str) -> bool {
+        Self::from_config(provider_type) == Self::ClaudeCode
+    }
+
+    pub fn from_config_and_url(provider_type: &str, api_base: &str) -> Self {
+        if provider_type == "claude-code" {
+            Self::ClaudeCode
+        } else {
+            Self::Http(ProviderKind::from_config_and_url(provider_type, api_base))
+        }
+    }
+
+    pub fn http(self) -> Option<ProviderKind> {
+        match self {
+            Self::Http(kind) => Some(kind),
+            Self::ClaudeCode => None,
+        }
+    }
+
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Http(kind) => kind.as_config_str(),
+            Self::ClaudeCode => "claude-code",
+        }
+    }
+
+    pub fn supports_mid_turn_reasoning_changes(self) -> bool {
+        self.http()
+            .is_some_and(ProviderKind::supports_mid_turn_reasoning_changes)
+    }
+
+    /// The model this backend runs auxiliary requests on, such as titles and
+    /// predictions, when they name none: Claude Code's `haiku` alias, the
+    /// latest Haiku, and Codex's `luna`. Others use the conversation's model.
+    pub fn auxiliary_model(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("haiku"),
+            Self::Http(ProviderKind::Codex) => Some("luna"),
+            Self::Http(_) => None,
+        }
+    }
+
+    pub fn supports_image_tool_results(self) -> bool {
+        match self {
+            Self::Http(kind) => kind.descriptor().supports_image_tool_results(),
+            Self::ClaudeCode => true,
+        }
+    }
+
+    pub fn supports_pdf_tool_results(self) -> bool {
+        self.http()
+            .is_some_and(|kind| kind.descriptor().supports_pdf_tool_results())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     OpenAiCompatible,
@@ -15,7 +83,7 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub fn from_config(provider_type: &str) -> Self {
+    fn from_config(provider_type: &str) -> Self {
         match provider_type {
             "openai" => Self::OpenAi,
             "codex" => Self::Codex,
@@ -27,7 +95,7 @@ impl ProviderKind {
         }
     }
 
-    pub fn from_config_and_url(provider_type: &str, api_base: &str) -> Self {
+    fn from_config_and_url(provider_type: &str, api_base: &str) -> Self {
         if is_kimi_code_api_base(api_base) {
             Self::KimiCode
         } else {
@@ -269,6 +337,22 @@ mod tests {
             ProviderKind::from_config("unknown"),
             ProviderKind::OpenAiCompatible
         );
+    }
+
+    #[test]
+    fn claude_code_identity_never_falls_back_to_http() {
+        assert_eq!(
+            BackendKind::from_config("claude-code"),
+            BackendKind::ClaudeCode
+        );
+        assert_eq!(
+            BackendKind::from_config_and_url("claude-code", "https://api.kimi.com/coding"),
+            BackendKind::ClaudeCode
+        );
+        assert!(BackendKind::ClaudeCode.http().is_none());
+        assert!(BackendKind::ClaudeCode.supports_image_tool_results());
+        assert!(!BackendKind::ClaudeCode.supports_pdf_tool_results());
+        assert!(!BackendKind::ClaudeCode.supports_mid_turn_reasoning_changes());
     }
 
     #[test]

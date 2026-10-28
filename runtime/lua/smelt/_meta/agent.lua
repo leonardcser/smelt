@@ -12,4 +12,12 @@ local agent = {}
 ---@type fun(text: string): smelt.Reg
 agent.add_system_prompt = nil
 
+--- List observed agents for a parent session. Records expose owner, parent_agent_id, typed status, supported controls and the child transcript session_id. Observation does not enable smelt-owned delegation.
+---@type fun(parent_id: string): any
+agent.runs = nil
+
+--- Request cancellation from an observed agent's execution owner. Returns false for unknown, terminal or unsupported agents; never interrupts the parent as a fallback.
+---@type fun(parent_id: string, id: string): boolean
+agent.stop = nil
+
 return agent

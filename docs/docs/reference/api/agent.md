@@ -21,3 +21,19 @@ Types: [`smelt.Reg`](types.md#smeltreg)
 
 Append concise guidance to the system prompt while this Lua runtime is active. Intended for plugins that register tools needing extra usage policy. Returns a `Reg` whose `:remove()` removes the fragment.
 
+## `smelt.agent.runs`
+
+```lua
+fun(parent_id: string): any
+```
+
+List observed agents for a parent session. Records expose owner, parent_agent_id, typed status, supported controls and the child transcript session_id. Observation does not enable smelt-owned delegation.
+
+## `smelt.agent.stop`
+
+```lua
+fun(parent_id: string, id: string): boolean
+```
+
+Request cancellation from an observed agent's execution owner. Returns false for unknown, terminal or unsupported agents; never interrupts the parent as a fallback.
+

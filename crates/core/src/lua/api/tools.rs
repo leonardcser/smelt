@@ -67,6 +67,17 @@ pub struct LuaToolPermissionDefaults {
     pub modes: std::collections::HashMap<String, LuaDecision>,
 }
 
+/// Claude Code visibility and native capability ownership for a registered tool.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.tools.ClaudeCodePolicy")]
+pub struct LuaClaudeCodePolicy {
+    /// Set false to hide this tool from Claude Code. Custom tools are visible by default.
+    pub enabled: Option<bool>,
+    /// Native tool names replaced by this tool, for example `{ "Bash" }`. Replaced native tools are disabled, not merely discouraged in the prompt.
+    #[lua(default)]
+    pub replaces: Vec<String>,
+}
+
 /// Plugin tool definition passed to `smelt.tools.register`.
 ///
 /// `execute` is required; the remaining hooks are optional and are
@@ -146,6 +157,8 @@ pub struct LuaToolDef {
     /// Replace a core tool of the same name (advanced).
     #[lua(rename = "override", default)]
     pub override_core: bool,
+    /// Claude Code backend policy. Bundled file/shell/search tools are hidden by default; use `replaces` to choose one owner for a native capability. Other backends are unaffected.
+    pub claude_code: Option<LuaClaudeCodePolicy>,
 }
 
 fn tool_parameters_json(lua: &Lua, params: &mlua::Table) -> LuaResult<serde_json::Value> {
@@ -279,6 +292,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 meta.set("hook_draft_preview", has_draft_preview)?;
                 meta.set("headless", def.headless.unwrap_or(true))?;
                 meta.set("override_core", def.override_core)?;
+                if let Some(policy) = def.claude_code {
+                    let policy = protocol::ClaudeCodeToolPolicy { enabled: policy.enabled.unwrap_or(true), replaces: policy.replaces };
+                    meta.set("claude_code_json", serde_json::to_string(&policy).map_err(mlua::Error::external)?)?;
+                }
                 if let Some(watchdog_timeout_ms) = def.watchdog_timeout_ms {
                     meta.set("watchdog_timeout_ms", watchdog_timeout_ms)?;
                 }

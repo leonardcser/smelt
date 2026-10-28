@@ -13,6 +13,7 @@ nav = [
   { "Guide" = [
     { "Getting started" = "guide/getting-started.md" },
     { "Common workflows" = "guide/workflows.md" },
+    { "Claude Code" = "guide/claude-code.md" },
     { "Headless and CI" = "guide/headless.md" },
     { "Benchmarks" = "guide/benchmarks.md" },
     { "Troubleshooting" = "guide/troubleshooting.md" },

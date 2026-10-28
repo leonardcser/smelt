@@ -507,6 +507,7 @@ pub fn parse_models_response(data: &serde_json::Value) -> Result<Vec<CodexModel>
                         show_in_picker,
                         default_reasoning_effort,
                         supported_reasoning_efforts,
+                        resolved: None,
                     },
                 },
             ))

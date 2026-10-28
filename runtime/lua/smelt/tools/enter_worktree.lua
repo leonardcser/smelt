@@ -19,6 +19,7 @@ smelt.tools.register({
   effect = "write",
   execution_mode = "sequential",
   headless = false,
+  claude_code = { replaces = { "EnterWorktree" } },
   parameters = {
     type = "object",
     properties = {

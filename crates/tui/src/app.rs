@@ -322,6 +322,7 @@ pub struct TuiApp {
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     pub(crate) working: smelt_core::working::WorkingState,
     host_work: host_dispatch::HostWorkState,
+    native_ui: engine_events::NativeSessionUi,
     /// Resolved viewport rectangles read by mouse hit-testing and scroll estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
     /// Inputs that produced the retained root layout tree.
@@ -513,6 +514,7 @@ pub enum AppEvent {
         auth_revision: u64,
         desired_revision: u64,
     },
+    ClaudeCodeModelsListed(Result<Vec<protocol::ModelMetadata>, String>),
     ManagedAuthChecked {
         snapshots: Vec<(
             engine::auth::AuthProvider,
@@ -789,7 +791,7 @@ pub use smelt_core::signals::WorkBusyEntry;
 
 impl BusyStack {
     pub(crate) fn push(&mut self, label: String) -> u64 {
-        self.push_entry(label, false).0
+        self.push_entry(label, false, Instant::now()).0
     }
 
     pub(crate) fn push_token(&mut self, label: String) -> BusyToken {
@@ -800,12 +802,22 @@ impl BusyStack {
         self.push_token_with_context_state(label, true)
     }
 
+    /// Holds work that continues an earlier timer: when nothing else is busy,
+    /// elapsed time counts from `since` instead of now.
+    pub(crate) fn push_token_since(&mut self, label: String, since: Instant) -> BusyToken {
+        let (id, state) = self.push_entry(label, false, since);
+        BusyToken {
+            state: std::rc::Rc::downgrade(&state),
+            id,
+        }
+    }
+
     fn push_token_with_context_state(
         &mut self,
         label: String,
         context_recalculating: bool,
     ) -> BusyToken {
-        let (id, state) = self.push_entry(label, context_recalculating);
+        let (id, state) = self.push_entry(label, context_recalculating, Instant::now());
         BusyToken {
             state: std::rc::Rc::downgrade(&state),
             id,
@@ -816,12 +828,13 @@ impl BusyStack {
         &mut self,
         label: String,
         context_recalculating: bool,
+        since: Instant,
     ) -> (u64, std::rc::Rc<std::cell::RefCell<BusyStackState>>) {
         let mut state = self.state.borrow_mut();
         state.next_id += 1;
         let id = state.next_id;
         if state.entries.is_empty() {
-            state.since = Some(Instant::now());
+            state.since = Some(since);
         }
         state.entries.push(BusyStackEntry {
             id,
@@ -1021,6 +1034,12 @@ pub(crate) struct DeferredDialogs {
 impl DeferredDialogs {
     pub(crate) fn defer_confirm(&mut self, request: Box<ConfirmRequest>) {
         self.queue.push_back(DeferredDialog::Confirm(request));
+    }
+
+    pub(crate) fn cancel_invocation(&mut self, invocation_id: protocol::InvocationId) {
+        self.queue.retain(|dialog| match dialog {
+            DeferredDialog::Confirm(request) => request.invocation_id != invocation_id,
+        });
     }
 
     pub(crate) fn pop(&mut self) -> Option<DeferredDialog> {
@@ -1286,7 +1305,7 @@ impl TuiApp {
 
     pub(crate) fn active_provider_supports_mid_turn_reasoning_changes(&self) -> bool {
         self.core.config.active_model().is_some_and(|model| {
-            smelt_provider::ProviderKind::from_config_and_url(&model.provider_type, &model.api_base)
+            smelt_provider::BackendKind::from_config_and_url(&model.provider_type, &model.api_base)
                 .supports_mid_turn_reasoning_changes()
         })
     }
@@ -2121,6 +2140,7 @@ impl TuiApp {
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             working: smelt_core::working::WorkingState::new(working_clock),
             host_work: host_dispatch::HostWorkState::default(),
+            native_ui: engine_events::NativeSessionUi::default(),
             layout: crate::content::layout::LayoutState::default(),
             main_layout_inputs: None,
             platform,
@@ -2159,8 +2179,28 @@ impl TuiApp {
         }
     }
 
-    /// Returns the system prompt without mutating app state.
+    pub(crate) fn native_system_prompt(&self) -> protocol::NativeSystemPrompt {
+        engine::build_native_system_prompt(
+            self.prompt_inputs.system_prompt_override.as_deref(),
+            self.prompt_inputs.instructions.as_deref(),
+            self.core
+                .skills
+                .as_ref()
+                .and_then(|skills| skills.native_prompt_section()),
+            &self.lua.system_prompt_fragments(),
+        )
+    }
+
+    /// Returns the frontend-owned prompt text; native presets stay CLI-owned.
     pub(crate) fn assemble_system_prompt(&self) -> String {
+        if self
+            .core
+            .config
+            .active_model()
+            .is_some_and(|model| smelt_provider::BackendKind::is_claude_code(&model.provider_type))
+        {
+            return self.native_system_prompt().append;
+        }
         let mut prompt = engine::assemble_system_prompt(
             self.prompt_inputs.system_prompt_override.as_deref(),
             engine::SystemPromptBehavior::Interactive,
@@ -2943,6 +2983,9 @@ impl TuiApp {
                 auth_revision,
                 desired_revision,
             } => self.handle_managed_models_retry(provider, auth_revision, desired_revision),
+            AppEvent::ClaudeCodeModelsListed(models) => {
+                self.handle_claude_code_models_listed(models)
+            }
             AppEvent::ManagedAuthChecked { snapshots } => {
                 self.handle_managed_auth_checked(snapshots)
             }
@@ -3586,6 +3629,7 @@ impl TuiApp {
         let mut pre_first_frame_startup = smelt_perf::perf::begin("startup:pre_first_frame");
         let mut first_frame_pending = true;
         self.submit_managed_model_refreshes();
+        self.list_claude_code_models();
         self.request_context_window(ContextWindowRequest::Reconcile);
 
         if !self.session_is_empty() {
@@ -4064,6 +4108,15 @@ impl TuiApp {
         }
 
         let persistence_error = self.finalize_graceful_shutdown().err();
+        let session_id = self.conversation.session().id.clone();
+        let archive_error = tokio::time::timeout(
+            crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+            self.core.agents.flush(&session_id),
+        )
+        .await
+        .unwrap_or_else(|_| Err("agent archive flush deadline elapsed".into()))
+        .err();
+        let persistence_error = persistence_error.or(archive_error);
 
         // Stop the stdin reader before releasing terminal modes so no background
         // thread can keep consuming bytes after the TUI gives the terminal back.

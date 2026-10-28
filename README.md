@@ -79,6 +79,19 @@ smelt auth                          # one-time login
 smelt                               # provider auto-detected from credentials
 ```
 
+**Claude Code** (runs your installed Claude Code agent):
+
+```bash
+claude auth login                   # authenticate through Claude Code
+smelt                               # claude-code models appear in the picker
+```
+
+Claude Code owns authentication, the agent loop, native tools, and context
+management. smelt provides the terminal UI, permissions, and additional tools
+through MCP. It does not copy subscription credentials or impersonate Claude
+Code's API requests. See [the Claude Code backend guide](docs/docs/guide/claude-code.md)
+for configuration, session behavior, and limitations.
+
 **API-key providers** (any OpenAI-compatible endpoint):
 
 ```bash

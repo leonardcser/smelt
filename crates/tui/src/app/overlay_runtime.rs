@@ -441,6 +441,10 @@ impl OverlayRuntime {
         self.deferred_dialogs.pop()
     }
 
+    pub(crate) fn cancel_deferred_confirm(&mut self, invocation_id: protocol::InvocationId) {
+        self.deferred_dialogs.cancel_invocation(invocation_id);
+    }
+
     pub(crate) fn clear_deferred_dialogs(&mut self) {
         self.deferred_dialogs.clear();
     }

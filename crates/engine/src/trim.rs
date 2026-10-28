@@ -216,6 +216,7 @@ mod tests {
             result: protocol::ToolOutcome::new(content, false, None),
             elapsed_ms: None,
             called_at_ms: None,
+            provider: None,
         }
     }
 

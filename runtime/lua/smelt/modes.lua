@@ -128,6 +128,11 @@ smelt.mode.register({
   },
 })
 
+local plan = require("smelt.plan_policy")
+smelt.mode.register(plan.mode)
+-- Bare core runtimes load the registry before frontend permission bindings exist.
+if smelt.permissions then smelt.permissions.extend(plan.rules) end
+
 -- Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`,
 -- wrapping at the end. No-op when the cycle is empty.
 ---@tier ui_host

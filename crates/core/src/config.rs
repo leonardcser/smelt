@@ -394,6 +394,7 @@ impl ResolvedModel {
             api_base: self.api_base.clone(),
             api_key,
             provider_type: self.provider_type.clone(),
+            provider: self.provider_name.clone(),
             config: self.config.clone(),
         }
     }
@@ -613,6 +614,9 @@ impl Config {
                     resolved_model.catalog.supported_reasoning_efforts =
                         model.catalog.supported_reasoning_efforts.clone();
                 }
+                if resolved_model.catalog.resolved.is_none() {
+                    resolved_model.catalog.resolved = model.catalog.resolved.clone();
+                }
                 if resolved_model.config.input_modalities.is_none() {
                     resolved_model.config.input_modalities = model.input_modalities.clone();
                 }
@@ -660,6 +664,30 @@ impl Config {
             return;
         };
         self.inject_dynamic_models(resolved, provider, "codex", models);
+    }
+
+    /// Adds the models Claude Code lists and their metadata.
+    pub fn inject_claude_code_models(
+        &self,
+        resolved: &mut Vec<ResolvedModel>,
+        models: &[DynamicModel],
+    ) {
+        let Some(provider) = self.providers.iter().find(|p| {
+            smelt_provider::BackendKind::is_claude_code(
+                p.provider_type.as_deref().unwrap_or_default(),
+            )
+        }) else {
+            return;
+        };
+        self.inject_dynamic_models(resolved, provider, "claude-code", models);
+    }
+
+    pub fn has_claude_code_provider(&self) -> bool {
+        self.providers.iter().any(|p| {
+            smelt_provider::BackendKind::is_claude_code(
+                p.provider_type.as_deref().unwrap_or_default(),
+            )
+        })
     }
 
     /// Returns true if the config has a codex provider.
@@ -823,6 +851,7 @@ mod tests {
                             protocol::ReasoningEffort::Low,
                             protocol::ReasoningEffort::High,
                         ],
+                        resolved: None,
                     },
                 },
             ],
@@ -885,6 +914,7 @@ mod tests {
                             protocol::ReasoningEffort::Max,
                             protocol::ReasoningEffort::Ultra,
                         ],
+                        resolved: None,
                     },
                 },
                 DynamicModel {

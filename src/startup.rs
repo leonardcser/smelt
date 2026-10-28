@@ -302,7 +302,7 @@ fn resolve_inputs(
     validate_auth: bool,
 ) -> ResolvedStartup {
     let mut managed_models = smelt_core::ManagedModels::load(&cfg, 0);
-    managed_models.inject_oauth_providers(&mut cfg);
+    managed_models.inject_providers(&mut cfg);
     managed_models.sync_desired(&cfg, 0);
     let mut available_models = cfg.resolve_models();
     managed_models.inject(&cfg, &mut available_models);

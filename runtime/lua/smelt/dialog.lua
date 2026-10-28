@@ -988,10 +988,15 @@ function smelt.dialog.open(opts)
 
   local _, leaves, layout, height = build_dialog(opts)
   local task_id = smelt.task.alloc()
-  setup_lifecycle(opts, leaves, layout, height, function(value)
+  local resolve = setup_lifecycle(opts, leaves, layout, height, function(value)
     smelt.task.resume(task_id, value)
   end)
-  return smelt.task.wait(task_id, { interactive = true })
+  local ok, result = pcall(smelt.task.wait, task_id, { interactive = true })
+  if not ok then
+    resolve(nil)
+    error(result, 0)
+  end
+  return result
 end
 
 -- ── Picker preset ─────────────────────────────────────────────────────

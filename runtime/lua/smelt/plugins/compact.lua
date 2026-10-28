@@ -8,8 +8,10 @@ local compact = require("smelt.compact").new({
 	notify = smelt.notify,
 	log = smelt.log.info,
 	ask = smelt.engine.ask_inherited,
+	-- A summary carries the whole conversation forward, so it defaults to the
+	-- main model rather than the cheaper one other helpers use.
 	preferred_model = function()
-		return smelt.model.preferred("compact")
+		return smelt.model.preferred("compact") or smelt.model.current()
 	end,
 	messages = smelt.session.model_messages,
 	context_tokens = smelt.session.context_tokens,

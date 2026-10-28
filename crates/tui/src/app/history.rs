@@ -936,11 +936,12 @@ fn push_assistant_blocks(
             inv.result.display_content.clone(),
         );
         let elapsed_ms = inv.elapsed_ms;
-        let summary = summary_resolver.resolve(&inv.name, &args);
+        let name = inv.displayed_name();
+        let summary = summary_resolver.resolve(&name, &args);
         transcript.push_hydrated_tool_block_with_origin(
             Block::ToolCall {
                 call_id: inv.call_id.clone(),
-                name: inv.name.clone(),
+                name,
                 summary,
                 args: args.into(),
             },
@@ -1026,6 +1027,7 @@ mod tests {
                     result: protocol::ToolOutcome::new("done".into(), false, None),
                     elapsed_ms: None,
                     called_at_ms: Some(1_742_573_823_000),
+                    provider: None,
                 }],
             ),
         ));
@@ -1079,6 +1081,7 @@ mod tests {
                     ),
                     elapsed_ms: Some(42),
                     called_at_ms: Some(1234),
+                    provider: None,
                 }],
             )),
             HistoryItem::note(protocol::HistoryNote::process_status("visible process")),
@@ -1727,6 +1730,7 @@ impl TuiApp {
         } else if self.turn_submission_is_pending() {
             self.discard_turn(crate::app::TurnEnd::Cancelled);
         }
+        self.cancel_native_session();
         self.lua.cancel_tasks();
     }
 
