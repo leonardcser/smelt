@@ -39,6 +39,9 @@ SELECTOR_CSS = "stylesheets/versions.css"
 # The landing page, relative to `docs/`. It belongs to the site, not to any one
 # version, so every build takes it from main, with the replays it embeds.
 HOME = ("overrides/home.html", "docs/index.md", "docs/javascripts/home.js")
+# Files fetched at the site root by tools that don't run the 404 redirect,
+# like `curl | sh` and LLM crawlers, taken from main.
+ROOT = ("install.sh", "llms.txt")
 
 
 def git(*args: str) -> bytes:
@@ -112,6 +115,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         if not build(checkout(None, Path(tmp) / "main"), "main", strict=True):
             sys.exit("the docs on main must build")
+        for name in ROOT:
+            shutil.copy(SITE / "main" / name, SITE / name)
         versions.append({"version": "main", "title": "main (unreleased)", "aliases": []})
         latest = None
         for tag in tags:
