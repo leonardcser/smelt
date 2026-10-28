@@ -382,6 +382,7 @@ fn native_shells_join_the_process_list_and_stop_through_their_agent() {
         ("claude-code:task", "npm run dev", "ready\n", true)
     );
     assert!(elapsed >= 65);
+    assert!(app.render_to_frame().text().contains("1 proc"));
     // Looking at its output asks for the latest.
     assert!(sent(&mut app, |command| matches!(command,
         protocol::UiCommand::ReadNativeProcess { session_id: to, id } if *to == session_id && id == "claude-code:task")));
@@ -401,4 +402,5 @@ fn native_shells_join_the_process_list_and_stop_through_their_agent() {
     }));
     let rows: i64 = app.eval_lua("return #smelt.process.list()").unwrap();
     assert_eq!(rows, 0);
+    assert!(!app.render_to_frame().text().contains("proc"));
 }

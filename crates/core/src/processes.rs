@@ -18,6 +18,11 @@ impl Core {
         processes
     }
 
+    /// How many processes `processes` lists.
+    pub fn running_process_count(&self) -> usize {
+        self.jobs.running_count() + self.native_processes.len()
+    }
+
     /// The output of process `id` without draining it. A native shell command
     /// shows what it printed by its last read and is read again.
     pub fn process_output(&self, id: &str) -> Result<JobOutput, String> {

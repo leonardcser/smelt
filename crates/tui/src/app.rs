@@ -2345,7 +2345,7 @@ impl TuiApp {
             self.core.config.settings.terminal_title,
         );
 
-        let running_procs = self.core.jobs.running_count() as u32;
+        let running_procs = self.core.running_process_count() as u32;
         self.core
             .signals
             .publish_if_changed("running_procs", running_procs);
