@@ -908,10 +908,10 @@ mod tests {
         (head.to_string(), body.to_string())
     }
 
-    fn assert_status(head: &str, expected: &str) {
+    fn assert_status(head: &str, body: &str, expected: &str) {
         assert!(
             head.contains(expected),
-            "expected {expected}, got response headers: {head}"
+            "expected {expected}, got response headers: {head}\nbody: {body}"
         );
     }
 
@@ -997,11 +997,11 @@ mod tests {
     async fn serves_index_html_and_static_assets() {
         let state = IsolatedState::new();
         let (head, body) = fetch(&state.sessions, "/").await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         assert!(body.contains("Smelt Inspector"));
 
         let (head, body) = fetch(&state.sessions, "/assets/style.css").await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         assert!(head.contains("text/css"));
         assert!(!body.is_empty());
     }
@@ -1025,7 +1025,7 @@ mod tests {
         );
 
         let (head, body) = fetch(&state.sessions, "/api/sessions?limit=1").await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         assert!(head.contains("application/json"));
         let first: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
@@ -1040,7 +1040,7 @@ mod tests {
         );
 
         let (head, body) = fetch(&state.sessions, &next_path).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let second: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(second["sessions"].as_array().unwrap().len(), 1);
         assert_eq!(second["sessions"][0]["id"], OLDER_SESSION_ID);
@@ -1068,7 +1068,7 @@ mod tests {
             &format!("/api/sessions/{NEWER_SESSION_ID}"),
         )
         .await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(detail["id"], NEWER_SESSION_ID);
         assert_eq!(detail["title"], "canonical");
@@ -1079,7 +1079,7 @@ mod tests {
             &format!("/api/sessions/{NEWER_SESSION_ID}/summary"),
         )
         .await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(summary["id"], NEWER_SESSION_ID);
         assert_eq!(summary["project"], "canonical");
@@ -1110,7 +1110,7 @@ mod tests {
             &format!("/api/sessions/{session_prefix}/requests"),
         )
         .await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(requests.as_array().unwrap().len(), 1);
         assert_eq!(requests[0]["id"], attempt_id);
@@ -1125,7 +1125,7 @@ mod tests {
             &format!("/api/sessions/{session_prefix}/requests/{attempt_id}"),
         )
         .await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(payload["body"]["prompt"], "hello");
         assert_eq!(payload["response"]["raw"]["id"], "response-1");
@@ -1163,13 +1163,13 @@ mod tests {
         drop(conn);
         let prefix = format!("/api/sessions/{NEWER_SESSION_ID}");
         let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests")).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(requests[0]["has_body"], false);
         assert_eq!(requests[0]["has_raw_response"], true);
         assert_eq!(requests[0]["response_payload_kind"], "full");
         let (head, body) = fetch(&state.sessions, &format!("{prefix}/summary")).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(summary["request_stats"]["raw_response_count"], 1);
     }
@@ -1191,7 +1191,7 @@ mod tests {
         );
         let prefix = format!("/api/sessions/{NEWER_SESSION_ID}");
         let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests")).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(requests[0]["has_response"], true);
         assert_eq!(requests[0]["has_raw_response"], false);
@@ -1199,7 +1199,7 @@ mod tests {
         assert_eq!(requests[0]["has_body"], false);
 
         let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests/{attempt_id}")).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             payload["response"],
@@ -1208,7 +1208,7 @@ mod tests {
         assert!(payload["body"].is_null());
 
         let (head, body) = fetch(&state.sessions, &format!("{prefix}/summary")).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(summary["request_stats"]["raw_response_count"], 0);
 
@@ -1229,13 +1229,13 @@ mod tests {
         .unwrap();
         drop(conn);
         let (head, body) = fetch(&state.sessions, &format!("{prefix}/requests")).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let requests: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(requests[0]["has_body"], true);
         assert_eq!(requests[0]["has_raw_response"], false);
         assert_eq!(requests[0]["response_payload_kind"], "diagnostics");
         let (head, body) = fetch(&state.sessions, &format!("{prefix}/summary")).await;
-        assert_status(&head, "200 OK");
+        assert_status(&head, &body, "200 OK");
         let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(summary["request_stats"]["raw_response_count"], 0);
     }
@@ -1253,7 +1253,7 @@ mod tests {
             "/api/sessions/1111111111111111111111111111111111111111111111111111111111111111/requests/0",
         ] {
             let (head, body) = fetch(&state.sessions, path).await;
-            assert_status(&head, "400 Bad Request");
+            assert_status(&head, &body, "400 Bad Request");
             assert!(serde_json::from_str::<serde_json::Value>(&body).is_ok());
         }
     }
@@ -1271,7 +1271,7 @@ mod tests {
             "/api/sessions/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/requests/1/extra",
         ] {
             let (head, body) = fetch(&state.sessions, path).await;
-            assert_status(&head, "404 Not Found");
+            assert_status(&head, &body, "404 Not Found");
             assert_eq!(body, r#"{"error":"not found"}"#);
         }
     }
@@ -1313,12 +1313,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_api_path_returns_404() {
         let state = IsolatedState::new();
-        let (head, _) = fetch(
+        let (head, body) = fetch(
             &state.sessions,
             &format!("/api/sessions/{MISSING_SESSION_ID}/unknown"),
         )
         .await;
-        assert_status(&head, "404 Not Found");
+        assert_status(&head, &body, "404 Not Found");
     }
 
     #[tokio::test]
