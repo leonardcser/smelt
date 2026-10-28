@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash cargo build --release  (timeout: 2m 0s)  10s            14:37:03
+  ctrl+g to run in background
+
+
+
+
+─ ● … 10s ──────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+ ○ normal                                                       1:1 100%

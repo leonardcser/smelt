@@ -6,6 +6,9 @@ local transcript_defaults = require("smelt.transcript.defaults")
 local DEFAULT_TIMEOUT_MS = 120000
 local MAX_TIMEOUT_MS = 600000
 local DEFAULT_BACKGROUND_ON_TIMEOUT = true
+local BACKGROUND_HINT_AFTER_MS = 10000
+local DETACH_KEY_DESC = "move running command to background"
+local DETACH_KEY_FALLBACK = "ctrl+g"
 
 -- Read-only command prefixes that auto-approve. Also used locally to avoid
 -- suggesting patterns that are already permanently allowed.
@@ -46,6 +49,31 @@ end
 
 local function format_timeout(ms)
   return format_duration(math.floor(ms / 1000))
+end
+
+local MODIFIER_NAMES = { C = "ctrl", M = "alt", S = "shift" }
+
+-- Display form of the key bound to the detach action (`<C-g>` -> `ctrl+g`).
+local function detach_key_label()
+  for _, row in ipairs(smelt.keymap.list()) do
+    if row.desc == DETACH_KEY_DESC then
+      local inner = row.chord:match("^<(.+)>$")
+      if not inner then return row.chord end
+      local parts = {}
+      for part in inner:gmatch("[^-]+") do
+        parts[#parts + 1] = MODIFIER_NAMES[part] or part:lower()
+      end
+      return table.concat(parts, "+")
+    end
+  end
+  return DETACH_KEY_FALLBACK
+end
+
+local function background_hint()
+  return smelt.layout.line({
+    { text = detach_key_label(), hl = "SmeltAccent", selectable = false },
+    { text = " to run in background", dim = true, selectable = false },
+  })
 end
 
 function M.approval_patterns(args)
@@ -114,12 +142,26 @@ function M.execute(args, ctx)
   }
 end
 
+local function show_background_hint(block)
+  return block.elapsed_active and (block.elapsed_ms or 0) >= BACKGROUND_HINT_AFTER_MS
+end
+
 smelt.transcript.register_tool("bash", {
   cache_key = "smelt.tool-presentation.bash:v1",
+  compact = function(block)
+    if show_background_hint(block) then return background_hint() end
+  end,
   body = function(block, ctx)
+    local items = {}
     local output = block.output
-    if not output or (tonumber(output.content_bytes) or 0) == 0 then return nil end
-    return transcript_defaults.render_tool_output(output, ctx)
+    if output and (tonumber(output.content_bytes) or 0) > 0 then
+      items[#items + 1] = transcript_defaults.render_tool_output(output, ctx)
+    end
+    if show_background_hint(block) then
+      items[#items + 1] = smelt.layout.gutter(background_hint(), { text = "  " })
+    end
+    if #items == 0 then return nil end
+    return smelt.layout.vbox(items)
   end,
 })
 

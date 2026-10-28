@@ -160,14 +160,15 @@ end
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
 function M.render_tool_summary(block, ctx, presentation)
   presentation = tool_presentation(block, presentation)
+  local detail = M.tool_collapsed_detail(block, ctx, presentation)
+  local no_detail = detail == nil or detail == ""
   local output = block.output
-  if not presentation.compact and output and output.is_error then
+  if no_detail and output and output.is_error then
     return render_tool_error_summary(block, ctx, presentation)
   end
 
   local header = M.render_tool_header(block, ctx, nil, presentation)
-  local detail = M.tool_collapsed_detail(block, ctx, presentation)
-  if detail == nil or detail == "" then return header end
+  if no_detail then return header end
   local detail_layout = detail
   if type(detail) == "string" then
     detail_layout = layout.runs({ { { text = detail, dim = true } } })

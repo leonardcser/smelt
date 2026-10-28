@@ -36,6 +36,20 @@ app_story!(bash_tool_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
+app_story!(bash_background_hint_appears_after_ten_seconds, |ctx| {
+    ctx.set_viewport(72, 10);
+    ctx.tool_started("bash", &[("command", json!("cargo build --release"))]);
+
+    ctx.advance_time(9000);
+    ctx.assert_snapshot_named("nine_seconds");
+
+    ctx.advance_time(1500);
+    ctx.assert_snapshot_named("ten_seconds");
+
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("ten_seconds_collapsed");
+});
+
 app_story!(write_file_tool_states, |ctx| {
     ctx.set_viewport(78, 22);
     ctx.tool_draft(
