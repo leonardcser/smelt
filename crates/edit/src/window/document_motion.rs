@@ -8,7 +8,7 @@ use super::*;
 use crate::motions::{
     bracket_search_forward, find_counted, find_reach, resolve, LineTo, Motion, Reach, Use, WordTo,
 };
-use crate::row::{BlockBoundary, DisplayDocument};
+use crate::row::{BlockBoundary, DisplayDocument, DisplayRow};
 use std::ops::Range;
 
 /// What a row motion needs to know besides the motion itself.
@@ -25,7 +25,7 @@ pub(super) struct RowEnv {
 /// Rows a scan held to a block (`%`, a text object) loads on each side of the
 /// cursor at most, which bounds how long one that finds nothing in a huge
 /// block takes.
-const SCAN_LIMIT_ROWS: RowIndex = 1024;
+pub(super) const SCAN_LIMIT_ROWS: RowIndex = 1024;
 
 /// How many rows a block may open with before its text, such as the padding
 /// around a user message.
@@ -343,6 +343,52 @@ pub(super) fn over_rows<D: DisplayDocument + ?Sized, T>(
             after = after.saturating_mul(2);
         }
     }
+}
+
+/// The first row from `from` on, towards the document's end or, unless
+/// `forward`, its start, that `found` holds for, looking at `limit` rows at
+/// most. When none does, the last row it looked at, or `from`.
+pub(super) fn find_row<D: DisplayDocument + ?Sized>(
+    doc: &mut D,
+    from: RowIndex,
+    forward: bool,
+    limit: RowIndex,
+    mut found: impl FnMut(&DisplayRow) -> bool,
+) -> Result<RowIndex, RowIndex> {
+    const CHUNK: RowIndex = 64;
+    let total_rows = doc.snapshot().total_rows;
+    let (mut next, mut seen, mut left) = (Some(from).filter(|&row| row < total_rows), from, limit);
+    while let Some(at) = next.filter(|_| left > 0) {
+        let len = CHUNK.min(left);
+        let chunk = if forward {
+            at..at.saturating_add(len).min(total_rows)
+        } else {
+            at.saturating_sub(len - 1)..at + 1
+        };
+        let rows = doc.materialize(chunk.clone()).rows;
+        if rows.len() as RowIndex != chunk.end - chunk.start {
+            break;
+        }
+        let mut rows = rows.iter().enumerate();
+        let hit = if forward {
+            rows.find(|(_, row)| found(row))
+        } else {
+            rows.rev().find(|(_, row)| found(row))
+        };
+        if let Some((offset, _)) = hit {
+            return Ok(chunk.start + offset as RowIndex);
+        }
+        left -= chunk.end - chunk.start;
+        (seen, next) = if forward {
+            (
+                chunk.end - 1,
+                Some(chunk.end).filter(|&row| row < total_rows),
+            )
+        } else {
+            (chunk.start, chunk.start.checked_sub(1))
+        };
+    }
+    Err(seen)
 }
 
 /// Run a word, sentence, paragraph or bracket motion over the rows around

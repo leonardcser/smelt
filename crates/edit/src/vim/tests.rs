@@ -2253,7 +2253,7 @@ fn code_block_objects_take_the_fenced_lines() {
         (20, "dic", "intro\n```rust\n```\noutro"),
         (20, "dac", "intro\noutro"),
         (6, "dic", "intro\n```rust\n```\noutro"),
-        (0, "dic", text),
+        (0, "dic", "intro\n```rust\n```\noutro"),
         (text.len() - 1, "dac", text),
     ] {
         let mut h = TestHarness::new(text);
@@ -2266,6 +2266,22 @@ fn code_block_objects_take_the_fenced_lines() {
     keys(&mut h, "yic");
     assert_eq!(h.clipboard.kill_ring.current(), "fn a() {}\nfn b() {}");
     assert!(h.clipboard.kill_ring.is_linewise());
+}
+
+#[test]
+fn code_block_objects_take_the_next_block_after_the_cursor() {
+    let text = "```\none\n```\nprose\n~~~\ntwo\n~~~\nend";
+    let mut h = TestHarness::new(text);
+    h.cpos = text.find("prose").unwrap();
+    keys(&mut h, "yic");
+    assert_eq!(h.clipboard.kill_ring.current(), "two");
+    assert_eq!(h.cpos, text.find("two").unwrap(), "the cursor moves to it");
+    keys(&mut h, "gg");
+    keys(&mut h, "yac");
+    assert_eq!(h.clipboard.kill_ring.current(), "```\none\n```");
+    h.cpos = text.find("end").unwrap();
+    keys(&mut h, "dac");
+    assert_eq!(h.buf, text, "no block after the last one");
 }
 
 #[test]

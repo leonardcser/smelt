@@ -36,6 +36,9 @@ pub(crate) struct Scan<'a> {
     pub cur: Pos,
     pub vis: Option<Visual>,
     pub oap: Oap,
+    /// Whether the last block object lies ahead of the cursor, as no block
+    /// is around it.
+    pub ahead: bool,
     /// `W`, `B` and `E` treat every non-blank run as one word.
     big: bool,
 }
@@ -54,6 +57,7 @@ impl<'a> Scan<'a> {
             cur: Pos::default(),
             vis: None,
             oap: Oap::default(),
+            ahead: false,
             big: false,
         };
         scan.cur = scan.pos_at(smelt_buffer::text::snap_grapheme(buf, cursor));
@@ -1127,6 +1131,7 @@ impl<'a> Scan<'a> {
         let mut start_pos = Pos::default();
         let mut found = true;
         let forward = self.find_match(self.cur, what, false).is_none();
+        self.ahead = forward;
         while count > 0 {
             count -= 1;
             match self.find_match(self.cur, what, forward) {

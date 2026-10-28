@@ -1,5 +1,5 @@
 use super::document_motion::{
-    clamp_to_row_text, over_rows, resolve_rows, Edges, RowEnv, ScanBound,
+    clamp_to_row_text, find_row, over_rows, resolve_rows, Edges, RowEnv, ScanBound, SCAN_LIMIT_ROWS,
 };
 use super::*;
 use crate::jumplist::JumpMove;
@@ -2051,6 +2051,9 @@ fn document_text_object_range<D: DisplayDocument + ?Sized>(
             Ok(selection) => {
                 let low = selection.start.min(selection.end);
                 let high = selection.start.max(selection.end);
+                let mut edges = window.edges(low..high);
+                // One around the cursor may open above the rows loaded.
+                edges.before |= selection.ahead;
                 (
                     Some(RowTextObjectSelection {
                         start: window.position(selection.start),
@@ -2058,7 +2061,7 @@ fn document_text_object_range<D: DisplayDocument + ?Sized>(
                         include_cursor_cell: selection.inclusive,
                         linewise: selection.linewise,
                     }),
-                    window.edges(low..high),
+                    edges,
                 )
             }
             Err(_) => (None, failed),
@@ -2066,49 +2069,20 @@ fn document_text_object_range<D: DisplayDocument + ?Sized>(
     })
 }
 
-/// `ic` and `ac`: the rows of the code block holding `row`. `ic` is the code
-/// itself and `ac` its rows, which copy as fenced markdown.
+/// `ic` and `ac`: the rows of the code block holding `row`, or else of the
+/// next one below it. `ic` is the code itself and `ac` its rows, which copy as
+/// fenced markdown.
 fn document_code_block_text_object<D: DisplayDocument + ?Sized>(
     document: &mut D,
     row: RowIndex,
     inner: bool,
 ) -> Option<RowTextObjectSelection> {
-    const CHUNK: RowIndex = 64;
-    let total_rows = document.snapshot().total_rows;
-    let rows = document.materialize(row..row.saturating_add(1)).rows;
-    if !rows.first()?.code_block {
-        return None;
-    }
-    let mut first = row;
-    'up: while first > 0 {
-        let from = first.saturating_sub(CHUNK);
-        let rows = document.materialize(from..first).rows;
-        if rows.is_empty() {
-            break;
-        }
-        for (offset, above) in rows.iter().enumerate().rev() {
-            if !above.code_block {
-                break 'up;
-            }
-            first = from + offset as RowIndex;
-        }
-    }
-    let mut last = row;
-    'down: while last + 1 < total_rows {
-        let from = last + 1;
-        let rows = document
-            .materialize(from..(from + CHUNK).min(total_rows))
-            .rows;
-        if rows.is_empty() {
-            break;
-        }
-        for (offset, below) in rows.iter().enumerate() {
-            if !below.code_block {
-                break 'down;
-            }
-            last = from + offset as RowIndex;
-        }
-    }
+    let row = find_row(document, row, true, SCAN_LIMIT_ROWS, |row| row.code_block).ok()?;
+    let prose = |row: &DisplayRow| !row.code_block;
+    let first =
+        find_row(document, row, false, RowIndex::MAX, prose).map_or_else(|top| top, |row| row + 1);
+    let last =
+        find_row(document, row, true, RowIndex::MAX, prose).map_or_else(|end| end, |row| row - 1);
     let end = if inner {
         let tail = document.materialize(last..last + 1).rows;
         DocPosition {
@@ -2948,20 +2922,89 @@ mod tests {
     }
 
     #[test]
-    fn code_block_object_needs_the_cursor_on_a_code_row() {
+    fn code_block_object_takes_the_next_block_below_the_cursor() {
         let mut state = state_for_rows(6);
         state.cursor = DocPosition {
             row: 4,
             byte_col: 0,
         };
+        let range = execute(
+            &mut code_block_document(),
+            &mut state,
+            DocumentCommand::YankTextObject(DocumentTextObject::new(true, 'c').unwrap()),
+            6,
+        )
+        .expect("next block");
+        let other = DocPosition {
+            row: 5,
+            byte_col: 0,
+        };
+        assert_eq!((range.start, range.end.row), (other, 5));
+        assert_eq!(state.cursor, other, "the cursor moves to the block");
+
+        let mut prose = StaticRowsDocument::from_text_rows(vec!["a".into(), "b".into()]);
+        let mut state = state_for_rows(2);
         assert_eq!(
             execute(
-                &mut code_block_document(),
+                &mut prose,
                 &mut state,
                 DocumentCommand::YankTextObject(DocumentTextObject::new(true, 'c').unwrap()),
-                6,
+                2,
             ),
-            None
+            None,
+            "no block below the cursor"
+        );
+    }
+
+    #[test]
+    fn find_row_walks_both_ways_within_its_limit() {
+        let mut rows: Vec<String> = (0..200).map(|_| "prose".into()).collect();
+        rows[10] = "hit".into();
+        rows[150] = "hit".into();
+        let mut doc = StaticRowsDocument::from_text_rows(rows);
+        let hit = |row: &DisplayRow| row.text == "hit";
+        assert_eq!(find_row(&mut doc, 10, true, RowIndex::MAX, hit), Ok(10));
+        assert_eq!(find_row(&mut doc, 11, true, RowIndex::MAX, hit), Ok(150));
+        assert_eq!(find_row(&mut doc, 149, false, RowIndex::MAX, hit), Ok(10));
+        assert_eq!(find_row(&mut doc, 151, true, RowIndex::MAX, hit), Err(199));
+        assert_eq!(find_row(&mut doc, 9, false, RowIndex::MAX, hit), Err(0));
+        assert_eq!(find_row(&mut doc, 11, true, 100, hit), Err(110));
+        assert_eq!(find_row(&mut doc, 149, false, 100, hit), Err(50));
+        assert_eq!(find_row(&mut doc, 200, true, RowIndex::MAX, hit), Err(200));
+    }
+
+    #[test]
+    fn pair_object_prefers_the_enclosing_pair_beyond_the_loaded_rows() {
+        let mut rows = vec!["fn f() {".to_string()];
+        rows.extend((1..40).map(|_| "    x".to_string()));
+        rows.push("    g { y }".into());
+        rows.push("}".into());
+        let total = rows.len() as RowIndex;
+        let mut doc = StaticRowsDocument::from_text_rows(rows);
+        let mut state = state_for_rows(total);
+        state.cursor = DocPosition {
+            row: 30,
+            byte_col: 4,
+        };
+        let range = execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::YankTextObject(DocumentTextObject::new(false, '{').unwrap()),
+            10,
+        )
+        .expect("enclosing braces");
+        assert_eq!(
+            (range.start, range.end),
+            (
+                DocPosition {
+                    row: 0,
+                    byte_col: 7
+                },
+                DocPosition {
+                    row: 41,
+                    byte_col: 1
+                }
+            )
         );
     }
 

@@ -87,13 +87,15 @@ pub(crate) struct VisualArea {
 /// What a text object selects: from `start` to `end`, the cursor after the
 /// object. `inclusive` says whether the character at `end` is part of it. In
 /// Visual mode `start` is the new anchor and `end` the new cursor, both
-/// inclusive, and `linewise` the mode to continue in.
+/// inclusive, and `linewise` the mode to continue in. `ahead` says the object
+/// was found after the cursor, as none was around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ObjectSelection {
     pub start: usize,
     pub end: usize,
     pub inclusive: bool,
     pub linewise: bool,
+    pub ahead: bool,
 }
 
 impl ObjectSelection {
@@ -193,20 +195,23 @@ pub(crate) fn select_object(
             end,
             inclusive: true,
             linewise: vis.linewise,
+            ahead: scan.ahead,
         },
         None => ObjectSelection {
             start: whole(scan.offset(scan.oap.start), scan.oap.linewise),
             end,
             inclusive: scan.oap.inclusive,
             linewise: scan.oap.linewise,
+            ahead: scan.ahead,
         },
     })
 }
 
-/// `ic` and `ac`: the lines of the fenced code block around `cursor`, without
-/// or with its fences. `ic` fails on an empty block.
+/// `ic` and `ac`: the lines of the fenced code block around `cursor`, or else
+/// of the next one after it, without or with its fences. `ic` fails on an
+/// empty block.
 fn code_block(buf: &str, cursor: usize, inner: bool) -> Option<ObjectSelection> {
-    let (open, close) = code_fence_around(buf, cursor)?;
+    let (open, close) = code_fence_at(buf, cursor)?;
     let (start, end) = if inner {
         let first = line_end(buf, open) + 1;
         if first >= close {
@@ -221,14 +226,16 @@ fn code_block(buf: &str, cursor: usize, inner: bool) -> Option<ObjectSelection> 
         end,
         inclusive: true,
         linewise: true,
+        ahead: open > cursor,
     })
 }
 
-/// The starts of the opening and closing fence lines of the Markdown code
-/// block that holds the line `cursor` is on. A fence is a run of at least
-/// three backticks or tildes; the closing one is at least as long as the
-/// opening one and has nothing after it.
-fn code_fence_around(buf: &str, cursor: usize) -> Option<(usize, usize)> {
+/// The starts of the opening and closing fence lines of the first Markdown
+/// code block that does not end before the line `cursor` is on: the one that
+/// holds it, or else the next one. A fence is a run of at least three
+/// backticks or tildes; the closing one is at least as long as the opening one
+/// and has nothing after it.
+fn code_fence_at(buf: &str, cursor: usize) -> Option<(usize, usize)> {
     let mut open: Option<(usize, char, usize)> = None;
     let mut line = 0;
     loop {
@@ -241,14 +248,14 @@ fn code_fence_around(buf: &str, cursor: usize) -> Option<(usize, usize)> {
             Some((start, held, len))
                 if mark == Some(held) && run >= len && text[run..].trim().is_empty() =>
             {
-                if start <= cursor && cursor <= eol {
+                if cursor <= eol {
                     return Some((start, line));
                 }
                 open = None;
             }
             _ => {}
         }
-        if eol >= buf.len() || (open.is_none() && eol >= cursor) {
+        if eol >= buf.len() {
             return None;
         }
         line = eol + 1;

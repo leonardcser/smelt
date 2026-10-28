@@ -178,10 +178,12 @@ In the prompt, normal and visual mode support:
 - **Text objects:** `iw` `aw` `iW` `aW`, `is` `as` (sentences), `ip` `ap`
   (paragraphs), `i(` `a(` (also `b`), `i[` `a[`, `i{` `a{` (also `B`), `i<` `a<`,
   `it` `at`, and the quotes `i"` `a"`, `i'` `a'`, ``i` `` ``a` ``. They take counts
-  (`2daw`, `d2i(`), look ahead on the line when the cursor is not inside one, and
-  grow a visual selection when repeated (`viwiw`, `vi(i(`). `iq` `aq` take the
-  nearest quote pair, `il` `al` the line, and `ic` `ac` the lines of the fenced
-  code block around the cursor, without or with its fences.
+  (`2daw`, `d2i(`) and grow a visual selection when repeated (`viwiw`, `vi(i(`).
+  `iq` `aq` take the nearest quote pair, `il` `al` the line, and `ic` `ac` the
+  lines of the fenced code block around the cursor, without or with its fences.
+  When the cursor is not inside one, the bracket objects and `ic` `ac` take the
+  next one after it and the quote objects the next one on the line, and the
+  cursor moves there.
 - **Visual:** `v` and `V`, `gv` to reselect the last selection, `o` to swap ends,
   and text objects. In `v` the cursor can rest on the line break, so `v$` and `vl`
   at the end of a line select it too. `d` `x` `c` `s` `y` `r` `J` `gJ` `p` `P` `U`
@@ -253,8 +255,9 @@ selection (`gv` brings the last one back), and `y` takes a motion, a text object
 `yy`; the yanked text flashes and the cursor stays at the start of what was yanked.
 Text objects reach across rows and take counts (`y2i(`, `yap`), and `"a` before a
 yank puts it in a register.
-`ic` selects the code of the fenced code block under the cursor and `ac` the whole
-block, so `yic` copies the code and `yac` copies it as fenced markdown.
+`ic` selects the code of the fenced code block under the cursor, or else of the
+next one below, and `ac` the whole block, so `yic` copies the code and `yac` copies
+it as fenced markdown.
 `zz` `zt` `zb` put the cursor row in the middle, at the top or at the bottom of the
 screen. `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` / `Ctrl+Y` / `Ctrl+E` scroll the
 viewport.

@@ -1200,12 +1200,49 @@ fn transcript_visual_code_block_selects_only_the_code() {
 }
 
 #[test]
-fn transcript_code_block_object_ignores_prose() {
+fn transcript_code_block_object_looks_ahead_from_prose() {
+    let (mut app, row) = transcript_with_code_block();
+    let intro = transcript_row_of(&app, "intro");
+    move_transcript_cursor_to_row(&mut app, intro as crate::smelt_edit::RowIndex);
+    app.type_text("yic");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "fn main() {}\nlet x = 1;"
+    );
+    assert_eq!(transcript_cursor(&app).0, row);
+}
+
+#[test]
+fn transcript_code_block_object_finds_nothing_after_the_last_block() {
     let (mut app, _) = transcript_with_code_block();
     let outro = transcript_row_of(&app, "outro");
     move_transcript_cursor_to_row(&mut app, outro as crate::smelt_edit::RowIndex);
     app.type_text("yic");
     assert_eq!(app.core_probe().clipboard.kill_ring.current(), "");
+}
+
+#[test]
+fn transcript_pair_object_looks_ahead_on_the_line() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 24);
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: "intro\n\nsee the docs (chapter two) first\n".into(),
+    });
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.type_text("gg");
+    app.render_silent();
+    let row = transcript_row_of(&app, "see the docs");
+    move_transcript_cursor_to_row(&mut app, row as crate::smelt_edit::RowIndex);
+    app.type_text("0yi(");
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "chapter two"
+    );
+    let cursor = transcript_cursor(&app);
+    assert_eq!(cursor.0, row);
+    assert!(cursor.1 > 0, "the cursor moves to the pair: {cursor:?}");
 }
 
 #[test]
