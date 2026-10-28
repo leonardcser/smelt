@@ -375,8 +375,11 @@ impl Transcript {
             let Some(invocation_id) = self.calls.get(id).copied() else {
                 continue;
             };
-            let content = text_content(&block["content"]);
             let is_error = block["is_error"].as_bool().unwrap_or(false);
+            let mut content = text_content(&block["content"]);
+            if is_error {
+                content = strip_tool_use_error(&content);
+            }
             let result = self.retained_results.remove(id).unwrap_or_else(|| {
                 structured
                     .filter(|_| !is_error)
@@ -577,4 +580,38 @@ pub(super) fn text_content(value: &Value) -> String {
                 .join("\n")
         })
         .unwrap_or_default()
+}
+
+/// Claude Code wraps its own tool failures in `<tool_use_error>` tags; the
+/// error flag already carries that meaning, so show only the message.
+fn strip_tool_use_error(content: &str) -> String {
+    content
+        .trim()
+        .strip_prefix("<tool_use_error>")
+        .and_then(|rest| rest.strip_suffix("</tool_use_error>"))
+        .unwrap_or(content)
+        .trim()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_tool_use_error;
+
+    #[test]
+    fn strips_wrapping_tool_use_error_tags() {
+        assert_eq!(
+            strip_tool_use_error("<tool_use_error>Blocked: sleep 150</tool_use_error>\n"),
+            "Blocked: sleep 150"
+        );
+    }
+
+    #[test]
+    fn leaves_other_error_text_untouched() {
+        assert_eq!(strip_tool_use_error("exit code 1"), "exit code 1");
+        assert_eq!(
+            strip_tool_use_error("<tool_use_error>unclosed"),
+            "<tool_use_error>unclosed"
+        );
+    }
 }
