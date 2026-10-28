@@ -19,7 +19,20 @@ never edits `main`, creates commits, pushes generated changes, or moves tags.
 
 1. Choose the next normal SemVer version. Do not edit Cargo manifests or
    lockfiles for the agent release.
-2. Run the full validation suite on the exact source commit:
+2. Write the changelog. Run
+
+   ```bash
+   scripts/changelog.py draft <X.Y.Z>
+   ```
+
+   It writes `docs/docs/changelog/<X.Y.Z>.md` from the `feat` and `fix` commits
+   since the last stable tag and updates the index and sidebar. Curate the
+   page for users: merge duplicates, drop internal items, reword, and replace
+   the `TODO` summary with one line of highlights. Merge that to `main`. The
+   release workflow publishes the page as the GitHub release notes and fails
+   when it is missing or still has the draft summary. Pre-release tags need no
+   page.
+3. Run the full validation suite on the exact source commit:
 
    ```bash
    cargo fmt -- --check
@@ -29,8 +42,8 @@ never edits `main`, creates commits, pushes generated changes, or moves tags.
    git diff --exit-code
    ```
 
-3. Confirm CI passed on that exact commit.
-4. Create and push the immutable tag:
+4. Confirm CI passed on that exact commit.
+5. Create and push the immutable tag:
 
    ```bash
    git switch main

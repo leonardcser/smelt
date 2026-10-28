@@ -243,30 +243,17 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
-          PREV_TAG=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -n 1 || true)
-          if [ -z "$PREV_TAG" ]; then
-            RANGE="$GITHUB_SHA"
-          else
-            RANGE="${PREV_TAG}..${GITHUB_SHA}"
-          fi
-
-          print_section() {
-            local title="$1"
-            local pattern="$2"
-            local commits=$(git log --pretty=format:"%h %s" $RANGE | grep -E "^[a-f0-9]+ ${pattern}" | sed 's/^/- /' || true)
-            if [ -n "$commits" ]; then
-              echo "## $title"
-              echo "$commits"
-              echo ""
-            fi
-          }
-
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
           {
             echo 'body<<EOF'
-            print_section "Breaking Changes" "[a-z]+(\(.+\))?!:"
-            print_section "Features" "feat(\(.+\))?:"
-            print_section "Bug Fixes" "fix(\(.+\))?:"
-            print_section "Other Changes" "(refactor|docs|perf|chore|test|ci|revert)(\(.+\))?:"
+            if [[ "$VERSION" == *-* ]]; then
+              echo "Pre-release build. See the [changelog](https://smeltagent.dev/changelog/) for stable releases."
+            else
+              python3 scripts/release_notes.py "$VERSION"
+              echo ""
+              echo "[All changes in $VERSION](https://smeltagent.dev/changelog/$VERSION/) and the [full changelog](https://smeltagent.dev/changelog/)."
+            fi
             echo ""
             echo "## Install"
             echo ""

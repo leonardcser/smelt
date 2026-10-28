@@ -38,6 +38,12 @@ Choosing a test layer: see `TESTING.md`. Releases: see `RELEASE.md`.
 Always write `smelt` in lowercase: product copy, terminal titles, command output,
 docs, UI labels, and the start of a sentence.
 
+### Changelog
+
+Release notes are written at release time, not per commit. Use conventional
+commit subjects that read well to users; `scripts/changelog.py draft` builds
+the release page from them. See `RELEASE.md`.
+
 ### Compatibility debt
 
 Mark removable compatibility code with `COMPAT(<id>)` and add the id to
