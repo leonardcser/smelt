@@ -1061,6 +1061,44 @@ fn tick_every_runs_while_idle_and_only_now_listeners_wake_each_second() {
 }
 
 #[test]
+fn the_working_indicator_paints_on_a_grid_its_letter_steps_fit() {
+    let mut app = TestApp::builder().build();
+    app.animate_with_virtual_clock();
+    app.run_lua(
+        r#"
+        _G.paints = {}
+        smelt.prompt_bar.top.add("zz_probe", function()
+          _G.paints[#_G.paints + 1] = smelt.time.now_ms()
+          return nil
+        end)
+        "#,
+    );
+    app.start_turn(42);
+    for _ in 0..1200 {
+        app.advance_animation(1);
+    }
+
+    let paints: Vec<i64> = app
+        .app
+        .lua
+        .lua()
+        .load("return _G.paints")
+        .eval::<Vec<i64>>()
+        .unwrap();
+    let painted: std::collections::HashSet<i64> = paints.iter().copied().collect();
+    let first = paints[0];
+    let missed: Vec<i64> = (0..50)
+        .map(|frame| first + frame * 22)
+        .filter(|at| !painted.contains(at))
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "every 22 ms frame from the label's first paint is painted, so each \
+         110 ms sweep step lasts exactly five frames; missed {missed:?} in {paints:?}"
+    );
+}
+
+#[test]
 fn truncated_live_output_is_replaced_by_the_final_bounded_output() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);

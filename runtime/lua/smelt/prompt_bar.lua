@@ -324,9 +324,10 @@ end
 -- leaves it still and dim in its color. A finished turn cools it to gray over a
 -- second, and an interrupted one, which you asked for, goes gray at once. The
 -- label types in white-hot whenever it changes, rests in gray, and a hammer
--- sweep runs along it on repeat. Each paint asks for the next frame: fast while
--- letters type in and cool, slow while only the coal breathes and the sweep
--- steps, and none once the coal is still.
+-- sweep runs along it on repeat. Each paint asks for the next frame, on a grid
+-- counted from when the label appeared. Every letter step lasts a whole number
+-- of frames, so no step stays on screen longer than the others. Once the coal
+-- is still, no frame is asked for.
 local COAL = "\u{25CF}"
 local MIN_HEAT = 0.05
 local CALL_BUMP = 0.15
@@ -337,14 +338,13 @@ local COLD_STOPS = { { 150, 60, 40 }, { 190, 80, 20 }, { 170, 100, 10 }, { 110, 
 local BREATH_MS = 1600
 local IGNITE_MS = 450
 local COOL_MS = 1000
-local TYPE_MS = 45
-local FIRST_SWEEP_MS = 1600
+local TYPE_MS = 44
+local FIRST_SWEEP_MS = 1584
 local SWEEP_MS = 2200
 local SWEEP_STEP_MS = 110
 local FLARE_COOL_MS = 650
 local PAUSED_LEVEL = 0.4
-local FAST_FRAME_MS = 33
-local SLOW_FRAME_MS = 100
+local FRAME_MS = 22
 
 local function mix(a, b, t)
   t = math.max(0, math.min(t, 1))
@@ -494,8 +494,7 @@ builtin.indicator = function()
       mark = working_coal(now)
     end
     local item = typed_label(label, now)
-    local typing = now - shown_since < #label * TYPE_MS + FLARE_COOL_MS
-    bar.invalidate_after(top_bar, typing and FAST_FRAME_MS or SLOW_FRAME_MS)
+    bar.invalidate_after(top_bar, FRAME_MS - (now - shown_since) % FRAME_MS)
     return { mark, item }
   end
 
@@ -506,7 +505,7 @@ builtin.indicator = function()
   elseif state == "done" then
     local cool = done_at and math.min((now - done_at) / COOL_MS, 1) or 1
     mark = coal_item(mix(heat(), ash(), cool))
-    if cool < 1 then bar.invalidate_after(top_bar, FAST_FRAME_MS) end
+    if cool < 1 then bar.invalidate_after(top_bar, FRAME_MS) end
   else
     mark = coal_item(ash())
   end
