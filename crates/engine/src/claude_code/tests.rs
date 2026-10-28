@@ -825,20 +825,10 @@ async fn cancelling_a_prompt_claude_code_has_not_taken_withdraws_it() {
         .find(|call| call["type"] == "user" && call["message"].to_string().contains("turn 2"))
         .unwrap();
     fixture
-        .wait_for("no interrupt reached Claude Code", |call| {
-            call["request"]["subtype"] == "interrupt"
+        .wait_for("the prompt was not withdrawn", |call| {
+            call["withdrawn"] == prompt["uuid"]
         })
         .await;
-    // Withdrawn first, it cannot be taken once the interrupt ends the wake.
-    let calls = fixture.calls();
-    let withdrawn = calls.iter().position(|call| {
-        call["request"]["subtype"] == "cancel_async_message"
-            && call["request"]["message_uuid"] == prompt["uuid"]
-    });
-    let interrupted = calls
-        .iter()
-        .position(|call| call["request"]["subtype"] == "interrupt");
-    assert!(withdrawn.is_some_and(|withdrawn| Some(withdrawn) < interrupted));
 }
 
 #[tokio::test]

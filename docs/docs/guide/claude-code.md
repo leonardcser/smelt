@@ -272,12 +272,13 @@ When a background command ends, or a monitor reports an event, Claude Code wakes
 on its own to report it. The work indicator shows the wake reply as it runs, and
 the reply is appended to the session history like any answer. A prompt sent
 meanwhile starts its turn at once: Claude Code queues it and takes it once the
-reply ends, and only its own answer completes the turn. Events that arrive during
-an answer wait for its end, so Claude Code wakes for them right after an
-interrupt too. Cancelling withdraws a prompt Claude Code has not started; one it
-started stays in its conversation, and a later wake reply may still answer it.
-In headless mode smelt waits for running background commands and their wake
-replies before reporting completion.
+reply ends, and only its own answer completes the turn. Cancelling withdraws what
+waits in Claude Code's queue: prompts it has not started, and events that arrived
+during the answer, so it does not wake for them at once. The background work
+keeps running, and its later events wake Claude Code as usual. A prompt Claude
+Code already started stays in its conversation, and a later wake reply may still
+answer it. In headless mode smelt waits for running background commands and
+their wake replies before reporting completion.
 
 ## Native subagents
 

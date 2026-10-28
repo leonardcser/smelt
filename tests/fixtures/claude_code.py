@@ -372,7 +372,7 @@ while True:
     if SCENARIO in ("monitor-wake", "monitor-wake-held"):
         # A monitor event wakes Claude Code, which thinks until it is
         # interrupted or, unless held, a prompt arrives. The prompt waits in its
-        # queue until the wake reply ends, and can be withdrawn until then.
+        # queue until the wake reply ends; an interrupt can withdraw it.
         send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
         send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
         log({"wake": "started"})
@@ -383,9 +383,10 @@ while True:
             except queue.Empty:
                 break
             request = message.get("request", {})
-            if request.get("subtype") == "cancel_async_message":
-                PENDING[:] = [queued for queued in PENDING if queued.get("uuid") != request["message_uuid"]]
-                continue
+            if request.get("subtype") == "interrupt" and request.get("cancel_queued"):
+                for queued in [queued for queued in PENDING if queued.get("type") == "user"]:
+                    log({"withdrawn": queued["uuid"]})
+                    PENDING.remove(queued)
             PENDING.append(message)
             if message.get("type") == "user":
                 log({"wake": "prompted"})

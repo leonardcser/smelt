@@ -666,30 +666,17 @@ impl Runtime<'_> {
             || self.turn.as_ref().is_some_and(|turn| {
                 matches!(turn.stage, Stage::Taking(_) | Stage::Sent | Stage::Steering)
             });
-        // Queued messages go back to the prompt, so Claude Code must not take
-        // them, as it would once the interrupt ends what it answers.
+        // Queued messages go back to the prompt. The interrupt withdraws those
+        // Claude Code has, with the events queued meanwhile, which would
+        // otherwise wake it at once.
         self.deferred.clear();
-        if let Some(OpenTurn {
-            stage: Stage::Taking(uuid),
-            ..
-        }) = &self.turn
-        {
-            let request = control(
-                &format!("smelt-untake-{uuid}"),
-                json!({"subtype":"cancel_async_message", "message_uuid":uuid}),
-            );
-            self.write(request).await?;
-        }
-        for (uuid, _) in std::mem::take(&mut self.steers) {
+        self.steers.clear();
+        if answering && !self.native.interrupting {
             self.write(control(
-                &format!("smelt-unsteer-{uuid}"),
-                json!({"subtype":"cancel_async_message", "message_uuid":uuid}),
+                "smelt-interrupt",
+                json!({"subtype":"interrupt", "cancel_queued":true}),
             ))
             .await?;
-        }
-        if answering && !self.native.interrupting {
-            self.write(control("smelt-interrupt", json!({"subtype":"interrupt"})))
-                .await?;
             self.native.interrupting = true;
         }
         if let Some(Move::Sent { resume, .. }) = &mut self.native.moving {
