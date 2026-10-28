@@ -2,7 +2,7 @@ pub mod dispatcher;
 
 use engine::log;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper};
-use rmcp::model::{CallToolRequestParams, ServerInfo};
+use rmcp::model::{CallToolRequestParams, ServerPeerInfo};
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
@@ -58,18 +58,23 @@ pub struct McpServerInfo {
     pub instructions: String,
 }
 
-impl From<&ServerInfo> for McpServerInfo {
-    fn from(info: &ServerInfo) -> Self {
+impl From<&ServerPeerInfo> for McpServerInfo {
+    fn from(info: &ServerPeerInfo) -> Self {
+        let (name, version) = info
+            .server_info
+            .as_ref()
+            .map(|imp| (imp.name.clone(), imp.version.clone()))
+            .unwrap_or_default();
         Self {
-            name: info.server_info.name.to_string(),
-            version: info.server_info.version.to_string(),
+            name,
+            version,
             instructions: info.instructions.clone().unwrap_or_default(),
         }
     }
 }
 
-impl From<Arc<ServerInfo>> for McpServerInfo {
-    fn from(info: Arc<ServerInfo>) -> Self {
+impl From<Arc<ServerPeerInfo>> for McpServerInfo {
+    fn from(info: Arc<ServerPeerInfo>) -> Self {
         Self::from(info.as_ref())
     }
 }

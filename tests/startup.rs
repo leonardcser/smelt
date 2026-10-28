@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::num::NonZeroU16;
 use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -25,12 +26,20 @@ impl Drop for ChildProcessGroup {
     }
 }
 
+const PTY_ROWS: NonZeroU16 = NonZeroU16::new(24).unwrap();
+const PTY_COLS: NonZeroU16 = NonZeroU16::new(100).unwrap();
+
+/// A terminal emulator sized to match the PTY from [`open_pty`].
+fn pty_terminal() -> vt100::Parser {
+    vt100::Parser::new(PTY_ROWS, PTY_COLS, 0)
+}
+
 fn open_pty() -> (File, File) {
     let mut master = -1;
     let mut slave = -1;
     let size = libc::winsize {
-        ws_row: 24,
-        ws_col: 100,
+        ws_row: PTY_ROWS.get(),
+        ws_col: PTY_COLS.get(),
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -236,7 +245,7 @@ smelt.tools.register({ name = "fixture_dialog_state", permission_defaults = { no
     }
     let (mut master, mut process) = spawn_in_pty(command);
     let mut captured = Vec::new();
-    let mut terminal = vt100::Parser::new(24, 100, 0);
+    let mut terminal = pty_terminal();
     let mut decision_sent = false;
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -439,7 +448,7 @@ end)
     }
     let (mut master, mut process) = spawn_in_pty(command);
     let mut captured = Vec::new();
-    let mut terminal = vt100::Parser::new(24, 100, 0);
+    let mut terminal = pty_terminal();
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut submitted = false;
     let mut queued = false;
@@ -634,7 +643,7 @@ smelt.provider.register("probe", {
         .env("TERM", "xterm-256color");
     let (mut master, mut process) = spawn_in_pty(command);
     let mut captured = Vec::new();
-    let mut terminal = vt100::Parser::new(24, 100, 0);
+    let mut terminal = pty_terminal();
     let startup_deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let previous_len = captured.len();
@@ -1030,7 +1039,7 @@ smelt.provider.register("probe", {{ type = "anthropic", api_base = "{}", api_key
     let (mut master, mut process) = spawn_in_pty(command);
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut captured = Vec::new();
-    let mut terminal = vt100::Parser::new(24, 100, 0);
+    let mut terminal = pty_terminal();
     let mut typed = false;
     let mut denied = false;
     loop {
@@ -3361,7 +3370,7 @@ smelt.provider.register("test", {{
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut captured = Vec::new();
     let mut consumed = 0;
-    let mut terminal = vt100::Parser::new(24, 100, 0);
+    let mut terminal = pty_terminal();
     loop {
         drain_pty(&mut master, &mut captured);
         terminal.process(&captured[consumed..]);

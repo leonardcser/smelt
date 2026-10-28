@@ -18,7 +18,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "3.8.0", default-features = false, features = ["client", "transport-child-process"] }
 sha2 = { workspace = true }
 libc = { workspace = true }
 url = { workspace = true }
@@ -31,10 +31,10 @@ two-face = "0.5"
 similar = { version = "3", features = ["inline"] }
 seahash = "4"
 mlua = { workspace = true }
-scraper = "0.27"
+scraper = "0.29.0"
 ego-tree = "0.11"
 include_dir = "0.7"
-neo_frizbee = { version = "0.11", features = ["safe_read"] }
+neo_frizbee = { version = "0.13.3", features = ["safe_read"] }
 notify = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 shellexpand = "3.1.2"
@@ -42,7 +42,7 @@ smelt-store = { workspace = true }
 chrono = "0.4.45"
 brush-parser = "0.4.0"
 scoped-tls-hkt = "0.1.5"
-process-wrap = { version = "9.1.0", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 atomic-write-file = "0.3.1"
 tempfile.workspace = true
 term-maths = "1.0.0"

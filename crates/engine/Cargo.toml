@@ -41,7 +41,7 @@ fuzz = []
 smelt-provider = { workspace = true, features = ["test-support"] }
 smelt-store = { workspace = true, features = ["test-util"] }
 smelt-test-support = { workspace = true }
-serial_test = "3.4.0"
+serial_test = "4.0.1"
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

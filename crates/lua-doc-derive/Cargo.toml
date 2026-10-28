@@ -11,7 +11,7 @@ name = "lua_doc_derive"
 proc-macro = true
 
 [dependencies]
-syn = "2"
+syn = "3.0.9"
 quote = "1"
 proc-macro2 = "1"
 

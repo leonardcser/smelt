@@ -1,6 +1,15 @@
 pub mod history;
 pub mod score;
 
+/// Matcher config shared by every fuzzy search: case-insensitive, sorted
+/// best-first.
+pub fn matcher_config() -> neo_frizbee::Config {
+    neo_frizbee::Config {
+        casing: neo_frizbee::CaseMatching::Ignore,
+        ..Default::default()
+    }
+}
+
 /// Fuzzy-match `text` against `query`. `None` = no match; lower = better.
 /// One-off pair scoring; for many candidates use [`fuzzy_rank`].
 pub fn fuzzy_score(text: &str, query: &str) -> Option<u32> {
@@ -8,7 +17,7 @@ pub fn fuzzy_score(text: &str, query: &str) -> Option<u32> {
     if query.is_empty() {
         return Some(0);
     }
-    let mut matcher = neo_frizbee::Matcher::new(query, &neo_frizbee::Config::default());
+    let mut matcher = neo_frizbee::Matcher::new(query, &matcher_config());
     let m = matcher.match_one(text, 0)?;
     Some((u16::MAX - m.score) as u32)
 }
@@ -20,7 +29,7 @@ pub fn fuzzy_rank<S: AsRef<str>>(query: &str, haystacks: &[S]) -> Vec<usize> {
     if query.is_empty() {
         return (0..haystacks.len()).collect();
     }
-    neo_frizbee::Matcher::new(query, &neo_frizbee::Config::default())
+    neo_frizbee::Matcher::new(query, &matcher_config())
         .match_list(haystacks)
         .into_iter()
         .map(|m| m.index as usize)

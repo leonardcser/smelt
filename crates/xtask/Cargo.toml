@@ -12,13 +12,13 @@ smelt-protocol = { workspace = true }
 smelt-store = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
 smelt-perf.workspace = true
 toml_edit = "0.25.13"
 semver = "1"
 anyhow = "1.0.104"
 tokio = { workspace = true, features = ["rt", "process", "io-util", "time", "signal", "macros", "rt-multi-thread", "sync"] }
-process-wrap = { version = "9.1.0", default-features = false, features = ["tokio1", "process-group", "process-session", "job-object", "kill-on-drop"] }
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "process-session", "job-object", "kill-on-drop"] }
 tempfile.workspace = true
 libc.workspace = true
 clap = { version = "4", features = ["derive"] }

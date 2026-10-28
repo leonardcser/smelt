@@ -14,15 +14,15 @@ fs4 = "1.1.0"
 getrandom = "0.4.3"
 hostname = "0.4.2"
 libc.workspace = true
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "blob", "bundled", "cache"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["backup", "blob", "bundled", "cache"] }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 smelt-buffer = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-protocol = { workspace = true }
-zstd = "0.13"
+zstd = "0.14.3"
 
 [dev-dependencies]
-rusqlite = { version = "0.40.1", default-features = false, features = ["functions", "hooks"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["functions", "hooks"] }
 tempfile = { workspace = true }

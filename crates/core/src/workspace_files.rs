@@ -1178,8 +1178,8 @@ fn rank_entries_window(
             .collect::<Vec<_>>()
     } else {
         let config = neo_frizbee::Config {
-            sort: false,
-            ..Default::default()
+            sort: neo_frizbee::SortStrategy::Unsorted,
+            ..crate::fuzzy::matcher_config()
         };
         let mut matcher = neo_frizbee::Matcher::new(query, &config);
         let query_lower = query.to_lowercase();
