@@ -730,6 +730,34 @@ async fn a_turn_after_cancellation_continues_on_the_same_process() {
 
 #[tokio::test]
 #[serial(claude_code)]
+async fn a_prompt_waits_while_claude_code_works_on_its_own() {
+    let fixture = Fixture::new("monitor-wake");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut history = Vec::new();
+    finish(&mut handle, &mut history).await;
+    while !fixture.calls().iter().any(|call| call["wake"] == "started") {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    handle.send(payload(fixture.root.path(), 2, history.clone()));
+    finish(&mut handle, &mut history).await;
+    assert!(
+        !fixture
+            .calls()
+            .iter()
+            .any(|call| call["wake"] == "prompted"),
+        "the prompt reached Claude Code while it was still working"
+    );
+    let history = serde_json::to_string(&history).unwrap();
+    let wake = history.find("MONITOR_WAKE_REPLY").expect("wake reply");
+    let prompt = history.find("turn 2").expect("second prompt");
+    assert!(wake < prompt, "the wake reply comes before the prompt");
+    assert!(history[prompt..].contains("fixture answer"));
+}
+
+#[tokio::test]
+#[serial(claude_code)]
 async fn models_are_listed_by_claude_code_and_cached_until_it_changes() {
     let fixture = Fixture::new("text");
     assert!(super::cached_models().is_empty());

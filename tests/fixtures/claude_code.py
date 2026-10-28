@@ -2,6 +2,7 @@
 """Deterministic Claude Code subprocess contract fixture. No network or credentials."""
 import json
 import os
+import select
 import sys
 import time
 
@@ -9,6 +10,8 @@ SESSION = "12345678-1234-4234-8234-123456789abc"
 SCENARIO = os.environ.get("SMELT_CLAUDE_FIXTURE", "text")
 LOG = os.environ.get("SMELT_CLAUDE_FIXTURE_LOG")
 TOOLS_ENABLED = sys.argv[sys.argv.index("--tools") + 1] == "default"
+# Messages read early that the main loop takes next.
+PENDING = []
 
 
 def log(value):
@@ -99,7 +102,7 @@ send({"type": "control_response", "response": {"subtype": "success", "request_id
     {"value": "opus", "displayName": "Opus 5.5", "supportsEffort": True, "supportedEffortLevels": ["low", "high"]},
 ]}}})
 while True:
-    prompt = receive()
+    prompt = PENDING.pop(0) if PENDING else receive()
     if prompt.get("type") != "user":
         if prompt.get("request", {}).get("subtype") == "interrupt":
             # An idle Claude Code has nothing to interrupt.
@@ -349,6 +352,20 @@ while True:
         send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
         assistant([{"type": "text", "text": "SHELL_WAKE_REPLY"}], "shell-wake")
         send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "SHELL_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
+    if SCENARIO == "monitor-wake":
+        # A monitor event wakes Claude Code, which thinks a while before it
+        # answers. A prompt that arrives meanwhile waits behind the wake.
+        send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
+        send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
+        log({"wake": "started"})
+        deadline = time.monotonic() + 0.5
+        while deadline > time.monotonic() and select.select([sys.stdin], [], [], deadline - time.monotonic())[0]:
+            message = receive()
+            if message.get("type") == "user":
+                log({"wake": "prompted"})
+            PENDING.append(message)
+        assistant([{"type": "text", "text": "MONITOR_WAKE_REPLY"}], "monitor-wake")
+        send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "MONITOR_WAKE_REPLY", "total_cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 3}})
     send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
     # The process persists across turns; later prompts are plain questions.
     SCENARIO = "text"

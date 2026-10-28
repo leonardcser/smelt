@@ -293,8 +293,17 @@ impl Runtime<'_> {
         }
     }
 
+    /// Whether Claude Code's main agent is working, or owes a wake. It also
+    /// works on its own, such as when a monitor event wakes it, and says so
+    /// before its first frame.
     fn root_busy(&self) -> bool {
-        self.native.root_in_progress || self.native.awaiting_wake
+        self.native.root_in_progress
+            || self.native.awaiting_wake
+            || self
+                .native
+                .session_state
+                .as_deref()
+                .is_some_and(|state| state != "idle")
     }
 
     /// Whether nothing holds the next prompt back. Background tasks don't.
@@ -1063,11 +1072,6 @@ impl Runtime<'_> {
                         .ok_or("Claude Code result has no session ID")?
                         .to_owned(),
                 );
-                self.native.awaiting_wake = self
-                    .native
-                    .session_state
-                    .as_deref()
-                    .is_some_and(|state| state != "idle");
                 self.transcript.finish();
                 if interrupted {
                     // A turn that ended before the interrupt reached it, or
