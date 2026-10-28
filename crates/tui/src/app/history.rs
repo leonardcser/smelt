@@ -3197,6 +3197,9 @@ impl TuiApp {
                 .conversation
                 .install_rewind_prefix(*transcript, record_count),
         }
+        // Output still streaming, such as a reply Claude Code started on its
+        // own, belongs to the discarded tail.
+        self.conversation.clear_stream_parser();
         self.restore_mode_after_rewind(mode);
         self.sync_session_snapshot();
         self.publish_history_delta(HistoryDeltaKind::Rewound);

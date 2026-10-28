@@ -404,3 +404,50 @@ fn native_shells_join_the_process_list_and_stop_through_their_agent() {
     assert_eq!(rows, 0);
     assert!(!app.render_to_frame().text().contains("proc"));
 }
+
+#[test]
+fn rewinding_drops_a_reply_claude_code_is_streaming_on_its_own() {
+    let mut app = TestApp::builder().build();
+    app.animate_with_virtual_clock();
+    app.start_submitted_turn("first");
+    let first = app.session_history().len() - 1;
+    let session_id = native_session(&mut app, true, true);
+    assert!(app.finish_turn());
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeSessionEvent {
+        session_id,
+        event: Box::new(EngineEvent::TextDelta {
+            delta: "WAKE_REPLY\n\nstill streaming".into(),
+        }),
+    }));
+    for _ in 0..10 {
+        app.advance_animation(100);
+    }
+    assert!(app.render_to_frame().text().contains("WAKE_REPLY"));
+
+    app.rewind_to_history_index(Some(first), false);
+    app.wait_for_rewind();
+    app.press_mod(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    app.start_submitted_turn("again");
+    let turn_id = app.current_turn_id().unwrap();
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "AFTER".into(),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
+        turn_id,
+        delta: protocol::CanonicalHistoryDelta::new(
+            app.session_history().len(),
+            vec![protocol::HistoryItem::Assistant(
+                protocol::AssistantStep::terminal(
+                    Some(protocol::Content::text("AFTER")),
+                    None,
+                    Vec::new(),
+                ),
+            )],
+        ),
+    }));
+    assert!(app.finish_turn());
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("AFTER"), "{frame}");
+    assert!(!frame.contains("WAKE_REPLY"), "{frame}");
+    assert!(!frame.contains("still streaming"), "{frame}");
+}
