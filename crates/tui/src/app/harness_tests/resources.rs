@@ -608,7 +608,7 @@ fn codex_model_accepts_all_advertised_reasoning_efforts() {
 }
 
 #[test]
-fn bundled_title_ask_uses_codex_default_when_off_is_unsupported() {
+fn bundled_title_ask_on_codex_uses_luna() {
     let mut app = TestApp::builder().with_vim(false).build();
     add_codex_gpt_5_6_sol_model(&mut app);
     app.apply_model("codex/gpt-5.6-sol", false);
@@ -620,13 +620,13 @@ fn bundled_title_ask_uses_codex_default_when_off_is_unsupported() {
     let requests = engine_ask_models_and_efforts(app.drain_engine_sends());
     assert_eq!(
         requests,
-        vec![("gpt-5.6-sol".into(), protocol::ReasoningEffort::Low)]
+        vec![("luna".into(), protocol::ReasoningEffort::Off)]
     );
     assert!(!app.lua_messages_contain("reasoning effort"));
 }
 
 #[test]
-fn bundled_prediction_ask_uses_codex_default_when_off_is_unsupported() {
+fn bundled_prediction_ask_on_codex_uses_luna() {
     let mut app = TestApp::builder().with_vim(false).build();
     add_codex_gpt_5_6_sol_model(&mut app);
     app.apply_model("codex/gpt-5.6-sol", false);
@@ -640,7 +640,7 @@ fn bundled_prediction_ask_uses_codex_default_when_off_is_unsupported() {
     let requests = engine_ask_models_and_efforts(app.drain_engine_sends());
     assert_eq!(
         requests,
-        vec![("gpt-5.6-sol".into(), protocol::ReasoningEffort::Low)]
+        vec![("luna".into(), protocol::ReasoningEffort::Off)]
     );
     assert!(!app.lua_messages_contain("reasoning effort"));
 }

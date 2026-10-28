@@ -35,7 +35,7 @@ pub fn select_model(config: &RuntimeState, reference: Option<&str>) -> Result<Ac
             .map_err(|error| error.to_string()),
         None => config
             .active_model()
-            .cloned()
+            .map(ActiveModel::auxiliary)
             .ok_or_else(|| "no usable model is available".into()),
     }
 }

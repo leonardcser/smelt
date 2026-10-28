@@ -124,6 +124,28 @@ impl ActiveModel {
         )
     }
 
+    /// The model for auxiliary requests, such as titles and predictions, that
+    /// name none. On Codex that is `luna`.
+    pub fn auxiliary(&self) -> Self {
+        if smelt_provider::ProviderKind::from_config(&self.provider_type)
+            != smelt_provider::ProviderKind::Codex
+        {
+            return self.clone();
+        }
+        let provider = self.key.strip_suffix(&self.model_name).unwrap_or_default();
+        Self {
+            key: format!("{provider}luna"),
+            model_name: "luna".into(),
+            display_name: None,
+            config: ModelConfig {
+                name: Some("luna".into()),
+                ..Default::default()
+            },
+            catalog: ModelCatalogMetadata::default(),
+            ..self.clone()
+        }
+    }
+
     pub fn target(&self, api_key: String) -> ModelTarget {
         ModelTarget {
             model: self.model_name.clone(),
@@ -718,6 +740,32 @@ pub fn resolve_runtime(inputs: RuntimeInputs<'_>) -> Result<RuntimeState, Resolv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_requests_use_luna_only_on_codex() {
+        let mut sol = ActiveModel {
+            key: "codex/gpt-5.6-sol".into(),
+            model_name: "gpt-5.6-sol".into(),
+            display_name: Some("GPT-5.6 Sol".into()),
+            api_base: String::new(),
+            api_key_env: String::new(),
+            provider_type: "codex".into(),
+            config: ModelConfig {
+                name: Some("gpt-5.6-sol".into()),
+                supports_fast_mode: Some(true),
+                ..Default::default()
+            },
+            catalog: ModelCatalogMetadata::default(),
+            availability: ModelAvailability::Available,
+        };
+        let luna = sol.auxiliary();
+        assert_eq!(luna.key, "codex/luna");
+        assert_eq!(luna.target(String::new()).model, "luna");
+        assert_eq!(luna.config.supports_fast_mode, None);
+
+        sol.provider_type = "openai".into();
+        assert_eq!(sol.auxiliary(), sol);
+    }
 
     fn provider_config() -> config::Config {
         config::Config {

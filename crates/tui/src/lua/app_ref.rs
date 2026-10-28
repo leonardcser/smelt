@@ -810,17 +810,23 @@ impl AgentLuaHost<'_> {
         model_reference: Option<&str>,
     ) -> Option<(protocol::ModelTarget, protocol::ModelCatalogMetadata)> {
         let Some(reference) = model_reference else {
-            let catalog = self
+            let auxiliary = self
                 .app
                 .core
                 .config
                 .active_model()
+                .map(smelt_core::ActiveModel::auxiliary);
+            let catalog = auxiliary
+                .as_ref()
                 .map(|model| model.reasoning_catalog())
                 .unwrap_or_default();
-            return self
-                .app
-                .resolve_model_target()
-                .map(|target| (target, catalog));
+            return self.app.resolve_model_target().map(|mut target| {
+                if let Some(model) = auxiliary {
+                    target.model = model.model_name;
+                    target.config = model.config;
+                }
+                (target, catalog)
+            });
         };
         let resolved =
             match smelt_core::lua::ask::select_model(&self.app.core.config, Some(reference)) {
