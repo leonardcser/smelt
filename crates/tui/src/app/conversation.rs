@@ -3752,7 +3752,7 @@ mod tests {
                 delta: "captured streaming text α".into(),
             },
         ));
-        app.clock.advance(Duration::from_millis(250));
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         app.render_silent();
         app.app.save_session();
         let generation = app.app.conversation.persistence_generation();
@@ -3761,7 +3761,7 @@ mod tests {
                 delta: " newer text 界".into(),
             },
         ));
-        app.clock.advance(Duration::from_millis(250));
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         app.render_silent();
         assert!(app.app.conversation.persistence_generation() > generation);
         release.send(()).unwrap();

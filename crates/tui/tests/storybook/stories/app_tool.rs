@@ -85,7 +85,7 @@ app_story!(streaming_tool_draft_syntax_highlighting, |ctx| {
         "bash",
         r#"{"command":"cargo test -p smelt-tui app::drafts -- --nocapture"#,
     );
-    ctx.advance_time(250);
+    ctx.finish_stream_reveal();
     ctx.assert_snapshot();
 });
 
@@ -95,7 +95,7 @@ app_story!(streaming_edit_file_draft_diff, |ctx| {
         "edit_file",
         r#"{"file_path":"src/live.rs","old_string":"pub fn live() -> i32 {\n    1\n}","new_string":"pub fn live() -> i32 {\n    2"#,
     );
-    ctx.advance_time(250);
+    ctx.finish_stream_reveal();
     ctx.assert_snapshot();
 });
 

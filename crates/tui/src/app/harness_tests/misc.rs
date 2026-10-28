@@ -51,7 +51,9 @@ fn response_draft_rejection_removes_only_attempt_output() {
         delta: "valid answer".into(),
     }));
     app.render_to_frame();
-    app.feed_one(SourceEvent::Tick(250));
+    app.feed_one(SourceEvent::Tick(
+        crate::app::test_harness::STREAM_REVEAL_LIMIT.as_millis() as u64,
+    ));
     assert!(app.render_to_frame().text().contains("valid answer"));
     app.assert_invariants();
 }
@@ -486,7 +488,7 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
             tool_name: Some(tool_name.into()),
             delta: format!(r#"{{"pattern":{}"#, serde_json::to_string(pattern).unwrap()),
         }));
-        app.clock.advance(std::time::Duration::from_millis(250));
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         let pattern_frame = app.render_to_frame().text();
         let expected_pattern = format!("* {tool_name} {pattern}");
         assert!(
@@ -505,7 +507,7 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
             tool_name: Some(tool_name.into()),
             delta: format!(r#","path":{}"#, partial_cwd),
         }));
-        app.clock.advance(std::time::Duration::from_millis(250));
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         let hidden_path_frame = app.render_to_frame().text();
         assert!(
             hidden_path_frame.contains(&expected_pattern),
@@ -522,7 +524,9 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
             tool_name: Some(tool_name.into()),
             delta: "/crates/core/src/content".into(),
         }));
-        app.feed_one(SourceEvent::Tick(250));
+        app.feed_one(SourceEvent::Tick(
+            crate::app::test_harness::STREAM_REVEAL_LIMIT.as_millis() as u64,
+        ));
         let relative_path_frame = app.render_to_frame().text();
         assert!(
             relative_path_frame.contains(&format!(
@@ -739,7 +743,7 @@ fn fast_streaming_keeps_thinking_before_answer() {
                 .contains("The lighthouse stood on the cliff."),
             "late reasoning completion flushed the answer animation"
         );
-        app.clock.advance(Duration::from_millis(250));
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         frames.push(app.render_to_frame().text());
         assert!(frames
             .last()

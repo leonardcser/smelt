@@ -37,7 +37,7 @@ fn compaction_draft_rejection_clears_queued_preview() {
         id,
         delta: "rejected summary".into(),
     });
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     assert!(app.render_to_frame().text().contains("rejected summary"));
     app.app
         .queue_engine_continuation(EngineEvent::EngineAskDelta {
@@ -53,7 +53,7 @@ fn compaction_draft_rejection_clears_queued_preview() {
     while !app.app.transcript_work.is_empty() {
         app.app.apply_pending_transcript_work();
     }
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     let frame = app.render_to_frame().text();
     assert!(frame.contains("recovered summary"));
     assert!(!frame.contains("rejected"));
@@ -344,7 +344,9 @@ fn streaming_thinking_honors_peek_and_enter_toggles() {
         )
         .into(),
     });
-    app.feed_one(SourceEvent::Tick(250));
+    app.feed_one(SourceEvent::Tick(
+        crate::app::test_harness::STREAM_REVEAL_LIMIT.as_millis() as u64,
+    ));
     app.render_silent();
 
     focus_transcript_in_normal_mode(&mut app);

@@ -64,6 +64,11 @@ impl AppStoryCtx {
         self.app.feed_one(SourceEvent::Tick(ms));
     }
 
+    /// Advance until every received stream chunk is fully revealed.
+    pub fn finish_stream_reveal(&mut self) {
+        self.advance_time(tui::app::test_harness::STREAM_REVEAL_LIMIT.as_millis() as u64);
+    }
+
     pub fn write_workspace_file(&self, path: &str, content: &str) {
         let path = std::path::Path::new(self.app.cwd_str()).join(path);
         if let Some(parent) = path.parent() {

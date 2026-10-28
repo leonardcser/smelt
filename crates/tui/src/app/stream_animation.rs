@@ -1,13 +1,15 @@
 //! Frame-paced transcript text. Only received text is revealed; provider signals
-//! retain their original chunks. Rates count graphemes so animation does not split
-//! a combining sequence or emoji contained in a provider chunk.
+//! retain their original chunks. Each chunk types out over the gap that preceded
+//! it, so bursty providers still read as continuous typing. Rates count graphemes
+//! so animation does not split a combining sequence or emoji in a provider chunk.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-const RATE_WINDOW: Duration = Duration::from_secs(1);
-const STARTUP_WINDOW: Duration = Duration::from_millis(100);
-const MAX_LAG: Duration = Duration::from_millis(250);
+/// Shortest reveal, so back-to-back chunks still type out over a few frames.
+const MIN_SPREAD: Duration = Duration::from_millis(50);
+/// Longest reveal, so a stalled provider does not make the next chunk crawl.
+pub(super) const MAX_SPREAD: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamKind {
@@ -18,7 +20,6 @@ pub(crate) enum StreamKind {
 struct Chunk {
     text: String,
     offset: usize,
-    arrived_at: Instant,
 }
 
 #[derive(Default)]
@@ -26,8 +27,9 @@ pub(crate) struct StreamAnimation {
     kind: Option<StreamKind>,
     chunks: VecDeque<Chunk>,
     pending_chars: usize,
-    samples: VecDeque<(Instant, usize)>,
-    started_at: Option<Instant>,
+    last_arrival: Option<Instant>,
+    /// When every pending character should be visible.
+    deadline: Option<Instant>,
     last_tick: Option<Instant>,
     credit: f64,
 }
@@ -56,32 +58,27 @@ impl StreamAnimation {
             return String::new();
         }
         self.kind = Some(kind);
-        self.expire_samples(now);
-        self.started_at.get_or_insert(now);
-        let chars = smelt_buffer::cell_width::grapheme_indices(&text).count();
-        // Coalesce arrivals within a frame to bound the rate history at high throughput.
-        if let Some((_, count)) = self
-            .samples
-            .back_mut()
-            .filter(|(at, _)| now.saturating_duration_since(*at) < Duration::from_millis(16))
-        {
-            *count += chars;
-        } else {
-            self.samples.push_back((now, chars));
-        }
+        // Expect the next chunk after the same gap that preceded this one.
+        let spread = self
+            .last_arrival
+            .map_or(MAX_SPREAD, |last| now.saturating_duration_since(last))
+            .clamp(MIN_SPREAD, MAX_SPREAD);
+        self.last_arrival = Some(now);
         let was_empty = self.chunks.is_empty();
-        self.pending_chars += chars;
-        self.chunks.push_back(Chunk {
-            text,
-            offset: 0,
-            arrived_at: now,
-        });
+        self.pending_chars += smelt_buffer::cell_width::grapheme_indices(&text).count();
+        self.chunks.push_back(Chunk { text, offset: 0 });
+        // Queued arrivals can predate the last frame; do not spend that frame's time twice.
+        let start = self.last_tick.map_or(now, |last| last.max(now));
+        self.deadline = Some(
+            self.deadline
+                .filter(|_| !was_empty)
+                .map_or(start + spread, |deadline| deadline.max(start + spread)),
+        );
         if was_empty {
             let show_first = self
                 .last_tick
-                .is_none_or(|last| now.saturating_duration_since(last) >= MAX_LAG);
-            // Queued arrivals can predate the last frame; do not spend that frame's time twice.
-            self.last_tick = Some(self.last_tick.map_or(now, |last| last.max(now)));
+                .is_none_or(|last| now.saturating_duration_since(last) >= MAX_SPREAD);
+            self.last_tick = Some(start);
             self.credit = 0.0;
             // Show the first character immediately, without banking credit during idle time.
             if show_first {
@@ -91,37 +88,21 @@ impl StreamAnimation {
         String::new()
     }
 
-    fn expire_samples(&mut self, now: Instant) {
-        while self
-            .samples
-            .front()
-            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= RATE_WINDOW)
-        {
-            self.samples.pop_front();
-        }
-        if self.samples.is_empty() {
-            self.started_at = None;
-        }
-    }
-
     pub(crate) fn advance(&mut self, now: Instant) -> String {
-        let Some(oldest) = self.chunks.front().map(|chunk| chunk.arrived_at) else {
+        let Some(deadline) = self.deadline.filter(|_| !self.chunks.is_empty()) else {
             return String::new();
         };
-        let elapsed = now.saturating_duration_since(self.last_tick.replace(now).unwrap_or(now));
-        self.expire_samples(now);
-        let window = now
-            .saturating_duration_since(self.started_at.unwrap_or(now))
-            .clamp(STARTUP_WINDOW, RATE_WINDOW)
-            .as_secs_f64();
-        let rate = self.samples.iter().map(|(_, count)| *count).sum::<usize>() as f64 / window;
-        let remaining = MAX_LAG.saturating_sub(now.saturating_duration_since(oldest));
-        if remaining.is_zero() {
+        let last = self.last_tick.replace(now).unwrap_or(now);
+        if now >= deadline {
             return self.take_chars(self.pending_chars);
         }
-        // Queue pressure prevents an outdated rate estimate from adding unbounded latency.
-        let catch_up_rate = self.pending_chars as f64 / remaining.as_secs_f64();
-        self.credit += elapsed.as_secs_f64() * rate.max(catch_up_rate);
+        let elapsed = now.saturating_duration_since(last);
+        if elapsed.is_zero() {
+            return String::new();
+        }
+        // Reveal the backlog linearly so it finishes exactly at the deadline.
+        let budget = deadline.saturating_duration_since(last);
+        self.credit += self.pending_chars as f64 * elapsed.as_secs_f64() / budget.as_secs_f64();
         let chars = (self.credit.floor() as usize).min(self.pending_chars);
         self.credit -= chars as f64;
         self.take_chars(chars)
@@ -180,6 +161,37 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn bursty_small_chunks_type_continuously_between_arrivals() {
+        let start = Instant::now();
+        let mut animation = StreamAnimation::default();
+        let arrivals = [
+            (0, "The quick brown fox "),
+            (352, "jumps over the lazy dog "),
+            (704, "and then keeps running "),
+        ];
+        let frame = Duration::from_millis(16);
+        let mut shown = String::new();
+        let mut last_reveal = start;
+        for ms in (0..=704 + MAX_SPREAD.as_millis() as u64).step_by(16) {
+            let now = start + Duration::from_millis(ms);
+            let before = shown.len();
+            for (_, text) in arrivals.iter().filter(|(at, _)| *at == ms) {
+                shown.push_str(&animation.push(StreamKind::Text, (*text).into(), now));
+            }
+            shown.push_str(&animation.advance(now));
+            if shown.len() > before {
+                last_reveal = now;
+            } else if ms <= 704 {
+                assert!(
+                    now - last_reveal <= 2 * frame,
+                    "typing stalled at {ms}ms after {shown:?}"
+                );
+            }
+        }
+        assert_eq!(shown, arrivals.map(|(_, text)| text).concat());
+    }
+
+    #[test]
     fn fractional_budget_preserves_unicode_and_does_not_advance_without_time() {
         let start = Instant::now();
         let source = "é漢🙂e\u{301}👩‍💻🇫🇷\ntext";
@@ -187,7 +199,7 @@ mod tests {
         let mut shown = animation.push(StreamKind::Text, source.into(), start);
         assert_eq!(shown, "é");
         assert!(animation.advance(start).is_empty());
-        for ms in 1..=250 {
+        for ms in 1..=MAX_SPREAD.as_millis() as u64 {
             shown.push_str(&animation.advance(start + Duration::from_millis(ms)));
             assert!(source.starts_with(&shown));
             assert_eq!(
@@ -207,7 +219,7 @@ mod tests {
         for finish in [false, true] {
             let mut animation = StreamAnimation::default();
             let mut shown = animation.push(StreamKind::Text, first.into(), start);
-            let later = start + Duration::from_millis(25);
+            let later = start + Duration::from_millis(100);
             shown.push_str(&animation.advance(later));
             assert!(shown.len() > "é".len());
             assert!(shown.len() < first.len());
@@ -219,7 +231,7 @@ mod tests {
                 shown.push_str(&remaining);
                 assert!(animation.kind().is_none());
             } else {
-                shown.push_str(&animation.advance(start + MAX_LAG));
+                shown.push_str(&animation.advance(start + MAX_SPREAD));
             }
             assert_eq!(shown, format!("{first}{second}"));
             assert_eq!(animation.pending_chars, 0);
@@ -229,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn faster_arrivals_increase_reveal_speed_and_keep_history_bounded() {
+    fn larger_chunks_reveal_faster_and_steady_streams_stay_close_behind() {
         let start = Instant::now();
         let mut animation = StreamAnimation::default();
         for ms in 0..1000 {
@@ -247,9 +259,9 @@ mod tests {
             let now = start + Duration::from_millis(ms);
             animation.push(StreamKind::Text, "a".into(), now);
             animation.advance(now);
-            assert!(animation.samples.len() <= 64);
+            assert!(animation.pending_chars as u128 <= 2 * MIN_SPREAD.as_millis());
         }
-        animation.advance(start + Duration::from_millis(4250));
+        animation.advance(start + Duration::from_millis(4000) + MIN_SPREAD);
         assert_eq!(animation.pending_chars, 0);
     }
 
@@ -265,7 +277,7 @@ mod tests {
             .push(StreamKind::Text, "c".into(), start)
             .is_empty());
         assert!(animation.advance(start).is_empty());
-        assert_eq!(animation.advance(start + MAX_LAG), "bc");
+        assert_eq!(animation.advance(start + MAX_SPREAD), "bc");
     }
 
     #[test]
@@ -273,14 +285,14 @@ mod tests {
         let start = Instant::now();
         let mut animation = StreamAnimation::default();
         animation.push(StreamKind::Text, "first".into(), start);
-        assert_eq!(animation.advance(start + MAX_LAG), "irst");
+        assert_eq!(animation.advance(start + MAX_SPREAD), "irst");
         let later = start + Duration::from_secs(10);
         assert_eq!(
             animation.push(StreamKind::Text, "second".into(), later),
             "s"
         );
         assert!(animation.advance(later).is_empty());
-        assert_eq!(animation.advance(later + MAX_LAG), "econd");
+        assert_eq!(animation.advance(later + MAX_SPREAD), "econd");
     }
 
     #[test]
@@ -288,7 +300,7 @@ mod tests {
         let start = Instant::now();
         let mut animation = StreamAnimation::default();
         animation.push(StreamKind::Text, "first".into(), start);
-        assert_eq!(animation.advance(start + MAX_LAG), "irst");
+        assert_eq!(animation.advance(start + MAX_SPREAD), "irst");
         assert!(animation
             .push(
                 StreamKind::Text,
@@ -296,9 +308,10 @@ mod tests {
                 start + Duration::from_millis(100)
             )
             .is_empty());
-        assert!(animation.advance(start + MAX_LAG).is_empty());
+        assert!(animation.advance(start + MAX_SPREAD).is_empty());
+        // Spread over the 100ms arrival gap, starting from the last frame.
         assert_eq!(
-            animation.advance(start + Duration::from_millis(350)),
+            animation.advance(start + MAX_SPREAD + Duration::from_millis(100)),
             "delayed"
         );
     }
@@ -322,7 +335,7 @@ mod tests {
             .text()
             .contains("Thinking still in progress"));
         assert!(app.app.conversation.has_pending_stream_animation());
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(app
             .render_to_frame()
             .text()
@@ -374,14 +387,14 @@ mod tests {
         assert!(app.render_to_frame().text().contains("Interrupted answer"));
         assert!(!app.app.conversation.has_pending_stream_animation());
         assert!(!app.agent_running());
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         app.render_to_frame();
         app.assert_invariants();
     }
 
     #[test]
     fn rejected_draft_does_not_reappear_on_later_frames() {
-        for reveal_delay in [Duration::ZERO, MAX_LAG] {
+        for reveal_delay in [Duration::ZERO, MAX_SPREAD] {
             let mut app = TestApp::builder().build();
             app.start_turn(1);
             app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
@@ -394,7 +407,7 @@ mod tests {
                 delta: "Valid answer".into(),
             }));
             app.render_to_frame();
-            app.clock.advance(MAX_LAG);
+            app.clock.advance(MAX_SPREAD);
             let frame = app.render_to_frame().text();
             assert!(frame.contains("Valid answer"));
             assert!(!frame.contains("Rejected"));
@@ -423,7 +436,7 @@ mod tests {
             });
             app.render_to_frame();
         }
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         app.render_to_frame();
         let history = app.app.conversation.transcript().history();
         let smelt_core::transcript_model::Block::Thinking { content, .. } =
@@ -451,7 +464,7 @@ mod tests {
             }),
         });
         app.app.clear_transcript();
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(!app.render_to_frame().text().contains("ld answer"));
         assert!(!app.app.conversation.has_pending_stream_animation());
     }
@@ -467,7 +480,7 @@ mod tests {
         app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
             delta: "Late queued text".into(),
         }));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(frame.contains("aLate queued text"), "{frame}");
         app.assert_invariants();
@@ -528,14 +541,14 @@ mod tests {
             .render_to_frame()
             .text()
             .contains("Auxiliary answer arriving in one chunk"));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(
             frame.contains("Auxiliary answer arriving in one chunk"),
             "{frame}"
         );
         assert!(app.run_lua("smooth_stream:reset()"));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(!app.render_to_frame().text().contains("Auxiliary answer"));
     }
 
@@ -547,14 +560,14 @@ mod tests {
             .render_to_frame()
             .text()
             .contains("Compaction summary arriving in one chunk"));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(app
             .render_to_frame()
             .text()
             .contains("Compaction summary arriving in one chunk"));
         app.push_compaction_preview("Replacement preview");
         app.app.clear_compaction_preview();
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(!app.render_to_frame().text().contains("Replacement preview"));
     }
 
@@ -577,14 +590,14 @@ mod tests {
             .render_to_frame()
             .text()
             .contains("Generated source arriving in one chunk"));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(
             frame.contains("Generated source arriving in one chunk"),
             "{frame}"
         );
         app.feed_one(SourceEvent::engine(EngineEvent::ResponseDraftRejected));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(!app.render_to_frame().text().contains("Generated source"));
         app.assert_invariants();
     }
@@ -600,7 +613,7 @@ mod tests {
             delta: "**Planning**\nA structured summary before completion".into(),
         }));
         app.render_to_frame();
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(
             frame.contains("A structured summary before completion"),
@@ -639,7 +652,7 @@ mod tests {
         "#,
         )
         .expect("independent auxiliary streams");
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         app.render_to_frame();
         app.run_lua_result(
             r#"
@@ -690,7 +703,7 @@ mod tests {
             error: None,
         }));
         app.drive_lua_tasks();
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(!app.render_to_frame().text().contains("Pending side answer"));
         assert!(app.drain_engine_sends().is_empty());
         app.assert_invariants();
@@ -729,7 +742,7 @@ mod tests {
                 delta: arguments.into(),
             }));
             assert!(!app.render_to_frame().text().contains(marker));
-            app.clock.advance(MAX_LAG);
+            app.clock.advance(MAX_SPREAD);
             let frame = app.render_to_frame().text();
             assert!(frame.contains(marker), "{name}: {frame}");
             if marker == "partial replacement" {
@@ -769,7 +782,7 @@ mod tests {
         let frame = app.render_to_frame().text();
         assert!(frame.contains("final canonical source"), "{frame}");
         assert!(!frame.contains("second draft source"), "{frame}");
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(frame.contains("second draft source"), "{frame}");
         assert!(!frame.contains("first draft source"), "{frame}");
@@ -812,7 +825,7 @@ mod tests {
             .render_to_frame()
             .text()
             .contains("Independent streaming answer"));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         app.render_to_frame();
         let history = app.app.conversation.transcript().history();
         let text_blocks = history
@@ -869,7 +882,7 @@ mod tests {
             title: None,
             delta: "Second summary body".into(),
         }));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(app.render_to_frame().text().contains("Second summary body"));
         app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartFinished {
             id: "second".into(),
@@ -883,14 +896,14 @@ mod tests {
             title: Some("Unfinished title".into()),
             delta: " title**\nFirst summary body".into(),
         }));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(
             frame.find("First summary body").unwrap() < frame.find("Second summary body").unwrap(),
             "{frame}"
         );
         app.feed_one(SourceEvent::engine(EngineEvent::ResponseDraftRejected));
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(!frame.contains("First summary body") && !frame.contains("Second summary body"));
         app.assert_invariants();
@@ -914,7 +927,7 @@ mod tests {
                 title: None,
                 delta: body.into(),
             }));
-            app.clock.advance(MAX_LAG);
+            app.clock.advance(MAX_SPREAD);
             assert!(app.render_to_frame().text().contains(body));
         }
         let frame = app.render_to_frame().text();
@@ -948,7 +961,7 @@ mod tests {
                 title: None,
                 delta: body.into(),
             }));
-            app.clock.advance(MAX_LAG);
+            app.clock.advance(MAX_SPREAD);
             assert!(app.render_to_frame().text().contains(body));
         }
         let frame = app.render_to_frame().text();
@@ -975,7 +988,7 @@ mod tests {
                 }));
             }
             app.render_to_frame();
-            app.clock.advance(MAX_LAG);
+            app.clock.advance(MAX_SPREAD);
             app.render_to_frame();
             let history = app.app.conversation.transcript().history();
             let bodies = history
@@ -1017,7 +1030,7 @@ mod tests {
                 id,
                 delta: "Already received auxiliary text".into(),
             });
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         app.render_to_frame();
         app.run_lua_result(r#"assert(table.concat(arrival_buf:lines(), "\n"):find("Already received auxiliary text", 1, true))"#).expect("receipt-time reveal");
     }
@@ -1041,7 +1054,7 @@ mod tests {
                 content: format!("{title} summary body"),
             }));
         }
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         app.render_to_frame();
         let history = app.app.conversation.transcript().history();
         assert_eq!(history.order.len(), 1);
@@ -1072,7 +1085,7 @@ mod tests {
                 title: None,
                 delta: body.into(),
             }));
-            app.clock.advance(MAX_LAG);
+            app.clock.advance(MAX_SPREAD);
             let frame = app.render_to_frame().text();
             assert!(frame.contains(body), "{frame}");
             app.feed_one(SourceEvent::engine(EngineEvent::ReasoningPartFinished {
@@ -1110,7 +1123,7 @@ mod tests {
         assert!(frame.contains("Final summary body"), "{frame}");
         assert!(!frame.contains("Provisional summary body"), "{frame}");
         assert!(!frame.contains("Answer remains frame paced"), "{frame}");
-        app.clock.advance(MAX_LAG);
+        app.clock.advance(MAX_SPREAD);
         assert!(app
             .render_to_frame()
             .text()
@@ -1135,7 +1148,7 @@ mod tests {
             } else {
                 app.cancel();
             }
-            app.clock.advance(MAX_LAG);
+            app.clock.advance(MAX_SPREAD);
             assert_eq!(
                 app.render_to_frame()
                     .text()
@@ -1159,11 +1172,11 @@ mod tests {
         let first = app.render_to_frame().text();
         assert!(first.contains("S"));
         assert!(!first.contains("Smooth streaming output"));
-        app.clock.advance(Duration::from_millis(32));
+        app.clock.advance(Duration::from_millis(150));
         let next = app.render_to_frame().text();
         assert!(next.contains("Smooth"));
         assert!(!next.contains("Smooth streaming output"));
-        app.clock.advance(Duration::from_millis(250));
+        app.clock.advance(MAX_SPREAD);
         assert!(app
             .render_to_frame()
             .text()

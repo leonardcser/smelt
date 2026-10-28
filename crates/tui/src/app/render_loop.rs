@@ -1710,10 +1710,13 @@ mod tests {
         }
         assert_eq!(streamed_text(&app), "f");
 
-        app.clock.advance(CONTINUATION_FRAME_INTERVAL);
+        app.clock.advance(6 * CONTINUATION_FRAME_INTERVAL);
         assert!(app.app.render_pending_transient_frame_to(&mut sink));
-        assert_eq!(streamed_text(&app), "fir");
-        app.clock.advance(std::time::Duration::from_millis(250));
+        let partial = streamed_text(&app);
+        assert!(
+            partial.len() > 1 && "first second third".starts_with(&partial) && partial.len() < 18
+        );
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         assert!(app.app.render_pending_transient_frame_to(&mut sink));
         assert_eq!(streamed_text(&app), "first second third");
     }
@@ -1738,7 +1741,7 @@ mod tests {
             });
         app.app.apply_pending_transcript_work();
         app.render_to_frame();
-        app.clock.advance(std::time::Duration::from_millis(250));
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(frame.contains("valid answer"));
         assert!(!frame.contains("rejected"));

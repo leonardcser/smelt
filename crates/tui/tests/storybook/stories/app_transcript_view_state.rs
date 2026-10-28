@@ -113,7 +113,7 @@ app_story!(compacted_block_states, |ctx| {
 app_story!(compaction_preview_block_states, |ctx| {
     ctx.set_viewport(60, 16);
     ctx.push_compaction_preview(COMPACTION_PREVIEW_SUMMARY);
-    ctx.advance_time(250);
+    ctx.finish_stream_reveal();
     ctx.assert_snapshot_named("peek");
 
     ctx.run_lua("smelt.transcript.fold_kind('compaction_preview', 'open')");

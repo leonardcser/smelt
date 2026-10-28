@@ -3871,7 +3871,7 @@ fn btw_dialog_resets_rejected_draft_and_recovers_without_waiting_styles() {
         id,
         delta: "rejected side answer".into(),
     }));
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     assert!(app
         .render_to_frame()
         .text()
@@ -3949,7 +3949,7 @@ fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
     .expect("queue /btw response");
 
     app.drain_ready_engine_outputs_for_frame_to(&mut std::io::sink(), |_| {});
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     let frame = app.render_to_frame().text();
     assert!(frame.contains("live dialog marker"), "frame: {frame}");
     assert!(!frame.contains("final answer"), "frame: {frame}");

@@ -245,7 +245,7 @@ fn compact_command_streams_preview_into_rendered_transcript() {
         .render_to_frame()
         .text()
         .contains("streamed via slash command"));
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     let frame = app.render_to_frame().text();
     assert!(frame.contains("compacting"), "frame: {frame}");
     assert!(
@@ -273,7 +273,7 @@ fn streaming_compaction_preview_keeps_sparse_projection_viewport_bounded() {
         id: ask_id,
         delta: format!("# Goal\n{}\n{marker}", "streaming summary ".repeat(1_000)),
     });
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     app.app
         .conversation
         .reset_transcript_projection_counters_for_harness();
@@ -620,7 +620,7 @@ fn engine_ask_delta_callbacks_can_update_compaction_preview_from_dispatch() {
         delta: "# Goal\nstream the summary".into(),
     });
 
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     app.render_to_frame();
     let preview_id = app
         .conversation_probe()
@@ -691,7 +691,7 @@ async fn timed_render_loop_shows_compaction_preview_only_while_following_tail() 
                 id: ask_id,
                 delta: marker.into(),
             }),
-            SourceEvent::Tick(250),
+            SourceEvent::Tick(crate::app::test_harness::STREAM_REVEAL_LIMIT.as_millis() as u64),
             SourceEvent::engine(protocol::EngineEvent::EngineAskResponse {
                 id: ask_id,
                 message: Some(protocol::Message::assistant(
@@ -953,7 +953,7 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
     let frame = streamed_frame.expect("streaming frame");
     assert!(frame.contains("compacting"), "frame: {frame}");
     assert!(!frame.contains("live compaction marker"), "frame: {frame}");
-    app.clock.advance(std::time::Duration::from_millis(250));
+    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
     let next_iteration_frame = app.render_to_frame().text();
     assert!(
         next_iteration_frame.contains("live compaction marker"),
@@ -1224,7 +1224,7 @@ async fn real_engine_one_shot_auto_compaction_preserves_lifecycle() {
                 .dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
             app.wait_for_project_context();
             if is_compaction_delta {
-                app.clock.advance(std::time::Duration::from_millis(250));
+                app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
             }
             let frame = app.render_to_frame().text();
             if is_prepare_request && waiting_frame.is_none() && frame.contains("compacting") {
@@ -1379,7 +1379,7 @@ fn delayed_host_calls_cannot_claim_a_replacement_turn() {
                     Err(tokio::sync::oneshot::error::TryRecvError::Empty)
                 ));
                 assert_eq!(app.working_probe().phase_label(), Some("compacting"));
-                app.clock.advance(std::time::Duration::from_millis(250));
+                app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
                 assert!(app.render_to_frame().text().contains("CURRENT_PREVIEW"));
             }
         }
@@ -1505,7 +1505,7 @@ fn late_compaction_callbacks_preserve_new_preview() {
             id: new_ask,
             delta: "NEW_SUMMARY".into(),
         });
-        app.clock.advance(std::time::Duration::from_millis(250));
+        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
         assert!(app.render_to_frame().text().contains("NEW_SUMMARY"));
         assert_eq!(app.working_probe().phase_label(), Some("compacting"));
 
