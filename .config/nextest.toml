@@ -1,5 +1,16 @@
+experimental = ["setup-scripts"]
+
 # These tests enforce wall-clock interaction budgets, so they must not compete
 # with CPU-heavy tests for runner time.
 [[profile.default.overrides]]
 filter = 'test(/^app::harness_tests::(persistence::current_compacted_read_only_session_forks_without_hydrating_or_cloning_history|persistence::large_response_keeps_history_append_and_follow_up_enter_responsive|persistence::large_sparse_fork_preserves_every_canonical_history_and_record_row|search::transcript_search_rapid_typing_cancels_stale_worker_generations)$/)'
 threads-required = "num-test-threads"
+
+# Tests and the smelt processes they spawn log and persist under the state dir;
+# keep them out of the developer's real one.
+[scripts.setup.isolate-state]
+command = ["sh", "-c", 'echo "XDG_STATE_HOME=$(mktemp -d "${TMPDIR:-/tmp}/smelt-nextest-state.XXXXXX")" >> "$NEXTEST_ENV"']
+
+[[profile.default.scripts]]
+filter = "all()"
+setup = "isolate-state"

@@ -369,6 +369,18 @@ fn claude_code_errors_are_actionable_and_do_not_hang() {
 }
 
 #[test]
+fn claude_code_unexpected_exit_reports_its_status_and_stderr() {
+    let (output, _) = run("early-exit", "");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("exit status: 2"), "{text}");
+    assert!(
+        text.contains("Error: fixture crashed with token [redacted]"),
+        "{text}"
+    );
+    assert!(!text.contains("sk-ant-"), "{text}");
+}
+
+#[test]
 fn claude_code_foreground_child_uses_policy_and_has_an_isolated_transcript() {
     let (output, calls) = run(
         "subagent-foreground",

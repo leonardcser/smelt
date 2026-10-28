@@ -4,11 +4,15 @@ use protocol::{AgentMode, ModelTarget, ReasoningEffort};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// How much of Claude Code's stderr is kept to explain an unexpected exit.
+const STDERR_TAIL_BYTES: usize = 4096;
+const STDERR_TAIL_LINES: usize = 8;
 
 pub(super) struct LaunchOptions<'a> {
     pub cwd: &'a Path,
@@ -34,6 +38,7 @@ pub(super) struct Process {
     stdout: BufReader<ChildStdout>,
     frame: Vec<u8>,
     stderr: tokio::task::JoinHandle<()>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
     pid: Option<u32>,
 }
 
@@ -212,13 +217,19 @@ impl Process {
             .stderr
             .take()
             .ok_or("Claude Code stderr is unavailable")?;
-        // Drain all stderr without retaining unbounded output or logging credentials.
+        // Drain all stderr, keeping only a bounded tail to explain an exit.
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let tail = stderr_tail.clone();
         let stderr = tokio::spawn(async move {
             let mut buffer = [0u8; 4096];
             while let Ok(n) = stderr.read(&mut buffer).await {
                 if n == 0 {
                     break;
                 }
+                let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
+                tail.extend_from_slice(&buffer[..n]);
+                let excess = tail.len().saturating_sub(STDERR_TAIL_BYTES);
+                tail.drain(..excess);
             }
         });
         Ok(Self {
@@ -228,6 +239,7 @@ impl Process {
             stdout,
             frame: Vec::new(),
             stderr,
+            stderr_tail,
         })
     }
 
@@ -263,10 +275,9 @@ impl Process {
     pub(super) async fn ask(&mut self, id: &str, request: Value) -> Result<Value, String> {
         self.write(control(id, request)).await?;
         loop {
-            let mut frame = self
-                .read()
-                .await?
-                .ok_or("Claude Code exited before it answered")?;
+            let Some(mut frame) = self.read().await? else {
+                return Err(self.exited("Claude Code exited before it answered").await);
+            };
             if frame["type"] != "control_response" || frame["response"]["request_id"] != id {
                 continue;
             }
@@ -330,6 +341,34 @@ impl Process {
         }
     }
 
+    /// Describes an exit that closed the output channel: `what`, then how the
+    /// process ended and the last lines it wrote to stderr.
+    pub(super) async fn exited(&mut self, what: &str) -> String {
+        let status = tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut self.stderr).await;
+        let mut message = match status {
+            Ok(Ok(status)) => format!("{what} ({status})."),
+            _ => format!("{what}."),
+        };
+        let tail = self.stderr_tail.lock().unwrap_or_else(|e| e.into_inner());
+        let tail = String::from_utf8_lossy(&tail);
+        let lines: Vec<_> = tail
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        if lines.is_empty() {
+            message.push_str(" Check `claude auth status` and the installed CLI version.");
+        } else {
+            message.push_str(" Claude Code stderr:");
+            for line in &lines[lines.len().saturating_sub(STDERR_TAIL_LINES)..] {
+                message.push('\n');
+                message.push_str(&redact(line));
+            }
+        }
+        message
+    }
+
     pub(super) async fn close(&mut self) {
         // End stdin first, then bound shutdown. kill_on_drop also covers unwinding.
         if let Some(mut stdin) = self.stdin.take() {
@@ -357,6 +396,19 @@ impl Process {
             }
         }
     }
+}
+
+/// Masks anything that looks like a credential, since stderr reaches the
+/// transcript and logs.
+fn redact(line: &str) -> String {
+    let mut redacted = Vec::new();
+    let mut bearer = false;
+    for word in line.split(' ') {
+        let secret = bearer || word.contains("sk-ant-");
+        bearer = word.eq_ignore_ascii_case("bearer");
+        redacted.push(if secret { "[redacted]" } else { word });
+    }
+    redacted.join(" ")
 }
 
 impl Drop for Process {

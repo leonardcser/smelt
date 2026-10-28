@@ -807,9 +807,9 @@ impl Runtime<'_> {
                 _ = async { if let Some(at) = idle { tokio::time::sleep_until(at).await } else { std::future::pending().await } } => {
                     self.retire(None).await;
                 }
-                frame = read(&mut self.native.process) => {
-                    let frame = frame?.ok_or("Claude Code exited unexpectedly. Check `claude auth status` and the installed CLI version.")?;
-                    self.frame(frame).await?;
+                frame = read(&mut self.native.process) => match frame? {
+                    Some(frame) => self.frame(frame).await?,
+                    None => return Err(exited(&mut self.native.process).await),
                 }
             }
         }
@@ -2046,6 +2046,14 @@ async fn auxiliary(
     }.await;
     process.close().await;
     result
+}
+
+async fn exited(process: &mut Option<Process>) -> String {
+    const WHAT: &str = "Claude Code exited unexpectedly";
+    match process {
+        Some(process) => process.exited(WHAT).await,
+        None => format!("{WHAT}."),
+    }
 }
 
 async fn read(process: &mut Option<Process>) -> Result<Option<Value>, String> {

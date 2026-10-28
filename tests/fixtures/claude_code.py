@@ -81,6 +81,7 @@ if SCENARIO == "invalid":
     print("{broken", flush=True)
     sys.exit(1)
 if SCENARIO == "early-exit":
+    print("Error: fixture crashed with token sk-ant-fixture-secret", file=sys.stderr, flush=True)
     sys.exit(2)
 send({"type": "control_response", "response": {"subtype": "success", "request_id": init["request_id"], "response": {"models": [
     {"value": "default", "displayName": "Default (recommended)"},
