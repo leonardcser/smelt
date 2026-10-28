@@ -32,14 +32,28 @@ const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
 pub(crate) struct TerminalInput {
     rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
     shutdown: Option<platform::Shutdown>,
+}
+
+/// Answers to smelt's own terminal queries, kept apart from [`TerminalInput`]
+/// so the event loop can wait on input and replies at the same time.
+pub(crate) struct TerminalReplies {
     #[cfg(unix)]
     probe_rx: tokio::sync::mpsc::UnboundedReceiver<bool>,
     #[cfg(unix)]
     geometry_rx: tokio::sync::mpsc::UnboundedReceiver<(u32, u32)>,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TerminalReply {
+    /// Whether the terminal implements the kitty graphics protocol.
+    KittyGraphics(bool),
+    /// Cell width and height in pixels.
+    CellPixels((u32, u32)),
+}
+
 impl TerminalInput {
-    pub(crate) fn spawn() -> io::Result<Self> {
+    pub(crate) fn spawn() -> io::Result<(Self, TerminalReplies)> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(unix)]
         let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -49,57 +63,36 @@ impl TerminalInput {
         let shutdown = platform::spawn_reader(tx, probe_tx, geometry_tx)?;
         #[cfg(not(unix))]
         let shutdown = platform::spawn_reader(tx)?;
-        Ok(Self {
+        let input = Self {
             rx,
             shutdown: Some(shutdown),
+        };
+        let replies = TerminalReplies {
             #[cfg(unix)]
             probe_rx,
             #[cfg(unix)]
             geometry_rx,
-        })
+        };
+        Ok((input, replies))
     }
 
     #[cfg(all(unix, test))]
-    fn spawn_from_fd(fd: std::os::fd::RawFd) -> io::Result<Self> {
+    fn spawn_from_fd(fd: std::os::fd::RawFd) -> io::Result<(Self, TerminalReplies)> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
         let (geometry_tx, geometry_rx) = tokio::sync::mpsc::unbounded_channel();
         let shutdown = platform::spawn_reader_from_fd(fd, tx, probe_tx, geometry_tx)?;
-        Ok(Self {
+        let input = Self {
             rx,
             shutdown: Some(shutdown),
-            probe_rx,
-            geometry_rx,
-        })
-    }
-
-    #[cfg(unix)]
-    pub(crate) async fn probe_kitty(
-        &mut self,
-        write: impl FnOnce(&[u8]) -> io::Result<bool>,
-    ) -> bool {
-        if !matches!(write(&kitty_probe_query()), Ok(true)) {
-            return false;
-        }
-        matches!(
-            tokio::time::timeout(Duration::from_millis(200), self.probe_rx.recv()).await,
-            Ok(Some(true))
-        )
-    }
-
-    #[cfg(unix)]
-    pub(crate) async fn probe_cell_pixels(
-        &mut self,
-        write: impl FnOnce(&[u8]) -> io::Result<bool>,
-    ) -> Option<(u32, u32)> {
-        let query = smelt_term::kitty_control_sequence(CELL_PIXEL_QUERY);
-        if !matches!(write(&query), Ok(true)) {
-            return None;
-        }
-        tokio::time::timeout(Duration::from_millis(200), self.geometry_rx.recv())
-            .await
-            .ok()
-            .flatten()
+        };
+        Ok((
+            input,
+            TerminalReplies {
+                probe_rx,
+                geometry_rx,
+            },
+        ))
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Event> {
@@ -117,16 +110,46 @@ impl Drop for TerminalInput {
     }
 }
 
+impl TerminalReplies {
+    /// Waits for the next reply. Only the first answer to [`kitty_probe_query`]
+    /// counts, and some terminals never send one, so it is awaited only while
+    /// `kitty_probe_pending`. Never resolves once the reader has stopped.
+    pub(crate) async fn recv(&mut self, kitty_probe_pending: bool) -> TerminalReply {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                Some(supported) = self.probe_rx.recv(), if kitty_probe_pending => {
+                    TerminalReply::KittyGraphics(supported)
+                }
+                Some(pixels) = self.geometry_rx.recv() => TerminalReply::CellPixels(pixels),
+                else => std::future::pending().await,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = kitty_probe_pending;
+            std::future::pending().await
+        }
+    }
+}
+
 /// The kitty graphics query, followed by the device attributes fence when the
 /// terminal is reached directly. tmux answers device attributes itself, which
-/// says nothing about the outer terminal, so it keeps the timeout alone.
+/// says nothing about the outer terminal, so there an unsupported terminal
+/// sends no answer at all.
 #[cfg(unix)]
-fn kitty_probe_query() -> Vec<u8> {
+pub(crate) fn kitty_probe_query() -> Vec<u8> {
     let mut query = smelt_term::kitty_control_sequence(KITTY_PROBE);
     if std::env::var_os("TMUX").is_none() {
         query.extend_from_slice(DEVICE_ATTRIBUTES_QUERY);
     }
     query
+}
+
+/// Asks for the cell size in pixels, answered as [`TerminalReply::CellPixels`].
+#[cfg(unix)]
+pub(crate) fn cell_pixel_query() -> Vec<u8> {
+    smelt_term::kitty_control_sequence(CELL_PIXEL_QUERY)
 }
 
 #[cfg(unix)]
@@ -1056,14 +1079,20 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn pipe_terminal_input() -> (TerminalInput, std::fs::File, [RawFd; 3]) {
+    fn pipe_terminal_input() -> (TerminalInput, TerminalReplies, std::fs::File, [RawFd; 3]) {
         let mut input_fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(input_fds.as_mut_ptr()) }, 0);
         let input_fd = input_fds[0];
         let writer = unsafe { std::fs::File::from_raw_fd(input_fds[1]) };
-        let input = TerminalInput::spawn_from_fd(input_fd).expect("spawn pipe-backed input");
+        let (input, replies) =
+            TerminalInput::spawn_from_fd(input_fd).expect("spawn pipe-backed input");
         let shutdown_fds = input.shutdown.as_ref().unwrap().pipe_fds();
-        (input, writer, [input_fd, shutdown_fds.0, shutdown_fds.1])
+        (
+            input,
+            replies,
+            writer,
+            [input_fd, shutdown_fds.0, shutdown_fds.1],
+        )
     }
 
     #[cfg(unix)]
@@ -1151,71 +1180,98 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn pipe_backed_cell_query_preserves_user_input() {
-        let (mut input, mut writer, _) = pipe_terminal_input();
+    fn reply_within(
+        replies: &mut TerminalReplies,
+        kitty_probe_pending: bool,
+        limit: Duration,
+    ) -> Option<TerminalReply> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .unwrap();
-        let size = rt.block_on(input.probe_cell_pixels(|query| {
-            assert_eq!(query, smelt_term::kitty_control_sequence(CELL_PIXEL_QUERY));
-            writer.write_all(b"z\x1b[6;24;12t")?;
-            Ok(true)
-        }));
-        assert_eq!(size, Some((12, 24)));
+        rt.block_on(async {
+            tokio::time::timeout(limit, replies.recv(kitty_probe_pending))
+                .await
+                .ok()
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_backed_cell_query_preserves_user_input() {
+        let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
+        writer.write_all(b"z\x1b[6;24;12t").unwrap();
+        assert_eq!(
+            reply_within(&mut replies, false, Duration::from_secs(1)),
+            Some(TerminalReply::CellPixels((12, 24)))
+        );
         assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
     }
 
     #[cfg(unix)]
     #[test]
     fn pipe_backed_kitty_probe_preserves_user_input() {
-        let (mut input, mut writer, _) = pipe_terminal_input();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let supported = rt.block_on(input.probe_kitty(|query| {
-            assert!(query.starts_with(&smelt_term::kitty_control_sequence(KITTY_PROBE)));
-            writer.write_all(b"z\x1b_Gi=16777214;OK\x1b\\")?;
-            Ok(true)
-        }));
-        assert!(supported);
+        assert!(kitty_probe_query().starts_with(&smelt_term::kitty_control_sequence(KITTY_PROBE)));
+        let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
+        writer.write_all(b"z\x1b_Gi=16777214;OK\x1b\\").unwrap();
+        assert_eq!(
+            reply_within(&mut replies, true, Duration::from_secs(1)),
+            Some(TerminalReply::KittyGraphics(true))
+        );
         assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
         assert!(input.try_recv().is_err());
     }
 
     #[cfg(unix)]
     #[test]
-    fn pipe_backed_kitty_probe_fence_reports_unsupported_without_waiting() {
-        let (mut input, mut writer, _) = pipe_terminal_input();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let started = std::time::Instant::now();
-        let supported = rt.block_on(input.probe_kitty(|query| {
-            assert!(query.starts_with(&smelt_term::kitty_control_sequence(KITTY_PROBE)));
-            writer.write_all(b"\x1b[?62;4c")?;
-            Ok(true)
-        }));
-        assert!(!supported);
-        assert!(started.elapsed() < Duration::from_millis(150));
+    fn pipe_backed_kitty_probe_fence_reports_unsupported() {
+        let (_input, mut replies, mut writer, _) = pipe_terminal_input();
+        writer.write_all(b"\x1b[?62;4c").unwrap();
+        assert_eq!(
+            reply_within(&mut replies, true, Duration::from_secs(1)),
+            Some(TerminalReply::KittyGraphics(false))
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn pipe_backed_kitty_probe_fence_after_reply_keeps_support() {
-        let (mut input, mut writer, _) = pipe_terminal_input();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
+        let (_input, mut replies, mut writer, _) = pipe_terminal_input();
+        writer
+            .write_all(b"\x1b_Gi=16777214;OK\x1b\\\x1b[?62;4c")
             .unwrap();
-        let supported = rt.block_on(input.probe_kitty(|_| {
-            writer.write_all(b"\x1b_Gi=16777214;OK\x1b\\\x1b[?62;4c")?;
-            Ok(true)
-        }));
-        assert!(supported);
+        assert_eq!(
+            reply_within(&mut replies, true, Duration::from_secs(1)),
+            Some(TerminalReply::KittyGraphics(true))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_backed_unanswered_kitty_probe_leaves_input_flowing() {
+        let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
+        writer.write_all(b"z").unwrap();
+        assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
+        assert_eq!(
+            reply_within(&mut replies, true, Duration::from_millis(50)),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_backed_settled_kitty_probe_ignores_later_answers() {
+        let (_input, mut replies, mut writer, _) = pipe_terminal_input();
+        writer.write_all(b"\x1b_Gi=16777214;OK\x1b\\").unwrap();
+        assert_eq!(
+            reply_within(&mut replies, false, Duration::from_millis(50)),
+            None
+        );
+        writer.write_all(b"\x1b[6;24;12t").unwrap();
+        assert_eq!(
+            reply_within(&mut replies, false, Duration::from_secs(1)),
+            Some(TerminalReply::CellPixels((12, 24)))
+        );
     }
 
     #[test]
@@ -1419,7 +1475,7 @@ mod tests {
     #[test]
     fn complete_input_is_delivered_before_writer_eof_closes_the_stream() {
         let _lock = terminal_reader_test_lock();
-        let (mut input, mut writer, fds) = pipe_terminal_input();
+        let (mut input, _replies, mut writer, fds) = pipe_terminal_input();
         writer.write_all(b"x").unwrap();
         drop(writer);
 
@@ -1442,7 +1498,7 @@ mod tests {
     #[test]
     fn partial_escape_sequence_is_discarded_when_the_writer_closes() {
         let _lock = terminal_reader_test_lock();
-        let (mut input, mut writer, fds) = pipe_terminal_input();
+        let (mut input, _replies, mut writer, fds) = pipe_terminal_input();
         writer.write_all(b"\x1b[").unwrap();
         drop(writer);
 
@@ -1457,7 +1513,7 @@ mod tests {
     #[test]
     fn shutdown_interrupts_a_blocked_reader_and_joins_it() {
         let _lock = terminal_reader_test_lock();
-        let (input, writer, fds) = pipe_terminal_input();
+        let (input, _replies, writer, fds) = pipe_terminal_input();
 
         let started = std::time::Instant::now();
         drop(input);
@@ -1472,7 +1528,7 @@ mod tests {
     #[test]
     fn shutdown_interrupts_a_reader_with_buffered_escape_bytes() {
         let _lock = terminal_reader_test_lock();
-        let (input, mut writer, fds) = pipe_terminal_input();
+        let (input, _replies, mut writer, fds) = pipe_terminal_input();
         writer.write_all(b"\x1b[").unwrap();
         wait_until_pipe_consumed(fds[0]);
 
@@ -1489,7 +1545,7 @@ mod tests {
     #[test]
     fn malformed_bytes_do_not_poison_following_input() {
         let _lock = terminal_reader_test_lock();
-        let (mut input, mut writer, fds) = pipe_terminal_input();
+        let (mut input, _replies, mut writer, fds) = pipe_terminal_input();
         writer.write_all(&[0xff, 0xfe, b'z']).unwrap();
 
         assert!(matches!(
@@ -1512,7 +1568,7 @@ mod tests {
     fn repeated_spawn_and_drop_closes_input_and_shutdown_descriptors() {
         let _lock = terminal_reader_test_lock();
         for _ in 0..32 {
-            let (input, writer, fds) = pipe_terminal_input();
+            let (input, _replies, writer, fds) = pipe_terminal_input();
             drop(input);
             for fd in fds {
                 assert_fd_closed(fd);

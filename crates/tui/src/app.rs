@@ -3618,7 +3618,7 @@ impl TuiApp {
 
         let mut workspace_warmup_pending = true;
 
-        let mut term_events = match crate::term_input::TerminalInput::spawn() {
+        let (mut term_events, mut term_replies) = match crate::term_input::TerminalInput::spawn() {
             Ok(input) => input,
             Err(e) => {
                 self.notify_error(format!("terminal input: {e}"));
@@ -3627,22 +3627,19 @@ impl TuiApp {
                 return;
             }
         };
+        // The kitty graphics answer arrives through `term_replies` while the
+        // loop runs, so the first frame never waits for it. Inside tmux an
+        // unsupported terminal never answers at all.
         #[cfg(unix)]
-        let kitty_supported = term_events
-            .probe_kitty(|query| self.platform.write_terminal_control(query))
-            .await;
+        let mut kitty_probe_pending = matches!(
+            self.platform
+                .write_terminal_control(&crate::term_input::kitty_probe_query()),
+            Ok(true)
+        );
+        #[cfg(not(unix))]
+        let kitty_probe_pending = false;
         #[cfg(unix)]
-        {
-            crate::content::display_layout::set_kitty_probe_result(kitty_supported);
-            if kitty_supported {
-                if let Some(pixels) = term_events
-                    .probe_cell_pixels(|query| self.platform.write_terminal_control(query))
-                    .await
-                {
-                    crate::content::display_layout::set_kitty_cell_pixels(Some(pixels));
-                }
-            }
-        }
+        let mut kitty_supported = false;
         // Independent SIGWINCH listener: crossterm's Unix signal source intermittently
         // drops resize events (signal-hook-mio counter / mio readiness race), so we keep
         // our own tokio-native handler there. Both fire on resize; the duplicate just
@@ -4018,22 +4015,39 @@ impl TuiApp {
                     self.render_normal();
                 }
 
-                Some(_) = window_change => {
+                reply = term_replies.recv(kitty_probe_pending) => {
                     #[cfg(unix)]
-                    if std::env::var_os("TMUX").is_some() && kitty_supported {
-                        // A font change can alter cell pixels without changing rows or columns.
-                        crate::content::display_layout::set_kitty_cell_pixels(None);
+                    {
+                        use crate::term_input::TerminalReply;
+                        match reply {
+                            TerminalReply::KittyGraphics(supported) => {
+                                kitty_probe_pending = false;
+                                kitty_supported = supported;
+                                crate::content::display_layout::set_kitty_probe_result(supported);
+                                if supported {
+                                    let _ = self.platform.write_terminal_control(
+                                        &crate::term_input::cell_pixel_query(),
+                                    );
+                                }
+                            }
+                            TerminalReply::CellPixels(pixels) => {
+                                crate::content::display_layout::set_kitty_cell_pixels(Some(pixels));
+                            }
+                        }
+                        self.request_urgent_render();
                     }
+                    #[cfg(not(unix))]
+                    let _ = reply;
+                }
+
+                Some(_) = window_change => {
+                    // A font change can alter cell pixels without changing rows
+                    // or columns; the answer lands as a `CellPixels` reply.
                     #[cfg(unix)]
                     if kitty_supported {
-                        let pixels = term_events
-                            .probe_cell_pixels(|query| self.platform.write_terminal_control(query))
-                            .await;
-                        if std::env::var_os("TMUX").is_some() {
-                            crate::content::display_layout::set_kitty_cell_pixels(pixels);
-                        } else if let Some(pixels) = pixels {
-                            crate::content::display_layout::set_kitty_cell_pixels(Some(pixels));
-                        }
+                        let _ = self
+                            .platform
+                            .write_terminal_control(&crate::term_input::cell_pixel_query());
                     }
                     if let Ok((w, h)) = terminal::size() {
                         if w != self.last_width || h != self.last_height {
