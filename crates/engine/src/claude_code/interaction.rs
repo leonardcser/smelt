@@ -80,24 +80,32 @@ impl ReplyTarget {
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.get("answers"))
-                    .and_then(Value::as_object)
+                    .and_then(Value::as_array)
                 else {
                     return deny("No user answers were supplied");
                 };
+                // Answers arrive in question order and are keyed by question
+                // text here, since metadata keys cannot hold long questions.
                 // Inputs were validated before opening the dialog. Do not turn
                 // partial or dismissed answers into native permission approval.
-                let complete = input["questions"].as_array().is_some_and(|questions| {
-                    questions.iter().all(|question| {
-                        question["question"]
-                            .as_str()
-                            .and_then(|text| answers.get(text))
-                            .and_then(Value::as_str)
-                            .is_some_and(|answer| !answer.trim().is_empty())
-                    })
-                });
-                if !complete {
+                let questions = input["questions"].as_array().map_or(&[][..], Vec::as_slice);
+                let answers: Option<serde_json::Map<String, Value>> = (questions.len()
+                    == answers.len())
+                .then(|| {
+                    questions
+                        .iter()
+                        .zip(answers)
+                        .map(|(question, answer)| {
+                            let text = question["question"].as_str()?;
+                            let answer = answer.as_str().filter(|a| !a.trim().is_empty())?;
+                            Some((text.to_owned(), json!(answer)))
+                        })
+                        .collect()
+                })
+                .flatten();
+                let Some(answers) = answers else {
                     return deny("No complete user answers were supplied");
-                }
+                };
                 let mut updated = input.clone();
                 updated["answers"] = json!(answers);
                 json!({"behavior":"allow", "updatedInput":updated})
@@ -132,7 +140,7 @@ mod tests {
         let answered = ToolOutcome::new(
             "human response".into(),
             false,
-            Some(json!({"answers":{"Choose":"A, B"}})),
+            Some(json!({"answers":["A, B"]})),
         );
         let response = target.response(&answered);
         assert_eq!(response["behavior"], "allow");
@@ -141,7 +149,29 @@ mod tests {
             target.response(&ToolOutcome::new("missing metadata".into(), false, None))["behavior"],
             "deny"
         );
+        for answers in [json!([]), json!([""]), json!(["A", "B"])] {
+            let partial =
+                ToolOutcome::new("partial".into(), false, Some(json!({"answers":answers})));
+            assert_eq!(target.response(&partial)["behavior"], "deny");
+        }
         assert!(ReplyTarget::question(&json!({"questions":[]})).is_err());
+    }
+
+    #[test]
+    fn long_question_text_survives_tool_result_validation() {
+        let text = "Which approach? ".repeat(40);
+        let input =
+            json!({"questions":[{"question":text,"options":[{"label":"A"},{"label":"B"}]}]});
+        let (target, _) = ReplyTarget::question(&input).unwrap();
+        let answered = ToolOutcome::new(
+            "human response".into(),
+            false,
+            Some(json!({"answers":["A"]})),
+        );
+        assert!(!answered.is_error, "{}", answered.content);
+        let response = target.response(&answered);
+        assert_eq!(response["behavior"], "allow");
+        assert_eq!(response["updatedInput"]["answers"][&text], "A");
     }
 
     #[test]

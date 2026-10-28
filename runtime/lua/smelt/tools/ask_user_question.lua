@@ -157,7 +157,7 @@ smelt.tools.register({
         return { content = "user cancelled", is_error = true }
       end
 
-      answers[q.question or ""] = native_answer or answer
+      table.insert(answers, native_answer or answer)
       table.insert(parts, string.format("q: %s\na: %s", q.question or "", answer))
     end
 
