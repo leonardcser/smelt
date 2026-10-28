@@ -7822,6 +7822,7 @@ pub(crate) mod tests {
             },
             5 => Block::Compacted {
                 summary: randomish_text(seed, 24),
+                kept: Vec::new(),
             },
             _ => Block::ProcessStatus {
                 text: format!("process status {i}: {}", randomish_text(seed, 6)),
@@ -8130,7 +8131,10 @@ pub(crate) mod tests {
                     content: text.into(),
                     kind: protocol::ReasoningKind::Raw,
                 }),
-                4 => transcript.push(Block::Compacted { summary: text }),
+                4 => transcript.push(Block::Compacted {
+                    summary: text,
+                    kept: Vec::new(),
+                }),
                 _ => transcript.push(Block::ProcessStatus { text, event: None, output: None }),
             }
             i += 1;

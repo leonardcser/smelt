@@ -372,9 +372,16 @@ impl TestApp {
     /// checkpoint. Stories use this to snapshot the final compaction chrome
     /// without running a real `engine.ask` round-trip.
     pub fn push_compacted(&mut self, summary: &str) {
+        self.push_compacted_kept(summary, Vec::new());
+    }
+
+    /// Push a compacted marker that repeats the entries the model still
+    /// receives verbatim after the checkpoint.
+    pub fn push_compacted_kept(&mut self, summary: &str, kept: Vec<smelt_core::KeptHistoryItem>) {
         self.app
             .push_block(smelt_core::transcript_model::Block::Compacted {
                 summary: summary.to_string(),
+                kept,
             });
     }
 

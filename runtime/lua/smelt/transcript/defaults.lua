@@ -797,6 +797,13 @@ local function render_compaction_summary(label, block, ctx)
     end
     items[#items + 1] = summary
   end
+  -- Repeat, dimmed, what the model still receives verbatim after the summary,
+  -- drawn like the original entries; tool calls show their collapsed header.
+  local kept_ctx = setmetatable({ view_state = "collapsed" }, { __index = ctx })
+  for _, kept in ipairs(block.kept or {}) do
+    items[#items + 1] = layout.line({})
+    items[#items + 1] = layout.style(M.render(kept, kept_ctx), { dim = true })
+  end
   return layout.vbox(items)
 end
 

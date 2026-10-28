@@ -19,7 +19,9 @@ use crate::lua::{
     ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
-use crate::transcript_model::{Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus};
+use crate::transcript_model::{
+    Block, BlockId, KeptHistoryItem, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
+};
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
@@ -3443,8 +3445,11 @@ fn transcript_render_node_to_lua_table(
             )?;
             set_output_metadata(&table, output)?;
         }
-        TranscriptRenderFields::Summary { summary } => {
+        TranscriptRenderFields::Summary { summary, kept } => {
             table.set("summary", summary.as_str())?;
+            if !kept.is_empty() {
+                table.set("kept", kept_history_to_lua(lua, kept)?)?;
+            }
         }
         TranscriptRenderFields::Group {
             group_kind,
@@ -3602,6 +3607,35 @@ struct TranscriptArgumentFieldMetadata {
     complete: bool,
 }
 
+fn kept_history_to_lua(lua: &Lua, kept: &[KeptHistoryItem]) -> LuaResult<mlua::Table> {
+    let out = lua.create_table()?;
+    for (i, item) in kept.iter().enumerate() {
+        let row = lua.create_table()?;
+        match item {
+            KeptHistoryItem::User { text } => {
+                row.set("kind", "user")?;
+                row.set("text", text.as_str())?;
+            }
+            KeptHistoryItem::Assistant { content } => {
+                row.set("kind", "assistant")?;
+                row.set("content_preview", content.as_str())?;
+            }
+            KeptHistoryItem::Tool {
+                name,
+                summary,
+                status,
+            } => {
+                row.set("kind", "tool")?;
+                row.set("name", name.as_str())?;
+                row.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
+                row.set("status", status.label())?;
+            }
+        }
+        out.raw_set(i + 1, row)?;
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug)]
 enum TranscriptRenderFields {
     User {
@@ -3667,6 +3701,7 @@ enum TranscriptRenderFields {
     },
     Summary {
         summary: String,
+        kept: Vec<KeptHistoryItem>,
     },
     Group {
         group_kind: String,
@@ -3898,11 +3933,14 @@ pub fn transcript_block_render_node(
             command_spans: exec_command_spans(command),
             output: transcript_content_metadata(output),
         },
-        Block::Compacted { summary } | Block::CompactionPreview { summary } => {
-            TranscriptRenderFields::Summary {
-                summary: summary.clone(),
-            }
-        }
+        Block::Compacted { summary, kept } => TranscriptRenderFields::Summary {
+            summary: summary.clone(),
+            kept: kept.clone(),
+        },
+        Block::CompactionPreview { summary } => TranscriptRenderFields::Summary {
+            summary: summary.clone(),
+            kept: Vec::new(),
+        },
     };
     TranscriptRenderNode {
         id: id.0,
@@ -4094,7 +4132,7 @@ fn fallback_transcript_node_layout(node: &TranscriptRenderNode) -> BlockLayout {
         | TranscriptRenderFields::Mode { text, .. }
         | TranscriptRenderFields::ProcessStatus { text, .. }
         | TranscriptRenderFields::Code { content: text, .. }
-        | TranscriptRenderFields::Summary { summary: text } => text.as_str(),
+        | TranscriptRenderFields::Summary { summary: text, .. } => text.as_str(),
         TranscriptRenderFields::ToolDraft {
             summary_text, name, ..
         }

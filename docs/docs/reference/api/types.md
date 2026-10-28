@@ -1318,6 +1318,7 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `argument_fields` | [smelt.transcript.ArgumentField[]](types.md#smelttranscriptargumentfield) |  | Opaque top-level string arguments. Complete field content is never included in renderer metadata. |
 | `summary` | `any` |  | Tool styled summary lines or compacted summary text. |
 | `summary_text` | `string` |  | Tool summary flattened to plain text. |
+| `kept` | [smelt.transcript.Block[]](types.md#smelttranscriptblock) |  | Compacted marker: user, assistant, and tool entries the model still receives verbatim, oldest first. |
 | `status` | `"pending"\|"confirm"\|"ok"\|"err"\|"denied"` |  | Tool status. |
 | `called_at_ms` | `integer` |  | Invocation start as Unix epoch milliseconds. |
 | `elapsed_ms` | `integer` |  | Best-known execution duration in milliseconds. |

@@ -2024,6 +2024,7 @@ fn record_resave_preserves_semantic_history_links() {
         HistoryItem::user(protocol::compaction_summary_content("retained summary")),
         Some(Block::Compacted {
             summary: "retained summary".into(),
+            kept: Vec::new(),
         }),
     );
     let note = protocol::HistoryNote::process_status_event(
@@ -3538,7 +3539,7 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
         app.with_pinned_transcript_blocks(&ids, |history| {
             ids.iter()
                 .map(|id| {
-                    let Block::Compacted { summary } = history
+                    let Block::Compacted { summary, .. } = history
                         .block(*id)
                         .expect("pinned compaction block is hydrated")
                     else {
@@ -3610,7 +3611,7 @@ fn successful_compactions_remain_after_canonical_transcript_rebuild() {
             .order
             .iter()
             .filter_map(|id| {
-                let Block::Compacted { summary } = rebuilt.history.block(*id)? else {
+                let Block::Compacted { summary, .. } = rebuilt.history.block(*id)? else {
                     return None;
                 };
                 let smelt_core::BlockOrigin::Checkpoint { history_index } =

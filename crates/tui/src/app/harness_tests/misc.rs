@@ -7248,6 +7248,7 @@ fn heterogeneous_resume_records(count: usize) -> Vec<smelt_core::TranscriptBlock
             }),
             5 => source.push(Block::Compacted {
                 summary: format!("{marker} compacted summary {}", "summary ".repeat(10)),
+                kept: Vec::new(),
             }),
             6 => source.push(Block::CompactionPreview {
                 summary: format!("{marker} streaming preview {}", "preview ".repeat(15)),

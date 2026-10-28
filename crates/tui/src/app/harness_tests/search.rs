@@ -981,6 +981,7 @@ fn transcript_search_finds_compacted_divider_label() {
     let mut app = searchable_transcript_app();
     app.push_transcript_block(smelt_core::transcript_model::Block::Compacted {
         summary: "archived earlier turns".into(),
+        kept: Vec::new(),
     });
     app.render_silent();
 
@@ -1007,6 +1008,7 @@ fn transcript_search_includes_selectable_compacted_separator_chrome() {
     let mut app = searchable_transcript_app();
     app.push_transcript_block(smelt_core::transcript_model::Block::Compacted {
         summary: "archived earlier turns".into(),
+        kept: Vec::new(),
     });
     app.render_silent();
 

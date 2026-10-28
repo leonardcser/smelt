@@ -2,7 +2,7 @@ use crate::app::{NotificationOperation, TuiApp};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::transcript_model::BlockHistory;
-use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
+use smelt_core::{Block, KeptHistoryItem, ToolOutput, ToolState, ToolStatus};
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::{BTreeMap, HashMap};
@@ -440,46 +440,117 @@ pub(crate) fn materialize_full_session(
     sessions.load_full_result(id).ok().flatten()
 }
 
+/// A compaction marker positioned where the checkpoint completed. `kept` is
+/// the canonical history range the model still receives verbatim after it.
+struct CheckpointMarker {
+    history_index: usize,
+    kept: std::ops::Range<usize>,
+    summary: String,
+}
+
 fn checkpoint_transcript_markers(
     session: &session::Session,
-) -> impl DoubleEndedIterator<Item = (usize, &str)> {
+) -> impl DoubleEndedIterator<Item = CheckpointMarker> + '_ {
     session
         .checkpoint_events
         .iter()
-        .map(|event| (event.completed_at_history_len, event.summary.as_ref()))
+        .map(|event| CheckpointMarker {
+            history_index: event.completed_at_history_len,
+            kept: event.first_live_index..event.completed_at_history_len,
+            summary: event.summary.to_string(),
+        })
         .chain(
             session
                 .checkpoint
                 .iter()
                 .filter(|_| session.checkpoint_events.is_empty())
-                .map(|checkpoint| (checkpoint.first_live_index, checkpoint.summary.as_ref())),
+                .map(|checkpoint| CheckpointMarker {
+                    history_index: checkpoint.first_live_index,
+                    kept: checkpoint.first_live_index..checkpoint.first_live_index,
+                    summary: checkpoint.summary.to_string(),
+                }),
         )
 }
 
 fn checkpoint_markers_by_completion_index(
     session: &session::Session,
-) -> BTreeMap<usize, Vec<String>> {
-    let mut markers = BTreeMap::<usize, Vec<String>>::new();
-    for (history_index, summary) in checkpoint_transcript_markers(session) {
+) -> BTreeMap<usize, Vec<CheckpointMarker>> {
+    let mut markers = BTreeMap::<usize, Vec<CheckpointMarker>>::new();
+    for marker in checkpoint_transcript_markers(session) {
         markers
-            .entry(history_index)
+            .entry(marker.history_index)
             .or_default()
-            .push(summary.to_owned());
+            .push(marker);
     }
     markers
 }
 
 fn insert_checkpoint_markers(
     transcript: &mut Transcript,
-    markers: &mut BTreeMap<usize, Vec<String>>,
+    markers: &mut BTreeMap<usize, Vec<CheckpointMarker>>,
     history_index: usize,
+    mut kept_items: impl FnMut(std::ops::Range<usize>) -> Vec<KeptHistoryItem>,
 ) {
-    let Some(summaries) = markers.remove(&history_index) else {
+    let Some(markers) = markers.remove(&history_index) else {
         return;
     };
-    for summary in summaries {
-        transcript.insert_checkpoint_marker(history_index, Block::Compacted { summary });
+    for marker in markers {
+        let block = Block::Compacted {
+            summary: marker.summary,
+            kept: kept_items(marker.kept),
+        };
+        transcript.insert_checkpoint_marker(history_index, block);
     }
+}
+
+fn kept_history_slice(history: &[HistoryItem], range: std::ops::Range<usize>) -> &[HistoryItem] {
+    let end = range.end.min(history.len());
+    &history[range.start.min(end)..end]
+}
+
+/// Kept entries in transcript order: user prompts, assistant text, and one
+/// row per tool invocation.
+fn kept_history_items(
+    items: &[HistoryItem],
+    summary_resolver: &ToolSummaryResolver<'_>,
+) -> Vec<KeptHistoryItem> {
+    let mut kept = Vec::new();
+    for item in items {
+        match item {
+            HistoryItem::User {
+                content, display, ..
+            } => {
+                if matches!(
+                    protocol::classify_user_history_content(content),
+                    protocol::UserHistoryContent::Plain
+                ) {
+                    kept.push(KeptHistoryItem::User {
+                        text: display
+                            .clone()
+                            .unwrap_or_else(|| content.text_content().into_owned()),
+                    });
+                }
+            }
+            HistoryItem::Assistant(turn) => {
+                if let Some(content) = &turn.content {
+                    kept.push(KeptHistoryItem::Assistant {
+                        content: content.text_content().into_owned(),
+                    });
+                }
+                for inv in &turn.invocations {
+                    let args: HashMap<String, serde_json::Value> =
+                        serde_json::from_str(&inv.arguments).unwrap_or_default();
+                    kept.push(KeptHistoryItem::Tool {
+                        name: inv.name.clone(),
+                        summary: summary_resolver.resolve(&inv.name, &args),
+                        status: invocation_status(inv),
+                    });
+                }
+            }
+            HistoryItem::Note(_) | HistoryItem::System { .. } => {}
+        }
+    }
+    kept
 }
 
 pub(crate) fn build_transcript_from_session(
@@ -499,7 +570,12 @@ pub(crate) fn build_transcript_from_session(
 
     let mut checkpoint_markers = checkpoint_markers_by_completion_index(session);
     for (idx, item) in session.history.iter().enumerate() {
-        insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, idx);
+        insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, idx, |range| {
+            kept_history_items(
+                kept_history_slice(&session.history, range),
+                &summary_resolver,
+            )
+        });
         match item {
             HistoryItem::User {
                 content,
@@ -527,6 +603,12 @@ pub(crate) fn build_transcript_from_session(
         &mut transcript,
         &mut checkpoint_markers,
         session.history.len(),
+        |range| {
+            kept_history_items(
+                kept_history_slice(&session.history, range),
+                &summary_resolver,
+            )
+        },
     );
 
     smelt_perf::perf::record_value(
@@ -850,7 +932,10 @@ fn user_history_to_block(
     sent_at_ms: Option<u64>,
 ) -> Block {
     match protocol::classify_user_history_content(content) {
-        protocol::UserHistoryContent::CompactionSummary { summary } => Block::Compacted { summary },
+        protocol::UserHistoryContent::CompactionSummary { summary } => Block::Compacted {
+            summary,
+            kept: Vec::new(),
+        },
         protocol::UserHistoryContent::ModeChange { text } => {
             crate::lua::mode_block(lua, None, &text)
         }
@@ -890,6 +975,18 @@ fn plain_user_history_block(
     }
 }
 
+fn invocation_status(inv: &protocol::ToolInvocation) -> ToolStatus {
+    if inv.result.content.contains("denied this tool call")
+        || inv.result.content.contains("blocked this tool call")
+    {
+        ToolStatus::Denied
+    } else if inv.result.is_error {
+        ToolStatus::Err
+    } else {
+        ToolStatus::Ok
+    }
+}
+
 fn push_assistant_blocks(
     transcript: &mut Transcript,
     summary_resolver: &ToolSummaryResolver<'_>,
@@ -920,15 +1017,7 @@ fn push_assistant_blocks(
     for inv in &turn.invocations {
         let args: HashMap<String, serde_json::Value> =
             serde_json::from_str(&inv.arguments).unwrap_or_default();
-        let status = if inv.result.content.contains("denied this tool call")
-            || inv.result.content.contains("blocked this tool call")
-        {
-            ToolStatus::Denied
-        } else if inv.result.is_error {
-            ToolStatus::Err
-        } else {
-            ToolStatus::Ok
-        };
+        let status = invocation_status(inv);
         let output = ToolOutput::from_display_content(
             inv.result.content.clone(),
             inv.result.is_error,
@@ -1042,6 +1131,73 @@ mod tests {
             }
             other => panic!("expected tool call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebuilt_compaction_marker_labels_the_kept_suffix() {
+        let lua = crate::lua::LuaRuntime::new();
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            HistoryItem::user(Content::text("old request")),
+            HistoryItem::Assistant(AssistantStep::terminal(
+                Some(Content::text("old reply")),
+                None,
+                Vec::new(),
+            )),
+            HistoryItem::user(Content::text("please fix it")),
+            HistoryItem::note(protocol::HistoryNote::context("hidden context")),
+            HistoryItem::Assistant(AssistantStep::with_invocations(
+                None,
+                None,
+                Vec::new(),
+                vec![protocol::ToolInvocation {
+                    call_id: "call-1".into(),
+                    name: "mcp_server_echo".into(),
+                    arguments: r#"{"label":"ok"}"#.into(),
+                    result: protocol::ToolOutcome::new("done".into(), false, None),
+                    elapsed_ms: None,
+                    called_at_ms: None,
+                    provider: None,
+                }],
+            )),
+            HistoryItem::Assistant(AssistantStep::terminal(
+                Some(Content::text("done")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        assert!(session.install_context_checkpoint_at_history_index(
+            "compaction".into(),
+            "summary".into(),
+            2,
+            None,
+            6,
+        ));
+
+        let transcript = build_transcript_from_session(&lua, &session);
+        let marker = transcript.history.order.last().expect("marker at tail");
+        assert_eq!(
+            transcript.history.block(*marker),
+            Some(&Block::Compacted {
+                summary: "summary".into(),
+                kept: vec![
+                    KeptHistoryItem::User {
+                        text: "please fix it".into(),
+                    },
+                    KeptHistoryItem::Tool {
+                        name: "mcp_server_echo".into(),
+                        summary: smelt_core::mcp::args_summary(&HashMap::from([(
+                            "label".to_string(),
+                            serde_json::json!("ok"),
+                        )])),
+                        status: ToolStatus::Ok,
+                    },
+                    KeptHistoryItem::Assistant {
+                        content: "done".into(),
+                    },
+                ],
+            })
+        );
     }
 
     #[test]
@@ -1914,7 +2070,12 @@ impl TuiApp {
         let mut transcript = Transcript::new();
         let lua = self.lua.execution();
         for history_index in 0..history_len {
-            insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, history_index);
+            insert_checkpoint_markers(
+                &mut transcript,
+                &mut checkpoint_markers,
+                history_index,
+                |range| self.current_kept_history_items(&lua, range),
+            );
             let Some(item) = self
                 .conversation
                 .session()
@@ -1952,8 +2113,24 @@ impl TuiApp {
                 HistoryItem::System { .. } => {}
             });
         }
-        insert_checkpoint_markers(&mut transcript, &mut checkpoint_markers, history_len);
+        insert_checkpoint_markers(
+            &mut transcript,
+            &mut checkpoint_markers,
+            history_len,
+            |range| self.current_kept_history_items(&lua, range),
+        );
         transcript
+    }
+
+    fn current_kept_history_items(
+        &mut self,
+        lua: &smelt_core::lua::LuaRuntime,
+        range: std::ops::Range<usize>,
+    ) -> Vec<KeptHistoryItem> {
+        let items = kept_history_slice(&self.conversation.session().history, range).to_vec();
+        crate::lua::scope_app(self, || {
+            kept_history_items(&items, &ToolSummaryResolver::new(lua))
+        })
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
@@ -2578,12 +2755,27 @@ impl TuiApp {
     }
 
     fn refresh_compaction_marker(&mut self) {
-        let Some((history_index, summary)) =
-            checkpoint_transcript_markers(self.conversation.session()).next_back()
+        let Some(CheckpointMarker {
+            history_index,
+            kept,
+            summary,
+        }) = checkpoint_transcript_markers(self.conversation.session()).next_back()
         else {
             return;
         };
-        let summary = summary.to_owned();
+        let kept_items = match self.conversation.history_range(kept) {
+            Ok(items) => items,
+            Err(err) => {
+                self.notify_session_error_sticky(format!(
+                    "failed to read canonical session history: {err}"
+                ));
+                return;
+            }
+        };
+        let lua = self.lua.execution();
+        let kept = crate::lua::scope_app(self, || {
+            kept_history_items(&kept_items, &ToolSummaryResolver::new(&lua))
+        });
         let index = match transcript_index_for_checkpoint(
             self.conversation.transcript().history(),
             &self.conversation.session().history,
@@ -2603,7 +2795,7 @@ impl TuiApp {
         self.conversation.insert_checkpoint_marker(
             index,
             history_index,
-            Block::Compacted { summary },
+            Block::Compacted { summary, kept },
         );
     }
 
@@ -4887,7 +5079,7 @@ mod checkpoint_tests {
         assert_eq!(history.order[3], before[3]);
         assert!(matches!(
             history.block(history.order[4]),
-            Some(Block::Compacted { summary }) if summary == "summary"
+            Some(Block::Compacted { summary, .. }) if summary == "summary"
         ));
     }
 
@@ -4926,7 +5118,7 @@ mod checkpoint_tests {
             .iter()
             .enumerate()
             .filter_map(|(idx, id)| match history.block(*id) {
-                Some(Block::Compacted { summary }) => Some((idx, summary.as_str())),
+                Some(Block::Compacted { summary, .. }) => Some((idx, summary.as_str())),
                 _ => None,
             })
             .collect();
@@ -4974,7 +5166,7 @@ mod checkpoint_tests {
         let history = app.app.conversation.transcript().history();
         assert!(matches!(
             history.block(history.order[4]),
-            Some(Block::Compacted { summary }) if summary == "summary"
+            Some(Block::Compacted { summary, .. }) if summary == "summary"
         ));
     }
 
@@ -5063,7 +5255,7 @@ mod checkpoint_tests {
         ));
         assert!(matches!(
             history.block(history.order[6]),
-            Some(Block::Compacted { summary }) if summary == "summary"
+            Some(Block::Compacted { summary, .. }) if summary == "summary"
         ));
     }
 
@@ -5101,7 +5293,7 @@ mod checkpoint_tests {
             .order
             .iter()
             .filter_map(|id| match history.block(*id) {
-                Some(Block::Compacted { summary }) => Some(summary.as_str()),
+                Some(Block::Compacted { summary, .. }) => Some(summary.as_str()),
                 _ => None,
             })
             .collect();

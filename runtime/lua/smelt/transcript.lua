@@ -86,6 +86,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field argument_fields? smelt.transcript.ArgumentField[] Opaque top-level string arguments. Complete field content is never included in renderer metadata.
 ---@field summary? any Tool styled summary lines or compacted summary text.
 ---@field summary_text? string Tool summary flattened to plain text.
+---@field kept? smelt.transcript.Block[] Compacted marker: user, assistant, and tool entries the model still receives verbatim, oldest first.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
 ---@field called_at_ms? integer Invocation start as Unix epoch milliseconds.
 ---@field elapsed_ms? integer Best-known execution duration in milliseconds.

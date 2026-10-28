@@ -83,12 +83,14 @@ pub(super) fn render_ir_panel(
     let child_panel_end = child_panel_start.saturating_add(child_rows);
     let requested_child_start = row_start.max(child_panel_start);
     let requested_child_end = end.min(child_panel_end);
+    let inherited_style = out.current_style();
     let child_render = (requested_child_start < requested_child_end).then(|| {
         let child_row_start = requested_child_start.saturating_sub(child_panel_start);
         let child_row_count = requested_child_end.saturating_sub(requested_child_start);
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         let outcome = {
             let mut col = LineBuilder::new(&mut buf, out.theme(), child_width);
+            col.push(None, inherited_style);
             render_layout_ir_range_measured(
                 &mut col,
                 child,

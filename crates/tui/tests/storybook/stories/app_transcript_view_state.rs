@@ -2,8 +2,9 @@
 //! their own story modules so block-level collapsed/peek/expanded behavior is
 //! easy to inspect without duplicate tool coverage.
 
-use protocol::EngineEvent;
+use protocol::{EngineEvent, StyledLines};
 use serde_json::json;
+use smelt_core::{KeptHistoryItem, ToolStatus};
 
 use crate::app_story;
 
@@ -104,6 +105,32 @@ app_story!(thinking_block_states, |ctx| {
 app_story!(compacted_block_states, |ctx| {
     ctx.set_viewport(60, 9);
     ctx.push_compacted(COMPACTED_SUMMARY);
+    ctx.assert_snapshot_named("collapsed");
+
+    ctx.run_lua("smelt.transcript.fold_kind('compacted', 'open')");
+    ctx.assert_snapshot_named("expanded");
+});
+
+app_story!(compacted_block_kept_states, |ctx| {
+    // Expanded, the marker repeats what the model still sees verbatim after
+    // the summary, rendered like the original transcript entries.
+    ctx.set_viewport(60, 16);
+    ctx.push_compacted_kept(
+        COMPACTED_SUMMARY,
+        vec![
+            KeptHistoryItem::User {
+                text: "fix the resume bug".into(),
+            },
+            KeptHistoryItem::Assistant {
+                content: "Reading the session loader first.".into(),
+            },
+            KeptHistoryItem::Tool {
+                name: "read".into(),
+                summary: StyledLines::from_plain("crates/core/src/session.rs"),
+                status: ToolStatus::Ok,
+            },
+        ],
+    );
     ctx.assert_snapshot_named("collapsed");
 
     ctx.run_lua("smelt.transcript.fold_kind('compacted', 'open')");

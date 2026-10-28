@@ -353,8 +353,11 @@ fn compact_command_keeps_completed_block_at_compaction_position() {
         .expect("completed marker at transcript tail");
     assert!(matches!(
         history.block(marker_id),
-        Some(smelt_core::transcript_model::Block::Compacted { summary })
+        Some(smelt_core::transcript_model::Block::Compacted { summary, kept })
             if summary == "# Goal\ncompleted marker"
+                && kept == &[smelt_core::KeptHistoryItem::User {
+                    text: "retained user line\n".repeat(20),
+                }]
     ));
     let frame = app.render_to_frame().text();
     assert!(frame.contains("compacted"), "frame: {frame}");

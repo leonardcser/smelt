@@ -258,6 +258,35 @@ impl ToolState {
     }
 }
 
+/// A transcript entry the model still receives verbatim after a compaction
+/// checkpoint. The compacted marker renders these again after its summary.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeptHistoryItem {
+    User {
+        text: String,
+    },
+    Assistant {
+        content: String,
+    },
+    Tool {
+        name: String,
+        summary: protocol::StyledLines,
+        status: ToolStatus,
+    },
+}
+
+impl KeptHistoryItem {
+    fn dynamic_retained_bytes(&self) -> usize {
+        match self {
+            Self::User { text } | Self::Assistant { content: text } => text.capacity(),
+            Self::Tool { name, summary, .. } => name
+                .capacity()
+                .saturating_add(summary.dynamic_retained_bytes()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Block {
     User {
@@ -315,6 +344,10 @@ pub enum Block {
     },
     Compacted {
         summary: String,
+        /// History the model still receives verbatim after this
+        /// checkpoint, oldest first.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kept: Vec<KeptHistoryItem>,
     },
     CompactionPreview {
         summary: String,
@@ -372,7 +405,7 @@ impl Block {
         match self {
             Block::User { text, .. }
             | Block::ProcessStatus { text, .. }
-            | Block::Compacted { summary: text }
+            | Block::Compacted { summary: text, .. }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(BlockText::Plain(text)),
             Block::Text { content } => Some(BlockText::Content(content)),
@@ -445,7 +478,7 @@ impl Block {
                 summary_titles,
                 &content.snapshot(),
             )),
-            Block::Compacted { summary } | Block::CompactionPreview { summary } => {
+            Block::Compacted { summary, .. } | Block::CompactionPreview { summary } => {
                 Some(summary.clone())
             }
             Block::CodeLine { content, .. } => Some(content.clone()),
@@ -457,7 +490,7 @@ impl Block {
     pub fn raw_text_len(&self) -> Option<usize> {
         match self {
             Block::User { text, .. }
-            | Block::Compacted { summary: text }
+            | Block::Compacted { summary: text, .. }
             | Block::CompactionPreview { summary: text }
             | Block::CodeLine { content: text, .. } => Some(text.len()),
             Block::ProcessStatus { text, output, .. } => Some(
@@ -1243,7 +1276,9 @@ pub fn transcript_indexed_text(
 fn append_block_raw_indexed_text(text: &mut BoundedIndexedText, block: &Block) {
     match block {
         Block::User { text: source, .. }
-        | Block::Compacted { summary: source }
+        | Block::Compacted {
+            summary: source, ..
+        }
         | Block::CompactionPreview { summary: source }
         | Block::CodeLine {
             content: source, ..
@@ -2204,7 +2239,11 @@ impl Block {
             Self::Exec { command, output } => command
                 .capacity()
                 .saturating_add(output.dynamic_retained_bytes()),
-            Self::Compacted { summary } | Self::CompactionPreview { summary } => summary.capacity(),
+            Self::Compacted { summary, kept } => kept
+                .iter()
+                .map(KeptHistoryItem::dynamic_retained_bytes)
+                .fold(summary.capacity(), usize::saturating_add),
+            Self::CompactionPreview { summary } => summary.capacity(),
         }
     }
 
@@ -5258,6 +5297,7 @@ mod tests {
     fn indexed_text_includes_default_compacted_chrome() {
         let block = Block::Compacted {
             summary: "archived".to_string(),
+            kept: Vec::new(),
         };
         assert_eq!(
             transcript_indexed_text(&block, None).indexed_text,
@@ -6714,6 +6754,7 @@ mod tests {
     fn raw_text_for_compacted_returns_summary() {
         let block = Block::Compacted {
             summary: "earlier session compacted".into(),
+            kept: Vec::new(),
         };
         assert_eq!(
             block.raw_text().as_deref(),
@@ -7193,6 +7234,7 @@ mod tests {
     fn compacted() -> Block {
         Block::Compacted {
             summary: "sum".into(),
+            kept: Vec::new(),
         }
     }
     fn mode() -> Block {

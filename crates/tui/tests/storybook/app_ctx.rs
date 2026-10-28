@@ -148,6 +148,12 @@ impl AppStoryCtx {
         self.app.push_compacted(summary);
     }
 
+    /// Push a compacted marker that repeats `kept`, the entries the model
+    /// still receives verbatim, oldest first.
+    pub fn push_compacted_kept(&mut self, summary: &str, kept: Vec<smelt_core::KeptHistoryItem>) {
+        self.app.push_compacted_kept(summary, kept);
+    }
+
     /// Push the transient block shown while the compact plugin streams a
     /// checkpoint summary. The real plugin rewrites this block on each delta
     /// and `smelt.session.checkpoint` replaces it with a compacted marker.

@@ -2668,6 +2668,7 @@ mod tests {
                 history_index: 3,
                 block: Block::Compacted {
                     summary: "summary".into(),
+                    kept: Vec::new(),
                 },
             },
         );

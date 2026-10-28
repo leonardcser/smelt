@@ -1240,6 +1240,7 @@ mod tests {
         assert_eq!(
             policy.block_default_view_state(&Block::Compacted {
                 summary: "checkpoint".into(),
+                kept: Vec::new(),
             }),
             ViewState::Collapsed
         );

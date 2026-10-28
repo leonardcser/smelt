@@ -89,13 +89,14 @@ impl Transcript {
                     kind,
                 }
             }
-            Block::Compacted { summary } => {
+            Block::Compacted { summary, kept } => {
                 let t = smelt_buffer::text::trim_whitespace(&summary);
                 if t.is_empty() {
                     return None;
                 }
                 Block::Compacted {
                     summary: t.to_string(),
+                    kept,
                 }
             }
             Block::CompactionPreview { summary } => Block::CompactionPreview {
@@ -404,7 +405,10 @@ mod tests {
     #[test]
     fn push_drops_blank_compacted_block() {
         let mut t = Transcript::new();
-        t.push(Block::Compacted { summary: "".into() });
+        t.push(Block::Compacted {
+            summary: "".into(),
+            kept: Vec::new(),
+        });
         assert!(t.history.is_empty());
     }
 

@@ -698,6 +698,7 @@ mod tests {
         let lines = render(
             &Block::Compacted {
                 summary: "ok".into(),
+                kept: Vec::new(),
             },
             None,
         );

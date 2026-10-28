@@ -2281,6 +2281,7 @@ mod tests {
             },
             Block::Compacted {
                 summary: "A compacted **summary** with enough text to wrap.".into(),
+                kept: Vec::new(),
             },
             Block::Mode {
                 text: "plan".into(),
