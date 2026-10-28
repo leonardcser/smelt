@@ -217,10 +217,7 @@ fn sync_retained_transcript_window(
         let viewport_rows = win
             .materialized_rows()
             .map_or(request.rect.height, |materialized| {
-                if materialized
-                    .nearest_backed_scroll_top(win.scroll_top(), request.rect.height)
-                    .is_some()
-                {
+                if materialized.covers_viewport(win.scroll_top(), request.rect.height) {
                     request.rect.height
                 } else {
                     win.retain_prepared_viewport_height()

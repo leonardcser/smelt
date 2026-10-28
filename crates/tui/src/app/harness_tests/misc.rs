@@ -3235,6 +3235,27 @@ fn transcript_resize_after_scrolling_anchors_the_new_position() {
 }
 
 #[test]
+fn transcript_height_growth_while_blocks_hydrate_keeps_the_visible_rows() {
+    let mut app = TestApp::builder().build();
+    app.install_sparse_transcript_scroll_fixture(150, 120, 40);
+    for _ in 0..40 {
+        wheel_and_render(&mut app, crossterm::event::MouseEventKind::ScrollUp);
+    }
+    resize_and_render(&mut app, 120, 24);
+    let before = transcript_viewport_lines(&app);
+
+    app.feed_one(SourceEvent::Resize {
+        width: 120,
+        height: 40,
+    });
+    app.render_unsettled_silent();
+    app.render_silent();
+
+    let after = transcript_viewport_lines(&app);
+    assert_eq!(after[..before.len()], before[..]);
+}
+
+#[test]
 fn transcript_pinned_bottom_resize_click_selects_clicked_row_without_tail_snap() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
