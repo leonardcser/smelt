@@ -498,7 +498,7 @@ impl TuiApp {
                 .collect()
         } else {
             let labels: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
-            smelt_core::fuzzy::fuzzy_rank(&typed, &labels)
+            smelt_core::fuzzy::fuzzy_rank(&typed, &labels, smelt_core::fuzzy::CaseMatching::Smart)
                 .into_iter()
                 .map(|i| CmdlineCompletionItem {
                     label: items[i].name.clone(),

@@ -1179,10 +1179,10 @@ fn rank_entries_window(
     } else {
         let config = neo_frizbee::Config {
             sort: neo_frizbee::SortStrategy::Unsorted,
-            ..crate::fuzzy::matcher_config()
+            ..Default::default()
         };
         let mut matcher = neo_frizbee::Matcher::new(query, &config);
-        let query_lower = query.to_lowercase();
+        let query_key = QueryKey::new(query, config.casing);
         let _perf = smelt_perf::perf::begin("workspace_files:fuzzy_match");
         if include_dirs {
             matcher
@@ -1193,7 +1193,7 @@ fn rank_entries_window(
                     let entry = &entries[index];
                     (
                         index,
-                        adjusted_score(entry, m.score as i32, &query_lower, accepted),
+                        adjusted_score(entry, m.score as i32, &query_key, accepted),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1215,7 +1215,7 @@ fn rank_entries_window(
                     let entry = &entries[index];
                     (
                         index,
-                        adjusted_score(entry, m.score as i32, &query_lower, accepted),
+                        adjusted_score(entry, m.score as i32, &query_key, accepted),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1278,31 +1278,55 @@ fn compare_ranked(
     }
 }
 
+/// The query as the exact/prefix bonuses compare it: lowercased unless the
+/// matcher's casing makes this query case-sensitive, so bonuses never
+/// disagree with what the matcher accepted.
+struct QueryKey {
+    text: String,
+    respect_case: bool,
+}
+
+impl QueryKey {
+    fn new(query: &str, casing: crate::fuzzy::CaseMatching) -> Self {
+        let respect_case = crate::fuzzy::respects_case(casing, query);
+        let text = if respect_case {
+            query.to_owned()
+        } else {
+            query.to_lowercase()
+        };
+        Self { text, respect_case }
+    }
+}
+
 fn adjusted_score(
     entry: &FileEntry,
     base_score: i32,
-    query_lower: &str,
+    query: &QueryKey,
     accepted: &HashMap<String, u64>,
 ) -> i32 {
     let mut score = base_score;
+    let (path, file_name) = if query.respect_case {
+        (entry.path.as_str(), entry.file_name())
+    } else {
+        (entry.lower_path.as_str(), entry.lower_file_name())
+    };
+    let query = query.text.as_str();
 
-    if entry.lower_path == query_lower {
+    if path == query {
         score += 50_000;
     }
-    let lower_file_name = entry.lower_file_name();
-    if lower_file_name == query_lower {
+    if file_name == query {
         score += 30_000;
     }
-    if entry.lower_path.starts_with(query_lower) {
+    if path.starts_with(query) {
         score += 15_000;
     }
-    if lower_file_name.starts_with(query_lower) {
+    if file_name.starts_with(query) {
         score += 10_000;
     }
-    if entry
-        .lower_path
+    if path
         .split('/')
-        .any(|component| component.starts_with(query_lower))
+        .any(|component| component.starts_with(query))
     {
         score += 5_000;
     }
@@ -1375,6 +1399,10 @@ impl FileEntry {
 
     fn lower_file_name(&self) -> &str {
         &self.lower_path[self.lower_file_name_start..]
+    }
+
+    fn file_name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
     }
 }
 
@@ -1546,6 +1574,49 @@ mod tests {
         ];
         let ranked = rank_entries("fs", &entries, true, &HashMap::new());
         assert_eq!(entries[ranked[0].0].path, "crates/core/src/lua/api/fs.rs");
+    }
+
+    #[test]
+    fn rank_entries_is_case_insensitive_for_lowercase_queries() {
+        let entries = vec![
+            FileEntry::new("README.md".to_string(), ItemKind::File),
+            FileEntry::new("docs/readme.rs".to_string(), ItemKind::File),
+        ];
+        let ranked = rank_entries("readme", &entries, true, &HashMap::new());
+        assert_eq!(ranked.len(), 2);
+    }
+
+    #[test]
+    fn rank_entries_respects_case_once_query_has_uppercase() {
+        let entries = vec![
+            FileEntry::new("docs/readme.rs".to_string(), ItemKind::File),
+            FileEntry::new("README.md".to_string(), ItemKind::File),
+            FileEntry::new("src/ReadMe/mod.rs".to_string(), ItemKind::File),
+        ];
+        let ranked = rank_entries("README", &entries, true, &HashMap::new());
+        let paths: Vec<_> = ranked
+            .iter()
+            .map(|(i, _)| entries[*i].path.as_str())
+            .collect();
+        assert_eq!(paths, ["README.md"]);
+    }
+
+    #[test]
+    fn case_sensitive_query_earns_bonuses_only_on_exact_case() {
+        let query = QueryKey::new("Cargo", crate::fuzzy::CaseMatching::Smart);
+        let exact = FileEntry::new("Cargo.toml".to_string(), ItemKind::File);
+        let other = FileEntry::new("cargo/Cxargo.toml".to_string(), ItemKind::File);
+        let accepted = HashMap::new();
+        let exact_score = adjusted_score(&exact, 0, &query, &accepted);
+        let other_score = adjusted_score(&other, 0, &query, &accepted);
+        assert!(
+            exact_score > 10_000,
+            "file-name prefix bonus applies: {exact_score}"
+        );
+        assert!(
+            other_score < 0,
+            "lowercase `cargo/` earns no bonus: {other_score}"
+        );
     }
 
     #[test]

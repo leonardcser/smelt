@@ -5,7 +5,8 @@ use crate::fuzzy::score::{recency_bonus, split_words};
 pub fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
     // Normalize the frizbee score into a small range so the
     // word/exact/prefix bonuses below dominate the relative ordering.
-    let base = (crate::fuzzy::fuzzy_score(text, query)? / 100) as i64;
+    let base =
+        (crate::fuzzy::fuzzy_score(text, query, crate::fuzzy::CaseMatching::Smart)? / 100) as i64;
     let text_norm = smelt_buffer::text::trim_whitespace(text).to_lowercase();
     let query_norm = smelt_buffer::text::trim_whitespace(query).to_lowercase();
 

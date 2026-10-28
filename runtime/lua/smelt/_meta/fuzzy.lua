@@ -8,12 +8,13 @@
 ---@class smelt.fuzzy
 local fuzzy = {}
 
---- Rank `items` by fuzzy match against `query`. Returns 1-based indices, best first. Empty query → identity order. Items may be strings or tables with `label`/`description`/`search_terms`; set `_hay` to a precomputed concatenated haystack to skip per-call concatenation.
----@type fun(items: table, query: string): integer[]
+--- Rank `items` by fuzzy match against `query`. Returns 1-based indices, best first. Empty query → identity order. Items may be strings or tables with `label`/`description`/`search_terms`; set `_hay` to a precomputed concatenated haystack to skip per-call concatenation. `opts.casing` works as in `smelt.fuzzy.score`.
+---@see smelt.fuzzy.score
+---@type fun(items: table, query: string, opts: table?): integer[]
 fuzzy.rank = nil
 
---- Fuzzy-match score for `text` against `query`. Lower = better; `nil` = no match.
----@type fun(text: string, query: string): integer?
+--- Fuzzy-match score for `text` against `query`. Lower = better; `nil` = no match. `opts.casing` is `"smart"` (default: case-insensitive until `query` contains an uppercase letter), `"ignore"` or `"respect"`.
+---@type fun(text: string, query: string, opts: table?): integer?
 fuzzy.score = nil
 
 return fuzzy
