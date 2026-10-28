@@ -136,11 +136,15 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Tests are dominated by CPU-bound store, transcript and sqlite work, so a
+# light optimization level pays for itself many times over in runtime.
 [profile.test]
 inherits = "dev"
+opt-level = 1
 
 [profile.test.package."*"]
 debug = false
+opt-level = 2
 
 [dev-dependencies]
 insta = { workspace = true }

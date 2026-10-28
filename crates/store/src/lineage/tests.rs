@@ -1110,14 +1110,14 @@ fn receipt_result_publication_is_process_crash_atomic() {
         )
         .unwrap();
         if role == "commit" {
-            conn.commit_hook(Some(|| -> bool { std::process::abort() }))
+            conn.commit_hook(Some(|| -> bool { crate::crash_process() }))
                 .unwrap();
         } else {
             conn.create_scalar_function(
                 "smelt_test_result_crash",
                 0,
                 rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                |_| -> rusqlite::Result<i64> { std::process::abort() },
+                |_| -> rusqlite::Result<i64> { crate::crash_process() },
             )
             .unwrap();
             conn.execute_batch(&format!(
@@ -1173,7 +1173,7 @@ fn receipt_result_publication_is_process_crash_atomic() {
             use std::os::unix::process::ExitStatusExt;
             assert_eq!(
                 status.signal(),
-                Some(libc::SIGABRT),
+                Some(libc::SIGKILL),
                 "wrong failure at {role}"
             );
         }
@@ -1515,7 +1515,7 @@ fn compact_revision_archive_publication_is_process_crash_atomic() {
             "smelt_test_archive_crash",
             0,
             rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            |_| -> rusqlite::Result<i64> { std::process::abort() },
+            |_| -> rusqlite::Result<i64> { crate::crash_process() },
         )
         .unwrap();
         conn.execute_batch(&format!("CREATE TEMP TRIGGER crash_archive_publication {} BEGIN SELECT smelt_test_archive_crash(); END;",
@@ -1582,7 +1582,7 @@ fn compact_revision_archive_publication_is_process_crash_atomic() {
             use std::os::unix::process::ExitStatusExt;
             assert_eq!(
                 status.signal(),
-                Some(libc::SIGABRT),
+                Some(libc::SIGKILL),
                 "wrong failure at {role}"
             );
         }
@@ -4153,7 +4153,7 @@ fn lineage_publication_is_crash_atomic_at_canonical_boundaries() {
             "smelt_test_crash",
             0,
             rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            |_| -> rusqlite::Result<i64> { std::process::abort() },
+            |_| -> rusqlite::Result<i64> { crate::crash_process() },
         )
         .unwrap();
         let trigger = match role.as_str() {
@@ -4312,7 +4312,7 @@ fn reclamation_crash_restores_guards_and_resumes_from_a_valid_state() {
             "smelt_test_crash",
             0,
             rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            |_| -> rusqlite::Result<i64> { std::process::abort() },
+            |_| -> rusqlite::Result<i64> { crate::crash_process() },
         )
         .unwrap();
         conn.execute_batch(
@@ -4399,7 +4399,7 @@ fn reclamation_crash_restores_guards_and_resumes_from_a_valid_state() {
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(
             status.signal(),
-            Some(libc::SIGABRT),
+            Some(libc::SIGKILL),
             "reclamation child did not abort at deletion"
         );
     }

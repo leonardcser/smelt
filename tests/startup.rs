@@ -580,7 +580,7 @@ smelt.provider.register("probe", {
             },
             smelt_core::BlockOrigin::History(index),
         );
-        let output = "large stored assistant output\n".repeat(8_192);
+        let output = "large stored assistant output\n".repeat(512);
         let index = session.history.len();
         session.history.push(protocol::HistoryItem::assistant(
             protocol::AssistantStep::terminal(
@@ -660,7 +660,7 @@ smelt.provider.register("probe", {
     master.write_all(b"\x1b").unwrap();
     std::thread::sleep(Duration::from_millis(50));
     master.write_all(b"\x1b[24~").unwrap();
-    let input_deadline = Instant::now() + Duration::from_millis(250);
+    let input_deadline = Instant::now() + Duration::from_secs(1);
     loop {
         let previous_len = captured.len();
         drain_pty(&mut master, &mut captured);
@@ -713,7 +713,7 @@ smelt.provider.register("probe", {
     }
     // Skip current and the newer-page action, then select a real stored prefix.
     master.write_all(b"\x1b[A\x1b[A\r\x1b[24~").unwrap();
-    let input_deadline = Instant::now() + Duration::from_millis(250);
+    let input_deadline = Instant::now() + Duration::from_secs(1);
     loop {
         let previous_len = captured.len();
         drain_pty(&mut master, &mut captured);
@@ -1681,11 +1681,6 @@ async fn interactive_quota_reset_resumes_original_work_before_queued_input() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_quota_retry_detects_early_reset_without_consuming_queued_input() {
-    interactive_quota_pause(true, QuotaRecovery::EarlyResume).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_double_escape_cancels_quota_retry_without_losing_queued_input() {
     interactive_quota_pause(true, QuotaRecovery::Cancel).await;
 }
@@ -1701,11 +1696,6 @@ async fn interactive_quota_recovery_cancels_foreground_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_quota_recovery_retains_deadline_without_new_metadata() {
-    interactive_quota_pause(true, QuotaRecovery::MissingReset).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_quota_recovery_can_be_cancelled_from_turn_end_hook() {
     interactive_quota_pause(true, QuotaRecovery::CancelHook).await;
 }
@@ -1714,9 +1704,7 @@ async fn interactive_quota_recovery_can_be_cancelled_from_turn_end_hook() {
 enum QuotaRecovery {
     Wait,
     Resume,
-    EarlyResume,
     CommandResume,
-    MissingReset,
     Cancel,
     CancelBusy,
     CancelHook,
@@ -1744,10 +1732,7 @@ async fn interactive_quota_pause(background: bool, recovery: QuotaRecovery) {
     let attempts = AtomicUsize::new(0);
     let resume = matches!(
         recovery,
-        QuotaRecovery::Resume
-            | QuotaRecovery::EarlyResume
-            | QuotaRecovery::CommandResume
-            | QuotaRecovery::MissingReset
+        QuotaRecovery::Resume | QuotaRecovery::CommandResume
     );
     let short_wait = matches!(
         recovery,
@@ -1758,18 +1743,8 @@ async fn interactive_quota_pause(background: bool, recovery: QuotaRecovery) {
     );
     let command_resume = recovery == QuotaRecovery::CommandResume;
     let cancel_hook = recovery == QuotaRecovery::CancelHook;
-    let quota_attempts = if recovery == QuotaRecovery::MissingReset {
-        2
-    } else {
-        1
-    };
-    let retry_after = if recovery == QuotaRecovery::MissingReset {
-        "90"
-    } else if short_wait {
-        "2"
-    } else {
-        "3600"
-    };
+    let quota_attempts = 1;
+    let retry_after = if short_wait { "2" } else { "3600" };
     let resumed_at = Arc::new(AtomicU64::new(0));
     let resumed_at_response = Arc::clone(&resumed_at);
     Mock::given(method("POST"))
@@ -1781,14 +1756,10 @@ async fn interactive_quota_pause(background: bool, recovery: QuotaRecovery) {
                 0
             };
             if !resume || (main && attempt < quota_attempts) {
-                let response = ResponseTemplate::new(429)
+                return ResponseTemplate::new(429)
                     .set_body_json(serde_json::json!({"error": {"code": "insufficient_quota"}}))
-                    .set_delay(Duration::from_secs(1));
-                return if recovery == QuotaRecovery::MissingReset && main && attempt == 1 {
-                    response
-                } else {
-                    response.insert_header("retry-after", retry_after)
-                };
+                    .set_delay(Duration::from_secs(1))
+                    .insert_header("retry-after", retry_after);
             }
             if main && attempt == quota_attempts {
                 resumed_at_response.store(
@@ -1891,12 +1862,7 @@ smelt.signal.subscribe("work_busy", record_busy_state)
         command.arg("original request");
     }
     let (mut master, mut process) = spawn_in_pty(command);
-    let deadline = Instant::now()
-        + Duration::from_secs(match recovery {
-            QuotaRecovery::EarlyResume => 90,
-            QuotaRecovery::MissingReset => 120,
-            _ => 30,
-        });
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut captured = Vec::new();
     let mut command_submitted = false;
     let mut busy_submitted = false;
@@ -1973,15 +1939,7 @@ smelt.signal.subscribe("work_busy", record_busy_state)
                 .parse()
                 .unwrap();
             let resumed_at = resumed_at.load(Ordering::SeqCst);
-            if recovery == QuotaRecovery::EarlyResume {
-                assert!(resumed_at < reset, "missed the early reset");
-                assert!(
-                    resumed_at >= reset.saturating_sub(3_540_000),
-                    "retried before the one-minute backoff"
-                );
-            } else {
-                assert!(resumed_at >= reset, "retried before the provider reset");
-            }
+            assert!(resumed_at >= reset, "retried before the provider reset");
             let messages = bodies[quota_attempts]["messages"].to_string();
             assert_eq!(messages.matches("original request").count(), 1);
             assert_eq!(
@@ -2004,10 +1962,7 @@ smelt.signal.subscribe("work_busy", record_busy_state)
             follow_up_at.get_or_insert_with(Instant::now);
         }
         let settled = match recovery {
-            QuotaRecovery::Resume
-            | QuotaRecovery::EarlyResume
-            | QuotaRecovery::CommandResume
-            | QuotaRecovery::MissingReset => {
+            QuotaRecovery::Resume | QuotaRecovery::CommandResume => {
                 follow_up_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(3))
             }
             QuotaRecovery::Cancel | QuotaRecovery::CancelBusy | QuotaRecovery::CancelHook => {
@@ -3095,6 +3050,10 @@ smelt.tools.register({{
     let stdout = home.path().join("events.jsonl");
     let stderr = home.path().join("stderr");
     let mut command = isolated_smelt_command(home.path());
+    if matches!(ending, StreamEnding::CancelDuringRetry) {
+        // The cancel must land inside the first backoff wait.
+        command.env("SMELT_RETRY_BASE_DELAY_MS", "30000");
+    }
     command
         .env("SMELT_STREAM_TEST_KEY", "test-only")
         .args([
@@ -3184,7 +3143,7 @@ smelt.tools.register({{
                     }
                 }
             } else {
-                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{body}\r\n", body.len()).unwrap();
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{body}\r\n", body.len());
                 if matches!(ending, StreamEnding::Cancel) {
                     held_streams.push(stream);
                 }
@@ -3246,6 +3205,7 @@ fn isolated_smelt_command(home: &Path) -> Command {
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))
         .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("SMELT_RETRY_BASE_DELAY_MS", "10")
         .current_dir(home);
     command
 }

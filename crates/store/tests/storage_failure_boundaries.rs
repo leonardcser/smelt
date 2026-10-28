@@ -46,7 +46,7 @@ fn storage_subprocess_probe() {
             let _writer = smelt_store::OwnedLineageWriter::open_existing(&root, SESSION_ID)
                 .expect("claim lineage writer");
             touch(&ready);
-            std::process::abort();
+            crash_process();
         }
         "closed-owner" => {
             let mut writer = smelt_store::OwnedLineageWriter::open_existing(&root, SESSION_ID)
@@ -75,7 +75,7 @@ fn storage_subprocess_probe() {
             )
             .expect("stage uncommitted row");
             touch(&ready);
-            std::process::abort();
+            crash_process();
         }
         other => panic!("unknown storage probe role {other}"),
     }
@@ -404,4 +404,11 @@ fn read(path: &Path) -> String {
 
 fn assert_success(status: ExitStatus) {
     assert!(status.success(), "subprocess failed with {status}");
+}
+
+/// Dies abruptly without destructors. SIGKILL skips the host crash reporter
+/// that `abort` triggers, which can stall each exit for about a second.
+fn crash_process() -> ! {
+    unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+    unreachable!("SIGKILL is delivered before kill returns")
 }

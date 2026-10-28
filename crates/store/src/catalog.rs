@@ -1528,7 +1528,7 @@ mod tests {
                     "smelt_test_crash",
                     0,
                     rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                    |_| -> rusqlite::Result<i64> { std::process::abort() },
+                    |_| -> rusqlite::Result<i64> { crate::crash_process() },
                 )
                 .unwrap();
             let table = if role == "during-message" {
@@ -1547,7 +1547,7 @@ mod tests {
             panic!("unknown catalog crash role {role}");
         }
         catalog.upsert_available(&row("crash", 7, 42)).unwrap();
-        std::process::abort();
+        crate::crash_process();
     }
 
     #[test]
@@ -1571,7 +1571,7 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::process::ExitStatusExt;
-                assert_eq!(status.signal(), Some(libc::SIGABRT));
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
             }
 
             let reader = CatalogReader::open_existing(&path).unwrap().unwrap();

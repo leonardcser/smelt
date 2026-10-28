@@ -1448,7 +1448,7 @@ mod tests {
             if boundary == 3 {
                 journal.clear().unwrap();
             }
-            std::process::abort();
+            crate::crash_process();
         }
         for boundary in 0..4 {
             let root = tempfile::tempdir().unwrap();
@@ -1459,7 +1459,7 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::process::ExitStatusExt;
-                assert_eq!(status.signal(), Some(6));
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
             }
             assert!(!status.success());
             let writer = SessionWriter::open_existing(root.path(), session_id).unwrap();
@@ -1639,7 +1639,7 @@ mod tests {
             if boundary == 3 {
                 journal.clear().unwrap();
             }
-            std::process::abort();
+            crate::crash_process();
         }
         for boundary in 0..4 {
             let root = tempfile::tempdir().unwrap();
@@ -1661,8 +1661,8 @@ mod tests {
                 use std::os::unix::process::ExitStatusExt;
                 assert_eq!(
                     status.signal(),
-                    Some(6),
-                    "child must reach its abort boundary"
+                    Some(libc::SIGKILL),
+                    "child must reach its crash boundary"
                 );
             }
             let mut writer = SessionWriter::open(root.path(), session_id).unwrap();

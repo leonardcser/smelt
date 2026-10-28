@@ -1275,14 +1275,14 @@ fn native_compact_publication_is_process_crash_atomic() {
         .unwrap();
         let command = publication_command(&conn, &lineage, &branch, &mode);
         if role == "commit" {
-            conn.commit_hook(Some(|| -> bool { std::process::abort() }))
+            conn.commit_hook(Some(|| -> bool { crate::crash_process() }))
                 .unwrap();
         } else {
             conn.create_scalar_function(
                 "smelt_test_native_crash",
                 0,
                 rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                |_| -> rusqlite::Result<i64> { std::process::abort() },
+                |_| -> rusqlite::Result<i64> { crate::crash_process() },
             )
             .unwrap();
             conn.execute_batch(&format!("CREATE TEMP TRIGGER crash_native_publication {} BEGIN SELECT smelt_test_native_crash(); END;", publication_event(&role))).unwrap();
@@ -1344,7 +1344,7 @@ fn native_compact_publication_is_process_crash_atomic() {
             #[cfg(unix)]
             {
                 use std::os::unix::process::ExitStatusExt;
-                assert_eq!(status.signal(), Some(libc::SIGABRT), "{mode}/{role}");
+                assert_eq!(status.signal(), Some(libc::SIGKILL), "{mode}/{role}");
             }
             assert!(!status.success());
             let mut conn = Connection::open(&path).unwrap();

@@ -368,8 +368,20 @@ pub fn parse_retry_from_body(body: &str) -> Option<Duration> {
     }
 }
 
+/// Delay before the first retry, in milliseconds. `SMELT_RETRY_BASE_DELAY_MS`
+/// overrides it so end-to-end tests do not sleep through real backoff.
+fn backoff_base_ms() -> u64 {
+    static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BASE.get_or_init(|| {
+        std::env::var("SMELT_RETRY_BASE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(500)
+    })
+}
+
 pub fn backoff_delay(attempt: usize) -> Duration {
-    Duration::from_millis(500 * 2u64.pow(attempt as u32))
+    Duration::from_millis(backoff_base_ms() * 2u64.pow(attempt as u32))
 }
 
 pub fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
