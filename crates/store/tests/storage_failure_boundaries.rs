@@ -408,7 +408,14 @@ fn assert_success(status: ExitStatus) {
 
 /// Dies abruptly without destructors. SIGKILL skips the host crash reporter
 /// that `abort` triggers, which can stall each exit for about a second.
+#[cfg(unix)]
 fn crash_process() -> ! {
     unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
     unreachable!("SIGKILL is delivered before kill returns")
+}
+
+/// Dies abruptly without destructors.
+#[cfg(not(unix))]
+fn crash_process() -> ! {
+    std::process::abort()
 }
