@@ -15,7 +15,7 @@ use protocol::{
     AgentMode, Content, Decision, EngineEvent, HistoryItem, InvocationId, ModelConfig,
     ModelHistorySource, ModelTarget, PersistenceScope, ReasoningEffort, RequestRuntimeConfig,
     StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags,
-    ToolMetadata, UiCommand,
+    ToolMetadata, ToolVisibility, UiCommand,
 };
 use serde_json::{json, Value};
 use smelt_provider::ChatTransport;
@@ -594,6 +594,7 @@ impl Sim {
                     api_base: "http://scripted.invalid".into(),
                     api_key: "key".into(),
                     provider_type: "anthropic-compatible".into(),
+                    provider: "sim".into(),
                     config: ModelConfig {
                         max_tokens: Some(4096),
                         context_window: Some(200_000),
@@ -607,8 +608,11 @@ impl Sim {
                 history: ModelHistorySource::items(self.history.clone()),
                 session_id: "sim-session".into(),
                 sessions_root: std::env::temp_dir(),
+                ephemeral: false,
                 persistence: PersistenceScope::default(),
                 permission_overrides: None,
+                native_prompt: None,
+                tool_visibility: ToolVisibility::Interactive,
                 system_prompt: Some("simulated system prompt".into()),
                 tools: sim_tools(),
             })));
@@ -919,6 +923,7 @@ fn sim_tools() -> Vec<ToolDef> {
         override_core: false,
         hooks,
         headless: true,
+        claude_code: None,
     };
     vec![
         tool(

@@ -509,6 +509,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     request_id,
                     call_id: format!("permission-{request_id}"),
                     tool_name: small_text(name),
+                    provider: None,
                     args: HashMap::new(),
                     approval_patterns: Vec::new(),
                     summary: protocol::style::StyledLines::from_plain("permission".to_string()),

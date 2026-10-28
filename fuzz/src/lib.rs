@@ -1155,6 +1155,7 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
                         result: ToolOutcome::new(format!("synth-result-{i}"), false, None),
                         elapsed_ms: None,
                         called_at_ms: Some(i as u64),
+                        provider: None,
                     };
                     protocol::HistoryItem::Assistant(protocol::AssistantStep::with_invocations(
                         Some(Content::text(body)),
@@ -1218,7 +1219,8 @@ impl Snapshot {
             turn_paused: app.turn_is_paused(),
             queued_next_starts: app.next_queued_input_starts_turn(),
             follow_up_context_append: app.next_follow_up_appends_context_note(),
-            follow_up_context_append_unfiltered: app.next_follow_up_appends_context_note_unfiltered(),
+            follow_up_context_append_unfiltered: app
+                .next_follow_up_appends_context_note_unfiltered(),
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
@@ -1541,7 +1543,9 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     );
                 }
             }
-            if targeted_active && !completed_turn_starts_queued_followup(pre, msg_count, targeted_active) {
+            if targeted_active
+                && !completed_turn_starts_queued_followup(pre, msg_count, targeted_active)
+            {
                 assert!(
                     !post.agent_running,
                     "TurnComplete against active turn did not end it",
@@ -2055,6 +2059,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name,
+                provider: None,
                 args: args.into_map(),
                 approval_patterns: Vec::new(),
                 summary: protocol::style::StyledLines::from_plain(summary),
@@ -2074,6 +2079,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
                 request_id: u64::from(req_id),
                 call_id: call_id_string(call_id),
                 tool_name: "bash".to_string(),
+                provider: None,
                 args,
                 approval_patterns: Vec::new(),
                 summary: protocol::style::StyledLines::from_plain("bash".to_string()),
