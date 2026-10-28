@@ -156,7 +156,12 @@ impl Process {
             }
         }
         if let Some(prompt) = override_prompt {
-            command.arg("--system-prompt").arg(prompt);
+            // smelt owns the whole prompt, so keep the user's CLAUDE.md and
+            // other Claude Code customizations out of it.
+            command
+                .arg("--safe-mode")
+                .arg("--system-prompt")
+                .arg(prompt);
         }
         if let Some(prompt) = prompt.filter(|s| !s.is_empty()) {
             // Keep the native Claude Code preset; do not impersonate it with smelt's prompt.

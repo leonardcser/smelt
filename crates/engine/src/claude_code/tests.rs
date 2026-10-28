@@ -860,6 +860,7 @@ async fn auxiliary_request_uses_schema_and_disables_tools() {
     assert_eq!(args[tool_flag + 1], "");
     assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
     assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+    assert!(args.iter().any(|arg| arg == "--safe-mode"));
     assert!(args.iter().any(|arg| arg == "--json-schema"));
 }
 
@@ -1583,6 +1584,7 @@ async fn ephemeral_turns_keep_context_without_native_persistence_or_links() {
     assert_eq!(launches.len(), 1, "the live process keeps the context");
     let args = launches[0]["argv"].as_array().unwrap();
     assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+    assert!(!args.iter().any(|arg| arg == "--safe-mode"));
     let prompt = calls.iter().rfind(|call| call["type"] == "user").unwrap();
     assert_eq!(prompt["message"]["content"][0]["text"], "turn 2");
 }

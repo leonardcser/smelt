@@ -2619,6 +2619,35 @@ fn rewind_to_start_clears_session_title_snapshot() {
 }
 
 #[test]
+fn first_title_request_uses_the_submitted_text_not_context_notes() {
+    let mut app = TestApp::builder().build();
+    app.session_append_history(protocol::HistoryItem::note(protocol::HistoryNote::context(
+        "Current working directory: /work.",
+    )));
+
+    publish_input_submit(&mut app, "Fix parser panic");
+    let asks: Vec<_> = app
+        .drain_engine_sends()
+        .into_iter()
+        .filter_map(|cmd| match cmd {
+            protocol::UiCommand::EngineAsk { messages, .. } => Some(messages),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asks.len(), 1, "title should issue one background ask");
+    let texts: Vec<_> = asks[0]
+        .iter()
+        .filter_map(|message| {
+            message
+                .content
+                .as_ref()
+                .map(protocol::Content::text_content)
+        })
+        .collect();
+    assert_eq!(texts, ["Fix parser panic"]);
+}
+
+#[test]
 fn second_title_request_supersedes_inflight_response() {
     let mut app = TestApp::builder().build();
 

@@ -75,7 +75,9 @@ local function update_title(new_text)
   end
 
   -- Gather recent user messages without materializing the full session history.
-  local history = smelt.session.messages.list()
+  -- The conversation view leaves out smelt's context and mode notes, which
+  -- describe the environment rather than the user's task.
+  local history = smelt.session.conversation()
   local target_history_len = smelt.session.history_len()
   local user_msgs = {}
   for _, m in ipairs(history) do
