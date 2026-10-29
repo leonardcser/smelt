@@ -1061,7 +1061,7 @@ fn tick_every_runs_while_idle_and_only_now_listeners_wake_each_second() {
 }
 
 #[test]
-fn the_working_indicator_paints_on_a_grid_its_letter_steps_fit() {
+fn the_working_indicator_paints_on_a_wall_clock_grid_its_letter_steps_fit() {
     let mut app = TestApp::builder().build();
     app.animate_with_virtual_clock();
     app.run_lua(
@@ -1086,15 +1086,15 @@ fn the_working_indicator_paints_on_a_grid_its_letter_steps_fit() {
         .eval::<Vec<i64>>()
         .unwrap();
     let painted: std::collections::HashSet<i64> = paints.iter().copied().collect();
-    let first = paints[0];
+    let first_frame = (paints[0] + 21) / 22 * 22;
     let missed: Vec<i64> = (0..50)
-        .map(|frame| first + frame * 22)
+        .map(|frame| first_frame + frame * 22)
         .filter(|at| !painted.contains(at))
         .collect();
     assert!(
         missed.is_empty(),
-        "every 22 ms frame from the label's first paint is painted, so each \
-         110 ms sweep step lasts exactly five frames; missed {missed:?} in {paints:?}"
+        "every 22 ms wall-clock frame is painted, so each 110 ms sweep step \
+         lasts exactly five frames; missed {missed:?} in {paints:?}"
     );
 }
 

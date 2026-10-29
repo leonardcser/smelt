@@ -373,9 +373,9 @@ fn working_word_rests_in_gray_and_a_sweep_flares_it() {
 
     first_letter(&mut app, 0);
     let landing = first_letter(&mut app, 50);
-    let resting = first_letter(&mut app, 3700);
-    let swept = first_letter(&mut app, 1650);
-    let next_sweep = first_letter(&mut app, 3850);
+    let resting = first_letter(&mut app, 1900);
+    let swept = first_letter(&mut app, 2250);
+    let next_sweep = first_letter(&mut app, 4450);
     assert!(landing > 240, "a letter lands white-hot: {landing}");
     assert!(
         (150..=156).contains(&resting),
@@ -389,6 +389,33 @@ fn working_word_rests_in_gray_and_a_sweep_flares_it() {
         next_sweep > resting + 50,
         "and it sweeps again: {next_sweep} vs {resting}"
     );
+}
+
+#[test]
+fn working_word_sweep_is_locked_to_the_wall_clock() {
+    let first_letter_at = |appeared_ms: u32, now_ms: u32| {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(64, 10);
+        app.start_turn(1);
+        let mut paint = |now_ms: u32| {
+            assert!(app.run_lua(&format!(
+                "smelt.time.now_ms = function() return {now_ms} end
+                 smelt.prompt_bar.top.invalidate()"
+            )));
+            app.render_to_frame()
+        };
+        paint(appeared_ms);
+        let frame = paint(now_ms);
+        green(&app.bar_cell_style(&frame, 4).expect("styled letter"))
+    };
+
+    for now_ms in [2250, 3000, 4450] {
+        assert_eq!(
+            first_letter_at(0, now_ms),
+            first_letter_at(600, now_ms),
+            "instances that started at different moments agree at {now_ms}"
+        );
+    }
 }
 
 #[test]

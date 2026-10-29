@@ -324,10 +324,12 @@ end
 -- leaves it still and dim in its color. A finished turn cools it to gray over a
 -- second, and an interrupted one, which you asked for, goes gray at once. The
 -- label types in white-hot whenever it changes, rests in gray, and a hammer
--- sweep runs along it on repeat. Each paint asks for the next frame, on a grid
--- counted from when the label appeared. Every letter step lasts a whole number
--- of frames, so no step stays on screen longer than the others. Once the coal
--- is still, no frame is asked for.
+-- sweep runs along it on repeat. Motion that repeats (the breath, the sweep and
+-- the frame grid) is a function of the wall clock, so every smelt instance
+-- shows the same frame at the same moment. Motion that happens once (typing,
+-- ignition, heat) follows its own events. Every letter step lasts a whole
+-- number of frames, so no step stays on screen longer than the others. Once the
+-- coal is still, no frame is asked for.
 local COAL = "\u{25CF}"
 local MIN_HEAT = 0.05
 local CALL_BUMP = 0.15
@@ -339,7 +341,6 @@ local BREATH_MS = 1600
 local IGNITE_MS = 450
 local COOL_MS = 1000
 local TYPE_MS = 44
-local FIRST_SWEEP_MS = 1584
 local SWEEP_MS = 2200
 local SWEEP_STEP_MS = 110
 local FLARE_COOL_MS = 650
@@ -438,15 +439,16 @@ smelt.signal.subscribe("work_state", function(state)
 end)
 
 -- How far letter `i` is flared toward white, from 0 (resting gray) to 1: it
--- lands white-hot as it types, and a sweep runs along the word on repeat.
-local function flare(i, age)
-  local flared = math.exp(-math.max(age - (i - 1) * TYPE_MS, 0) / FLARE_COOL_MS)
-  local reach = age - FIRST_SWEEP_MS - (i - 1) * SWEEP_STEP_MS
-  if reach >= 0 then
-    flared = math.max(flared, math.exp(-(reach % SWEEP_MS) / FLARE_COOL_MS))
-  end
-  return flared
+-- lands white-hot as it types, and a sweep runs along the word on repeat,
+-- locked to the wall clock `now`.
+local function flare(i, age, now)
+  local landed = math.exp(-math.max(age - (i - 1) * TYPE_MS, 0) / FLARE_COOL_MS)
+  local swept = math.exp(-((now - (i - 1) * SWEEP_STEP_MS) % SWEEP_MS) / FLARE_COOL_MS)
+  return math.max(landed, swept)
 end
+
+-- Time to the next frame on the wall-clock grid shared by every instance.
+local function next_frame(now) return FRAME_MS - now % FRAME_MS end
 
 local shown, shown_since
 local function typed_label(label, now)
@@ -463,7 +465,7 @@ local function typed_label(label, now)
       local landed = i <= typed or age >= #label * TYPE_MS
       runs[#runs + 1] = {
         text = i <= #label and label:sub(i, i) or "\u{2026}",
-        style = { fg = mix(rest_color, flash, landed and flare(i, age) or 0), bold = true },
+        style = { fg = mix(rest_color, flash, landed and flare(i, age, now) or 0), bold = true },
       }
     end
   end
@@ -494,7 +496,7 @@ builtin.indicator = function()
       mark = working_coal(now)
     end
     local item = typed_label(label, now)
-    bar.invalidate_after(top_bar, FRAME_MS - (now - shown_since) % FRAME_MS)
+    bar.invalidate_after(top_bar, next_frame(now))
     return { mark, item }
   end
 
@@ -505,7 +507,7 @@ builtin.indicator = function()
   elseif state == "done" then
     local cool = done_at and math.min((now - done_at) / COOL_MS, 1) or 1
     mark = coal_item(mix(heat(), ash(), cool))
-    if cool < 1 then bar.invalidate_after(top_bar, FRAME_MS) end
+    if cool < 1 then bar.invalidate_after(top_bar, next_frame(now)) end
   else
     mark = coal_item(ash())
   end
