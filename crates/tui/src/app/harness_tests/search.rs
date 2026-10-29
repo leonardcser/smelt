@@ -1373,3 +1373,35 @@ fn transcript_star_skips_rows_where_the_word_is_part_of_a_longer_word() {
         first
     );
 }
+
+/// Typing a query in a large plain-buffer viewer: the time of each key when
+/// the first match is far from the cursor, and when nothing matches.
+#[test]
+#[ignore = "timed benchmark: cargo xtask bench-search"]
+fn viewer_search_benchmark() {
+    let mut lines: Vec<String> = (0..300_000)
+        .map(|i| format!("    let value_{i} = compute({i}, \"payload\"); // line {i}"))
+        .collect();
+    lines[290_000] = "fn far_target() {}".into();
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.open_readonly_overlay_fixture(lines, None);
+    app.render_silent();
+    for (label, query) in [("far", "far_target"), ("miss", "no_such_text")] {
+        let mut slowest = std::time::Duration::ZERO;
+        let start = std::time::Instant::now();
+        app.type_text("gg");
+        app.type_char('/');
+        for ch in query.chars() {
+            let key = std::time::Instant::now();
+            app.type_char(ch);
+            app.render_silent();
+            slowest = slowest.max(key.elapsed());
+        }
+        app.press(KeyCode::Esc);
+        eprintln!(
+            "  viewer search {label:<5} typing total={:>8.2?} slowest key={:>8.2?}",
+            start.elapsed(),
+            slowest
+        );
+    }
+}

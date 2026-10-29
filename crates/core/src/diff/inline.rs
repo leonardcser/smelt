@@ -108,8 +108,8 @@ fn rows_with_budget(
                 .map(|raw| display_text(diff.source(raw, false)))
                 .collect();
             align_changed_lines_deadline(
-                &old.iter().map(String::as_str).collect::<Vec<_>>(),
-                &new.iter().map(String::as_str).collect::<Vec<_>>(),
+                &old.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+                &new.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
                 Some(Instant::now() + work_budget),
             )
             .into_iter()

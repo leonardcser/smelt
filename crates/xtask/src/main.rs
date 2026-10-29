@@ -44,6 +44,17 @@ fn main() {
                 });
             }
         }
+        Some("bench-search") => {
+            bench_support::run_cargo_test_benchmark(bench_support::CargoTestBenchmark {
+                package: "smelt-tui",
+                test_filter: "viewer_search_benchmark",
+                features: &["harness"],
+                release: true,
+                env: Vec::new(),
+                bench_name: "viewer_search_benchmark",
+                ignored: true,
+            });
+        }
         Some("bench-file-search") => bench_file_search::run(args.collect()),
         Some("bench-lineage-search") => bench_lineage_search::run(args.collect()),
         Some("bench-store-compression") => bench_store_compression::run(args.collect()),
@@ -70,6 +81,9 @@ fn print_usage() {
     eprintln!();
     eprintln!("commands:");
     eprintln!("  bench-diff                            benchmark indexed diffs and million-line overlay frames");
+    eprintln!(
+        "  bench-search                          benchmark typing a search in a large viewer"
+    );
     eprintln!(
         "  bench-file-search [--runs N] [--entries N] [--queries CSV] benchmark file fuzzy search"
     );

@@ -1,6 +1,7 @@
 //! Compact unified-patch index with random-access, foldable row projections.
 //! Patch text is stored once; only requested display rows are allocated/styled.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -912,7 +913,7 @@ impl DiffView {
                 2,
             ),
             Kind::Context => (format!("  {}", display_text(source)), "Normal", 2),
-            Kind::Hunk | Kind::Meta => (display_text(source), "Comment", 0),
+            Kind::Hunk | Kind::Meta => (display_text(source).into_owned(), "Comment", 0),
         };
         let mut row = styled_row(text, group, prefix);
         if matches!(line.kind, Kind::Add | Kind::Delete) {
@@ -1134,6 +1135,30 @@ impl RowSource for DiffView {
     fn is_pending(&self) -> bool {
         self.syntax.pending()
     }
+
+    fn search_text(&self, rows: Range<u64>, visit: &mut dyn FnMut(u64, Option<&str>)) -> bool {
+        let projection = self.projection.lock().unwrap();
+        for row in rows.start..rows.end.min(projection.total) {
+            let segment = projection.segment(row).unwrap();
+            if segment.raw.is_empty() {
+                visit(row, Some(""));
+                continue;
+            }
+            if segment.fold && row == segment.start {
+                visit(row, None);
+                continue;
+            }
+            let raw = segment.raw.start + (row - segment.start - u64::from(segment.fold)) as usize;
+            if self.diff.lines[raw].kind == Kind::File {
+                visit(row, None);
+                continue;
+            }
+            // Rendered rows show the source as `display_text` after a prefix
+            // that search never matches, so the source alone decides.
+            visit(row, Some(&display_text(self.diff.source(raw, false))));
+        }
+        true
+    }
 }
 
 fn styled_row(text: String, group: &str, prefix: u16) -> DocumentRow {
@@ -1166,7 +1191,12 @@ fn styled_row(text: String, group: &str, prefix: u16) -> DocumentRow {
 }
 
 /// Make terminal control characters visible rather than interpreting patch data.
-fn display_text(text: &str) -> String {
+/// `text` as rows show it: tabs expand to four spaces and control characters
+/// are escaped. Borrows `text` when it shows as is.
+fn display_text(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(|ch| ch.is_control()) {
+        return Cow::Borrowed(text);
+    }
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
@@ -1177,7 +1207,7 @@ fn display_text(text: &str) -> String {
             ch => out.push(ch),
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -1386,6 +1416,29 @@ mod tests {
             }
             assert_eq!(actual, colors, "row {raw}: {}", rendered.text);
         }
+    }
+
+    #[test]
+    fn search_text_is_the_matchable_tail_of_every_rendered_row() {
+        let patch = "diff --git a/a.rs b/a.rs\n@@ -1,12 +1,12 @@\n".to_string()
+            + &" context\n".repeat(8)
+            + "-\told\u{1b}\n+new \u{85}é\n context\n\\ No newline at end of file\n"
+            + "diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n-x\n+y\n";
+        let view = DiffView::new(Arc::new(Diff::parse(patch)), 1);
+        let total = view.projection.lock().unwrap().total;
+        let rendered = view.rows(0..total, &THEME);
+        let mut visited = Vec::new();
+        assert!(view.search_text(0..total, &mut |row, text| {
+            visited.push(row);
+            if let Some(text) = text {
+                let row_text = &rendered[row as usize].text;
+                assert!(
+                    row_text.ends_with(text),
+                    "row {row}: {row_text:?} vs {text:?}"
+                );
+            }
+        }));
+        assert_eq!(visited, (0..total).collect::<Vec<_>>());
     }
 
     #[test]

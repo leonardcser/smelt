@@ -192,6 +192,18 @@ pub trait DisplayDocument {
         search_document_next(self, query, origin, forward, total_rows, chunk_rows)
     }
 
+    /// Visits each row of `rows` with text that contains every match of its
+    /// rendered row, or `None` when only rendering tells, so search can skip
+    /// rows that cannot match. Returns `false` when the document has no
+    /// cheaper text than `materialize`.
+    fn search_text(
+        &mut self,
+        _rows: Range<RowIndex>,
+        _visit: &mut dyn FnMut(RowIndex, Option<&str>),
+    ) -> bool {
+        false
+    }
+
     /// Nearest block of `kind` before or after the row `from`. A block that
     /// `from` sits inside, below its first row, counts as the previous one.
     /// `kind` is the key the document binds to a kind of block, such as `u`.
@@ -230,11 +242,51 @@ pub(crate) fn scan_document_rows<D: DisplayDocument + ?Sized>(
     let mut row = start;
     while row < total_rows {
         let count = chunk_rows.min(total_rows - row);
-        let display = document.materialize(row..row.saturating_add(count));
-        collect_display_matches(&display.rows, row, query, &mut matches);
+        collect_range_matches(
+            document,
+            query,
+            row..row.saturating_add(count),
+            &mut matches,
+        );
         row = row.saturating_add(count);
     }
     matches
+}
+
+/// Runs of rows in `range` that may hold a match of `query`: all of `range`
+/// unless the document can rule rows out without rendering them.
+fn candidate_runs<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    query: &str,
+    range: Range<RowIndex>,
+) -> Vec<Range<RowIndex>> {
+    let pattern = SearchPattern::parse(query);
+    let mut runs: Vec<Range<RowIndex>> = Vec::new();
+    let filtered = document.search_text(range.clone(), &mut |row, text| {
+        if text.is_none_or(|text| pattern.find_in(text).next().is_some()) {
+            match runs.last_mut() {
+                Some(last) if last.end == row => last.end = row.saturating_add(1),
+                _ => runs.push(row..row.saturating_add(1)),
+            }
+        }
+    });
+    if filtered {
+        runs
+    } else {
+        vec![range]
+    }
+}
+
+fn collect_range_matches<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    query: &str,
+    range: Range<RowIndex>,
+    matches: &mut Vec<DocRange>,
+) {
+    for run in candidate_runs(document, query, range) {
+        let display = document.materialize(run.clone());
+        collect_display_matches(&display.rows, run.start, query, matches);
+    }
 }
 
 pub(crate) fn search_document_next<D: DisplayDocument + ?Sized>(
@@ -287,9 +339,11 @@ fn search_forward_range<D: DisplayDocument + ?Sized>(
     let mut row = range.start;
     while row < range.end {
         let count = chunk_rows.min(range.end - row);
-        let display = document.materialize(row..row.saturating_add(count));
-        if let Some(found) = first_forward_match(&display.rows, row, query, min_pos) {
-            return Some(found);
+        for run in candidate_runs(document, query, row..row.saturating_add(count)) {
+            let display = document.materialize(run.clone());
+            if let Some(found) = first_forward_match(&display.rows, run.start, query, min_pos) {
+                return Some(found);
+            }
         }
         row = row.saturating_add(count);
     }
@@ -310,9 +364,14 @@ fn search_backward_range<D: DisplayDocument + ?Sized>(
     let mut end = range.end;
     while end > range.start {
         let start = end.saturating_sub(chunk_rows).max(range.start);
-        let display = document.materialize(start..end);
-        if let Some(found) = first_backward_match(&display.rows, start, query, max_pos) {
-            return Some(found);
+        for run in candidate_runs(document, query, start..end)
+            .into_iter()
+            .rev()
+        {
+            let display = document.materialize(run.clone());
+            if let Some(found) = first_backward_match(&display.rows, run.start, query, max_pos) {
+                return Some(found);
+            }
         }
         end = start;
     }
@@ -438,12 +497,14 @@ pub(crate) fn scan_document_row_window<D: DisplayDocument + ?Sized>(
     let mut matches = Vec::new();
     let start = origin.row.min(total_rows.saturating_sub(1));
     let count = chunk_rows.min(total_rows - start);
-    let display = document.materialize(start..start.saturating_add(count));
-    collect_display_matches(&display.rows, start, query, &mut matches);
+    collect_range_matches(
+        document,
+        query,
+        start..start.saturating_add(count),
+        &mut matches,
+    );
     if matches.is_empty() && start > 0 {
-        let count = chunk_rows.min(start);
-        let display = document.materialize(0..count);
-        collect_display_matches(&display.rows, 0, query, &mut matches);
+        collect_range_matches(document, query, 0..chunk_rows.min(start), &mut matches);
     }
     matches
 }
@@ -620,6 +681,14 @@ impl DisplayDocument for RowSourceDocument<'_> {
             })
             .collect();
         DisplayRows { rows }
+    }
+
+    fn search_text(
+        &mut self,
+        rows: Range<RowIndex>,
+        visit: &mut dyn FnMut(RowIndex, Option<&str>),
+    ) -> bool {
+        self.source.search_text(rows, visit)
     }
 
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
@@ -1086,6 +1155,88 @@ mod tests {
             })
         );
         assert_eq!(doc.materialized, vec![0..4, 4..8, 8..12, 12..16]);
+    }
+
+    #[test]
+    fn search_text_skips_rendering_rows_that_cannot_match_without_changing_results() {
+        struct FilteredDoc {
+            rows: Vec<DisplayRow>,
+            /// Rows whose cheap text is unknown, so they must render.
+            opaque: Vec<RowIndex>,
+            materialized: Vec<Range<RowIndex>>,
+        }
+
+        impl DisplayDocument for FilteredDoc {
+            fn snapshot(&mut self) -> DisplaySnapshot {
+                DisplaySnapshot {
+                    generation: 0,
+                    total_rows: self.rows.len() as RowIndex,
+                }
+            }
+
+            fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+                self.materialized.push(range.clone());
+                DisplayRows {
+                    rows: self.rows[row_to_usize(range.start)..row_to_usize(range.end)].to_vec(),
+                }
+            }
+
+            fn copy_range(&mut self, _range: TextRange) -> Option<CopyOutput> {
+                None
+            }
+
+            fn search_text(
+                &mut self,
+                rows: Range<RowIndex>,
+                visit: &mut dyn FnMut(RowIndex, Option<&str>),
+            ) -> bool {
+                for row in rows {
+                    let text = self.rows[row_to_usize(row)].text.as_str();
+                    visit(row, (!self.opaque.contains(&row)).then_some(text));
+                }
+                true
+            }
+        }
+
+        let selectable =
+            |text: &str| DisplayRow::new(text.to_owned(), std::iter::once(0..text.len()).collect());
+        let mut rows: Vec<_> = (0..20).map(|i| selectable(&format!("row {i}"))).collect();
+        rows[5] = selectable("a needle");
+        rows[6] = selectable("needle again");
+        rows[9] = DisplayRow::new("hidden needle".into(), Vec::new());
+        rows[14] = selectable("last needle");
+        let mut unfiltered = StaticRowsDocument::new(rows.clone());
+        let origin = DocPosition {
+            row: 7,
+            byte_col: 0,
+        };
+
+        let mut filtered = FilteredDoc {
+            rows: rows.clone(),
+            opaque: vec![2, 6],
+            materialized: Vec::new(),
+        };
+        for forward in [true, false] {
+            assert_eq!(
+                filtered.search_next_match("needle", origin, forward, 8),
+                unfiltered.search_next_match("needle", origin, forward, 8),
+            );
+        }
+        assert_eq!(
+            filtered.search_matches("needle", origin, true, 8),
+            unfiltered.search_matches("needle", origin, true, 8),
+        );
+        // Only rows holding the needle, plus the opaque row, ever render.
+        assert!(filtered
+            .materialized
+            .iter()
+            .flat_map(Clone::clone)
+            .all(|row| [2, 5, 6, 9, 14].contains(&row)));
+        assert!(
+            filtered.materialized.contains(&(5..7)),
+            "{:?}",
+            filtered.materialized
+        );
     }
 
     #[test]

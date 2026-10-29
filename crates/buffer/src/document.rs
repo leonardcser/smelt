@@ -63,6 +63,13 @@ pub trait RowSource: Send + Sync {
     fn line_number_bounds(&self) -> Option<crate::buffer::SourceLine> {
         None
     }
+    /// Lets search skip rendering rows that cannot match. Visits each row of
+    /// `rows` with text that contains every match its rendered row has, or
+    /// `None` if only rendering tells. Returns `false`, visiting nothing, when
+    /// the source has no cheaper text than its rendered rows.
+    fn search_text(&self, _rows: Range<u64>, _visit: &mut dyn FnMut(u64, Option<&str>)) -> bool {
+        false
+    }
 }
 
 /// A window's subscription to shared row storage. Cloning creates an independent

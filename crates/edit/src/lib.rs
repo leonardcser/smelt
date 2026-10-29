@@ -3687,46 +3687,55 @@ pub trait UiHost {
     }
 }
 
+/// The buffer lines behind document rows `start..start + count` of `win`,
+/// and the document row of the first one.
+fn buffer_lines_for_ui_range(
+    ui: &Ui,
+    win: WinId,
+    start: RowIndex,
+    count: RowIndex,
+) -> Option<(&Buffer, std::ops::Range<usize>, RowIndex)> {
+    let window = ui.win(win)?;
+    let buf = ui.buf(window.buf)?;
+    let len = buf.lines().len();
+    let requested = start..start.saturating_add(count);
+    let (lines, first) = if let Some(materialized) = window.materialized_rows() {
+        let available = materialized.materialized_range();
+        let first = requested.start.max(available.start);
+        let end = requested.end.min(available.end);
+        if first >= end {
+            return Some((buf, 0..0, first));
+        }
+        (
+            row_to_usize(materialized.local_row(first)).min(len)
+                ..row_to_usize(materialized.local_row(end)).min(len),
+            first,
+        )
+    } else {
+        (
+            row_to_usize(requested.start).min(len)..row_to_usize(requested.end).min(len),
+            requested.start,
+        )
+    };
+    Some((buf, lines, first))
+}
+
 fn display_rows_for_ui_range(
     ui: &Ui,
     win: WinId,
     start: RowIndex,
     count: RowIndex,
 ) -> Option<DisplayRows> {
-    let (buf_id, materialized) = {
-        let win = ui.win(win)?;
-        (win.buf, win.materialized_rows())
-    };
-    let buf = ui.buf(buf_id)?;
-    let rows = buf.lines();
-    let (start_idx, end) = if let Some(materialized) = materialized {
-        let requested = start..start.saturating_add(count);
-        let available = materialized.materialized_range();
-        let clipped_start = requested.start.max(available.start);
-        let clipped_end = requested.end.min(available.end);
-        if clipped_start >= clipped_end {
-            return Some(DisplayRows::empty());
-        }
-        (
-            row_to_usize(materialized.local_row(clipped_start)).min(rows.len()),
-            row_to_usize(materialized.local_row(clipped_end)).min(rows.len()),
-        )
-    } else {
-        (
-            row_to_usize(start).min(rows.len()),
-            row_to_usize(start.saturating_add(count)).min(rows.len()),
-        )
-    };
-    let text_rows = rows[start_idx..end].to_vec();
-    let display_rows: Vec<DisplayRow> = text_rows
+    let (buf, lines, _) = buffer_lines_for_ui_range(ui, win, start, count)?;
+    let display_rows: Vec<DisplayRow> = buf.lines()[lines.clone()]
         .iter()
-        .enumerate()
-        .map(|(offset, row)| {
-            let spans = buf.highlights_at(start_idx + offset);
+        .zip(lines.clone())
+        .map(|(row, line)| {
+            let spans = buf.highlights_at(line);
             let display_row =
                 DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans))
                     .with_actions(display_actions_for_spans(&spans));
-            if offset == 0 {
+            if line == lines.start {
                 display_row
             } else {
                 display_row.with_break_before(RowBreak::Hard)
@@ -3814,6 +3823,27 @@ impl DisplayDocument for BufferDisplayDocument<'_> {
             range
         };
         crate::row::copy_buffer_doc_range(buf, range)
+    }
+
+    fn search_text(
+        &mut self,
+        rows: std::ops::Range<RowIndex>,
+        visit: &mut dyn FnMut(RowIndex, Option<&str>),
+    ) -> bool {
+        if let Some(mut document) = self.native() {
+            return document.search_text(rows, visit);
+        }
+        // A buffer row renders as its line, so the line holds every match.
+        let count = rows.end.saturating_sub(rows.start);
+        let Some((buf, lines, first)) =
+            buffer_lines_for_ui_range(self.ui, self.win, rows.start, count)
+        else {
+            return true;
+        };
+        for (row, line) in (first..).zip(&buf.lines()[lines]) {
+            visit(row, Some(line));
+        }
+        true
     }
 
     fn search_matches(
