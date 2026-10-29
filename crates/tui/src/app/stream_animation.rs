@@ -729,6 +729,21 @@ mod tests {
             ),
         ] {
             let mut app = TestApp::builder().build();
+            let dir = tempfile::tempdir().expect("create draft fixture directory");
+            let file = dir.path().join(if name == "edit_file" {
+                "example.rs"
+            } else {
+                "example.ipynb"
+            });
+            let source = "old snippet\n";
+            std::fs::write(&file, source).expect("write draft fixture");
+            let path = file.to_string_lossy();
+            assert!(app.run_lua(&format!(
+                "smelt.fs.file_state.record_read({}, {}, 0, {})",
+                serde_json::to_string(path.as_ref()).unwrap(),
+                serde_json::to_string(source).unwrap(),
+                source.len(),
+            )));
             app.start_turn(1);
             app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
                 stream_id: name.into(),
@@ -739,7 +754,9 @@ mod tests {
                 stream_id: name.into(),
                 call_id: Some(name.into()),
                 tool_name: Some(name.into()),
-                delta: arguments.into(),
+                delta: arguments
+                    .replace("/tmp/example.rs", &path)
+                    .replace("/tmp/example.ipynb", &path),
             }));
             assert!(!app.render_to_frame().text().contains(marker));
             app.clock.advance(MAX_SPREAD);

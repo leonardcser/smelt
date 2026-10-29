@@ -80,7 +80,10 @@ local function replacement_line_detail(block)
 end
 
 smelt.transcript.register_tool("edit_file", {
-  cache_key = "smelt.tool-presentation.edit_file:v5",
+  cache_key = "smelt.tool-presentation.edit_file:v6",
+  draft_error = function(block)
+    return transcript_defaults.unread_file_error(block, "file_path", "file")
+  end,
   draft = function(block)
     local old = argument_field(block, "old_string")
     local new = argument_field(block, "new_string")

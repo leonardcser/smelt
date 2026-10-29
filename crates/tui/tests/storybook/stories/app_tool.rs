@@ -105,9 +105,14 @@ app_story!(streaming_tool_draft_syntax_highlighting, |ctx| {
 
 app_story!(streaming_edit_file_draft_diff, |ctx| {
     ctx.set_viewport(78, 14);
+    let source = "pub fn live() -> i32 {\n    1\n}\n";
+    let path = ctx.write_fixture("src/live.rs", source);
+    ctx.cache_file_read(&path, source);
     ctx.tool_draft_delta(
         "edit_file",
-        r#"{"file_path":"src/live.rs","old_string":"pub fn live() -> i32 {\n    1\n}","new_string":"pub fn live() -> i32 {\n    2"#,
+        &format!(
+            r#"{{"file_path":{path:?},"old_string":"pub fn live() -> i32 {{\n    1\n}}","new_string":"pub fn live() -> i32 {{\n    2"#
+        ),
     );
     ctx.finish_stream_reveal();
     ctx.assert_snapshot();
@@ -115,9 +120,14 @@ app_story!(streaming_edit_file_draft_diff, |ctx| {
 
 app_story!(edit_file_tool_states, |ctx| {
     ctx.set_viewport(84, 30);
+    let source = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+    let path = ctx.write_fixture("src/lib.rs", source);
+    ctx.cache_file_read(&path, source);
     ctx.tool_draft(
         "edit_file",
-        r#"{"file_path":"src/lib.rs","old_string":"fn add(a: i32, b: i32) -> i32 {\n    a + b\n}","new_string":"fn add(a: i64, b: i64) -> i64 {\n    a.checked_add(b).expect(\"overflow\")\n}"}"#,
+        &format!(
+            r#"{{"file_path":{path:?},"old_string":"fn add(a: i32, b: i32) -> i32 {{\n    a + b\n}}","new_string":"fn add(a: i64, b: i64) -> i64 {{\n    a.checked_add(b).expect(\"overflow\")\n}}"}}"#
+        ),
     );
     ctx.tool_started(
         "edit_file",
@@ -240,9 +250,14 @@ app_story!(edit_file_success_uses_retained_content_diff, |ctx| {
 
 app_story!(edit_notebook_tool_states, |ctx| {
     ctx.set_viewport(84, 22);
+    let notebook = r#"{"cells":[]}"#;
+    let path = ctx.write_fixture("analysis.ipynb", notebook);
+    ctx.cache_file_read(&path, notebook);
     ctx.tool_draft(
         "edit_notebook",
-        r#"{"notebook_path":"analysis.ipynb","cell_number":0,"new_source":"import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n"}"#,
+        &format!(
+            r#"{{"notebook_path":{path:?},"cell_number":0,"new_source":"import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n"}}"#
+        ),
     );
     ctx.tool_call_with_display_content(
         "edit_notebook",

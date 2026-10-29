@@ -1,6 +1,8 @@
 -- Built-in edit_notebook tool. Replace/insert/delete a Jupyter cell with
 -- staleness preflight and per-path flock.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
 local function preview_layout(meta)
   local lang = meta.syntax_ext
   local path = meta.path or ""
@@ -61,7 +63,10 @@ local function retained_layout(block)
 end
 
 smelt.transcript.register_tool("edit_notebook", {
-  cache_key = "smelt.tool-presentation.edit_notebook:v4",
+  cache_key = "smelt.tool-presentation.edit_notebook:v5",
+  draft_error = function(block)
+    return transcript_defaults.unread_file_error(block, "notebook_path", "notebook")
+  end,
   draft = function(block)
     local args = block.args or {}
     if args.edit_mode == "delete" then return nil end

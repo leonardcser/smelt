@@ -2393,6 +2393,10 @@ fn assert_invalid_edit_file_lifecycle(case: &InvalidEditFileCase, request_id: u6
         "{draft_frame}"
     );
 
+    if !matches!(case.read_state, EditFileReadState::Fresh) {
+        assert!(draft_frame.contains(case.error), "frame: {draft_frame}");
+        assert_no_speculative_edit(&draft_frame, case, "draft");
+    }
     let invocation_id = protocol::InvocationId::new(request_id);
     let decision = evaluate_tool_decision(&mut app, request_id, &call_id, "edit_file", &args);
     assert_eq!(
@@ -2443,6 +2447,41 @@ fn assert_no_speculative_edit(frame: &str, case: &InvalidEditFileCase, stage: &s
         "{} edit rendered speculative content at {stage}:\n{frame}",
         case.name
     );
+}
+
+#[test]
+fn unread_edit_notebook_draft_shows_the_error_instead_of_the_source() {
+    let dir = tempfile::tempdir().expect("create notebook fixture directory");
+    let file = dir.path().join("unread.ipynb");
+    std::fs::write(&file, r#"{"cells":[]}"#).expect("write notebook fixture");
+    let arguments = serde_json::json!({
+        "notebook_path": file.to_string_lossy(),
+        "cell_number": 0,
+        "new_source": "UNREAD_NOTEBOOK_SOURCE",
+    })
+    .to_string();
+
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    app.start_turn(7);
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
+        stream_id: "unread-notebook".into(),
+        call_id: Some("unread-notebook".into()),
+        tool_name: Some("edit_notebook".into()),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
+        stream_id: "unread-notebook".into(),
+        call_id: "unread-notebook".into(),
+        tool_name: "edit_notebook".into(),
+        arguments,
+    }));
+
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("read the notebook with read_file before editing"),
+        "frame: {frame}"
+    );
+    assert!(!frame.contains("UNREAD_NOTEBOOK_SOURCE"), "frame: {frame}");
 }
 
 #[test]

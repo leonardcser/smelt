@@ -456,6 +456,20 @@ function M.tool_collapsed_detail(block, ctx, presentation)
   return detail
 end
 
+--- Read/staleness error the tool preflight would report for a streamed draft,
+--- once its path argument `path_arg` has finished streaming. `noun` labels the
+--- entity in the message (`"file"` or `"notebook"`).
+---@type fun(block: smelt.transcript.Block, path_arg: string, noun: string): string|nil
+function M.unread_file_error(block, path_arg, noun)
+  for _, field in ipairs(block.argument_fields or {}) do
+    if field.name == path_arg then
+      if not field.complete then return nil end
+      return smelt.fs.file_state.staleness_error((block.args or {})[path_arg] or "", noun)
+    end
+  end
+  return nil
+end
+
 --- Render a tool body. Drafts can provide an explicit best-effort preview;
 --- completed tools fall back to raw output or their structured body renderer.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node|nil
@@ -465,6 +479,13 @@ function M.render_tool_body(block, ctx, opts, presentation)
   local renderer = presentation.body
   local draft_renderer = presentation.draft
   if block.draft and draft_renderer then
+    local draft_error = presentation.draft_error and presentation.draft_error(block)
+    if draft_error then
+      return layout.gutter(
+        layout.text(draft_error, { hl_group = "ErrorMsg" }),
+        { text = opts.gutter or "  " }
+      )
+    end
     local body = require_layout_result(block, "draft", draft_renderer(block, ctx, opts), true)
     if body == nil then return nil end
     return layout.gutter(body, { text = opts.gutter or "  " })

@@ -1612,6 +1612,7 @@ Registrations are copied and immutable.
 | `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker. Return nil to use the tool summary. |
 | `body` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Expanded body renderer. Return nil to suppress the body. |
 | `draft` | `fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Draft body renderer. Return nil to suppress the body. |
+| `draft_error` | `fun(draft: smelt.transcript.Block): string\|nil` |  | Reason the streamed call will be rejected. When it returns a string the draft shows that error instead of the `draft` body. |
 | `compact` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.layout.Node\|nil` |  | Collapsed detail renderer. Return nil to suppress the detail. |
 
 ### `smelt.transcript.View`

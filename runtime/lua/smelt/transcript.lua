@@ -177,9 +177,10 @@ smelt.transcript = smelt.transcript or {}
 ---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
 ---@field body? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Expanded body renderer. Return nil to suppress the body.
 ---@field draft? fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Draft body renderer. Return nil to suppress the body.
+---@field draft_error? fun(draft: smelt.transcript.Block): string|nil Reason the streamed call will be rejected. When it returns a string the draft shows that error instead of the `draft` body.
 ---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
-local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v4"
+local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v5"
 local transcript = smelt.transcript
 local internal_transcript = __smelt_internal.transcript
 local base_renderer = internal_transcript.__get_renderer and internal_transcript.__get_renderer() or nil
@@ -189,11 +190,12 @@ local order = {}
 local tool_presentations = {}
 local tool_order = {}
 local next_token = 0
-local tool_presentation_fields = { "cache_key", "render", "title", "body", "draft", "compact" }
+local tool_presentation_callbacks = { "render", "title", "body", "draft", "draft_error", "compact" }
 
 local function copy_tool_presentation(presentation)
   local copy = {}
-  for _, field in ipairs(tool_presentation_fields) do
+  copy.cache_key = presentation.cache_key
+  for _, field in ipairs(tool_presentation_callbacks) do
     copy[field] = presentation[field]
   end
   return copy
@@ -336,7 +338,7 @@ function smelt.transcript.register_tool(name, presentation)
   if type(presentation) ~= "table" then
     error("smelt.transcript.register_tool: presentation must be a table", 2)
   end
-  for _, field in ipairs({ "render", "title", "body", "draft", "compact" }) do
+  for _, field in ipairs(tool_presentation_callbacks) do
     if presentation[field] ~= nil and type(presentation[field]) ~= "function" then
       error("smelt.transcript.register_tool: presentation." .. field .. " must be a function", 2)
     end
