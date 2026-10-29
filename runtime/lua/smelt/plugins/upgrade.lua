@@ -87,7 +87,8 @@ local function run_cli(args, ch, timeout_secs)
     smelt.log.warn("upgrade.failed", {
       args = argv, exit_code = result.exit_code, stderr = result.stderr,
     })
-    return nil, (result.stderr or ""):match(".*error: ([^\n]+)")
+    -- Prefer the cause from Cargo over the CLI's final exit-status summary.
+    return nil, ("\n" .. (result.stderr or "")):match("\nerror: ([^\r\n]+)")
       or ("smelt upgrade exited with " .. tostring(result.exit_code))
   end
   local report = smelt.parse.json(result.stdout or "")

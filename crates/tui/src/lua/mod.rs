@@ -3643,6 +3643,36 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_unstable_failure_reports_the_cargo_error_not_the_exit_summary() {
+        let rt = LuaRuntime::new();
+        load_upgrade_plugin(
+            &rt,
+            r#"
+                smelt.settings.autoupgrade_channel = "unstable"
+                _G.cli.check = report('{"channel":"unstable","current":"v0.6.2","latest":"main@26c57bd","update":true,"auto_install":false}')
+                _G.cli.install = failure("building main@26c57bd with cargo install; this may take a few minutes...\nwarning: spurious network error: retrying\r\nerror: unexpected argument '--package' found\r\n\nUsage: cargo install [OPTIONS] [CRATE[@<VER>]]...\nerror: cargo install: cargo exited with exit status: 1\n")
+            "#,
+        );
+
+        assert!(rt.run_command("upgrade", None));
+        assert_eq!(
+            cli_calls(&rt),
+            [
+                "upgrade check --json --channel unstable",
+                "upgrade --json --channel unstable"
+            ]
+        );
+        assert_eq!(
+            drain_errors(&rt),
+            ["upgrade to main@26c57bd failed: unexpected argument '--package' found"]
+        );
+        assert_eq!(
+            upgrade_banner(&rt).as_deref(),
+            Some("update main@26c57bd available  →  /upgrade")
+        );
+    }
+
+    #[test]
     fn upgrade_notify_mode_announces_each_version_once_and_never_installs() {
         let rt = LuaRuntime::new();
         load_upgrade_plugin(

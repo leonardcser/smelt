@@ -136,7 +136,7 @@ dead-process records are ignored. Files live under `$XDG_RUNTIME_DIR/smelt/statu
 | Flag                 | Description                                                                               |
 | -------------------- | ----------------------------------------------------------------------------------------- |
 | `--channel stable`   | Use the newest stable GitHub release and its prebuilt archive (default)                   |
-| `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main --package smelt-agent` |
+| `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main smelt-agent` |
 | `--json`             | Print one JSON status line on stdout instead of text                                      |
 
 `smelt upgrade check` accepts the same flags and never installs.

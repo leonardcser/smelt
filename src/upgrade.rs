@@ -26,6 +26,16 @@ use std::time::Duration;
 const WEB_URL: &str = "https://github.com/leonardcser/smelt";
 const API_URL: &str = "https://api.github.com/repos/leonardcser/smelt";
 const REPO_URL: &str = "https://github.com/leonardcser/smelt.git";
+const MAIN_INSTALL_ARGS: &[&str] = &[
+    "install",
+    "--git",
+    REPO_URL,
+    "--branch",
+    "main",
+    "smelt-agent",
+    "--force",
+    "--locked",
+];
 const STAGING_PREFIX: &str = ".smelt-upgrade-";
 /// Staging directories older than this belong to an interrupted upgrade.
 const STALE_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
@@ -630,21 +640,7 @@ fn replace_executable(
 
 fn install_main(latest: &str) -> Result<(), String> {
     eprintln!("building {latest} with cargo install; this may take a few minutes...");
-    run(
-        "cargo",
-        &[
-            "install",
-            "--git",
-            REPO_URL,
-            "--branch",
-            "main",
-            "--package",
-            "smelt-agent",
-            "--force",
-            "--locked",
-        ],
-        "cargo install",
-    )
+    run("cargo", MAIN_INSTALL_ARGS, "cargo install")
 }
 
 /// Run a helper program. Its output goes to stderr so stdout stays reserved
@@ -719,6 +715,21 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(server)
             .await;
+    }
+
+    #[test]
+    fn unstable_install_arguments_are_accepted_by_cargo() {
+        // Exercise Cargo's parser without fetching, building, or installing.
+        let output = Command::new("cargo")
+            .args(MAIN_INSTALL_ARGS)
+            .arg("--help")
+            .output()
+            .expect("run cargo install --help");
+        assert!(
+            output.status.success(),
+            "cargo rejected the unstable install arguments: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
