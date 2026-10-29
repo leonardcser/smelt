@@ -619,11 +619,36 @@ async fn session_requests(
     }
 }
 
+/// Interactive catalog reads give up after a short busy timeout. The inspect
+/// server is a diagnostic tool, so it waits out a briefly busy catalog instead
+/// of answering 500.
+fn resolve_with_retry(
+    sessions: &smelt_core::session::SessionStorage,
+    id: &str,
+) -> std::result::Result<smelt_core::session::ResolvedSession, smelt_core::session::SessionStoreError>
+{
+    use smelt_core::session::SessionStoreError;
+    const ATTEMPTS: u32 = 20;
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+    let mut attempt = 1;
+    loop {
+        match sessions.resolve_session_for_read_result(id) {
+            Err(SessionStoreError::Busy { .. } | SessionStoreError::Sqlite { .. })
+                if attempt < ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(DELAY);
+            }
+            result => return result,
+        }
+    }
+}
+
 fn session_requests_json(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
 ) -> std::result::Result<Option<String>, String> {
-    let resolved = match sessions.resolve_session_for_read_result(id) {
+    let resolved = match resolve_with_retry(sessions, id) {
         Ok(resolved) => resolved,
         Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
             return match smelt_store::LineageSessionReader::try_open_existing(
@@ -688,7 +713,7 @@ fn request_payload_json(
     id: &str,
     attempt_id: i64,
 ) -> std::result::Result<Option<String>, String> {
-    let resolved = match sessions.resolve_session_for_read_result(id) {
+    let resolved = match resolve_with_retry(sessions, id) {
         Ok(resolved) => resolved,
         Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
             return match smelt_store::LineageSessionReader::try_open_existing(
