@@ -889,21 +889,24 @@ fn assert_burst_bench_projection_bounded(
     label: &str,
     frames: &[crate::app::transcript_scroll_trace::TranscriptScrollTraceFrame],
     before_scroll: crate::smelt_edit::RowIndex,
-    max_input_rows: crate::smelt_edit::RowIndex,
+    max_burst_rows: crate::smelt_edit::RowIndex,
     max_projection_delta: crate::smelt_edit::RowIndex,
     strict_projection_delta: bool,
 ) {
     let mut checked = 0usize;
+    // A frame carries the coalesced delta of every input since the previous
+    // render, so the burst as a whole is what each key's step bounds.
+    let mut burst_rows: crate::smelt_edit::RowIndex = 0;
     for frame in frames {
         let crate::app::transcript_scroll_trace::TranscriptScrollIntent::UserDelta { rows } =
             frame.scroll_intent
         else {
             continue;
         };
-        let input_rows = rows.unsigned_abs() as crate::smelt_edit::RowIndex;
+        burst_rows = burst_rows.saturating_add(rows.unsigned_abs() as crate::smelt_edit::RowIndex);
         assert!(
-            input_rows <= max_input_rows,
-            "{label} over-accumulated a single burst input: input_rows={input_rows}, max_input_rows={max_input_rows}, frame={frame:?}"
+            burst_rows <= max_burst_rows,
+            "{label} over-accumulated the burst input: burst_rows={burst_rows}, max_burst_rows={max_burst_rows}, frame={frame:?}"
         );
         let Some(target) = frame.projection_target.exact_target_row() else {
             panic!("{label} projected user delta through a non-exact target: {frame:?}");
@@ -964,15 +967,16 @@ fn measure_transcript_burst_operation(
         .app
         .conversation
         .take_transcript_scroll_trace_frames_for_harness();
-    let max_input_rows = key.max_rows_per_event(viewport_rows);
-    let max_projection_delta = max_input_rows
-        .saturating_mul(BURST_EVENTS as crate::smelt_edit::RowIndex)
+    let max_burst_rows = key
+        .max_rows_per_event(viewport_rows)
+        .saturating_mul(BURST_EVENTS as crate::smelt_edit::RowIndex);
+    let max_projection_delta = max_burst_rows
         .saturating_add(crate::smelt_edit::RowIndex::from(viewport_rows).saturating_mul(2));
     assert_burst_bench_projection_bounded(
         label,
         &frames,
         before_scroll,
-        max_input_rows,
+        max_burst_rows,
         max_projection_delta,
         matches!(position, BurstBenchPosition::Top),
     );

@@ -2921,7 +2921,9 @@ async fn diff_loading_benchmark() {
                     .text
                     .contains("hello"));
             }
-            let tree_rows = file_count as u64 + if key == 's' { 2 } else { 3 };
+            // Both sections keep their header, so the row count never changes;
+            // the staged header's file count is what shows the index moved.
+            let staged_header = format!("staged ({})", usize::from(key == 's'));
             let start = std::time::Instant::now();
             app.type_char(key);
             let mut frames = Vec::new();
@@ -2939,12 +2941,16 @@ async fn diff_loading_benchmark() {
                 );
                 let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
                 let tree = app.ui_probe().win(sidebar).unwrap().row_source().unwrap();
-                if tree.snapshot().total_rows == tree_rows {
+                let rows = tree.rows(0..tree.snapshot().total_rows, app.ui_probe().theme());
+                if rows.iter().any(|row| row.text.starts_with(&staged_header)) {
                     break;
                 }
                 assert!(
                     start.elapsed() < Duration::from_secs(15),
-                    "{action} did not update sections"
+                    "{action} did not update sections: {:?}",
+                    rows.iter()
+                        .map(|row| row.text.trim_end())
+                        .collect::<Vec<_>>()
                 );
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
