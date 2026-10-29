@@ -65,9 +65,11 @@ fn main() {
     // The dirty flag depends on tracked working-tree contents, not just git
     // refs. Watch every tracked file so a cached build reruns when a source tree
     // becomes dirty or clean without changing HEAD.
-    if let (Some(repo_root), Some(tracked_files)) =
-        (git(&["rev-parse", "--show-toplevel"]), git(&["ls-files"]))
-    {
+    let repo_root = git(&["rev-parse", "--show-toplevel"]);
+    let tracked_files = repo_root
+        .as_deref()
+        .and_then(|root| git(&["-C", root, "ls-files"]));
+    if let (Some(repo_root), Some(tracked_files)) = (repo_root, tracked_files) {
         let repo_root = PathBuf::from(repo_root);
         for path in build_support::tracked_file_paths(&repo_root, &tracked_files) {
             println!("cargo:rerun-if-changed={}", path.display());
