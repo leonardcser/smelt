@@ -26,11 +26,67 @@ Registering the same name again replaces the earlier entry.
 | `openai-compatible`    | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
 | `openai`               | `/v1/responses`                                    | OpenAI, OpenRouter |
 | `codex`                | ChatGPT backend (OAuth)                            | ChatGPT subscription |
-| `claude-code`          | Installed Claude Code executable                   | Claude Code, see the [backend guide](../guide/claude-code.md) |
+| `claude-code`          | Installed Claude Code executable                   | Claude Code, see [Claude Code](#claude-code) |
 | `anthropic-compatible` | `/v1/messages` with thinking                       | Anthropic-compatible APIs |
 | `anthropic`            | `/v1/messages` with thinking                       | Anthropic |
 | `copilot`              | GitHub Copilot (OAuth)                             | GitHub Copilot subscription |
 | `kimi-code`            | Kimi Code (OAuth)                                  | Kimi Code subscription |
+
+## Claude Code
+
+The `claude-code` provider runs your installed Claude Code as the agent, behind
+smelt's interface. Claude Code keeps its own tools, context management and
+authentication. smelt adds the terminal UI, permissions, MCP tools and your
+custom tools. smelt never copies your credentials or sends requests to
+Anthropic itself.
+
+Log in once with Claude Code, then start smelt. Its models show up in `/model`
+(for example `claude-code/opus`) with no provider setup:
+
+```sh
+claude auth login
+smelt --model claude-code/sonnet
+```
+
+To pick the models yourself or set a default, register the provider:
+
+```lua
+smelt.provider.register("claude-code", {
+  type = "claude-code",
+  models = { "sonnet", "opus" },
+})
+smelt.defaults.set({ model = "claude-code/sonnet" })
+```
+
+Do not set `api_base` or `api_key_env`. Configure API keys and endpoints in
+Claude Code instead. If `claude` is not on `PATH`, set
+`SMELT_CLAUDE_CODE_EXECUTABLE` to its path.
+
+What to expect:
+
+- `/usage` shows the plan limits that Claude Code reports.
+- Tool calls go through smelt's permission rules and dialogs. Claude Code's own
+  permission system also applies.
+- Questions and plans from Claude Code open in smelt's dialogs.
+- Background shell commands appear in `/ps` and native subagents in
+  `/subagents`. Cancelling a turn with **Esc** leaves them running.
+- Claude Code loads its own hooks, plugins, skills and MCP servers. Only use it
+  in projects you trust.
+- It does not start when `redact_secrets` is on, because smelt cannot redact
+  Claude Code's tool output.
+
+To replace a native tool with one of yours, name it in `claude_code.replaces`:
+
+```lua
+smelt.tools.register({
+  name = "project_shell",
+  -- description, parameters, execute ...
+  claude_code = { replaces = { "Bash" } },
+})
+```
+
+Use `claude_code = { enabled = false }` to hide a custom tool from this provider
+only.
 
 ## Choosing a model
 

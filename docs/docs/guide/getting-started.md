@@ -104,7 +104,7 @@ its own login instead:
     offers, such as `claude-code/opus` or `claude-code/claude-opus-4-8`. smelt
     runs Claude Code itself as the agent, with its own tools and context
     management, behind smelt's interface and permissions. See the
-    [Claude Code guide](claude-code.md).
+    [Claude Code provider](../customize/providers.md#claude-code).
 
 === ":simple-moonshotai: Kimi Code"
 
