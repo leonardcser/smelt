@@ -270,6 +270,24 @@ fn add_codex_gpt_5_6_sol_model(app: &mut TestApp) {
     app.set_available_models(vec![current, target]);
 }
 
+fn add_codex_luna_models(app: &mut TestApp) {
+    let mut models = app.core_probe().config.available_models.clone();
+    let codex = models
+        .iter()
+        .find(|model| model.provider_type == "codex")
+        .unwrap()
+        .clone();
+    for name in ["gpt-6-luna", "gpt-5.6-luna"] {
+        let mut model = codex.clone();
+        model.key = format!("codex/{name}");
+        model.model_name = name.into();
+        model.catalog.default_reasoning_effort = Some(protocol::ReasoningEffort::Low);
+        model.catalog.supported_reasoning_efforts = vec![protocol::ReasoningEffort::Low];
+        models.push(model);
+    }
+    app.set_available_models(models);
+}
+
 fn engine_ask_models_and_efforts(
     commands: Vec<protocol::UiCommand>,
 ) -> Vec<(String, protocol::ReasoningEffort)> {
@@ -624,50 +642,130 @@ fn codex_model_accepts_all_advertised_reasoning_efforts() {
 
 #[test]
 fn bundled_title_ask_on_claude_code_uses_the_latest_haiku() {
+    for (resolved, explicit, expected) in [
+        (None, None, "haiku"),
+        (
+            Some("claude-haiku-5-5"),
+            Some("claude-haiku-4-5-20251001"),
+            "claude-haiku-5-5",
+        ),
+        (
+            Some("claude-haiku-5-5"),
+            Some("claude-haiku-6-10"),
+            "claude-haiku-6-10",
+        ),
+    ] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        let current = app.core_probe().config.available_models[0].clone();
+        let mut opus = current.clone();
+        opus.key = "claude-code/opus".into();
+        opus.provider_name = "claude-code".into();
+        opus.model_name = "opus".into();
+        opus.provider_type = "claude-code".into();
+        opus.api_base = String::new();
+        opus.api_key_env = String::new();
+        let mut haiku = opus.clone();
+        haiku.key = "claude-code/haiku".into();
+        haiku.model_name = "haiku".into();
+        haiku.config.supports_reasoning = Some(true);
+        haiku.catalog.resolved = resolved.map(str::to_owned);
+        haiku.catalog.supported_reasoning_efforts = vec![protocol::ReasoningEffort::Low];
+        let mut models = vec![current, opus, haiku.clone()];
+        if let Some(name) = explicit {
+            haiku.key = format!("claude-code/{name}");
+            haiku.model_name = name.into();
+            haiku.catalog.resolved = None;
+            models.push(haiku);
+        }
+        app.set_available_models(models);
+        app.apply_model("claude-code/opus", false);
+        let _ = app.drain_engine_sends();
+
+        publish_input_submit(&mut app, "Name this session");
+
+        assert_eq!(
+            engine_ask_models_and_efforts(app.drain_engine_sends()),
+            [(expected.into(), protocol::ReasoningEffort::Low)]
+        );
+    }
+}
+
+#[test]
+fn bundled_title_ask_on_codex_uses_latest_luna_or_the_selected_model() {
+    for (model_name, use_luna) in [
+        ("gpt-5.6-sol", false),
+        ("gpt-6.1-terra", false),
+        ("gpt-6.1-terra", true),
+    ] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        add_codex_gpt_5_6_sol_model(&mut app);
+        let mut models = app.core_probe().config.available_models.clone();
+        models[1].key = format!("codex/{model_name}");
+        models[1].model_name = model_name.into();
+        app.set_available_models(models);
+        if use_luna {
+            add_codex_luna_models(&mut app);
+        }
+        app.apply_model(&format!("codex/{model_name}"), false);
+        assert!(app.run_lua(r#"smelt.reasoning.set("ultra")"#));
+        let _ = app.drain_engine_sends();
+
+        let prompt = "Please fix the login button on mobile devices";
+        app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(prompt)));
+        publish_input_submit(&mut app, prompt);
+
+        let commands = app.drain_engine_sends();
+        let ids = engine_ask_ids(commands.clone());
+        assert_eq!(
+            engine_ask_models_and_efforts(commands),
+            vec![(
+                if use_luna { "gpt-6-luna" } else { model_name }.into(),
+                protocol::ReasoningEffort::Low,
+            )]
+        );
+        assert!(!app.lua_messages_contain("reasoning effort"));
+        respond_ask_with_text(
+            &mut app,
+            ids[0],
+            r#"{"title":"Fix mobile login button","slug":"fix-mobile-login"}"#,
+        );
+        assert_eq!(
+            app.session_snapshot().title.as_deref(),
+            Some("Fix mobile login button")
+        );
+        assert_eq!(
+            app.session_snapshot().slug.as_deref(),
+            Some("fix-mobile-login")
+        );
+    }
+}
+
+#[test]
+fn bundled_title_ask_on_codex_respects_the_preferred_model() {
     let mut app = TestApp::builder().with_vim(false).build();
-    let current = app.core_probe().config.available_models[0].clone();
-    let mut opus = current.clone();
-    opus.key = "claude-code/opus".into();
-    opus.provider_name = "claude-code".into();
-    opus.model_name = "opus".into();
-    opus.provider_type = "claude-code".into();
-    opus.api_base = String::new();
-    opus.api_key_env = String::new();
-    app.set_available_models(vec![current, opus]);
-    app.apply_model("claude-code/opus", false);
+    add_codex_gpt_5_6_sol_model(&mut app);
+    add_codex_luna_models(&mut app);
+    app.apply_model("codex/gpt-5.6-sol", false);
+    assert!(app.run_lua(r#"smelt.model.preferred("title", "test/test-model")"#));
     let _ = app.drain_engine_sends();
 
     publish_input_submit(&mut app, "Name this session");
 
-    let models: Vec<_> = engine_ask_models_and_efforts(app.drain_engine_sends())
-        .into_iter()
-        .map(|(model, _)| model)
-        .collect();
-    assert_eq!(models, ["haiku"]);
-}
-
-#[test]
-fn bundled_title_ask_on_codex_uses_luna() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    add_codex_gpt_5_6_sol_model(&mut app);
-    app.apply_model("codex/gpt-5.6-sol", false);
-    assert!(app.run_lua(r#"smelt.reasoning.set("ultra")"#));
-    let _ = app.drain_engine_sends();
-
-    publish_input_submit(&mut app, "Submit with ultra reasoning");
-
-    let requests = engine_ask_models_and_efforts(app.drain_engine_sends());
     assert_eq!(
-        requests,
-        vec![("luna".into(), protocol::ReasoningEffort::Off)]
+        engine_ask_models_and_efforts(app.drain_engine_sends()),
+        vec![("test-model".into(), protocol::ReasoningEffort::Off)]
     );
-    assert!(!app.lua_messages_contain("reasoning effort"));
+    assert_eq!(
+        app.core_probe().config.active_model().unwrap().model_name,
+        "gpt-5.6-sol"
+    );
 }
 
 #[test]
-fn bundled_prediction_ask_on_codex_uses_luna() {
+fn bundled_prediction_ask_on_codex_uses_the_latest_luna() {
     let mut app = TestApp::builder().with_vim(false).build();
     add_codex_gpt_5_6_sol_model(&mut app);
+    add_codex_luna_models(&mut app);
     app.apply_model("codex/gpt-5.6-sol", false);
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
         "How should I debug this failing test?",
@@ -679,7 +777,7 @@ fn bundled_prediction_ask_on_codex_uses_luna() {
     let requests = engine_ask_models_and_efforts(app.drain_engine_sends());
     assert_eq!(
         requests,
-        vec![("luna".into(), protocol::ReasoningEffort::Off)]
+        vec![("gpt-6-luna".into(), protocol::ReasoningEffort::Low)]
     );
     assert!(!app.lua_messages_contain("reasoning effort"));
 }
@@ -688,6 +786,7 @@ fn bundled_prediction_ask_on_codex_uses_luna() {
 fn compaction_on_codex_runs_on_the_main_model() {
     let mut app = TestApp::builder().with_vim(false).build();
     add_codex_gpt_5_6_sol_model(&mut app);
+    add_codex_luna_models(&mut app);
     app.apply_model("codex/gpt-5.6-sol", false);
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
     app.push_assistant_text("a1");
@@ -898,6 +997,42 @@ fn restored_static_credentials_recover_without_model_reselection() {
         Action::EngineSend(command)
             if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
     )));
+}
+
+#[test]
+fn default_engine_ask_recovers_when_static_credentials_are_restored() {
+    const KEY_ENV: &str = "SMELT_TEST_RESTORED_ASK_KEY_58C130";
+    let environment_guard = test_environment_guard();
+    environment_guard.remove_var(KEY_ENV);
+    let mut app = TestApp::builder().build_with_test_environment_guard(&environment_guard);
+    let mut active = app.core_probe().config.active_model().unwrap().clone();
+    active.api_key_env = KEY_ENV.into();
+    app.replace_active_model_for_harness(active);
+    let _ = app.drain_engine_sends();
+
+    assert!(app
+        .run_lua_result(
+            r#"smelt.engine.ask({ system = "credential recovery", question = "missing credentials" })"#,
+        )
+        .is_err());
+    assert!(engine_ask_ids(app.drain_engine_sends()).is_empty());
+    assert!(matches!(
+        app.core_probe().config.active_model().unwrap().availability,
+        smelt_core::ModelAvailability::Unavailable {
+            reason: smelt_core::ModelUnavailableReason::MissingCredentials,
+        }
+    ));
+
+    environment_guard.set_var(KEY_ENV, "stub-key");
+    app.run_lua_result(
+        r#"smelt.engine.ask({ system = "credential recovery", question = "restored credentials" })"#,
+    )
+    .unwrap();
+    assert_eq!(engine_ask_ids(app.drain_engine_sends()).len(), 1);
+    assert_eq!(
+        app.core_probe().config.active_model().unwrap().availability,
+        smelt_core::ModelAvailability::Available
+    );
 }
 
 #[test]

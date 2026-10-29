@@ -129,22 +129,36 @@ impl ActiveModel {
 
     /// The model for auxiliary requests, such as titles and predictions, that
     /// name none.
-    pub fn auxiliary(&self) -> Self {
-        let Some(name) =
-            smelt_provider::BackendKind::from_config(&self.provider_type).auxiliary_model()
-        else {
-            return self.clone();
+    pub fn auxiliary(&self, available_models: &[config::ResolvedModel]) -> Self {
+        let backend = smelt_provider::BackendKind::from_config(&self.provider_type);
+        let latest = available_models
+            .iter()
+            .filter(|model| {
+                model.provider_type == self.provider_type
+                    && model.provider_name == self.provider_name
+            })
+            .filter_map(|model| {
+                auxiliary_model_version(backend, model)
+                    .map(|(name, version)| (version, name, model))
+            })
+            .max_by(|(a, name_a, _), (b, name_b, _)| a.cmp(b).then_with(|| name_a.cmp(name_b)));
+        let (name, source) = match latest {
+            Some((_, name, model)) => (name, Some(model)),
+            None if backend == smelt_provider::BackendKind::ClaudeCode => ("haiku", None),
+            None => return self.clone(),
         };
         let provider = self.key.strip_suffix(&self.model_name).unwrap_or_default();
         Self {
             key: format!("{provider}{name}"),
             model_name: name.into(),
-            display_name: None,
+            display_name: source.and_then(|model| model.display_name.clone()),
             config: ModelConfig {
                 name: Some(name.into()),
-                ..Default::default()
+                ..source.map(|model| model.config.clone()).unwrap_or_default()
             },
-            catalog: ModelCatalogMetadata::default(),
+            catalog: source
+                .map(|model| model.catalog.clone())
+                .unwrap_or_default(),
             ..self.clone()
         }
     }
@@ -159,6 +173,50 @@ impl ActiveModel {
             config: self.config.clone(),
         }
     }
+}
+
+fn auxiliary_model_version(
+    backend: smelt_provider::BackendKind,
+    model: &config::ResolvedModel,
+) -> Option<(&str, Vec<u32>)> {
+    use smelt_provider::{BackendKind, ClaudeModelFamily, ProviderKind};
+    match backend {
+        BackendKind::Http(ProviderKind::Codex) => {
+            Some((&model.model_name, codex_luna_version(&model.model_name)?))
+        }
+        BackendKind::ClaudeCode => {
+            let name = model
+                .catalog
+                .resolved
+                .as_deref()
+                .unwrap_or(&model.model_name);
+            if name == "haiku" {
+                return Some((name, Vec::new()));
+            }
+            let version = smelt_provider::parse_claude_model_version(name)?;
+            (version.family == Some(ClaudeModelFamily::Haiku)).then(|| {
+                (
+                    name,
+                    vec![u32::from(version.major), u32::from(version.minor)],
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+fn codex_luna_version(model: &str) -> Option<Vec<u32>> {
+    model
+        .strip_prefix("gpt-")?
+        .strip_suffix("-luna")?
+        .split('.')
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            part.parse().ok()
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -755,34 +813,124 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auxiliary_requests_use_luna_only_on_codex() {
-        let mut sol = ActiveModel {
-            key: "codex/gpt-5.6-sol".into(),
+    fn auxiliary_requests_preserve_the_selected_http_model() {
+        let mut terra = ActiveModel {
+            key: "codex/gpt-6.1-terra".into(),
             provider_name: "codex".into(),
-            model_name: "gpt-5.6-sol".into(),
-            display_name: Some("GPT-5.6 Sol".into()),
+            model_name: "gpt-6.1-terra".into(),
+            display_name: Some("GPT-6.1 Terra".into()),
             api_base: String::new(),
             api_key_env: String::new(),
             provider_type: "codex".into(),
             config: ModelConfig {
-                name: Some("gpt-5.6-sol".into()),
+                name: Some("gpt-6.1-terra".into()),
                 supports_fast_mode: Some(true),
                 ..Default::default()
             },
             catalog: ModelCatalogMetadata::default(),
             availability: ModelAvailability::Available,
         };
-        let luna = sol.auxiliary();
-        assert_eq!(luna.key, "codex/luna");
-        assert_eq!(luna.target(String::new()).model, "luna");
-        assert_eq!(luna.config.supports_fast_mode, None);
+        assert_eq!(terra.auxiliary(&[]), terra);
+        assert_eq!(
+            terra.auxiliary(&[]).target(String::new()).model,
+            "gpt-6.1-terra"
+        );
 
-        sol.provider_type = "openai".into();
-        assert_eq!(sol.auxiliary(), sol);
+        terra.provider_type = "openai".into();
+        assert_eq!(terra.auxiliary(&[]), terra);
     }
 
     #[test]
-    fn auxiliary_requests_use_the_latest_haiku_only_on_claude_code() {
+    fn auxiliary_requests_select_the_newest_luna_in_the_same_codex_provider() {
+        let luna = |name: &str| config::ResolvedModel {
+            key: format!("codex/{name}"),
+            provider_name: "codex".into(),
+            model_name: name.into(),
+            display_name: Some(name.into()),
+            api_base: "https://example.test/codex".into(),
+            api_key_env: "CODEX_KEY".into(),
+            provider_type: "codex".into(),
+            config: ModelConfig {
+                name: Some(name.into()),
+                supports_fast_mode: Some(true),
+                ..Default::default()
+            },
+            catalog: ModelCatalogMetadata {
+                default_reasoning_effort: Some(ReasoningEffort::Low),
+                supported_reasoning_efforts: vec![ReasoningEffort::Low],
+                ..Default::default()
+            },
+        };
+        let mut active = ActiveModel::from_resolved(&luna("gpt-6.1-terra"));
+        active.api_base = "https://override.test/codex".into();
+        active.api_key_env = "OVERRIDE_KEY".into();
+        let mut models = vec![luna("gpt-5.6-luna"), luna("gpt-6-luna")];
+        assert_eq!(active.auxiliary(&models).model_name, "gpt-6-luna");
+        models.extend([luna("gpt-6.10-luna"), luna("gpt-6.9-luna")]);
+        let mut foreign = luna("gpt-99-luna");
+        foreign.provider_name = "other-codex".into();
+        models.push(foreign);
+        models.extend([luna("luna"), luna("gpt-next-luna"), luna("gpt-7-sol")]);
+        let selected = active.auxiliary(&models);
+        assert_eq!(selected.model_name, "gpt-6.10-luna");
+        assert_eq!(selected.config, models[2].config);
+        assert_eq!(selected.catalog, models[2].catalog);
+        assert_eq!(selected.api_base, active.api_base);
+        assert_eq!(selected.api_key_env, active.api_key_env);
+        models.push(luna("gpt-10-luna"));
+        assert_eq!(active.auxiliary(&models).model_name, "gpt-10-luna");
+        active.provider_type = "openai".into();
+        assert_eq!(active.auxiliary(&models), active);
+    }
+
+    #[test]
+    fn auxiliary_requests_select_the_newest_haiku_including_resolved_aliases() {
+        let haiku = |name: &str| config::ResolvedModel {
+            key: format!("claude-code/{name}"),
+            provider_name: "claude-code".into(),
+            model_name: name.into(),
+            display_name: Some(name.into()),
+            api_base: String::new(),
+            api_key_env: String::new(),
+            provider_type: "claude-code".into(),
+            config: ModelConfig {
+                name: Some(name.into()),
+                supports_reasoning: Some(true),
+                ..Default::default()
+            },
+            catalog: ModelCatalogMetadata {
+                supported_reasoning_efforts: vec![ReasoningEffort::Low],
+                ..Default::default()
+            },
+        };
+        let active = ActiveModel::from_resolved(&haiku("opus"));
+        let mut alias = haiku("haiku");
+        alias.catalog.resolved = Some("claude-haiku-5-5".into());
+        let mut foreign = haiku("claude-haiku-99-0");
+        foreign.provider_name = "other-claude-code".into();
+        let mut models = vec![
+            alias.clone(),
+            haiku("claude-haiku-4-5-20251001"),
+            haiku("claude-3-5-haiku-20241022"),
+            haiku("claude-sonnet-99-0"),
+            foreign,
+        ];
+        let selected = active.auxiliary(&models);
+        assert_eq!(selected.model_name, "claude-haiku-5-5");
+        assert_eq!(selected.key, "claude-code/claude-haiku-5-5");
+        assert_eq!(selected.config.name.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(selected.config.supports_reasoning, Some(true));
+        assert_eq!(selected.catalog, alias.catalog);
+        models.extend([haiku("claude-haiku-6-10"), haiku("claude-haiku-6-9")]);
+        assert_eq!(active.auxiliary(&models).model_name, "claude-haiku-6-10");
+        alias.catalog.resolved = None;
+        let selected = active.auxiliary(&[alias.clone()]);
+        assert_eq!(selected.model_name, "haiku");
+        assert_eq!(selected.catalog, alias.catalog);
+    }
+
+    #[test]
+    fn auxiliary_requests_fall_back_to_haiku_only_on_claude_code() {
         let mut opus = ActiveModel {
             key: "claude-code/opus".into(),
             provider_name: "claude-code".into(),
@@ -799,13 +947,13 @@ mod tests {
             catalog: ModelCatalogMetadata::default(),
             availability: ModelAvailability::Available,
         };
-        let haiku = opus.auxiliary();
+        let haiku = opus.auxiliary(&[]);
         assert_eq!(haiku.key, "claude-code/haiku");
         assert_eq!(haiku.target(String::new()).model, "haiku");
         assert_eq!(haiku.config.supports_fast_mode, None);
 
         opus.provider_type = "anthropic".into();
-        assert_eq!(opus.auxiliary(), opus);
+        assert_eq!(opus.auxiliary(&[]), opus);
     }
 
     fn provider_config() -> config::Config {

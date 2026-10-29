@@ -81,8 +81,12 @@ smelt.remember.set({
 
 Background features can use a cheaper model than your main session:
 `title`, `compact`, `predict`, `btw` and `web_fetch`. When unset they use the
-main model, except on Codex, which uses `luna`, and Claude Code, which uses its
-`haiku` alias, the latest Haiku. Compaction always defaults to the main model,
+main model, except on Codex, which selects the highest-version `gpt-*-luna`
+model in that provider's catalog (for example, `gpt-6-luna` over `gpt-5.6-luna`).
+Claude Code uses the same selection logic for Haiku, comparing versioned IDs
+and the resolved IDs of aliases, then requesting the newest full model ID.
+If no version is known, Claude Code falls back to `haiku`; if no Luna model is
+listed, Codex uses the main model. Compaction always defaults to the main model,
 since its summary carries the whole conversation forward.
 
 ```lua

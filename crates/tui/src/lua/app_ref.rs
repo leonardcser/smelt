@@ -809,27 +809,8 @@ impl AgentLuaHost<'_> {
         &mut self,
         model_reference: Option<&str>,
     ) -> Option<(protocol::ModelTarget, protocol::ModelCatalogMetadata)> {
-        let Some(reference) = model_reference else {
-            let auxiliary = self
-                .app
-                .core
-                .config
-                .active_model()
-                .map(smelt_core::ActiveModel::auxiliary);
-            let catalog = auxiliary
-                .as_ref()
-                .map(|model| model.reasoning_catalog())
-                .unwrap_or_default();
-            return self.app.resolve_model_target().map(|mut target| {
-                if let Some(model) = auxiliary {
-                    target.model = model.model_name;
-                    target.config = model.config;
-                }
-                (target, catalog)
-            });
-        };
         let resolved =
-            match smelt_core::lua::ask::select_model(&self.app.core.config, Some(reference)) {
+            match smelt_core::lua::ask::select_model(&self.app.core.config, model_reference) {
                 Ok(model) => model,
                 Err(error) => {
                     self.app.notify_operation_error_sticky(
@@ -839,7 +820,11 @@ impl AgentLuaHost<'_> {
                     return None;
                 }
             };
-        let api_key = self.app.resolve_api_key_for_env(&resolved.api_key_env)?;
+        let api_key = if model_reference.is_none() {
+            self.app.resolve_model_target()?.api_key
+        } else {
+            self.app.resolve_api_key_for_env(&resolved.api_key_env)?
+        };
         let catalog = resolved.reasoning_catalog();
         Some((resolved.target(api_key), catalog))
     }

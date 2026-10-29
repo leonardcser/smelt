@@ -39,7 +39,7 @@ pub fn select_model(config: &RuntimeState, reference: Option<&str>) -> Result<Ac
         },
         None => config
             .active_model()
-            .map(ActiveModel::auxiliary)
+            .map(|model| model.auxiliary(&config.available_models))
             .ok_or_else(|| "no usable model is available".into()),
     }
 }

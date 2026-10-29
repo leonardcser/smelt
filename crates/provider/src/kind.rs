@@ -47,17 +47,6 @@ impl BackendKind {
             .is_some_and(ProviderKind::supports_mid_turn_reasoning_changes)
     }
 
-    /// The model this backend runs auxiliary requests on, such as titles and
-    /// predictions, when they name none: Claude Code's `haiku` alias, the
-    /// latest Haiku, and Codex's `luna`. Others use the conversation's model.
-    pub fn auxiliary_model(self) -> Option<&'static str> {
-        match self {
-            Self::ClaudeCode => Some("haiku"),
-            Self::Http(ProviderKind::Codex) => Some("luna"),
-            Self::Http(_) => None,
-        }
-    }
-
     pub fn supports_image_tool_results(self) -> bool {
         match self {
             Self::Http(kind) => kind.descriptor().supports_image_tool_results(),
