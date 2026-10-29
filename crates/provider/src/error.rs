@@ -1,3 +1,4 @@
+use chrono::{Datelike, TimeZone};
 use std::time::Duration;
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -260,40 +261,28 @@ pub fn format_rate_limit(resets_at: &Option<u64>) -> String {
 }
 
 pub fn format_epoch_local(epoch_secs: u64) -> String {
-    #[cfg(unix)]
-    {
-        let t = epoch_secs as libc::time_t;
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&t, &mut tm) };
+    i64::try_from(epoch_secs)
+        .ok()
+        .and_then(|secs| chrono::Local.timestamp_opt(secs, 0).single())
+        .map_or_else(|| "later".to_string(), |time| format_reset_time(&time))
+}
 
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        let month = MONTHS[tm.tm_mon as usize % 12];
-        let day = tm.tm_mday;
-        let year = tm.tm_year + 1900;
-        let suffix = match day % 10 {
-            1 if day != 11 => "st",
-            2 if day != 12 => "nd",
-            3 if day != 13 => "rd",
-            _ => "th",
-        };
-        let (hour12, ampm) = match tm.tm_hour {
-            0 => (12, "AM"),
-            1..=11 => (tm.tm_hour, "AM"),
-            12 => (12, "PM"),
-            _ => (tm.tm_hour - 12, "PM"),
-        };
-        format!(
-            "{month} {day}{suffix}, {year} {hour12}:{:02} {ampm}",
-            tm.tm_min
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = epoch_secs;
-        "later".to_string()
-    }
+fn format_reset_time<Tz: chrono::TimeZone>(time: &chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let day = time.day();
+    let suffix = match day % 10 {
+        1 if day != 11 => "st",
+        2 if day != 12 => "nd",
+        3 if day != 13 => "rd",
+        _ => "th",
+    };
+    format!(
+        "{} {day}{suffix}, {}",
+        time.format("%b"),
+        time.format("%Y %-I:%M %p")
+    )
 }
 
 pub fn unix_now() -> u64 {
@@ -395,6 +384,15 @@ pub fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_time_uses_ordinal_day_and_twelve_hour_clock() {
+        let at = |secs| format_reset_time(&chrono::Utc.timestamp_opt(secs, 0).unwrap());
+        assert_eq!(at(1_700_000_000), "Nov 14th, 2023 10:13 PM");
+        assert_eq!(at(1_704_067_200), "Jan 1st, 2024 12:00 AM");
+        assert_eq!(at(1_704_283_200), "Jan 3rd, 2024 12:00 PM");
+        assert_eq!(at(1_705_017_600), "Jan 12th, 2024 12:00 AM");
+    }
 
     #[test]
     fn transient_stream_errors_are_retryable_and_sanitized() {

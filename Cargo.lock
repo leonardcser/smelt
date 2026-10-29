@@ -3678,8 +3678,8 @@ version = "0.0.0-dev"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
+ "chrono",
  "futures-util",
- "libc",
  "rand 0.10.3",
  "reqwest",
  "rustls",

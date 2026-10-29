@@ -1133,7 +1133,6 @@ mod tests {
 
     // ---- format_epoch_local ----
 
-    #[cfg(unix)]
     #[test]
     fn format_epoch_local_produces_month_day_year_time_ampm() {
         let s = format_epoch_local(1_700_000_000);
