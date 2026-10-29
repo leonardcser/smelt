@@ -31,6 +31,7 @@ fn main() {
                 ("smelt-core", "diff_index_benchmark", &[][..]),
                 ("smelt-tui", "diff_viewer_benchmark", &["harness"][..]),
                 ("smelt-tui", "diff_loading_benchmark", &["harness"][..]),
+                ("smelt-tui", "diff_interaction_benchmark", &["harness"][..]),
             ] {
                 bench_support::run_cargo_test_benchmark(bench_support::CargoTestBenchmark {
                     package,

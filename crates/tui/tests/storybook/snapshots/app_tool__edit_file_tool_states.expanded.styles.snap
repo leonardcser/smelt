@@ -169,7 +169,8 @@ dim: 84 30
  19   0   2 bg=Rgb { r: 20, g: 50, b: 20 }
  19   2   3 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
  19   5   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
- 19   7   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 19   7   3 fg=Rgb { r: 255, g: 255, b: 255 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 19  10   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
  19  11   4 fg=Rgb { r: 255, g: 255, b: 255 } bg=Rgb { r: 20, g: 50, b: 20 }
  19  15   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
  19  16   2 fg=Rgb { r: 255, g: 255, b: 255 } bg=Rgb { r: 20, g: 50, b: 20 }

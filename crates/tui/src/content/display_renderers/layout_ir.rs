@@ -25,8 +25,8 @@ use smelt_core::content::builder::{
 };
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
-    emit_inline_spans, parse_inline_spans_with_options, render_code_block, wrap_inline_spans,
-    InlineOptions, InlineSpan, InlineSyntax, InlineSyntaxSpan,
+    emit_inline_spans, parse_inline_spans_with_options, print_inline_syntax, render_code_block,
+    wrap_inline_spans, InlineOptions, InlineSpan, InlineSyntaxSpan,
 };
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
 use smelt_core::theme::{intern, Theme};
@@ -2592,8 +2592,7 @@ fn print_styled_text_range(
         }
         Some(lang) if span.selectable => {
             let _perf = smelt_perf::perf::begin("render:layout:inline_syntax");
-            let mut highlighter = InlineSyntax::new(lang, out.theme());
-            highlighter.print_line_range(out, text, range);
+            print_inline_syntax(out, lang, text, range);
         }
         _ if span.selectable => out.print(piece),
         _ => out.print_with_meta(piece, SpanMeta::unselectable()),

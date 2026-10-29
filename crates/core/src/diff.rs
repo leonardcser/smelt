@@ -1194,7 +1194,7 @@ mod tests {
             cursor: Some(range.start),
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while view.is_pending() {
+        while view.is_pending() || !view.syntax.settled(&view.diff) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "syntax worker stalled"
@@ -1327,44 +1327,53 @@ mod tests {
         assert_eq!(previous.snapshot().total_rows, 105);
     }
 
-    #[test]
-    fn syntax_matches_full_source_on_both_sides_after_folds_and_random_seeks() {
-        use crate::content::highlight::InlineSyntax;
+    /// Every row's colours equal a full parse of its side's whole source,
+    /// whichever order the rows are first requested in.
+    fn assert_syntax_matches_full_sides(view: &DiffView, path: &str) {
+        use crate::content::highlight::source::{Syntax, SyntaxParser};
         use crate::style::Color;
-        let patch = "diff --git a/code.rs b/code.rs\n@@ -1,205 +1,205 @@\n /* comment\n".to_string()
-            + &" still a comment\n".repeat(200)
-            + " */\n-/* old-only comment\n+let value = \"new\";\n let common = 42;\n-*/\n+\tlet end = \"界 e\u{301}\u{1b}\";\n";
-        let view = DiffView::new(Arc::new(Diff::parse(patch)), 3);
-        let mut old = InlineSyntax::new("rs", &THEME);
-        let mut new = InlineSyntax::new("rs", &THEME);
+        let theme = crate::content::highlight::syntax_theme(&THEME);
+        let highlighter = syntect::highlighting::Highlighter::new(theme);
+        let fresh = || [0, 1].map(|_| SyntaxParser::new(Syntax::for_path(path)));
+        let mut parsers = fresh();
         let mut expected = Vec::new();
         for (raw, line) in view.diff.lines.iter().enumerate() {
-            let source = view.diff.source(raw, false);
-            let spans = match line.kind {
-                Kind::Context => {
-                    old.highlight_spans(source);
-                    new.highlight_spans(source)
+            let side = match line.kind {
+                Kind::Hunk => {
+                    parsers = fresh();
+                    continue;
                 }
-                Kind::Add => new.highlight_spans(source),
-                Kind::Delete => old.highlight_spans(source),
+                Kind::Delete => 0,
+                Kind::Context | Kind::Add => 1,
                 _ => continue,
             };
-            let text = display_text(source);
-            let mut colors = vec![None; smelt_buffer::text::byte_to_cell(&text, text.len())];
-            for span in spans {
-                let start = display_text(smelt_buffer::text::slice(source, 0..span.byte_start));
-                let end = display_text(smelt_buffer::text::slice(source, 0..span.byte_end));
-                let a = smelt_buffer::text::byte_to_cell(&start, start.len());
-                let b = smelt_buffer::text::byte_to_cell(&end, end.len());
-                let [r, g, b_color] = span.foreground;
-                colors[a..b].fill(Some(Color::Rgb { r, g, b: b_color }));
+            let text = view.diff.source(raw, true);
+            if line.kind == Kind::Context {
+                parsers[0].line(text, |_, _| {});
             }
-            expected.push((raw, colors));
+            let source = view.diff.source(raw, false);
+            let cell = |byte: usize| {
+                let prefix = display_text(smelt_buffer::text::slice(source, 0..byte));
+                smelt_buffer::text::byte_to_cell(&prefix, prefix.len())
+            };
+            let mut cells = vec![None; cell(source.len())];
+            parsers[side].line(text, |bytes, stack| {
+                let end = bytes.end.min(source.len());
+                if bytes.start < end {
+                    let fg = highlighter.style_for_stack(stack).foreground;
+                    let color = Color::Rgb {
+                        r: fg.r,
+                        g: fg.g,
+                        b: fg.b,
+                    };
+                    cells[cell(bytes.start)..cell(end)].fill(Some(color));
+                }
+            });
+            expected.push((raw, cells));
         }
-        assert!(view.toggle_fold(5).is_some());
         for (raw, colors) in expected.into_iter().rev() {
             let row = view.projection.lock().unwrap().display_row(raw);
-            let rendered = highlighted(&view, row..row + 1).pop().unwrap();
+            let rendered = highlighted(view, row..row + 1).pop().unwrap();
             let mut actual = vec![None; colors.len()];
             for span in rendered.spans.iter().skip(2) {
                 let a = usize::from(span.col_start)
@@ -1377,6 +1386,55 @@ mod tests {
             }
             assert_eq!(actual, colors, "row {raw}: {}", rendered.text);
         }
+    }
+
+    #[test]
+    fn syntax_matches_full_source_on_both_sides_after_folds_and_random_seeks() {
+        let patch = "diff --git a/code.rs b/code.rs\n@@ -1,205 +1,205 @@\n /* comment\n".to_string()
+            + &" still a comment\n".repeat(200)
+            + " */\n-/* old-only comment\n+let value = \"new\";\n let common = 42;\n-*/\n+\tlet end = \"界 e\u{301}\u{1b}\";\n";
+        let view = DiffView::new(Arc::new(Diff::parse(patch)), 3);
+        assert!(view.toggle_fold(5).is_some());
+        assert_syntax_matches_full_sides(&view, "code.rs");
+    }
+
+    #[test]
+    fn syntax_windows_match_full_source_beyond_the_lookback() {
+        let mut body = String::new();
+        for i in 0..1500 {
+            body += &format!(" fn f{i}(x: u32) -> u32 {{\n     let y = x + {i}; // note\n");
+            if i % 100 == 50 {
+                body += &format!("-    y * {i}\n+    y.pow({i}) as u32\n");
+            } else {
+                body += "     y * 2\n";
+            }
+            body += " }\n \n";
+            if i == 1000 {
+                body += " /*\n";
+                body += &"     inside a long comment\n".repeat(2400);
+                body += " */\n";
+            }
+        }
+        let old = body.lines().filter(|line| !line.starts_with('+')).count();
+        let new = body.lines().filter(|line| !line.starts_with('-')).count();
+        let patch = format!("diff --git a/b.rs b/b.rs\n@@ -1,{old} +1,{new} @@\n{body}");
+        let view = DiffView::new(Arc::new(Diff::parse(patch)), 10_000);
+        assert_syntax_matches_full_sides(&view, "b.rs");
+    }
+
+    #[test]
+    fn distant_seeks_parse_a_bounded_window() {
+        let patch = "diff --git a/large.rs b/large.rs\n@@ -0,0 +1,100000 @@\n".to_string()
+            + &"+fn value() -> u32 {\n+    compute(42, \"hello\")\n+}\n".repeat(33333);
+        let view = DiffView::new(Arc::new(Diff::parse(patch)), 3);
+        let rows = highlighted(&view, 99000..99040);
+        assert!(rows[0].spans.len() > 3, "{:?}", rows[0]);
+        let (chunks, _, parsed) = view.syntax.stats();
+        assert!(chunks <= 4, "{chunks} chunks");
+        assert!(
+            parsed < chunks as u64 * 4096,
+            "seek parsed {parsed} rows for {chunks} chunks"
+        );
     }
 
     #[test]
@@ -1447,9 +1505,10 @@ mod tests {
         let rows = highlighted(&view, 0..40);
         assert_eq!(rows[2].spans.len(), 3);
         let (chunks, bytes, parsed) = view.syntax.stats();
-        assert_eq!(chunks, 1);
-        assert!(bytes < 1024);
-        assert!(parsed <= 128, "viewport parsed {parsed} rows");
+        // The visible chunk plus the prefetched chunk below it.
+        assert_eq!(chunks, 2);
+        assert!(bytes < 2048);
+        assert!(parsed <= 256, "viewport parsed {parsed} rows");
         let calls = std::cell::Cell::new(0);
         assert!(Diff::parse_cancellable(patch, || {
             calls.set(calls.get() + 1);
@@ -1459,9 +1518,9 @@ mod tests {
     }
 
     #[test]
-    fn syntax_cache_is_bounded_reuses_checkpoints_and_notifies_repaints() {
-        let patch = "diff --git a/file.txt b/file.txt\n@@ -0,0 +1,21000 @@\n".to_string()
-            + &"+plain text\n".repeat(21000);
+    fn syntax_cache_is_bounded_reuses_the_parse_and_notifies_repaints() {
+        let patch = "diff --git a/file.rs b/file.rs\n@@ -0,0 +1,21000 @@\n".to_string()
+            + &"+let x = 1;\n".repeat(21000);
         let view = DiffView::new(Arc::new(Diff::parse(patch)), 3);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         view.set_wakeup(Some(tx));
@@ -1471,16 +1530,16 @@ mod tests {
         }
         let (chunks, bytes, parsed) = view.syntax.stats();
         assert_eq!(chunks, 64);
-        assert!(bytes < 64 * 1024);
+        assert!(bytes < 2 * 1024 * 1024, "{bytes}");
         assert!(view.snapshot().generation > generation);
         assert!(rx.try_recv().is_ok(), "syntax never requested a repaint");
+        assert!(
+            view.syntax.cached(&view.diff, 12000..12001).is_empty(),
+            "test did not revisit an evicted chunk"
+        );
         highlighted(&view, 12000..12040);
         let rebuilt = view.syntax.stats().2 - parsed;
-        assert!(rebuilt > 0, "test did not revisit an evicted chunk");
-        assert!(
-            rebuilt <= 4096 + 128,
-            "checkpoint not reused: {rebuilt} rows"
-        );
+        assert!(rebuilt <= 128, "retained parse not reused: {rebuilt} rows");
         let parsed = view.syntax.stats().2;
         highlighted(&view, 20000..20040);
         assert_eq!(view.syntax.stats().2, parsed, "cached syntax was reparsed");

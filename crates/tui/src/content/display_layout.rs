@@ -579,9 +579,8 @@ impl InlineSyntaxCache {
             return spans;
         }
 
-        let spans: Arc<[_]> = smelt_core::content::highlight::InlineSyntax::new(language, theme)
-            .highlight_spans(source)
-            .into();
+        let spans: Arc<[_]> =
+            smelt_core::content::highlight::inline_syntax_spans(language, source, theme).into();
         let retained_bytes = std::mem::size_of::<CachedInlineSyntax>()
             .saturating_add(language.len())
             .saturating_add(source.len())

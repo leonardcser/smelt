@@ -1,12 +1,8 @@
-//! Syntax-highlighted code blocks and source files plus the shared
-//! `InlineSyntax` highlighter used in confirm dialogs and the transcript.
+//! Syntax-highlighted code blocks and source files plus the single-line
+//! highlighting used for inline code in confirm dialogs and the transcript.
 
-use std::path::Path;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Highlighter, Style};
-use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference};
-
-use super::{syntax_theme, GutterStyle, SYNTAX_SET};
+use super::source::{self, SourceHighlighter, Syntax};
+use super::GutterStyle;
 use crate::buffer::SpanMeta;
 use crate::content::builder::{wrapped_segments, LineBuilder};
 use crate::content::code_block::CodeBlock;
@@ -29,82 +25,6 @@ pub fn lang_to_ext(lang: &str) -> &str {
         "yml" => "yaml",
         other => other,
     }
-}
-
-/// Resolve a syntect `SyntaxReference` from a language token. Falls back to plain text.
-pub fn syntax_for_lang(lang: &str) -> &'static SyntaxReference {
-    let ext = lang_to_ext(lang);
-    SYNTAX_SET
-        .find_syntax_by_extension(ext)
-        .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text())
-}
-
-/// Stateful, theme-independent tokenization. The parser stays on its loading
-/// thread; emitted scope stacks and byte ranges can be indexed and shared.
-#[derive(Clone, Debug)]
-pub(crate) struct SyntaxParser {
-    parse: ParseState,
-    scopes: ScopeStack,
-}
-
-impl SyntaxParser {
-    pub(crate) fn for_path(path: &str) -> Self {
-        let path = Path::new(path);
-        let syntax = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| SYNTAX_SET.find_syntax_by_extension(name))
-            .or_else(|| {
-                path.extension()
-                    .and_then(|ext| ext.to_str())
-                    .and_then(|ext| SYNTAX_SET.find_syntax_by_extension(ext))
-            })
-            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-        Self {
-            parse: ParseState::new(syntax),
-            scopes: ScopeStack::new(),
-        }
-    }
-
-    /// `line` includes its newline. Emitted ranges use source byte offsets.
-    pub(crate) fn line(
-        &mut self,
-        line: &str,
-        mut emit: impl FnMut(std::ops::Range<usize>, &[Scope]),
-    ) {
-        let mut start = 0;
-        if let Ok(ops) = self.parse.parse_line(line, &SYNTAX_SET) {
-            for (end, op) in ops {
-                if start < end {
-                    emit(start..end, self.scopes.as_slice());
-                }
-                let _ = self.scopes.apply(&op);
-                start = end;
-            }
-        }
-        if start < line.len() {
-            emit(start..line.len(), self.scopes.as_slice());
-        }
-    }
-}
-
-pub(crate) fn syntax_scope_colors(
-    scopes: &[Vec<Scope>],
-    theme: &crate::theme::Theme,
-) -> Vec<Color> {
-    let highlighter = Highlighter::new(syntax_theme(theme));
-    scopes
-        .iter()
-        .map(|stack| {
-            let fg = highlighter.style_for_stack(stack).foreground;
-            Color::Rgb {
-                r: fg.r,
-                g: fg.g,
-                b: fg.b,
-            }
-        })
-        .collect()
 }
 
 /// Render a code block. When `fence` is true, each line's `source_text` carries the fenced
@@ -136,36 +56,35 @@ pub fn render_code_block_range(
     if range.is_empty() {
         return 0;
     }
-    let theme = syntax_theme(out.theme());
     let content_width = if let Some(b) = bctx { b.inner_w } else { width };
     let text_w = content_width.max(1);
     let mut rows = 0usize;
     let mut emitted = 0usize;
+    let plain = source::plain_foreground(out.theme());
+    let lines: Vec<&str> = block.lines().iter().map(|line| line.text()).collect();
+    // Every source line takes at least one row, so no later line can be needed.
+    let needed = lines.len().min(range.end);
     // Unlabelled fences need no parser. Avoid loading the entire syntax set on
     // the UI thread just to render plain text for the first time.
-    let plain_style = (lang_to_ext(block.lang()) == "txt")
-        .then(|| Highlighter::new(theme).style_for_stack(&[Scope::new("text.plain").unwrap()]));
-    let mut h = plain_style
-        .is_none()
-        .then(|| HighlightLines::new(syntax_for_lang(block.lang()), theme));
+    let spans = (lang_to_ext(block.lang()) != "txt").then(|| {
+        SourceHighlighter::new(Syntax::for_lang(block.lang())).spans(
+            &lines[..],
+            0..needed,
+            out.theme(),
+        )
+    });
 
     let bg_group = intern("SmeltCodeBlockBg");
     let bg = out.theme().resolve(bg_group).bg.unwrap_or(Color::Reset);
     let last_idx = block.len().saturating_sub(1);
-    for (line_idx, code_line) in block.lines().iter().enumerate() {
+    for (line_idx, line) in lines.iter().copied().enumerate().take(needed) {
         if rows >= range.end {
             break;
         }
-        let line = code_line.text();
-        let highlighted = if let Some(h) = &mut h {
-            let line_with_nl = format!("{}\n", line);
-            let regions = h
-                .highlight_line(&line_with_nl, &SYNTAX_SET)
-                .unwrap_or_default();
-            highlighted_line(&regions)
-        } else {
-            highlighted_line(&[(plain_style.unwrap(), line)])
-        };
+        let highlighted = highlighted_line(&match &spans {
+            Some(spans) => line_regions(line, &spans[line_idx], plain),
+            None => vec![(plain, line)],
+        });
         let visual_rows = highlighted.wrap_fragments(text_w);
         for (offset, segment) in wrapped_segments(out, &visual_rows).enumerate() {
             let row = rows.saturating_add(offset);
@@ -231,16 +150,15 @@ pub fn render_code_block_range(
     emitted
 }
 
-pub(super) fn render_highlighted(
+fn render_highlighted(
     out: &mut LineBuilder,
     lines: &[&str],
-    syntax: &syntect::parsing::SyntaxReference,
+    syntax: Syntax,
     gutter: GutterStyle,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:highlighted");
-    let theme = syntax_theme(out.theme());
     let lineno_digits = lines.len().max(1).to_string().len();
     // `Stamped` reserves gutter cells for the host window's `LineNumberGutter`.
     // `None` reserves nothing. Inline-gutter callers go through
@@ -250,20 +168,21 @@ pub(super) fn render_highlighted(
         GutterStyle::None | GutterStyle::InlineLineNumbers => 0,
     };
     let max_content = default_width().saturating_sub(gutter_cells + 1).max(1);
-    let limit = lines.len();
+    let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
+    // Every source line takes at least one row, so no later line can be emitted.
+    let limit = lines
+        .len()
+        .min(usize::from(skip).saturating_add(usize::from(emit_limit)));
+    let spans = SourceHighlighter::new(syntax).spans(lines, 0..limit, out.theme());
+    let plain = source::plain_foreground(out.theme());
 
     let mut total_rows = 0u16;
     let mut emitted = 0u16;
-    let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
-    let mut h = HighlightLines::new(syntax, theme);
     for (i, line) in lines[..limit].iter().enumerate() {
         if emitted >= emit_limit {
             break;
         }
-        let line_with_nl = format!("{}\n", line);
-        let regions = h
-            .highlight_line(&line_with_nl, &SYNTAX_SET)
-            .unwrap_or_default();
+        let regions = line_regions(line, &spans[i], plain);
         let visual_rows = split_regions_into_rows(out, &regions, max_content);
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if total_rows >= skip && emitted < emit_limit {
@@ -307,19 +226,40 @@ pub fn print_syntax_file_ext(
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:syntax_file");
-    let ext = syntax_ext.unwrap_or_else(|| {
-        Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("txt")
-    });
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(ext)
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let syntax = syntax_ext.map_or_else(|| Syntax::for_path(path), Syntax::for_ext);
     let lines: Vec<&str> = content.lines().collect();
     render_highlighted(out, &lines, syntax, gutter, skip, max_rows)
 }
-fn highlighted_line(regions: &[(Style, &str)]) -> InlineLine<Style> {
+
+/// Text runs of `line` in their syntax colours; bytes no span covers are plain.
+pub(super) fn line_regions<'a>(
+    line: &'a str,
+    spans: &[InlineSyntaxSpan],
+    plain: Color,
+) -> Vec<(Color, &'a str)> {
+    let mut regions = Vec::with_capacity(spans.len() + 1);
+    let mut cursor = 0;
+    for span in spans {
+        if cursor < span.byte_start {
+            regions.push((
+                plain,
+                smelt_buffer::text::slice(line, cursor..span.byte_start),
+            ));
+        }
+        let [r, g, b] = span.foreground;
+        regions.push((
+            Color::Rgb { r, g, b },
+            smelt_buffer::text::slice(line, span.byte_start..span.byte_end),
+        ));
+        cursor = span.byte_end;
+    }
+    if cursor < line.len() {
+        regions.push((plain, smelt_buffer::text::slice(line, cursor..line.len())));
+    }
+    regions
+}
+
+fn highlighted_line(regions: &[(Color, &str)]) -> InlineLine<Color> {
     InlineLine::new(
         regions
             .iter()
@@ -335,10 +275,10 @@ fn highlighted_line(regions: &[(Style, &str)]) -> InlineLine<Style> {
 /// Split syntax regions into visual rows that each fit within `max_width` columns.
 fn split_regions_into_rows(
     out: &mut LineBuilder,
-    regions: &[(Style, &str)],
+    regions: &[(Color, &str)],
     max_width: usize,
-) -> Vec<Vec<(Style, String)>> {
-    let rows: Vec<Vec<(Style, String)>> = highlighted_line(regions)
+) -> Vec<Vec<(Color, String)>> {
+    let rows: Vec<Vec<(Color, String)>> = highlighted_line(regions)
         .wrap_ranges(max_width.max(1))
         .into_iter()
         .map(|row| row.into_iter().map(|run| (run.meta, run.text)).collect())
@@ -357,76 +297,57 @@ pub struct InlineSyntaxSpan {
     pub foreground: [u8; 3],
 }
 
-/// Stateful single-line syntax highlighter. The language token feeds `syntax_for_lang`,
-/// so `"bash"`, `"rust"`, `"py"`, etc. all work.
-pub struct InlineSyntax<'a> {
-    h: HighlightLines<'a>,
+/// Syntax colours for one logical line in the language token `lang`
+/// (`"bash"`, `"rust"`, `"py"`, ...).
+pub fn inline_syntax_spans(
+    lang: &str,
+    line: &str,
+    theme: &crate::theme::Theme,
+) -> Vec<InlineSyntaxSpan> {
+    source::line_spans(Syntax::for_lang(lang), line, theme)
 }
 
-impl<'a> InlineSyntax<'a> {
-    pub fn new(lang: &str, theme: &crate::theme::Theme) -> Self {
-        let theme = syntax_theme(theme);
-        Self {
-            h: HighlightLines::new(syntax_for_lang(lang), theme),
-        }
-    }
+/// Print a byte range of one logical line with syntax highlighting. The whole
+/// line is highlighted before clipping, so soft-wrapped rows keep the same
+/// tokens as the unwrapped line. Does not emit a newline.
+pub fn print_inline_syntax(
+    out: &mut LineBuilder,
+    lang: &str,
+    line: &str,
+    range: std::ops::Range<usize>,
+) {
+    let spans = inline_syntax_spans(lang, line, out.theme());
+    print_spans_range(out, line, &spans, range);
+}
 
-    /// Parse one logical line into retained byte ranges and syntax-theme colors.
-    pub fn highlight_spans(&mut self, line: &str) -> Vec<InlineSyntaxSpan> {
-        let line_with_nl = format!("{}\n", line);
-        let regions = self
-            .h
-            .highlight_line(&line_with_nl, &SYNTAX_SET)
-            .unwrap_or_default();
-        let mut spans = Vec::with_capacity(regions.len());
-        let mut byte_start = 0usize;
-        for (style, text) in regions {
-            let text = text.trim_end_matches('\n').trim_end_matches('\r');
-            if text.is_empty() {
-                continue;
-            }
-            let byte_end = byte_start.saturating_add(text.len());
-            spans.push(InlineSyntaxSpan {
-                byte_start,
-                byte_end,
-                foreground: [style.foreground.r, style.foreground.g, style.foreground.b],
-            });
-            byte_start = byte_end;
+/// Prints `range` of `line` in the colours of `spans`. Snapshots the caller's
+/// style, so per-span colours don't leak while dim/bold/italic stay in effect.
+fn print_spans_range(
+    out: &mut LineBuilder,
+    line: &str,
+    spans: &[InlineSyntaxSpan],
+    range: std::ops::Range<usize>,
+) {
+    out.save_style();
+    let mut cursor = range.start;
+    for span in spans {
+        let byte_start = span.byte_start.max(range.start);
+        let byte_end = span.byte_end.min(range.end);
+        if byte_start >= byte_end {
+            continue;
         }
-        spans
-    }
-
-    /// Print a byte range from one logical line with syntax highlighting.
-    ///
-    /// The whole logical line is highlighted before clipping, so soft-wrapped
-    /// rows keep the same tokenization as the unwrapped line.
-    pub fn print_line_range(
-        &mut self,
-        out: &mut LineBuilder,
-        line: &str,
-        range: std::ops::Range<usize>,
-    ) {
-        let spans = self.highlight_spans(line);
-        out.save_style();
-        for span in spans {
-            let byte_start = span.byte_start.max(range.start);
-            let byte_end = span.byte_end.min(range.end);
-            if byte_start >= byte_end {
-                continue;
-            }
-            let [r, g, b] = span.foreground;
-            out.set_fg(Color::Rgb { r, g, b });
-            out.print(smelt_buffer::text::slice(line, byte_start..byte_end));
+        if cursor < byte_start {
+            out.print(smelt_buffer::text::slice(line, cursor..byte_start));
         }
-        out.pop_style();
+        let [r, g, b] = span.foreground;
+        out.set_fg(Color::Rgb { r, g, b });
+        out.print(smelt_buffer::text::slice(line, byte_start..byte_end));
+        cursor = byte_end;
     }
-
-    /// Print a single line with syntax highlighting; does not emit a newline.
-    /// Snapshots the caller's style on entry and restores it on exit, so per-region
-    /// fg mutations don't leak (other axes - dim/bold/italic/group - stay in effect).
-    pub fn print_line(&mut self, out: &mut LineBuilder, line: &str) {
-        self.print_line_range(out, line, 0..line.len());
+    if cursor < range.end {
+        out.print(smelt_buffer::text::slice(line, cursor..range.end));
     }
+    out.pop_style();
 }
 
 /// Render `content` as a plain code block - one source line per row, no gutter, no line
@@ -436,34 +357,34 @@ impl<'a> InlineSyntax<'a> {
 /// would be too heavy.
 pub fn print_code_lines(out: &mut LineBuilder, content: &str, lang: &str) {
     let _perf = smelt_perf::perf::begin("render:code_lines");
-    let mut hi = InlineSyntax::new(lang, out.theme());
-    for line in content.lines() {
-        hi.print_line(out, line);
+    let lines: Vec<&str> = content.lines().collect();
+    let spans = SourceHighlighter::new(Syntax::for_lang(lang)).spans(
+        &lines[..],
+        0..lines.len(),
+        out.theme(),
+    );
+    for (line, spans) in lines.iter().zip(&spans) {
+        print_spans_range(out, line, spans, 0..line.len());
         out.newline();
     }
 }
 
 fn print_split_regions(
     out: &mut LineBuilder,
-    regions: &[(Style, String)],
+    regions: &[(Color, String)],
     bg: Option<Color>,
 ) -> usize {
     let col =
         smelt_buffer::cell_width::joined_text_width(regions.iter().map(|(_, text)| text.as_str()));
     out.save_style();
-    for (style, text) in regions {
+    for (fg, text) in regions {
         if text.is_empty() {
             continue;
         }
         if let Some(bg_color) = bg {
             out.set_bg(bg_color);
         }
-        let fg = Color::Rgb {
-            r: style.foreground.r,
-            g: style.foreground.g,
-            b: style.foreground.b,
-        };
-        out.set_fg(fg);
+        out.set_fg(*fg);
         out.print(text);
     }
     out.pop_style();
@@ -476,25 +397,9 @@ mod tests {
     use crate::content::builder::{display_width, test_util::render_test};
     use crate::content::BoxContext;
     use crate::theme::HlGroup;
-    use syntect::highlighting::Color as SyntectColor;
-    use syntect::highlighting::FontStyle;
 
-    fn style(rgb: (u8, u8, u8)) -> Style {
-        Style {
-            foreground: SyntectColor {
-                r: rgb.0,
-                g: rgb.1,
-                b: rgb.2,
-                a: 255,
-            },
-            background: SyntectColor {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 0,
-            },
-            font_style: FontStyle::empty(),
-        }
+    fn style((r, g, b): (u8, u8, u8)) -> Color {
+        Color::Rgb { r, g, b }
     }
 
     fn join_text(block: &crate::content::builder::test_util::TestBlock) -> String {
@@ -518,7 +423,7 @@ mod tests {
     #[test]
     fn bundled_syntax_set_supports_typescript_react_extensions() {
         for ext in ["ts", "tsx", "jsx"] {
-            let syntax = SYNTAX_SET
+            let syntax = crate::content::highlight::SYNTAX_SET
                 .find_syntax_by_extension(ext)
                 .unwrap_or_else(|| panic!("missing syntax for .{ext}"));
             assert_ne!(
@@ -542,34 +447,6 @@ mod tests {
     }
 
     // ── render_code_block ─────────────────────────────────────────────
-
-    #[test]
-    fn plain_code_style_matches_syntax_parser() {
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut theme = syntect::highlighting::Theme::default();
-        theme.scopes.push(syntect::highlighting::ThemeItem {
-            scope: "text.plain".parse().unwrap(),
-            style: syntect::highlighting::StyleModifier {
-                foreground: Some(SyntectColor::BLACK),
-                font_style: Some(FontStyle::BOLD),
-                ..Default::default()
-            },
-        });
-        for theme in [syntect::highlighting::Theme::default(), theme] {
-            let plain_style =
-                Highlighter::new(&theme).style_for_stack(&[Scope::new("text.plain").unwrap()]);
-            let mut parser = HighlightLines::new(syntax, &theme);
-            for line in ["", "plain text  ", "é界👩‍💻", "trailing carriage return\r"] {
-                let with_newline = format!("{line}\n");
-                let regions = parser.highlight_line(&with_newline, &SYNTAX_SET).unwrap();
-                assert_eq!(
-                    highlighted_line(&[(plain_style, line)]),
-                    highlighted_line(&regions),
-                    "line={line:?}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn render_code_block_unknown_lang_falls_back_to_plain_text() {
@@ -976,26 +853,20 @@ mod tests {
         });
     }
 
-    // ── InlineSyntax ──────────────────────────────────────────────────
+    // ── inline syntax ─────────────────────────────────────────────────
 
     #[test]
-    fn inline_syntax_print_line_emits_text_into_buffer() {
-        let block = render_test(80, |out| {
-            let mut hi = InlineSyntax::new("bash", out.theme());
-            hi.print_line(out, "echo hello");
-            out.newline();
-        });
-        assert!(block.lines[0].text.contains("echo hello"));
-    }
-
-    #[test]
-    fn inline_syntax_print_line_strips_trailing_newline_artifacts() {
-        let block = render_test(80, |out| {
-            let mut hi = InlineSyntax::new("bash", out.theme());
-            hi.print_line(out, "ls");
-            out.newline();
-        });
-        assert_eq!(block.lines[0].text, "ls");
+    fn print_inline_syntax_emits_only_the_requested_range() {
+        for lang in ["bash", "rust"] {
+            let block = render_test(80, |out| {
+                print_inline_syntax(out, lang, "echo hello", 0..10);
+                out.newline();
+                print_inline_syntax(out, lang, "echo hello", 5..10);
+                out.newline();
+            });
+            assert_eq!(block.lines[0].text, "echo hello");
+            assert_eq!(block.lines[1].text, "hello");
+        }
     }
 
     #[test]

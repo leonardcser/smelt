@@ -7,6 +7,8 @@ use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 mod action_refs;
 pub mod diff;
 pub mod inline;
+pub(crate) mod sides;
+pub(crate) mod source;
 pub mod syntax;
 
 /// How the highlight renderers paint the left margin / gutter.
@@ -62,7 +64,7 @@ fn embedded_syntax_theme(name: &str) -> Option<EmbeddedThemeName> {
 
 /// Pick the requested syntax theme, falling back to the matching Monokai
 /// dark/light palette when the colorscheme omits `syntax`.
-pub(super) fn syntax_theme(theme: &crate::theme::Theme) -> &'static syntect::highlighting::Theme {
+pub(crate) fn syntax_theme(theme: &crate::theme::Theme) -> &'static syntect::highlighting::Theme {
     if let Some(name) = theme.syntax_theme() {
         if let Some(theme) = embedded_syntax_theme(name) {
             return &THEME_SET[theme];
@@ -93,6 +95,6 @@ pub use inline::{
     wrap_inline_spans, InlineOptions, InlineSpan, InlineStyle,
 };
 pub use syntax::{
-    lang_to_ext, print_code_lines, print_syntax_file, print_syntax_file_ext, render_code_block,
-    render_code_block_range, syntax_for_lang, InlineSyntax, InlineSyntaxSpan,
+    inline_syntax_spans, lang_to_ext, print_code_lines, print_inline_syntax, print_syntax_file,
+    print_syntax_file_ext, render_code_block, render_code_block_range, InlineSyntaxSpan,
 };

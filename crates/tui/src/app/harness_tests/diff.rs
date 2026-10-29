@@ -3170,6 +3170,345 @@ fn diff_viewer_benchmark() {
     }
 }
 
+/// Real Rust sources from this workspace, so syntax, inline word diffs and
+/// folds see production-shaped text instead of one repeated line.
+fn workspace_sources() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut paths = Vec::new();
+    walk(&root.join("crates"), &mut paths);
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path.strip_prefix(&root).unwrap().display().to_string();
+            (name, std::fs::read_to_string(path).unwrap())
+        })
+        .collect()
+}
+
+/// Full-context Git patch (as `/diff` requests) for one file; `edit` returns
+/// the new text of changed lines.
+fn full_context_patch(
+    path: &str,
+    lines: &[&str],
+    edit: impl Fn(usize, &str) -> Option<String>,
+) -> String {
+    let mut body = String::new();
+    let (mut old, mut new) = (0, 0);
+    for (index, line) in lines.iter().enumerate() {
+        match edit(index, line) {
+            Some(changed) => {
+                body.push_str(&format!("-{line}\n+{changed}\n"));
+            }
+            None => {
+                body.push_str(&format!(" {line}\n"));
+            }
+        }
+        old += 1;
+        new += 1;
+    }
+    format!(
+        "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,{old} +1,{new} @@\n{body}"
+    )
+}
+
+fn added_patch(path: &str, lines: &[&str]) -> String {
+    let mut out = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for line in lines {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Multi-million-row working-tree diff shaped like a large refactor.
+fn interaction_fixture() -> String {
+    let sources = workspace_sources();
+    let all: String = sources.iter().map(|(_, text)| text.as_str()).collect();
+    let lines: Vec<&str> = all.lines().collect();
+    let mut patch = String::new();
+    // Sparse edits in full context: long folds with occasional hunks.
+    patch += &full_context_patch("big/sparse.rs", &lines, |i, line| {
+        (i % 400 == 0).then(|| format!("{line} // touched"))
+    });
+    // Dense rename: inline word diffs on every `self.` line.
+    patch += &full_context_patch("big/rename.rs", &lines, |_, line| {
+        line.contains("self.")
+            .then(|| line.replace("self.", "this."))
+    });
+    // Large new files: every row is visible, nothing folds.
+    for copy in 0..3 {
+        patch += &added_patch(&format!("big/new_{copy}.rs"), &lines);
+    }
+    // A wide tree of small edits.
+    for (path, text) in &sources {
+        let lines: Vec<&str> = text.lines().collect();
+        patch += &full_context_patch(&format!("tree/{path}"), &lines, |i, line| {
+            (i % 97 == 13).then(|| format!("{line} // review"))
+        });
+    }
+    patch
+}
+
+/// Visible code rows the user can see without syntax colours yet.
+fn uncoloured_code_rows(app: &TestApp, win: WinId) -> usize {
+    let buf = app
+        .ui_probe()
+        .buf(app.ui_probe().win(win).unwrap().buf)
+        .unwrap();
+    buf.lines()
+        .iter()
+        .enumerate()
+        .filter(|(row, line)| {
+            let code = line
+                .strip_prefix("+ ")
+                .or_else(|| line.strip_prefix("- "))
+                .or_else(|| line.strip_prefix("  "));
+            code.is_some_and(|code| code.chars().any(|c| c.is_alphanumeric()))
+                && buf.highlights_at(*row).len() <= 2
+        })
+        .count()
+}
+
+fn wait_for_colours(app: &mut TestApp, win: WinId, timeout: Duration) -> Option<Duration> {
+    let start = std::time::Instant::now();
+    loop {
+        paint_diff(app);
+        if uncoloured_code_rows(app, win) == 0 {
+            return Some(start.elapsed());
+        }
+        if start.elapsed() > timeout {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        app.feed_one(SourceEvent::LuaWakeup);
+    }
+}
+
+fn summarize(label: &str, mut samples: Vec<Duration>) {
+    samples.sort();
+    let at = |q: usize| samples[(samples.len() - 1) * q / 100];
+    println!(
+        "  {label:<24} n={:<4} p50={:>9.2?} p95={:>9.2?} max={:>9.2?}",
+        samples.len(),
+        at(50),
+        at(95),
+        samples[samples.len() - 1]
+    );
+}
+
+/// What users do in a huge diff: fling the wheel, hold keys, page, jump,
+/// drag the scrollbar and search. Reports frame cost, how long seeks stay
+/// uncoloured, and how often continuous scrolling shows plain rows.
+#[test]
+#[ignore = "timed benchmark: cargo xtask bench-diff"]
+fn diff_interaction_benchmark() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let patch = interaction_fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let patch_path = dir.path().join("fixture.patch");
+    std::fs::write(&patch_path, &patch).unwrap();
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(200, 55);
+    let start = std::time::Instant::now();
+    app.run_lua_result(&format!(
+        r#"
+        local file = assert(io.open({:?}, 'rb'))
+        local diff = smelt.diff.parse(file:read('a'))
+        file:close()
+        smelt.git.diff = function() return {{ diff = diff }} end
+        smelt.cmd.run('diff')
+    "#,
+        patch_path.display().to_string()
+    ))
+    .unwrap();
+    drive_lua_tasks(&mut app);
+    paint_diff(&mut app);
+    let win = preview(&app);
+    let total = app
+        .ui_probe()
+        .win(win)
+        .unwrap()
+        .row_source()
+        .unwrap()
+        .snapshot()
+        .total_rows;
+    println!(
+        "diff interaction: patch_rows={} display_rows={total} usable={:?}",
+        patch.lines().count(),
+        start.elapsed()
+    );
+    let mut rng = 0x2545F4914F6CDD1Du64;
+    let mut random = move |bound: u64| {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng % bound
+    };
+    let frame = |app: &mut TestApp, action: &mut dyn FnMut(&mut TestApp)| {
+        let start = std::time::Instant::now();
+        action(app);
+        paint_diff(app);
+        start.elapsed()
+    };
+
+    // Frame cost: each step is one terminal-loop iteration, without waiting
+    // for background syntax.
+    let rect = app.ui_probe().win(win).unwrap().viewport.unwrap().rect;
+    let wheel = |app: &mut TestApp, down: bool| {
+        for _ in 0..8 {
+            app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
+                kind: if down {
+                    MouseEventKind::ScrollDown
+                } else {
+                    MouseEventKind::ScrollUp
+                },
+                row: rect.top + 2,
+                column: rect.left + 3,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        app.dispatch_ui_window_events(false);
+    };
+    let samples = (0..300)
+        .map(|i| frame(&mut app, &mut |app| wheel(app, i % 100 < 50)))
+        .collect();
+    summarize("wheel burst x8", samples);
+    let samples = (0..300)
+        .map(|i| {
+            frame(&mut app, &mut |app| {
+                app.type_char(if i % 100 < 50 { 'j' } else { 'k' })
+            })
+        })
+        .collect();
+    summarize("held j/k", samples);
+    let samples = (0..200)
+        .map(|i| {
+            frame(&mut app, &mut |app| {
+                app.press_mod(
+                    KeyCode::Char(if i % 80 < 40 { 'd' } else { 'u' }),
+                    KeyModifiers::CONTROL,
+                )
+            })
+        })
+        .collect();
+    summarize("ctrl-d/u", samples);
+    let samples = (0..200)
+        .map(|_| {
+            let row = random(total) + 1;
+            frame(&mut app, &mut |app| app.type_text(&format!("{row}G")))
+        })
+        .collect();
+    summarize("random NG", samples);
+    let samples = (0..100)
+        .map(|i| {
+            let row = rect.top + (i * 7 % rect.height as u64) as u16;
+            frame(&mut app, &mut |app| {
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
+                        kind,
+                        row,
+                        column: rect.left + rect.width - 1,
+                        modifiers: KeyModifiers::NONE,
+                    }));
+                }
+                app.dispatch_ui_window_events(false);
+            })
+        })
+        .collect();
+    summarize("scrollbar click", samples);
+
+    // Time to colour: how long a freshly revealed viewport stays plain.
+    let mut seeks = Vec::new();
+    let mut stalled = 0;
+    for _ in 0..12 {
+        let row = random(total) + 1;
+        app.type_text(&format!("{row}G"));
+        match wait_for_colours(&mut app, win, Duration::from_secs(30)) {
+            Some(elapsed) => seeks.push(elapsed),
+            None => stalled += 1,
+        }
+    }
+    if !seeks.is_empty() {
+        summarize("seek -> colours", seeks);
+    }
+    println!("  seek -> colours stalled (>30s): {stalled}");
+
+    // Continuous scrolling at a 60 Hz cadence from a coloured start: the
+    // share of frames that show plain code rows is what reads as stutter.
+    for (label, step) in [("ctrl-d 60Hz", None), ("wheel x8 60Hz", Some(()))] {
+        app.type_text("gg");
+        wait_for_colours(&mut app, win, Duration::from_secs(30));
+        let (mut plain_frames, mut plain_rows, frames) = (0, 0, 180);
+        for _ in 0..frames {
+            let tick = std::time::Instant::now();
+            if step.is_some() {
+                wheel(&mut app, true);
+            } else {
+                app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL);
+            }
+            app.feed_one(SourceEvent::LuaWakeup);
+            paint_diff(&mut app);
+            let plain = uncoloured_code_rows(&app, win);
+            plain_frames += usize::from(plain > 0);
+            plain_rows += plain;
+            std::thread::sleep(Duration::from_micros(16_667).saturating_sub(tick.elapsed()));
+        }
+        println!(
+            "  {label:<24} plain frames {plain_frames}/{frames} ({}%), plain rows/frame {:.1}",
+            plain_frames * 100 / frames,
+            plain_rows as f64 / frames as f64
+        );
+    }
+
+    // Search is incremental: every query keystroke scans on the UI thread, so
+    // the slowest keystroke is how long typing freezes.
+    for (label, query) in [
+        ("search near", "fn new"),
+        ("search far (tree/)", "fn interaction_fixture"),
+        ("search miss", "zzz_absent_needle_zzz"),
+    ] {
+        app.type_text("gg");
+        paint_diff(&mut app);
+        app.type_char('/');
+        let mut keystrokes: Vec<_> = query
+            .chars()
+            .map(|c| frame(&mut app, &mut |app| app.type_char(c)))
+            .collect();
+        keystrokes.push(frame(&mut app, &mut |app| app.press(KeyCode::Enter)));
+        let total: Duration = keystrokes.iter().sum();
+        let slowest = keystrokes.iter().max().unwrap();
+        let cursor = app.ui_probe().win(win).unwrap().cursor_abs_row();
+        println!(
+            "  {label:<24} typing total={total:>9.2?} slowest key={slowest:>9.2?} cursor={cursor}"
+        );
+    }
+    app.type_text("gg/self");
+    app.press(KeyCode::Enter);
+    let samples = (0..100)
+        .map(|_| frame(&mut app, &mut |app| app.type_char('n')))
+        .collect();
+    summarize("search n", samples);
+}
+
 #[test]
 fn diff_search_keeps_preview_focus_across_repeated_searches() {
     let mut app = TestApp::builder().build();

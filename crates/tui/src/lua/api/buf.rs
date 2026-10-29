@@ -595,7 +595,7 @@ pub(super) fn create_or_open(
 /// old `set_styled_lines`; lifted out so `Buf` methods stay tidy.
 fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResult<()> {
     use smelt_core::content::builder::LineBuilder;
-    use smelt_core::content::highlight::InlineSyntax;
+    use smelt_core::content::highlight::print_inline_syntax;
     use smelt_core::style::Style;
     use smelt_core::theme::intern;
 
@@ -697,8 +697,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
                     }
                     sink.push(group, style);
                     if let Some(lang) = &span.syntax {
-                        let mut hi = InlineSyntax::new(lang, sink.theme());
-                        hi.print_line(&mut sink, &span.text);
+                        print_inline_syntax(&mut sink, lang, &span.text, 0..span.text.len());
                     } else {
                         sink.print(&span.text);
                     }

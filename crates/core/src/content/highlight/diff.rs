@@ -5,14 +5,15 @@
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::HighlightState;
-use syntect::parsing::ParseState;
+use std::rc::Rc;
 
-use super::{syntax_theme, GutterStyle, SYNTAX_SET};
+use super::sides::{DiffSides, RowSide};
+use super::source::{self, LineSource, SourceHighlighter, Syntax};
+use super::syntax::line_regions;
+use super::{GutterStyle, InlineSyntaxSpan};
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
@@ -45,8 +46,6 @@ struct DiffViewData {
     is_full_file: bool,
 }
 
-const SYNTAX_CHECKPOINT_INTERVAL: usize = 128;
-const MAX_SYNTAX_CHECKPOINTS: usize = u16::MAX as usize / SYNTAX_CHECKPOINT_INTERVAL + 2;
 const MAX_ROW_LAYOUTS: usize = 2;
 const MAX_HIGHLIGHT_LINE_BYTES: usize = 16 * 1024;
 const MAX_HIGHLIGHT_FILE_BYTES: usize = 64 * 1024;
@@ -57,7 +56,7 @@ pub struct DiffIr {
     pub(crate) syntax_ext: String,
     pub(crate) lines: Vec<DiffLine>,
     #[serde(skip)]
-    render_cache: Arc<Mutex<DiffRenderCache>>,
+    render_cache: Rc<RefCell<DiffRenderCache>>,
 }
 
 impl DiffIr {
@@ -73,46 +72,109 @@ impl DiffIr {
     }
 }
 
-#[derive(Clone, Default)]
+/// The syntax parse of one retained file or code block, keyed by language.
+#[derive(Clone, Debug, Default)]
 pub struct RetainedFileViewCache {
-    syntax: Arc<Mutex<Option<DiffSyntaxCache>>>,
-}
-
-impl std::fmt::Debug for RetainedFileViewCache {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let syntax = self
-            .syntax
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        formatter
-            .debug_struct("RetainedFileViewCache")
-            .field(
-                "syntax_checkpoints",
-                &syntax.as_ref().map_or(0, |syntax| syntax.checkpoints.len()),
-            )
-            .finish()
-    }
+    syntax: Rc<RefCell<Option<(String, SourceHighlighter)>>>,
 }
 
 impl RetainedFileViewCache {
     pub fn retained_bytes(&self) -> usize {
-        let syntax = self
+        self.syntax
+            .borrow()
+            .as_ref()
+            .map_or(0, |(_, highlighter)| highlighter.retained_bytes())
+    }
+
+    fn highlighter(
+        &self,
+        key: &str,
+        syntax: impl FnOnce() -> Syntax,
+    ) -> std::cell::Ref<'_, SourceHighlighter> {
+        if self
             .syntax
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        syntax.as_ref().map_or(0, |syntax| {
-            syntax
-                .checkpoints
-                .capacity()
-                .saturating_mul(std::mem::size_of::<SyntaxCheckpoint>())
+            .borrow()
+            .as_ref()
+            .is_none_or(|(cached, _)| cached != key)
+        {
+            *self.syntax.borrow_mut() = Some((key.to_owned(), SourceHighlighter::new(syntax())));
+        }
+        std::cell::Ref::map(self.syntax.borrow(), |cached| &cached.as_ref().unwrap().1)
+    }
+}
+
+/// Lines of retained content as rendered: tabs expand to four spaces, and
+/// lines too long to highlight restart parsing.
+struct RetainedLines<'a>(&'a ContentRead<'a>);
+
+impl LineSource for RetainedLines<'_> {
+    fn line_count(&self) -> usize {
+        self.0.logical_line_count()
+    }
+
+    fn line(&self, index: usize) -> Option<Cow<'_, str>> {
+        let range = self.0.line_range(index)?;
+        if range.len() > MAX_HIGHLIGHT_LINE_BYTES {
+            return None;
+        }
+        let line = self.0.slice(range);
+        Some(if line.contains('\t') {
+            Cow::Owned(line.replace('\t', "    "))
+        } else {
+            line
         })
     }
 }
 
+/// Syntax spans for `lines` of retained content, relative to each line.
+fn retained_spans(
+    content: &TranscriptContent,
+    highlighter: &SourceHighlighter,
+    lines: std::ops::Range<usize>,
+    theme: &crate::theme::Theme,
+) -> Vec<Vec<InlineSyntaxSpan>> {
+    let read = content.read();
+    highlighter.spans(&RetainedLines(&read), lines, theme)
+}
+
 #[derive(Debug, Default)]
 struct DiffRenderCache {
-    row_layouts: VecDeque<Arc<DiffRowLayout>>,
-    syntax: Option<DiffSyntaxCache>,
+    row_layouts: VecDeque<Rc<DiffRowLayout>>,
+    sides: Option<Rc<DiffSides>>,
+}
+
+fn diff_sides(cache: &DiffIr) -> Rc<DiffSides> {
+    let mut render = render_cache(cache);
+    let sides = render.sides.get_or_insert_with(|| {
+        let syntax = Syntax::for_ext(&cache.syntax_ext);
+        let rows = cache.lines.iter().enumerate().map(|(row, line)| {
+            let side = match line {
+                DiffLine::Context { .. } => RowSide::Both,
+                DiffLine::Delete { .. } => RowSide::Old,
+                DiffLine::Insert { .. } => RowSide::New,
+                DiffLine::Ellipsis => RowSide::Gap,
+            };
+            (row, side)
+        });
+        Rc::new(DiffSides::new([syntax, syntax], rows))
+    });
+    Rc::clone(sides)
+}
+
+/// Syntax spans for diff lines `range`, each from its own side's source.
+fn diff_line_spans(
+    cache: &DiffIr,
+    range: std::ops::Range<usize>,
+    theme: &crate::theme::Theme,
+) -> Vec<Vec<InlineSyntaxSpan>> {
+    diff_sides(cache)
+        .scopes(
+            |row| cache.lines[row].text().map(Cow::Borrowed),
+            range,
+            &mut || false,
+        )
+        .unwrap_or_default()
+        .spans(theme)
 }
 
 #[derive(Debug)]
@@ -135,30 +197,12 @@ impl DiffRowLayout {
     }
 }
 
-#[derive(Debug)]
-struct DiffSyntaxCache {
-    theme_id: usize,
-    checkpoints: Vec<SyntaxCheckpoint>,
-}
-
-#[derive(Clone, Debug)]
-struct SyntaxCheckpoint {
-    line_index: usize,
-    highlight_state: HighlightState,
-    parse_state: ParseState,
-}
-
-#[cfg(test)]
-thread_local! {
-    static PREFIX_SYNTAX_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 fn diff_ir(max_display_lineno: usize, syntax_ext: String, lines: Vec<DiffLine>) -> DiffIr {
     DiffIr {
         max_display_lineno,
         syntax_ext,
         lines,
-        render_cache: Arc::default(),
+        render_cache: Rc::default(),
     }
 }
 
@@ -192,6 +236,15 @@ pub(crate) enum DiffLine {
 }
 
 impl DiffLine {
+    fn text(&self) -> Option<&str> {
+        match self {
+            Self::Context { text, .. } | Self::Delete { text, .. } | Self::Insert { text, .. } => {
+                Some(text)
+            }
+            Self::Ellipsis => None,
+        }
+    }
+
     fn dynamic_bytes(&self) -> usize {
         match self {
             Self::Context { text, .. } => text.capacity(),
@@ -922,24 +975,24 @@ fn push_render_span(spans: &mut Vec<RenderSpan>, text: String, meta: RenderMeta)
 }
 
 fn syntax_spans_for_line_with_highlights(
-    h: &mut HighlightLines,
     line: &str,
+    syntax: &[InlineSyntaxSpan],
+    plain: Color,
     highlights: &[DiffByteRange],
 ) -> Vec<RenderSpan> {
-    let mut line_with_nl = String::with_capacity(line.len() + 1);
-    line_with_nl.push_str(line);
-    line_with_nl.push('\n');
     let mut byte_pos = 0usize;
     let mut spans = Vec::new();
-    h.highlight_line(&line_with_nl, &SYNTAX_SET)
-        .unwrap_or_default()
+    line_regions(line, syntax, plain)
         .into_iter()
-        .for_each(|(style, text)| {
-            let text = text.trim_end_matches('\n').trim_end_matches('\r');
+        .for_each(|(color, text)| {
+            let text = text.trim_end_matches('\r');
             if text.is_empty() {
                 return;
             }
-            let fg = (style.foreground.r, style.foreground.g, style.foreground.b);
+            let fg = match color {
+                Color::Rgb { r, g, b } => (r, g, b),
+                _ => (255, 255, 255),
+            };
             let mut chunk = String::new();
             let mut chunk_highlighted: Option<bool> = None;
             for ch in text.chars() {
@@ -968,8 +1021,8 @@ fn syntax_spans_for_line_with_highlights(
 }
 
 #[cfg(test)]
-fn syntax_spans_for_line(h: &mut HighlightLines, line: &str) -> Vec<RenderSpan> {
-    syntax_spans_for_line_with_highlights(h, line, &[])
+fn syntax_spans_for_line(line: &str, syntax: &[InlineSyntaxSpan], plain: Color) -> Vec<RenderSpan> {
+    syntax_spans_for_line_with_highlights(line, syntax, plain, &[])
 }
 
 fn print_syntax_spans(
@@ -1004,12 +1057,13 @@ fn print_syntax_spans(
 }
 
 fn split_syntax_spans_into_rows_with_highlights(
-    h: &mut HighlightLines,
     line: &str,
+    syntax: &[InlineSyntaxSpan],
+    plain: Color,
     highlights: &[DiffByteRange],
     max_width: usize,
 ) -> Vec<Vec<RenderSpan>> {
-    let spans = syntax_spans_for_line_with_highlights(h, line, highlights);
+    let spans = syntax_spans_for_line_with_highlights(line, syntax, plain, highlights);
     let line = InlineLine::new(
         spans
             .into_iter()
@@ -1031,11 +1085,12 @@ fn split_syntax_spans_into_rows_with_highlights(
 
 #[cfg(test)]
 fn split_syntax_spans_into_rows(
-    h: &mut HighlightLines,
     line: &str,
+    syntax: &[InlineSyntaxSpan],
+    plain: Color,
     max_width: usize,
 ) -> Vec<Vec<RenderSpan>> {
-    split_syntax_spans_into_rows_with_highlights(h, line, &[], max_width)
+    split_syntax_spans_into_rows_with_highlights(line, syntax, plain, &[], max_width)
 }
 
 fn diff_line_rows(layout: &InlineLine<()>, max_width: usize) -> usize {
@@ -1078,14 +1133,11 @@ impl DiffPalette {
     }
 }
 
-fn render_cache(cache: &DiffIr) -> std::sync::MutexGuard<'_, DiffRenderCache> {
-    cache
-        .render_cache
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
+fn render_cache(cache: &DiffIr) -> std::cell::RefMut<'_, DiffRenderCache> {
+    cache.render_cache.borrow_mut()
 }
 
-fn diff_row_layout(cache: &DiffIr, max_content: usize) -> Arc<DiffRowLayout> {
+fn diff_row_layout(cache: &DiffIr, max_content: usize) -> Rc<DiffRowLayout> {
     if let Some(layout) = render_cache(cache)
         .row_layouts
         .iter()
@@ -1106,244 +1158,17 @@ fn diff_row_layout(cache: &DiffIr, max_content: usize) -> Arc<DiffRowLayout> {
             DiffLine::Ellipsis => 1,
         });
     }
-    let layout = Arc::new(DiffRowLayout {
+    let layout = Rc::new(DiffRowLayout {
         max_content,
         line_starts,
         total_rows,
     });
     let mut render_cache = render_cache(cache);
-    if let Some(existing) = render_cache
-        .row_layouts
-        .iter()
-        .find(|candidate| candidate.max_content == max_content)
-        .cloned()
-    {
-        return existing;
-    }
-    render_cache.row_layouts.push_back(layout.clone());
+    render_cache.row_layouts.push_back(Rc::clone(&layout));
     while render_cache.row_layouts.len() > MAX_ROW_LAYOUTS {
         render_cache.row_layouts.pop_front();
     }
     layout
-}
-
-fn cache_syntax_checkpoint(
-    cache: &DiffIr,
-    theme_id: usize,
-    line_index: usize,
-    highlighter: HighlightLines<'static>,
-    theme: &'static syntect::highlighting::Theme,
-) -> HighlightLines<'static> {
-    let (highlight_state, parse_state) = highlighter.state();
-    if line_index <= u16::MAX as usize {
-        let mut render_cache = render_cache(cache);
-        if let Some(syntax_cache) = render_cache
-            .syntax
-            .as_mut()
-            .filter(|syntax_cache| syntax_cache.theme_id == theme_id)
-        {
-            match syntax_cache
-                .checkpoints
-                .binary_search_by_key(&line_index, |checkpoint| checkpoint.line_index)
-            {
-                Ok(_) => {}
-                Err(index) if syntax_cache.checkpoints.len() < MAX_SYNTAX_CHECKPOINTS => {
-                    syntax_cache.checkpoints.insert(
-                        index,
-                        SyntaxCheckpoint {
-                            line_index,
-                            highlight_state: highlight_state.clone(),
-                            parse_state: parse_state.clone(),
-                        },
-                    );
-                }
-                Err(_) => {}
-            }
-        }
-    }
-    HighlightLines::from_state(theme, highlight_state, parse_state)
-}
-
-fn advance_syntax_line(highlighter: &mut HighlightLines<'static>, line: &str) {
-    let mut line_with_nl = String::with_capacity(line.len() + 1);
-    line_with_nl.push_str(line);
-    line_with_nl.push('\n');
-    let _ = highlighter.highlight_line(&line_with_nl, &SYNTAX_SET);
-}
-
-fn highlighter_at_line(
-    cache: &DiffIr,
-    line_index: usize,
-    syntax: &'static syntect::parsing::SyntaxReference,
-    theme: &'static syntect::highlighting::Theme,
-) -> HighlightLines<'static> {
-    let theme_id = std::ptr::from_ref(theme) as usize;
-    let checkpoint = {
-        let mut render_cache = render_cache(cache);
-        let reset = render_cache
-            .syntax
-            .as_ref()
-            .is_none_or(|syntax_cache| syntax_cache.theme_id != theme_id);
-        if reset {
-            let initial = HighlightLines::new(syntax, theme);
-            let (highlight_state, parse_state) = initial.state();
-            render_cache.syntax = Some(DiffSyntaxCache {
-                theme_id,
-                checkpoints: vec![SyntaxCheckpoint {
-                    line_index: 0,
-                    highlight_state,
-                    parse_state,
-                }],
-            });
-        }
-        render_cache
-            .syntax
-            .as_ref()
-            .and_then(|syntax_cache| {
-                syntax_cache
-                    .checkpoints
-                    .iter()
-                    .rev()
-                    .find(|checkpoint| checkpoint.line_index <= line_index)
-            })
-            .cloned()
-            .expect("syntax cache always contains the initial checkpoint")
-    };
-
-    let mut highlighter =
-        HighlightLines::from_state(theme, checkpoint.highlight_state, checkpoint.parse_state);
-    let mut prefix_syntax_lines = 0usize;
-    for index in checkpoint.line_index..line_index {
-        if index > checkpoint.line_index && index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
-            highlighter = cache_syntax_checkpoint(cache, theme_id, index, highlighter, theme);
-        }
-        match &cache.lines[index] {
-            DiffLine::Context { text, .. }
-            | DiffLine::Delete { text, .. }
-            | DiffLine::Insert { text, .. } => {
-                advance_syntax_line(&mut highlighter, text);
-                prefix_syntax_lines = prefix_syntax_lines.saturating_add(1);
-            }
-            DiffLine::Ellipsis => {
-                highlighter = HighlightLines::new(syntax, theme);
-            }
-        }
-    }
-    if line_index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
-        highlighter = cache_syntax_checkpoint(cache, theme_id, line_index, highlighter, theme);
-    }
-    smelt_perf::perf::record_value(
-        "render:inline_diff_cached:prefix_syntax_lines",
-        prefix_syntax_lines as u64,
-    );
-    #[cfg(test)]
-    PREFIX_SYNTAX_LINES.with(|count| {
-        count.set(count.get().saturating_add(prefix_syntax_lines));
-    });
-    highlighter
-}
-
-fn cache_retained_file_checkpoint(
-    cache: &RetainedFileViewCache,
-    theme_id: usize,
-    line_index: usize,
-    highlighter: HighlightLines<'static>,
-    theme: &'static syntect::highlighting::Theme,
-) -> HighlightLines<'static> {
-    let (highlight_state, parse_state) = highlighter.state();
-    if line_index <= u16::MAX as usize {
-        let mut syntax = cache
-            .syntax
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if let Some(syntax) = syntax.as_mut().filter(|syntax| syntax.theme_id == theme_id) {
-            match syntax
-                .checkpoints
-                .binary_search_by_key(&line_index, |checkpoint| checkpoint.line_index)
-            {
-                Ok(_) => {}
-                Err(index) if syntax.checkpoints.len() < MAX_SYNTAX_CHECKPOINTS => {
-                    syntax.checkpoints.insert(
-                        index,
-                        SyntaxCheckpoint {
-                            line_index,
-                            highlight_state: highlight_state.clone(),
-                            parse_state: parse_state.clone(),
-                        },
-                    );
-                }
-                Err(_) => {}
-            }
-        }
-    }
-    HighlightLines::from_state(theme, highlight_state, parse_state)
-}
-
-fn retained_file_highlighter_at_line(
-    content: &TranscriptContent,
-    cache: &RetainedFileViewCache,
-    line_index: usize,
-    syntax: &'static syntect::parsing::SyntaxReference,
-    theme: &'static syntect::highlighting::Theme,
-) -> HighlightLines<'static> {
-    let theme_id = std::ptr::from_ref(theme) as usize;
-    let checkpoint = {
-        let mut retained = cache
-            .syntax
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if retained
-            .as_ref()
-            .is_none_or(|retained| retained.theme_id != theme_id)
-        {
-            let initial = HighlightLines::new(syntax, theme);
-            let (highlight_state, parse_state) = initial.state();
-            *retained = Some(DiffSyntaxCache {
-                theme_id,
-                checkpoints: vec![SyntaxCheckpoint {
-                    line_index: 0,
-                    highlight_state,
-                    parse_state,
-                }],
-            });
-        }
-        retained
-            .as_ref()
-            .and_then(|retained| {
-                retained
-                    .checkpoints
-                    .iter()
-                    .rev()
-                    .find(|checkpoint| checkpoint.line_index <= line_index)
-            })
-            .cloned()
-            .expect("retained file syntax cache contains its initial checkpoint")
-    };
-
-    let mut highlighter =
-        HighlightLines::from_state(theme, checkpoint.highlight_state, checkpoint.parse_state);
-    let content = content.read();
-    for index in checkpoint.line_index..line_index {
-        if index > checkpoint.line_index && index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
-            highlighter =
-                cache_retained_file_checkpoint(cache, theme_id, index, highlighter, theme);
-        }
-        let Some(line_range) = content.line_range(index) else {
-            break;
-        };
-        if line_range.len() > MAX_HIGHLIGHT_LINE_BYTES {
-            highlighter = HighlightLines::new(syntax, theme);
-            continue;
-        }
-        let line = content.slice(line_range);
-        advance_syntax_line(&mut highlighter, &line);
-    }
-    drop(content);
-    if line_index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
-        highlighter =
-            cache_retained_file_checkpoint(cache, theme_id, line_index, highlighter, theme);
-    }
-    highlighter
 }
 
 fn visit_render_span_rows(
@@ -1618,20 +1443,18 @@ pub fn print_retained_file_view(
         return emitted;
     }
 
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(syntax_ext)
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = syntax_theme(out.theme());
-    let theme_id = std::ptr::from_ref(theme) as usize;
-    let mut highlighter =
-        retained_file_highlighter_at_line(content, cache, first_line, syntax, theme);
+    let last_line = ranges.last().map_or(first_line, |range| range.line);
+    let highlighter = cache.highlighter(syntax_ext, || Syntax::for_ext(syntax_ext));
+    let syntax = retained_spans(
+        content,
+        &highlighter,
+        first_line..last_line + 1,
+        out.theme(),
+    );
+    let plain = source::plain_foreground(out.theme());
     let mut emitted = 0u16;
     out.mark_wrapped();
     for range in ranges {
-        if range.line > first_line && range.line.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
-            highlighter =
-                cache_retained_file_checkpoint(cache, theme_id, range.line, highlighter, theme);
-        }
         let Some(line_range) = content.read().line_range(range.line) else {
             break;
         };
@@ -1658,7 +1481,6 @@ pub fn print_retained_file_view(
                     visual_row = visual_row.saturating_add(1);
                 },
             );
-            highlighter = HighlightLines::new(syntax, theme);
             continue;
         }
 
@@ -1667,7 +1489,12 @@ pub fn print_retained_file_view(
             let line = read.slice(line_range);
             let expanded = line.contains('\t').then(|| line.replace('\t', "    "));
             let line = expanded.as_deref().unwrap_or(&line);
-            syntax_spans_for_line_with_highlights(&mut highlighter, line, &[])
+            syntax_spans_for_line_with_highlights(
+                line,
+                &syntax[range.line - first_line],
+                plain,
+                &[],
+            )
         };
         visit_render_span_rows(
             &spans,
@@ -1833,20 +1660,17 @@ pub fn print_retained_code_block(
         return emitted;
     }
 
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(super::lang_to_ext(lang))
-        .or_else(|| SYNTAX_SET.find_syntax_by_name(lang))
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = syntax_theme(out.theme());
-    let theme_id = std::ptr::from_ref(theme) as usize;
-    let mut highlighter =
-        retained_file_highlighter_at_line(content, cache, first_line, syntax, theme);
+    let last_line = ranges.last().map_or(first_line, |range| range.line);
+    let highlighter = cache.highlighter(lang, || Syntax::for_lang(lang));
+    let syntax = retained_spans(
+        content,
+        &highlighter,
+        first_line..last_line + 1,
+        out.theme(),
+    );
+    let plain = source::plain_foreground(out.theme());
     let mut emitted = 0u16;
     for range in ranges {
-        if range.line > first_line && range.line.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
-            highlighter =
-                cache_retained_file_checkpoint(cache, theme_id, range.line, highlighter, theme);
-        }
         let Some(line_range) = content.read().line_range(range.line) else {
             break;
         };
@@ -1869,12 +1693,16 @@ pub fn print_retained_code_block(
                     visual_row = visual_row.saturating_add(1);
                 },
             );
-            highlighter = HighlightLines::new(syntax, theme);
             continue;
         }
 
         let syntax_line = copy_line.as_ref();
-        let spans = syntax_spans_for_line_with_highlights(&mut highlighter, syntax_line, &[]);
+        let spans = syntax_spans_for_line_with_highlights(
+            syntax_line,
+            &syntax[range.line - first_line],
+            plain,
+            &[],
+        );
         visit_render_span_rows(
             &spans,
             usize::from(width),
@@ -1999,31 +1827,32 @@ pub fn print_diff_ir_with_width(
     // background (text still highlights via syntax colors).
     let palette = diff_palette(out.theme());
 
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(&cache.syntax_ext)
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let syntax_theme = syntax_theme(out.theme());
     let row_layout = diff_row_layout(cache, max_content);
     let Some(first_line_index) = row_layout.line_index_for_row(skip) else {
         smelt_perf::perf::record_value("render:inline_diff_cached:source_lines", 0);
         return 0;
     };
-    let mut h = highlighter_at_line(cache, first_line_index, syntax, syntax_theme);
-    let theme_id = std::ptr::from_ref(syntax_theme) as usize;
+    // Every line takes at least one row, so no later line can be emitted.
+    let line_end = cache
+        .lines
+        .len()
+        .min(first_line_index.saturating_add(usize::from(emit_limit)));
+    let syntax = diff_line_spans(cache, first_line_index..line_end, out.theme());
+    let plain = source::plain_foreground(out.theme());
 
     let mut seen_rows = row_layout.line_starts[first_line_index];
     let mut emitted = 0u16;
     let mut source_lines = 0u64;
-    'lines: for (line_index, line) in cache.lines.iter().enumerate().skip(first_line_index) {
+    'lines: for (line_index, line) in cache.lines[..line_end]
+        .iter()
+        .enumerate()
+        .skip(first_line_index)
+    {
         if emitted >= emit_limit {
             break;
         }
-        if line_index > first_line_index && line_index.is_multiple_of(SYNTAX_CHECKPOINT_INTERVAL) {
-            h = cache_syntax_checkpoint(cache, theme_id, line_index, h, syntax_theme);
-        }
         match line {
             DiffLine::Ellipsis => {
-                h = HighlightLines::new(syntax, syntax_theme);
                 if seen_rows < skip {
                     seen_rows = seen_rows.saturating_add(1);
                     continue;
@@ -2087,8 +1916,9 @@ pub fn print_diff_ir_with_width(
                 };
                 source_lines = source_lines.saturating_add(1);
                 let visual_rows = split_syntax_spans_into_rows_with_highlights(
-                    &mut h,
                     text,
+                    &syntax[line_index - first_line_index],
+                    plain,
                     highlights,
                     max_content,
                 );
@@ -2332,10 +2162,12 @@ pub enum SplitSide {
     Right,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_diff_line(
     out: &mut LineBuilder,
     text: &str,
-    h: &mut HighlightLines,
+    syntax: &[InlineSyntaxSpan],
+    plain: Color,
     bg: Option<Color>,
     inline_bg: Option<Color>,
     highlights: &[DiffByteRange],
@@ -2345,7 +2177,7 @@ fn paint_diff_line(
         out.fill_line_bg(bg);
     }
     out.set_source_line(source_line);
-    let spans = syntax_spans_for_line_with_highlights(h, text, highlights);
+    let spans = syntax_spans_for_line_with_highlights(text, syntax, plain, highlights);
     print_syntax_spans(out, &spans, bg, inline_bg);
     out.reset_style();
     out.newline();
@@ -2367,23 +2199,29 @@ pub fn print_split_diff_side(
     side: SplitSide,
 ) {
     let _perf = smelt_perf::perf::begin("render:split_diff_side");
-    let ext = syntax_ext.unwrap_or("txt");
-    let syntax = SYNTAX_SET
-        .find_syntax_by_extension(ext)
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = syntax_theme(out.theme());
-    let mut h = HighlightLines::new(syntax, theme);
-    let side_palette = diff_palette(out.theme()).split_side(side);
-    for row in &plan.rows {
-        let cell = match side {
+    fn cell(row: &SplitDiffRow, side: SplitSide) -> Option<&SplitDiffCell> {
+        match side {
             SplitSide::Left => row.left.as_ref(),
             SplitSide::Right => row.right.as_ref(),
-        };
-        match cell {
+        }
+    }
+    let texts: Vec<&str> = plan
+        .rows
+        .iter()
+        .filter_map(|row| cell(row, side).map(|cell| cell.text.as_str()))
+        .collect();
+    let mut syntax = SourceHighlighter::new(Syntax::for_ext(syntax_ext.unwrap_or("txt")))
+        .spans(&texts[..], 0..texts.len(), out.theme())
+        .into_iter();
+    let plain = source::plain_foreground(out.theme());
+    let side_palette = diff_palette(out.theme()).split_side(side);
+    for row in &plan.rows {
+        match cell(row, side) {
             Some(c) => paint_diff_line(
                 out,
                 &c.text,
-                &mut h,
+                &syntax.next().unwrap_or_default(),
+                plain,
                 if c.changed { side_palette.row_bg } else { None },
                 if c.changed {
                     side_palette.inline_bg
@@ -2654,14 +2492,22 @@ mod tests {
         assert!(saw_insert);
     }
 
+    fn plain_syntax() -> (impl Fn(&str) -> Vec<InlineSyntaxSpan>, Color) {
+        let theme = crate::theme::Theme::default();
+        let plain = source::plain_foreground(&theme);
+        (
+            move |line: &str| source::line_spans(Syntax::for_ext("txt"), line, &theme),
+            plain,
+        )
+    }
+
     #[test]
     fn syntax_spans_preserve_inline_highlight_metadata_when_wrapping() {
-        let theme = syntax_theme(&crate::theme::Theme::default());
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut h = HighlightLines::new(syntax, theme);
+        let (syntax, plain) = plain_syntax();
         let rows = split_syntax_spans_into_rows_with_highlights(
-            &mut h,
             "abcdef",
+            &syntax("abcdef"),
+            plain,
             &[DiffByteRange { start: 2, end: 5 }],
             3,
         );
@@ -2685,10 +2531,8 @@ mod tests {
 
     #[test]
     fn split_syntax_spans_into_rows_wraps_at_max_width() {
-        let theme = syntax_theme(&crate::theme::Theme::default());
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut h = HighlightLines::new(syntax, theme);
-        let rows = split_syntax_spans_into_rows(&mut h, "abcdefghij", 4);
+        let (syntax, plain) = plain_syntax();
+        let rows = split_syntax_spans_into_rows("abcdefghij", &syntax("abcdefghij"), plain, 4);
         assert_eq!(rows.len(), 3);
         let concat: String = rows
             .iter()
@@ -2702,20 +2546,16 @@ mod tests {
 
     #[test]
     fn split_syntax_spans_into_rows_counts_display_width() {
-        let theme = syntax_theme(&crate::theme::Theme::default());
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut h = HighlightLines::new(syntax, theme);
-        let rows = split_syntax_spans_into_rows(&mut h, "😀abc", 2);
+        let (syntax, plain) = plain_syntax();
+        let rows = split_syntax_spans_into_rows("😀abc", &syntax("😀abc"), plain, 2);
         assert_eq!(rows[0][0].text, "😀");
         assert_eq!(rows[1][0].text, "ab");
     }
 
     #[test]
     fn split_syntax_spans_into_rows_clamps_max_width_to_one() {
-        let theme = syntax_theme(&crate::theme::Theme::default());
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut h = HighlightLines::new(syntax, theme);
-        let rows = split_syntax_spans_into_rows(&mut h, "ab", 0);
+        let (syntax, plain) = plain_syntax();
+        let rows = split_syntax_spans_into_rows("ab", &syntax("ab"), plain, 0);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0].text, "a");
         assert_eq!(rows[1][0].text, "b");
@@ -2723,20 +2563,16 @@ mod tests {
 
     #[test]
     fn split_syntax_spans_into_rows_emits_empty_row_for_empty_input() {
-        let theme = syntax_theme(&crate::theme::Theme::default());
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut h = HighlightLines::new(syntax, theme);
-        let rows = split_syntax_spans_into_rows(&mut h, "", 4);
+        let (syntax, plain) = plain_syntax();
+        let rows = split_syntax_spans_into_rows("", &syntax(""), plain, 4);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].is_empty());
     }
 
     #[test]
     fn syntax_spans_for_line_returns_non_empty_for_plain_text() {
-        let theme = syntax_theme(&crate::theme::Theme::default());
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut h = HighlightLines::new(syntax, theme);
-        let spans = syntax_spans_for_line(&mut h, "hello world");
+        let (syntax, plain) = plain_syntax();
+        let spans = syntax_spans_for_line("hello world", &syntax("hello world"), plain);
         assert!(!spans.is_empty());
         let concat: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(concat, "hello world");
@@ -2744,10 +2580,8 @@ mod tests {
 
     #[test]
     fn syntax_spans_for_line_strips_trailing_newline_and_cr() {
-        let theme = syntax_theme(&crate::theme::Theme::default());
-        let syntax = SYNTAX_SET.find_syntax_plain_text();
-        let mut h = HighlightLines::new(syntax, theme);
-        let spans = syntax_spans_for_line(&mut h, "ab");
+        let (syntax, plain) = plain_syntax();
+        let spans = syntax_spans_for_line("ab", &syntax("ab"), plain);
         let concat: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert!(!concat.ends_with('\n'));
         assert!(!concat.ends_with('\r'));
@@ -3161,7 +2995,7 @@ mod tests {
         {
             let runtime = render_cache(&cache);
             assert!(!runtime.row_layouts.is_empty());
-            assert!(runtime.syntax.is_some());
+            assert!(runtime.sides.is_some());
         }
 
         let encoded = serde_json::to_string(&cache).unwrap();
@@ -3171,7 +3005,7 @@ mod tests {
         {
             let runtime = render_cache(&decoded);
             assert!(runtime.row_layouts.is_empty());
-            assert!(runtime.syntax.is_none());
+            assert!(runtime.sides.is_none());
         }
         assert_eq!(measure_diff_ir(&decoded, 80, GutterStyle::None, 0), 2);
     }
@@ -3336,41 +3170,29 @@ mod tests {
     }
 
     #[test]
-    fn deep_diff_ranges_reuse_bounded_syntax_checkpoints() {
+    fn deep_diff_ranges_reuse_the_cached_parse() {
         let content = (0..5_000)
             .map(|i| format!("let value_{i} = {i};"))
             .collect::<Vec<_>>()
             .join("\n");
-        let cache = build_file_view_ir(&content, Some("rs"));
-
-        render_test(80, |out| {
-            assert_eq!(
-                print_diff_ir(out, &cache, GutterStyle::None, 0, 4_000, 20),
-                20
-            );
-        });
-        PREFIX_SYNTAX_LINES.with(|count| count.set(0));
-        render_test(80, |out| {
-            assert_eq!(
-                print_diff_ir(out, &cache, GutterStyle::None, 0, 4_010, 20),
-                20
-            );
-        });
-
-        let scanned = PREFIX_SYNTAX_LINES.with(std::cell::Cell::get);
-        assert!(
-            scanned < SYNTAX_CHECKPOINT_INTERVAL,
-            "deep range replayed {scanned} prefix lines"
-        );
-        let runtime = render_cache(&cache);
-        let checkpoints = runtime
-            .syntax
-            .as_ref()
-            .expect("deep render syntax cache")
-            .checkpoints
-            .len();
-        assert!(checkpoints > 1);
-        assert!(checkpoints <= MAX_SYNTAX_CHECKPOINTS);
+        for ext in ["rs", "sh"] {
+            let cache = build_file_view_ir(&content, Some(ext));
+            render_test(80, |out| {
+                assert_eq!(
+                    print_diff_ir(out, &cache, GutterStyle::None, 0, 4_000, 20),
+                    20
+                );
+            });
+            source::PARSED_LINES.with(|count| count.set(0));
+            render_test(80, |out| {
+                assert_eq!(
+                    print_diff_ir(out, &cache, GutterStyle::None, 0, 4_010, 20),
+                    20
+                );
+            });
+            let parsed = source::PARSED_LINES.with(std::cell::Cell::get);
+            assert!(parsed < 160, "{ext}: deep range parsed {parsed} lines");
+        }
     }
 
     #[test]

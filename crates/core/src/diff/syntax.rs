@@ -3,7 +3,8 @@
 //! neither loading nor rendering waits for offscreen source processing.
 
 use smelt_buffer::document::ViewId;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,13 +14,14 @@ use syntect::parsing::Scope;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{inline, Diff, Kind};
-use crate::content::highlight::syntax::{syntax_scope_colors, SyntaxParser};
+use crate::content::highlight::sides::{DiffSides, RowSide};
+use crate::content::highlight::source::{stack_colors, Syntax};
 
 const CHUNK_ROWS: usize = 128;
 const CACHE_CHUNKS: usize = 64;
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
-const CHECKPOINT_ROWS: usize = 4096;
-const CHECKPOINTS: usize = 256;
+// Files whose parses stay warm, so switching back to one does not seek again.
+const PARSED_FILES: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Request {
@@ -70,7 +72,7 @@ impl Chunk {
         if cached.0 != theme.revision() {
             let backgrounds = ["Normal", "SmeltDiffAddBg", "SmeltDiffDeleteBg"]
                 .map(|name| theme.resolve(intern(name)).bg);
-            let colors: Vec<_> = syntax_scope_colors(&self.scopes, theme)
+            let colors: Vec<_> = stack_colors(&self.scopes, theme)
                 .into_iter()
                 .map(|fg| {
                     backgrounds.map(|bg| {
@@ -156,6 +158,8 @@ struct State {
     clock: u64,
     bytes: usize,
     wakeup: Option<UnboundedSender<()>>,
+    /// The worker is waiting with no visible or speculative work left.
+    idle: bool,
 }
 
 impl State {
@@ -311,9 +315,21 @@ impl SyntaxCache {
         height: usize,
     ) {
         let visible = requests(diff, rows);
+        // Warm the chunks just above and below the viewport, so scrolling
+        // reveals rows that are already highlighted.
+        let neighbors = visible
+            .first()
+            .map(|first| first.start.saturating_sub(CHUNK_ROWS)..first.start)
+            .into_iter()
+            .chain(
+                visible
+                    .last()
+                    .map(|last| last.end..(last.end + CHUNK_ROWS).min(diff.lines.len())),
+            )
+            .flatten();
         // Warm only the initial one or two chunks of adjacent files. Seeking to
         // the tail of a huge folded neighbor is not speculative viewport work.
-        let prefetch = selected
+        let adjacent_files = selected
             .into_iter()
             .flat_map(|file| {
                 [file.checked_sub(1), file.checked_add(1)]
@@ -331,7 +347,7 @@ impl SyntaxCache {
             .flatten();
         let demand = Demand {
             visible,
-            prefetch: requests(diff, prefetch),
+            prefetch: requests(diff, neighbors.chain(adjacent_files)),
         };
         let mut state = self.shared.state.lock().unwrap();
         if state.views.get(&view) != Some(&demand) {
@@ -379,6 +395,13 @@ impl SyntaxCache {
             state.views.len(),
             state.wanted.iter().map(|r| r.start..r.end).collect(),
         )
+    }
+
+    /// No visible or prefetch work is queued or running.
+    #[cfg(test)]
+    pub fn settled(&self, diff: &Diff) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        self.shared.stopped.load(Ordering::Acquire) || (state.idle && state.next(diff).is_none())
     }
 
     #[cfg(test)]
@@ -456,49 +479,44 @@ fn interrupted(
             .is_some_and(|next| state.priority(diff, next) < state.priority(diff, request))
 }
 
-#[derive(Clone)]
-struct Cursor {
-    file: usize,
-    row: usize,
-    old: SyntaxParser,
-    new: SyntaxParser,
+/// Both sides of `file`, highlighted over the rows of the patch.
+fn file_sides(diff: &Diff, file: usize) -> DiffSides {
+    let meta = &diff.files[file];
+    let end = diff
+        .files
+        .get(file + 1)
+        .map_or(diff.lines.len(), |f| f.start);
+    let rows = (meta.start..end).filter_map(|raw| {
+        let side = match diff.lines[raw].kind {
+            Kind::Hunk => RowSide::Gap,
+            Kind::Context => RowSide::Both,
+            Kind::Add => RowSide::New,
+            Kind::Delete => RowSide::Old,
+            _ => return None,
+        };
+        Some((raw, side))
+    });
+    DiffSides::new(
+        [
+            Syntax::for_path(&meta.old_path),
+            Syntax::for_path(&meta.path),
+        ],
+        rows,
+    )
 }
 
-impl Cursor {
-    fn new(diff: &Diff, file: usize) -> Self {
-        let meta = &diff.files[file];
-        Self {
-            file,
-            row: meta.start,
-            old: SyntaxParser::for_path(&meta.old_path),
-            new: SyntaxParser::for_path(&meta.path),
-        }
-    }
-
-    fn advance(&mut self, diff: &Diff, mut emit: impl FnMut(Range<usize>, &[Scope])) {
-        let line = diff.lines[self.row];
-        let source = diff.source(self.row, true);
-        match line.kind {
-            Kind::Hunk => {
-                self.old = SyntaxParser::for_path(&diff.files[self.file].old_path);
-                self.new = SyntaxParser::for_path(&diff.files[self.file].path);
-            }
-            Kind::Context => {
-                self.old.line(source, |_, _| {});
-                self.new.line(source, &mut emit);
-            }
-            Kind::Add => self.new.line(source, &mut emit),
-            Kind::Delete => self.old.line(source, &mut emit),
-            _ => {}
-        }
-        self.row += 1;
-    }
+/// Source text of a patch row; hunk headers and other rows are gaps.
+fn row_text(diff: &Diff, raw: usize) -> Option<Cow<'_, str>> {
+    matches!(
+        diff.lines[raw].kind,
+        Kind::Add | Kind::Delete | Kind::Context
+    )
+    .then(|| Cow::Borrowed(diff.source(raw, false)))
 }
 
 fn run(diff: Arc<Diff>, shared: Arc<Shared>) {
-    let mut checkpoints: BTreeMap<usize, (u64, Cursor)> = BTreeMap::new();
-    let mut frontier: Option<Cursor> = None;
-    let mut clock = 0u64;
+    // Most recently used last.
+    let mut files: Vec<(usize, DiffSides)> = Vec::new();
     loop {
         let (request, version, inline) = {
             let mut state = shared.state.lock().unwrap();
@@ -507,12 +525,14 @@ fn run(diff: Arc<Diff>, shared: Arc<Shared>) {
                     return;
                 }
                 if let Some(request) = state.next(&diff) {
+                    state.idle = false;
                     let inline = state
                         .chunks
                         .get(&request.start)
                         .map(|(_, chunk)| Arc::clone(&chunk.inline));
                     break (request, shared.request.load(Ordering::Acquire), inline);
                 }
+                state.idle = true;
                 state = shared.changed.wait(state).unwrap();
             }
         };
@@ -543,98 +563,73 @@ fn run(diff: Arc<Diff>, shared: Arc<Shared>) {
             }
             continue;
         };
-        clock += 1;
-        let checkpoint = checkpoints
-            .range_mut(diff.files[request.file].start..=request.start)
-            .next_back()
-            .filter(|(_, (_, cursor))| cursor.file == request.file)
-            .map(|(_, (stamp, cursor))| {
-                *stamp = clock;
-                cursor.clone()
-            });
-        let mut cursor = match frontier
-            .take()
-            .filter(|c| c.file == request.file && c.row <= request.start)
-        {
-            Some(cursor) if checkpoint.as_ref().is_none_or(|c| c.row <= cursor.row) => cursor,
-            _ => checkpoint.unwrap_or_else(|| Cursor::new(&diff, request.file)),
+        let at = match files.iter().position(|(file, _)| *file == request.file) {
+            Some(at) => at,
+            None => {
+                if files.len() == PARSED_FILES {
+                    files.remove(0);
+                }
+                files.push((request.file, file_sides(&diff, request.file)));
+                files.len() - 1
+            }
         };
-        let mut ids: HashMap<Vec<Scope>, usize> = HashMap::new();
-        let mut spans: Vec<SyntaxRange> = Vec::new();
-        let mut interrupted = false;
-        while cursor.row < request.end {
-            if cursor.row.is_multiple_of(32) {
-                if shared.stopped.load(Ordering::Acquire) {
-                    return;
-                }
-                if self::interrupted(&shared, &diff, request, &version) {
-                    interrupted = true;
-                    break;
-                }
-            }
-            let raw = cursor.row;
-            let line = diff.lines[raw];
-            cursor.advance(&diff, |range, scopes| {
-                if raw < request.start {
-                    return;
-                }
-                let end = (line.start + range.end).min(line.end);
-                if line.start + range.start >= end {
-                    return;
-                }
-                let id = if let Some(id) = ids.get(scopes) {
-                    *id
-                } else {
-                    let id = ids.len();
-                    ids.insert(scopes.to_vec(), id);
-                    id
-                };
-                if let Some(last) = spans.last_mut().filter(|s| s.scope == id) {
-                    last.end = end;
-                } else {
-                    spans.push(SyntaxRange { end, scope: id });
-                }
-            });
-            #[cfg(test)]
-            shared.parsed_rows.fetch_add(1, Ordering::Relaxed);
-            if cursor.row.is_multiple_of(CHECKPOINT_ROWS) {
-                checkpoints.insert(cursor.row, (clock, cursor.clone()));
-                if checkpoints.len() > CHECKPOINTS {
-                    let key = *checkpoints
-                        .iter()
-                        .min_by_key(|(_, (stamp, _))| stamp)
-                        .unwrap()
-                        .0;
-                    checkpoints.remove(&key);
-                }
-            }
-        }
-        // Retain progress even if a newer viewport preempted a distant seek.
-        if cursor.row <= request.start || !interrupted {
-            frontier = Some(cursor);
-        }
-        if interrupted {
+        let entry = files.remove(at);
+        files.push(entry);
+        let sides = &files.last().unwrap().1;
+        #[cfg(test)]
+        let parsed = crate::content::highlight::source::PARSED_LINES.with(std::cell::Cell::get);
+        let scoped = sides.scopes(
+            |raw| row_text(&diff, raw),
+            request.start..request.end,
+            &mut || interrupted(&shared, &diff, request, &version),
+        );
+        #[cfg(test)]
+        shared.parsed_rows.fetch_add(
+            (crate::content::highlight::source::PARSED_LINES.with(std::cell::Cell::get) - parsed)
+                as u64,
+            Ordering::Relaxed,
+        );
+        let Some(scoped) = scoped else {
             continue;
-        }
-        let mut scopes = vec![Vec::new(); ids.len()];
-        for (stack, id) in ids {
-            scopes[id] = stack;
-        }
-        let chunk = Chunk {
-            raw: request.start..request.end,
-            spans,
-            inline,
-            syntax_ready: true,
-            scopes,
-            colors: Mutex::new((0, Arc::default())),
         };
-        let mut state = shared.state.lock().unwrap();
-        state.publish(chunk);
-        shared.generation.fetch_add(1, Ordering::Release);
-        if state.wanted.contains(&request) {
-            if let Some(wakeup) = &state.wakeup {
-                let _ = wakeup.send(());
+        let mut spans: Vec<SyntaxRange> = Vec::new();
+        for (raw, runs) in (request.start..).zip(&scoped.lines) {
+            let start = diff.lines[raw].start;
+            for &(end, scope) in runs {
+                match spans.last_mut() {
+                    Some(last) if last.scope == scope => last.end = start + end,
+                    _ => spans.push(SyntaxRange {
+                        end: start + end,
+                        scope,
+                    }),
+                }
             }
+        }
+        let scopes = scoped.stacks;
+        publish_syntax(&shared, request, spans, scopes, inline);
+    }
+}
+
+fn publish_syntax(
+    shared: &Shared,
+    request: Request,
+    spans: Vec<SyntaxRange>,
+    scopes: Vec<Vec<Scope>>,
+    inline: Arc<[inline::InlineRow]>,
+) {
+    let mut state = shared.state.lock().unwrap();
+    state.publish(Chunk {
+        raw: request.start..request.end,
+        spans,
+        inline,
+        syntax_ready: true,
+        scopes,
+        colors: Mutex::new((0, Arc::default())),
+    });
+    shared.generation.fetch_add(1, Ordering::Release);
+    if state.wanted.contains(&request) {
+        if let Some(wakeup) = &state.wakeup {
+            let _ = wakeup.send(());
         }
     }
 }

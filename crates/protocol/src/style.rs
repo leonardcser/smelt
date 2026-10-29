@@ -19,7 +19,7 @@ fn is_true(v: &bool) -> bool {
 /// One styled run of characters. `text` is the only required field; the
 /// rest are optional decoration that the renderer applies on top.
 ///
-/// `syntax` runs `text` through `InlineSyntax` for that language and
+/// `syntax` highlights `text` as a line of that language and
 /// overrides per-character fg; `style` modifiers (dim/bold/italic) stack.
 /// `selectable = false` marks chrome text that should render but be omitted
 /// from selection/copy. `title_suffix = true` marks summary metadata that renders
