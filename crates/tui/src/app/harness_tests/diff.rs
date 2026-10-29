@@ -3169,3 +3169,33 @@ fn diff_viewer_benchmark() {
         }
     }
 }
+
+#[test]
+fn diff_search_keeps_preview_focus_across_repeated_searches() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(110, 28);
+    open_fixture(&mut app, 1000);
+    let win = preview(&app);
+    for _ in 0..2 {
+        app.type_text("gg/last change");
+        app.press(KeyCode::Enter);
+        app.render_silent();
+        assert_eq!(app.ui_probe().focus(), Some(win));
+        assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), 1007);
+    }
+    app.type_text("gg/9a");
+    app.press(KeyCode::Enter);
+    let first = app.ui_probe().win(win).unwrap().cursor_abs_row();
+    for step in 1..=3 {
+        app.type_char('n');
+        app.render_silent();
+        assert_eq!(
+            app.ui_probe().win(win).unwrap().cursor_abs_row(),
+            first + step
+        );
+    }
+    app.type_char('N');
+    app.render_silent();
+    assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), first + 2);
+    assert_eq!(app.ui_probe().focus(), Some(win));
+}

@@ -1417,7 +1417,13 @@ impl Ui {
                 }
             }
         }
-        if self.active_modal().is_some() {
+        // A restored leaf inside the active modal keeps focus; only stray focus
+        // moves to the modal's default leaf.
+        let focus_in_modal = self
+            .active_modal()
+            .and_then(|modal| self.modal(modal))
+            .is_some_and(|modal| self.focus.is_some_and(|focus| modal.contains(focus)));
+        if self.active_modal().is_some() && !focus_in_modal {
             self.focus_active_modal();
         }
         Some(removed)
@@ -5090,6 +5096,23 @@ mod tests {
             ui.raise_overlay_to_front(overlay);
             assert_eq!(ui.focus(), Some(first));
         }
+    }
+
+    #[test]
+    fn closing_a_stacked_modal_returns_focus_to_the_leaf_that_opened_it() {
+        let mut ui = make_ui();
+        let [first, second, third, prompt] = [WinId(100), WinId(101), WinId(102), WinId(103)];
+        for win in [first, second, third, prompt] {
+            register_window(&mut ui, win);
+        }
+        ui.overlay_open(modal_overlay_with_leaves(first, second, third));
+        assert!(ui.set_focus(second));
+        let stacked = ui.overlay_open(
+            Overlay::new(LayoutTree::leaf(prompt), layout::Anchor::ScreenCenter).modal(true),
+        );
+        assert_eq!(ui.focus(), Some(prompt));
+        ui.overlay_close(stacked);
+        assert_eq!(ui.focus(), Some(second));
     }
 
     #[test]

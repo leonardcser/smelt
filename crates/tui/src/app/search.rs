@@ -920,7 +920,12 @@ impl TuiApp {
         let Some(session) = self.overlays.search_session() else {
             return FullSearchRefresh::Unchanged;
         };
-        let SearchBackend::Full { changedtick, .. } = &session.backend else {
+        let SearchBackend::Full {
+            changedtick,
+            matches,
+            current,
+        } = &session.backend
+        else {
             return FullSearchRefresh::Unchanged;
         };
         let Some(buf_tick) = self.ui.buf(session.target_buf).map(Buffer::changedtick) else {
@@ -931,6 +936,20 @@ impl TuiApp {
         }
 
         let query = session.query.clone();
+        // Native documents reinstall their viewport projection on every scroll,
+        // so the tick alone cannot tell a rewrite from movement. A current match
+        // that still holds the query means the text it was found in is intact.
+        let current_range = current
+            .and_then(|index| matches.get(index))
+            .and_then(TextRange::rows);
+        if let Some(range) = current_range {
+            let (matches, current) = (matches.clone(), *current);
+            if self.search_match_is_intact(target, &query, range) {
+                self.overlays
+                    .refresh_full_search(matches, current, buf_tick);
+                return FullSearchRefresh::Unchanged;
+            }
+        }
         let origin = self.search_origin(target).unwrap_or_default();
         let range = self.search_next_match(target, &query, origin, direction);
         let matches = range.map(TextRange::Rows).into_iter().collect::<Vec<_>>();
@@ -938,6 +957,21 @@ impl TuiApp {
         self.overlays
             .refresh_full_search(matches, current, buf_tick);
         FullSearchRefresh::Changed(range)
+    }
+
+    fn search_match_is_intact(&mut self, target: WinId, query: &str, range: DocRange) -> bool {
+        self.with_display_document_for_win(target, |document| {
+            let row = range.start.row;
+            document
+                .materialize(row..row.saturating_add(1))
+                .rows
+                .first()
+                .is_some_and(|display| {
+                    crate::smelt_edit::display_row_matches(display, row, query)
+                        .any(|found| found == range)
+                })
+        })
+        .unwrap_or(false)
     }
 
     /// Leaves the position a search starts from in the window's jump list.
