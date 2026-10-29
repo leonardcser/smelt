@@ -3151,9 +3151,12 @@ fn transcript_render_ctx_to_lua_table(
         transcript_limit(configured_limits.as_ref(), "tool_rows")?.unwrap_or(default_rows);
 
     let limits = lua.create_table()?;
+    if let Some(rows) = transcript_limit(configured_limits.as_ref(), "tool_header_rows")? {
+        limits.set("tool_header_rows", rows)?;
+    }
     limits.set(
-        "tool_header_rows",
-        transcript_limit(configured_limits.as_ref(), "tool_header_rows")?.unwrap_or(tool_rows),
+        "collapsed_header_rows",
+        transcript_limit(configured_limits.as_ref(), "collapsed_header_rows")?.unwrap_or(4),
     )?;
     limits.set(
         "tool_body_rows",

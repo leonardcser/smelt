@@ -107,8 +107,12 @@ smelt.settings.transcript = {
 - `view` sets the default fold state (`"collapsed"`, `"peek"` or `"expanded"`)
   for block kinds, tools and groups. Use `false` for a group to switch it off.
 - `limits` caps how many rows tool output and thinking previews show:
-  `tool_rows`, `tool_header_rows`, `tool_body_rows`, `tool_output_rows`,
-  `collapsed_error_rows`, `thinking_peek_rows` and `thinking_peek_head_rows`.
+  `tool_rows`, `tool_body_rows`, `tool_output_rows`, `collapsed_error_rows`,
+  `thinking_peek_rows` and `thinking_peek_head_rows`. `tool_rows` is the
+  default for the body and output caps.
+- Tool headers, such as a long bash command, show `collapsed_header_rows` rows
+  (default 4) while the block is collapsed, and in full once it is expanded.
+  Set `tool_header_rows` to cap expanded headers too.
 - `show_timestamps = false` hides timestamps on messages and tool calls. Tool
   durations stay visible.
 

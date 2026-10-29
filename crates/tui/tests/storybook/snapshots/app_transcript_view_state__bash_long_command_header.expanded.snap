@@ -1,0 +1,18 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash line one                                                              14:37:03
+       line two
+       line three
+       line four
+       line five
+       line six
+       line seven
+  done
+
+
+─ ● … ────────────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                     1:1 100%

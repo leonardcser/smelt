@@ -2131,9 +2131,6 @@ mod tests {
             spec.rest.iter().any(|span| !span.text.is_empty()),
             "expected continued header rows to keep prefix indentation"
         );
-        let BlockLayout::Cap { child, .. } = child.as_ref() else {
-            panic!("expected capped header, got {child:?}");
-        };
         let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = child.as_ref() else {
             panic!("expected Lua-owned runs header, got {child:?}");
         };

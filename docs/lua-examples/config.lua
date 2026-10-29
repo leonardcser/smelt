@@ -166,9 +166,9 @@ smelt.settings.transcript = {
   },
   limits = {
     tool_rows = 20,
-    tool_header_rows = 20,
     tool_body_rows = 20,
     tool_output_rows = 20,
+    collapsed_header_rows = 4,
     collapsed_error_rows = 4,
     thinking_peek_rows = 4,
     thinking_peek_head_rows = 1,

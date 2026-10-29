@@ -291,12 +291,14 @@ function M.render_tool_header(block, ctx, opts, presentation)
       },
     })
   end
+  local limits = ctx.limits or {}
+  local header_rows = limits.tool_header_rows
+  if ctx.view_state == "collapsed" then header_rows = limits.collapsed_header_rows or 4 end
+  if header_rows then
+    header = layout.cap(header, { rows = header_rows, keep = "head", marker = "below" })
+  end
   header = layout.row_prefix(
-    layout.cap(header, {
-      rows = (ctx.limits and ctx.limits.tool_header_rows) or 20,
-      keep = "head",
-      marker = "below",
-    }),
+    header,
     {
       first = tool_header_prefix(block, hl, tail, has_summary),
       rest = tool_header_rest_prefix(block),

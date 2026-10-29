@@ -506,9 +506,9 @@ fn default_config_lua() -> String {
     lua.push_str("  },\n");
     lua.push_str("  limits = {\n");
     lua.push_str("    tool_rows = 20,\n");
-    lua.push_str("    tool_header_rows = 20,\n");
     lua.push_str("    tool_body_rows = 20,\n");
     lua.push_str("    tool_output_rows = 20,\n");
+    lua.push_str("    collapsed_header_rows = 4,\n");
     lua.push_str("    collapsed_error_rows = 4,\n");
     lua.push_str("    thinking_peek_rows = 4,\n");
     lua.push_str("    thinking_peek_head_rows = 1,\n");

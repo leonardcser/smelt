@@ -164,26 +164,32 @@ app_story!(bash_multiline_header_indent, |ctx| {
     ctx.assert_snapshot();
 });
 
-app_story!(bash_multiline_header_capped, |ctx| {
-    ctx.set_viewport(86, 12);
+app_story!(bash_long_command_header, |ctx| {
+    ctx.set_viewport(86, 14);
+    ctx.tool_call(
+        "bash",
+        &[(
+            "command",
+            json!("line one\nline two\nline three\nline four\nline five\nline six\nline seven"),
+        )],
+        "done",
+        Some(42_000),
+    );
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+
     ctx.run_lua(
         r#"
         smelt.settings.transcript = {
           limits = { tool_header_rows = 3 },
         }
         smelt.transcript.invalidate_renderer()
+        smelt.transcript.fold_all('open')
         "#,
     );
-    ctx.tool_call(
-        "bash",
-        &[(
-            "command",
-            json!("line one\nline two\nline three\nline four\nline five\nline six"),
-        )],
-        "done",
-        Some(42_000),
-    );
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded_capped");
 });
 
 app_story!(transcript_settings_view_and_limits, |ctx| {
