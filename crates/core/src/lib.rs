@@ -5,9 +5,10 @@ extern crate self as smelt_core;
 
 #[cfg(test)]
 #[global_allocator]
-static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
+static GLOBAL_ALLOCATOR: allocator::Allocator = allocator::ALLOCATOR;
 
 pub mod agents;
+pub mod allocator;
 pub mod commands;
 pub mod config;
 pub mod confirms;

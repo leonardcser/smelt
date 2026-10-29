@@ -4,9 +4,9 @@ Lightweight allocation and timing instrumentation.
 
 Two coordinated pieces:
 
-- `alloc::Counting`: a global allocator shim that bumps process and
-  per-thread counters when `alloc::enable()` has been called. Cheap when
-  disabled.
+- `alloc::Counting`: a global allocator shim around any `GlobalAlloc`
+  (`System` by default) that bumps process and per-thread counters when
+  `alloc::enable()` has been called. Cheap when disabled.
 - `perf::begin`: RAII scope guards that record duration and per-thread
   alloc deltas under a `&'static str` label. Snapshot via
   `perf::snapshot`, pretty-print via `perf::print_summary`.
@@ -18,9 +18,10 @@ interesting scopes.
 
 ```rust
 use smelt_perf::{alloc, perf};
+use std::alloc::System;
 
 #[global_allocator]
-static A: alloc::Counting = alloc::Counting;
+static A: alloc::Counting = alloc::Counting::new(System);
 
 fn main() {
     alloc::enable();

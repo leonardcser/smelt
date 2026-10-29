@@ -49,10 +49,8 @@ detect_target() {
 
 	case "$os" in
 	Linux)
-		if ldd --version 2>&1 | grep -qi musl; then
-			die "musl libc is not supported; install from source with cargo"
-		fi
-		echo "$arch-unknown-linux-gnu"
+		# Statically linked, so it runs on glibc and musl distributions alike.
+		echo "$arch-unknown-linux-musl"
 		;;
 	Darwin)
 		# An x86_64 shell under Rosetta still runs the native arm64 build.
@@ -83,9 +81,18 @@ main() {
 	tmp="$(mktemp -d)"
 	trap 'rm -rf "$tmp"' EXIT INT TERM
 
+	fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
+	# Older releases only published glibc-linked Linux archives.
+	case "$target" in
+	*-linux-musl)
+		if ! grep -q " $archive\$" "$tmp/SHA256SUMS"; then
+			archive="smelt-${target%-musl}-gnu.tar.gz"
+		fi
+		;;
+	esac
+
 	say "downloading $archive"
 	fetch "$base/$archive" "$tmp/$archive" || die "download failed: $base/$archive"
-	fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
 
 	expected="$(grep " $archive\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)"
 	[ -n "$expected" ] || die "$archive is missing from SHA256SUMS"

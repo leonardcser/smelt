@@ -325,7 +325,7 @@ async fn install_release(
     // filesystem, and fails before any download when the directory is not
     // writable.
     let staging = Staging::create(exe)?;
-    let asset = format!("smelt-{target}.tar.gz");
+    let asset = release_asset(target);
     let base = format!("{web}/releases/download/{tag}");
     eprintln!("downloading {asset} from {tag}...");
     let sums = download(client, &format!("{base}/SHA256SUMS"), REQUEST_TIMEOUT).await?;
@@ -361,6 +361,15 @@ async fn download(
 }
 
 /// Checksum listed for `file` in `sha256sum` output.
+/// Release archive for a build target. Linux releases are static musl
+/// builds, so glibc builds from source upgrade to the same archive.
+fn release_asset(target: &str) -> String {
+    let target = target
+        .strip_suffix("-linux-gnu")
+        .map_or_else(|| target.to_string(), |arch| format!("{arch}-linux-musl"));
+    format!("smelt-{target}.tar.gz")
+}
+
 fn checksum_for(sums: &str, file: &str) -> Option<String> {
     sums.lines().find_map(|line| {
         let (hash, name) = line.trim().split_once(char::is_whitespace)?;
@@ -690,7 +699,7 @@ mod tests {
             &format!("v{version}"),
             &format!("v{version}"),
             "abc1234",
-            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
         )
     }
 
@@ -795,7 +804,7 @@ mod tests {
             "v0.6.2",
             "v0.6.2-5-abc1234",
             "abc1234",
-            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
         );
         assert!(!build.release);
         assert_eq!(build.version, Version::new(0, 6, 2));
@@ -808,15 +817,36 @@ mod tests {
     }
 
     #[test]
+    fn linux_builds_upgrade_to_the_static_release_archive() {
+        for (target, asset) in [
+            (
+                "x86_64-unknown-linux-gnu",
+                "smelt-x86_64-unknown-linux-musl.tar.gz",
+            ),
+            (
+                "aarch64-unknown-linux-musl",
+                "smelt-aarch64-unknown-linux-musl.tar.gz",
+            ),
+            ("aarch64-apple-darwin", "smelt-aarch64-apple-darwin.tar.gz"),
+            (
+                "x86_64-pc-windows-msvc",
+                "smelt-x86_64-pc-windows-msvc.tar.gz",
+            ),
+        ] {
+            assert_eq!(release_asset(target), asset);
+        }
+    }
+
+    #[test]
     fn checksums_match_by_exact_file_name() {
         let sums = "AAAA  smelt-aarch64-apple-darwin.tar.gz\n\
-                    bbbb *smelt-x86_64-unknown-linux-gnu.tar.gz\n";
+                    bbbb *smelt-x86_64-unknown-linux-musl.tar.gz\n";
         assert_eq!(
             checksum_for(sums, "smelt-aarch64-apple-darwin.tar.gz").as_deref(),
             Some("aaaa")
         );
         assert_eq!(
-            checksum_for(sums, "smelt-x86_64-unknown-linux-gnu.tar.gz").as_deref(),
+            checksum_for(sums, "smelt-x86_64-unknown-linux-musl.tar.gz").as_deref(),
             Some("bbbb")
         );
         assert_eq!(checksum_for(sums, "smelt-x86_64-apple-darwin.tar.gz"), None);
@@ -951,7 +981,7 @@ mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
-        const TARGET: &str = "x86_64-unknown-linux-gnu";
+        const TARGET: &str = "x86_64-unknown-linux-musl";
 
         fn executable(path: &Path, contents: &str) {
             fs::write(path, contents).unwrap();

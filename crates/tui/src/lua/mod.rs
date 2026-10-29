@@ -3601,7 +3601,7 @@ mod tests {
             &rt,
             r#"
                 _G.cli.check = failure("error: github request failed: dns error\n")
-                _G.cli.install = failure("downloading smelt-x86_64-unknown-linux-gnu.tar.gz from v0.6.3...\nerror: cannot write to /opt/smelt/bin, where smelt is installed: Permission denied (os error 13)\n")
+                _G.cli.install = failure("downloading smelt-x86_64-unknown-linux-musl.tar.gz from v0.6.3...\nerror: cannot write to /opt/smelt/bin, where smelt is installed: Permission denied (os error 13)\n")
             "#,
         );
 

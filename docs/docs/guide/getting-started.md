@@ -25,7 +25,9 @@ description: "Install smelt on Linux, macOS or Windows, log in with ChatGPT, Git
 
     Grab the latest binary for Linux or macOS (`x86_64` or `aarch64`), or
     Windows (`x86_64`), from
-    [GitHub Releases](https://github.com/leonardcser/smelt/releases).
+    [GitHub Releases](https://github.com/leonardcser/smelt/releases). Linux
+    binaries are statically linked and run on any distribution, including
+    Alpine.
 
     Linux and macOS:
 

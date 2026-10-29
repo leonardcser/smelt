@@ -110,6 +110,43 @@ jobs:
             docs/zensical.toml \
             || (echo "::error::Generated Lua documentation is out of date. Run 'cargo xtask gen-lua-docs' and commit." && exit 1)
 
+  linux-static:
+    name: Linux static build
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -D warnings
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pinned Rust
+        run: |
+          rustup toolchain install
+          rustup target add $TARGET
+
+      - name: Install musl C toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-static
+
+      - name: Build
+        run: cargo build --locked --bin smelt --target $TARGET
+
+      - name: Run in Alpine
+        run: |
+          set -euo pipefail
+          BINARY="$PWD/target/$TARGET/debug/smelt"
+          if readelf --program-headers "$BINARY" | grep -q INTERP; then
+            echo "binary requests a dynamic loader" >&2
+            exit 1
+          fi
+          docker run --rm -v "$BINARY:/smelt:ro" alpine:3 /smelt --version
+
   latest-stable:
     name: Latest stable compatibility
     if: github.event_name != 'pull_request_target'

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[global_allocator]
-static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
+static ALLOCATOR: smelt_core::allocator::Allocator = smelt_core::allocator::ALLOCATOR;
 
 #[derive(Parser)]
 #[command(name = "smelt", about = "Coding agent TUI", version = tui::DISPLAY)]
@@ -998,6 +998,7 @@ fn restore_canonical_session_cwd_for_launch(
 }
 
 fn main() {
+    smelt_core::allocator::configure();
     upgrade::cleanup_stale_staging();
     std::panic::set_hook(Box::new(|info| {
         let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);

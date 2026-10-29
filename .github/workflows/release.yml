@@ -89,12 +89,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-            artifact: smelt-x86_64-unknown-linux-gnu.tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
-            artifact: smelt-aarch64-unknown-linux-gnu.tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            artifact: smelt-x86_64-unknown-linux-musl.tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            artifact: smelt-aarch64-unknown-linux-musl.tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: smelt-x86_64-apple-darwin.tar.gz
@@ -124,12 +124,11 @@ jobs:
           git tag --points-at HEAD | grep -Fx "$GITHUB_REF_NAME"
           test -z "$(git status --porcelain)"
 
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install musl C toolchain
+        if: endsWith(matrix.target, '-linux-musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          sudo apt-get install -y musl-tools
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -145,41 +144,35 @@ jobs:
           SMELT_RELEASE_TAG: ${{ github.ref_name }}
         run: cargo build --locked --profile dist --bin smelt --target ${{ matrix.target }}
 
-      - name: Verify Linux glibc baseline
-        if: endsWith(matrix.target, '-linux-gnu')
-        env:
-          RELEASE_TARGET: ${{ matrix.target }}
+      - name: Verify static Linux binary
+        if: endsWith(matrix.target, '-linux-musl')
         run: |
-          python3 - <<'PY'
-          import os
-          import re
-          import subprocess
-
-          binary = f"target/{os.environ['RELEASE_TARGET']}/dist/smelt"
-          versions = subprocess.check_output(["readelf", "--version-info", binary], text=True)
-          required = set(re.findall(r"Name: (GLIBC_[^\s]+)", versions))
-          unsupported = []
-          for version in required:
-              suffix = version.removeprefix("GLIBC_")
-              if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", suffix):
-                  unsupported.append(version)
-              elif tuple(map(int, suffix.split("."))) > (2, 35):
-                  unsupported.append(version)
-          if unsupported:
-              raise SystemExit(f"binary exceeds glibc 2.35 baseline: {sorted(unsupported)}")
-          print(f"Verified glibc requirements: {sorted(required)}")
-          PY
+          set -euo pipefail
+          BINARY="target/${{ matrix.target }}/dist/smelt"
+          if readelf --program-headers "$BINARY" | grep -q INTERP; then
+            echo "binary requests a dynamic loader" >&2
+            exit 1
+          fi
+          if readelf --dynamic "$BINARY" | grep -q NEEDED; then
+            echo "binary links shared libraries:" >&2
+            readelf --dynamic "$BINARY" | grep NEEDED >&2
+            exit 1
+          fi
 
       - name: Smoke-test native binary identity
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: endsWith(matrix.target, '-linux-musl')
         run: |
           set -euo pipefail
           EXPECTED="smelt v${GITHUB_REF_NAME#v}"
-          ACTUAL="$(target/${{ matrix.target }}/dist/smelt --version)"
-          test "$ACTUAL" = "$EXPECTED" || {
-            echo "expected '$EXPECTED', got '$ACTUAL'" >&2
-            exit 1
-          }
+          BINARY="$PWD/target/${{ matrix.target }}/dist/smelt"
+          for ACTUAL in \
+            "$("$BINARY" --version)" \
+            "$(docker run --rm -v "$BINARY:/smelt:ro" alpine:3 /smelt --version)"; do
+            test "$ACTUAL" = "$EXPECTED" || {
+              echo "expected '$EXPECTED', got '$ACTUAL'" >&2
+              exit 1
+            }
+          done
 
       - name: Package binary
         if: runner.os != 'Windows'
@@ -276,6 +269,10 @@ jobs:
             exit 1
           }
           cp "${ARCHIVES[@]}" release/
+          # COMPAT(linux-gnu-asset): glibc-linked installs upgrade by this name.
+          for archive in release/smelt-*-unknown-linux-musl.tar.gz; do
+            cp "$archive" "${archive%-musl.tar.gz}-gnu.tar.gz"
+          done
           (cd release && sha256sum smelt-*.tar.gz > SHA256SUMS)
 
       - name: Create Release

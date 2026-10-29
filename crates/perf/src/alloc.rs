@@ -1,7 +1,8 @@
 //! Counting global-allocator shim. Process-wide counters always update so peak / current /
 //! dealloc stats stay consistent across the whole run; per-thread tallies (used by
 //! [`crate::perf::Guard`]) only update when [`enable`] has been called. Install via
-//! `#[global_allocator]` in the binary crate.
+//! `#[global_allocator]` in the binary crate, wrapping [`System`] or any other
+//! [`GlobalAlloc`].
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -167,11 +168,18 @@ fn finish_peak_measurement(active_state: usize) -> usize {
     peak
 }
 
-pub struct Counting;
+/// Counting wrapper around the allocator `A` that serves the memory.
+pub struct Counting<A = System>(A);
 
-unsafe impl GlobalAlloc for Counting {
+impl<A> Counting<A> {
+    pub const fn new(inner: A) -> Self {
+        Self(inner)
+    }
+}
+
+unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc(layout) };
+        let p = unsafe { self.0.alloc(layout) };
         if !p.is_null() {
             let size = layout.size();
             ALLOC_COUNT.fetch_add(1, Relaxed);
@@ -188,14 +196,14 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
+        unsafe { self.0.dealloc(ptr, layout) };
         DEALLOC_COUNT.fetch_add(1, Relaxed);
         BYTES_DEALLOCATED.fetch_add(layout.size() as u64, Relaxed);
         CURRENT_BYTES.fetch_sub(layout.size(), Relaxed);
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc_zeroed(layout) };
+        let p = unsafe { self.0.alloc_zeroed(layout) };
         if !p.is_null() {
             let size = layout.size();
             ALLOC_COUNT.fetch_add(1, Relaxed);
@@ -211,7 +219,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        let p = unsafe { self.0.realloc(ptr, layout, new_size) };
         if !p.is_null() {
             REALLOC_COUNT.fetch_add(1, Relaxed);
             let old = layout.size();

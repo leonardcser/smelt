@@ -49,6 +49,13 @@ term-maths = "1.0.0"
 rust-latex-parser = "0.1.0"
 ratex-parser = "0.1.14"
 ratex-font = "0.1.14"
+mimalloc = "0.1.52"
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+
+# musl's malloc maps and unmaps large blocks on every call. Overriding the C
+# allocator routes bundled C libraries such as SQLite through mimalloc too.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1.52", features = ["override"] }
 
 [dev-dependencies]
 smelt-store = { workspace = true, features = ["test-util"] }

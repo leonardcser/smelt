@@ -33,3 +33,14 @@ whatever v7 left unreclaimed is still found.
 
 Remove the `7` arm and `migrate_reclamation_queue` once alpha users have opened
 their sessions with a v8 build, or when a later schema drops v7 support.
+
+## `linux-gnu-asset`
+
+Linux releases are statically linked musl builds published as
+`smelt-<arch>-unknown-linux-musl.tar.gz`. Builds from glibc-linked releases ask
+`smelt upgrade` for `smelt-<arch>-unknown-linux-gnu.tar.gz`, so the release
+job also publishes each musl archive under that name. After the upgrade,
+the installed binary reports the musl target and requests the new name.
+
+Remove the copy loop in the release job once alpha users have upgraded past the
+last glibc-linked release.

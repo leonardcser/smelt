@@ -3,7 +3,7 @@
 /// builds install the allocator in `src/main.rs`.
 #[cfg(test)]
 #[global_allocator]
-static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
+static ALLOCATOR: smelt_core::allocator::Allocator = smelt_core::allocator::ALLOCATOR;
 
 pub mod app;
 pub mod auto_reload;
