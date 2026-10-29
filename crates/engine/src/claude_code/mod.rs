@@ -994,6 +994,55 @@ impl Runtime<'_> {
         }
     }
 
+    /// The context's latest size. The turn's result reports it again, so a
+    /// reading taken without a model request must replace the last response's.
+    fn context_read(&mut self, tokens: u32) {
+        self.transcript.context_tokens = Some(tokens);
+        let _ = self.live_tx().send(EngineEvent::ContextTokens { tokens });
+    }
+
+    /// Reports Claude Code's own compaction. Its boundary carries the context
+    /// size the compacted history leaves, which the next reading replaces.
+    async fn compaction(&mut self, frame: &Value) -> Result<bool, String> {
+        if frame["type"] != "system" {
+            return Ok(false);
+        }
+        let state = match frame["subtype"].as_str() {
+            Some("status") if frame["compact_result"] == "failed" => {
+                protocol::NativeCompaction::Failed {
+                    message: frame["compact_error"].as_str().map(str::to_owned),
+                }
+            }
+            Some("status") if frame["status"] == "compacting" => {
+                protocol::NativeCompaction::Started
+            }
+            Some("compact_boundary") => {
+                let tokens = |key: &str| {
+                    frame["compact_metadata"][key]
+                        .as_u64()
+                        .map(|tokens| tokens.min(u32::MAX as u64) as u32)
+                };
+                let after_tokens = tokens("post_tokens").filter(|&tokens| tokens > 0);
+                if let Some(tokens) = after_tokens {
+                    self.context_read(tokens);
+                }
+                // Its figure is an estimate. Claude Code's own count is exact.
+                self.write(control(
+                    "smelt-context",
+                    json!({"subtype":"get_context_usage"}),
+                ))
+                .await?;
+                protocol::NativeCompaction::Finished {
+                    before_tokens: tokens("pre_tokens"),
+                    after_tokens,
+                }
+            }
+            _ => return Ok(false),
+        };
+        let _ = self.live_tx().send(EngineEvent::NativeCompaction { state });
+        Ok(true)
+    }
+
     async fn frame(&mut self, frame: Value) -> Result<(), String> {
         let now_ms = crate::clock::unix_time_ms(self.config.clock.as_ref());
         if frame["type"] == "system" && frame["subtype"] == "session_state_changed" {
@@ -1001,6 +1050,9 @@ impl Runtime<'_> {
             if self.native.session_state.as_deref() == Some("idle") {
                 self.native.awaiting_wake = false;
             }
+            return Ok(());
+        }
+        if self.compaction(&frame).await? {
             return Ok(());
         }
         self.track_background(&frame);
@@ -1039,9 +1091,7 @@ impl Runtime<'_> {
                     }
                 } else if frame["response"]["request_id"].as_str() == Some("smelt-context") {
                     if let Some(tokens) = frame["response"]["response"]["totalTokens"].as_u64() {
-                        let _ = self.live_tx().send(EngineEvent::ContextTokens {
-                            tokens: tokens.min(u32::MAX as u64) as u32,
-                        });
+                        self.context_read(tokens.min(u32::MAX as u64) as u32);
                     }
                 } else if let Some(id @ ("smelt-cwd" | "smelt-cwd-trusted")) =
                     frame["response"]["request_id"].as_str()

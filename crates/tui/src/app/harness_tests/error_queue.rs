@@ -1500,3 +1500,47 @@ fn turn_complete_still_chains_queued_turn() {
     );
     assert!(app.queued_message_count() == 0 || app.state().queued_inputs.is_empty());
 }
+
+#[test]
+fn native_compaction_shows_its_phase_and_resets_the_context_reading() {
+    use protocol::NativeCompaction;
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.engine_event(EngineEvent::ContextTokens { tokens: 27_445 });
+
+    app.engine_event(EngineEvent::NativeCompaction {
+        state: NativeCompaction::Started,
+    });
+    assert_eq!(app.working_probe().phase_label(), Some("compacting"));
+
+    app.engine_event(EngineEvent::ContextTokens { tokens: 1_192 });
+    app.engine_event(EngineEvent::NativeCompaction {
+        state: NativeCompaction::Finished {
+            before_tokens: Some(27_445),
+            after_tokens: Some(1_192),
+        },
+    });
+    assert_eq!(app.working_probe().phase_label(), Some("working"));
+    assert_eq!(
+        app.app.conversation.session().display_context_tokens(),
+        Some(1_192)
+    );
+    assert!(app.state().notification.is_some(), "the outcome is shown");
+}
+
+#[test]
+fn failed_native_compaction_returns_to_working() {
+    use protocol::NativeCompaction;
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.engine_event(EngineEvent::NativeCompaction {
+        state: NativeCompaction::Started,
+    });
+    app.engine_event(EngineEvent::NativeCompaction {
+        state: NativeCompaction::Failed {
+            message: Some("Could not compact.".into()),
+        },
+    });
+    assert_eq!(app.working_probe().phase_label(), Some("working"));
+    assert!(app.state().notification.is_some(), "the failure is shown");
+}

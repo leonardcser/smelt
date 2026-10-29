@@ -50,6 +50,20 @@ impl EngineAskErrorKind {
     }
 }
 
+/// Where a native agent's own context compaction stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeCompaction {
+    Started,
+    Finished {
+        /// Context size before and after, when the agent reports them.
+        before_tokens: Option<u32>,
+        after_tokens: Option<u32>,
+    },
+    Failed {
+        message: Option<String>,
+    },
+}
+
 /// Typed error payload returned alongside `EngineAskResponse` when the
 /// underlying provider call failed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -533,6 +547,10 @@ pub enum EngineEvent {
 
     /// The conversation's context size, counted without an LLM call.
     ContextTokens { tokens: u32 },
+
+    /// A native agent compacts its own context. smelt only reports it: the
+    /// agent owns the summary and the canonical history is unchanged.
+    NativeCompaction { state: NativeCompaction },
 
     /// LLM call failed, engine is retrying.
     Retrying { delay_ms: u64, attempt: u32 },

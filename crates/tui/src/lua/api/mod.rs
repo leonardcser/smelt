@@ -25,7 +25,7 @@ mod search;
 mod session;
 mod settings;
 pub(crate) mod terminal;
-mod text;
+pub(crate) mod text;
 pub(crate) mod theme;
 pub(crate) mod transcript;
 pub(crate) mod vim;

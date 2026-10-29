@@ -89,6 +89,47 @@ impl TuiApp {
         });
     }
 
+    /// A native agent compacts its own context: show the phase while it runs
+    /// and its outcome once it ends.
+    fn show_native_compaction(&mut self, state: protocol::NativeCompaction) {
+        use protocol::NativeCompaction;
+        let tokens = |tokens: u32| crate::lua::api::text::format_tokens(tokens.into());
+        match state {
+            NativeCompaction::Started => {
+                if self.working.is_animating() {
+                    self.working.begin(TurnPhase::Compacting);
+                }
+            }
+            NativeCompaction::Finished {
+                before_tokens,
+                after_tokens,
+            } => {
+                if self.working.is_compacting() {
+                    self.working.begin(TurnPhase::Working);
+                }
+                self.notify(match (before_tokens, after_tokens) {
+                    (Some(before), Some(after)) => {
+                        format!(
+                            "compacted context: {} -> {} tokens",
+                            tokens(before),
+                            tokens(after)
+                        )
+                    }
+                    _ => "compacted context".into(),
+                });
+            }
+            NativeCompaction::Failed { message } => {
+                if self.working.is_compacting() {
+                    self.working.begin(TurnPhase::Working);
+                }
+                self.notify_warn(match message {
+                    Some(message) => format!("compaction failed: {message}"),
+                    None => "compaction failed".into(),
+                });
+            }
+        }
+    }
+
     pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         if !self.session_is_read_only() {
             let identity = self.active_context_token_identity();
@@ -685,6 +726,10 @@ impl TuiApp {
                     context_tokens: Some(tokens),
                     ..Default::default()
                 });
+                SessionControl::Continue
+            }
+            EngineEvent::NativeCompaction { state } => {
+                self.show_native_compaction(state);
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput {

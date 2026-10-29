@@ -8,6 +8,17 @@ use smelt_core::content::width::{pad_left_to_cells, pad_right_to_cells, truncate
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
+/// A raw token count as `1.2k`, `3.4m`, or the bare integer under 1000.
+pub(crate) fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 fn lossy_utf8(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -249,15 +260,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "format_tokens",
         "Format a raw token count as `1.2k`, `3.4m`, or the bare integer for values under 1000. Useful for compact statusline / banner displays.",
         &["n"],
-        |_, n: u64| -> LuaResult<String> {
-            Ok(if n >= 1_000_000 {
-                format!("{:.1}m", n as f64 / 1_000_000.0)
-            } else if n >= 1_000 {
-                format!("{:.1}k", n as f64 / 1_000.0)
-            } else {
-                n.to_string()
-            })
-        },
+        |_, n: u64| -> LuaResult<String> { Ok(format_tokens(n)) },
     )?;
     m.fn_(
         "format_cost",

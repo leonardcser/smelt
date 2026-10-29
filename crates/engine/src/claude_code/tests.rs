@@ -2018,3 +2018,88 @@ async fn shutting_the_engine_down_stops_claude_code_shells_before_it_returns() {
         .iter()
         .any(|call| call["request"] == json!({"subtype":"stop_task", "task_id":"shell-task"})));
 }
+
+/// Every event of a turn up to its completion.
+async fn events_until_complete(handle: &mut crate::EngineHandle) -> Vec<EngineEvent> {
+    let mut events = Vec::new();
+    loop {
+        match output(handle).await {
+            EngineOutput::Event(EngineEvent::TurnComplete { .. }) => return events,
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            EngineOutput::Event(event) => events.push(event),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn claude_codes_compaction_is_reported_and_resets_the_context_reading() {
+    let fixture = Fixture::new("compact");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let events = events_until_complete(&mut handle).await;
+    let compaction: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::NativeCompaction { state } => Some(state.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        compaction,
+        [
+            protocol::NativeCompaction::Started,
+            protocol::NativeCompaction::Finished {
+                before_tokens: Some(27445),
+                after_tokens: Some(1192),
+            },
+        ]
+    );
+    let readings: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ContextTokens { tokens } => Some(*tokens),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        readings,
+        [1192, 1234],
+        "the boundary's estimate shows at once, then Claude Code's count"
+    );
+    let result_context = events.iter().rev().find_map(|event| match event {
+        EngineEvent::TokenUsage { usage, .. } => Some(usage.context_tokens),
+        _ => None,
+    });
+    assert_eq!(
+        result_context,
+        Some(Some(1234)),
+        "the turn's result keeps the latest reading"
+    );
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn claude_codes_failed_compaction_is_reported_with_its_error() {
+    let fixture = Fixture::new("compact-failed");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let events = events_until_complete(&mut handle).await;
+    let compaction: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::NativeCompaction { state } => Some(state.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        compaction,
+        [
+            protocol::NativeCompaction::Started,
+            protocol::NativeCompaction::Failed {
+                message: Some("Could not compact.".into()),
+            },
+        ]
+    );
+}

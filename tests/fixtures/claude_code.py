@@ -341,6 +341,17 @@ while True:
             assert cancel["request"] == {"subtype": "cancel_async_message", "message_uuid": steer["uuid"]}, cancel
             send({"type": "control_response", "response": {"subtype": "success", "request_id": cancel["request_id"], "response": {"cancelled": True}}})
             tool_result("steer-tool", "found")
+    if SCENARIO in ("compact", "compact-failed"):
+        send({"type": "assistant", "uuid": "before-compact", "message": {"id": "before-compact", "content": [{"type": "text", "text": "before"}], "usage": {"input_tokens": 27445, "output_tokens": 0}}, "parent_tool_use_id": None})
+        send({"type": "system", "subtype": "status", "status": "compacting", "session_id": SESSION, "uuid": "compacting"})
+        if SCENARIO == "compact":
+            send({"type": "system", "subtype": "status", "status": None, "compact_result": "success", "session_id": SESSION, "uuid": "compacted"})
+            send({"type": "system", "subtype": "compact_boundary", "session_id": SESSION, "uuid": "boundary", "compact_metadata": {"trigger": "auto", "pre_tokens": 27445, "post_tokens": 1192}})
+            recount = receive()
+            assert recount["request"]["subtype"] == "get_context_usage", recount
+            send({"type": "control_response", "response": {"subtype": "success", "request_id": recount["request_id"], "response": {"totalTokens": 1234, "maxTokens": 200000}}})
+        else:
+            send({"type": "system", "subtype": "status", "status": None, "compact_result": "failed", "compact_error": "Could not compact.", "session_id": SESSION, "uuid": "compact-failed"})
     text = "fixture answer café 🌱"
     send({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "message"}}})
     send({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}})
