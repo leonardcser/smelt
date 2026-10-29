@@ -27,6 +27,11 @@ smelt-buffer = { version = "0.0.0-dev", path = "../buffer" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 chrono = "0.4.45"
 
+# Platforms where reqwest's verifier reads the system CA bundle from disk.
+[target.'cfg(all(unix, not(target_os = "android"), not(target_vendor = "apple")))'.dependencies]
+rustls-native-certs = "0.8.5"
+webpki-root-certs = "1.0.11"
+
 [features]
 fuzz = []
 test-support = []

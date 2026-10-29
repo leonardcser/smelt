@@ -3710,6 +3710,7 @@ dependencies = [
  "rand 0.10.3",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
@@ -3721,6 +3722,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "webpki-root-certs",
 ]
 
 [[package]]
