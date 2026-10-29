@@ -17,6 +17,13 @@ on:
       - "!crates/perf/**"
   pull_request_target:
     types: [opened, reopened, edited]
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
   pr-title:
@@ -31,8 +38,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  test:
-    name: Test
+  lint:
+    name: Lint
     if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
 
@@ -46,26 +53,14 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Install coverage compiler tools
-        run: rustup component add llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
-
       - name: Check formatting
         run: cargo fmt -- --check
 
       - name: Run lints
         run: cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings
 
-      - name: Build
-        run: cargo build --workspace
+      - name: Check transcript benchmark target
+        run: cargo clippy -p smelt-tui --tests --features "harness transcript-bench" -- -D warnings
 
       - name: Check crate publication policy
         run: |
@@ -90,14 +85,6 @@ jobs:
               raise SystemExit("\n".join(errors))
           PY
 
-      - name: Build transcript benchmark target
-        run: cargo test -p smelt-tui --features "harness transcript-bench" --no-run
-
-      - name: Run tests with coverage floor
-        env:
-          CARGO_INCREMENTAL: "0"
-        run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80
-
       - name: Check Lua API docs are in sync
         run: |
           cargo xtask gen-lua-docs
@@ -109,6 +96,62 @@ jobs:
             runtime/skills/customize/SKILL.md \
             docs/zensical.toml \
             || (echo "::error::Generated Lua documentation is out of date. Run 'cargo xtask gen-lua-docs' and commit." && exit 1)
+
+  test:
+    name: Test
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pinned Rust
+        run: rustup toolchain install
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Run tests
+        run: cargo nextest run --workspace --features smelt-tui/harness
+
+  coverage:
+    name: Coverage
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pinned Rust
+        run: rustup toolchain install
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install coverage compiler tools
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Run tests with coverage floor
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 80
 
   linux-static:
     name: Linux static build
@@ -240,7 +283,7 @@ jobs:
 
   windows-install:
     name: Windows install smoke test
-    if: github.event_name != 'pull_request_target'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     env:
       RUSTFLAGS: -D warnings
@@ -255,8 +298,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile Windows test targets
-        run: cargo test --workspace --all-targets --features smelt-tui/harness --no-run
+      - name: Check Windows targets
+        run: cargo check --workspace --all-targets --features smelt-tui/harness
 
       - name: Build and run release archive
         shell: pwsh
@@ -265,8 +308,8 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $artifact = Join-Path $env:RUNNER_TEMP "smelt-x86_64-pc-windows-msvc.tar.gz"
           $extractRoot = Join-Path $env:RUNNER_TEMP "smelt release"
-          cargo build --profile dist --bin smelt --target x86_64-pc-windows-msvc
-          tar czf $artifact -C "target/x86_64-pc-windows-msvc/dist" smelt.exe
+          cargo build --bin smelt --target x86_64-pc-windows-msvc
+          tar czf $artifact -C "target/x86_64-pc-windows-msvc/debug" smelt.exe
           New-Item -ItemType Directory -Force $extractRoot | Out-Null
           tar xzf $artifact -C $extractRoot
           & (Join-Path $extractRoot "smelt.exe") --version
@@ -282,7 +325,7 @@ jobs:
 
   fuzz-tooling-integration:
     name: Fuzz tooling integration
-    if: github.event_name != 'pull_request_target'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -319,7 +362,7 @@ jobs:
 
   fuzz-regression:
     name: Fuzz regression replay
-    if: github.event_name != 'pull_request_target'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

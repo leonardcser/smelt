@@ -42,7 +42,8 @@ never edits `main`, creates commits, pushes generated changes, or moves tags.
    git diff --exit-code
    ```
 
-4. Confirm CI passed on that exact commit.
+4. Confirm CI passed on that exact commit. The coverage, Windows and fuzz jobs run
+   nightly only; trigger them with `gh workflow run CI` and confirm they pass too.
 5. Create and push the immutable tag:
 
    ```bash
