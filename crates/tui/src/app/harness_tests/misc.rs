@@ -7873,6 +7873,87 @@ fn block_nav(app: &mut TestApp, keys: &str) -> String {
 }
 
 #[test]
+fn user_message_jumps_align_multiline_prompts_at_top() {
+    for (vim, detail_lines) in [(false, 1), (true, 1), (false, 30), (true, 30)] {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.set_terminal_size(80, 16);
+        for turn in ["first", "second", "third"] {
+            app.push_transcript_block(smelt_core::transcript_model::Block::User {
+                text: format!(
+                    "{turn} question\n{}{turn} final line",
+                    format!("{turn} details\n").repeat(detail_lines)
+                ),
+                image_labels: Vec::new(),
+                command: false,
+                sent_at_ms: None,
+            });
+            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                content: (0..30)
+                    .map(|i| format!("{turn} answer {i}\n"))
+                    .collect::<String>()
+                    .into(),
+            });
+        }
+        app.render_silent();
+        app.focus_transcript();
+        app.configure_transcript_vim(vim, VimMode::Normal);
+        app.render_silent();
+        for (forward, expected) in [
+            (false, "third"),
+            (false, "second"),
+            (true, "third"),
+            (false, "second"),
+            (false, "first"),
+        ] {
+            if vim {
+                block_nav(&mut app, if forward { "]u" } else { "[u" });
+            } else {
+                app.press_mod(
+                    if forward { KeyCode::Down } else { KeyCode::Up },
+                    KeyModifiers::ALT | KeyModifiers::SHIFT,
+                );
+                app.render_silent();
+            }
+            let rows = app.transcript_window().viewport.unwrap().rect.height;
+            assert_eq!(
+                app.transcript_cursor_screen_row(rows),
+                Some(0),
+                "vim={vim}, forward={forward}"
+            );
+            let lines = transcript_viewport_lines(&app).join("\n");
+            assert!(lines.contains(&format!("{expected} question")), "{lines}");
+            assert!(lines.contains(&format!("{expected} details")), "{lines}");
+            if detail_lines == 1 {
+                assert!(lines.contains(&format!("{expected} final line")), "{lines}");
+                assert!(lines.contains(&format!("{expected} answer 0")), "{lines}");
+            } else {
+                assert!(
+                    !lines.contains(&format!("{expected} final line")),
+                    "{lines}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn user_message_jump_at_tail_keeps_the_full_prompt_visible() {
+    let mut app = block_nav_app(true);
+    app.push_transcript_block(smelt_core::transcript_model::Block::User {
+        text: "final question\nfinal details\nfinal line".into(),
+        image_labels: Vec::new(),
+        command: false,
+        sent_at_ms: None,
+    });
+    app.render_silent();
+    assert_eq!(block_nav(&mut app, "gg]u]u"), "final question");
+    let lines = transcript_viewport_lines(&app).join("\n");
+    for expected in ["final question", "final details", "final line"] {
+        assert!(lines.contains(expected), "{lines}");
+    }
+}
+
+#[test]
 fn block_motions_walk_user_messages() {
     let mut app = block_nav_app(true);
     block_nav(&mut app, "G");
@@ -8039,10 +8120,19 @@ fn block_motions_take_counts() {
 #[test]
 fn block_motions_step_over_every_block() {
     let mut app = block_nav_app(true);
-    assert_eq!(block_nav(&mut app, "gg]]"), "first answer 0");
-    assert_eq!(block_nav(&mut app, "]]"), "first answer 1");
-    assert_eq!(block_nav(&mut app, "[["), "first answer 0");
-    assert_eq!(block_nav(&mut app, "[["), "first question");
+    for (keys, expected) in [
+        ("gg]]", "first answer 0"),
+        ("]]", "first answer 1"),
+        ("[[", "first answer 0"),
+        ("[[", "first question"),
+        ("]a", "first answer 0"),
+        ("]a", "first answer 1"),
+        ("[a", "first answer 0"),
+    ] {
+        assert_eq!(block_nav(&mut app, keys), expected);
+        let rows = app.transcript_window().viewport.unwrap().rect.height;
+        assert_eq!(app.transcript_cursor_screen_row(rows), Some(0), "{keys}");
+    }
 }
 
 #[test]
