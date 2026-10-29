@@ -78,7 +78,7 @@ pub(super) fn record(models: &Value) {
 /// Asks the installed Claude Code for its models and caches them. It starts
 /// Claude Code without sending a model request.
 pub async fn refresh() -> Result<Vec<ModelMetadata>, String> {
-    let mut process = Process::spawn_bare()?;
+    let mut process = Process::spawn_bare("default")?;
     let listed = tokio::time::timeout(
         Duration::from_secs(30),
         process.ask("smelt-models", json!({"subtype":"initialize"})),

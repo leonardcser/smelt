@@ -248,13 +248,13 @@ impl Process {
         })
     }
 
-    /// Starts Claude Code without tools, persistence or a conversation, to ask
-    /// it about its installation or account.
-    pub(super) fn spawn_bare() -> Result<Self, String> {
+    /// Starts Claude Code on `model` without tools, persistence or a
+    /// conversation, to ask it about its installation, account or model.
+    pub(super) fn spawn_bare(model: &str) -> Result<Self, String> {
         Self::spawn(LaunchOptions {
             cwd: &std::env::temp_dir(),
             target: &ModelTarget {
-                model: "default".into(),
+                model: model.into(),
                 api_base: String::new(),
                 api_key: String::new(),
                 provider_type: "claude-code".into(),

@@ -592,7 +592,8 @@ impl HeadlessApp {
             eprintln!("error: no model is available for headless dispatch");
             return HeadlessExit::Error;
         };
-        if smelt_provider::BackendKind::is_claude_code(&model_target.provider_type) {
+        let claude_code = smelt_provider::BackendKind::is_claude_code(&model_target.provider_type);
+        if claude_code {
             crate::permissions::claude_code::grant_plan_artifacts(
                 &self.core.permissions,
                 &self.core.sessions.sessions_dir(),
@@ -651,7 +652,8 @@ impl HeadlessApp {
                 .flatten()
         };
         tokio::pin!(context_discovery);
-        let mut discovering_context = compaction.is_some();
+        // Claude Code manages its own context, so it is never compacted here.
+        let mut discovering_context = compaction.is_some() && !claude_code;
         let mut final_message = String::new();
         let mut draft_text_start = 0;
         let mut total_usage = protocol::TokenUsage::default();

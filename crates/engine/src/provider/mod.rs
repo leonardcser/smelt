@@ -599,7 +599,7 @@ impl EngineProvider {
         // if it doesn't expose a window field.
         let http_error = |error: reqwest::Error| error.without_url().to_string();
         let from_provider = match self.backend {
-            BackendKind::ClaudeCode => None,
+            BackendKind::ClaudeCode => crate::claude_code::context_window(model).await?,
             BackendKind::Http(kind) => match kind {
                 ProviderKind::OpenAiCompatible => self
                     .client

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Asks the installed Claude Code for its account's usage limits. It starts
 /// Claude Code without sending a model request.
 pub async fn usage() -> Result<ManagedUsageReport, String> {
-    let mut process = Process::spawn_bare()?;
+    let mut process = Process::spawn_bare("default")?;
     let usage = tokio::time::timeout(Duration::from_secs(30), async {
         process
             .ask("smelt-init", json!({"subtype":"initialize"}))

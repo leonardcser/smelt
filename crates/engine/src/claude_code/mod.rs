@@ -6,10 +6,12 @@
 
 mod agents;
 mod catalog;
+mod context;
 mod interaction;
 mod models;
 mod plans;
 pub use catalog::smelt_tool;
+pub use context::context_window;
 pub use models::{cached as cached_models, refresh as refresh_models, stale as models_stale};
 pub use plans::directory as plan_directory;
 pub use transport::installed;

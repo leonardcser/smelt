@@ -11,6 +11,7 @@ SESSION = "12345678-1234-4234-8234-123456789abc"
 SCENARIO = os.environ.get("SMELT_CLAUDE_FIXTURE", "text")
 LOG = os.environ.get("SMELT_CLAUDE_FIXTURE_LOG")
 TOOLS_ENABLED = sys.argv[sys.argv.index("--tools") + 1] == "default"
+MODEL = sys.argv[sys.argv.index("--model") + 1]
 # Messages read early that the main loop takes next.
 PENDING = []
 # Lines from stdin, read on a thread so a wait for the next one can time out.
@@ -126,8 +127,9 @@ while True:
                 "rate_limits": {"limits": [{"kind": "session", "group": "session", "percent": 42, "resets_at": None, "scope": None}]},
             }}})
         if prompt.get("request", {}).get("subtype") == "get_context_usage":
+            # Like Claude Code, this reports the launch model's window even after set_model.
             send({"type": "control_response", "response": {"subtype": "success", "request_id": prompt["request_id"], "response": {
-                "totalTokens": 1234, "maxTokens": 200000,
+                "totalTokens": 1234, "maxTokens": 1000000 if MODEL == "opus" else 200000,
             }}})
         continue
     if prompt.get("uuid"):

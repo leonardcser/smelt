@@ -869,6 +869,27 @@ async fn usage_is_reported_by_claude_code_without_a_model_request() {
 
 #[tokio::test]
 #[serial(claude_code)]
+async fn context_windows_are_asked_of_claude_code_on_each_model_once() {
+    let fixture = Fixture::new("text");
+    assert_eq!(super::context_window("opus").await, Ok(Some(1_000_000)));
+    assert_eq!(super::context_window("sonnet").await, Ok(Some(200_000)));
+    assert_eq!(super::context_window("opus").await, Ok(Some(1_000_000)));
+
+    let calls = fixture.calls();
+    let launches: Vec<_> = calls
+        .iter()
+        .filter_map(|call| call["argv"].as_array())
+        .map(|argv| {
+            let at = argv.iter().position(|arg| arg == "--model").unwrap();
+            argv[at + 1].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(launches, ["opus", "sonnet"], "each model launches once");
+    assert!(calls.iter().all(|call| call["type"] != "user"));
+}
+
+#[tokio::test]
+#[serial(claude_code)]
 async fn sessions_record_the_models_claude_code_lists() {
     let fixture = Fixture::new("text");
     let mut handle = fixture.handle();
