@@ -94,16 +94,7 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
             .ui_probe()
             .named_win("smelt.scroll_pills.top.win")
             .expect("visible top scroll pill");
-        let top_buf = app
-            .ui_probe()
-            .named_buf("smelt.scroll_pills.top.buf")
-            .expect("top scroll pill buffer");
-        let label_before = app
-            .ui_probe()
-            .buf(top_buf)
-            .and_then(|buf| buf.get_line(0))
-            .expect("top scroll pill label before click")
-            .to_string();
+        let label_before = top_scroll_pill_label(&app).expect("top scroll pill label before click");
         let pill_rect = app
             .ui_probe()
             .win(top_win)
@@ -130,7 +121,7 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
         let viewport_lines = transcript_viewport_lines(&app);
         let target_screen_row = viewport_lines
             .iter()
-            .position(|line| line.contains(label_before.trim()))
+            .position(|line| line.contains(&label_before))
             .unwrap_or_else(|| {
                 panic!(
                     "click {click} should reveal its user message: label={label_before:?}, lines={viewport_lines:?}"
@@ -140,16 +131,7 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
             target_screen_row, 2,
             "click {click} should clear the top pill and panel padding: {viewport_lines:?}"
         );
-        let top_buf = app
-            .ui_probe()
-            .named_buf("smelt.scroll_pills.top.buf")
-            .expect("top scroll pill should remain visible after click");
-        let label_after = app
-            .ui_probe()
-            .buf(top_buf)
-            .and_then(|buf| buf.get_line(0))
-            .expect("top scroll pill label after click")
-            .to_string();
+        let label_after = top_scroll_pill_label(&app).expect("top scroll pill label after click");
         assert_ne!(
             label_after, label_before,
             "click {click} should advance to the previous user message"

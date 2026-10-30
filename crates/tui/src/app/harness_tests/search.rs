@@ -1405,3 +1405,46 @@ fn viewer_search_benchmark() {
         );
     }
 }
+
+#[test]
+fn transcript_search_keeps_top_pill_on_the_viewport_top_message() {
+    let mut app = user_answer_transcript_app(40, 6);
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+
+    app.type_char('/');
+    let query = "answer 020 line 5";
+    for end in 1..=query.len() {
+        app.type_char(query.as_bytes()[end - 1] as char);
+        wait_for_search_query(&mut app, &query[..end]);
+        app.render_silent();
+        let preview = top_scroll_pill_label(&app);
+        app.render_silent();
+        assert_eq!(
+            preview,
+            top_scroll_pill_label(&app),
+            "top pill switched messages after previewing {:?}: {:?}",
+            &query[..end],
+            transcript_viewport_lines(&app)
+        );
+    }
+
+    app.press(KeyCode::Enter);
+    app.render_silent();
+    let lines = transcript_viewport_lines(&app);
+    assert_eq!(
+        lines.get(1).map(|line| line.trim()),
+        Some("user target 020")
+    );
+    assert_eq!(
+        top_scroll_pill_label(&app).as_deref(),
+        Some("user target 019"),
+        "top pill followed the match instead of the viewport top: {lines:?}"
+    );
+    app.render_silent();
+    assert_eq!(
+        top_scroll_pill_label(&app).as_deref(),
+        Some("user target 019")
+    );
+}

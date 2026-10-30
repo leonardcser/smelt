@@ -4566,15 +4566,7 @@ fn committed_view_previous_user_includes_block_containing_viewport_top() {
         "CURRENT USER line 00"
     );
 
-    let pill_buf = app
-        .ui_probe()
-        .named_buf("smelt.scroll_pills.top.buf")
-        .expect("visible top pill buffer");
-    let label = app
-        .ui_probe()
-        .buf(pill_buf)
-        .and_then(|buf| buf.get_line(0))
-        .expect("top pill label");
+    let label = top_scroll_pill_label(&app).expect("top pill label");
     assert!(label.contains("CURRENT USER line 00"));
     assert!(!label.contains("older user target"));
 }
@@ -4658,6 +4650,38 @@ fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
     app.render_silent();
     assert!(app.transcript_window().following_tail);
     assert!(app.transcript_window().scroll_top >= tail_scroll);
+}
+
+#[test]
+fn tail_clamped_user_reveal_keeps_top_pill_on_the_viewport_top_message() {
+    let mut app = user_answer_transcript_app(12, 1);
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+
+    let record_index = 22;
+    let block_id = app.conversation_probe().transcript().history().order[record_index];
+    assert!(app
+        .app
+        .reveal_transcript_target_at_top(record_index, block_id, 1, false));
+    app.render_silent();
+    let lines = transcript_viewport_lines(&app);
+    let target_row = lines
+        .iter()
+        .position(|line| line.contains("user target 011"))
+        .unwrap_or_else(|| panic!("last user message not revealed: {lines:?}"));
+    assert!(
+        target_row > 2,
+        "fixture must clamp the reveal at the tail: {lines:?}"
+    );
+    let after_reveal = top_scroll_pill_label(&app);
+
+    app.render_silent();
+    assert_eq!(
+        after_reveal,
+        top_scroll_pill_label(&app),
+        "top pill switched messages after a tail-clamped reveal: {lines:?}"
+    );
 }
 
 #[test]
@@ -5724,16 +5748,8 @@ fn resumed_sparse_top_scroll_pill_click_advances_without_extra_scroll() {
         .ui_probe()
         .named_win("smelt.scroll_pills.top.win")
         .expect("visible sparse top scroll pill");
-    let top_buf = app
-        .ui_probe()
-        .named_buf("smelt.scroll_pills.top.buf")
-        .expect("sparse top scroll pill buffer");
-    let label_before = app
-        .ui_probe()
-        .buf(top_buf)
-        .and_then(|buf| buf.get_line(0))
-        .expect("sparse top scroll pill label before click")
-        .to_string();
+    let label_before =
+        top_scroll_pill_label(&app).expect("sparse top scroll pill label before click");
     assert_eq!(parse_record_index(&label_before), Some(target_before));
     let pill_rect = app
         .ui_probe()
@@ -5762,17 +5778,10 @@ fn resumed_sparse_top_scroll_pill_click_advances_without_extra_scroll() {
         "top pill should advance after one click without a repairing scroll: before={target_before}, after={target_after}, lines={:?}",
         transcript_viewport_lines(&app)
     );
-    let top_buf = app
-        .ui_probe()
-        .named_buf("smelt.scroll_pills.top.buf")
-        .expect("top pill should remain available for the next previous-user jump");
-    let label_after = app
-        .ui_probe()
-        .buf(top_buf)
-        .and_then(|buf| buf.get_line(0))
-        .expect("sparse top scroll pill label after click");
+    let label_after =
+        top_scroll_pill_label(&app).expect("sparse top scroll pill label after click");
     assert_ne!(label_after, label_before);
-    assert_eq!(parse_record_index(label_after), Some(target_after));
+    assert_eq!(parse_record_index(&label_after), Some(target_after));
 }
 
 #[test]

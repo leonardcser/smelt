@@ -536,7 +536,8 @@ struct TranscriptResolvedViewportAnchor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TranscriptViewportState {
     resolved_anchor: Option<TranscriptResolvedViewportAnchor>,
-    semantic_anchor: Option<TranscriptSemanticAnchor>,
+    /// First content row at or after the viewport top.
+    navigation_anchor: Option<TranscriptSemanticAnchor>,
     mode: TranscriptViewportMode,
     pending_projection: Option<PendingTranscriptProjection>,
     exact_viewport: Option<TranscriptExactViewport>,
@@ -547,7 +548,7 @@ impl Default for TranscriptViewportState {
     fn default() -> Self {
         Self {
             resolved_anchor: None,
-            semantic_anchor: None,
+            navigation_anchor: None,
             mode: TranscriptViewportMode::Tail,
             pending_projection: None,
             exact_viewport: None,
@@ -786,7 +787,6 @@ pub(crate) struct TranscriptProjectionPlan {
     requested_scroll: Option<RowIndex>,
     repin_at_semantic_tail: bool,
     cursor_target: Option<TranscriptCursorTarget>,
-    semantic_anchor: Option<TranscriptSemanticAnchor>,
     scroll_anchor: TranscriptScrollAnchor,
     width: u16,
     viewport_rows: u16,
@@ -2460,28 +2460,6 @@ impl TranscriptDocument {
         }
     }
 
-    fn semantic_anchor_for_intent(
-        intent: &TranscriptScrollIntent,
-    ) -> Option<TranscriptSemanticAnchor> {
-        match intent {
-            TranscriptScrollIntent::RevealBlock {
-                record_index,
-                block_id,
-                row_offset,
-                ..
-            } => Some(TranscriptSemanticAnchor {
-                record_index: *record_index,
-                block_id: *block_id,
-                row_offset: *row_offset,
-            }),
-            TranscriptScrollIntent::SearchJump {
-                anchor: TranscriptSearchAnchor::Content(anchor),
-                ..
-            } => Some((*anchor).into()),
-            _ => None,
-        }
-    }
-
     fn trace_record_range(
         range: Option<&Range<smelt_store::TranscriptRecordOffset>>,
     ) -> Option<TranscriptRecordTraceRange> {
@@ -3395,7 +3373,7 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn current_navigation_anchor(&self) -> Option<TranscriptSemanticAnchor> {
-        if let Some(anchor) = self.viewport.state.semantic_anchor {
+        if let Some(anchor) = self.viewport.state.navigation_anchor {
             return Some(anchor);
         }
 
@@ -5383,7 +5361,6 @@ impl TranscriptDocument {
             requested_scroll: None,
             repin_at_semantic_tail,
             cursor_target: None,
-            semantic_anchor: None,
             scroll_anchor: TranscriptScrollAnchor::EstimatedRow(target),
             width,
             viewport_rows,
@@ -5508,7 +5485,6 @@ impl TranscriptDocument {
             }
         }
         let behavior = Self::intent_behavior(&intent);
-        let semantic_anchor = Self::semantic_anchor_for_intent(&intent);
         let semantic_far_seek =
             self.semantic_far_seek_for_intent(lua, width, viewport_rows, &intent);
         let (scroll_target, cursor_target) = semantic_far_seek.map_or_else(
@@ -5623,7 +5599,6 @@ impl TranscriptDocument {
             }
         }
         plan.cursor_target = cursor_target;
-        plan.semantic_anchor = semantic_anchor;
         if let Some(trace_frame) = plan.trace_frame.as_mut() {
             trace_frame.active_record_range_before = active_record_range_before;
         }
@@ -5795,7 +5770,6 @@ impl TranscriptDocument {
             requested_scroll,
             repin_at_semantic_tail: options.repin_at_semantic_tail,
             cursor_target: None,
-            semantic_anchor: None,
             scroll_anchor,
             width,
             viewport_rows,
@@ -5847,7 +5821,6 @@ impl TranscriptDocument {
             requested_scroll,
             repin_at_semantic_tail,
             cursor_target,
-            semantic_anchor,
             scroll_anchor,
             width,
             viewport_rows,
@@ -5930,7 +5903,7 @@ impl TranscriptDocument {
             row_offset,
             scroll_anchor,
         );
-        let captured_semantic_anchor = self
+        self.viewport.state.navigation_anchor = self
             .content_anchor_at_or_after_row_with_offset(
                 lua,
                 width,
@@ -5939,7 +5912,6 @@ impl TranscriptDocument {
                 row_offset,
             )
             .map(|(anchor, _)| anchor.into());
-        self.viewport.state.semantic_anchor = semantic_anchor.or(captured_semantic_anchor);
         let active_record_range = self
             .records
             .active_range()

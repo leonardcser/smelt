@@ -221,6 +221,40 @@ fn row_document_transcript_app(rows: usize, vim: bool) -> TestApp {
     app
 }
 
+/// Alternating `user target NNN` messages and `answer_lines`-line answers.
+fn user_answer_transcript_app(pairs: usize, answer_lines: usize) -> TestApp {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 16);
+    for i in 0..pairs {
+        app.push_transcript_block(smelt_core::transcript_model::Block::User {
+            text: format!("user target {i:03}"),
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: None,
+        });
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: (0..answer_lines)
+                .map(|line| format!("answer {i:03} line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        });
+    }
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app
+}
+
+/// Trimmed label of the "jump to previous user message" pill, if visible.
+fn top_scroll_pill_label(app: &TestApp) -> Option<String> {
+    let buf = app.ui_probe().named_buf("smelt.scroll_pills.top.buf")?;
+    app.ui_probe()
+        .buf(buf)
+        .and_then(|buf| buf.get_line(0))
+        .map(|line| line.trim().to_string())
+}
+
 fn drag_transcript_text(
     app: &mut TestApp,
     start_text: &str,
