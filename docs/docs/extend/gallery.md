@@ -76,3 +76,16 @@ while the agent works. The title keeps the score and the session's best.
     ```lua
     --8<-- "snake.lua"
     ```
+
+## Donut
+
+Built in: `/donut` spins Andy Sloane's donut.c over everything on screen. It is
+a see-through overlay (`transparent = true`): only the torus covers the screen,
+and keys and the mouse still reach the session under it. `/donut` again stops
+it.
+
+??? example "donut.lua"
+
+    ```lua
+    --8<-- "donut.lua"
+    ```
