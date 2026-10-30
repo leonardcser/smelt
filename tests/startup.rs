@@ -322,12 +322,7 @@ smelt.tools.register({ name = "fixture_dialog_state", permission_defaults = { no
             } else if scenario.starts_with("question") || scenario.starts_with("plan") {
                 assert!(decision_sent, "Native interaction did not prompt: {screen}");
                 if scenario != "question-cancel" {
-                    let calls = std::fs::read_to_string(&log).unwrap();
-                    let response = calls
-                        .lines()
-                        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                        .find(|call| call["response"]["request_id"] == "interaction")
-                        .unwrap();
+                    let response = logged_reply(&log, "interaction", deadline);
                     let response = &response["response"]["response"];
                     let allowed = !matches!(scenario, "plan-draft" | "plan-dismiss");
                     assert_eq!(response["behavior"], if allowed { "allow" } else { "deny" });
@@ -345,12 +340,7 @@ smelt.tools.register({ name = "fixture_dialog_state", permission_defaults = { no
             }
             if let Some(approve) = approve {
                 assert!(decision_sent, "Native permission did not prompt");
-                let calls = std::fs::read_to_string(&log).unwrap();
-                let reply = calls
-                    .lines()
-                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                    .find(|call| call["response"]["request_id"] == "permission")
-                    .unwrap();
+                let reply = logged_reply(&log, "permission", deadline);
                 assert_eq!(
                     reply["response"]["response"]["hookSpecificOutput"]["permissionDecision"],
                     if approve { "allow" } else { "deny" }
@@ -2592,6 +2582,27 @@ struct LifecycleSample {
     ready: Duration,
     shutdown: Duration,
     peak_rss_kib: u64,
+}
+
+/// The fixture's logged copy of smelt's reply to control request `request_id`.
+/// smelt can render the outcome of a reply (a denied turn shows
+/// "interrupted") before the fixture reads and logs it, so wait for it.
+fn logged_reply(log: &Path, request_id: &str, deadline: Instant) -> serde_json::Value {
+    loop {
+        let calls = std::fs::read_to_string(log).unwrap_or_default();
+        if let Some(reply) = calls
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|call| call["response"]["request_id"] == request_id)
+        {
+            return reply;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fixture never logged a reply to {request_id}:\n{calls}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn drain_pty(master: &mut File, captured: &mut Vec<u8>) {
