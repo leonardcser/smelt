@@ -142,13 +142,6 @@ impl Transcript {
         self.history.push_with_origin(block, origin);
     }
 
-    pub fn push_hydrated_block_with_origin(&mut self, block: Block, origin: BlockOrigin) {
-        let Some(block) = Self::normalize_block(block) else {
-            return;
-        };
-        self.history.push_hydrated_block_with_origin(block, origin);
-    }
-
     pub fn insert_checkpoint_marker(&mut self, history_index: usize, block: Block) {
         let Some(block) = Self::normalize_block(block) else {
             return;
@@ -187,22 +180,6 @@ impl Transcript {
         debug_assert!(matches!(block, Block::ToolCall { .. }));
         self.history
             .push_with_state_and_origin(block, state, origin);
-    }
-
-    pub fn push_hydrated_tool_block_with_origin(
-        &mut self,
-        block: Block,
-        state: ToolState,
-        origin: BlockOrigin,
-    ) {
-        let Some(block) = Self::normalize_block(block) else {
-            return;
-        };
-        if block.tool_call_id().is_none() {
-            return;
-        }
-        self.history
-            .push_hydrated_block_with_state_and_origin(block, state, origin);
     }
 
     pub fn truncate_to(&mut self, block_idx: usize) {

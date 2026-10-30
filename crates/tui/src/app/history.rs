@@ -854,8 +854,7 @@ fn push_note_block(
     let Some(block) = history_note_to_block(lua, note) else {
         return;
     };
-    transcript
-        .push_hydrated_block_with_origin(block, smelt_core::BlockOrigin::History(history_index));
+    transcript.push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
 }
 
 fn rewindable_user(item: &HistoryItem) -> Option<(&Content, Option<&str>)> {
@@ -920,8 +919,7 @@ fn push_user_block(
     sent_at_ms: Option<u64>,
 ) {
     let block = user_history_to_block(lua, content, display, command, sent_at_ms);
-    transcript
-        .push_hydrated_block_with_origin(block, smelt_core::BlockOrigin::History(history_index));
+    transcript.push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
 }
 
 fn user_history_to_block(
@@ -1007,7 +1005,7 @@ fn push_assistant_blocks(
         }
     }
     if let Some(ref content) = turn.content {
-        transcript.push_hydrated_block_with_origin(
+        transcript.push_with_origin(
             Block::Text {
                 content: content.text_content().into_owned().into(),
             },
@@ -1027,7 +1025,7 @@ fn push_assistant_blocks(
         let elapsed_ms = inv.elapsed_ms;
         let name = inv.displayed_name();
         let summary = summary_resolver.resolve(&name, &args);
-        transcript.push_hydrated_tool_block_with_origin(
+        transcript.push_tool_call_with_origin(
             Block::ToolCall {
                 call_id: inv.call_id.clone(),
                 name,
@@ -1198,6 +1196,37 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn rebuilt_blocks_stay_live_until_persisted() {
+        let lua = crate::lua::LuaRuntime::new();
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            HistoryItem::user(Content::text("question")),
+            HistoryItem::Assistant(AssistantStep::with_invocations(
+                Some(Content::text("answer")),
+                Some("reasoning".into()),
+                Vec::new(),
+                vec![protocol::ToolInvocation {
+                    call_id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"ls"}"#.into(),
+                    result: protocol::ToolOutcome::new("done".into(), false, None),
+                    elapsed_ms: None,
+                    called_at_ms: None,
+                    provider: None,
+                }],
+            )),
+        ];
+
+        let transcript = build_transcript_from_session(&lua, &session);
+
+        // A hydrated block can be evicted and reloaded from disk, but these
+        // records only reach disk with the next save.
+        let history = &transcript.history;
+        assert_eq!(history.len(), 4);
+        assert!(history.order.iter().all(|id| history.is_live(*id)));
     }
 
     #[test]

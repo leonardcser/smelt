@@ -4970,3 +4970,76 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
         1
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_history_rebuild_under_memory_budget_saves_and_rehydrates() {
+    const ROWS: usize = 24;
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    for idx in 0..ROWS {
+        let text = format!("row {idx}");
+        app.commit_request_history_item(
+            HistoryItem::user(Content::text(text.clone())),
+            Some(Block::User {
+                text,
+                image_labels: Vec::new(),
+                command: false,
+                sent_at_ms: None,
+            }),
+        );
+    }
+    app.save_session_and_flush();
+    let session_id = app.session_snapshot().id.clone();
+    app.set_transcript_memory_budget_for_harness(crate::app::transcript::TranscriptMemoryBudget {
+        hydrated_blocks: 1,
+        ..Default::default()
+    });
+
+    // The engine rewrites the first item with a different kind, so the
+    // transcript no longer links to history and rebuilds from scratch.
+    let mut replacement = (0..ROWS)
+        .map(|idx| HistoryItem::user(Content::text(format!("row {idx}"))))
+        .collect::<Vec<_>>();
+    replacement[0] = HistoryItem::Assistant(AssistantStep::terminal(
+        Some(Content::text("rewritten reply")),
+        None,
+        Vec::new(),
+    ));
+    app.start_turn(7);
+    app.feed_one(SourceEvent::engine(EngineEvent::HistoryUpdated {
+        turn_id: 7,
+        update: protocol::CanonicalHistoryDelta::new(0, replacement),
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id: 7,
+        history: None,
+        meta: None,
+    }));
+    app.render_silent();
+    app.save_session_and_flush();
+
+    assert!(
+        !has_sticky_session_save_failure(&app, &session_id),
+        "rebuilt transcript failed to save: {:?}",
+        app.overlays_probe().notification()
+    );
+    let order = app
+        .conversation_probe()
+        .transcript()
+        .history()
+        .order
+        .clone();
+    assert_eq!(order.len(), ROWS);
+    for id in &order {
+        assert!(
+            app.hydrate_transcript_blocks(&[*id]),
+            "rebuilt block {id:?} cannot be hydrated"
+        );
+    }
+    let loaded = loaded_session(&app, &session_id);
+    assert!(matches!(
+        loaded.history.first(),
+        Some(HistoryItem::Assistant(step))
+            if step.content.as_ref().is_some_and(|content| content.text_content() == "rewritten reply")
+    ));
+}

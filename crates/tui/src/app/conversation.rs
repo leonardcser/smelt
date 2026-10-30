@@ -763,7 +763,7 @@ impl ConversationRuntime {
             .replace_loaded_transcript(transcript);
     }
 
-    #[cfg(feature = "transcript-bench")]
+    #[cfg(any(test, feature = "transcript-bench"))]
     pub(crate) fn ensure_transcript_blocks_hydrated_for_harness(
         &mut self,
         ids: &[smelt_core::transcript_model::BlockId],

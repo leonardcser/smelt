@@ -198,7 +198,7 @@ impl TestApp {
         self.app.transcript_win_mut().set_document_view_state(state);
     }
 
-    #[cfg(feature = "transcript-bench")]
+    #[cfg(any(test, feature = "transcript-bench"))]
     pub(crate) fn hydrate_transcript_blocks(
         &mut self,
         ids: &[smelt_core::transcript_model::BlockId],

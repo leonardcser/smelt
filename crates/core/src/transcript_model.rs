@@ -3751,77 +3751,6 @@ impl BlockHistory {
         id
     }
 
-    fn add_hydrated_block(
-        &mut self,
-        idx: Option<usize>,
-        block: Block,
-        origin: Option<BlockOrigin>,
-        content_hash: Option<u64>,
-    ) -> BlockId {
-        let id = BlockId(self.next_id);
-        self.next_id += 1;
-        self.add_hydrated_block_with_id(id, idx, block, origin, content_hash)
-    }
-
-    fn add_hydrated_block_with_id(
-        &mut self,
-        id: BlockId,
-        idx: Option<usize>,
-        block: Block,
-        origin: Option<BlockOrigin>,
-        content_hash: Option<u64>,
-    ) -> BlockId {
-        let normalized = block.normalize_content();
-        let normalized_hash = normalized.content_hash();
-        let hash = content_hash
-            .filter(|hash| *hash == normalized_hash)
-            .unwrap_or(normalized_hash);
-        let block = normalized;
-        self.next_id = self.next_id.max(id.0.saturating_add(1));
-        let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
-        let tool_state = self.tool_state(id).cloned();
-        let record = TranscriptBlockRecord {
-            block,
-            content_hash: hash,
-            origin,
-            tool_state,
-            tool_render_revision: self.sidecar_hash(id),
-        };
-        let indexed = transcript_indexed_text(&record.block, record.tool_state.as_ref());
-        let (_, stored) = StoredBlockRef::from_record(
-            order_index,
-            id,
-            &record,
-            &indexed.indexed_text,
-            indexed.estimated_text_bytes,
-        );
-        let block_weight = block_retained_bytes(&record.block);
-        let tool_state_weight = record
-            .tool_state
-            .as_ref()
-            .map_or(0, tool_state_retained_bytes);
-        let entry = BlockEntry::Hydrated {
-            stored,
-            block: Box::new(record.block),
-            block_weight,
-            tool_state_weight,
-        };
-        self.insert_order_id(order_index, id);
-        self.insert_entry(id, entry);
-        self.bump_order_generation();
-        self.mark_record_dirty_from(order_index);
-        self.record_patch(
-            vec![TranscriptPatchOperation::Insert {
-                id,
-                index: order_index,
-            }],
-            true,
-            true,
-            true,
-        );
-        id
-    }
-
     pub(crate) fn push(&mut self, block: Block) -> BlockId {
         self.add_block(None, block, None)
     }
@@ -3877,14 +3806,6 @@ impl BlockHistory {
         }
         self.remove_block(id);
         true
-    }
-
-    pub fn push_hydrated_block_with_origin(
-        &mut self,
-        block: Block,
-        origin: BlockOrigin,
-    ) -> BlockId {
-        self.add_hydrated_block(None, block, Some(origin), None)
     }
 
     pub(crate) fn insert_checkpoint_marker(
@@ -3974,24 +3895,6 @@ impl BlockHistory {
             },
         );
         id
-    }
-
-    pub fn push_hydrated_block_with_state_and_origin(
-        &mut self,
-        block: Block,
-        state: ToolState,
-        origin: BlockOrigin,
-    ) -> BlockId {
-        let id = BlockId(self.next_id);
-        let render_revision = self.next_tool_render_revision();
-        self.set_tool_state_entry(
-            id,
-            ToolStateEntry::Hydrated {
-                state,
-                render_revision,
-            },
-        );
-        self.add_hydrated_block_with_id(id, None, block, Some(origin), None)
     }
 
     pub fn apply_tool_state_mutation(&mut self, id: BlockId, mutation: ToolStateMutation) -> bool {
@@ -6406,8 +6309,7 @@ mod tests {
             ToolDraft::new("stream-1".into(), Some("call-1".into()), "bash".into());
         tool_draft.summary = protocol::StyledLines::from_plain("echo hi");
         tool_draft.append("{\"command\":\"echo hi\"}".into());
-        let draft = history
-            .push_hydrated_block_with_origin(Block::ToolDraft(tool_draft), BlockOrigin::History(1));
+        let draft = history.push_with_origin(Block::ToolDraft(tool_draft), BlockOrigin::History(1));
         history.push(Block::CompactionPreview {
             summary: "streaming summary".into(),
         });
@@ -6727,30 +6629,6 @@ mod tests {
     }
 
     #[test]
-    fn hydrated_block_history_normalizes_thinking_title_spacing() {
-        let mut history = BlockHistory::new();
-        let id = history.push_hydrated_block_with_origin(
-            Block::Thinking {
-                title: None,
-                summary_titles: Vec::new(),
-                kind: protocol::ReasoningKind::Raw,
-                content: "**Plan**\n\nbody".into(),
-            },
-            BlockOrigin::History(0),
-        );
-
-        assert_eq!(
-            history.block(id),
-            Some(&Block::Thinking {
-                title: None,
-                summary_titles: Vec::new(),
-                kind: protocol::ReasoningKind::Raw,
-                content: "**Plan**\nbody".into(),
-            })
-        );
-    }
-
-    #[test]
     fn raw_text_for_compacted_returns_summary() {
         let block = Block::Compacted {
             summary: "earlier session compacted".into(),
@@ -6808,13 +6686,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "status can only change on a live transcript block")]
     fn set_status_rejects_hydrated_blocks() {
-        let mut history = BlockHistory::new();
-        let id = history.push_hydrated_block_with_origin(
-            Block::Text {
+        let id = BlockId(0);
+        let record = TranscriptBlockRecord {
+            block: Block::Text {
                 content: "hydrated".into(),
             },
-            BlockOrigin::History(0),
-        );
+            content_hash: 0,
+            origin: Some(BlockOrigin::History(0)),
+            tool_state: None,
+            tool_render_revision: 0,
+        };
+        let (_, stored) = StoredBlockRef::from_record(0, id, &record, "hydrated", 8);
+        let mut history = BlockHistory::new();
+        assert!(history.install_hydrated_record(id, stored, record));
         assert_eq!(history.status(id), Some(Status::Done));
         history.set_status(id, Status::Streaming);
     }
