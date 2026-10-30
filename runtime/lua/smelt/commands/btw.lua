@@ -81,6 +81,11 @@ smelt.cmd.register("btw", function(args)
       waiting_timer = smelt.timer.every(WAITING_FRAME_MS, render_waiting)
     end
 
+    local function show_error(kind, message)
+      stream:reset()
+      smelt.render.text(buf, "error (" .. kind .. "): " .. message, { hl_group = "ErrorMsg" })
+    end
+
     local base_messages = build_base_messages(question)
     local restarts = 0
 
@@ -106,8 +111,7 @@ smelt.cmd.register("btw", function(args)
           if closed then return end
           stop_waiting()
           if err then
-            stream:reset()
-            buf:source("error (" .. err.kind .. "): " .. err.message)
+            show_error(err.kind, err.message)
             return
           end
           if response and response.tool_calls and #response.tool_calls > 0 then
@@ -122,8 +126,7 @@ smelt.cmd.register("btw", function(args)
               send(base_messages, false)
               return
             end
-            stream:reset()
-            buf:source("error (invalid_response): model kept requesting tools")
+            show_error("invalid_response", "model kept requesting tools")
             return
           end
           stream:finish((response and response.content) or "")
