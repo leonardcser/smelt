@@ -1452,16 +1452,23 @@ mod tests {
         }
         for boundary in 0..4 {
             let root = tempfile::tempdir().unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "session_writer::tests::native_turn_journal_startup_recovers_after_process_abort", "--nocapture"])
                 .env(ROOT, root.path()).env(BOUNDARY, boundary.to_string())
-                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
+                .output().unwrap();
+            let status = output.status;
+            // The child's own output says why it did not die where it should.
+            let child = String::from_utf8_lossy(&output.stderr);
             #[cfg(unix)]
             {
                 use std::os::unix::process::ExitStatusExt;
-                assert_eq!(status.signal(), Some(libc::SIGKILL));
+                assert_eq!(
+                    status.signal(),
+                    Some(libc::SIGKILL),
+                    "boundary {boundary}: {status}\n{child}"
+                );
             }
-            assert!(!status.success());
+            assert!(!status.success(), "boundary {boundary}: {status}\n{child}");
             let writer = SessionWriter::open_existing(root.path(), session_id).unwrap();
             assert_eq!(
                 writer.startup_journal_recovery().complete_batches,
