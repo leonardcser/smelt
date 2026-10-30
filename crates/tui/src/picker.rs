@@ -17,6 +17,7 @@ use crate::smelt_edit::{
     WinId,
 };
 use smelt_core::content::builder::render_into;
+use smelt_core::content::selection::truncate_str;
 use smelt_core::style::Style;
 
 /// One row in a picker. Description (if any) is column-aligned after the
@@ -126,6 +127,7 @@ pub(crate) fn open(
         layout_for(leaf, height),
         anchor_for(&app.ui, placement, height),
     )
+    .with_width(overlay_width(placement, &app.ui))
     .with_z(z)
     .blocks_agent(blocks_agent);
     let overlay_id = app.ui.overlay_open(overlay);
@@ -165,12 +167,14 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     state.materialized = 0..0;
     let height = picker_height(state.items.len(), state.placement, &app.ui);
     let new_anchor = anchor_for(&app.ui, state.placement, height);
+    let width = overlay_width(state.placement, &app.ui);
     let overlay = state.overlay;
     app.overlays.install_picker(leaf, state);
 
     if let Some(ov) = app.ui.overlay_mut(overlay) {
         ov.layout = layout_for(leaf, height);
         ov.anchor = new_anchor;
+        ov.width = width;
     }
     sync_selected(app, leaf, selected);
 }
@@ -221,7 +225,7 @@ pub(crate) fn sync_scrolled(app: &mut TuiApp) {
 
 /// Recompute prompt-docked picker sizes after the main layout changes.
 /// Called from `refresh_main_layout` so pickers shrink or grow as the
-/// available headroom above the prompt changes.
+/// available headroom above the prompt and the prompt's width change.
 pub(crate) fn sync_layouts(app: &mut TuiApp) {
     let leaves: Vec<WinId> = app.overlays.picker_leaves();
     for leaf in leaves {
@@ -237,11 +241,13 @@ pub(crate) fn sync_layouts(app: &mut TuiApp) {
         let total = state.items.len();
         let height = picker_height(total, state.placement, &app.ui);
         let new_anchor = anchor_for(&app.ui, state.placement, height);
+        let width = overlay_width(state.placement, &app.ui);
         if let Some(ov) = app.ui.overlay_mut(state.overlay) {
             ov.layout = layout_for(leaf, height);
             ov.anchor = new_anchor;
+            ov.width = width;
         }
-        // Re-materialize with the new height while keeping the current
+        // Re-materialize with the new size while keeping the current
         // logical selection visible.
         sync_selected(app, leaf, state.selected);
     }
@@ -297,6 +303,7 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
         PICKER_OVERSCAN_ROWS,
     );
     let buf_id = app.ui.win(leaf).map(|w| w.buf);
+    let width = picker_width(state.placement, &app.ui).map(usize::from);
     if let Some(buf_id) = buf_id {
         write_buffer_range(
             app,
@@ -305,6 +312,7 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
             range.clone(),
             state.reversed,
             state.max_label,
+            width,
         );
         let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
         if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
@@ -386,6 +394,23 @@ fn visual_cursor(logical: usize, n: usize, reversed: bool) -> RowIndex {
     }
 }
 
+/// Columns a picker may span. A prompt-docked picker is as wide as the
+/// prompt chrome it floats over, so a layout that narrows the prompt (a
+/// sidebar beside it) narrows the picker with it. Other placements size to
+/// their content.
+fn picker_width(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> Option<u16> {
+    match placement {
+        PickerPlacement::PromptDocked { .. } => ui
+            .split_rect(crate::content::layout::prompt_chrome_top_win(ui))
+            .map(|r| r.width),
+        _ => None,
+    }
+}
+
+fn overlay_width(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> Constraint {
+    picker_width(placement, ui).map_or(Constraint::Fit, Constraint::Length)
+}
+
 fn layout_for(leaf: WinId, height: u16) -> LayoutTree {
     LayoutTree::vbox(vec![(
         Constraint::Length(height),
@@ -429,7 +454,8 @@ fn max_label_width(items: &[PickerItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// Write a materialized visual-row range into the backing buffer.
+/// Write a materialized visual-row range into the backing buffer. Rows wider
+/// than `width` end in an ellipsis: the description first, then the label.
 fn write_buffer_range(
     app: &mut TuiApp,
     buf: BufId,
@@ -437,7 +463,9 @@ fn write_buffer_range(
     range: std::ops::Range<RowIndex>,
     reversed: bool,
     max_label: usize,
+    width: Option<usize>,
 ) {
+    let room = width.map_or(usize::MAX, |w| w.saturating_sub(INDENT));
     // Clone the theme Arc so the buffer can be borrowed mutably alongside it.
     let theme = app.ui.theme().clone();
     let Some(b) = app.ui.buf_mut(buf) else {
@@ -463,10 +491,12 @@ fn write_buffer_range(
                 visual_row as usize
             };
             let item = &items[src_idx];
+            let prefix_width = smelt_buffer::cell_width::text_width(&item.prefix);
             let label_width = smelt_buffer::cell_width::joined_text_width([
                 item.prefix.as_str(),
                 item.label.as_str(),
             ]);
+            let label_fits = label_width <= room;
 
             out.print(&" ".repeat(INDENT));
 
@@ -477,14 +507,26 @@ fn write_buffer_range(
             }
             if !item.label.is_empty() {
                 out.push(None, item.label_style);
-                out.print(&item.label);
+                if label_fits {
+                    out.print(&item.label);
+                } else {
+                    out.print(&truncate_str(
+                        &item.label,
+                        room.saturating_sub(prefix_width),
+                    ));
+                }
                 out.pop_style();
             }
-            if let Some(desc) = item.description.as_deref() {
-                let pad = max_label.saturating_sub(label_width) + DESC_GAP;
+            let pad = max_label.saturating_sub(label_width) + DESC_GAP;
+            let desc_room = room.saturating_sub(label_width + pad);
+            if let Some(desc) = item
+                .description
+                .as_deref()
+                .filter(|_| label_fits && desc_room > 0)
+            {
                 out.print(&" ".repeat(pad));
                 out.push(None, Style::new().dim());
-                out.print(desc);
+                out.print(&truncate_str(desc, desc_room));
                 out.pop_style();
             }
             out.newline();

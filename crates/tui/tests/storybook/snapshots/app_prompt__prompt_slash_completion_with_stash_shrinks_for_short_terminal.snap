@@ -1,10 +1,9 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 515
 expression: frame.text()
 ---
  /btw          ask a side question
- /brief        summarize planned or completed chan
+ /brief        summarize planned or completed cha…
  /branch       fork current session
   ◌ Stashed (ctrl+s to unstash)
 ──────────────────────────────────────────────────

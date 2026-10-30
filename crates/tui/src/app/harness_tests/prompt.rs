@@ -36,6 +36,47 @@ fn slash_completion_tab_accepts_command_name() {
 }
 
 #[test]
+fn slash_completion_stays_within_a_prompt_narrowed_by_a_sidebar() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    assert!(app.run_lua(
+        r#"
+        smelt.cmd.register("zzsidebar", function() end, {
+            desc = "a description far too long to fit beside the sidebar at all",
+        })
+        local side = smelt.buf.new({ readonly = true })
+        local rows = {}
+        for i = 1, 40 do rows[i] = "SIDE" end
+        side:lines(rows)
+        local ui = smelt.ui.layout
+        local default = require("smelt.layout").compose
+        ui.set(function(state)
+            return ui.hbox({
+                { default(state), width = "fill" },
+                { ui.leaf(smelt.win.new(side, { surface = "list_inert" })), width = 22 },
+            })
+        end)
+        "#
+    ));
+    app.render();
+
+    app.type_text("/zzsidebar");
+    let frame = app.render_to_frame().text();
+    let row = frame
+        .lines()
+        .find(|line| line.contains("a description"))
+        .unwrap_or_else(|| panic!("picker row missing:\n{frame}"));
+    assert!(
+        row.contains('…'),
+        "the description should end in an ellipsis where the prompt ends:\n{frame}"
+    );
+    assert!(
+        row.trim_end().ends_with("SIDE"),
+        "the picker should leave the sidebar showing beside it:\n{frame}"
+    );
+}
+
+#[test]
 fn slash_completion_accepts_current_command_from_a_terminal_burst() {
     for accept in [KeyCode::Enter, KeyCode::Tab] {
         let mut app = TestApp::builder().with_vim(false).build();

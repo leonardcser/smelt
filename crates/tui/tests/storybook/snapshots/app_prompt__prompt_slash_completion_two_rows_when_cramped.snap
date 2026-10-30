@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- /brief        summarize planned or completed chan
+ /brief        summarize planned or completed cha…
  /branch       fork current session
 ──────────────────────────────────────────────────
  /
