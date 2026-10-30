@@ -12,15 +12,15 @@ expression: frame.text()
 
 
 
-
-
-
-
-
 ─ show me a tiny rust example ────────────────────────────────────────
  Here is inline and a block:
 
  fn main() {
      println!("hi");
  }
+
+
+
+
+
  ○ normal                                                       1:1 0%

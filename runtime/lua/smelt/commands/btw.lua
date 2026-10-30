@@ -140,7 +140,7 @@ smelt.cmd.register("btw", function(args)
 
     smelt.dialog.open({
       title      = question,
-      min_height = "30%",
+      min_height = "50%",
       max_height = "70%",
       panels     = { { leaf = leaf, height = "fill" } },
       on_close   = function()

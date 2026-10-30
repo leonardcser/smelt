@@ -9,16 +9,14 @@ dim: 70 16
   1   1  25 bg=AnsiValue(236) attrs=bold
   1  26  43 bg=AnsiValue(236)
   2   0  69 bg=AnsiValue(236)
- 11   0   2 fg=AnsiValue(208)
- 11   2  48 fg=AnsiValue(208) attrs=dim
- 11  50  20 fg=AnsiValue(208)
- 12   1   1 fg=Black bg=White
- 12   2  15 fg=AnsiValue(208)
- 12  69   1 bg=AnsiValue(243)
- 13  15  14 fg=AnsiValue(208)
- 13  69   1 bg=AnsiValue(235)
- 14  24   6 fg=AnsiValue(208)
- 14  69   1 bg=AnsiValue(235)
+  7   0   2 fg=AnsiValue(208)
+  7   2  48 fg=AnsiValue(208) attrs=dim
+  7  50  20 fg=AnsiValue(208)
+  8   1   1 fg=Black bg=White
+  8   2  15 fg=AnsiValue(208)
+  9  15  14 fg=AnsiValue(208)
+ 10  24   6 fg=AnsiValue(208)
+ 11  28   5 fg=AnsiValue(208)
  15   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
  15  10  54 bg=AnsiValue(233)
  15  64   6 fg=AnsiValue(244) bg=AnsiValue(233)

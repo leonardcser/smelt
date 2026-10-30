@@ -9,11 +9,11 @@ dim: 70 22
   1   1  25 bg=AnsiValue(236) attrs=bold
   1  26  43 bg=AnsiValue(236)
   2   0  69 bg=AnsiValue(236)
- 15   0   2 fg=AnsiValue(208)
- 15   2  27 fg=AnsiValue(208) attrs=dim
- 15  29  41 fg=AnsiValue(208)
- 16   1   1 fg=Black bg=White
- 16   2   2 attrs=dim|italic
+ 10   0   2 fg=AnsiValue(208)
+ 10   2  27 fg=AnsiValue(208) attrs=dim
+ 10  29  41 fg=AnsiValue(208)
+ 11   1   1 fg=Black bg=White
+ 11   2   2 attrs=dim|italic
  21   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
  21  10  52 bg=AnsiValue(233)
  21  62   8 fg=AnsiValue(244) bg=AnsiValue(233)

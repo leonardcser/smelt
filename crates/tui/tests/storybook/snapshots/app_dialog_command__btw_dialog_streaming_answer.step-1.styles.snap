@@ -9,16 +9,16 @@ dim: 70 22
   1   1  25 bg=AnsiValue(236) attrs=bold
   1  26  43 bg=AnsiValue(236)
   2   0  69 bg=AnsiValue(236)
- 15   0   2 fg=AnsiValue(208)
- 15   2  27 fg=AnsiValue(208) attrs=dim
- 15  29  41 fg=AnsiValue(208)
- 16   1   1 fg=Black bg=White
- 16   9   6 fg=AnsiValue(208)
- 18   1   2 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
- 18   3   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 18   4   4 fg=Rgb { r: 166, g: 226, b: 46 } bg=AnsiValue(233)
- 18   8   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
- 18  12  56 bg=AnsiValue(233)
+ 10   0   2 fg=AnsiValue(208)
+ 10   2  27 fg=AnsiValue(208) attrs=dim
+ 10  29  41 fg=AnsiValue(208)
+ 11   1   1 fg=Black bg=White
+ 11   9   6 fg=AnsiValue(208)
+ 13   1   2 fg=Rgb { r: 102, g: 217, b: 239 } bg=AnsiValue(233)
+ 13   3   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 13   4   4 fg=Rgb { r: 166, g: 226, b: 46 } bg=AnsiValue(233)
+ 13   8   4 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
+ 13  12  56 bg=AnsiValue(233)
  21   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
  21  10  52 bg=AnsiValue(233)
  21  62   8 fg=AnsiValue(244) bg=AnsiValue(233)
