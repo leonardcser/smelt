@@ -1,5 +1,6 @@
 use super::document_motion::{
-    clamp_to_row_text, find_row, over_rows, resolve_rows, Edges, RowEnv, ScanBound, SCAN_LIMIT_ROWS,
+    block_landing, clamp_to_row_text, find_row, over_rows, resolve_rows, Edges, RowEnv, ScanBound,
+    SCAN_LIMIT_ROWS,
 };
 use super::*;
 use crate::jumplist::JumpMove;
@@ -1271,6 +1272,7 @@ impl DocumentViewExecutor {
         };
         let mut next = current;
         let mut sets_preferred_cell = false;
+        let mut block_top = None;
         let mut copy = None;
         match command {
             DocumentCommand::MoveRows(delta) => {
@@ -1314,6 +1316,15 @@ impl DocumentViewExecutor {
                     let rows = if motion == Motion::Down { rows } else { -rows };
                     let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
                     move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
+                }
+                Motion::Block(block) => {
+                    if let Some(landing) =
+                        block_landing(document, total_rows, current, block, count.unwrap_or(1))
+                    {
+                        next = clamp_to_row_text(document, landing.cursor, *vim_mode);
+                        sets_preferred_cell = true;
+                        block_top = landing.top;
+                    }
                 }
                 _ => {
                     if let Some((pos, _)) =
@@ -1532,7 +1543,10 @@ impl DocumentViewExecutor {
                 | DocumentCommand::ScrollCursor(_)
                 | DocumentCommand::PanColumns(_)
         ) {
-            *scroll_top = scroll_to_show(*scroll_top, next.row, viewport_rows);
+            *scroll_top = match block_top {
+                Some(start) => start.min(total_rows.saturating_sub(viewport_rows as RowIndex)),
+                None => scroll_to_show(*scroll_top, next.row, viewport_rows),
+            };
         }
         copy
     }
@@ -2213,6 +2227,14 @@ mod tests {
                 starts: starts.to_vec(),
             }
         }
+
+        /// The first row with text in the block starting at `start`.
+        fn home_of(&mut self, start: RowIndex) -> RowIndex {
+            let total = self.rows.snapshot().total_rows;
+            (start..total)
+                .find(|&row| document_row_string(self, row).is_some_and(|text| !text.is_empty()))
+                .unwrap_or(start)
+        }
     }
 
     impl DisplayDocument for BlockRows {
@@ -2236,8 +2258,12 @@ mod tests {
                 self.starts.iter().find(|&&start| start > from)
             } else {
                 self.starts.iter().rev().find(|&&start| start < from)
-            };
-            start.map_or(BlockBoundary::End, |&start| BlockBoundary::At(start))
+            }
+            .copied();
+            start.map_or(BlockBoundary::End, |start| BlockBoundary::At {
+                start,
+                home: self.home_of(start),
+            })
         }
     }
 

@@ -161,8 +161,9 @@ pub enum BlockBoundary {
     Unsupported,
     /// No further block lies in that direction.
     End,
-    /// First row of the nearest block.
-    At(RowIndex),
+    /// The nearest block: its first row and its first row with text, where a
+    /// cursor rests.
+    At { start: RowIndex, home: RowIndex },
 }
 
 pub trait DisplayDocument {

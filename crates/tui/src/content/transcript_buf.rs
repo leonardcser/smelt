@@ -2846,17 +2846,47 @@ impl TranscriptProjection {
         block_id: BlockId,
         display_offset: usize,
     ) -> Option<RowIndex> {
+        self.with_exact_block_text(lua, history, width, block_id, |buf, rows| {
+            row_offset_for_display_offset(buf, rows, display_offset, 0)
+        })
+    }
+
+    /// Row inside `block_id` at `width` that holds its first selectable text,
+    /// past any padding or header chrome that opens the block.
+    pub(crate) fn block_first_text_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        block_id: BlockId,
+    ) -> Option<RowIndex> {
+        self.with_exact_block_text(lua, history, width, block_id, |buf, rows| {
+            (0..rows)
+                .find(|&row| !selectable_row_string(buf, row).trim().is_empty())
+                .unwrap_or(0) as RowIndex
+        })
+    }
+
+    /// Measures `block_id` exactly at `width` and reads its rendered text.
+    fn with_exact_block_text<R>(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        block_id: BlockId,
+        read: impl FnOnce(&Buffer, usize) -> R,
+    ) -> Option<R> {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.prepare_row_index_with_env(env.clone(), history, width);
         let index = self.transcript_scene.index_for_block(block_id)?;
         self.pin_display_node_range(index..index.saturating_add(1));
         let _ = self.exactify_node_range(env, history, index..index.saturating_add(1));
         self.measurements.remember_active();
-        let row = self
+        let result = self
             .render_block_text(history, block_id)
-            .map(|(buf, rows)| row_offset_for_display_offset(&buf, rows, display_offset, 0));
+            .map(|(buf, rows)| read(&buf, rows));
         self.layout_cache.set_pinned_nodes(std::iter::empty());
-        row
+        result
     }
 
     /// Renders a block's cached layout for text measurement. Display offsets

@@ -27,10 +27,6 @@ pub(super) struct RowEnv {
 /// block takes.
 pub(super) const SCAN_LIMIT_ROWS: RowIndex = 1024;
 
-/// How many rows a block may open with before its text, such as the padding
-/// around a user message.
-const BLOCK_LEADING_BLANK_ROWS: RowIndex = 4;
-
 /// Where `motion` takes the cursor from `from`, and how far it reaches; `None`
 /// when it cannot move.
 pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
@@ -152,7 +148,7 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             (at(from.row, col), find_reach(kind))
         }
         Motion::Block(block) => (
-            block_position(doc, env.total_rows, from, block, n)?,
+            block_landing(doc, env.total_rows, from, block, n)?.cursor,
             Reach::Exclusive,
         ),
         Motion::ByteOffset => return None,
@@ -441,58 +437,55 @@ fn scan_rows<D: DisplayDocument + ?Sized>(
     )
 }
 
-fn document_row_is_blank<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<bool> {
-    Some(document_row_string(doc, row)?.trim().is_empty())
+/// Where a block motion lands: the cursor, on the first row with text of the
+/// block, and the row the block starts on, `None` when the motion ran past the
+/// last block.
+pub(super) struct BlockLanding {
+    pub cursor: DocPosition,
+    pub top: Option<RowIndex>,
 }
 
-/// The first row with text in the block starting at `start`.
-fn block_home_row<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    total_rows: RowIndex,
-    start: RowIndex,
-) -> RowIndex {
-    let last = start
-        .saturating_add(BLOCK_LEADING_BLANK_ROWS)
-        .min(total_rows.saturating_sub(1));
-    (start..=last)
-        .find(|&row| document_row_is_blank(doc, row) == Some(false))
-        .unwrap_or(start)
-}
-
-/// Where `motion` lands from `from`, `count` blocks away, on the first row with
-/// text of the block. Past the last block in its direction the cursor goes to
-/// the document edge, like vim's section motions; a document that does not
-/// know the kind has nowhere to go.
-fn block_position<D: DisplayDocument + ?Sized>(
+/// Where `motion` lands from `from`, `count` blocks away. Past the last block
+/// in its direction the cursor goes to the document edge, like vim's section
+/// motions; a document that does not know the kind has nowhere to go.
+pub(super) fn block_landing<D: DisplayDocument + ?Sized>(
     doc: &mut D,
     total_rows: RowIndex,
     from: DocPosition,
     motion: BlockMotion,
     count: usize,
-) -> Option<DocPosition> {
+) -> Option<BlockLanding> {
     let mut row = from.row;
+    let mut top = None;
     for _ in 0..count {
         let mut boundary = doc.block_boundary(row, motion.kind, motion.forward);
-        if let BlockBoundary::At(start) = boundary {
+        if let BlockBoundary::At { start, home } = boundary {
             // `row` already rests in the block starting at `start`: step to the one before.
-            if !motion.forward && start < row && block_home_row(doc, total_rows, start) >= row {
+            if !motion.forward && start < row && home >= row {
                 boundary = doc.block_boundary(start, motion.kind, false);
             }
         }
         match boundary {
             BlockBoundary::Unsupported => return None,
-            BlockBoundary::At(start) => row = block_home_row(doc, total_rows, start),
+            BlockBoundary::At { start, home } => {
+                row = home;
+                top = Some(start);
+            }
             BlockBoundary::End => {
                 row = if motion.forward {
                     total_rows.saturating_sub(1)
                 } else {
                     0
                 };
+                top = None;
                 break;
             }
         }
     }
-    Some(DocPosition { row, byte_col: 0 })
+    Some(BlockLanding {
+        cursor: DocPosition { row, byte_col: 0 },
+        top,
+    })
 }
 
 #[cfg(test)]

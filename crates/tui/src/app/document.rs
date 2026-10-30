@@ -700,7 +700,7 @@ impl TuiApp {
             }
         }
 
-        let align_block_jump = win == crate::app::TRANSCRIPT_WIN
+        let block_jump = win == crate::app::TRANSCRIPT_WIN
             && matches!(
                 command,
                 DocumentCommand::Move {
@@ -723,8 +723,7 @@ impl TuiApp {
                     byte_col: cursor.byte_col,
                 };
             }
-            let before = state.cursor;
-            let copy = DocumentViewExecutor::execute(
+            DocumentViewExecutor::execute(
                 &mut state,
                 document,
                 command,
@@ -735,22 +734,7 @@ impl TuiApp {
                 viewport_cols,
                 following_tail,
                 now,
-            );
-            if align_block_jump && state.cursor != before {
-                DocumentViewExecutor::execute(
-                    &mut state,
-                    document,
-                    DocumentCommand::ScrollCursor(crate::smelt_edit::ScrollTo::Top),
-                    &mut vim_mode,
-                    &mut scroll_top,
-                    &mut scroll_left,
-                    viewport_rows,
-                    viewport_cols,
-                    following_tail,
-                    now,
-                );
-            }
-            copy
+            )
         })?;
 
         let transcript_scroll_intent =
@@ -785,7 +769,7 @@ impl TuiApp {
                     self.transcript_anchor_or_approximate_row_seek(viewport_cols, scroll_top)
                 };
                 let restore = if defer_local_transcript_scroll
-                    || align_block_jump
+                    || block_jump
                     || matches!(command, DocumentCommand::ScrollCursor(_))
                 {
                     TranscriptProjectionRestore {

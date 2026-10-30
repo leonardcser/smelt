@@ -7956,7 +7956,7 @@ fn user_message_jumps_align_multiline_prompts_at_top() {
             let rows = app.transcript_window().viewport.unwrap().rect.height;
             assert_eq!(
                 app.transcript_cursor_screen_row(rows),
-                Some(0),
+                Some(1),
                 "vim={vim}, forward={forward}"
             );
             let lines = transcript_viewport_lines(&app).join("\n");
@@ -8159,18 +8159,22 @@ fn block_motions_take_counts() {
 #[test]
 fn block_motions_step_over_every_block() {
     let mut app = block_nav_app(true);
-    for (keys, expected) in [
-        ("gg]]", "first answer 0"),
-        ("]]", "first answer 1"),
-        ("[[", "first answer 0"),
-        ("[[", "first question"),
-        ("]a", "first answer 0"),
-        ("]a", "first answer 1"),
-        ("[a", "first answer 0"),
+    for (keys, expected, screen_row) in [
+        ("gg]]", "first answer 0", 0),
+        ("]]", "first answer 1", 0),
+        ("[[", "first answer 0", 0),
+        ("[[", "first question", 1),
+        ("]a", "first answer 0", 0),
+        ("]a", "first answer 1", 0),
+        ("[a", "first answer 0", 0),
     ] {
         assert_eq!(block_nav(&mut app, keys), expected);
         let rows = app.transcript_window().viewport.unwrap().rect.height;
-        assert_eq!(app.transcript_cursor_screen_row(rows), Some(0), "{keys}");
+        assert_eq!(
+            app.transcript_cursor_screen_row(rows),
+            Some(screen_row),
+            "{keys}"
+        );
     }
 }
 
@@ -8287,5 +8291,48 @@ fn resumed_sparse_block_motions_land_on_user_records() {
             transcript_viewport_lines(&app)
         );
         expected = previous_heterogeneous_user_before(expected);
+    }
+}
+
+#[test]
+fn user_message_jump_lands_on_the_text_below_the_pill_row() {
+    for sent_at_ms in [None, Some(1_700_000_000_000)] {
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.set_terminal_size(80, 16);
+        for turn in ["first", "second", "third"] {
+            app.push_transcript_block(smelt_core::transcript_model::Block::User {
+                text: format!("{turn} question"),
+                image_labels: Vec::new(),
+                command: false,
+                sent_at_ms,
+            });
+            for i in 0..30 {
+                app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                    content: format!("{turn} answer {i}").into(),
+                });
+            }
+        }
+        app.render_silent();
+        app.focus_transcript();
+        app.configure_transcript_vim(true, VimMode::Normal);
+        app.render_silent();
+        block_nav(&mut app, "G");
+        for (expected, pill_open) in [("third", true), ("second", true), ("first", false)] {
+            assert_eq!(block_nav(&mut app, "[u"), format!("{expected} question"));
+            let rows = app.transcript_window().viewport.unwrap().rect.height;
+            assert_eq!(app.transcript_cursor_screen_row(rows), Some(1));
+            assert_eq!(
+                app.transcript_window().row_cursor.unwrap().byte_col,
+                1,
+                "cursor sits on the text column"
+            );
+            assert_eq!(
+                app.ui_probe()
+                    .named_win("smelt.scroll_pills.top.win")
+                    .is_some(),
+                pill_open,
+                "{expected}, sent_at_ms={sent_at_ms:?}"
+            );
+        }
     }
 }

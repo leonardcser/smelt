@@ -3701,11 +3701,28 @@ impl TranscriptDocument {
         let Some(block) = self.navigation_block(anchor.into(), roles, direction) else {
             return BlockBoundary::End;
         };
-        let row = match self.block_target_row(lua, width, block.block_id, 0) {
-            Some((row, _)) => row,
-            None => self.rows_before_record(width, block.record_index),
+        let Some((start, _)) = self.block_target_row(lua, width, block.block_id, 0) else {
+            let start = self.rows_before_record(width, block.record_index);
+            return BlockBoundary::At { start, home: start };
         };
-        BlockBoundary::At(row)
+        let home_offset = self
+            .pin_operation_blocks(&[block.block_id])
+            .then(|| {
+                let offset = self.content.projection.block_first_text_row(
+                    lua,
+                    &mut self.content.transcript.history,
+                    width,
+                    block.block_id,
+                );
+                self.unpin_operation_blocks(&[block.block_id]);
+                offset
+            })
+            .flatten()
+            .unwrap_or(0);
+        BlockBoundary::At {
+            start,
+            home: start.saturating_add(home_offset),
+        }
     }
 
     pub(crate) fn record_block_reveal_position(
