@@ -103,6 +103,9 @@ impl TuiApp {
 
     /// Warm up the content pane on focus switch: clamp cpos and sync cursor state.
     /// Without this, a resumed session has stale state and the first key is a no-op.
+    /// A transcript following its newest output is read at the bottom, so the
+    /// cursor lands on its last line, as `G` would put it; one scrolled back
+    /// keeps the cursor where the reader is.
     fn refocus_content(&mut self) {
         let viewport = self.viewport_rows_estimate();
         let win_id = self.well_known.transcript;
@@ -111,6 +114,18 @@ impl TuiApp {
         win.expect("transcript window")
             .refocus(buf.expect("transcript buffer"), viewport);
         self.snap_transcript_cursor();
+        if self.win_uses_document_view(win_id) && self.transcript_win().is_following_tail() {
+            let now = self.core.clock.instant_now();
+            self.execute_document_view_command_for_win(
+                win_id,
+                crate::smelt_edit::DocumentCommand::Move {
+                    motion: crate::smelt_edit::Motion::BufferEnd,
+                    count: None,
+                },
+                viewport,
+                now,
+            );
+        }
     }
 }
 
@@ -185,6 +200,48 @@ mod tests {
         assert_eq!(app.app.app_focus, AppFocus::Prompt);
         assert_eq!(app.app.ui.focus(), Some(crate::app::PROMPT_WIN));
         assert!(app.app.ui.focused_overlay().is_none());
+    }
+
+    #[test]
+    fn pane_chord_into_a_following_transcript_lands_on_its_last_line() {
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_vim(true)
+            .build();
+        app.set_terminal_size(80, 24);
+        // An answer streaming in, the view following it down.
+        app.start_submitted_turn("where does the rounding happen?");
+        for n in 0..40 {
+            app.feed_one(crate::app::test_harness::SourceEvent::engine(
+                protocol::EngineEvent::TextDelta {
+                    delta: format!("paragraph {n}\n\n"),
+                },
+            ));
+            app.render();
+        }
+        assert!(app.finish_turn());
+        app.render();
+        assert!(app.transcript_window().is_following_tail());
+
+        app.press(KeyCode::Esc);
+        app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        app.press(KeyCode::Char('k'));
+        app.render();
+        assert_eq!(app.app.app_focus, AppFocus::Content);
+        let landed = app
+            .transcript_window()
+            .row_cursor()
+            .expect("transcript cursor");
+
+        app.press(KeyCode::Char('G'));
+        app.render();
+        let bottom = app
+            .transcript_window()
+            .row_cursor()
+            .expect("transcript cursor");
+        assert_eq!(
+            landed, bottom,
+            "focus should land where G does, on the last line"
+        );
     }
 
     #[test]
