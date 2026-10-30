@@ -56,7 +56,13 @@ impl TuiApp {
                     (KeyCode::Char('w'), _) | (KeyCode::Char('j' | 'k' | 'h' | 'l' | 'p'), M::NONE)
                 );
                 if navigated {
-                    self.toggle_pane_focus();
+                    // From a floating window, go back to the pane under it,
+                    // the one that had focus before the window took it.
+                    if self.ui.focused_overlay().is_some() {
+                        self.focus_pane(self.app_focus);
+                    } else {
+                        self.toggle_pane_focus();
+                    }
                     return Some(EventOutcome::Redraw);
                 }
                 return None;
@@ -79,8 +85,18 @@ impl TuiApp {
         if target == crate::app::AppFocus::Content && !self.has_transcript_content() {
             return;
         }
-        self.app_focus = target;
-        if self.app_focus == crate::app::AppFocus::Content {
+        self.focus_pane(target);
+    }
+
+    /// Focus one of the two primary panes.
+    fn focus_pane(&mut self, pane: crate::app::AppFocus) {
+        let win = match pane {
+            crate::app::AppFocus::Prompt => crate::app::PROMPT_WIN,
+            crate::app::AppFocus::Content => crate::app::TRANSCRIPT_WIN,
+        };
+        self.focus_window(win);
+        self.app_focus = pane;
+        if pane == crate::app::AppFocus::Content {
             self.refocus_content();
         }
     }
@@ -140,6 +156,35 @@ mod tests {
         assert!(matches!(outcome, Some(EventOutcome::Redraw)));
         assert_eq!(app.app_focus, AppFocus::Content);
         assert!(app.timers.pending_pane_chord.is_none());
+    }
+
+    #[test]
+    fn pane_chord_leaves_a_floating_window_for_the_pane_under_it() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.push_block(smelt_core::Block::Text {
+            content: "content".into(),
+        });
+        app.run_lua_result(
+            r#"
+            game = smelt.win.new(smelt.buf.new(), { surface = "readonly_text" })
+            smelt.overlay.new({ layout = smelt.ui.layout.leaf(game), width = 10, height = 4, modal = false })
+            game:focus()
+        "#,
+        )
+        .unwrap();
+        app.render_silent();
+        assert!(app.app.ui.focused_overlay().is_some());
+
+        app.app
+            .handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let outcome = app
+            .app
+            .handle_pane_chord(&key(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert!(matches!(outcome, Some(EventOutcome::Redraw)));
+        assert_eq!(app.app.app_focus, AppFocus::Prompt);
+        assert_eq!(app.app.ui.focus(), Some(crate::app::PROMPT_WIN));
+        assert!(app.app.ui.focused_overlay().is_none());
     }
 
     #[test]
