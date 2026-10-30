@@ -2188,6 +2188,22 @@ mod tests {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
 
+    /// Wait until the supervisor's only job has printed `started`.
+    async fn wait_for_started_job(supervisor: &JobSupervisor) -> String {
+        let id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(job) = supervisor.list().into_iter().next() {
+                    break job.id;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("foreground job did not start");
+        wait_for_snapshot(supervisor, &id, |out| out.text.contains("started")).await;
+        id
+    }
+
     async fn wait_for_snapshot(
         supervisor: &JobSupervisor,
         id: &str,
@@ -2562,16 +2578,7 @@ mod tests {
                     .await
             }
         });
-        let id = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(job) = supervisor.list().into_iter().next() {
-                    break job.id;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("foreground job did not start");
+        let id = wait_for_started_job(&supervisor).await;
 
         let stopped = supervisor.stop(&id).await.unwrap();
         let followed = handle.await.unwrap();
@@ -2605,13 +2612,7 @@ mod tests {
                     .await
             }
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while supervisor.list().is_empty() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("foreground job did not start");
+        wait_for_started_job(&supervisor).await;
 
         supervisor.clear();
         assert!(supervisor.list().is_empty());
