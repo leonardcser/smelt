@@ -70,6 +70,18 @@ app_story!(process_status_block_states, |ctx| {
     ctx.assert_snapshot_named("expanded");
 });
 
+app_story!(native_agent_process_failed, |ctx| {
+    ctx.set_viewport(64, 8);
+    ctx.push_background_process_ended(
+        "claude-code:b7x2k9",
+        None,
+        protocol::JobTermination::Failed,
+        "error: address already in use",
+    );
+    ctx.run_lua("smelt.transcript.fold_kind('process_status', 'open')");
+    ctx.assert_snapshot_named("expanded");
+});
+
 app_story!(exec_block_states, |ctx| {
     ctx.set_viewport(64, 14);
     ctx.exec_with_output("ls -1 src", "lib.rs\nmain.rs\nparser.rs");

@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+background process claude-code:b7x2k9 failed
+  error: address already in use
+
+  tip ctrl+enter / ctrl+q, steer the current response without…
+────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────
+ ○ normal                                               1:1 100%

@@ -376,8 +376,11 @@ while True:
         send({"type": "system", "subtype": "session_state_changed", "state": "idle", "sdk_host_only": True})
         task_output("shell-task", "tick 1\n")
         # Claude Code wakes to report a background shell that ended.
-        send({"type": "system", "subtype": "task_updated", "task_id": "shell-task", "patch": {"status": "completed"}})
-        send({"type": "system", "subtype": "task_notification", "task_id": "shell-task", "tool_use_id": "shell-call", "status": "completed", "output_file": "", "summary": "Serve"})
+        send({"type": "system", "subtype": "task_updated", "task_id": "shell-task", "patch": {"status": "failed"}})
+        output_file = os.path.join(os.path.dirname(os.environ["SMELT_CLAUDE_FIXTURE_LOG"]), "shell-task.output")
+        with open(output_file, "w") as output:
+            output.write("tick 1\ntick 2\n")
+        send({"type": "system", "subtype": "task_notification", "task_id": "shell-task", "tool_use_id": "shell-call", "status": "failed", "output_file": output_file, "summary": "Serve"})
         send({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
         send({"type": "system", "subtype": "session_state_changed", "state": "running", "sdk_host_only": True})
         assistant([{"type": "text", "text": "SHELL_WAKE_REPLY"}], "shell-wake")

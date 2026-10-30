@@ -110,6 +110,7 @@ impl TuiApp {
                         "[terminated by signal]".to_string()
                     }
                     Some(protocol::JobTermination::Stopped) => "[stopped]".to_string(),
+                    Some(protocol::JobTermination::Failed) => "[failed]".to_string(),
                     Some(protocol::JobTermination::Exited) | None => match exit_code {
                         Some(0) => "[exit 0]".to_string(),
                         Some(code) => format!("[exit {code}]"),

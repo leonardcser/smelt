@@ -174,11 +174,18 @@ impl AppStoryCtx {
         exit_code: Option<i32>,
         output: &str,
     ) {
-        let event = protocol::ProcessStatusEvent::background_process_completed(
-            id,
-            exit_code,
-            protocol::JobTermination::Exited,
-        );
+        self.push_background_process_ended(id, exit_code, protocol::JobTermination::Exited, output);
+    }
+
+    pub fn push_background_process_ended(
+        &mut self,
+        id: &str,
+        exit_code: Option<i32>,
+        termination: protocol::JobTermination,
+        output: &str,
+    ) {
+        let event =
+            protocol::ProcessStatusEvent::background_process_completed(id, exit_code, termination);
         self.app.push_process_status(event, output);
     }
 

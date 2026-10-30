@@ -1938,6 +1938,30 @@ async fn background_shell_keeps_claude_code_until_it_wakes_smelt() {
         .iter()
         .any(|list| list.first().is_some_and(|shell| shell.output == "tick 1\n")));
     assert_eq!(lists.last().unwrap(), &Vec::new());
+    let finished = history
+        .iter()
+        .position(|item| matches!(item, HistoryItem::Note(_)))
+        .expect("the finished shell has a note");
+    assert_eq!(
+        history[finished],
+        HistoryItem::note(protocol::HistoryNote::process_status_with_output(
+            protocol::ProcessStatusEvent::background_process_completed(
+                "claude-code:shell-task",
+                None,
+                protocol::JobTermination::Failed,
+            ),
+            "tick 1\ntick 2",
+        ))
+    );
+    let wake = history
+        .iter()
+        .position(|item| {
+            serde_json::to_string(item)
+                .unwrap()
+                .contains("SHELL_WAKE_REPLY")
+        })
+        .expect("Claude Code reports the shell");
+    assert!(finished < wake, "the note comes before the report on it");
     let history = serde_json::to_string(&history).unwrap();
     assert_eq!(history.matches("SHELL_WAKE_REPLY").count(), 1);
 }

@@ -28,6 +28,7 @@ pub(super) struct Transcript {
     thinking: HashMap<u64, (String, String)>,
     drafts: HashMap<u64, (String, String, String)>,
     steers: Vec<HistoryItem>,
+    notes: Vec<HistoryItem>,
     tx: EngineEventSender,
     provider: String,
     turn_id: u64,
@@ -56,6 +57,7 @@ impl Transcript {
             thinking: HashMap::new(),
             drafts: HashMap::new(),
             steers: Vec::new(),
+            notes: Vec::new(),
             tx,
             provider,
             turn_id,
@@ -146,6 +148,13 @@ impl Transcript {
     /// Whether every tool call has its result.
     pub(super) fn settled(&self) -> bool {
         self.pending.is_empty()
+    }
+
+    /// Records a note about the session. It follows the steps still waiting
+    /// for their tool results, which were taken before it.
+    pub(super) fn note(&mut self, item: HistoryItem) {
+        self.notes.push(item);
+        self.flush();
     }
 
     /// Records a steer Claude Code took. It joins the conversation after the
@@ -437,7 +446,13 @@ impl Transcript {
                 step.tools,
             )));
         }
-        if self.pending.is_empty() && !self.steers.is_empty() {
+        if !self.pending.is_empty() {
+            return;
+        }
+        for item in std::mem::take(&mut self.notes) {
+            self.append(item);
+        }
+        if !self.steers.is_empty() {
             let items = std::mem::take(&mut self.steers);
             self.emit(EngineEvent::Steered {
                 turn_id: self.turn_id,
@@ -448,7 +463,8 @@ impl Transcript {
         }
     }
 
-    /// Forgets what the turn had not finished, without recording it.
+    /// Forgets what the turn had not finished, without recording it. Notes
+    /// waiting behind it still happened, so they are recorded.
     pub(super) fn abandon(&mut self) {
         self.pending.clear();
         self.thinking.clear();
@@ -456,6 +472,7 @@ impl Transcript {
         self.steers.clear();
         self.partial_text.clear();
         self.partial_reasoning.clear();
+        self.flush();
     }
 
     pub(super) fn finish(&mut self) {
@@ -623,7 +640,31 @@ fn strip_tool_use_error(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_tool_use_error;
+    use super::*;
+
+    #[test]
+    fn a_note_waits_for_the_running_step_and_survives_its_cancel() {
+        let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::EngineEventSender {
+            output_tx,
+            route: None,
+        };
+        let mut transcript = Transcript::new(tx, "claude-code".into(), 1, 0);
+        transcript.frame(
+            &serde_json::json!({"type":"assistant", "message":{"id":"step", "content":[
+                {"type":"tool_use", "id":"call", "name":"Bash", "input":{"command":"make"}}
+            ]}}),
+            0,
+        );
+        let note = HistoryItem::note(protocol::HistoryNote::process_status("done"));
+        transcript.note(note.clone());
+        assert!(
+            transcript.committed.is_empty(),
+            "it follows the running step"
+        );
+        transcript.abandon();
+        assert_eq!(transcript.committed, [note]);
+    }
 
     #[test]
     fn strips_wrapping_tool_use_error_tags() {

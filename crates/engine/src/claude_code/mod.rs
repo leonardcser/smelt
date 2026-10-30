@@ -1058,7 +1058,13 @@ impl Runtime<'_> {
             return Ok(());
         }
         self.track_background(&frame);
-        if self.native.shells.frame(&frame, now_ms) || self.native.agents.frame(&frame, now_ms)? {
+        if self.native.shells.frame(&frame, now_ms) {
+            for note in self.native.shells.finished() {
+                self.transcript.note(HistoryItem::note(note));
+            }
+            return Ok(());
+        }
+        if self.native.agents.frame(&frame, now_ms)? {
             return Ok(());
         }
         match frame["type"].as_str() {

@@ -62,6 +62,8 @@ pub enum JobTermination {
     #[serde(rename = "oom")]
     OutOfMemory,
     Stopped,
+    /// The agent that ran the process reports a failure without its cause.
+    Failed,
 }
 
 impl JobTermination {
@@ -71,6 +73,7 @@ impl JobTermination {
             Self::Signaled => "signaled",
             Self::OutOfMemory => "oom",
             Self::Stopped => "stopped",
+            Self::Failed => "failed",
         }
     }
 }
@@ -149,6 +152,7 @@ impl ProcessStatusEvent {
                         "was terminated after an out-of-memory event".to_string()
                     }
                     JobTermination::Stopped => "was stopped".to_string(),
+                    JobTermination::Failed => "failed".to_string(),
                 };
                 format!("background process {process_id} {status}")
             }
