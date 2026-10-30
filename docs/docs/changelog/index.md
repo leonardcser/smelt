@@ -7,6 +7,7 @@ not listed. Releases are also published on
 <!-- >>> RELEASES -->
 | Version | Date | Highlights |
 | --- | --- | --- |
+| [0.6.5](0.6.5.md) | 2026-10-30 | /donut and see-through overlays, smoother math streaming, steadier block jumps. |
 | [0.6.4](0.6.4.md) | 2026-10-29 | Static Linux binaries, full commands in expanded blocks, faster search and highlighting. |
 | [0.6.3](0.6.3.md) | 2026-10-28 | Claude Code as a native backend, background upgrades, smarter vim text objects. |
 | [0.6.2](0.6.2.md) | 2026-10-27 | Vim motions and operators everywhere, 256-color downgrade, smoother prompt and transcript. |
