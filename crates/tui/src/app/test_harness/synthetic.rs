@@ -105,8 +105,7 @@ impl TestApp {
         selected: usize,
         placement: crate::picker::PickerPlacement,
         focusable: bool,
-        close_on_select: bool,
-        max_rows: u16,
+        blocks_agent: bool,
     ) -> Option<WinId> {
         crate::picker::open(
             &mut self.app,
@@ -114,8 +113,7 @@ impl TestApp {
             selected,
             placement,
             focusable,
-            close_on_select,
-            max_rows,
+            blocks_agent,
         )
     }
 

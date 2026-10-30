@@ -36,6 +36,21 @@ pub(crate) fn prompt_chrome_width(ui: &Ui) -> u16 {
         .map_or(ui.terminal_size().0, |r| r.width)
 }
 
+/// Stacking order of the host's overlays, lowest first.
+pub(crate) mod z {
+    /// The prompt's own floating chrome: its notifications and the pickers
+    /// docked to it. Both sit under every floating window, the way the
+    /// prompt's queued and stash rows sit under them as part of the layout. A
+    /// prompt picker covers a notification.
+    pub(crate) const NOTIFICATION: u16 = 40;
+    pub(crate) const PROMPT_PICKER: u16 = 41;
+    /// The shell panel docked above the statusline, under dialogs.
+    pub(crate) const SHELL_PANEL: u16 = 45;
+    /// Floating windows and dialogs (a Lua overlay, a game, a picker), the
+    /// engine's default.
+    pub(crate) const FLOATING: u16 = crate::smelt_edit::Overlay::DEFAULT_Z;
+}
+
 /// Anchor that floats an overlay `height` rows above the prompt block.
 pub(crate) fn anchor_above_prompt_chrome(ui: &Ui, height: u16) -> Anchor {
     let target = prompt_chrome_top_win(ui);

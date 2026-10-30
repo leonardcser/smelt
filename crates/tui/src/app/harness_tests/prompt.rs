@@ -77,6 +77,49 @@ fn slash_completion_stays_within_a_prompt_narrowed_by_a_sidebar() {
 }
 
 #[test]
+fn prompt_picker_and_notification_stay_under_a_floating_window() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    // A game over everything above the prompt chrome, the way snake floats.
+    assert!(app.run_lua(
+        r#"
+        smelt.cmd.register("zzunder", function() end, { desc = "UNDER" })
+        local game = smelt.buf.new({ readonly = true })
+        local rows = {}
+        for i = 1, 18 do rows[i] = "GAME" end
+        game:lines(rows)
+        smelt.overlay.new({
+            layout = smelt.ui.layout.leaf(smelt.win.new(game, { surface = "readonly_text" })),
+            anchor = "screen_at",
+            row = 0,
+            col = 0,
+            width = 80,
+            height = 20,
+            modal = false,
+        })
+        "#
+    ));
+    app.render();
+
+    app.type_text("/zzunder");
+    app.app.notify("NOTICE under the game".into());
+    let frame = app.render_to_frame().text();
+    assert!(
+        app.state().picker_count > 0,
+        "the picker should be open:\n{frame}"
+    );
+    assert!(
+        !frame.contains("UNDER") && !frame.contains("NOTICE"),
+        "the prompt's picker and notification should stay under the game:\n{frame}"
+    );
+    assert_eq!(
+        frame.lines().filter(|line| line.contains("GAME")).count(),
+        18,
+        "the game should stay whole:\n{frame}"
+    );
+}
+
+#[test]
 fn notification_stays_within_a_prompt_narrowed_by_a_sidebar() {
     const SIDEBAR: &str = r#"
         local side = smelt.buf.new({ readonly = true })

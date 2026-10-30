@@ -518,7 +518,6 @@ impl TuiApp {
             crate::picker::PickerPlacement::CmdlineDocked { max_rows: 8 },
             false,
             false,
-            50,
         ) else {
             return;
         };

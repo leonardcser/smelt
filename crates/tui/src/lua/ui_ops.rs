@@ -155,7 +155,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let border = crate::lua::parse::border(&opts).map_err(|e| format!("overlay border: {e}"))?;
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let modal: bool = opts.get("modal").unwrap_or(true);
-    let z: u16 = opts.get("z").unwrap_or(50);
+    let z: u16 = opts.get("z").unwrap_or(crate::content::layout::z::FLOATING);
     let draggable = parse_drag_config(opts.get::<mlua::Value>("draggable").ok())?;
     let resizable = parse_resize_config(opts.get::<mlua::Value>("resizable").ok())?;
     // `width`/`height` resolve the overlay rect per-frame against the
@@ -909,15 +909,12 @@ pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, 
         _ => crate::picker::PickerPlacement::ScreenCenter,
     };
     // prompt_docked is non-focusable (keys flow to the prompt); other placements own dispatch.
-    // All pickers use the dialog z-plane (50) so transient notifications
-    // (z=40) are covered instead of shifting the picker upward.
     let focusable = !matches!(
         placement,
         crate::picker::PickerPlacement::PromptDocked { .. }
     );
-    let z = 50;
 
-    crate::picker::open(app, items, 0, placement, focusable, false, z)
+    crate::picker::open(app, items, 0, placement, focusable, false)
         .ok_or_else(|| "picker.open: failed to create overlay".to_string())
 }
 

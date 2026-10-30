@@ -295,6 +295,9 @@ pub struct Overlay {
 }
 
 impl Overlay {
+    /// Stacking order a new overlay opens at.
+    pub const DEFAULT_Z: u16 = 50;
+
     pub fn new(layout: LayoutTree, anchor: Anchor) -> Self {
         Self {
             layout,
@@ -306,7 +309,7 @@ impl Overlay {
             max_height: None,
             min_width: None,
             min_height: None,
-            z: 50,
+            z: Self::DEFAULT_Z,
             modal: false,
             blocks_agent: false,
             draggable: DragConfig::none(),

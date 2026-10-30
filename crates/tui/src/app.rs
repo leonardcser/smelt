@@ -3292,9 +3292,9 @@ impl TuiApp {
             crate::smelt_edit::Overlay::new(layout, anchor)
                 .with_width(crate::smelt_edit::Constraint::Percentage(100))
                 .with_anchor_width(true)
-                // Sits below dialogs (default overlay z 50) so a toast
-                // never obscures a modal asking for input.
-                .with_z(40),
+                // Under every floating window, so a toast never obscures a
+                // dialog asking for input or a game in play.
+                .with_z(crate::content::layout::z::NOTIFICATION),
         );
         self.overlays.install_notification(Notification {
             win,

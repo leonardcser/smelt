@@ -227,7 +227,6 @@ fn picker_wheel_pans_viewport_when_unfocused() {
             crate::picker::PickerPlacement::ScreenCenter,
             false, // non-focusable: focus stays on prompt
             false,
-            10,
         )
         .expect("picker leaf created");
 
@@ -309,7 +308,6 @@ fn prompt_docked_picker_clamps_height_to_headroom() {
             crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
             false,
             false,
-            30,
         )
         .expect("picker leaf created");
 
@@ -352,7 +350,6 @@ fn prompt_docked_picker_relayouts_on_resize() {
             crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
             false,
             false,
-            30,
         )
         .expect("picker leaf created");
 

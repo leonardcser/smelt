@@ -165,7 +165,6 @@ fn open_test_picker(app: &mut TestApp, labels: &[&str], selected: usize) -> WinI
         crate::picker::PickerPlacement::ScreenCenter,
         true,  // focusable
         false, // blocks_agent
-        10,    // z
     )
     .expect("picker leaf created")
 }

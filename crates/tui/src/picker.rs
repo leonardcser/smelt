@@ -101,7 +101,6 @@ pub(crate) fn open(
     placement: PickerPlacement,
     focusable: bool,
     blocks_agent: bool,
-    z: u16,
 ) -> Option<WinId> {
     let reversed = matches!(
         placement,
@@ -129,7 +128,7 @@ pub(crate) fn open(
     )
     .with_width(overlay_width(placement))
     .with_anchor_width(matches!(placement, PickerPlacement::PromptDocked { .. }))
-    .with_z(z)
+    .with_z(overlay_z(placement))
     .blocks_agent(blocks_agent);
     let overlay_id = app.ui.overlay_open(overlay);
 
@@ -409,6 +408,16 @@ fn overlay_width(placement: PickerPlacement) -> Constraint {
     match placement {
         PickerPlacement::PromptDocked { .. } => Constraint::Percentage(100),
         _ => Constraint::Fit,
+    }
+}
+
+/// A prompt-docked picker is the prompt's own chrome, so it stays under
+/// floating windows such as a game; every other picker is a floating window
+/// of its own, over notifications.
+fn overlay_z(placement: PickerPlacement) -> u16 {
+    match placement {
+        PickerPlacement::PromptDocked { .. } => crate::content::layout::z::PROMPT_PICKER,
+        _ => crate::content::layout::z::FLOATING,
     }
 }
 

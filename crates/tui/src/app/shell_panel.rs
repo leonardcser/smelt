@@ -69,7 +69,7 @@ impl TuiApp {
                 crate::smelt_edit::layout::Anchor::ScreenBottom { above_rows: 1 },
             )
             .modal(true)
-            .with_z(45)
+            .with_z(crate::content::layout::z::SHELL_PANEL)
             .resize_config(crate::smelt_edit::ResizeConfig {
                 top: true,
                 right: false,
