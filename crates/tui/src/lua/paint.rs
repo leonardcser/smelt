@@ -228,7 +228,10 @@ impl PaintLayer {
                 }
                 let cell = self.grid.cell(col, row);
                 if !cell.symbol.is_continuation() {
-                    slice.set_symbol(col, row, cell.symbol.as_str(), cell.style);
+                    // A cell painted without a background keeps the one under it.
+                    let mut style = cell.style;
+                    style.bg = style.bg.or(slice.cell(col, row).style.bg);
+                    slice.set_symbol(col, row, cell.symbol.as_str(), style);
                 }
             }
         }
@@ -355,7 +358,7 @@ pub fn register_paint_slice_docs() {
     record_class(LuaClassDecl {
         name: "smelt.paint.Slice",
         classification: smelt_core::lua::doc::classification_for_type("smelt.paint.Slice"),
-        doc: "Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.",
+        doc: "Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly. Cells the callback leaves alone show what is under the paint, and a cell written without `bg` keeps the background under it.",
         fields: smelt_core::class_methods! {
             "width" => fn() -> i64, "Return the slice width in cells.",
             "height" => fn() -> i64, "Return the slice height in cells.",
@@ -490,6 +493,26 @@ mod tests {
         assert_eq!(grid.cell(0, 0).symbol, 'X');
         assert_eq!(grid.cell(1, 0).symbol, ' ');
         assert_eq!(grid.cell(2, 0).symbol, 'X');
+    }
+
+    #[test]
+    fn paint_layer_keeps_the_background_under_cells_painted_without_one() {
+        use crate::smelt_edit::{Color, Style};
+        let mut layer = PaintLayer::new(2, 1);
+        PaintSurface::put_str(&mut layer, 0, 0, "@", Style::default().fg(Color::Red));
+        PaintSurface::put_str(&mut layer, 1, 0, "@", Style::default().bg(Color::Blue));
+        let mut grid = Grid::new(2, 1);
+        grid.fill(
+            Rect::new(0, 0, 2, 1),
+            ' ',
+            Style::default().bg(Color::Green),
+        );
+
+        layer.composite_into(&mut grid.slice_mut(Rect::new(0, 0, 2, 1)));
+
+        assert_eq!(grid.cell(0, 0).style.fg, Some(Color::Red));
+        assert_eq!(grid.cell(0, 0).style.bg, Some(Color::Green));
+        assert_eq!(grid.cell(1, 0).style.bg, Some(Color::Blue));
     }
 
     #[test]

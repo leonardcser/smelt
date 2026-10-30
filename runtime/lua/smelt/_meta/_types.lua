@@ -492,8 +492,9 @@
 ---@field max_height? integer | string | table Optional upper bound applied after height resolves.
 ---@field min_width? integer | string | table Optional lower bound applied after width resolves.
 ---@field min_height? integer | string | table Optional lower bound applied after height resolves.
----@field modal? boolean Whether the overlay blocks input behind it. Defaults to true.
+---@field modal? boolean Whether the overlay blocks input behind it. Defaults to true, or false when `transparent`.
 ---@field blocks_agent? boolean Whether the overlay should block agent progress while open.
+---@field transparent? boolean Draw the overlay as a see-through layer: its rect is not cleared, so only the cells its leaves draw cover what is under it, and the mouse passes through. Not modal by default; cannot be modal, draggable or resizable.
 ---@field z? integer Z-index. Higher overlays render above lower overlays.
 ---@field draggable? boolean | smelt.overlay.DragConfig Enable or configure mouse dragging.
 ---@field resizable? boolean | smelt.overlay.ResizeConfig Enable or configure mouse resize handles.
@@ -521,7 +522,7 @@
 ---@field rect fun(): any Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
 ---@field on fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription.
 
---- Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.
+--- Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly. Cells the callback leaves alone show what is under the paint, and a cell written without `bg` keeps the background under it.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Slice
 ---@field width fun(): integer Return the slice width in cells.

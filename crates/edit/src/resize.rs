@@ -7,6 +7,7 @@ pub(super) struct ResolvedOverlay {
     pub id: OverlayId,
     pub rect: Rect,
     pub z: u16,
+    pub transparent: bool,
     pub layout: ResolvedLayout,
 }
 
@@ -51,6 +52,7 @@ impl Ui {
                 id,
                 rect,
                 z: overlay.z,
+                transparent: overlay.transparent,
                 layout: overlay.layout.resolve(rect, self),
             })
             .collect();

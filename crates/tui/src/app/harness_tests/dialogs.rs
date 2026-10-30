@@ -4136,3 +4136,23 @@ fn dialog_with_unknown_keymap_chord_is_rejected_before_opening() {
         .unwrap();
     assert!(!app.render_to_frame().text().contains("never shown"));
 }
+
+#[test]
+fn transparent_overlay_is_not_modal_and_rejects_mouse_capture() {
+    let mut app = TestApp::builder().build();
+    const OPEN: &str = r#"
+        local paint = smelt.paint.register(function() end)
+        return smelt.overlay.new({ layout = smelt.ui.layout.leaf(paint), transparent = true %s })
+    "#;
+    app.run_lua_result(&OPEN.replace("%s", "")).unwrap();
+    app.render();
+    assert!(app.app.ui.active_modal().is_none());
+
+    for extra in [", modal = true", ", draggable = true", ", resizable = true"] {
+        let err = app.run_lua_result(&OPEN.replace("%s", extra)).unwrap_err();
+        assert!(
+            err.contains("cannot be modal, draggable or resizable"),
+            "{extra}: {err}"
+        );
+    }
+}

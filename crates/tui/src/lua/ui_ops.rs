@@ -154,10 +154,20 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let anchor = parse_overlay_anchor(&opts, term_w, term_h)?;
     let border = crate::lua::parse::border(&opts).map_err(|e| format!("overlay border: {e}"))?;
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
-    let modal: bool = opts.get("modal").unwrap_or(true);
+    let transparent: bool = opts.get("transparent").unwrap_or(false);
+    let modal: bool = opts.get("modal").unwrap_or(!transparent);
     let z: u16 = opts.get("z").unwrap_or(crate::content::layout::z::FLOATING);
     let draggable = parse_drag_config(opts.get::<mlua::Value>("draggable").ok())?;
     let resizable = parse_resize_config(opts.get::<mlua::Value>("resizable").ok())?;
+    // The mouse passes through a transparent overlay, so it cannot be held
+    // modal, dragged or resized.
+    if transparent
+        && (modal || draggable != DragConfig::none() || resizable != ResizeConfig::none())
+    {
+        return Err(
+            "overlay.open: a transparent overlay cannot be modal, draggable or resizable".into(),
+        );
+    }
     // `width`/`height` resolve the overlay rect per-frame against the
     // terminal extent. Reuse the same constraint parser as `layout.vbox`
     // items so `"70%"`, `"max:60"`, `"fit"`, integer cells, etc. all work.
@@ -209,6 +219,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
             ov.z = z;
             ov.modal = modal;
             ov.blocks_agent = blocks_agent;
+            ov.transparent = transparent;
             ov.draggable = draggable;
             ov.resizable = resizable;
             app.ui.sync_overlay_modal(id);
@@ -232,6 +243,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .with_z(z)
         .modal(modal)
         .blocks_agent(blocks_agent)
+        .transparent(transparent)
         .drag_config(draggable)
         .resize_config(resizable)
         .with_width(width)

@@ -729,8 +729,9 @@ Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.l
 | `max_height` | `integer \| string \| table` |  | Optional upper bound applied after height resolves. |
 | `min_width` | `integer \| string \| table` |  | Optional lower bound applied after width resolves. |
 | `min_height` | `integer \| string \| table` |  | Optional lower bound applied after height resolves. |
-| `modal` | `boolean` |  | Whether the overlay blocks input behind it. Defaults to true. |
+| `modal` | `boolean` |  | Whether the overlay blocks input behind it. Defaults to true, or false when `transparent`. |
 | `blocks_agent` | `boolean` |  | Whether the overlay should block agent progress while open. |
+| `transparent` | `boolean` |  | Draw the overlay as a see-through layer: its rect is not cleared, so only the cells its leaves draw cover what is under it, and the mouse passes through. Not modal by default; cannot be modal, draggable or resizable. |
 | `z` | `integer` |  | Z-index. Higher overlays render above lower overlays. |
 | `draggable` | `boolean \| smelt.overlay.DragConfig` |  | Enable or configure mouse dragging. |
 | `resizable` | `boolean \| smelt.overlay.ResizeConfig` |  | Enable or configure mouse resize handles. |
@@ -777,7 +778,7 @@ Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.l
 
 **Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
-Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly.
+Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly. Cells the callback leaves alone show what is under the paint, and a cell written without `bg` keeps the background under it.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

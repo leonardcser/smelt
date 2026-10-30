@@ -285,6 +285,10 @@ pub struct Overlay {
     pub modal: bool,
     /// When true, the host pauses engine-event drain while focus is here.
     pub blocks_agent: bool,
+    /// When true, the overlay is a see-through layer: its rect is not cleared,
+    /// so only the cells its leaves draw cover what is under it, and the mouse
+    /// passes through to whatever is below.
+    pub transparent: bool,
     /// Regions that can move this overlay.
     pub draggable: DragConfig,
     /// Chrome edges that can resize this overlay.
@@ -312,6 +316,7 @@ impl Overlay {
             z: Self::DEFAULT_Z,
             modal: false,
             blocks_agent: false,
+            transparent: false,
             draggable: DragConfig::none(),
             resizable: ResizeConfig::none(),
             size_override: None,
@@ -330,6 +335,11 @@ impl Overlay {
 
     pub fn blocks_agent(mut self, b: bool) -> Self {
         self.blocks_agent = b;
+        self
+    }
+
+    pub fn transparent(mut self, b: bool) -> Self {
+        self.transparent = b;
         self
     }
 

@@ -1696,7 +1696,7 @@ impl Ui {
             .and_then(|id| scene.overlays.iter().find(|overlay| overlay.id == id));
         for resolved in scene.overlays.iter().rev() {
             let (id, rect) = (resolved.id, resolved.rect);
-            if !rect.contains(row, col) {
+            if resolved.transparent || !rect.contains(row, col) {
                 continue;
             }
             // The active modal blocks lower-z overlays at its rectangle.
@@ -2757,9 +2757,11 @@ impl Ui {
         };
         collect_root_frame_commands(&scene.root, &scene.decorations, active_resize, &mut builder);
         for overlay in &scene.overlays {
-            builder
-                .commands
-                .push(PreparedFrameCommand::Clear(overlay.rect));
+            if !overlay.transparent {
+                builder
+                    .commands
+                    .push(PreparedFrameCommand::Clear(overlay.rect));
+            }
             let root_chrome = active_resize
                 .and_then(|(owner, context)| {
                     (owner == overlay::ChromeOwner::Overlay(overlay.id)).then_some(context)
@@ -7055,6 +7057,51 @@ mod tests {
         // Leaf paints inside the border at (top+1, left+1) = (10, 20).
         assert_eq!(frame.cell(20, 10).symbol, 'o');
         assert_eq!(frame.cell(31, 10).symbol, 't');
+    }
+
+    #[test]
+    fn transparent_overlay_keeps_what_is_under_it_and_lets_the_mouse_through() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines(vec!["x".repeat(80); 24]);
+        }
+        let below = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::leaf(below));
+        // A paint leaf no painter draws into: it leaves every cell untouched.
+        let layer = || {
+            Overlay::new(
+                LayoutTree::hbox(vec![(
+                    Constraint::Length(40),
+                    LayoutTree::vbox(vec![(
+                        Constraint::Length(10),
+                        LayoutTree::leaf(PaintId(9999)),
+                    )]),
+                )]),
+                layout::Anchor::ScreenCenter,
+            )
+        };
+
+        let opaque = ui.overlay_open(layer());
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        assert_eq!(ui.surface.compositor().previous().cell(30, 10).symbol, ' ');
+        assert!(ui.overlay_hit_test(10, 30, None).is_some());
+        ui.overlay_close(opaque);
+
+        ui.overlay_open(layer().transparent(true));
+        ui.render(&mut out).unwrap();
+        assert_eq!(ui.surface.compositor().previous().cell(30, 10).symbol, 'x');
+        assert_eq!(ui.overlay_hit_test(10, 30, None), None);
+        assert_eq!(ui.hit_test(10, 30, None), Some(HitTarget::Window(below)));
     }
 
     // ── UiHost trait dispatch ────────────────────────────────────────
