@@ -276,7 +276,7 @@ impl mlua::UserData for LuaBuf {
                             crate::lua::with_ui_host(|host| {
                                 host.with_ui(|ui| {
                                     if let Some(buf) = ui.buf_mut(this.id) {
-                                        buf.set_source(text);
+                                        buf.set_text(text);
                                     }
                                 });
                             });
@@ -455,7 +455,7 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
         classification: smelt_core::lua::doc::classification_for_type("smelt.buf.Buf"),
         doc: "Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.",
         fields: smelt_core::class_methods! {
-            "source" => fn(s: Option<String>) -> mlua::Value, "Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.",
+            "source" => fn(s: Option<String>) -> mlua::Value, "Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. A plain buffer shows the new text right away; a buffer with a mode such as `markdown` renders it on its next layout. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.",
             "lines" => fn(arr: Option<Vec<String>>) -> mlua::Value, "Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining. On the built-in prompt buffer, writes are joined with `\\n` and installed through `smelt.prompt.set_text` semantics.",
             "line" => fn(idx: u64) -> Option<String>, "Read a single line by 1-based index. `nil` if out of range or the buffer is gone.",
             "styled" => fn(lines: mlua::Table) -> LuaBuf, "Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.",

@@ -3914,6 +3914,65 @@ fn btw_dialog_resets_rejected_draft_and_recovers_without_waiting_styles() {
 }
 
 #[test]
+fn plain_buffer_source_shows_in_a_dialog() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    assert!(app.run_lua(
+        r#"
+        smelt.spawn(function()
+          local buf = smelt.buf.new({ readonly = true })
+          buf:styled({ { { text = "painted row" } } })
+          buf:source("plain source text")
+          smelt.dialog.open({
+            title = "plain",
+            min_height = "30%",
+            panels = { { leaf = smelt.dialog.content({ buf = buf }), height = "fill" } },
+          })
+        end)
+        "#
+    ));
+    app.drive_lua_tasks();
+    let frame = app.render_to_frame();
+    assert!(
+        frame.text().contains("plain source text"),
+        "{}",
+        frame.text()
+    );
+    assert!(!frame.text().contains("painted row"), "{}", frame.text());
+    app.clear_timers();
+    app.assert_invariants();
+}
+
+#[test]
+fn btw_dialog_shows_a_failed_answer() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(70, 22);
+    app.apply_lua_command("btw explain the retry");
+    app.drive_lua_tasks();
+    let id = app.pending_ask_id().expect("/btw registered ask callback");
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::EngineAskResponse {
+            id,
+            message: None,
+            error: Some(protocol::EngineAskError {
+                kind: protocol::EngineAskErrorKind::InvalidResponse,
+                message: "Claude Code returned no answer".into(),
+            }),
+        },
+    ));
+    let frame = app.render_to_frame();
+    assert!(
+        frame
+            .text()
+            .contains("error (invalid_response): Claude Code returned no answer"),
+        "{}",
+        frame.text()
+    );
+    app.clear_timers();
+    app.assert_invariants();
+}
+
+#[test]
 fn btw_dialog_streams_before_a_busy_engine_queue_reaches_the_final_response() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(70, 22);

@@ -972,6 +972,20 @@ impl Buffer {
         self.source_tick = self.source_tick.wrapping_add(1);
     }
 
+    /// Replace the full text. A buffer without a parser shows it as its lines
+    /// right away; a parsed buffer renders it on its next layout.
+    pub fn set_text(&mut self, source: String) {
+        self.set_source(source);
+        if self.parser.is_none() {
+            self.install_source_lines();
+        }
+    }
+
+    fn install_source_lines(&mut self) {
+        let lines = self.source.split('\n').map(String::from).collect();
+        self.set_all_lines(lines);
+    }
+
     /// Re-render at `width`. With a parser, re-runs `parse` if `(source_tick,
     /// width)` is stale. Without a parser, no-op - caller-written lines are
     /// final and wrap (if any) is owned by the host window.
@@ -1196,8 +1210,7 @@ impl Buffer {
             self.last_render = None;
             self.ensure_rendered_at(width);
         } else {
-            let new_lines: Vec<String> = self.source.split('\n').map(String::from).collect();
-            self.set_all_lines(new_lines);
+            self.install_source_lines();
         }
     }
 
@@ -1721,6 +1734,19 @@ mod tests {
         buf.set_all_lines(vec!["a".into()]);
         buf.set_lines(0, 100, vec!["replaced".into()]);
         assert_eq!(buf.lines(), &["replaced"]);
+    }
+
+    #[test]
+    fn set_text_without_parser_shows_the_text() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["stale".into(), "rows".into()]);
+        buf.set_text("first\nsecond".into());
+        assert_eq!(buf.source(), "first\nsecond");
+        assert_eq!(buf.lines(), &["first", "second"]);
+        // Rows written since must not survive a repeat of the same text.
+        buf.set_all_lines(vec!["painted".into()]);
+        buf.set_text("first\nsecond".into());
+        assert_eq!(buf.lines(), &["first", "second"]);
     }
 
     #[test]

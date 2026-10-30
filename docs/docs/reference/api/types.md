@@ -76,7 +76,7 @@ Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `source` | `fun(s: string?): any` | yes | Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent. |
+| `source` | `fun(s: string?): any` | yes | Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. A plain buffer shows the new text right away; a buffer with a mode such as `markdown` renders it on its next layout. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent. |
 | `lines` | `fun(arr: string[]?): any` | yes | Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining. On the built-in prompt buffer, writes are joined with `\n` and installed through `smelt.prompt.set_text` semantics. |
 | `line` | `fun(idx: integer): string?` | yes | Read a single line by 1-based index. `nil` if out of range or the buffer is gone. |
 | `styled` | `fun(lines: table): smelt.buf.Buf` | yes | Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining. |
