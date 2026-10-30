@@ -3,11 +3,11 @@
 //! `MarkdownStream` is intentionally less eager than plain text streaming. It
 //! withholds Markdown control lines whose meaning can change as more bytes
 //! arrive, such as fence delimiters and table delimiters, and it keeps
-//! incomplete table rows out of the visible preview. It is not a Markdown
-//! parser; the stabilized subset is limited to fenced code blocks and pipe
-//! tables. The stream only exposes content once the Markdown renderer can
-//! produce stable rows; final Markdown parsing and formatting still belong to
-//! the normal rendering path.
+//! incomplete table rows and math spans still open out of the visible preview.
+//! It is not a Markdown parser; the stabilized subset is limited to fenced code
+//! blocks, pipe tables and math. The stream only exposes content once the
+//! Markdown renderer can produce stable rows; final Markdown parsing and
+//! formatting still belong to the normal rendering path.
 
 use crate::transcript_content::{ContentRead, TranscriptContent};
 use crate::transcript_model::{Block, BlockHistory, BlockId, Status};
@@ -218,13 +218,15 @@ impl MarkdownStream {
         let kind = self.kind;
         match self.state.active.as_mut() {
             Some(ActiveMarkdownBlock::Paragraph { content, visible }) => {
-                if opening_fence_candidate(&self.state.current_line) != Candidate::Not
+                let line = self.state.current_line.as_str();
+                if line.is_empty()
+                    || opening_fence_candidate(line) != Candidate::Not
                     || (kind.uses_thinking_section_policy()
-                        && thinking_title_candidate(&self.state.current_line) != Candidate::Not)
+                        && thinking_title_candidate(line) != Candidate::Not)
                 {
-                    Self::sync_parts(kind, history, visible, &[content]);
+                    Self::sync_prose(kind, history, visible, &[content]);
                 } else {
-                    Self::sync_preview(kind, history, visible, content, &self.state.current_line);
+                    Self::sync_prose(kind, history, visible, &[content, "\n", line]);
                 }
             }
             Some(ActiveMarkdownBlock::TableCandidate { header }) => {
@@ -264,7 +266,7 @@ impl MarkdownStream {
                 {
                     return;
                 }
-                Self::sync_parts(
+                Self::sync_prose(
                     kind,
                     history,
                     &mut self.state.current_visible,
@@ -272,6 +274,25 @@ impl MarkdownStream {
                 );
             }
         }
+    }
+
+    /// Syncs prose, stopping short of a math span still open, so its TeX never shows raw before
+    /// the renderer can typeset it.
+    fn sync_prose(
+        kind: MarkdownStreamKind,
+        history: &mut BlockHistory,
+        visible: &mut VisibleBlock,
+        parts: &[&str],
+    ) {
+        let text = parts.concat();
+        let Some(open) = open_math_start(&text) else {
+            Self::sync_parts(kind, history, visible, parts);
+            return;
+        };
+        let before =
+            smelt_buffer::text::trim_end_whitespace(smelt_buffer::text::slice(&text, 0..open));
+        let stable = smelt_buffer::text::slice(&text, 0..before.len().max(visible.len));
+        Self::sync_parts(kind, history, visible, &[stable]);
     }
 
     fn process_line(&mut self, history: &mut BlockHistory, line: &str) {
@@ -670,6 +691,70 @@ fn scan_fence_run(line: &str) -> Option<(usize, FenceMarker, usize, &str)> {
     Some((start, marker, pos - start, &line[pos..]))
 }
 
+/// The start of a math span still open at the end of streaming prose, where its preview must stop:
+/// display math (`$$`, `\[`) open anywhere in it, or inline math (`$`, `\(`) open on its last line.
+/// A trailing `$` or `\` counts, as it may still open one. Inline code and escapes are skipped,
+/// and a `$` before a digit opens nothing, so prices stream on.
+fn open_math_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut code = None::<usize>;
+    let mut display = None::<(usize, &[u8])>;
+    let mut inline = None::<(usize, &[u8])>;
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if let Some((_, close)) = display.or(inline) {
+            if rest.starts_with(close) && (close != b"$" || !bytes[i - 1].is_ascii_whitespace()) {
+                if display.is_some() {
+                    display = None;
+                } else {
+                    inline = None;
+                }
+                i += close.len();
+            } else if rest[0] == b'\n' && display.is_none() {
+                inline = None;
+                i += 1;
+            } else {
+                i += if rest[0] == b'\\' { 2 } else { 1 };
+            }
+            continue;
+        }
+        match rest[0] {
+            b'`' => {
+                let run = rest.iter().take_while(|&&b| b == b'`').count();
+                code = match code {
+                    Some(open) if open == run => None,
+                    None => Some(run),
+                    open => open,
+                };
+                i += run;
+            }
+            _ if code.is_some() => i += 1,
+            b'\\' | b'$' if rest.len() == 1 => return Some(i),
+            b'\\' => {
+                match rest[1] {
+                    b'[' => display = Some((i, br"\]")),
+                    b'(' => inline = Some((i, br"\)")),
+                    _ => {}
+                }
+                i += 2;
+            }
+            b'$' if rest[1] == b'$' => {
+                display = Some((i, b"$$"));
+                i += 2;
+            }
+            b'$' => {
+                if !rest[1].is_ascii_whitespace() && !rest[1].is_ascii_digit() {
+                    inline = Some((i, b"$"));
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    display.or(inline).map(|(start, _)| start)
+}
+
 pub fn markdown_table_delimiter(line: &str) -> bool {
     table_delimiter_candidate(line) == Candidate::Complete
 }
@@ -895,6 +980,10 @@ mod tests {
                 MarkdownStreamKind::Thinking,
                 "first paragraph\n\n**Assessing 世界**\n\nbody café",
             ),
+            (
+                MarkdownStreamKind::Text,
+                "price $p' = p - \\lfloor x \\rfloor$ for 東京 at $5\n\n$$\n\\frac{α}{2}\n$$\nafter",
+            ),
         ];
 
         for (kind, input) in cases {
@@ -915,6 +1004,84 @@ mod tests {
         }
         stream.append(&mut history, "\nfn main()");
         assert_eq!(text_at(&history, 0), "```rust\nfn main()");
+    }
+
+    fn append_chars(stream: &mut MarkdownStream, history: &mut BlockHistory, text: &str) {
+        let mut encoded = [0; 4];
+        for ch in text.chars() {
+            stream.append(history, ch.encode_utf8(&mut encoded));
+        }
+    }
+
+    #[test]
+    fn display_math_is_held_until_it_closes() {
+        let (mut stream, mut history) = setup();
+        stream.append(&mut history, "The price is\n");
+        for ch in r"$$p' = p - \left\lfloor \frac{pd}{100} \right\rfloor".chars() {
+            stream.append(&mut history, &ch.to_string());
+            assert_eq!(text_at(&history, 0), "The price is");
+        }
+        stream.append(&mut history, "$");
+        assert_eq!(text_at(&history, 0), "The price is");
+        stream.append(&mut history, "$");
+        assert_eq!(
+            text_at(&history, 0),
+            "The price is\n$$p' = p - \\left\\lfloor \\frac{pd}{100} \\right\\rfloor$$"
+        );
+    }
+
+    #[test]
+    fn display_math_on_its_own_lines_is_held_until_its_closing_line() {
+        let (mut stream, mut history) = setup();
+        stream.append(&mut history, "So\n\\[\nx^2\n");
+        assert_eq!(text_at(&history, 0), "So");
+        stream.append(&mut history, "\\]\nafter");
+        assert_eq!(text_at(&history, 0), "So\n\\[\nx^2\n\\]\nafter");
+    }
+
+    #[test]
+    fn inline_math_is_held_until_it_closes() {
+        let (mut stream, mut history) = setup();
+        append_chars(&mut stream, &mut history, r"Clamping $d \le 100");
+        assert_eq!(text_at(&history, 0), "Clamping ");
+        append_chars(&mut stream, &mut history, r"$ keeps \(p' \ge");
+        assert_eq!(text_at(&history, 0), r"Clamping $d \le 100$ keeps ");
+        stream.append(&mut history, r" 0\).");
+        assert_eq!(
+            text_at(&history, 0),
+            r"Clamping $d \le 100$ keeps \(p' \ge 0\)."
+        );
+    }
+
+    #[test]
+    fn prices_escapes_and_inline_code_stream_on() {
+        for text in [
+            "costs $5 and $10 more",
+            r"an escaped \$HOME here",
+            "run `echo $HOME` now",
+        ] {
+            let (mut stream, mut history) = setup();
+            append_chars(&mut stream, &mut history, text);
+            assert_eq!(text_at(&history, 0), text);
+        }
+    }
+
+    #[test]
+    fn inline_math_left_open_is_released_at_the_end_of_its_line() {
+        let (mut stream, mut history) = setup();
+        stream.append(&mut history, "set $PATH first");
+        assert_eq!(text_at(&history, 0), "set");
+        stream.append(&mut history, "\nnext");
+        assert_eq!(text_at(&history, 0), "set $PATH first\nnext");
+    }
+
+    #[test]
+    fn math_left_open_flushes_raw() {
+        let (mut stream, mut history) = setup();
+        stream.append(&mut history, r"a $$\frac{1}{2}");
+        assert_eq!(text_at(&history, 0), "a");
+        stream.flush(&mut history);
+        assert_eq!(text_at(&history, 0), r"a $$\frac{1}{2}");
     }
 
     #[test]
