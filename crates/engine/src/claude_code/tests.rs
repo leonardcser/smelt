@@ -382,6 +382,33 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
 
 #[tokio::test]
 #[serial(claude_code)]
+async fn an_empty_turn_continues_without_a_user_message_in_history() {
+    let fixture = Fixture::new("text");
+    let mut history = Vec::new();
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, history.clone()));
+    finish(&mut handle, &mut history).await;
+    let before = history.len();
+    let UiCommand::StartTurn(mut empty) = payload(fixture.root.path(), 2, history.clone()) else {
+        unreachable!()
+    };
+    empty.input = StartTurnInput::user(Content::text(""));
+    handle.send(UiCommand::StartTurn(empty));
+    finish(&mut handle, &mut history).await;
+
+    assert!(
+        history[before..]
+            .iter()
+            .all(|item| !matches!(item, HistoryItem::User { .. })),
+        "a continuation records no user message"
+    );
+    let calls = fixture.calls();
+    let prompt = calls.iter().rfind(|call| call["type"] == "user").unwrap();
+    assert_eq!(prompt["message"]["content"][0]["text"], "continue");
+}
+
+#[tokio::test]
+#[serial(claude_code)]
 async fn resumes_native_session_and_rewinds_without_replaying_tools() {
     let fixture = Fixture::new("text");
     let mut history = Vec::new();

@@ -391,7 +391,7 @@ impl Runtime<'_> {
             .get();
         let setup = (|| {
             Ok::<_, String>((
-                user_content(&self.payload.input.provider_content())?,
+                prompt_content(&self.payload.input)?,
                 catalog::Catalog::new(&self.payload.tools, self.payload.tool_visibility)?,
                 plan_directory(&self.payload.sessions_root, &self.payload.session_id)?,
             ))
@@ -616,7 +616,9 @@ impl Runtime<'_> {
         else {
             unreachable!()
         };
-        self.transcript.append(input_history(&self.payload.input));
+        if !is_continuation(&self.payload.input) {
+            self.transcript.append(input_history(&self.payload.input));
+        }
         let mut message = user_message(content);
         message["uuid"] = json!(uuid);
         self.write(message).await
@@ -2059,6 +2061,24 @@ fn imported_history(history: &[HistoryItem]) -> String {
     text.push_str(&entries[entries.len() - kept..].join("\n\n"));
     text.push_str("\n\nEnd of previous conversation.");
     text
+}
+
+/// Text Claude Code receives to continue a turn that has no input of its own.
+const CONTINUE_PROMPT: &str = "continue";
+
+/// Whether the input only asks to continue: an empty user message, which
+/// smelt's own loop answers by running again on the history it has.
+fn is_continuation(input: &StartTurnInput) -> bool {
+    matches!(input, StartTurnInput::User { content, .. } if content.is_empty())
+}
+
+/// What Claude Code gets for a turn's input. A continuation has no history
+/// item, so the prompt that starts it stays out of the transcript.
+fn prompt_content(input: &StartTurnInput) -> Result<Vec<Value>, String> {
+    if is_continuation(input) {
+        return user_content(&Content::text(CONTINUE_PROMPT));
+    }
+    user_content(&input.provider_content())
 }
 
 fn user_content(content: &Content) -> Result<Vec<Value>, String> {
