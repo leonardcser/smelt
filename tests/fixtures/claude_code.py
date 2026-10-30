@@ -352,6 +352,17 @@ while True:
             send({"type": "control_response", "response": {"subtype": "success", "request_id": recount["request_id"], "response": {"totalTokens": 1234, "maxTokens": 200000}}})
         else:
             send({"type": "system", "subtype": "status", "status": None, "compact_result": "failed", "compact_error": "Could not compact.", "session_id": SESSION, "uuid": "compact-failed"})
+    if SCENARIO == "aux-empty-result" and not TOOLS_ENABLED:
+        # The result only carries the last assistant message's text.
+        assistant([{"type": "text", "text": "side answer"}], "answer")
+        assistant([{"type": "thinking", "thinking": "done", "signature": ""}], "trailing")
+        send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "", "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 2}})
+        continue
+    if SCENARIO == "aux-no-answer" and not TOOLS_ENABLED:
+        assistant([{"type": "thinking", "thinking": "hmm", "signature": ""}], "thinking")
+        send({"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "refusal"}}})
+        send({"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION, "result": "", "terminal_reason": "completed", "usage": {"input_tokens": 1, "output_tokens": 0}})
+        continue
     text = "fixture answer café 🌱"
     send({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "message"}}})
     send({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}})

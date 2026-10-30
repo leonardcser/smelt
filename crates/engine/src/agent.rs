@@ -790,11 +790,13 @@ fn spawn_engine_ask(
                     resp.reasoning_details,
                     (!resp.tool_calls.is_empty()).then_some(resp.tool_calls),
                 );
-                let _ = tx.send(EngineEvent::EngineAskResponse {
-                    id,
-                    message: Some(message),
-                    error: None,
-                });
+                let (message, error) = if is_empty_answer(&message) {
+                    let stop_reason = resp.metadata.finish_reason.as_deref();
+                    (None, Some(empty_answer_error(stop_reason)))
+                } else {
+                    (Some(message), None)
+                };
+                let _ = tx.send(EngineEvent::EngineAskResponse { id, message, error });
             }
             Err(e) => {
                 let kind = classify_provider_error(&e);
@@ -807,6 +809,26 @@ fn spawn_engine_ask(
             }
         }
     });
+}
+
+/// Whether an auxiliary answer has neither text nor tool calls to act on.
+pub(crate) fn is_empty_answer(message: &protocol::Message) -> bool {
+    message.tool_calls.as_ref().is_none_or(Vec::is_empty)
+        && message
+            .content
+            .as_ref()
+            .is_none_or(|content| smelt_buffer::text::trim_whitespace(content.as_text()).is_empty())
+}
+
+/// The error an auxiliary request reports when the model gave no answer.
+pub(crate) fn empty_answer_error(stop_reason: Option<&str>) -> EngineAskError {
+    EngineAskError {
+        kind: EngineAskErrorKind::EmptyAnswer,
+        message: match stop_reason {
+            Some(reason) => format!("The model returned no answer (stop reason: {reason})"),
+            None => "The model returned no answer".into(),
+        },
+    }
 }
 
 /// Map a provider error to a stable `EngineAskErrorKind` for Lua callers.

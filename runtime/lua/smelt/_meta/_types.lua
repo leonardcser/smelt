@@ -266,7 +266,7 @@
 --- Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is serialized by the shared auxiliary callback dispatcher.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.engine.AskError
----@field kind string One of `"network" | "rate_limited" | "quota" | "invalid_response" | "context_window" | "cyber_policy" | "cancelled" | "other"`.
+---@field kind string One of `"network" | "rate_limited" | "quota" | "invalid_response" | "empty_answer" | "context_window" | "cyber_policy" | "cancelled" | "other"`.
 ---@field message string Human-readable single-line description (newlines collapsed to spaces).
 
 --- One text-only message used by request hooks that exchange plain user/assistant rows.

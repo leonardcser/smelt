@@ -296,6 +296,48 @@ fn streaming_compaction_preview_keeps_sparse_projection_viewport_bounded() {
 }
 
 #[test]
+fn compact_command_retries_an_empty_answer() {
+    let mut app = TestApp::builder().build();
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.push_assistant_text("a1");
+    app.set_context_token_baseline_for_harness(Some(500));
+
+    assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+    let first = app.pending_ask_id().expect("/compact registered ask");
+    app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+        id: first,
+        message: None,
+        error: Some(protocol::EngineAskError {
+            kind: protocol::EngineAskErrorKind::EmptyAnswer,
+            message: "The model returned no answer".into(),
+        }),
+    });
+    app.drive_lua_tasks();
+
+    let retry = app.pending_ask_id().expect("empty answer is retried");
+    assert_ne!(retry, first);
+    assert!(!app.lua_messages_contain("compaction failed"));
+    app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+        id: retry,
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text("# Goal\nretried summary")),
+            None,
+            None,
+        )),
+        error: None,
+    });
+    app.drive_lua_tasks();
+
+    let history = app.conversation_probe().transcript().history();
+    let marker = *history.order.last().expect("compacted marker");
+    assert!(matches!(
+        history.block(marker),
+        Some(smelt_core::transcript_model::Block::Compacted { summary, .. })
+            if summary == "# Goal\nretried summary"
+    ));
+}
+
+#[test]
 fn compact_command_keeps_completed_block_at_compaction_position() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(60, 12);

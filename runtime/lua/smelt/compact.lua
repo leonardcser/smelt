@@ -237,7 +237,19 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 			done(summary, err)
 		end
 
-		local function send(messages, retrying_after_tool_denial)
+		local send
+
+		local function retry_empty()
+			if empty_retries < MAX_EMPTY_RETRIES then
+				empty_retries = empty_retries + 1
+				send(base_messages, false)
+				return
+			end
+			host.notify.error("compaction failed: empty summary after retries")
+			finish(nil, nil)
+		end
+
+		function send(messages, retrying_after_tool_denial)
 			if not current() then
 				finish(nil, { kind = "cancelled", message = "compaction superseded" })
 				return
@@ -277,6 +289,10 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 							finish(nil, err)
 							return
 						end
+						if err.kind == "empty_answer" then
+							retry_empty()
+							return
+						end
 						if is_terminal_provider_error(err) then
 							set_consecutive_failures(MAX_CONSECUTIVE_FAILURES)
 							finish(nil, err)
@@ -306,13 +322,7 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 					end
 					local summary = response and response.content or nil
 					if not summary or summary == "" then
-						if empty_retries < MAX_EMPTY_RETRIES then
-							empty_retries = empty_retries + 1
-							send(base_messages, false)
-							return
-						end
-						host.notify.error("compaction failed: empty summary after retries")
-						finish(nil, nil)
+						retry_empty()
 						return
 					end
 					finish(summary, nil)

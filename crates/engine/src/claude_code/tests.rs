@@ -966,10 +966,10 @@ async fn missing_executable_and_invalid_transport_fail_without_http_fallback() {
     }
 }
 
-#[tokio::test]
-#[serial(claude_code)]
-async fn auxiliary_request_uses_schema_and_disables_tools() {
-    let fixture = Fixture::new("text");
+async fn auxiliary_ask(
+    fixture: &Fixture,
+    response_format: Option<protocol::AskResponseFormat>,
+) -> Result<String, EngineAskError> {
     let mut handle = fixture.handle();
     let UiCommand::StartTurn(payload) = payload(fixture.root.path(), 1, Vec::new()) else {
         unreachable!()
@@ -980,10 +980,7 @@ async fn auxiliary_request_uses_schema_and_disables_tools() {
         messages: vec![protocol::Message::user(Content::text("test"))],
         target: Box::new(payload.model_target),
         request_config: Default::default(),
-        response_format: Some(protocol::AskResponseFormat {
-            name: "title".into(),
-            schema: json!({"type":"object"}),
-        }),
+        response_format,
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
         tools: Vec::new(),
@@ -997,14 +994,27 @@ async fn auxiliary_request_uses_schema_and_disables_tools() {
             output(&mut handle).await
         {
             assert_eq!(id, 42);
-            assert!(error.is_none(), "{error:?}");
-            assert_eq!(
-                message.unwrap().content.unwrap().as_text(),
-                "{\"title\":\"fixture title\"}"
-            );
-            break;
+            return match error {
+                Some(error) => Err(error),
+                None => Ok(message.unwrap().content.unwrap().as_text().to_owned()),
+            };
         }
     }
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn auxiliary_request_uses_schema_and_disables_tools() {
+    let fixture = Fixture::new("text");
+    let answer = auxiliary_ask(
+        &fixture,
+        Some(protocol::AskResponseFormat {
+            name: "title".into(),
+            schema: json!({"type":"object"}),
+        }),
+    )
+    .await;
+    assert_eq!(answer.unwrap(), "{\"title\":\"fixture title\"}");
     let calls = fixture.calls();
     let args = calls[0]["argv"].as_array().unwrap();
     let tool_flag = args.iter().position(|arg| arg == "--tools").unwrap();
@@ -1013,6 +1023,34 @@ async fn auxiliary_request_uses_schema_and_disables_tools() {
     assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
     assert!(args.iter().any(|arg| arg == "--safe-mode"));
     assert!(args.iter().any(|arg| arg == "--json-schema"));
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn auxiliary_text_request_answers_with_text_not_structured_output() {
+    let fixture = Fixture::new("text");
+    let answer = auxiliary_ask(&fixture, None).await;
+    assert_eq!(answer.unwrap(), "fixture answer café 🌱");
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn auxiliary_request_keeps_text_the_result_dropped() {
+    let fixture = Fixture::new("aux-empty-result");
+    let answer = auxiliary_ask(&fixture, None).await;
+    assert_eq!(answer.unwrap(), "side answer");
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn auxiliary_request_without_text_reports_why() {
+    let fixture = Fixture::new("aux-no-answer");
+    let error = auxiliary_ask(&fixture, None).await.unwrap_err();
+    assert_eq!(error.kind, EngineAskErrorKind::EmptyAnswer);
+    assert_eq!(
+        error.message,
+        "The model returned no answer (stop reason: refusal)"
+    );
 }
 
 #[tokio::test]

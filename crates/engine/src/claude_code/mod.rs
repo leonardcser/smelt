@@ -24,7 +24,7 @@ mod transcript;
 mod transport;
 mod usage;
 
-use crate::{agent, EngineConfig, EngineEventSender, HostCallSender};
+use crate::{agent, log, EngineConfig, EngineEventSender, HostCallSender};
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
 use protocol::{
     Content, Decision, EngineAskError, EngineAskErrorKind, EngineEvent, HistoryItem,
@@ -2246,14 +2246,16 @@ pub(crate) fn spawn_ask(
     tokio::spawn(async move {
         let result = auxiliary(&cwd, &task, &tx, &cancel).await;
         let (message, error) = match result {
-            Ok(content) => (
-                Some(protocol::Message::assistant(
-                    Some(Content::text(content)),
-                    None,
-                    None,
-                )),
-                None,
-            ),
+            Ok(answer) => {
+                let message =
+                    protocol::Message::assistant(Some(Content::text(answer.text)), None, None);
+                if agent::is_empty_answer(&message) {
+                    let error = agent::empty_answer_error(answer.stop_reason.as_deref());
+                    (None, Some(error))
+                } else {
+                    (Some(message), None)
+                }
+            }
             Err(message) => (
                 None,
                 Some(EngineAskError {
@@ -2274,12 +2276,80 @@ pub(crate) fn spawn_ask(
     });
 }
 
+/// The text an auxiliary request answered with, and why the model stopped.
+#[derive(Default)]
+struct AuxiliaryAnswer {
+    text: String,
+    stop_reason: Option<String>,
+    /// Content block types seen, to explain an answer with no text.
+    blocks: Vec<String>,
+}
+
+impl AuxiliaryAnswer {
+    /// Keep the latest assistant text, for when Claude Code's final `result`
+    /// comes back empty.
+    fn observe(&mut self, frame: &Value) {
+        match frame["type"].as_str() {
+            Some("assistant") if frame["parent_tool_use_id"].is_null() => {
+                let blocks = frame["message"]["content"].as_array().into_iter().flatten();
+                let mut text = String::new();
+                for block in blocks {
+                    let kind = block["type"].as_str().unwrap_or("unknown");
+                    self.blocks.push(kind.into());
+                    if kind == "text" {
+                        text.push_str(block["text"].as_str().unwrap_or_default());
+                    }
+                }
+                if !text.trim().is_empty() {
+                    self.text = text;
+                }
+            }
+            Some("stream_event") => {
+                if let Some(reason) = frame["event"]["delta"]["stop_reason"].as_str() {
+                    self.stop_reason = Some(reason.into());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(mut self, task: &agent::AskTask, frame: &Value) -> Self {
+        if let Some(reason) = frame["stop_reason"].as_str() {
+            self.stop_reason = Some(reason.into());
+        }
+        if task.response_format.is_some() {
+            if let Some(value) = frame.get("structured_output") {
+                self.text = value.to_string();
+                return self;
+            }
+        }
+        let result = frame["result"].as_str().unwrap_or_default();
+        if !result.trim().is_empty() {
+            self.text = result.into();
+        } else if self.text.is_empty() {
+            log::entry(
+                log::Level::Warn,
+                "claude_code_auxiliary_empty",
+                &json!({
+                    "model": task.target.model,
+                    "stop_reason": self.stop_reason,
+                    "terminal_reason": frame["terminal_reason"],
+                    "num_turns": frame["num_turns"],
+                    "output_tokens": frame["usage"]["output_tokens"],
+                    "blocks": self.blocks,
+                }),
+            );
+        }
+        self
+    }
+}
+
 async fn auxiliary(
     cwd: &std::path::Path,
     task: &agent::AskTask,
     tx: &EngineEventSender,
     cancel: &CancellationToken,
-) -> Result<String, String> {
+) -> Result<AuxiliaryAnswer, String> {
     if task.request_config.redact_secrets {
         return Err("The Claude Code backend cannot apply smelt's pre-request secret redaction. Disable redact_secrets explicitly or use smelt's native agent backend.".into());
     }
@@ -2306,12 +2376,14 @@ async fn auxiliary(
         tokio::pin!(deadline);
         let mut initialized = false;
         let mut usage = UsageTracker::default();
+        let mut answer = AuxiliaryAnswer::default();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Err("cancelled".into()),
                 _ = &mut deadline => return Err("Claude Code auxiliary request timed out".into()),
                 frame = process.read() => {
                     let frame = frame?.ok_or("Claude Code exited before its auxiliary request completed")?;
+                    answer.observe(&frame);
                     match frame["type"].as_str() {
                         Some("control_response") if !initialized && frame["response"]["request_id"].as_str() == Some("smelt-init") => {
                             if frame["response"]["subtype"].as_str() == Some("error") { return Err("Claude Code auxiliary initialization failed".into()); }
@@ -2327,7 +2399,7 @@ async fn auxiliary(
                         Some("result") if initialized => {
                             usage.emit(tx, &frame, true, None);
                             if frame["is_error"].as_bool().unwrap_or(false) || frame["subtype"].as_str() != Some("success") { return Err(result_error(&frame)); }
-                            return Ok(if let Some(value) = frame.get("structured_output") { value.to_string() } else { frame["result"].as_str().unwrap_or("").to_owned() });
+                            return Ok(std::mem::take(&mut answer).finish(task, &frame));
                         }
                         _ => {}
                     }

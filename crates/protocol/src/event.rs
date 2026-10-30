@@ -29,6 +29,8 @@ pub enum EngineAskErrorKind {
     RateLimited,
     Quota,
     InvalidResponse,
+    /// The model finished with neither text nor tool calls.
+    EmptyAnswer,
     ContextWindow,
     CyberPolicy,
     Cancelled,
@@ -42,6 +44,7 @@ impl EngineAskErrorKind {
             EngineAskErrorKind::RateLimited => "rate_limited",
             EngineAskErrorKind::Quota => "quota",
             EngineAskErrorKind::InvalidResponse => "invalid_response",
+            EngineAskErrorKind::EmptyAnswer => "empty_answer",
             EngineAskErrorKind::ContextWindow => "context_window",
             EngineAskErrorKind::CyberPolicy => "cyber_policy",
             EngineAskErrorKind::Cancelled => "cancelled",

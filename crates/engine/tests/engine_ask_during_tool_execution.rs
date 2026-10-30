@@ -1380,3 +1380,69 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
         "sequential switched system"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn engine_ask_without_an_answer_reports_an_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut sock).await;
+        let events: Vec<&str> = vec![
+            r#"{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"x","stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null},"usage":{"output_tokens":0}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        write_sse_response(&mut sock, &sse(&events)).await;
+    });
+    let config = EngineConfig::new(PathBuf::from("/tmp"), Arc::new(engine::clock::RealClock));
+    let mut handle = engine::start(config, Box::new(engine::tools::EmptyDispatcher));
+    while !matches!(handle.recv().await, Some(EngineEvent::Ready)) {}
+    handle.send(UiCommand::EngineAsk {
+        id: 7,
+        system: "side question".into(),
+        messages: vec![Message::user(Content::text("what changed?"))],
+        target: Box::new(ModelTarget {
+            model: "test-model".into(),
+            api_base: format!("http://{addr}"),
+            api_key: "test-key".into(),
+            provider_type: "anthropic-compatible".into(),
+            provider: "anthropic-compatible".into(),
+            config: ModelConfig::default(),
+        }),
+        request_config: RequestRuntimeConfig {
+            request_audit: protocol::RequestAuditMode::Off,
+            ..Default::default()
+        },
+        response_format: None,
+        reasoning_effort: ReasoningEffort::Off,
+        fast_mode: false,
+        tools: Vec::new(),
+        session_id: "sess".into(),
+        persistence: protocol::PersistenceScope::default(),
+        stream: true,
+        visible_retries: false,
+    });
+    let (message, error) = tokio::time::timeout(TEST_DEADLINE, async {
+        loop {
+            if let Some(EngineEvent::EngineAskResponse {
+                id: 7,
+                message,
+                error,
+            }) = handle.recv().await
+            {
+                return (message, error);
+            }
+        }
+    })
+    .await
+    .expect("empty engine ask must still answer");
+    assert!(message.is_none());
+    let error = error.expect("empty answer is an error");
+    assert_eq!(error.kind, protocol::EngineAskErrorKind::EmptyAnswer);
+    assert!(
+        error.message.starts_with("The model returned no answer"),
+        "{}",
+        error.message
+    );
+}
