@@ -255,10 +255,14 @@ pub struct Overlay {
     pub layout: LayoutTree,
     pub anchor: Anchor,
     /// How wide the overlay rect is along the horizontal axis. Resolved
-    /// against the terminal width every frame. Default `Fit` reads the
-    /// layout's natural width - back-compat with the original
-    /// `natural_size_with` path.
+    /// against the terminal width every frame, or the anchor window's with
+    /// [`Self::anchor_width`]. Default `Fit` reads the layout's natural
+    /// width - back-compat with the original `natural_size_with` path.
     pub width: Constraint,
+    /// When true and the anchor is a window, [`Self::width`] and its bounds
+    /// resolve against that window's width instead of the terminal's, so the
+    /// overlay narrows and widens with the window as the layout changes.
+    pub anchor_width: bool,
     /// Vertical-axis twin of [`Self::width`].
     pub height: Constraint,
     /// Optional cap applied after [`Self::width`] resolves. Lets a caller
@@ -296,6 +300,7 @@ impl Overlay {
             layout,
             anchor,
             width: Constraint::Fit,
+            anchor_width: false,
             height: Constraint::Fit,
             max_width: None,
             max_height: None,
@@ -360,6 +365,11 @@ impl Overlay {
 
     pub fn with_width(mut self, w: Constraint) -> Self {
         self.width = w;
+        self
+    }
+
+    pub fn with_anchor_width(mut self, b: bool) -> Self {
+        self.anchor_width = b;
         self
     }
 

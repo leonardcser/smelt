@@ -1748,9 +1748,9 @@ impl Ui {
         };
         let mut out = Vec::with_capacity(self.overlays.len());
         for (id, ov) in self.overlays_in_z_order() {
-            let size = ov
-                .size_override
-                .unwrap_or_else(|| resolve_overlay_size(ov, (term_w, term_h), self));
+            let size = ov.size_override.unwrap_or_else(|| {
+                resolve_overlay_size(ov, overlay_extent(ov, (term_w, term_h), split_rects), self)
+            });
             if let Some(rect) = overlay::resolve_anchor(&ov.anchor, size, &ctx) {
                 out.push((id, rect, ov));
             }
@@ -4087,6 +4087,22 @@ pub fn resolve_constraint(
     }
 }
 
+/// The extent an overlay's size resolves against: the terminal, narrowed to
+/// the anchor window's width for an overlay that sets
+/// [`Overlay::anchor_width`]. A missing anchor window leaves the terminal's.
+fn overlay_extent(
+    overlay: &Overlay,
+    term: (u16, u16),
+    split_rects: &HashMap<WinId, Rect>,
+) -> (u16, u16) {
+    match &overlay.anchor {
+        layout::Anchor::Win { target, .. } if overlay.anchor_width => split_rects
+            .get(&WinId(target.0))
+            .map_or(term, |r| (r.width.min(term.0), term.1)),
+        _ => term,
+    }
+}
+
 /// Resolve an overlay's rect size from its `width`/`height` `Constraint`
 /// against the terminal extent. `Fit` reads the layout's natural size on
 /// that axis; explicit sizing modes evaluate independently per axis.
@@ -4973,6 +4989,44 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         let (_, rect, _) = &resolved[0];
         assert_eq!(*rect, Rect::new(5, 10, 10, 5));
+    }
+
+    #[test]
+    fn anchor_width_overlay_sizes_against_its_window() {
+        let mut ui = make_ui();
+        let target = WinId(999);
+        let buf = ui.buf_create(BufCreateOpts::default());
+        assert!(ui.win_open_split_at(
+            target,
+            buf,
+            SplitConfig {
+                region: "anchor".into(),
+                gutters: layout::Gutters::default(),
+            },
+        ));
+        ui.set_layout(LayoutTree::hbox(vec![
+            (Constraint::Length(30), LayoutTree::leaf(target)),
+            (Constraint::Fill, LayoutTree::vbox(Vec::new())),
+        ]));
+        let anchor = layout::Anchor::Win {
+            target: target.into(),
+            attach: layout::Align::NW,
+            row_offset: 0,
+            col_offset: 0,
+        };
+        let full = |anchor_width| {
+            sized_overlay(1, 1, anchor.clone())
+                .with_width(Constraint::Percentage(100))
+                .with_anchor_width(anchor_width)
+        };
+        let width_of = |ui: &Ui| ui.resolve_overlays(None)[0].1.width;
+
+        let wide = ui.overlay_open(full(false));
+        assert_eq!(width_of(&ui), 80);
+        ui.overlay_close(wide);
+
+        ui.overlay_open(full(true));
+        assert_eq!(width_of(&ui), 30);
     }
 
     #[test]

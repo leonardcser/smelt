@@ -77,6 +77,55 @@ fn slash_completion_stays_within_a_prompt_narrowed_by_a_sidebar() {
 }
 
 #[test]
+fn notification_stays_within_a_prompt_narrowed_by_a_sidebar() {
+    const SIDEBAR: &str = r#"
+        local side = smelt.buf.new({ readonly = true })
+        local rows = {}
+        for i = 1, 40 do rows[i] = "SIDE" end
+        side:lines(rows)
+        local ui = smelt.ui.layout
+        local default = require("smelt.layout").compose
+        ui.set(function(state)
+            return ui.hbox({
+                { default(state), width = "fill" },
+                { ui.leaf(smelt.win.new(side, { surface = "list_inert" })), width = 22 },
+            })
+        end)
+    "#;
+    const NOTICE: &str =
+        "a notice far too long to fit beside the sidebar, so it ends where the prompt does";
+    // Raised under the sidebar, and raised just before a reload brings the sidebar in.
+    for notice_first in [false, true] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(80, 24);
+        app.render();
+        if notice_first {
+            app.app.notify(NOTICE.into());
+            app.render();
+        }
+        assert!(app.run_lua(SIDEBAR));
+        app.render();
+        if !notice_first {
+            app.app.notify(NOTICE.into());
+        }
+
+        let frame = app.render_to_frame().text();
+        let row = frame
+            .lines()
+            .find(|line| line.contains("a notice"))
+            .unwrap_or_else(|| panic!("notification row missing:\n{frame}"));
+        assert!(
+            row.contains('…'),
+            "the notice should end in an ellipsis where the prompt ends:\n{frame}"
+        );
+        assert!(
+            row.trim_end().ends_with("SIDE"),
+            "the notice should leave the sidebar showing beside it:\n{frame}"
+        );
+    }
+}
+
+#[test]
 fn slash_completion_accepts_current_command_from_a_terminal_burst() {
     for accept in [KeyCode::Enter, KeyCode::Tab] {
         let mut app = TestApp::builder().with_vim(false).build();

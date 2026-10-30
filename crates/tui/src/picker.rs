@@ -127,7 +127,8 @@ pub(crate) fn open(
         layout_for(leaf, height),
         anchor_for(&app.ui, placement, height),
     )
-    .with_width(overlay_width(placement, &app.ui))
+    .with_width(overlay_width(placement))
+    .with_anchor_width(matches!(placement, PickerPlacement::PromptDocked { .. }))
     .with_z(z)
     .blocks_agent(blocks_agent);
     let overlay_id = app.ui.overlay_open(overlay);
@@ -167,14 +168,12 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     state.materialized = 0..0;
     let height = picker_height(state.items.len(), state.placement, &app.ui);
     let new_anchor = anchor_for(&app.ui, state.placement, height);
-    let width = overlay_width(state.placement, &app.ui);
     let overlay = state.overlay;
     app.overlays.install_picker(leaf, state);
 
     if let Some(ov) = app.ui.overlay_mut(overlay) {
         ov.layout = layout_for(leaf, height);
         ov.anchor = new_anchor;
-        ov.width = width;
     }
     sync_selected(app, leaf, selected);
 }
@@ -241,11 +240,9 @@ pub(crate) fn sync_layouts(app: &mut TuiApp) {
         let total = state.items.len();
         let height = picker_height(total, state.placement, &app.ui);
         let new_anchor = anchor_for(&app.ui, state.placement, height);
-        let width = overlay_width(state.placement, &app.ui);
         if let Some(ov) = app.ui.overlay_mut(state.overlay) {
             ov.layout = layout_for(leaf, height);
             ov.anchor = new_anchor;
-            ov.width = width;
         }
         // Re-materialize with the new size while keeping the current
         // logical selection visible.
@@ -394,21 +391,25 @@ fn visual_cursor(logical: usize, n: usize, reversed: bool) -> RowIndex {
     }
 }
 
-/// Columns a picker may span. A prompt-docked picker is as wide as the
-/// prompt chrome it floats over, so a layout that narrows the prompt (a
-/// sidebar beside it) narrows the picker with it. Other placements size to
-/// their content.
+/// Columns a prompt-docked picker spans: the width of the prompt chrome it
+/// floats over. Other placements size to their content.
 fn picker_width(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> Option<u16> {
     match placement {
-        PickerPlacement::PromptDocked { .. } => ui
-            .split_rect(crate::content::layout::prompt_chrome_top_win(ui))
-            .map(|r| r.width),
+        PickerPlacement::PromptDocked { .. } => {
+            Some(crate::content::layout::prompt_chrome_width(ui))
+        }
         _ => None,
     }
 }
 
-fn overlay_width(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> Constraint {
-    picker_width(placement, ui).map_or(Constraint::Fit, Constraint::Length)
+/// A prompt-docked picker fills the prompt chrome it is anchored to, so a
+/// layout that narrows the prompt (a sidebar beside it) narrows the picker
+/// with it. Other placements size to their content.
+fn overlay_width(placement: PickerPlacement) -> Constraint {
+    match placement {
+        PickerPlacement::PromptDocked { .. } => Constraint::Percentage(100),
+        _ => Constraint::Fit,
+    }
 }
 
 fn layout_for(leaf: WinId, height: u16) -> LayoutTree {

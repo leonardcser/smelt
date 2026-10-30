@@ -3256,7 +3256,7 @@ impl TuiApp {
             return;
         }
 
-        let width = self.ui.terminal_size().0 as usize;
+        let width = crate::content::layout::prompt_chrome_width(&self.ui) as usize;
         let buf = self
             .ui
             .buf_create(crate::smelt_edit::BufCreateOpts::default());
@@ -3283,12 +3283,15 @@ impl TuiApp {
             )]),
         )]);
         // Float `1` row above the prompt's Lua-allocated top bar (or the
-        // prompt input on cold start, before Lua has registered the bar).
-        // Anchoring against the named window keeps the toast correctly
-        // placed even when queued/stash rows grow the top bar.
+        // prompt input on cold start, before Lua has registered the bar),
+        // as wide as it. Anchoring against the named window keeps the toast
+        // correctly placed even when queued/stash rows grow the top bar, and
+        // inside the prompt's column when a layout puts a sidebar beside it.
         let anchor = crate::content::layout::anchor_above_prompt_chrome(&self.ui, 1);
         let _overlay_id = self.ui.overlay_open(
             crate::smelt_edit::Overlay::new(layout, anchor)
+                .with_width(crate::smelt_edit::Constraint::Percentage(100))
+                .with_anchor_width(true)
                 // Sits below dialogs (default overlay z 50) so a toast
                 // never obscures a modal asking for input.
                 .with_z(40),

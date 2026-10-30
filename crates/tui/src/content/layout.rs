@@ -29,6 +29,13 @@ pub(crate) fn available_rows_above_prompt_chrome(ui: &Ui) -> u16 {
     ui.split_rect(target).map(|r| r.top).unwrap_or(0)
 }
 
+/// Columns the prompt chrome spans: the terminal's width, or less when a
+/// layout puts a sidebar beside the prompt.
+pub(crate) fn prompt_chrome_width(ui: &Ui) -> u16 {
+    ui.split_rect(prompt_chrome_top_win(ui))
+        .map_or(ui.terminal_size().0, |r| r.width)
+}
+
 /// Anchor that floats an overlay `height` rows above the prompt block.
 pub(crate) fn anchor_above_prompt_chrome(ui: &Ui, height: u16) -> Anchor {
     let target = prompt_chrome_top_win(ui);
