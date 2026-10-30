@@ -1811,6 +1811,18 @@ async fn turns_share_one_process_until_launch_settings_change() {
         .unwrap()
         .iter()
         .any(|arg| arg.as_str().is_some_and(|arg| arg.starts_with("--resume="))));
+    let thinking_display = |launch: &Value| {
+        let argv = launch["argv"].as_array().unwrap();
+        argv.iter()
+            .position(|arg| arg == "--thinking-display")
+            .map(|at| argv[at + 1].clone())
+    };
+    assert_eq!(thinking_display(launches[0]), None);
+    assert_eq!(
+        thinking_display(launches[1]),
+        Some(json!("summarized")),
+        "thinking launches ask for visible thinking text"
+    );
     assert_eq!(
         calls
             .iter()

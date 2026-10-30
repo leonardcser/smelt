@@ -168,7 +168,11 @@ impl Process {
             command.arg("--append-system-prompt").arg(prompt);
         }
         if !matches!(effort, ReasoningEffort::Off) {
-            command.arg("--effort").arg(effort.label());
+            // Claude Code omits thinking text unless asked for summaries.
+            command
+                .arg("--effort")
+                .arg(effort.label())
+                .args(["--thinking-display", "summarized"]);
         }
         if let Some(schema) = schema {
             command.arg("--json-schema").arg(schema.to_string());
