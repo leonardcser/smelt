@@ -2701,6 +2701,13 @@ impl LuaRuntime {
             .cloned()
     }
 
+    /// Rows at the top of the transcript viewport that overlays cover.
+    pub fn transcript_top_inset(&self) -> u64 {
+        self.shared
+            .transcript_top_inset
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn transcript_group_specs(&self) -> Vec<TranscriptGroupSpec> {
         self.shared
             .transcript_groups

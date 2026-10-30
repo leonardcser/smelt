@@ -178,7 +178,7 @@ Types: [`smelt.transcript.MoveBlockOpts`](types.md#smelttranscriptmoveblockopts)
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. Past the last block it goes to the transcript edge. Returns false when the transcript is not focused, so a keymap handler can fall through.
+Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. With no block that way the cursor stays put. Returns false when the transcript is not focused, so a keymap handler can fall through.
 
 ## `smelt.transcript.node_at_row`
 
@@ -216,7 +216,7 @@ Types: [`smelt.transcript.Target`](types.md#smelttranscripttarget), [`smelt.tran
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to zero; `opts.move_cursor` defaults to true.
+Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to the `top_inset`; `opts.move_cursor` defaults to true and puts the cursor at the start of the target's text.
 
 ## `smelt.transcript.rows`
 
@@ -256,6 +256,16 @@ Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.transcript.StreamOpts`](
 **Availability:** Terminal UI only; raises in headless mode.
 
 Create a transcript-shaped streaming renderer for `buf`. The returned object feeds deltas through the same incremental markdown parser and renderer used by the main transcript.
+
+## `smelt.transcript.top_inset`
+
+```lua
+fun(rows: integer): nil
+```
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Reserve `rows` at the top of the transcript viewport for overlays such as the scroll pill. Block motions and `reveal` keep their target below them. Defaults to zero.
 
 ## `smelt.transcript.view`
 

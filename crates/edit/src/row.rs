@@ -24,7 +24,8 @@ impl DocumentHandle {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Ordered by row, then column, as positions read in the document.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DocPosition {
     pub row: RowIndex,
     pub byte_col: usize,
@@ -154,18 +155,6 @@ pub struct DisplaySnapshot {
     pub total_rows: RowIndex,
 }
 
-/// Where a block motion from a row lands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlockBoundary {
-    /// The document has no blocks of that kind, or cannot place the origin.
-    Unsupported,
-    /// No further block lies in that direction.
-    End,
-    /// The nearest block: its first row and its first row with text, where a
-    /// cursor rests.
-    At { start: RowIndex, home: RowIndex },
-}
-
 pub trait DisplayDocument {
     fn snapshot(&mut self) -> DisplaySnapshot;
     fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows;
@@ -205,11 +194,18 @@ pub trait DisplayDocument {
         false
     }
 
-    /// Nearest block of `kind` before or after the row `from`. A block that
-    /// `from` sits inside, below its first row, counts as the previous one.
-    /// `kind` is the key the document binds to a kind of block, such as `u`.
-    fn block_boundary(&mut self, _from: RowIndex, _kind: char, _forward: bool) -> BlockBoundary {
-        BlockBoundary::Unsupported
+    /// Where the text of the block `count` blocks of `kind` before or after
+    /// `from` starts, counting the block text starts strictly past `from` in
+    /// that direction. `None` when no such block lies that way. `kind` is the
+    /// key the document binds to a kind of block, such as `u`.
+    fn block_landing(
+        &mut self,
+        _from: DocPosition,
+        _kind: char,
+        _forward: bool,
+        _count: usize,
+    ) -> Option<DocPosition> {
+        None
     }
 
     fn action_at(&mut self, pos: DocPosition) -> Option<SpanAction> {

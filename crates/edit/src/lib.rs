@@ -76,10 +76,9 @@ pub use overlay::{
 };
 pub use row::{
     add_signed_row, display_row_matches, doc_range_for_match, row_match_is_selectable,
-    row_to_usize, BlockBoundary, BufferDocument, DisplayAction, DisplayDocument, DisplayRow,
-    DisplayRows, DisplaySnapshot, DocPosition, DocRange, DocumentHandle, MaterializeRequest,
-    MaterializedRows, PreparedWindowRequest, RowBreak, RowIndex, SearchPattern, StaticRowsDocument,
-    TextRange,
+    row_to_usize, BufferDocument, DisplayAction, DisplayDocument, DisplayRow, DisplayRows,
+    DisplaySnapshot, DocPosition, DocRange, DocumentHandle, MaterializeRequest, MaterializedRows,
+    PreparedWindowRequest, RowBreak, RowIndex, SearchPattern, StaticRowsDocument, TextRange,
 };
 pub use vim::VimMode;
 pub use window::{

@@ -1740,6 +1740,7 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
         local previous_block_role = nil
         local row_lookup_calls = 0
         local revealed_block = nil
+        local top_inset = nil
         local view_handler = nil
         local transcript_win = {}
         local view = {
@@ -1807,6 +1808,7 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
           },
           ui = { layout = { leaf = function() return {} end } },
           transcript = {
+            top_inset = function(rows) top_inset = rows end,
             watch_view = function(fn)
               view_handler = fn
               fn(view)
@@ -1851,6 +1853,7 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
         function __previous_block_role() return previous_block_role end
         function __row_lookup_calls() return row_lookup_calls end
         function __revealed_block() return revealed_block end
+        function __top_inset() return top_inset end
         function __event(name)
           if name == "scrolled" or name == "focus" or name == "blur" then
             assert(view_handler, "view_handler")(view)
@@ -1890,8 +1893,20 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
         revealed_block_id,
         reveal_align,
         reveal_top_padding,
+        top_inset,
         reveal_moves_cursor,
-    ): (bool, bool, i64, String, i64, i64, String, i64, bool) = lua
+    ): (
+        bool,
+        bool,
+        i64,
+        String,
+        i64,
+        i64,
+        String,
+        Option<i64>,
+        i64,
+        bool,
+    ) = lua
         .load(
             r#"
             __set_blocks({ { block_id = 1, role = "user", first_line = "previous message" } })
@@ -1910,6 +1925,7 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
               revealed.block_id,
               revealed.align,
               revealed.top_padding,
+              __top_inset(),
               revealed.move_cursor
             "#,
         )
@@ -1922,7 +1938,8 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
     assert_eq!(row_lookup_calls, 0);
     assert_eq!(revealed_block_id, 1);
     assert_eq!(reveal_align, "top");
-    assert_eq!(reveal_top_padding, 1);
+    assert_eq!(reveal_top_padding, None, "the reveal pads by the top inset");
+    assert_eq!(top_inset, 1, "the pill reserves its row");
     assert!(!reveal_moves_cursor);
 
     let (bottom_after_blur, bottom_after_focus): (bool, bool) = lua

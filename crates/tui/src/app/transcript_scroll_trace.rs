@@ -41,6 +41,15 @@ use crate::content::transcript_scene::RenderNodeId;
 use crate::smelt_edit::{add_signed_row, DocPosition, RowIndex};
 use smelt_core::transcript_model::BlockId;
 
+/// Where a block reveal puts the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranscriptRevealCursor {
+    /// On the block's first row, at `byte_col`.
+    BlockStart { byte_col: usize },
+    /// At the start of the block's text, past any padding or header chrome.
+    TextStart,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TranscriptScrollIntent {
@@ -62,13 +71,12 @@ pub(crate) enum TranscriptScrollIntent {
     RevealBlock {
         record_index: usize,
         block_id: BlockId,
-        row_offset: RowIndex,
         screen_padding_top: RowIndex,
-        cursor_byte_col: Option<usize>,
+        cursor: Option<TranscriptRevealCursor>,
     },
     RevealFirstRecord {
         screen_padding_top: RowIndex,
-        cursor_byte_col: Option<usize>,
+        cursor: Option<TranscriptRevealCursor>,
     },
     ResizeReflow {
         previous_width: u16,

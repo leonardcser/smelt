@@ -229,6 +229,9 @@ pub struct LuaShared {
     pub transcript_groups: Mutex<TranscriptGroupRegistry>,
     /// Transcript block roles bound to each vim block-motion key (`[u`, `]u`).
     pub transcript_block_kinds: Mutex<HashMap<char, Vec<&'static str>>>,
+    /// Rows at the top of the transcript viewport that overlays cover; block
+    /// jumps and reveals keep their target below them.
+    pub transcript_top_inset: AtomicU64,
     pub transcript_groups_generation: AtomicU64,
     pub transcript_groups_cache_key: AtomicU64,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
@@ -429,6 +432,7 @@ impl Default for LuaShared {
             transcript_renderer_cache_key: AtomicU64::new(0),
             transcript_groups: Mutex::new(TranscriptGroupRegistry::default()),
             transcript_block_kinds: Mutex::new(HashMap::new()),
+            transcript_top_inset: AtomicU64::new(0),
             transcript_groups_generation: AtomicU64::new(0),
             transcript_groups_cache_key: AtomicU64::new(0),
             callbacks: Mutex::new(HashMap::new()),
@@ -761,6 +765,7 @@ impl LuaShared {
         if let Ok(mut m) = self.transcript_block_kinds.lock() {
             m.clear();
         }
+        self.transcript_top_inset.store(0, Ordering::Release);
         if let Ok(mut m) = self.callbacks.lock() {
             m.clear();
         }

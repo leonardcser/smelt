@@ -1487,8 +1487,8 @@ Viewport placement used when revealing a semantic transcript target.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `align` | [smelt.transcript.RevealAlign](types.md#smelttranscriptrevealalign) |  | Target alignment within the transcript viewport. Currently only `top`. |
-| `top_padding` | `integer` |  | Rows to reserve above the target. Defaults to zero. |
-| `move_cursor` | `boolean` |  | Move the transcript cursor to the target. Defaults to true. |
+| `top_padding` | `integer` |  | Rows to reserve above the target. Defaults to the transcript's `top_inset`. |
+| `move_cursor` | `boolean` |  | Move the transcript cursor to the start of the target's text. Defaults to true. |
 
 ### `smelt.transcript.Stream`
 

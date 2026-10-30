@@ -229,8 +229,9 @@ paths; in vim mode, use `gf`.
 
 `[` / `]` plus a kind jump to the previous / next block: `[[` any block, `[u` user
 message, `[a` assistant message, `[t` tool call. They take counts and compose with
-operators and visual mode (`3]u`, `y]u`); past the last block they go to the
-transcript edge. `Alt+Up` / `Alt+Down` (blocks) and `Alt+Shift+Up` /
+operators and visual mode (`3]u`, `y]u`). The cursor lands at the start of the
+block's text, with the block just below the scroll pill, and stays put when no
+block lies that way. `Alt+Up` / `Alt+Down` (blocks) and `Alt+Shift+Up` /
 `Alt+Shift+Down` (user messages) work without vim mode. Add kinds with
 `smelt.transcript.block_kind`.
 

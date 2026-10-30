@@ -1,6 +1,5 @@
 use super::document_motion::{
-    block_landing, clamp_to_row_text, find_row, over_rows, resolve_rows, Edges, RowEnv, ScanBound,
-    SCAN_LIMIT_ROWS,
+    clamp_to_row_text, find_row, over_rows, resolve_rows, Edges, RowEnv, ScanBound, SCAN_LIMIT_ROWS,
 };
 use super::*;
 use crate::jumplist::JumpMove;
@@ -1272,7 +1271,6 @@ impl DocumentViewExecutor {
         };
         let mut next = current;
         let mut sets_preferred_cell = false;
-        let mut block_top = None;
         let mut copy = None;
         match command {
             DocumentCommand::MoveRows(delta) => {
@@ -1316,15 +1314,6 @@ impl DocumentViewExecutor {
                     let rows = if motion == Motion::Down { rows } else { -rows };
                     let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
                     move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
-                }
-                Motion::Block(block) => {
-                    if let Some(landing) =
-                        block_landing(document, total_rows, current, block, count.unwrap_or(1))
-                    {
-                        next = clamp_to_row_text(document, landing.cursor, *vim_mode);
-                        sets_preferred_cell = true;
-                        block_top = landing.top;
-                    }
                 }
                 _ => {
                     if let Some((pos, _)) =
@@ -1543,10 +1532,7 @@ impl DocumentViewExecutor {
                 | DocumentCommand::ScrollCursor(_)
                 | DocumentCommand::PanColumns(_)
         ) {
-            *scroll_top = match block_top {
-                Some(start) => start.min(total_rows.saturating_sub(viewport_rows as RowIndex)),
-                None => scroll_to_show(*scroll_top, next.row, viewport_rows),
-            };
+            *scroll_top = scroll_to_show(*scroll_top, next.row, viewport_rows);
         }
         copy
     }
@@ -2188,7 +2174,7 @@ fn advance_doc_position_if_on_char(
 mod tests {
     use super::*;
     use crate::motions::WordTo;
-    use crate::row::{BlockBoundary, DisplayAction, RowBreak, StaticRowsDocument};
+    use crate::row::{DisplayAction, RowBreak, StaticRowsDocument};
     use crate::text::CharClass;
     use smelt_buffer::buffer::SpanAction;
 
@@ -2212,28 +2198,21 @@ mod tests {
         }
     }
 
-    /// Rows of text whose blocks start at `starts`; only the kind `u` is bound.
+    /// Ten rows whose block motions of kind `u` land on `landing`; other kinds
+    /// are unbound.
     struct BlockRows {
         rows: StaticRowsDocument,
-        starts: Vec<RowIndex>,
+        landing: Option<DocPosition>,
     }
 
     impl BlockRows {
-        fn new(rows: &[&str], starts: &[RowIndex]) -> Self {
+        fn new(landing: Option<DocPosition>) -> Self {
             Self {
                 rows: StaticRowsDocument::from_text_rows(
-                    rows.iter().map(|r| r.to_string()).collect(),
+                    (0..10).map(|row| format!("row {row}")).collect(),
                 ),
-                starts: starts.to_vec(),
+                landing,
             }
-        }
-
-        /// The first row with text in the block starting at `start`.
-        fn home_of(&mut self, start: RowIndex) -> RowIndex {
-            let total = self.rows.snapshot().total_rows;
-            (start..total)
-                .find(|&row| document_row_string(self, row).is_some_and(|text| !text.is_empty()))
-                .unwrap_or(start)
         }
     }
 
@@ -2250,72 +2229,93 @@ mod tests {
             self.rows.copy_range(range)
         }
 
-        fn block_boundary(&mut self, from: RowIndex, kind: char, forward: bool) -> BlockBoundary {
-            if kind != 'u' {
-                return BlockBoundary::Unsupported;
-            }
-            let start = if forward {
-                self.starts.iter().find(|&&start| start > from)
-            } else {
-                self.starts.iter().rev().find(|&&start| start < from)
-            }
-            .copied();
-            start.map_or(BlockBoundary::End, |start| BlockBoundary::At {
-                start,
-                home: self.home_of(start),
-            })
+        fn block_landing(
+            &mut self,
+            _from: DocPosition,
+            kind: char,
+            _forward: bool,
+            _count: usize,
+        ) -> Option<DocPosition> {
+            self.landing.filter(|_| kind == 'u')
         }
     }
 
-    fn block_env(doc: &mut impl DisplayDocument) -> RowEnv {
-        RowEnv {
-            total_rows: doc.snapshot().total_rows,
-            vim_mode: VimMode::Normal,
-            usage: Use::Move,
-            scroll_top: 0,
-            viewport_rows: 10,
-        }
-    }
-
+    /// The cursor and scroll after the block motion `kind` from row 5 in a
+    /// viewport of `viewport_rows`.
     fn block_move(
-        doc: &mut BlockRows,
-        from: RowIndex,
+        landing: Option<DocPosition>,
         kind: char,
         forward: bool,
-        count: usize,
-    ) -> RowIndex {
-        let cursor = DocPosition {
-            row: from,
-            byte_col: 3,
+        viewport_rows: u16,
+    ) -> (DocPosition, RowIndex) {
+        let mut doc = BlockRows::new(landing);
+        let mut state = DocumentViewState {
+            active: true,
+            materialized: MaterializedRows {
+                clamped_scroll: 0,
+                row_base: 0,
+                total_rows: 10,
+                materialized_rows: 10,
+            },
+            cursor: DocPosition {
+                row: 5,
+                byte_col: 2,
+            },
+            ..DocumentViewState::default()
         };
-        let env = block_env(doc);
-        let motion = Motion::Block(BlockMotion { kind, forward });
-        resolve_rows(doc, cursor, motion, Some(count), env).map_or(from, |(pos, _)| pos.row)
+        let mut mode = VimMode::Normal;
+        let mut scroll_top = 3;
+        let mut scroll_left = 0;
+        DocumentViewExecutor::execute(
+            &mut state,
+            &mut doc,
+            DocumentCommand::Move {
+                motion: Motion::Block(BlockMotion { kind, forward }),
+                count: Some(1),
+            },
+            &mut mode,
+            &mut scroll_top,
+            &mut scroll_left,
+            viewport_rows,
+            80,
+            false,
+            Instant::now(),
+        );
+        (state.cursor, scroll_top)
     }
 
-    const BLOCK_TEXT: [&str; 9] = ["one", "", "", "two", "x", "three", "y", "z", ""];
-
     #[test]
-    fn block_move_steps_by_count_between_block_starts() {
-        let mut doc = BlockRows::new(&BLOCK_TEXT, &[0, 3, 5]);
-        assert_eq!(block_move(&mut doc, 0, 'u', true, 1), 3);
-        assert_eq!(block_move(&mut doc, 0, 'u', true, 2), 5);
-        assert_eq!(block_move(&mut doc, 8, 'u', false, 2), 3);
+    fn block_move_lands_on_the_block_text_and_scrolls_it_into_view() {
+        let home = DocPosition {
+            row: 2,
+            byte_col: 1,
+        };
+        assert_eq!(block_move(Some(home), 'u', false, 4), (home, 2));
+        let home = DocPosition {
+            row: 8,
+            byte_col: 1,
+        };
+        assert_eq!(block_move(Some(home), 'u', true, 4), (home, 5));
     }
 
     #[test]
-    fn block_move_goes_to_the_edge_past_the_last_block() {
-        let mut doc = BlockRows::new(&BLOCK_TEXT, &[0, 3, 5]);
-        assert_eq!(block_move(&mut doc, 5, 'u', true, 1), 8);
-        assert_eq!(block_move(&mut doc, 0, 'u', true, 9), 8);
-        assert_eq!(block_move(&mut doc, 0, 'u', false, 1), 0);
-        assert_eq!(block_move(&mut doc, 4, 'u', false, 9), 0);
+    fn block_move_stays_put_past_the_last_block() {
+        let cursor = DocPosition {
+            row: 5,
+            byte_col: 2,
+        };
+        assert_eq!(block_move(None, 'u', false, 4), (cursor, 3));
+        assert_eq!(block_move(None, 'u', true, 4), (cursor, 3));
     }
 
     #[test]
     fn block_move_leaves_the_cursor_for_unbound_kinds() {
-        let mut doc = BlockRows::new(&BLOCK_TEXT, &[0, 3, 5]);
-        assert_eq!(block_move(&mut doc, 4, 'q', true, 1), 4);
+        let home = DocPosition {
+            row: 8,
+            byte_col: 1,
+        };
+        let (cursor, scroll_top) = block_move(Some(home), 'q', true, 4);
+        assert_eq!((cursor.row, scroll_top), (5, 3));
     }
 
     #[test]
@@ -2325,7 +2325,13 @@ mod tests {
             row: 1,
             byte_col: 1,
         };
-        let env = block_env(&mut doc);
+        let env = RowEnv {
+            total_rows: 2,
+            vim_mode: VimMode::Normal,
+            usage: Use::Move,
+            scroll_top: 0,
+            viewport_rows: 10,
+        };
         let motion = Motion::Block(BlockMotion {
             kind: 'u',
             forward: false,

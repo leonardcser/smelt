@@ -499,6 +499,20 @@ impl ConversationRuntime {
             .materialize_block_snapshots(lua, width)
     }
 
+    pub(crate) fn transcript_block_jump(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        width: u16,
+        from: crate::smelt_edit::DocPosition,
+        roles: &[&str],
+        direction: super::transcript::TranscriptNavigationDirection,
+        count: usize,
+    ) -> Option<super::transcript::TranscriptNavigationBlock> {
+        self.document
+            .transcript
+            .block_jump(lua, width, from, roles, direction, count)
+    }
+
     pub(crate) fn transcript_record_block_reveal_position(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,

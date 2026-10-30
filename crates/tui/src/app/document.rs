@@ -4,7 +4,9 @@ use std::hash::{Hash, Hasher};
 use serde_json::json;
 
 use crate::app::transcript::TranscriptProjectionRestore;
-use crate::app::transcript_scroll_trace::{TranscriptScrollIntent, TranscriptTraceAnchor};
+use crate::app::transcript_scroll_trace::{
+    TranscriptRevealCursor, TranscriptScrollIntent, TranscriptTraceAnchor,
+};
 use crate::app::TuiApp;
 use crate::smelt_edit::{
     BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DocPosition, DocRange,
@@ -552,6 +554,17 @@ impl TuiApp {
                 cursor,
             )
         };
+        if let DocumentCommand::Move {
+            motion: crate::smelt_edit::Motion::Block(motion),
+            count,
+        } = command
+        {
+            if win == crate::app::TRANSCRIPT_WIN
+                && self.reveal_transcript_block_jump(motion, count.unwrap_or(1), cursor)
+            {
+                return None;
+            }
+        }
         let local_transcript_command = win == crate::app::TRANSCRIPT_WIN
             && matches!(
                 command,
@@ -700,14 +713,6 @@ impl TuiApp {
             }
         }
 
-        let block_jump = win == crate::app::TRANSCRIPT_WIN
-            && matches!(
-                command,
-                DocumentCommand::Move {
-                    motion: crate::smelt_edit::Motion::Block(_),
-                    ..
-                }
-            );
         let copy = self.with_display_document_for_win(win, |document| {
             let total_rows = document.snapshot().total_rows;
             if !state.active {
@@ -755,21 +760,23 @@ impl TuiApp {
                         TranscriptScrollIntent::RevealBlock {
                             record_index: 0,
                             block_id: reveal.block_id,
-                            row_offset: 0,
                             screen_padding_top: 0,
-                            cursor_byte_col: Some(state.cursor.byte_col),
+                            cursor: Some(TranscriptRevealCursor::BlockStart {
+                                byte_col: state.cursor.byte_col,
+                            }),
                         }
                     } else {
                         TranscriptScrollIntent::RevealFirstRecord {
                             screen_padding_top: 0,
-                            cursor_byte_col: Some(state.cursor.byte_col),
+                            cursor: Some(TranscriptRevealCursor::BlockStart {
+                                byte_col: state.cursor.byte_col,
+                            }),
                         }
                     }
                 } else {
                     self.transcript_anchor_or_approximate_row_seek(viewport_cols, scroll_top)
                 };
                 let restore = if defer_local_transcript_scroll
-                    || block_jump
                     || matches!(command, DocumentCommand::ScrollCursor(_))
                 {
                     TranscriptProjectionRestore {

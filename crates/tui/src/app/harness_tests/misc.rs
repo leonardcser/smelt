@@ -5717,18 +5717,19 @@ fn assert_reveal_block_frame(frame: &TranscriptScrollTraceFrame, block: &Reveale
         TranscriptScrollIntent::RevealBlock {
             record_index,
             block_id,
-            row_offset,
             screen_padding_top,
-            cursor_byte_col,
+            cursor,
         } => {
             assert_eq!(record_index, block.record_index);
             assert_eq!(
                 block_id,
                 smelt_core::transcript_model::BlockId::new(block.block_id)
             );
-            assert_eq!(row_offset, 0);
-            assert_eq!(screen_padding_top, 0);
-            assert_eq!(cursor_byte_col, Some(0));
+            assert_eq!(screen_padding_top, 1, "the scroll pill's top inset");
+            assert_eq!(
+                cursor,
+                Some(crate::app::transcript_scroll_trace::TranscriptRevealCursor::TextStart)
+            );
         }
         ref intent => panic!("semantic user navigation collapsed to wrong intent: {intent:?}"),
     }
@@ -5802,7 +5803,6 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
     let frame = frames.first().expect("previous user reveal frame");
     assert_reveal_block_frame(frame, &previous);
     let revealed_cursor = app.transcript_window().document_view_state().cursor;
-    assert_eq!(revealed_cursor.row, frame.resolved_scroll_top);
     assert!(
         app.transcript_window()
             .materialized_rows()
@@ -5815,6 +5815,14 @@ fn transcript_previous_and_next_user_reveals_are_full_frame_semantic() {
         .split_whitespace()
         .next()
         .expect("previous user marker");
+    assert!(
+        revealed_cursor.row > frame.resolved_scroll_top,
+        "the cursor stays below the top inset: {frame:?}"
+    );
+    assert!(
+        transcript_cursor_line(&app).contains(previous_marker),
+        "the cursor lands on the revealed text: lines={lines:?}"
+    );
     assert!(
         lines.iter().any(|line| line.contains(previous_marker)),
         "previous user target was not revealed in the viewport: target={:?}, lines={lines:?}, frame={frame:?}",
@@ -6353,7 +6361,6 @@ fn transcript_jump_top_uses_first_record_anchor_from_sparse_tail() {
             frame.scroll_intent,
             TranscriptScrollIntent::RevealBlock {
                 record_index: 0,
-                row_offset: 0,
                 screen_padding_top: 0,
                 ..
             }
@@ -7962,10 +7969,13 @@ fn user_message_jumps_align_multiline_prompts_at_top() {
                 );
                 app.render_silent();
             }
+            // The block opens below the scroll pill's row with a padding row;
+            // the first one sits at the transcript top, where no pill shows.
             let rows = app.transcript_window().viewport.unwrap().rect.height;
+            let text_row = if expected == "first" { 1 } else { 2 };
             assert_eq!(
                 app.transcript_cursor_screen_row(rows),
-                Some(1),
+                Some(text_row),
                 "vim={vim}, forward={forward}"
             );
             let lines = transcript_viewport_lines(&app).join("\n");
@@ -8168,31 +8178,32 @@ fn block_motions_take_counts() {
 #[test]
 fn block_motions_step_over_every_block() {
     let mut app = block_nav_app(true);
-    for (keys, expected, screen_row) in [
-        ("gg]]", "first answer 0", 0),
-        ("]]", "first answer 1", 0),
-        ("[[", "first answer 0", 0),
-        ("[[", "first question", 1),
-        ("]a", "first answer 0", 0),
-        ("]a", "first answer 1", 0),
-        ("[a", "first answer 0", 0),
+    for (keys, expected) in [
+        ("gg]]", "first answer 0"),
+        ("]]", "first answer 1"),
+        ("[[", "first answer 0"),
+        ("[[", "first question"),
+        ("]a", "first answer 0"),
+        ("]a", "first answer 1"),
+        ("[a", "first answer 0"),
     ] {
         assert_eq!(block_nav(&mut app, keys), expected);
         let rows = app.transcript_window().viewport.unwrap().rect.height;
-        assert_eq!(
-            app.transcript_cursor_screen_row(rows),
-            Some(screen_row),
-            "{keys}"
-        );
+        assert_eq!(app.transcript_cursor_screen_row(rows), Some(1), "{keys}");
     }
 }
 
 #[test]
-fn block_motions_go_to_the_edges_past_the_last_block() {
+fn block_motions_stay_put_past_the_last_block() {
     let mut app = block_nav_app(true);
-    block_nav(&mut app, "G");
-    assert_eq!(block_nav(&mut app, "]u"), "second answer 29");
-    assert_eq!(block_nav(&mut app, "gg[u"), "first question");
+    block_nav(&mut app, "G[u");
+    let last = app.transcript_window().row_cursor;
+    assert_eq!(block_nav(&mut app, "]u"), "second question");
+    assert_eq!(app.transcript_window().row_cursor, last);
+    block_nav(&mut app, "[u");
+    let first = app.transcript_window().row_cursor;
+    assert_eq!(block_nav(&mut app, "[u"), "first question");
+    assert_eq!(app.transcript_window().row_cursor, first);
 }
 
 #[test]
@@ -8326,22 +8337,280 @@ fn user_message_jump_lands_on_the_text_below_the_pill_row() {
         app.configure_transcript_vim(true, VimMode::Normal);
         app.render_silent();
         block_nav(&mut app, "G");
-        for (expected, pill_open) in [("third", true), ("second", true), ("first", false)] {
+        // The pill covers row 0 and names the previous message; the block's
+        // timestamp or padding row follows, then its text. The first message
+        // sits at the transcript top, where no pill shows.
+        for (expected, pill, text_row) in [
+            ("third", Some("second question"), 2),
+            ("second", Some("first question"), 2),
+            ("first", None, 1),
+        ] {
             assert_eq!(block_nav(&mut app, "[u"), format!("{expected} question"));
             let rows = app.transcript_window().viewport.unwrap().rect.height;
-            assert_eq!(app.transcript_cursor_screen_row(rows), Some(1));
+            let context = format!("{expected}, sent_at_ms={sent_at_ms:?}");
+            assert_eq!(
+                app.transcript_cursor_screen_row(rows),
+                Some(text_row),
+                "{context}"
+            );
             assert_eq!(
                 app.transcript_window().row_cursor.unwrap().byte_col,
                 1,
-                "cursor sits on the text column"
+                "the cursor sits on the text column: {context}"
             );
-            assert_eq!(
-                app.ui_probe()
-                    .named_win("smelt.scroll_pills.top.win")
-                    .is_some(),
-                pill_open,
-                "{expected}, sent_at_ms={sent_at_ms:?}"
+            let pill_open = app
+                .ui_probe()
+                .named_win("smelt.scroll_pills.top.win")
+                .is_some();
+            let label = app
+                .ui_probe()
+                .named_buf("smelt.scroll_pills.top.buf")
+                .filter(|_| pill_open)
+                .and_then(|buf| app.ui_probe().buf(buf))
+                .and_then(|buf| buf.get_line(0).map(str::to_owned));
+            assert_eq!(label.as_deref().map(str::trim), pill, "{context}");
+        }
+    }
+}
+
+/// A chat of `turns` timestamped turns whose user messages cycle through a
+/// short line, three lines, a message taller than the viewport and a wrapped
+/// paragraph. Every answer spans several rows and every third turn runs a tool.
+fn varied_chat_blocks(turns: usize) -> Vec<smelt_core::transcript_model::Block> {
+    use smelt_core::transcript_model::Block;
+    let mut blocks = Vec::new();
+    for t in 0..turns {
+        let text = match t % 4 {
+            0 => format!("u{t:03} short question"),
+            1 => format!("u{t:03} first line\nsecond line\nthird line"),
+            2 => format!(
+                "u{t:03} tall {}",
+                (0..30)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            _ => format!("u{t:03} wrapped {}", "word ".repeat(40)),
+        };
+        blocks.push(Block::User {
+            text,
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: Some(1_700_000_000_000 + t as u64 * 60_000),
+        });
+        blocks.push(Block::Text {
+            content: format!("a{t:03} answer\n\n{}", "para ".repeat(30 + (t % 3) * 40)).into(),
+        });
+        if t % 3 == 0 {
+            blocks.push(Block::ToolCall {
+                call_id: format!("grep-{t}"),
+                name: "grep".into(),
+                summary: protocol::StyledLines::from_plain(format!("t{t:03} grep needle")),
+                args: std::collections::HashMap::from([(
+                    "pattern".to_string(),
+                    serde_json::json!("needle"),
+                )])
+                .into(),
+            });
+        }
+    }
+    blocks
+}
+
+fn varied_chat_app(turns: usize) -> TestApp {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 20);
+    for block in varied_chat_blocks(turns) {
+        app.push_transcript_block(block);
+    }
+    app.render_silent();
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.render_silent();
+    app
+}
+
+fn resumed_varied_chat_app(turns: usize) -> (TestApp, tempfile::TempDir) {
+    let mut source = smelt_core::content::transcript::Transcript::new();
+    for block in varied_chat_blocks(turns) {
+        source.push(block);
+    }
+    let (mut app, dir) =
+        resumed_transcript_app_from_records(source.history.block_records(), 80, 20);
+    app.focus_transcript();
+    app.configure_transcript_vim(true, VimMode::Normal);
+    app.render_silent();
+    (app, dir)
+}
+
+/// The cursor, its viewport row, and the viewport line it sits on.
+fn transcript_cursor_at(app: &TestApp) -> (crate::smelt_edit::DocPosition, Option<u16>, String) {
+    let rows = app.transcript_window().viewport.unwrap().rect.height;
+    let cursor = app.transcript_window().row_cursor.unwrap();
+    let screen = app.transcript_cursor_screen_row(rows);
+    let line = screen
+        .and_then(|row| transcript_viewport_lines(app).get(row as usize).cloned())
+        .unwrap_or_default();
+    (cursor, screen, line)
+}
+
+fn top_pill_label(app: &TestApp) -> Option<String> {
+    app.ui_probe().named_win("smelt.scroll_pills.top.win")?;
+    let buf = app.ui_probe().named_buf("smelt.scroll_pills.top.buf")?;
+    let line = app.ui_probe().buf(buf)?.get_line(0)?.trim().to_owned();
+    Some(line)
+}
+
+/// Walks every user message with `keys` from the end the walk starts at and
+/// checks each lands on the message text, just below the pill naming the
+/// message before it, until the walk stops at the last message.
+fn assert_user_message_walk(app: &mut TestApp, keys: &str, order: &[usize], context: &str) {
+    for (step, &turn) in order.iter().enumerate() {
+        block_nav(app, keys);
+        let (cursor, screen, line) = transcript_cursor_at(app);
+        let context = format!("{context} {keys} step {step}");
+        assert!(
+            line.starts_with(&format!(" u{turn:03} ")),
+            "{context}: cursor line {line:?}"
+        );
+        assert_eq!(cursor.byte_col, 1, "{context}: the cursor is on the text");
+        let pill = (turn > 0).then(|| format!("u{:03}", turn - 1));
+        let label = top_pill_label(app);
+        assert_eq!(
+            label.as_deref().map(|label| &label[..4]),
+            pill.as_deref(),
+            "{context}: pill"
+        );
+        let at_bottom = {
+            let window = app.transcript_window();
+            let viewport = window.viewport.unwrap();
+            window.scroll_top + RowIndex::from(viewport.rect.height) >= viewport.total_rows
+        };
+        if turn == 0 {
+            assert_eq!(screen, Some(1), "{context}: the first message has no pill");
+        } else if !at_bottom {
+            assert_eq!(screen, Some(2), "{context}: the block sits below the pill");
+        }
+    }
+    let before = app.transcript_window().row_cursor;
+    let scroll_before = app.transcript_window().scroll_top;
+    block_nav(app, keys);
+    assert_eq!(
+        app.transcript_window().row_cursor,
+        before,
+        "{context} {keys}: no message lies that way, so the cursor stays put"
+    );
+    assert_eq!(
+        app.transcript_window().scroll_top,
+        scroll_before,
+        "{context}"
+    );
+}
+
+#[test]
+fn user_message_jumps_land_on_every_message_text_below_the_pill() {
+    let mut app = varied_chat_app(12);
+    block_nav(&mut app, "G");
+    let backward = (0..12).rev().collect::<Vec<_>>();
+    assert_user_message_walk(&mut app, "[u", &backward, "live");
+    let forward = (1..12).collect::<Vec<_>>();
+    assert_user_message_walk(&mut app, "]u", &forward, "live");
+}
+
+#[test]
+fn resumed_user_message_jumps_land_on_every_message_text_below_the_pill() {
+    let (mut app, _dir) = resumed_varied_chat_app(40);
+    block_nav(&mut app, "G");
+    let backward = (0..40).rev().collect::<Vec<_>>();
+    assert_user_message_walk(&mut app, "[u", &backward, "resumed");
+    let forward = (1..40).collect::<Vec<_>>();
+    assert_user_message_walk(&mut app, "]u", &forward, "resumed");
+}
+
+/// From each row of `rows`, every block motion either lands on the text start
+/// of a block of its kind past the cursor, below the pill, or stays put
+/// because no such block lies that way.
+fn assert_block_jumps_from_rows(
+    app: &mut TestApp,
+    rows: impl Iterator<Item = RowIndex>,
+    context: &str,
+) {
+    const MOTIONS: [(&str, &str); 8] = [
+        ("[u", " u"),
+        ("]u", " u"),
+        ("[a", "a"),
+        ("]a", "a"),
+        ("[t", "* grep"),
+        ("]t", "* grep"),
+        ("[[", ""),
+        ("]]", ""),
+    ];
+    // The first and last landing of each kind bound where it may stay put.
+    let mut bounds = Vec::new();
+    for (keys, _) in MOTIONS {
+        let forward = keys.starts_with(']');
+        let flipped = if forward {
+            keys.replace(']', "[")
+        } else {
+            keys.replace('[', "]")
+        };
+        block_nav(app, if forward { "G" } else { "gg" });
+        block_nav(app, &flipped);
+        bounds.push(transcript_cursor_at(app).0);
+    }
+    for row in rows {
+        for ((keys, prefix), bound) in MOTIONS.into_iter().zip(&bounds) {
+            block_nav(app, "gg");
+            if row > 0 {
+                block_nav(app, &format!("{row}j"));
+            }
+            let (from, _, from_line) = transcript_cursor_at(app);
+            block_nav(app, keys);
+            let (to, screen, line) = transcript_cursor_at(app);
+            let forward = keys.starts_with(']');
+            let context = format!("{context}: {keys} from {from:?} {from_line:?}");
+            if to == from {
+                let at_edge = if forward {
+                    from >= *bound
+                } else {
+                    from <= *bound
+                };
+                assert!(at_edge, "{context}: stayed put with a block that way");
+                continue;
+            }
+            assert!(
+                if forward { to > from } else { to < from },
+                "{context}: went {to:?}"
+            );
+            let text = &line[to.byte_col.min(line.len())..];
+            assert!(
+                text.starts_with(prefix.trim_start()) && !text.starts_with(' '),
+                "{context}: landed on {line:?} at {}",
+                to.byte_col
+            );
+            let window = app.transcript_window();
+            let viewport = window.viewport.unwrap();
+            let at_bottom =
+                window.scroll_top + RowIndex::from(viewport.rect.height) >= viewport.total_rows;
+            assert!(
+                matches!(screen, Some(1 | 2)) || at_bottom,
+                "{context}: landed on screen row {screen:?}"
             );
         }
     }
+}
+
+#[test]
+fn block_jumps_from_any_row_land_on_a_block_text_start() {
+    let mut app = varied_chat_app(6);
+    let total = app.transcript_total_rows();
+    assert_block_jumps_from_rows(&mut app, 0..total, "live");
+}
+
+#[test]
+fn resumed_block_jumps_reveal_blocks_on_the_loaded_window_edge() {
+    // Record 31 of 80 is the last one the first loaded window holds, so its
+    // reveal needs the window moved past it before the scroll resolves.
+    let (mut app, _dir) = resumed_varied_chat_app(80);
+    assert_block_jumps_from_rows(&mut app, (220..272).step_by(3), "resumed");
 }

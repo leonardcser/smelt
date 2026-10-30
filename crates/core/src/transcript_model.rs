@@ -3088,7 +3088,12 @@ impl BlockHistory {
         if let Some(stored) = self.stored_ref(id) {
             return Some(stored.first_line().to_string());
         }
-        self.raw_text(id).map(|text| {
+        // Tool calls have no raw text; their indexed text leads with the call.
+        let text = self.raw_text(id).or_else(|| {
+            let block = self.block(id)?;
+            Some(transcript_indexed_text(block, self.tool_state(id)).indexed_text)
+        });
+        text.map(|text| {
             text.lines()
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("")

@@ -2,13 +2,13 @@
 //! against display rows, as `motions::resolve` does against plain text.
 
 use super::document_view::{
-    document_byte_col_at_cell, document_position_cell, document_row_string, BlockMotion,
+    document_byte_col_at_cell, document_position_cell, document_row_string,
 };
 use super::*;
 use crate::motions::{
     bracket_search_forward, find_counted, find_reach, resolve, LineTo, Motion, Reach, Use, WordTo,
 };
-use crate::row::{BlockBoundary, DisplayDocument, DisplayRow};
+use crate::row::{DisplayDocument, DisplayRow};
 use std::ops::Range;
 
 /// What a row motion needs to know besides the motion itself.
@@ -148,7 +148,7 @@ pub(super) fn resolve_rows<D: DisplayDocument + ?Sized>(
             (at(from.row, col), find_reach(kind))
         }
         Motion::Block(block) => (
-            block_landing(doc, env.total_rows, from, block, n)?.cursor,
+            doc.block_landing(from, block.kind, block.forward, n)?,
             Reach::Exclusive,
         ),
         Motion::ByteOffset => return None,
@@ -435,57 +435,6 @@ fn scan_rows<D: DisplayDocument + ?Sized>(
             }
         },
     )
-}
-
-/// Where a block motion lands: the cursor, on the first row with text of the
-/// block, and the row the block starts on, `None` when the motion ran past the
-/// last block.
-pub(super) struct BlockLanding {
-    pub cursor: DocPosition,
-    pub top: Option<RowIndex>,
-}
-
-/// Where `motion` lands from `from`, `count` blocks away. Past the last block
-/// in its direction the cursor goes to the document edge, like vim's section
-/// motions; a document that does not know the kind has nowhere to go.
-pub(super) fn block_landing<D: DisplayDocument + ?Sized>(
-    doc: &mut D,
-    total_rows: RowIndex,
-    from: DocPosition,
-    motion: BlockMotion,
-    count: usize,
-) -> Option<BlockLanding> {
-    let mut row = from.row;
-    let mut top = None;
-    for _ in 0..count {
-        let mut boundary = doc.block_boundary(row, motion.kind, motion.forward);
-        if let BlockBoundary::At { start, home } = boundary {
-            // `row` already rests in the block starting at `start`: step to the one before.
-            if !motion.forward && start < row && home >= row {
-                boundary = doc.block_boundary(start, motion.kind, false);
-            }
-        }
-        match boundary {
-            BlockBoundary::Unsupported => return None,
-            BlockBoundary::At { start, home } => {
-                row = home;
-                top = Some(start);
-            }
-            BlockBoundary::End => {
-                row = if motion.forward {
-                    total_rows.saturating_sub(1)
-                } else {
-                    0
-                };
-                top = None;
-                break;
-            }
-        }
-    }
-    Some(BlockLanding {
-        cursor: DocPosition { row, byte_col: 0 },
-        top,
-    })
 }
 
 #[cfg(test)]

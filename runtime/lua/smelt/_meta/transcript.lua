@@ -84,7 +84,7 @@ transcript.loaded_blocks_expensive = nil
 transcript.loaded_text_expensive = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. Past the last block it goes to the transcript edge. Returns false when the transcript is not focused, so a keymap handler can fall through.
+--- Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. With no block that way the cursor stays put. Returns false when the transcript is not focused, so a keymap handler can fall through.
 ---@type fun(kind: string, opts: smelt.transcript.MoveBlockOpts?): boolean
 transcript.move_block = nil
 
@@ -102,7 +102,7 @@ transcript.node_at_row = nil
 transcript.register_tool = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to zero; `opts.move_cursor` defaults to true.
+--- Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to the `top_inset`; `opts.move_cursor` defaults to true and puts the cursor at the start of the target's text.
 ---@type fun(target: smelt.transcript.Target, opts: smelt.transcript.RevealOpts?): boolean
 transcript.reveal = nil
 
@@ -125,6 +125,11 @@ transcript.set_renderer = nil
 --- Create a transcript-shaped streaming renderer for `buf`. The returned object feeds deltas through the same incremental markdown parser and renderer used by the main transcript.
 ---@type fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream
 transcript.stream = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Reserve `rows` at the top of the transcript viewport for overlays such as the scroll pill. Block motions and `reveal` keep their target below them. Defaults to zero.
+---@type fun(rows: integer): nil
+transcript.top_inset = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return the latest committed transcript view, or nil before the first projection. The returned snapshot remains immutable; use `watch_view` to observe later revisions.

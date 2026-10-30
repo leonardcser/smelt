@@ -51,17 +51,17 @@ impl DisplayDocument for TranscriptDisplayDocument<'_> {
         })
     }
 
-    fn block_boundary(&mut self, from: RowIndex, kind: char, forward: bool) -> BlockBoundary {
-        let Some(roles) = self.lua.transcript_block_roles(kind) else {
-            return BlockBoundary::Unsupported;
-        };
-        let direction = if forward {
-            TranscriptNavigationDirection::Next
-        } else {
-            TranscriptNavigationDirection::Previous
-        };
+    fn block_landing(
+        &mut self,
+        from: DocPosition,
+        kind: char,
+        forward: bool,
+        count: usize,
+    ) -> Option<DocPosition> {
+        let roles = self.lua.transcript_block_roles(kind)?;
+        let direction = TranscriptNavigationDirection::from_forward(forward);
         self.document
-            .block_boundary(self.lua, self.width, from, &roles, direction)
+            .block_landing(self.lua, self.width, from, &roles, direction, count)
     }
 }
 

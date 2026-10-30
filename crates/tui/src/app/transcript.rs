@@ -2,16 +2,15 @@
 
 use crate::app::transcript_scroll_trace::{
     TranscriptInteractionTraceEvent, TranscriptProjectionTargetTrace, TranscriptRecordTraceRange,
-    TranscriptScrollIntent, TranscriptScrollTrace, TranscriptScrollTraceFrame,
-    TranscriptScrollTraceFrameStart, TranscriptScrollTraceRenderInput, TranscriptTraceAnchor,
-    TranscriptVisibleContentAnchor,
+    TranscriptRevealCursor, TranscriptScrollIntent, TranscriptScrollTrace,
+    TranscriptScrollTraceFrame, TranscriptScrollTraceFrameStart, TranscriptScrollTraceRenderInput,
+    TranscriptTraceAnchor, TranscriptVisibleContentAnchor,
 };
 use crate::app::TuiApp;
 use crate::content::transcript_buf::TranscriptRowAnchor;
 use crate::smelt_edit::{
-    add_signed_row, BlockBoundary, Buffer, DisplayDocument, DisplayRow, DisplayRows,
-    DisplaySnapshot, DocPosition, DocRange, DocumentCommand, RowIndex, TextRange, Theme,
-    VerticalScroll,
+    add_signed_row, Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition,
+    DocRange, DocumentCommand, RowIndex, TextRange, Theme, VerticalScroll,
 };
 use smelt_core::content::file_icons::FileIconOptions;
 use smelt_core::content::highlight::InlineOptions;
@@ -758,6 +757,12 @@ enum TranscriptCursorTarget {
     },
     ResolvedPosition {
         row: RowIndex,
+        byte_col: usize,
+    },
+    /// A position in a block, resolved against the final projection rows.
+    BlockPosition {
+        row_anchor: TranscriptRowAnchor,
+        planned_row: RowIndex,
         byte_col: usize,
     },
 }
@@ -3466,15 +3471,12 @@ impl TranscriptDocument {
         }
     }
 
+    /// The block `anchor` lies in when it is actionable and has any of `roles`.
     fn containing_navigation_block(
         &self,
         anchor: TranscriptSemanticAnchor,
         roles: &[&str],
     ) -> Option<TranscriptNavigationBlock> {
-        if anchor.row_offset == 0 {
-            return None;
-        }
-
         if self.records.total_count().is_some() {
             let record = self
                 .records
@@ -3512,7 +3514,7 @@ impl TranscriptDocument {
         direction: TranscriptNavigationDirection,
     ) -> Option<TranscriptNavigationBlock> {
         let _perf = smelt_perf::perf::begin("transcript:navigation:block_from_anchor");
-        if direction == TranscriptNavigationDirection::Previous {
+        if direction == TranscriptNavigationDirection::Previous && anchor.row_offset > 0 {
             if let Some(block) = self.containing_navigation_block(anchor, roles) {
                 return Some(block);
             }
@@ -3612,8 +3614,7 @@ impl TranscriptDocument {
         crate::content::transcript_buf::TranscriptRowAnchor,
     )> {
         let block_id = if self.records.total_count().is_some() {
-            let range =
-                self.record_window_range_around_center(width, record_index, viewport_rows, true)?;
+            let range = self.record_window_range_for_reveal(width, record_index, viewport_rows)?;
             let _ = self.activate_record_window_range(range);
             self.records
                 .sparse
@@ -3655,52 +3656,130 @@ impl TranscriptDocument {
         ))
     }
 
-    /// Where a block motion from display row `from` lands among blocks with any
-    /// of `roles`. A block holds the row from its first row on, so the previous
-    /// block from a row inside a block is that block's own start.
-    pub(crate) fn block_boundary(
+    /// The block `count` block motions among blocks with any of `roles` land on
+    /// from `from`, found by record identity so blocks outside the loaded
+    /// window resolve exactly. Each block is landed on at the start of its
+    /// text. The block holding `from` counts as the previous one when `from`
+    /// is past its text start, and as the next one from the gap rows above
+    /// it; from its chrome rows above the text, the cursor is already there.
+    /// `None` when no such block lies that way.
+    pub(crate) fn block_jump(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        from: RowIndex,
+        from: DocPosition,
         roles: &[&str],
         direction: TranscriptNavigationDirection,
-    ) -> BlockBoundary {
-        let row_offset = self.row_offset(width);
-        let Some(anchor) = self.content_anchor_at_row_with_offset(
-            lua,
-            width,
-            from,
-            row_offset,
-            TranscriptAnchorBias::Top,
-        ) else {
-            return BlockBoundary::Unsupported;
+        count: usize,
+    ) -> Option<TranscriptNavigationBlock> {
+        let (mut anchor, within) = self.block_position_at(lua, width, from)?;
+        let past_text = match within {
+            Some(within) => {
+                let text_start = self
+                    .block_text_start(lua, width, anchor.block_id)
+                    .unwrap_or_default();
+                within > text_start
+            }
+            None => false,
         };
-        let Some(block) = self.navigation_block(anchor.into(), roles, direction) else {
-            return BlockBoundary::End;
-        };
-        let Some((start, _)) = self.block_target_row(lua, width, block.block_id, 0) else {
-            let start = self.rows_before_record(width, block.record_index);
-            return BlockBoundary::At { start, home: start };
-        };
-        let home_offset = self
-            .pin_operation_blocks(&[block.block_id])
-            .then(|| {
-                let offset = self.content.projection.block_first_text_row(
-                    lua,
-                    &mut self.content.transcript.history,
-                    width,
-                    block.block_id,
-                );
-                self.unpin_operation_blocks(&[block.block_id]);
-                offset
-            })
-            .flatten()
-            .unwrap_or(0);
-        BlockBoundary::At {
-            start,
-            home: start.saturating_add(home_offset),
+        // `navigation_block` counts the holding block as previous exactly when
+        // the anchor is inside it.
+        anchor.row_offset = RowIndex::from(past_text);
+        let mut count = count.max(1);
+        let mut target = None;
+        if direction == TranscriptNavigationDirection::Next && within.is_none() {
+            if let Some(block) = self.containing_navigation_block(anchor, roles) {
+                target = Some(block);
+                count -= 1;
+            }
         }
+        for _ in 0..count {
+            let block = self.navigation_block(anchor, roles, direction)?;
+            anchor = TranscriptSemanticAnchor {
+                record_index: block.record_index,
+                block_id: block.block_id,
+                row_offset: 0,
+            };
+            target = Some(block);
+        }
+        target
+    }
+
+    /// The block holding display position `from` and where in the block it
+    /// lies, `None` within the gap rows that precede the block.
+    fn block_position_at(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        from: DocPosition,
+    ) -> Option<(TranscriptSemanticAnchor, Option<DocPosition>)> {
+        let row_offset = self.row_offset(width);
+        let row_anchor = self.row_anchor_at_row_with_offset(lua, width, from.row, row_offset)?;
+        if let Some(anchor) =
+            self.content_anchor_for_row_anchor(row_anchor, from.row, TranscriptAnchorBias::Top)
+        {
+            let within = DocPosition {
+                row: anchor.block_row_offset,
+                byte_col: from.byte_col,
+            };
+            return Some((TranscriptSemanticAnchor::from(anchor), Some(within)));
+        }
+        let block_id = row_anchor.id.as_block_id()?;
+        let record_index = self.record_index_for_block_id(block_id)?;
+        let anchor = TranscriptSemanticAnchor {
+            record_index,
+            block_id,
+            row_offset: 0,
+        };
+        Some((anchor, None))
+    }
+
+    /// Where the text of the block [`Self::block_jump`] lands on starts, estimated
+    /// for a block outside the loaded window.
+    pub(crate) fn block_landing(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        from: DocPosition,
+        roles: &[&str],
+        direction: TranscriptNavigationDirection,
+        count: usize,
+    ) -> Option<DocPosition> {
+        let block = self.block_jump(lua, width, from, roles, direction, count)?;
+        let Some((start, _)) = self.block_target_row(lua, width, block.block_id, 0) else {
+            return Some(DocPosition {
+                row: self.rows_before_record(width, block.record_index),
+                byte_col: 0,
+            });
+        };
+        let text = self
+            .block_text_start(lua, width, block.block_id)
+            .unwrap_or_default();
+        Some(DocPosition {
+            row: start.saturating_add(text.row),
+            byte_col: text.byte_col,
+        })
+    }
+
+    /// Where the text of `block_id` starts: a row inside the block, past any
+    /// padding or header chrome that opens it, and a byte column.
+    fn block_text_start(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        block_id: BlockId,
+    ) -> Option<DocPosition> {
+        if !self.pin_operation_blocks(&[block_id]) {
+            return None;
+        }
+        let start = self.content.projection.block_text_start(
+            lua,
+            &mut self.content.transcript.history,
+            width,
+            block_id,
+        );
+        self.unpin_operation_blocks(&[block_id]);
+        start
     }
 
     pub(crate) fn record_block_reveal_position(
@@ -3867,6 +3946,32 @@ impl TranscriptDocument {
                 if active.start.get() <= center && center < active.end.get() {
                     return Some(active.clone());
                 }
+            }
+        }
+        Some(self.record_window_range_for_center(width, center, viewport_rows, total))
+    }
+
+    /// The record window to reveal `record_index` in: the active one while it
+    /// keeps a quarter window of records around the record, so the viewport
+    /// fills on both sides of it, else one centered on the record.
+    fn record_window_range_for_reveal(
+        &self,
+        width: u16,
+        record_index: usize,
+        viewport_rows: u16,
+    ) -> Option<Range<smelt_store::TranscriptRecordOffset>> {
+        let total = self.records.total_count()?;
+        if total == 0 {
+            return None;
+        }
+        let center = record_index.min(total.saturating_sub(1));
+        if let Some(active) = self.records.active_range() {
+            let margin = self.record_window_count(width, viewport_rows, total) / 4;
+            let (start, end) = (active.start.get(), active.end.get());
+            let room_above = start == 0 || center >= start.saturating_add(margin);
+            let room_below = end >= total || center.saturating_add(margin) < end;
+            if start <= center && center < end && room_above && room_below {
+                return Some(active.clone());
             }
         }
         Some(self.record_window_range_for_center(width, center, viewport_rows, total))
@@ -5169,28 +5274,43 @@ impl TranscriptDocument {
             TranscriptScrollIntent::RevealBlock {
                 record_index,
                 block_id,
-                row_offset,
                 screen_padding_top,
-                cursor_byte_col,
+                cursor,
             } => {
-                let Some(reveal) = self.record_block_reveal_position(
-                    lua,
-                    width,
-                    *record_index,
-                    *row_offset,
-                    viewport_rows,
-                ) else {
+                let Some(reveal) =
+                    self.record_block_reveal_position(lua, width, *record_index, 0, viewport_rows)
+                else {
                     return (
                         crate::content::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 };
-                if reveal.block_id != *block_id {
+                // The window around the block is still loading: resolve once
+                // it lands, so the scroll is not clamped to the old window.
+                if reveal.block_id != *block_id || self.pending_hydration.record_is_pending() {
                     return (
                         crate::content::transcript_buf::ScrollTarget::visible_tail(),
                         None,
                     );
                 }
+                let cursor = cursor.map(|cursor| {
+                    let at = match cursor {
+                        TranscriptRevealCursor::BlockStart { byte_col } => {
+                            DocPosition { row: 0, byte_col }
+                        }
+                        TranscriptRevealCursor::TextStart => self
+                            .block_text_start(lua, width, *block_id)
+                            .unwrap_or_default(),
+                    };
+                    TranscriptCursorTarget::BlockPosition {
+                        row_anchor: TranscriptRowAnchor {
+                            row_offset: reveal.row_anchor.row_offset.saturating_add(at.row),
+                            ..reveal.row_anchor
+                        },
+                        planned_row: reveal.target_row.saturating_add(at.row),
+                        byte_col: at.byte_col,
+                    }
+                });
                 let screen_padding_top = (*screen_padding_top).min(isize::MAX as RowIndex) as isize;
                 (
                     crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
@@ -5198,10 +5318,7 @@ impl TranscriptDocument {
                         Some(reveal.row_anchor),
                         -screen_padding_top,
                     ),
-                    cursor_byte_col.map(|byte_col| TranscriptCursorTarget::ResolvedPosition {
-                        row: reveal.target_row,
-                        byte_col,
-                    }),
+                    cursor,
                 )
             }
             TranscriptScrollIntent::RevealFirstRecord { .. } => (
@@ -5260,6 +5377,16 @@ impl TranscriptDocument {
                 ..
             } => return None,
             TranscriptCursorTarget::ResolvedPosition { row, byte_col } => (row, byte_col, byte_col),
+            TranscriptCursorTarget::BlockPosition {
+                row_anchor,
+                planned_row,
+                byte_col,
+            } => (
+                self.row_for_anchor_with_offset(lua, width, row_anchor, row_offset)
+                    .unwrap_or(planned_row),
+                byte_col,
+                byte_col,
+            ),
         };
         if start_byte_col > end_byte_col {
             return None;
@@ -5396,19 +5523,18 @@ impl TranscriptDocument {
         }
         if let TranscriptScrollIntent::RevealFirstRecord {
             screen_padding_top,
-            cursor_byte_col,
+            cursor,
         } = &intent
         {
             let screen_padding_top = *screen_padding_top;
-            let cursor_byte_col = *cursor_byte_col;
+            let cursor = *cursor;
             if let Some(reveal) = self.record_block_reveal_position(lua, width, 0, 0, viewport_rows)
             {
                 intent = TranscriptScrollIntent::RevealBlock {
                     record_index: 0,
                     block_id: reveal.block_id,
-                    row_offset: 0,
                     screen_padding_top,
-                    cursor_byte_col,
+                    cursor,
                 };
                 if let Some(pending) = self.viewport.state.pending_projection.as_mut() {
                     pending.intent = intent.clone();
@@ -9788,9 +9914,8 @@ mod document_tests {
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
             record_index,
             block_id,
-            row_offset: 0,
             screen_padding_top: top_padding,
-            cursor_byte_col: None,
+            cursor: None,
         });
         assert_eq!(document.hydration.pending_projection_pin, Some(block_id));
         let plan = plan_viewport_after_hydration(
@@ -9832,9 +9957,8 @@ mod document_tests {
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
             record_index,
             block_id,
-            row_offset: 0,
             screen_padding_top: top_padding,
-            cursor_byte_col: None,
+            cursor: None,
         });
         assert_eq!(document.hydration.pending_projection_pin, Some(block_id));
         let plan = plan_viewport_after_hydration(
@@ -9899,9 +10023,8 @@ mod document_tests {
         document.set_pending_scroll_intent(TranscriptScrollIntent::RevealBlock {
             record_index,
             block_id,
-            row_offset: 0,
             screen_padding_top: 0,
-            cursor_byte_col: None,
+            cursor: None,
         });
         let plan = plan_viewport_after_hydration(
             &mut document,
@@ -10375,6 +10498,16 @@ pub(crate) enum TranscriptNavigationDirection {
     Next,
 }
 
+impl TranscriptNavigationDirection {
+    pub(crate) fn from_forward(forward: bool) -> Self {
+        if forward {
+            Self::Next
+        } else {
+            Self::Previous
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptNavigationBlock {
     pub(crate) record_index: usize,
@@ -10608,6 +10741,7 @@ impl TuiApp {
         top_padding: crate::smelt_edit::RowIndex,
         cursor: bool,
     ) -> bool {
+        let cursor = cursor.then_some(TranscriptRevealCursor::TextStart);
         self.reveal_transcript_block(record_index, None, top_padding, cursor)
     }
 
@@ -10625,7 +10759,38 @@ impl TuiApp {
         {
             return false;
         }
-        self.reveal_transcript_block(record_index, Some(block_id), top_padding, move_cursor)
+        let cursor = move_cursor.then_some(TranscriptRevealCursor::TextStart);
+        self.reveal_transcript_block(record_index, Some(block_id), top_padding, cursor)
+    }
+
+    /// Jump the transcript cursor `count` blocks of the kind bound to
+    /// `motion.kind`, revealing the target block below the transcript's top
+    /// inset. Returns false when the jump cannot be revealed, so the motion
+    /// resolves through the row document instead.
+    pub(crate) fn reveal_transcript_block_jump(
+        &mut self,
+        motion: crate::smelt_edit::BlockMotion,
+        count: usize,
+        from: DocPosition,
+    ) -> bool {
+        let Some(roles) = self.lua.transcript_block_roles(motion.kind) else {
+            return false;
+        };
+        let direction = TranscriptNavigationDirection::from_forward(motion.forward);
+        let width = self.transcript_width() as u16;
+        let Some(block) = self
+            .conversation
+            .transcript_block_jump(&self.lua, width, from, &roles, direction, count)
+        else {
+            return false;
+        };
+        let top_inset = self.lua.transcript_top_inset();
+        self.reveal_transcript_block(
+            block.record_index,
+            Some(block.block_id),
+            top_inset,
+            Some(TranscriptRevealCursor::TextStart),
+        )
     }
 
     fn reveal_transcript_block(
@@ -10633,7 +10798,7 @@ impl TuiApp {
         record_index: usize,
         expected_block_id: Option<BlockId>,
         top_padding: crate::smelt_edit::RowIndex,
-        cursor: bool,
+        cursor: Option<TranscriptRevealCursor>,
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
@@ -10671,11 +10836,10 @@ impl TuiApp {
         let intent = TranscriptScrollIntent::RevealBlock {
             record_index,
             block_id,
-            row_offset: 0,
             screen_padding_top: top_padding,
-            cursor_byte_col: cursor.then_some(0),
+            cursor,
         };
-        if !cursor {
+        if cursor.is_none() {
             let cursor_document_position = self.transcript_win().document_view_state().cursor;
             self.record_transcript_scroll_intent_from_document_command(
                 "reveal_block",

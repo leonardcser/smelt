@@ -3,6 +3,8 @@
 --   * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail.
 --   * Top pill    - first line of the nearest actionable user message;
 --     click reveals it below the pill, then the next target walks back.
+--     The pill's row is the transcript's top inset, so block jumps and
+--     reveals land below it.
 -- Disable via `smelt.builtins.disable({ plugins = { "scroll_pills" } })`.
 
 local ns_bottom = smelt.ns("smelt.scroll_pills.bottom")
@@ -11,6 +13,8 @@ local ns_top = smelt.ns("smelt.scroll_pills.top")
 local PILL_BG = "SmeltScrollPillBg"
 local PILL_FG = "Comment"
 local TOP_PILL_HEIGHT = 1
+
+smelt.transcript.top_inset(TOP_PILL_HEIGHT)
 
 local state = {
   transcript_win = nil,
@@ -116,11 +120,7 @@ local function open_top(width)
   })
   win:on("press", function()
     if state.top_target then
-      smelt.transcript.reveal(state.top_target, {
-        align = "top",
-        top_padding = TOP_PILL_HEIGHT,
-        move_cursor = false,
-      })
+      smelt.transcript.reveal(state.top_target, { align = "top", move_cursor = false })
     end
   end)
   state.top_buf = buf

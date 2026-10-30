@@ -1344,9 +1344,10 @@ fn subtract_byte_range(ranges: &mut Vec<std::ops::Range<usize>>, remove: std::op
     *ranges = out;
 }
 
-fn selectable_row_string(buf: &Buffer, row: usize) -> String {
+/// Row `row` of `buf` and the byte ranges of it that are selectable text.
+fn selectable_byte_ranges(buf: &Buffer, row: usize) -> (&str, Vec<std::ops::Range<usize>>) {
     let Some(line) = buf.get_line(row) else {
-        return String::new();
+        return ("", Vec::new());
     };
     let mut ranges: Vec<std::ops::Range<usize>> = std::iter::once(0..line.len()).collect();
     for span in buf
@@ -1358,6 +1359,11 @@ fn selectable_row_string(buf: &Buffer, row: usize) -> String {
         let end = smelt_buffer::text::cell_to_byte(line, span.col_end as usize);
         subtract_byte_range(&mut ranges, start..end);
     }
+    (line, ranges)
+}
+
+fn selectable_row_string(buf: &Buffer, row: usize) -> String {
+    let (line, ranges) = selectable_byte_ranges(buf, row);
     ranges
         .into_iter()
         .map(|range| smelt_buffer::text::slice(line, range))
@@ -2851,19 +2857,30 @@ impl TranscriptProjection {
         })
     }
 
-    /// Row inside `block_id` at `width` that holds its first selectable text,
-    /// past any padding or header chrome that opens the block.
-    pub(crate) fn block_first_text_row(
+    /// Where the selectable text of `block_id` at `width` starts: a row inside
+    /// the block, past any padding or header chrome that opens it, and a byte
+    /// column.
+    pub(crate) fn block_text_start(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
         block_id: BlockId,
-    ) -> Option<RowIndex> {
+    ) -> Option<crate::smelt_edit::DocPosition> {
         self.with_exact_block_text(lua, history, width, block_id, |buf, rows| {
             (0..rows)
-                .find(|&row| !selectable_row_string(buf, row).trim().is_empty())
-                .unwrap_or(0) as RowIndex
+                .find_map(|row| {
+                    let (line, ranges) = selectable_byte_ranges(buf, row);
+                    ranges.into_iter().find_map(|range| {
+                        let text = smelt_buffer::text::slice(line, range.clone());
+                        let lead = text.len() - text.trim_start().len();
+                        (lead < text.len()).then_some(crate::smelt_edit::DocPosition {
+                            row: row as RowIndex,
+                            byte_col: range.start + lead,
+                        })
+                    })
+                })
+                .unwrap_or_default()
         })
     }
 

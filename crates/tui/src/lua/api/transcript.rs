@@ -68,9 +68,9 @@ pub enum LuaTranscriptRevealAlign {
 pub struct LuaTranscriptRevealOpts {
     /// Target alignment within the transcript viewport. Currently only `top`.
     pub align: Option<LuaTranscriptRevealAlign>,
-    /// Rows to reserve above the target. Defaults to zero.
+    /// Rows to reserve above the target. Defaults to the transcript's `top_inset`.
     pub top_padding: Option<crate::smelt_edit::RowIndex>,
-    /// Move the transcript cursor to the target. Defaults to true.
+    /// Move the transcript cursor to the start of the target's text. Defaults to true.
     pub move_cursor: Option<bool>,
 }
 
@@ -152,11 +152,7 @@ impl LuaTranscriptView {
         let anchor = self.view.state.anchor?;
         let session_id = self.view.state.session_id.clone();
         let role = role.unwrap_or(LuaTranscriptRole::User).as_str();
-        let direction = if previous {
-            TranscriptNavigationDirection::Previous
-        } else {
-            TranscriptNavigationDirection::Next
-        };
+        let direction = TranscriptNavigationDirection::from_forward(!previous);
         crate::lua::try_with_conversation_host(|host| {
             host.transcript_navigation_block(
                 &session_id,
@@ -705,12 +701,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.live_only_fn(
         "reveal",
-        "Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to zero; `opts.move_cursor` defaults to true.",
+        "Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to the `top_inset`; `opts.move_cursor` defaults to true and puts the cursor at the start of the target's text.",
         &["target", "opts"],
-        |_, (target, opts): (LuaTranscriptTarget, Option<LuaTranscriptRevealOpts>)| -> LuaResult<bool> {
+        |lua, (target, opts): (LuaTranscriptTarget, Option<LuaTranscriptRevealOpts>)| -> LuaResult<bool> {
             let opts = opts.unwrap_or_default();
             let align = opts.align.unwrap_or(LuaTranscriptRevealAlign::Top);
-            let top_padding = opts.top_padding.unwrap_or_default();
+            let top_padding = match opts.top_padding {
+                Some(rows) => rows,
+                None => super::win::current_shared(lua)?
+                    .transcript_top_inset
+                    .load(std::sync::atomic::Ordering::Acquire),
+            };
             let move_cursor = opts.move_cursor.unwrap_or(true);
             Ok(crate::lua::try_with_conversation_host(|host| match align {
                 LuaTranscriptRevealAlign::Top => host.reveal_transcript_target_at_top(
@@ -722,6 +723,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 ),
             })
             .unwrap_or(false))
+        },
+    )?;
+    m.fn_(
+        "top_inset",
+        "Reserve `rows` at the top of the transcript viewport for overlays such as the scroll pill. Block motions and `reveal` keep their target below them. Defaults to zero.",
+        &["rows"],
+        |lua, rows: crate::smelt_edit::RowIndex| -> LuaResult<()> {
+            super::win::current_shared(lua)?
+                .transcript_top_inset
+                .store(rows, std::sync::atomic::Ordering::Release);
+            Ok(())
         },
     )?;
     m.fn_(
@@ -750,7 +762,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.live_only_fn(
         "move_block",
-        "Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. Past the last block it goes to the transcript edge. Returns false when the transcript is not focused, so a keymap handler can fall through.",
+        "Move the focused transcript cursor to the previous block, or the next with `opts.forward`, of the kind bound to `kind` by `block_kind`; vim's `[kind` and `]kind`. With no block that way the cursor stays put. Returns false when the transcript is not focused, so a keymap handler can fall through.",
         &["kind", "opts"],
         |_, (kind, opts): (String, Option<LuaTranscriptMoveBlockOpts>)| -> LuaResult<bool> {
             let mut chars = kind.chars();
