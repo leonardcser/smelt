@@ -123,14 +123,13 @@ such as the accent, see [Themes and keymaps](appearance.md).
 
 ## Run with extra caution
 
-Starts every session read-only in plan mode, scrubs secrets before they reach
-the model, lets read-only git commands through, and blocks a few destructive
-ones outright. `deny` always wins over `allow`.
+Starts every session read-only in plan mode, lets read-only git commands
+through, and blocks a few destructive ones outright. `deny` always wins over
+`allow`.
 
 ```lua
 smelt.defaults.set({ mode = "plan" })
 smelt.remember.set({ mode = false }) -- always start in plan, not the last mode
-smelt.settings.redact_secrets = true
 
 smelt.permissions.extend({
   default = {

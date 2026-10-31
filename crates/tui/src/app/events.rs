@@ -247,7 +247,6 @@ impl TuiApp {
             } => {
                 let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
                 self.clear_prompt_prediction();
-                self.redact_prompt_submission(&mut submission);
                 let mut edit = Some(edit);
                 let accepted = match self.prompt_work_state() {
                     PromptWorkState::TurnActive
@@ -308,7 +307,6 @@ impl TuiApp {
                                                 crate::input::prompt_ctx_ref(&self.ui),
                                                 edit.as_ref().expect("submit edit"),
                                                 replay,
-                                                self.core.config.settings.redact_secrets,
                                             );
                                             self.commit_prompt_submission(
                                                 edit.take().expect("submit edit"),
@@ -348,32 +346,6 @@ impl TuiApp {
                     self.prompt.restore_stash(&mut pctx);
                 }
                 false
-            }
-        }
-    }
-
-    fn redact_prompt_submission(&self, submission: &mut PromptSubmission) {
-        self.redact_user_submission(&mut submission.content, &mut submission.display);
-        if self.core.config.settings.redact_secrets {
-            if let Some(replay) = &mut submission.replay {
-                replay.redact();
-                let store = self.prompt.attachment_store();
-                let store = store.lock().unwrap();
-                let mut ids = replay.ids.iter();
-                let mut display = String::new();
-                for (index, segment) in replay
-                    .source
-                    .split(crate::input::ATTACHMENT_MARKER)
-                    .enumerate()
-                {
-                    if index > 0 {
-                        if let Some(id) = ids.next() {
-                            display.push_str(&engine::redact::redact(&store.display_label(*id)));
-                        }
-                    }
-                    display.push_str(segment);
-                }
-                submission.display = display;
             }
         }
     }
@@ -851,7 +823,7 @@ impl TuiApp {
 
     fn handle_running_submit(
         &mut self,
-        mut submission: PromptSubmission,
+        submission: PromptSubmission,
         edit: crate::input::SubmitEdit,
         target: QueueStage,
     ) -> EventOutcome {
@@ -860,7 +832,6 @@ impl TuiApp {
         }
         let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
         self.clear_prompt_prediction();
-        self.redact_prompt_submission(&mut submission);
         let text = submission.content.text_content().into_owned();
         if self.prompt_work_state() == PromptWorkState::Paused
             && submission.content.image_count() == 0
@@ -2481,37 +2452,6 @@ mod tests {
     }
 
     #[test]
-    fn redacted_image_queue_preserves_marker_on_unqueue() {
-        let mut app = TestApp::builder().build();
-        app.app.core.config.settings.redact_secrets = true;
-        app.start_turn(1);
-        app.type_text("password=abcdefghijklmnop");
-        insert_prompt_image(&mut app, "pic.png");
-        app.press(KeyCode::Enter);
-        app.press(KeyCode::Esc);
-        app.press(KeyCode::Esc);
-
-        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
-        assert_eq!(pctx.buf.attachment_ids.len(), 1);
-        assert_eq!(
-            pctx.buf
-                .source()
-                .matches(crate::input::ATTACHMENT_MARKER)
-                .count(),
-            1
-        );
-        assert!(!pctx.buf.source().contains("abcdefghijklmnop"));
-        assert_eq!(
-            app.app
-                .prompt
-                .render_input()
-                .build_content(pctx.buf)
-                .image_count(),
-            1
-        );
-    }
-
-    #[test]
     fn image_request_without_replay_is_rejected() {
         let image = protocol::Content::with_images(
             "see ".into(),
@@ -2521,39 +2461,6 @@ mod tests {
             crate::app::queue::QueuedInput::request("see [pic.png]", image, 0)
         })
         .is_err());
-    }
-
-    #[test]
-    fn redacted_secret_spanning_image_marker_is_not_restored_on_unqueue() {
-        let mut app = TestApp::builder().build();
-        app.app.core.config.settings.redact_secrets = true;
-        app.start_turn(1);
-        app.type_text("password=12345678");
-        insert_prompt_image(&mut app, "pic.png");
-        app.type_text("12345678");
-        app.press(KeyCode::Enter);
-        assert!(app.state().queued_inputs[0].contains("[pic.png]"));
-        app.press(KeyCode::Esc);
-        app.press(KeyCode::Esc);
-
-        let pctx = crate::input::prompt_ctx_ref(&app.app.ui);
-        assert!(!pctx.buf.source().contains("12345678"));
-        assert_eq!(
-            pctx.buf
-                .source()
-                .matches(crate::input::ATTACHMENT_MARKER)
-                .count(),
-            1
-        );
-        assert_eq!(pctx.buf.attachment_ids.len(), 1);
-        assert_eq!(
-            app.app
-                .prompt
-                .render_input()
-                .build_content(pctx.buf)
-                .image_count(),
-            1
-        );
     }
 
     #[test]

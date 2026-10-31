@@ -657,15 +657,6 @@ fn spawn_engine_ask(
     // field - sending MCP defs to them would waste tokens and break
     // their own cache prefix.
     let mut messages = supplied_messages;
-    if request_config.redact_secrets {
-        for message in &mut messages {
-            if matches!(message.role, protocol::Role::User | protocol::Role::Tool) {
-                if let Some(content) = &mut message.content {
-                    crate::redact::redact_content(content);
-                }
-            }
-        }
-    }
     let tools = supplied_tools;
     let mcp_defs = if tools.is_empty() {
         Vec::new()
@@ -1286,44 +1277,12 @@ impl<'a> Turn<'a> {
     /// Append current-turn content that may be a synthetic internal note.
     fn push_turn_content(
         &mut self,
-        mut content: Content,
+        content: Content,
         display: Option<String>,
         command: bool,
         sent_at_ms: Option<u64>,
         image_placement: Option<protocol::history::ImagePlacement>,
     ) {
-        let mut image_placement = image_placement;
-        let display = if self.request_config.redact_secrets {
-            crate::redact::redact_content(&mut content);
-            let labels = content.image_labels();
-            let restored_display = image_placement.as_mut().and_then(|placement| {
-                placement.source = crate::redact::redact_with_markers(&placement.source);
-                let mut indices = placement.image_indices.iter();
-                if placement
-                    .source
-                    .matches(smelt_buffer::ATTACHMENT_MARKER)
-                    .count()
-                    != indices.len()
-                {
-                    return None;
-                }
-                let mut result = String::new();
-                for (index, segment) in placement
-                    .source
-                    .split(smelt_buffer::ATTACHMENT_MARKER)
-                    .enumerate()
-                {
-                    if index > 0 {
-                        result.push_str(&crate::redact::redact(labels.get(*indices.next()?)?));
-                    }
-                    result.push_str(segment);
-                }
-                Some(result)
-            });
-            restored_display.or_else(|| display.map(|text| crate::redact::redact(&text)))
-        } else {
-            display
-        };
         let sent_at_ms =
             sent_at_ms.unwrap_or_else(|| crate::clock::unix_time_ms(self.config.clock.as_ref()));
         let mut item =
@@ -1347,15 +1306,7 @@ impl<'a> Turn<'a> {
     /// every entry already carries its `ToolOutcome` - the only way to
     /// satisfy `AssistantStep`'s shape - so the on-disk and on-wire
     /// representations can never carry an orphan tool_use.
-    fn push_assistant_step(&mut self, mut step: AssistantStep) {
-        if self.request_config.redact_secrets {
-            for inv in &mut step.invocations {
-                let redacted = crate::redact::redact(&inv.result.content);
-                if redacted != inv.result.content {
-                    inv.result.content = redacted;
-                }
-            }
-        }
+    fn push_assistant_step(&mut self, step: AssistantStep) {
         self.mark_append_history_changed();
         self.history.push(HistoryItem::Assistant(step));
     }
@@ -2896,10 +2847,7 @@ impl<'a> Turn<'a> {
             } = result;
 
             if log::Level::Debug.enabled() {
-                let mut preview = smelt_buffer::text::slice(&content, 0..500).to_owned();
-                if self.request_config.redact_secrets {
-                    preview = crate::redact::redact(&preview);
-                }
+                let preview = smelt_buffer::text::slice(&content, 0..500).to_owned();
                 log::entry(
                     log::Level::Debug,
                     "tool_result",
@@ -4250,31 +4198,6 @@ mod tests {
                 sent_at_ms: Some(1_742_567_823_000),
                 ..
             } if content.text_content() == "expanded command body" && display == "/reflect"
-        ));
-
-        turn.request_config.redact_secrets = true;
-        let marker = smelt_buffer::ATTACHMENT_MARKER;
-        turn.push_current_turn_input(
-            protocol::StartTurnInput::user_with_display(
-                Content::with_images(
-                    "password=1234567812345678".into(),
-                    vec![("pic.png".into(), "data:image/png;base64,AAA".into())],
-                ),
-                "password=12345678[pic.png]12345678",
-            )
-            .with_image_placement(Some(protocol::history::ImagePlacement {
-                source: format!("password=12345678{marker}12345678"),
-                image_indices: vec![0],
-            })),
-        );
-        assert!(matches!(
-            &turn.history[5],
-            HistoryItem::User {
-                display: Some(display),
-                image_placement: Some(placement),
-                ..
-            } if display == "password=[REDACTED:password][pic.png]"
-                && placement.source == format!("password=[REDACTED:password]{marker}")
         ));
     }
 

@@ -357,10 +357,6 @@ impl Runtime<'_> {
     /// the payload's conversation and launch settings, otherwise on a new one
     /// that resumes or imports it. Returns false when the session should end.
     async fn open(&mut self) -> Result<bool, String> {
-        if self.payload.request_config.redact_secrets {
-            emit_error(self.tx, "The Claude Code backend cannot redact native tool output before Claude Code sends it. Disable redact_secrets explicitly or use smelt's native agent backend.".into());
-            return Ok(self.native.process.is_some());
-        }
         if self.payload.mode != self.mode {
             self.policy_revision = self.policy_revision.saturating_add(1);
             self.write(control("smelt-mode", json!({"subtype":"set_permission_mode", "mode":transport::permission_mode(&self.payload.mode)}))).await?;
@@ -2350,9 +2346,6 @@ async fn auxiliary(
     tx: &EngineEventSender,
     cancel: &CancellationToken,
 ) -> Result<AuxiliaryAnswer, String> {
-    if task.request_config.redact_secrets {
-        return Err("The Claude Code backend cannot apply smelt's pre-request secret redaction. Disable redact_secrets explicitly or use smelt's native agent backend.".into());
-    }
     let mut process = Process::spawn(transport::LaunchOptions {
         cwd,
         target: &task.target,

@@ -1396,12 +1396,6 @@ fn every_scalar_setting_write_reconciles_desired_state_and_live_effects() {
         app.core_probe()
             .config
             .request_runtime_config()
-            .redact_secrets
-    );
-    assert!(
-        app.core_probe()
-            .config
-            .request_runtime_config()
             .cache_ttl_long
     );
 }

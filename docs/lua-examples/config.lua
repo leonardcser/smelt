@@ -94,9 +94,6 @@ smelt.settings.terminal_title = true
 -- Downgrade `Allow` to `Ask` for paths outside the workspace.
 smelt.settings.restrict_to_workspace = true
 
--- Scrub detected secrets from user input and tool results before they reach the LLM.
-smelt.settings.redact_secrets = false
-
 -- Watch Lua config inputs (init.lua, plugins/, commands/, completers/, tools/, dialogs/, runtime overrides) and dispatch `/reload` when any of them changes. Prompt inputs such as AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`.
 smelt.settings.auto_reload = true
 

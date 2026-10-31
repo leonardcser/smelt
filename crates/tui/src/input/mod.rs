@@ -135,10 +135,6 @@ impl PromptReplay {
             image_indices: self.image_indices.clone(),
         }
     }
-
-    pub(crate) fn redact(&mut self) {
-        self.source = engine::redact::redact_with_markers(&self.source);
-    }
 }
 
 fn rewind_source_and_attachments(

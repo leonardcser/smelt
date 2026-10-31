@@ -1508,18 +1508,6 @@ mod tests {
 }
 
 impl TuiApp {
-    /// Redact secrets from user-submitted text before it lands on screen or
-    /// in history. The `display` string is the rendered form of the submitted
-    /// message; `content` is what gets sent to the engine. Both are scrubbed
-    /// so the UI and the LLM see the same redacted form.
-    pub(crate) fn redact_user_submission(&self, content: &mut Content, display: &mut String) {
-        if self.core.config.settings.redact_secrets {
-            let _perf = smelt_perf::perf::begin("ingress:redact");
-            engine::redact::redact_content(content);
-            *display = engine::redact::redact(display);
-        }
-    }
-
     pub(crate) fn set_history_from(&mut self, first_index: usize, history: Vec<HistoryItem>) {
         if self.block_read_only_mutation("update read-only session history") {
             return;

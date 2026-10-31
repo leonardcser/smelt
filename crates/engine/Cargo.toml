@@ -23,7 +23,6 @@ libc = { workspace = true }
 thiserror = "2"
 futures-util = { workspace = true }
 rand = "0.10"
-regex = "1"
 smelt-perf = { version = "0.2.0", path = "../perf" }
 keyring-core = "1.0.0"
 smelt-buffer = { workspace = true }

@@ -281,7 +281,6 @@ impl RuntimeState {
 
     pub fn request_runtime_config(&self) -> RequestRuntimeConfig {
         RequestRuntimeConfig {
-            redact_secrets: self.settings.redact_secrets,
             cache_ttl_long: self.settings.cache_ttl_long,
             request_audit: self.request_audit,
         }

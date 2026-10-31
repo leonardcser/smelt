@@ -1136,7 +1136,6 @@ mod tests {
         let active = config.active_model_mut().unwrap();
         active.api_key_env.clear();
         active.config.max_tokens = Some(3210);
-        config.settings.redact_secrets = true;
         config.settings.cache_ttl_long = true;
         let core = Core::new(
             config,
@@ -1166,7 +1165,6 @@ mod tests {
             assert_eq!(payload.model_target.provider_type, "openai");
             assert_eq!(payload.model_target.config.max_tokens, Some(3210));
             assert_eq!(payload.model_target.config.tool_calling, Some(false));
-            assert!(payload.request_config.redact_secrets);
             assert!(payload.request_config.cache_ttl_long);
             event_tx
                 .send(EngineEvent::TurnComplete {

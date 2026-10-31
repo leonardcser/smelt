@@ -20,7 +20,6 @@ pub mod opener;
 pub mod paths;
 
 pub mod provider;
-pub mod redact;
 mod request_log;
 pub(crate) mod result_dedup;
 pub(crate) mod skills;

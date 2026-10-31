@@ -129,7 +129,6 @@ impl RequestAuditMode {
 /// Runtime settings snapshotted for one turn or auxiliary request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RequestRuntimeConfig {
-    pub redact_secrets: bool,
     pub cache_ttl_long: bool,
     pub request_audit: RequestAuditMode,
 }
@@ -232,7 +231,6 @@ mod tests {
             },
         };
         let runtime = RequestRuntimeConfig {
-            redact_secrets: true,
             cache_ttl_long: true,
             request_audit: RequestAuditMode::Full,
         };

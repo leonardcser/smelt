@@ -1241,7 +1241,6 @@ async fn async_main() {
     }
 
     std::thread::spawn(tui::warm_up_syntect);
-    std::thread::spawn(engine::redact::warm_up);
 
     if args.headless && runtime.active_model().is_none() {
         eprintln!(

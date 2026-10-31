@@ -1,6 +1,6 @@
 ---
 title: "Permissions"
-description: "How smelt decides what the coding agent may do without asking: modes, rules, approval scopes, workspace restriction, project trust and secret redaction."
+description: "How smelt decides what the coding agent may do without asking: modes, rules, approval scopes, workspace restriction, and project trust."
 ---
 
 # Permissions
@@ -183,19 +183,6 @@ file invalidates the hash and requires re-running `/trust`.
 Trust state is stored in `trust.json` in the
 [state directory](storage.md). See
 [`smelt.trust`](api/trust.md) for the Lua API.
-
-## Secret Redaction
-
-When `redact_secrets` is enabled, smelt scrubs detected secrets from
-user-submitted text and tool output, including command lines and file contents
-shown in the confirm prompt, before they reach the LLM or the transcript. This
-matters because LLM providers may log or train on prompts; redaction lowers the
-risk of accidentally leaking API keys or tokens into a third-party system.
-Enable it with:
-
-```lua
-smelt.settings.redact_secrets = true
-```
 
 ## Headless Mode
 
