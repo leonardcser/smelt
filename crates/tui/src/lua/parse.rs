@@ -170,7 +170,8 @@ pub(crate) fn style_patch(t: &mlua::Table) -> Result<StylePatch, String> {
 /// Project a `Style` to a Lua style table. Unset fields are omitted so the
 /// table round-trips through [`style`] and `smelt.theme.apply`.
 pub(crate) fn style_to_lua(lua: &Lua, style: Style) -> LuaResult<mlua::Table> {
-    let t = lua.create_table()?;
+    // Room for the colors; attribute flags are rare.
+    let t = lua.create_table_with_capacity(0, 2)?;
     if let Some(fg) = style.fg {
         t.set("fg", color_to_lua(lua, fg)?)?;
     }
@@ -199,10 +200,10 @@ pub(crate) fn style_to_lua(lua: &Lua, style: Style) -> LuaResult<mlua::Table> {
 }
 
 fn color_to_lua(lua: &Lua, color: Color) -> LuaResult<mlua::Table> {
-    let t = lua.create_table()?;
+    let t = lua.create_table_with_capacity(0, 1)?;
     match color {
         Color::AnsiValue(v) => t.set("ansi", v)?,
-        Color::Rgb { r, g, b } => t.set("rgb", [r, g, b])?,
+        Color::Rgb { r, g, b } => t.set("rgb", lua.create_sequence_from([r, g, b])?)?,
         other => {
             // Project the named colors back to their canonical ANSI slot.
             if let Some(idx) = crate::lua::api::color_to_ansi(other) {

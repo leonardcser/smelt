@@ -345,7 +345,7 @@ fn style_arg(style: Option<mlua::Table>) -> LuaResult<Style> {
 }
 
 fn cell_to_lua(lua: &Lua, cell: &Cell) -> LuaResult<mlua::Table> {
-    let t = lua.create_table()?;
+    let t = lua.create_table_with_capacity(0, 4)?;
     if cell.symbol.is_continuation() {
         t.set("ch", "")?;
         t.set("width", 0)?;
