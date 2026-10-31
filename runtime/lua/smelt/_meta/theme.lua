@@ -31,6 +31,10 @@ theme.is_light = nil
 ---@type fun(): table[]
 theme.list = nil
 
+--- Resolve any color (`{ ansi = n }`, `{ rgb = { r, g, b } }`, a name such as `"red"`, or `"#rrggbb"`) to `{ rgb = { r, g, b } }`, using the standard xterm palette for indexed colors. Use it to blend colors, for example in a paint. Returns `nil` for `nil` and `"reset"`, whose real value is up to the terminal.
+---@type fun(color: any): table?
+theme.rgb = nil
+
 --- Override a single highlight group's style. `style` is a `StyleDecl` table (`{ fg = { ansi = 244 }, bold = true }`). The override sticks until the next `apply()` or `use()` call.
 ---@type fun(group: string, style: smelt.theme.StyleDecl): nil
 theme.set = nil

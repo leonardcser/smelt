@@ -1240,7 +1240,23 @@ impl UiLuaHost<'_> {
         removed
     }
 
+    pub(crate) fn set_paint_fps(
+        &mut self,
+        paint: crate::smelt_edit::layout::PaintId,
+        fps: Option<u16>,
+    ) -> bool {
+        let known = self
+            .app
+            .paint_registry
+            .update(paint, |options| options.fps = fps);
+        if known {
+            self.app.request_urgent_render();
+        }
+        known
+    }
+
     pub(crate) fn remove_paint(&mut self, paint: crate::smelt_edit::layout::PaintId) -> bool {
+        self.app.request_urgent_render();
         for callback_id in self.app.ui.leaf_clear_callbacks(paint) {
             self.app.lua.remove_callback(callback_id);
         }
@@ -1256,8 +1272,10 @@ impl UiLuaHost<'_> {
         &mut self,
         callback_id: u64,
         name: Option<String>,
+        options: crate::lua::paint::PaintOptions,
     ) -> crate::smelt_edit::layout::PaintId {
-        let (paint_id, previous) = self.app.paint_registry.register(callback_id, name);
+        let (paint_id, previous) = self.app.paint_registry.register(callback_id, name, options);
+        self.app.request_urgent_render();
         for stale in self.app.ui.leaf_clear_callbacks(paint_id) {
             self.app.lua.remove_callback(stale);
         }

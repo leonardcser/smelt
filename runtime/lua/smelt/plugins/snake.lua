@@ -73,11 +73,11 @@ local function paint(slice)
   for i, p in ipairs(game.snake) do cells[key(p[1], p[2])] = shade(i) end
   if game.food then cells[key(game.food[1], game.food[2])] = FOOD end
   local cols, rows = math.min(W, slice:width()), math.min(H // 2, slice:height())
-  slice:fill_rect(0, 0, cols, rows, " ", { bg = bg })
+  slice:fill(0, 0, cols, rows, " ", { bg = bg })
   for row = 0, rows - 1 do
     for x = 0, cols - 1 do
       local top, bottom = cells[key(x, row * 2)], cells[key(x, row * 2 + 1)]
-      if top or bottom then slice:set(row, x, "▀", { fg = top or bg, bg = bottom or bg }) end
+      if top or bottom then slice:set(x, row, "▀", { fg = top or bg, bg = bottom or bg }) end
     end
   end
 end

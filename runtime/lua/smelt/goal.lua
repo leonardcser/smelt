@@ -314,98 +314,38 @@ local function banner_mode(goal)
   return goal.auto_continue ~= false and "auto" or "manual"
 end
 
-local function banner_text(goal, width)
-  local goal_text = present(goal.summary) or goal.objective
-  if goal.state == STATE.BLOCKED and goal.reason then
-    goal_text = goal.reason .. " · " .. goal_text
-  end
-
-  local progress = progress_label(goal.progress)
-  if not progress then return smelt.text.truncate_cells(goal_text, width, { suffix = "…" }) end
-
-  local separator = " · "
-  local progress_width = smelt.text.width(progress)
-  local separator_width = smelt.text.width(separator)
-  if progress_width + separator_width >= width then
-    return smelt.text.truncate_cells(progress, width, { suffix = "…" })
-  end
-
-  local goal_width = width - progress_width - separator_width
-  return smelt.text.truncate_cells(goal_text, goal_width, { suffix = "…" }) .. separator .. progress
+local function banner_text(goal)
+  local text = present(goal.summary) or goal.objective
+  if goal.state == STATE.BLOCKED and goal.reason then text = goal.reason .. " · " .. text end
+  return text
 end
 
-local function banner_row(goal, width)
-  width = math.max(width or 0, 0)
-  if width == 0 then return { text = "", highlights = {} } end
-
+-- The banner as header items. When the row is narrow the goal text shrinks
+-- first, then the progress, then the label; the mode always stays.
+local function banner_items(goal)
   local label, label_group = banner_label(goal)
-  local mode_text = banner_mode(goal)
-  local mode = mode_text and (" " .. mode_text .. " ") or ""
-  local label_width = smelt.text.width(label)
-  local mode_width = smelt.text.width(mode)
-  local fixed_width = label_width + mode_width
-  local label_part = label
-  local text = ""
-  local fill = ""
-
-  if fixed_width >= width then
-    if mode ~= "" and mode_width < width then
-      label_part = smelt.text.fit(label, width - mode_width, { suffix = "…" })
-    elseif mode ~= "" then
-      label_part = ""
-      mode = smelt.text.fit(mode, width, { suffix = "…" })
-    else
-      label_part = smelt.text.fit(label, width, { suffix = "…" })
-    end
-  else
-    text = banner_text(goal, width - fixed_width)
-    local used = label_width + smelt.text.width(text) + mode_width
-    fill = string.rep(" ", math.max(width - used, 0))
-  end
-
-  local row = label_part .. text .. fill .. mode
-
-  local label_end = #label_part
-  local highlights = {
-    {
-      bytes_start = 0,
-      bytes_end = #row,
-      style = { hl_group = "SmeltGoalBanner" },
-      selectable = true,
-    },
-    {
-      bytes_start = 0,
-      bytes_end = label_end,
-      style = { hl_group = label_group },
-      selectable = true,
-    },
+  local banner = { hl_group = "SmeltGoalBanner" }
+  local items = {
+    { text = label, style = { hl_group = label_group }, fill = "SmeltGoalBanner", priority = 1, truncatable = true },
+    { text = banner_text(goal), style = banner, priority = 3, truncatable = true, separated = true },
   }
-  if mode ~= "" then
-    highlights[#highlights + 1] = {
-      bytes_start = #row - #mode,
-      bytes_end = #row,
-      style = { hl_group = "SmeltGoalBannerMode" },
-      selectable = true,
-    }
+  local progress = progress_label(goal.progress)
+  if progress then
+    items[#items + 1] = { text = progress, style = banner, priority = 2, truncatable = true, separated = true }
   end
-  return {
-    text = row,
-    highlights = highlights,
-  }
+  local mode = banner_mode(goal)
+  if mode then
+    items[#items + 1] = { text = " " .. mode .. " ", style = { hl_group = "SmeltGoalBannerMode" }, align_right = true }
+  end
+  return items
 end
 
 local function register_headerline()
   headerline = require("smelt.headerline")
-  headerline.add("goal", {
-    visible = function()
-      return is_visible(session_goal())
-    end,
-    render = function(width)
-      local goal = session_goal()
-      if not is_visible(goal) then return { text = "", highlights = {} } end
-      return banner_row(goal, width)
-    end,
-  })
+  headerline.add("goal", function()
+    local goal = session_goal()
+    if is_visible(goal) then return banner_items(goal) end
+  end)
 end
 
 function M.current()

@@ -3229,7 +3229,7 @@ fn lua_layout_is_applied_before_first_render() {
             local transcript = smelt.win.transcript():rect()
             assert(top ~= nil, "prompt top bar has layout rect before first render")
             assert(transcript ~= nil, "transcript has layout rect before first render")
-            assert(top.row > transcript.row, "top bar is below transcript")
+            assert(top.y > transcript.y, "top bar is below transcript")
         "#,
     )
     .expect("Lua layout is available before first render");
@@ -3332,13 +3332,13 @@ fn win_rect_prefers_current_layout_after_resize_before_paint() {
         r#"
             local r = smelt.win.transcript():rect()
             assert(r ~= nil, "transcript rect")
-            assert(r.row == {row}, "row " .. tostring(r.row))
-            assert(r.col == {col}, "col " .. tostring(r.col))
+            assert(r.x == {x}, "x " .. tostring(r.x))
+            assert(r.y == {y}, "y " .. tostring(r.y))
             assert(r.width == {width}, "width " .. tostring(r.width))
             assert(r.height == {height}, "height " .. tostring(r.height))
         "#,
-        row = expected.y,
-        col = expected.x,
+        x = expected.x,
+        y = expected.y,
         width = expected.width,
         height = expected.height,
     );

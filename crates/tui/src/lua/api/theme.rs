@@ -11,7 +11,7 @@ use mlua::prelude::*;
 use smelt_core::content::highlight::syntax_theme_names;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use smelt_core::style::{Color, Style};
+use smelt_core::style::Style;
 
 #[derive(Clone)]
 struct ThemeMetadata {
@@ -81,7 +81,27 @@ resolve to an empty table.",
         &["group"],
         |lua, group: String| -> LuaResult<mlua::Table> {
             let style = crate::lua::with_runtime_host(|host| host.theme_group(&group));
-            style_to_lua(lua, style)
+            crate::lua::parse::style_to_lua(lua, style)
+        },
+    )?;
+
+    m.fn_(
+        "rgb",
+        "Resolve any color (`{ ansi = n }`, `{ rgb = { r, g, b } }`, a name such \
+as `\"red\"`, or `\"#rrggbb\"`) to `{ rgb = { r, g, b } }`, using the standard \
+xterm palette for indexed colors. Use it to blend colors, for example in a \
+paint. Returns `nil` for `nil` and `\"reset\"`, whose real value is up to the \
+terminal.",
+        &["color"],
+        |lua, color: mlua::Value| -> LuaResult<Option<mlua::Table>> {
+            let color =
+                crate::lua::parse::color_opt(Some(color)).map_err(LuaError::RuntimeError)?;
+            let Some((r, g, b)) = color.and_then(|color| color.rgb()) else {
+                return Ok(None);
+            };
+            let t = lua.create_table()?;
+            t.set("rgb", [r, g, b])?;
+            Ok(Some(t))
         },
     )?;
 
@@ -94,7 +114,7 @@ resolve to an empty table.",
             let pairs = crate::lua::with_runtime_host(|host| host.theme_snapshot());
             let out = lua.create_table()?;
             for (name, style) in pairs {
-                out.set(name, style_to_lua(lua, style)?)?;
+                out.set(name, crate::lua::parse::style_to_lua(lua, style)?)?;
             }
             Ok(out)
         },
@@ -141,52 +161,6 @@ plugins flip glyphs or contrast levels based on the current palette.",
     )?;
 
     Ok(())
-}
-
-/// Project a `Style` to a Lua `StyleDecl` table. Unset fields are
-/// omitted so `snapshot()` round-trips cleanly back through `apply()`.
-fn style_to_lua(lua: &Lua, style: Style) -> LuaResult<mlua::Table> {
-    let t = lua.create_table()?;
-    if let Some(fg) = style.fg {
-        t.set("fg", color_to_lua(lua, fg)?)?;
-    }
-    if let Some(bg) = style.bg {
-        t.set("bg", color_to_lua(lua, bg)?)?;
-    }
-    if style.bold {
-        t.set("bold", true)?;
-    }
-    if style.italic {
-        t.set("italic", true)?;
-    }
-    if style.dim {
-        t.set("dim", true)?;
-    }
-    if style.underline {
-        t.set("underline", true)?;
-    }
-    if style.crossedout {
-        t.set("crossedout", true)?;
-    }
-    if style.reverse {
-        t.set("reverse", true)?;
-    }
-    Ok(t)
-}
-
-fn color_to_lua(lua: &Lua, color: Color) -> LuaResult<mlua::Table> {
-    let t = lua.create_table()?;
-    match color {
-        Color::AnsiValue(v) => t.set("ansi", v)?,
-        Color::Rgb { r, g, b } => t.set("rgb", [r, g, b])?,
-        other => {
-            // Project the named colors back to their canonical ANSI slot.
-            if let Some(idx) = super::color_to_ansi(other) {
-                t.set("ansi", idx)?;
-            }
-        }
-    }
-    Ok(t)
 }
 
 fn style_decl_to_style(decl: &StyleDecl, is_light: bool) -> Style {

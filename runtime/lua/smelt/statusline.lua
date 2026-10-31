@@ -4,8 +4,8 @@
 --   * the statusline window (`M.win`)
 --   * a bar (`smelt._bar`, strip layout) holding the named source callbacks
 --     registered with `smelt.statusline.add` / `remove`
---   * a retained renderer that asks the bar for one row after semantic
---     invalidation and writes it to the window's buffer.
+--   * a retained renderer that lays the bar's rows out after semantic
+--     invalidation and writes them to the window's buffer.
 --
 -- The built-in `core` source reads engine state from signals plus
 -- `smelt.session.status()` for values that carry pending/stale markers
@@ -28,9 +28,9 @@ local line = bar.new({
 local M = {}
 smelt.statusline = M
 
--- Repaint after plugin-owned state changes that are not represented by a
--- built-in signal. Adding, replacing, and removing sources invalidates
--- automatically.
+--- Repaint after plugin-owned state changes that are not represented by a
+--- built-in signal. Adding, replacing, and removing sources invalidates
+--- automatically.
 ---@tier ui_host
 ---@type fun()
 function smelt.statusline.invalidate()
@@ -47,7 +47,8 @@ end
 
 --- Add a named source of statusline items. `handler` runs on every repaint and
 --- returns a list of items (see `smelt.bar.Item`); errors are reported on
---- stderr and skip the source. Adding a name that already exists replaces that
+--- stderr and skip the source. Items with `row = 2` or more make the
+--- statusline taller. Adding a name that already exists replaces that
 --- source in place, keeping its position. Returns a `Reg` that removes this
 --- source, unless a later `add` with the same name has replaced it.
 ---@tier ui_host
@@ -61,6 +62,30 @@ end
 ---@type fun(name: string)
 function smelt.statusline.remove(name)
   bar.remove(line, name)
+end
+
+--- Rows the statusline takes: its lowest item row, at least 1, or the rows
+--- passed to `set_view`.
+---@tier ui_host
+---@type fun(): integer
+function smelt.statusline.rows()
+  return bar.rows(line)
+end
+
+--- Replace the statusline with any layout node, such as a paint leaf from
+--- `smelt.ui.layout.leaf(smelt.paint.register(fn))`, taking `rows` rows
+--- (default 1). Pass `nil` to restore the built-in statusline.
+---@tier ui_host
+---@type fun(node: smelt.ui.layout?, rows: integer?)
+function smelt.statusline.set_view(node, rows)
+  bar.set_view(line, node, rows)
+end
+
+--- The statusline's layout node and row count, for layout composers.
+---@tier ui_host
+---@type fun(): smelt.ui.layout, integer
+function smelt.statusline.node()
+  return bar.node(line)
 end
 
 -- ── default `core` source ───────────────────────────────────────────
@@ -223,7 +248,7 @@ smelt.statusline.add("core", core_compose)
 local function render(win)
   local buf = win:buf()
   if not buf then return end
-  bar.write_rows(buf, { bar.row(line, win:content_width() or 80) }, NS)
+  bar.write_rows(buf, bar.rows_for(line, win:content_width() or 80), NS)
 end
 
 -- ── window allocation ───────────────────────────────────────────────
@@ -259,13 +284,5 @@ if M.win then
     end
   end
 end
-
--- Row count this composer paints into. Layout / overlay code that needs
--- to reserve space above the statusline reads this instead of touching
--- the window rect directly (the rect is only valid after the first
--- render, so an overlay opening on cold start would see nil). A plugin
--- replacing this module is free to override `M.rows` if it produces a
--- multi-row statusline.
-M.rows = 1
 
 return M

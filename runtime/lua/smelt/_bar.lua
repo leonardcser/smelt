@@ -5,14 +5,15 @@
 -- the bar's width. Two layouts share the item shape, the priority-drop fitter
 -- and the spacing rules:
 --
---   * "strip": a filled row with the left items and the right items packed
---     against opposite edges (statusline).
+--   * "strip": filled rows with the left items and the right items packed
+--     against opposite edges (statusline, headerline). Items pick their row
+--     with `row`, and the bar is as tall as its lowest visible row.
 --   * "rule":  a horizontal rule with the left items and the right items set
 --     into it (prompt top and bottom bars).
 --
--- Internal - plugins reach bars through `smelt.statusline` and
--- `smelt.prompt_bar.top` / `.bottom`, which wrap `add`, `remove` and
--- `invalidate` below.
+-- Internal - plugins reach bars through `smelt.statusline`,
+-- `smelt.headerline` and `smelt.prompt_bar.top` / `.bottom`, which wrap the
+-- functions below.
 --
 -- `style` is a subset of `smelt.buf.MarkOpts` (`fg`, `bg`, `hl_group`, `bold`,
 -- `dim`, `italic`). `fg` / `bg` accept a theme group name (string) or a direct
@@ -51,6 +52,8 @@ local DEFAULT_RULE_STYLE = { fg = "SmeltSeparator" }
 ---@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
 ---@field align_right? boolean Pack against the right edge instead of the left.
 ---@field selectable? boolean Include the text in drag-copy. Defaults to true.
+---@field row? integer Row of a multi-row bar, from 1 at the top. Defaults to 1. The statusline and headerline grow to fit; the prompt rules ignore it.
+---@field fill? string Theme group that styles the empty space of this item's row instead of the bar's background.
 
 --- A styled piece of a `runs` item.
 ---@class smelt.bar.Run
@@ -257,15 +260,19 @@ end
 
 -- Append the runs of one side: items in order, one space between neighbours
 -- and a `·` between consecutive separated items.
-local function join_side(entries, right, out, style_of, gap_style, sep_style)
+local function join_side(entries, right, out, style_of, gap_style, sep_style, filler_selectable)
+  filler_selectable = filler_selectable == true
   local sep_seen, prev = false, nil
   for _, e in ipairs(entries) do
     if e.right == right then
       if prev then
         if e.item.separated and sep_seen then
-          out[#out + 1] = { text = SEP, style = sep_style, selectable = false }
+          -- Between two block items the dot sits on their background.
+          local style = sep_style
+          if has_block_bg(prev) and has_block_bg(e) then style = style_of(e.item.style) end
+          out[#out + 1] = { text = SEP, style = style, selectable = filler_selectable }
         elseif gap_between(prev, e) > 0 then
-          out[#out + 1] = { text = " ", style = gap_style, selectable = false }
+          out[#out + 1] = { text = " ", style = gap_style, selectable = filler_selectable }
         end
       end
       if e.item.separated then sep_seen = true end
@@ -291,6 +298,21 @@ local function join_side(entries, right, out, style_of, gap_style, sep_style)
   end
 end
 
+-- Cells kept between the two sides of a strip: none when the facing items
+-- both carry a background, like neighbours on one side.
+local function side_gap(entries)
+  local last_left, first_right
+  for _, e in ipairs(entries) do
+    if e.right then
+      first_right = first_right or e
+    else
+      last_left = e
+    end
+  end
+  if last_left and first_right then return gap_between(last_left, first_right) end
+  return 1
+end
+
 local function text_width(runs)
   local w = 0
   for _, run in ipairs(runs) do w = w + smelt.text.width(run.text) end
@@ -299,15 +321,20 @@ end
 
 --- Lay `items` out as a filled row. `opts` accepts `bg_group` (theme group
 --- that fills empty space and backs items without their own background) and
---- `sep_group` (theme group of the separator dots).
+--- `sep_group` (theme group of the separator dots) and `fill_selectable`
+--- (include the filler between items in drag-copy). An item's `fill`
+--- overrides `bg_group` for the row.
 function M.layout_strip(items, width, opts)
   opts = opts or {}
-  local bg_group = opts.bg_group
+  local bg_group, row_fill = opts.bg_group, nil
+  for _, item in ipairs(items) do
+    if item.fill then bg_group, row_fill = item.fill, item.fill end
+  end
 
   local entries = fit(entries_of(items), width, function(es)
     local left = side_size(es, false)
     local right, right_count = side_size(es, true)
-    return left + right + (right_count > 0 and 1 or 0)
+    return left + right + (right_count > 0 and side_gap(es) or 0)
   end)
 
   -- `hl_group` carries its own bg, so an item that picked one (a mode pill)
@@ -318,12 +345,13 @@ function M.layout_strip(items, width, opts)
     if bg_group and not s.bg and not s.hl_group then s.bg = bg_group end
     return s
   end
-  local fill_style = with_default_bg(nil)
+  local fill_style = row_fill and { hl_group = row_fill } or with_default_bg(nil)
   local sep_style = with_default_bg({ fg = opts.sep_group, dim = true })
+  local fill_selectable = opts.fill_selectable == true
 
   local left_runs, right_runs = {}, {}
-  join_side(entries, false, left_runs, with_default_bg, fill_style, sep_style)
-  join_side(entries, true, right_runs, with_default_bg, fill_style, sep_style)
+  join_side(entries, false, left_runs, with_default_bg, fill_style, sep_style, fill_selectable)
+  join_side(entries, true, right_runs, with_default_bg, fill_style, sep_style, fill_selectable)
 
   local right_start = math.max(width - text_width(right_runs), 0)
 
@@ -336,7 +364,7 @@ function M.layout_strip(items, width, opts)
     col = col + w
   end
   if col < right_start then
-    segs[#segs + 1] = { text = string.rep(" ", right_start - col), style = fill_style, selectable = false }
+    segs[#segs + 1] = { text = string.rep(" ", right_start - col), style = fill_style, selectable = fill_selectable }
     col = right_start
   end
   for _, run in ipairs(right_runs) do
@@ -346,7 +374,7 @@ function M.layout_strip(items, width, opts)
     col = col + w
   end
   if col < width then
-    segs[#segs + 1] = { text = string.rep(" ", width - col), style = fill_style, selectable = false }
+    segs[#segs + 1] = { text = string.rep(" ", width - col), style = fill_style, selectable = fill_selectable }
   end
 
   return M.segments_to_line(segs)
@@ -417,8 +445,9 @@ end
 --- Create a bar. `opts.name` labels diagnostics, `opts.layout` is `"strip"` or
 --- `"rule"`, and `opts.win` is the window `invalidate` repaints; assign `win`
 --- on the returned bar when the window is allocated afterwards. A strip takes
---- `bg_group` and `sep_group`; a rule takes `bar_style`, a function returning
---- the style of the rule (or nil for the default), called on every repaint.
+--- `bg_group`, `sep_group`, `fill_selectable` and `min_rows` (rows kept even
+--- when empty, default 1); a rule takes `bar_style`, a function returning the style of the rule
+--- (or nil for the default), called on every repaint.
 function M.new(opts)
   return {
     name = opts.name,
@@ -427,12 +456,76 @@ function M.new(opts)
     bg_group = opts.bg_group,
     sep_group = opts.sep_group,
     bar_style = opts.bar_style,
+    fill_selectable = opts.fill_selectable,
+    min_rows = opts.min_rows or 1,
     sources = {}, -- ordered { name, handler } pairs
+    items = nil, -- collected on demand, dropped on invalidate
+    shown_rows = nil, -- rows the layout last reserved
   }
 end
 
+-- Every source's items in registration order. A source may return a single
+-- item instead of a list; a failing source is reported and skipped.
+local function collect(bar)
+  local items = {}
+  for _, src in ipairs(bar.sources) do
+    local ok, result = pcall(src.handler)
+    if not ok then
+      io.stderr:write(bar.name .. " source `" .. src.name .. "`: " .. tostring(result) .. "\n")
+    elseif type(result) == "table" then
+      if result.text or result.runs then result = { result } end
+      for _, item in ipairs(result) do
+        items[#items + 1] = item
+      end
+    end
+  end
+  return items
+end
+
+local function items_of(bar)
+  if not bar.items then bar.items = collect(bar) end
+  return bar.items
+end
+
+--- Rows the bar needs: the lowest row holding a visible item, or the bar's
+--- view rows when a view replaces it. Never fewer than `min_rows`.
+function M.rows(bar)
+  if bar.view then return bar.view.rows end
+  local rows = bar.min_rows
+  for _, entry in ipairs(entries_of(items_of(bar))) do
+    rows = math.max(rows, entry.item.row or 1)
+  end
+  return rows
+end
+
+--- The layout node and row count for this bar: its view when one is set,
+--- otherwise its window. The layout composer calls this, so the rows it
+--- returns are the rows `invalidate` compares against.
+function M.node(bar)
+  bar.shown_rows = M.rows(bar)
+  if bar.view then return bar.view.node, bar.shown_rows end
+  return smelt.ui.layout.leaf(bar.win), bar.shown_rows
+end
+
+--- Replace the bar with `node` (any layout node, such as a paint leaf) that
+--- takes `rows` rows, or restore the built-in bar with `nil`.
+function M.set_view(bar, node, rows)
+  if node == nil then
+    bar.view = nil
+  else
+    bar.view = { node = node, rows = rows or 1 }
+  end
+  smelt.ui.layout.invalidate()
+end
+
 function M.invalidate(bar)
+  bar.items = nil
   if bar.win then bar.win:invalidate_renderer() end
+  -- A strip's height follows its items, so relayout in the same frame when
+  -- the row count changes.
+  if bar.layout == "strip" and bar.shown_rows and M.rows(bar) ~= bar.shown_rows then
+    smelt.ui.layout.invalidate()
+  end
 end
 
 -- Repaint after `ms` milliseconds. Nothing repaints on its own, so an animated
@@ -485,31 +578,32 @@ function M.remove(bar, name)
   M.invalidate(bar)
 end
 
--- Every source's items in registration order. A source may return a single
--- item instead of a list; a failing source is reported and skipped.
-local function collect(bar)
-  local items = {}
-  for _, src in ipairs(bar.sources) do
-    local ok, result = pcall(src.handler)
-    if not ok then
-      io.stderr:write(bar.name .. " source `" .. src.name .. "`: " .. tostring(result) .. "\n")
-    elseif type(result) == "table" then
-      if result.text or result.runs then result = { result } end
-      for _, item in ipairs(result) do
-        items[#items + 1] = item
-      end
-    end
+--- The bar laid out for `width` cells as one row. A strip uses its row-1 items.
+function M.row(bar, width)
+  if bar.layout == "rule" then
+    return M.layout_rule(items_of(bar), width, { bar_style = bar.bar_style and bar.bar_style() })
   end
-  return items
+  return M.rows_for(bar, width, 1)[1]
 end
 
---- The bar laid out for `width` cells as one row.
-function M.row(bar, width)
-  local items = collect(bar)
-  if bar.layout == "rule" then
-    return M.layout_rule(items, width, { bar_style = bar.bar_style and bar.bar_style() })
+--- A strip laid out for `width` cells, one entry per row. `rows` defaults to
+--- the bar's own row count.
+function M.rows_for(bar, width, rows)
+  local by_row = {}
+  for _, item in ipairs(items_of(bar)) do
+    local r = item.row or 1
+    by_row[r] = by_row[r] or {}
+    table.insert(by_row[r], item)
   end
-  return M.layout_strip(items, width, { bg_group = bar.bg_group, sep_group = bar.sep_group })
+  local out = {}
+  for r = 1, rows or M.rows(bar) do
+    out[r] = M.layout_strip(by_row[r] or {}, width, {
+      bg_group = bar.bg_group,
+      sep_group = bar.sep_group,
+      fill_selectable = bar.fill_selectable,
+    })
+  end
+  return out
 end
 
 return M

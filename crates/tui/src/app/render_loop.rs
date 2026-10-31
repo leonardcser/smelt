@@ -1154,7 +1154,7 @@ impl TuiApp {
             let search_session = overlays
                 .search_session()
                 .map(crate::app::search::SearchRenderSession::from);
-            self.ui.prepare_frame_with_prepared_splits(
+            self.ui.prepare_frame(
                 prepared_transcript,
                 |ui, request| {
                     let width = request.content_width as usize;
@@ -1191,54 +1191,63 @@ impl TuiApp {
         };
 
         // Lua paint callbacks need a scoped app host, which cannot alias the UI
-        // borrow held by the compositor. Render them into transparent layers from
-        // the prepared frame, then insert each layer by its stable painter slot.
-        let paint_jobs: Vec<_> = if self.paint_registry.is_empty() {
-            Vec::new()
-        } else {
-            prepared_frame
-                .paint_leaves()
-                .iter()
-                .enumerate()
-                .filter_map(|(slot, leaf)| {
-                    self.paint_registry
-                        .lookup(leaf.id)
-                        .map(|handle| (slot, handle))
-                })
-                .collect()
-        };
-        let mut prepared_paints: Vec<Option<crate::lua::paint::PaintLayer>> =
-            std::iter::repeat_with(|| None)
-                .take(prepared_frame.paint_leaves().len())
-                .collect();
-        if !paint_jobs.is_empty() {
-            let lua = self.lua.execution();
-            crate::lua::scope_app(self, || {
-                for (slot, handle) in paint_jobs {
-                    let leaf = &prepared_frame.paint_leaves()[slot];
-                    prepared_paints[slot] = Some(crate::lua::paint::render_paint(
-                        &lua,
-                        handle,
-                        leaf.rect.width,
-                        leaf.rect.height,
-                        &leaf.context,
-                    ));
-                }
-            });
+        // borrow. The frame owns its grid and borrows the UI only while painting
+        // built-in commands, so each Lua leaf paints directly into the frame in
+        // its layer order. Frame-stage paints then see the finished screen.
+        let clock = self.paint_timeline.advance(self.core.clock.instant_now());
+        let mut animation: Option<std::time::Duration> = None;
+        let mut frame = self.ui.begin_frame(prepared_frame);
+        while let Some(leaf) = frame.paint_to_next_leaf(&self.ui) {
+            let Some(slot) = self.paint_registry.leaf(leaf.id) else {
+                continue;
+            };
+            animation = animation.into_iter().chain(slot.options.interval()).min();
+            self.run_paint(
+                slot,
+                &mut frame.grid_mut().slice_mut(leaf.rect),
+                &leaf.context,
+                &clock,
+            );
         }
-
-        let frame = self.ui.paint_prepared_frame_with_paints(
-            prepared_frame,
-            |slot, _id, slice, _context| {
-                if let Some(layer) = prepared_paints[slot].take() {
-                    layer.composite_into(slice);
-                }
-            },
-        );
-        let _ = self.ui.flush_prepared_frame(out, frame);
+        let mut frame = frame.into_grid();
+        let frame_paints = self.paint_registry.frame_paints();
+        if !frame_paints.is_empty() {
+            let clock = crate::lua::paint::PaintClock {
+                cursor: frame.terminal_cursor_position(),
+                ..clock
+            };
+            let area = crate::smelt_edit::Rect::new(0, 0, frame.width(), frame.height());
+            let context = crate::smelt_edit::DrawContext {
+                terminal_width: frame.width(),
+                terminal_height: frame.height(),
+                theme: std::sync::Arc::clone(self.ui.theme()),
+                ..Default::default()
+            };
+            for (_, slot) in frame_paints {
+                animation = animation.into_iter().chain(slot.options.interval()).min();
+                self.run_paint(slot, &mut frame.slice_mut(area), &context, &clock);
+            }
+        }
+        if let Some(interval) = animation {
+            self.request_animation_render(interval);
+        }
+        let _ = self.ui.flush_frame(out, frame);
         if let Some(trace) = frame_trace {
             FrameScheduler::record_flushed(trace);
         }
+    }
+
+    fn run_paint(
+        &mut self,
+        slot: crate::lua::paint::PaintSlot,
+        slice: &mut crate::smelt_edit::GridSlice<'_>,
+        context: &crate::smelt_edit::DrawContext,
+        clock: &crate::lua::paint::PaintClock,
+    ) {
+        let lua = self.lua.execution();
+        crate::lua::scope_app(self, || {
+            crate::lua::paint::paint(&lua, slot, slice, context, clock);
+        });
     }
 
     /// Compute which pane owns the cursor this frame.

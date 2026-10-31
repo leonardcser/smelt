@@ -1,12 +1,9 @@
 -- Headerline window - Lua-allocated, Lua-rendered top chrome.
 --
--- Features register named sources with `smelt.headerline.add(name, spec)`. Each spec may
--- expose:
---   * visible() -> boolean      whether this source currently reserves a row
---   * render(width) -> row      returns `{ text, highlights }` for one row
---
--- The default layout reserves this window above the transcript when any source
--- is visible. The first visible source owns the row.
+-- A strip bar like the statusline, with the same item sources: features add
+-- named sources with `smelt.headerline.add(name, handler)`, and each returns
+-- `smelt.bar.Item`s. The default layout reserves rows above the transcript
+-- only while some source returns a visible item.
 
 local bar = require("smelt._bar")
 
@@ -14,121 +11,79 @@ local M = {}
 smelt.headerline = M
 
 local NS = smelt.ns("smelt.headerline")
-local sources = {} -- ordered { name, spec } pairs
 local renderer_subscriptions = {}
 
--- Repaint and recompose the layout after plugin-owned state changes that are
--- not represented by a built-in signal. Visibility may change the row count.
--- Adding, replacing, and removing sources invalidates automatically.
+local line = bar.new({
+  name = "smelt.headerline",
+  layout = "strip",
+  min_rows = 0,
+  -- A header is content (a goal, a title), so drag-copy takes the whole row.
+  fill_selectable = true,
+})
+
+--- Repaint after plugin-owned state changes that are not represented by a
+--- built-in signal; the layout follows when the row count changes. Adding,
+--- replacing, and removing sources invalidates automatically.
 ---@tier ui_host
 ---@type fun()
 function smelt.headerline.invalidate()
-  if M.win then M.win:invalidate_renderer() end
-  smelt.ui.layout.invalidate()
+  bar.invalidate(line)
 end
 
---- One header row: its text and the highlight ranges to paint over it.
----@class smelt.headerline.Row
----@field text string Row text.
----@field highlights? smelt.headerline.Highlight[] Highlights over `text`.
-
---- A highlight over a header row, in byte offsets into the row text.
----@class smelt.headerline.Highlight
----@field bytes_start integer Start byte offset (inclusive).
----@field bytes_end integer End byte offset (exclusive).
----@field style smelt.buf.MarkOpts Style to apply.
----@field selectable? boolean Include the range in drag-copy.
-
---- A headerline source. The first source whose `visible` returns true owns the row.
----@class smelt.headerline.Spec
----@field render fun(width: integer): smelt.headerline.Row Build the row for a given content width.
----@field visible? fun(): boolean Whether this source currently reserves the row. Defaults to always visible.
-
---- Add a named headerline source; a bare function is shorthand for `{ render = fn }`.
---- The header takes a row above the transcript only while some source is visible.
---- Adding a name that already exists replaces that source in place. Returns a
---- `Reg` that removes this source, unless a later `add` with the same name has
---- replaced it.
+--- Repaint after `ms` milliseconds. An animated source calls it on every paint
+--- to ask for its next frame; the earliest pending request wins.
 ---@tier ui_host
----@type fun(name: string, spec: smelt.headerline.Spec|fun(width: integer): smelt.headerline.Row): smelt.Reg
-function smelt.headerline.add(name, spec)
-  if type(name) ~= "string" or name == "" then
-    error("smelt.headerline.add: name must be a non-empty string", 2)
-  end
-  if type(spec) == "function" then spec = { render = spec } end
-  if type(spec) ~= "table" or type(spec.render) ~= "function" then
-    error("smelt.headerline.add: spec must be a table with render(width)", 2)
-  end
-  local entry = { name = name, spec = spec }
-  local replaced = false
-  for i, src in ipairs(sources) do
-    if src.name == name then
-      sources[i] = entry
-      replaced = true
-      break
-    end
-  end
-  if not replaced then sources[#sources + 1] = entry end
-  M.invalidate()
-  return smelt.reg.new(function()
-    for i, src in ipairs(sources) do
-      if src == entry then
-        table.remove(sources, i)
-        M.invalidate()
-        return
-      end
-    end
-  end)
+---@type fun(ms: integer)
+function smelt.headerline.invalidate_after(ms)
+  bar.invalidate_after(line, ms)
+end
+
+--- Add a named source of header items. `handler` runs on every repaint and
+--- returns a list of items (see `smelt.bar.Item`), or nothing to take no room.
+--- The header is as tall as its lowest visible item row and disappears when
+--- no source shows anything. Adding a name that already exists replaces that
+--- source in place. Returns a `Reg` that removes this source, unless a later
+--- `add` with the same name has replaced it.
+---@tier ui_host
+---@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+function smelt.headerline.add(name, handler)
+  return bar.add(line, name, handler)
 end
 
 --- Remove every source named `name`.
 ---@tier ui_host
 ---@type fun(name: string)
 function smelt.headerline.remove(name)
-  for i = #sources, 1, -1 do
-    if sources[i].name == name then table.remove(sources, i) end
-  end
-  M.invalidate()
+  bar.remove(line, name)
 end
 
-local function is_visible(src)
-  if type(src.spec.visible) ~= "function" then return true end
-  local ok, result = pcall(src.spec.visible)
-  if not ok then
-    io.stderr:write("smelt.headerline source `" .. src.name .. "`: " .. tostring(result) .. "\n")
-    return false
-  end
-  return result == true
+--- Rows the header takes: its lowest visible item row, 0 when empty, or the
+--- rows passed to `set_view`.
+---@tier ui_host
+---@type fun(): integer
+function smelt.headerline.rows()
+  return bar.rows(line)
 end
 
-local function visible_source()
-  for _, src in ipairs(sources) do
-    if is_visible(src) then return src end
-  end
-  return nil
+--- Replace the header with any layout node, such as a paint leaf, taking
+--- `rows` rows (default 1). Pass `nil` to restore the built-in header.
+---@tier ui_host
+---@type fun(node: smelt.ui.layout?, rows: integer?)
+function smelt.headerline.set_view(node, rows)
+  bar.set_view(line, node, rows)
 end
 
-function M.rows()
-  return visible_source() and 1 or 0
+--- The header's layout node and row count, for layout composers.
+---@tier ui_host
+---@type fun(): smelt.ui.layout, integer
+function smelt.headerline.node()
+  return bar.node(line)
 end
 
 local function render(win)
   local buf = win:buf()
   if not buf then return end
-  local src = visible_source()
-  if not src then
-    bar.write_rows(buf, { { text = "", highlights = {} } }, NS)
-    return
-  end
-  local ok, row = pcall(src.spec.render, win:content_width() or 80)
-  if not ok then
-    io.stderr:write("smelt.headerline source `" .. src.name .. "`: " .. tostring(row) .. "\n")
-    row = { text = "", highlights = {} }
-  end
-  if type(row) ~= "table" or type(row.text) ~= "string" then
-    row = { text = "", highlights = {} }
-  end
-  bar.write_rows(buf, { row }, NS)
+  bar.write_rows(buf, bar.rows_for(line, win:content_width() or 80, math.max(bar.rows(line), 1)), NS)
 end
 
 M.win = smelt.win.new(smelt.buf.new({ name = "smelt.headerline" }), {
@@ -138,6 +93,7 @@ M.win = smelt.win.new(smelt.buf.new({ name = "smelt.headerline" }), {
   region = "header",
 })
 
+line.win = M.win
 if M.win then
   M.win:set_renderer(render)
   if type(smelt.signal.subscribe) == "function" then

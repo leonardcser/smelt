@@ -84,22 +84,22 @@ function M.logo_mark_size()
 end
 
 -- Paint a pixel grid into a `smelt.paint.Slice` using half-block glyphs.
-function M.paint_pixels(slice, row0, col0, pixels, palette)
+function M.paint_pixels(slice, x0, y0, pixels, palette)
 	palette = palette or M.palette()
 	for y = 1, #pixels, 2 do
 		local top = pixels[y]
 		local bot = pixels[y + 1] or string.rep(".", #top)
-		local r = row0 + math.floor((y - 1) / 2)
+		local row = y0 + math.floor((y - 1) / 2)
 		for x = 1, #top do
 			local fg = palette[top:sub(x, x)]
 			local bg = palette[bot:sub(x, x)]
-			local c = col0 + x - 1
+			local col = x0 + x - 1
 			if fg and bg then
-				slice:set(r, c, "▀", { fg = fg, bg = bg })
+				slice:set(col, row, "▀", { fg = fg, bg = bg })
 			elseif fg then
-				slice:set(r, c, "▀", { fg = fg })
+				slice:set(col, row, "▀", { fg = fg })
 			elseif bg then
-				slice:set(r, c, "▄", { fg = bg })
+				slice:set(col, row, "▄", { fg = bg })
 			end
 		end
 	end

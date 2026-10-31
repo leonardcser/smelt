@@ -334,12 +334,9 @@ fn headerline_explicit_invalidation_recomposes_plugin_visibility() {
         r#"
         local headerline = require("smelt.headerline")
         _G.__plugin_header_visible = false
-        headerline.add("retained-visibility-probe", {
-          visible = function() return _G.__plugin_header_visible end,
-          render = function()
-            return { text = "retained header visible", highlights = {} }
-          end,
-        })
+        headerline.add("retained-visibility-probe", function()
+          if _G.__plugin_header_visible then return { text = "retained header visible" } end
+        end)
         "#,
     ));
 
@@ -353,6 +350,75 @@ fn headerline_explicit_invalidation_recomposes_plugin_visibility() {
     assert!(app.run_lua(r#"require("smelt.headerline").invalidate()"#));
     let invalidated = app.render_to_frame();
     assert!(invalidated.rows[0].contains("retained header visible"));
+}
+
+#[test]
+fn statusline_grows_with_item_rows_in_the_same_frame() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    app.render_silent();
+    assert!(app.run_lua(
+        r#"
+        _G.__reg = smelt.statusline.add("rows", function()
+          return {
+            { text = "second row", row = 2 },
+            { text = "third row", row = 3, align_right = true },
+          }
+        end)
+        "#,
+    ));
+
+    let grown = app.render_to_frame();
+    assert_eq!(
+        app.eval_lua::<u16>("return smelt.statusline.rows()")
+            .unwrap(),
+        3
+    );
+    assert!(grown.rows[10].contains("second row"), "{}", grown.text());
+    assert!(
+        grown.rows[11].trim_end().ends_with("third row"),
+        "{}",
+        grown.text()
+    );
+    let prompt = app
+        .ui_probe()
+        .split_rect(crate::app::PROMPT_WIN)
+        .expect("prompt rect");
+    assert!(
+        prompt.bottom() <= 9,
+        "prompt chrome must sit above the statusline"
+    );
+
+    assert!(app.run_lua("_G.__reg:remove()"));
+    let shrunk = app.render_to_frame();
+    assert_eq!(
+        app.eval_lua::<u16>("return smelt.statusline.rows()")
+            .unwrap(),
+        1
+    );
+    assert!(!shrunk.text().contains("second row"), "{}", shrunk.text());
+}
+
+#[test]
+fn statusline_view_can_be_replaced_by_a_paint() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        local paint = smelt.paint.register(function(slice)
+          for y = 0, slice:height() - 1 do slice:put_str(0, y, "painted " .. y) end
+        end)
+        smelt.statusline.set_view(smelt.ui.layout.leaf(paint), 2)
+        "#,
+    ));
+
+    let frame = app.render_to_frame();
+    assert!(frame.rows[10].starts_with("painted 0"), "{}", frame.text());
+    assert!(frame.rows[11].starts_with("painted 1"), "{}", frame.text());
+
+    assert!(app.run_lua("smelt.statusline.set_view(nil)"));
+    let restored = app.render_to_frame();
+    assert!(!restored.text().contains("painted"), "{}", restored.text());
 }
 
 #[test]
@@ -404,7 +470,7 @@ fn statusline_add_rejects_invalid_arguments() {
         assert(not pcall(smelt.statusline.add, "", function() return {} end))
         assert(not pcall(smelt.statusline.add, "x", "not a function"))
         assert(not pcall(smelt.headerline.add, "", function() return { text = "" } end))
-        assert(not pcall(smelt.headerline.add, "x", {}))
+        assert(not pcall(smelt.headerline.add, "x", "not a function"))
         "#,
     ));
 }
@@ -416,7 +482,7 @@ fn headerline_add_reg_removes_only_its_own_source() {
     assert!(app.run_lua(
         r#"
         _G.__reg = smelt.headerline.add("probe", function()
-          return { text = "header one", highlights = {} }
+          return { text = "header one" }
         end)
         "#,
     ));
@@ -425,7 +491,7 @@ fn headerline_add_reg_removes_only_its_own_source() {
     assert!(app.run_lua(
         r#"
         smelt.headerline.add("probe", function()
-          return { text = "header two", highlights = {} }
+          return { text = "header two" }
         end)
         _G.__reg:remove()
         "#,

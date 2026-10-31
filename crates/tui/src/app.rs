@@ -320,6 +320,9 @@ pub struct TuiApp {
     pub(crate) pending_quit: bool,
     pub(crate) pending_session_save: bool,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
+    pub(crate) paint_timeline: crate::lua::paint::PaintTimeline,
+    /// Leaf under the pointer while hover events are subscribed.
+    pub(crate) hovered_leaf: Option<crate::smelt_edit::WinId>,
     pub(crate) working: smelt_core::working::WorkingState,
     host_work: host_dispatch::HostWorkState,
     native_ui: engine_events::NativeSessionUi,
@@ -2148,6 +2151,8 @@ impl TuiApp {
             pending_quit: false,
             pending_session_save: false,
             paint_registry: crate::lua::paint::PaintRegistry::default(),
+            paint_timeline: crate::lua::paint::PaintTimeline::default(),
+            hovered_leaf: None,
             working: smelt_core::working::WorkingState::new(working_clock),
             host_work: host_dispatch::HostWorkState::default(),
             native_ui: engine_events::NativeSessionUi::default(),
@@ -3943,6 +3948,7 @@ impl TuiApp {
                         Some(ev)
                     };
 
+                    let mut needs_frame = self.event_needs_frame(&ev);
                     let drain_started_at = Instant::now();
                     let mut drained_events = 1usize;
                     if let Some(ev) = absorb(
@@ -3963,6 +3969,7 @@ impl TuiApp {
                             break;
                         };
                         drained_events = drained_events.saturating_add(1);
+                        needs_frame |= self.event_needs_frame(&ev);
                         if let Some(ev) = absorb(
                             ev,
                             &mut scroll_delta,
@@ -3979,8 +3986,10 @@ impl TuiApp {
                         let _ = self.scroll_at_with_transcript_intent(scroll_col, scroll_row, scroll_delta, format!("coalesced_wheel:{scroll_delta}"));
                     }
 
-                    self.dispatch_ui_window_events(false);
-                    self.render_normal();
+                    if needs_frame {
+                        self.dispatch_ui_window_events(false);
+                        self.render_normal();
+                    }
                 }
 
                 event = self.platform.receive() => {

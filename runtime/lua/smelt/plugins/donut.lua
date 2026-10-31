@@ -6,7 +6,7 @@
 -- lit from behind the viewer and above. Only the scale follows the screen, and
 -- the turn follows the clock, so a late frame still lands where it should.
 
-local TICK_MS = 16
+local FPS = 60
 -- donut.c's turn: 0.07 about x and 0.035 about z every 30 ms frame.
 local A_PER_MS, B_PER_MS = 0.07 / 30, 0.035 / 30
 -- donut.c's luminance ramp, each step in an ember from the unlit side to
@@ -21,7 +21,7 @@ for i, rgb in ipairs(RAMP) do STEPS[i] = { glyph = GLYPHS:sub(i, i), style = { f
 
 local floor, sin, cos = math.floor, math.sin, math.cos
 
-local ui, spin
+local handle, start
 
 -- The sines and cosines of `n` angles evenly round the circle.
 local function circle(n)
@@ -121,52 +121,26 @@ local function render(cols, rows, A, B)
   frame.gen, frame.count, frame.cols = gen, count, cols
 end
 
-local function paint(slice)
-  if not spin then return end
+-- A frame paint draws over the finished screen: only the torus covers what is
+-- under it, and keys and the mouse still reach the session.
+local function paint(slice, ctx)
+  start = start or ctx.now_ms
   local cols, rows = slice:width(), slice:height()
-  if spin.stale or spin.cols ~= cols or spin.rows ~= rows then
-    local ms = smelt.time.monotonic_ms() - spin.start
-    render(cols, rows, ms * A_PER_MS, ms * B_PER_MS)
-    spin.stale, spin.cols, spin.rows = false, cols, rows
-  end
+  local ms = ctx.now_ms - start
+  render(cols, rows, ms * A_PER_MS, ms * B_PER_MS)
   local cells, step = frame.cells, frame.step
   for i = 1, frame.count do
     local o = cells[i]
     local s = STEPS[step[o]]
-    slice:set(o // cols, o % cols, s.glyph, s.style)
+    slice:set(o % cols, o // cols, s.glyph, s.style)
   end
 end
 
-local function tick()
-  spin.stale = true
-end
-
-local function close()
-  if not ui then return end
-  ui.timer:remove()
-  ui.overlay:close()
-  ui.paint:remove()
-  ui, spin = nil, nil
-end
-
-local function open()
-  spin = { start = smelt.time.monotonic_ms(), stale = true }
-  ui = { paint = smelt.paint.register(paint, { name = "smelt.donut.paint" }) }
-  -- A see-through layer over the whole screen: only the torus covers what is
-  -- under it, and keys and the mouse still reach the session.
-  ui.overlay = smelt.overlay.new({
-    name = "smelt.donut",
-    anchor = "screen_at", corner = "nw", row = 0, col = 0,
-    width = "100%", height = "100%",
-    layout = smelt.ui.layout.leaf(ui.paint),
-    border = "none",
-    transparent = true,
-    modal = false,
-    z = 200,
-  })
-  ui.timer = smelt.timer.every(TICK_MS, tick)
-end
-
 smelt.cmd.register("donut", function()
-  if ui then close() else open() end
+  if handle then
+    handle:remove()
+    handle, start = nil, nil
+  else
+    handle = smelt.paint.frame(paint, { name = "smelt.donut", fps = FPS })
+  end
 end, { desc = "spin a donut over everything" })

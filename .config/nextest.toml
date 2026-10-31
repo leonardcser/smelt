@@ -1,5 +1,11 @@
 experimental = ["setup-scripts"]
 
+# Under a full parallel run a test process can take over the 100ms default to
+# close its output pipes, which flagged random tests as leaky. Real leaks (a
+# child that keeps running) still exceed this.
+[profile.default]
+leak-timeout = "500ms"
+
 # These tests enforce wall-clock interaction budgets, so they must not compete
 # with CPU-heavy tests for runner time.
 [[profile.default.overrides]]

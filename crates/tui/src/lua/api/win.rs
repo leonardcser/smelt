@@ -42,7 +42,7 @@ pub enum LuaWinEvent {
     Dismiss,
     /// Periodic tick for animation/refresh.
     Tick,
-    /// Mouse-down landed on the window. Payload: `{ row, col, button }`
+    /// Mouse-down landed on the window. Payload: `{ x, y, button }`
     /// (leaf-relative cell coords, `button` ∈ `"left"|"right"|"middle"`).
     /// Non-focusable, non-selectable windows still receive it.
     Press,
@@ -53,10 +53,18 @@ pub enum LuaWinEvent {
     /// Mouse drag (motion with button held) while this window owns the press.
     /// Same payload as `Press`; coords are leaf-relative for the new position.
     Drag,
+    /// The pointer moved onto the window with no button held. Payload:
+    /// `{ x, y }` (leaf-relative).
+    Enter,
+    /// The pointer left the window with no button held. Payload: `{ x, y }`
+    /// relative to this window, so it may lie outside it.
+    Leave,
+    /// The pointer moved within the window with no button held. Payload: `{ x, y }`.
+    Move,
     /// Window's scroll state changed. Payload: `{ top, follow }` where
     /// `top` is the new `scroll_top` and `follow` is the pin-to-tail flag.
     Scrolled,
-    /// Leaf's viewport rect changed. Payload: `{ row, col, width, height,
+    /// Leaf's viewport rect changed. Payload: `{ x, y, width, height,
     /// content_width }` for the new outer rect and inner cell budget.
     /// Fires once after the first paint and on every later resize/reflow.
     Resized,
@@ -86,6 +94,9 @@ impl From<LuaWinEvent> for crate::smelt_edit::WinEvent {
             LuaWinEvent::Press => WinEvent::Press,
             LuaWinEvent::Release => WinEvent::Release,
             LuaWinEvent::Drag => WinEvent::Drag,
+            LuaWinEvent::Enter => WinEvent::PointerEnter,
+            LuaWinEvent::Leave => WinEvent::PointerLeave,
+            LuaWinEvent::Move => WinEvent::PointerMove,
             LuaWinEvent::Scrolled => WinEvent::Scrolled,
             LuaWinEvent::Resized => WinEvent::Resized,
             LuaWinEvent::PlaceholderAccepted => WinEvent::PlaceholderAccepted,
@@ -263,8 +274,8 @@ impl mlua::UserData for LuaWin {
             match rect {
                 Some(r) => {
                     let t = lua.create_table()?;
-                    t.set("row", r.y)?;
-                    t.set("col", r.x)?;
+                    t.set("x", r.x)?;
+                    t.set("y", r.y)?;
                     t.set("width", r.width)?;
                     t.set("height", r.height)?;
                     Ok(mlua::Value::Table(t))

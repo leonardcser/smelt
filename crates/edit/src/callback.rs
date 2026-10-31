@@ -61,19 +61,27 @@ pub enum WinEvent {
     Dismiss,
     /// Fired once per event-loop iteration for live-refresh overlays.
     Tick,
-    /// Mouse-down landed inside this leaf. Payload carries leaf-relative `row`/`col`
+    /// Mouse-down landed inside this leaf. Payload carries leaf-relative `x`/`y`
     /// and the button. Fires before focus promotion; non-focusable leaves still receive it.
     Press,
     /// Mouse-up after a `Press` on this leaf. Fires on the leaf that owned the
     /// press, even if the pointer drifted out (capture). Same payload as `Press`.
     Release,
     /// Mouse motion while a button is held after a `Press` on this leaf. Same
-    /// payload as `Press`; `row`/`col` are leaf-relative for the new position.
+    /// payload as `Press`; `x`/`y` are leaf-relative for the new position.
     Drag,
+    /// The pointer moved onto this leaf with no button held. Same payload as
+    /// `Press`, without a button.
+    PointerEnter,
+    /// The pointer left this leaf with no button held. Coordinates are relative
+    /// to this leaf and may lie outside it.
+    PointerLeave,
+    /// The pointer moved within this leaf with no button held.
+    PointerMove,
     /// Window's scroll state changed. Payload carries the new `top` and `follow` flag.
     Scrolled,
     /// Leaf's viewport rect changed (first paint, terminal resize, layout
-    /// reflow). Payload carries the new `{ row, col, width, height }` rect
+    /// reflow). Payload carries the new `{ x, y, width, height }` rect
     /// and the inner `content_width` in `Payload::Rect`.
     Resized,
     /// User accepted a placeholder suggestion via an `accept_keys` chord.
@@ -109,24 +117,24 @@ pub enum Payload {
     Text {
         content: String,
     },
-    /// Mouse event hit a leaf. `row`/`col` are leaf-relative cell coordinates.
-    /// Used for `Press`, `Release`, and `Drag`.
+    /// Mouse event on a leaf. `x`/`y` are leaf-relative cell coordinates and
+    /// may be negative for `PointerLeave`. `button` is `None` for pointer motion.
     Mouse {
-        row: u16,
-        col: u16,
-        button: MouseButton,
+        x: i32,
+        y: i32,
+        button: Option<MouseButton>,
     },
     /// Scroll state changed. `top` is the new `scroll_top`; `follow` is tail mode.
     Scroll {
         top: RowIndex,
         follow: bool,
     },
-    /// Resize payload. `row`/`col`/`width`/`height` describe the new outer
+    /// Resize payload. `x`/`y`/`width`/`height` describe the new outer
     /// rect (matches `win:rect()`); `content_width` is the inner cell
     /// budget after gutter and pad subtraction (matches `win:content_width()`).
     Rect {
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
         width: u16,
         height: u16,
         content_width: u16,
@@ -239,6 +247,15 @@ impl Callbacks {
             .entry(ev)
             .or_default()
             .push(cb);
+    }
+
+    /// Whether any leaf has a callback for `ev`.
+    pub(crate) fn listens_for(&self, ev: WinEvent) -> bool {
+        self.events.values().any(|events| {
+            events
+                .get(&ev)
+                .is_some_and(|callbacks| !callbacks.is_empty())
+        })
     }
 
     pub(crate) fn has_event(&self, win: WinId, ev: WinEvent) -> bool {

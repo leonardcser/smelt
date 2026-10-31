@@ -4,6 +4,7 @@
 use crate::smelt_edit::layout::{Border, BorderStyle, Constraint, EdgeStyle};
 use crate::smelt_edit::Corner;
 use crate::smelt_edit::{Line, Span, Style};
+use mlua::prelude::*;
 use smelt_core::style::Color;
 
 // ── color ──────────────────────────────────────────────────────────────
@@ -112,6 +113,78 @@ pub(crate) fn style(t: &mlua::Table) -> Result<Style, String> {
         style = style.reverse();
     }
     Ok(style)
+}
+
+/// Apply a partial style table over `base`: only keys present in `t` change.
+/// `fg = false` / `bg = false` clear a color.
+pub(crate) fn style_patch(t: &mlua::Table, base: Style) -> Result<Style, String> {
+    let mut style = base;
+    for (key, slot) in [("fg", &mut style.fg), ("bg", &mut style.bg)] {
+        match t.get::<mlua::Value>(key).map_err(|e| e.to_string())? {
+            mlua::Value::Nil => {}
+            mlua::Value::Boolean(false) => *slot = None,
+            value => *slot = color_opt(Some(value))?,
+        }
+    }
+    for (key, slot) in [
+        ("bold", &mut style.bold),
+        ("dim", &mut style.dim),
+        ("italic", &mut style.italic),
+        ("underline", &mut style.underline),
+        ("crossedout", &mut style.crossedout),
+        ("reverse", &mut style.reverse),
+    ] {
+        if let Some(on) = t.get::<Option<bool>>(key).map_err(|e| e.to_string())? {
+            *slot = on;
+        }
+    }
+    Ok(style)
+}
+
+/// Project a `Style` to a Lua style table. Unset fields are omitted so the
+/// table round-trips through [`style`] and `smelt.theme.apply`.
+pub(crate) fn style_to_lua(lua: &Lua, style: Style) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    if let Some(fg) = style.fg {
+        t.set("fg", color_to_lua(lua, fg)?)?;
+    }
+    if let Some(bg) = style.bg {
+        t.set("bg", color_to_lua(lua, bg)?)?;
+    }
+    if style.bold {
+        t.set("bold", true)?;
+    }
+    if style.italic {
+        t.set("italic", true)?;
+    }
+    if style.dim {
+        t.set("dim", true)?;
+    }
+    if style.underline {
+        t.set("underline", true)?;
+    }
+    if style.crossedout {
+        t.set("crossedout", true)?;
+    }
+    if style.reverse {
+        t.set("reverse", true)?;
+    }
+    Ok(t)
+}
+
+fn color_to_lua(lua: &Lua, color: Color) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    match color {
+        Color::AnsiValue(v) => t.set("ansi", v)?,
+        Color::Rgb { r, g, b } => t.set("rgb", [r, g, b])?,
+        other => {
+            // Project the named colors back to their canonical ANSI slot.
+            if let Some(idx) = crate::lua::api::color_to_ansi(other) {
+                t.set("ansi", idx)?;
+            }
+        }
+    }
+    Ok(t)
 }
 
 fn span(t: &mlua::Table) -> Result<Span<'static>, String> {

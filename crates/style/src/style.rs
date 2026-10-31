@@ -25,11 +25,8 @@ pub enum Color {
 
 impl Color {
     pub fn mix_toward(self, target: Color, amount: f32) -> Option<Color> {
-        if matches!(self, Color::Reset) || matches!(target, Color::Reset) {
-            return None;
-        }
-        let (r, g, b) = self.rgb();
-        let (tr, tg, tb) = target.rgb();
+        let (r, g, b) = self.rgb()?;
+        let (tr, tg, tb) = target.rgb()?;
         let amount = amount.clamp(0.0, 1.0);
         Some(Color::Rgb {
             r: mix_channel(r, tr, amount),
@@ -38,9 +35,12 @@ impl Color {
         })
     }
 
-    fn rgb(self) -> (u8, u8, u8) {
-        match self {
-            Color::Reset => (0, 0, 0),
+    /// The color as an sRGB triple, using the standard xterm palette for
+    /// named and indexed colors. `Reset` is the terminal's own default, whose
+    /// value is unknown, so it has none.
+    pub fn rgb(self) -> Option<(u8, u8, u8)> {
+        Some(match self {
+            Color::Reset => return None,
             Color::Black => (0, 0, 0),
             Color::DarkGrey => (128, 128, 128),
             Color::Red => (255, 0, 0),
@@ -59,7 +59,7 @@ impl Color {
             Color::Grey => (192, 192, 192),
             Color::Rgb { r, g, b } => (r, g, b),
             Color::AnsiValue(value) => ansi_value_rgb(value),
-        }
+        })
     }
 }
 

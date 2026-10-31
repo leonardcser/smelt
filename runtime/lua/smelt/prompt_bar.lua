@@ -33,23 +33,19 @@ local OPTIONAL_PRIORITY = 4
 local COMMENT_DIM_STYLE = { fg = "Comment", dim = true }
 local renderer_subscriptions = {}
 
-local function invalidate_on(win, names)
-  if not win or type(smelt.signal.subscribe) ~= "function" then return end
+local function invalidate_on(invalidate, names)
+  if type(smelt.signal.subscribe) ~= "function" then return end
   for _, name in ipairs(names) do
-    renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(name, function()
-      win:invalidate_renderer()
-    end)
+    renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(name, invalidate)
   end
 end
 
-local function invalidate_when_changed(win, name, display_value)
-  if not win or type(smelt.signal.subscribe) ~= "function" then return end
+local function invalidate_when_changed(invalidate, name, display_value)
+  if type(smelt.signal.subscribe) ~= "function" then return end
   renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(
     name,
     function(value, previous)
-      if display_value(value) ~= display_value(previous) then
-        win:invalidate_renderer()
-      end
+      if display_value(value) ~= display_value(previous) then invalidate() end
     end)
 end
 
@@ -748,13 +744,19 @@ if M.bottom_win then
   M.bottom_win:set_renderer(render_bottom)
 end
 
-invalidate_on(M.aux_win, {
+local function invalidate_aux()
+  if M.aux_win then M.aux_win:invalidate_renderer() end
+end
+local function invalidate_top() bar.invalidate(top_bar) end
+local function invalidate_bottom() bar.invalidate(bottom_bar) end
+
+invalidate_on(invalidate_aux, {
   "input_epoch",
   "notification_visible",
   "prompt_queue_revision",
   "work_state",
 })
-invalidate_on(M.top_win, {
+invalidate_on(invalidate_top, {
   "auto_continue_status",
   "fast_mode",
   "input_epoch",
@@ -769,13 +771,13 @@ invalidate_on(M.top_win, {
   "work_retry_attempt",
   "work_state",
 })
-invalidate_when_changed(M.top_win, "work_elapsed_ms", function(value)
+invalidate_when_changed(invalidate_top, "work_elapsed_ms", function(value)
   return math.floor((tonumber(value) or 0) / 1000)
 end)
-invalidate_when_changed(M.top_win, "work_retry_remaining_ms", function(value)
+invalidate_when_changed(invalidate_top, "work_retry_remaining_ms", function(value)
   return math.max(1, math.ceil((tonumber(value) or 0) / 1000))
 end)
-invalidate_on(M.bottom_win, {
+invalidate_on(invalidate_bottom, {
   "prompt_resize_active",
   "prompt_resize_chrome",
 })
@@ -804,7 +806,7 @@ if smelt.win and smelt.win.PROMPT then
   renderer_subscriptions[#renderer_subscriptions + 1] = smelt.win.PROMPT:on(
     "text_changed",
     function()
-      if M.aux_win then M.aux_win:invalidate_renderer() end
+      invalidate_aux()
       if M.top_win then M.top_win:invalidate_renderer() end
       local top_rows = M.top_rows()
       if top_rows ~= previous_top_rows then

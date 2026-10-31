@@ -309,12 +309,15 @@ when status signals or explicit plugin invalidation make their output dirty:
 ```lua
 local sl = require("smelt.statusline")
 sl.add("greeting", function()
-  return { { text = "hi ", hl_group = "SmeltAccent" } }
+  return { { text = "hi", style = { fg = "SmeltAccent" } } }
 end)
 ```
 
-The handler returns a segment table or a list of them. Each segment is
-`{ text, hl_group?, style?, priority?, align_right?, truncatable?, separated? }`.
+The handler returns an item or a list of them. Each item is
+`{ text, style?, priority?, align_right?, truncatable?, separated?, row? }`
+(`smelt.bar.Item`); `row = 2` and up make the statusline taller. To draw the
+statusline yourself, `sl.set_view(smelt.ui.layout.leaf(paint), rows)` swaps it
+for any layout node, and `sl.set_view(nil)` restores it.
 `sl.add` and `sl.remove` invalidate automatically. If a source closes over
 plugin-owned state that changes independently of a built-in signal, call
 `sl.invalidate()` after changing it. The canonical worked example lives at
@@ -581,7 +584,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.fuzzy` - Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
 - `smelt.git` - Asynchronous Git snapshots and explicit file-level staging.
 - `smelt.grep` - Ripgrep wrapper for searching files.
-- `smelt.headerline` - Optional row above the transcript.
+- `smelt.headerline` - Optional rows above the transcript, built like the statusline.
 - `smelt.html` - HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 - `smelt.http` - Asynchronous HTTP get/post.
 - `smelt.http.cache` - Runtime-owned HTTP response cache.

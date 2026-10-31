@@ -132,8 +132,8 @@ function M.open()
   end
   local function pointer_row(event)
     local rect, scroll = sidebar:rect(), sidebar:scroll()
-    if not rect or not scroll or event.row >= rect.height or event.col < 1 or event.col >= rect.width - 1 then return end
-    return scroll.top + event.row
+    if not rect or not scroll or event.y >= rect.height or event.x < 1 or event.x >= rect.width - 1 then return end
+    return scroll.top + event.y
   end
   sidebar:on("press", function(event)
     sidebar_count, folder_press = nil, nil

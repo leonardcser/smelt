@@ -305,6 +305,10 @@ impl TuiApp {
 
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(crate) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
+        self.paint_timeline.pointer = Some((me.column, me.row));
+        if matches!(me.kind, MouseEventKind::Moved) {
+            return self.handle_pointer_move(me);
+        }
         if self.update_prompt_resize_drag(me) {
             return EventOutcome::Redraw;
         }
@@ -460,8 +464,8 @@ impl TuiApp {
             } else {
                 None
             };
-            if let Some(ev) = pointer_event {
-                self.fire_pointer_event(target, ev, me, crate::smelt_edit::MouseButton::Left);
+            if let (Some(ev), Some(leaf)) = (pointer_event, Self::pointer_leaf(target)) {
+                self.fire_pointer_event(leaf, ev, me, Some(crate::smelt_edit::MouseButton::Left));
             }
             let HitTarget::Window(win) = target else {
                 return EventOutcome::Redraw;
@@ -619,39 +623,32 @@ impl TuiApp {
         }
     }
 
-    /// Fire a pointer `WinEvent` (`Press`/`Release`/`Drag`) on `target` with
-    /// leaf-relative cell coords. Coords are clamped to `(0, 0)` when the leaf
-    /// has no live viewport (the event landed during a hit-test stale frame).
+    /// The layout leaf a hit lands on: a window or a paint leaf.
+    fn pointer_leaf(target: HitTarget) -> Option<WinId> {
+        match target {
+            HitTarget::Window(win) => Some(win),
+            HitTarget::Paint(paint) => Some(WinId(paint.0)),
+            HitTarget::Scrollbar { .. } | HitTarget::Chrome { .. } => None,
+        }
+    }
+
+    /// Fire a pointer `WinEvent` on `leaf` with leaf-relative cell coords.
+    /// Coords fall back to the screen position when the leaf has no live rect
+    /// (the event landed during a hit-test stale frame).
     fn fire_pointer_event(
         &mut self,
-        target: HitTarget,
+        leaf: WinId,
         event: crate::smelt_edit::WinEvent,
         me: MouseEvent,
-        button: crate::smelt_edit::MouseButton,
+        button: Option<crate::smelt_edit::MouseButton>,
     ) {
-        let (leaf, rect) = match target {
-            HitTarget::Window(win) => {
-                let rect = self
-                    .ui
-                    .win(win)
-                    .and_then(|w| w.viewport)
-                    .map(|v| v.rect)
-                    .or_else(|| self.ui.paint_rect(crate::smelt_edit::PaintId::from(win)));
-                (win, rect)
-            }
-            HitTarget::Paint(paint) => {
-                let rect = self.ui.paint_rect(paint);
-                (WinId(paint.0), rect)
-            }
-            HitTarget::Scrollbar { .. } | HitTarget::Chrome { .. } => return,
-        };
-        let (rel_row, rel_col) = match rect {
-            Some(rect) => (
-                me.row.saturating_sub(rect.y),
-                me.column.saturating_sub(rect.x),
-            ),
-            None => (0, 0),
-        };
+        let rect = self
+            .ui
+            .win(leaf)
+            .and_then(|w| w.viewport)
+            .map(|v| v.rect)
+            .or_else(|| self.ui.paint_rect(crate::smelt_edit::PaintId::from(leaf)));
+        let origin = rect.map_or((0, 0), |rect| (rect.x, rect.y));
         let lua = &self.lua;
         let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
                               w: WinId,
@@ -662,12 +659,65 @@ impl TuiApp {
             leaf,
             event,
             crate::smelt_edit::Payload::Mouse {
-                row: rel_row,
-                col: rel_col,
+                x: i32::from(me.column) - i32::from(origin.0),
+                y: i32::from(me.row) - i32::from(origin.1),
                 button,
             },
             &mut lua_invoke,
         );
+    }
+
+    /// Whether the event loop should paint after `ev`. Pointer motion nothing
+    /// listens to only records the position, so it never costs a frame.
+    pub(crate) fn event_needs_frame(&self, ev: &crossterm::event::Event) -> bool {
+        let motion = matches!(
+            ev,
+            crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                ..
+            })
+        );
+        !motion || self.wants_pointer_motion()
+    }
+
+    /// Whether plain pointer motion matters to anything: a hover listener on
+    /// some leaf, or a paint that tracks the pointer. Both are opt-in.
+    fn wants_pointer_motion(&self) -> bool {
+        use crate::smelt_edit::WinEvent;
+        self.paint_registry.tracks_pointer()
+            || [
+                WinEvent::PointerEnter,
+                WinEvent::PointerLeave,
+                WinEvent::PointerMove,
+            ]
+            .into_iter()
+            .any(|event| self.ui.listens_for(event))
+    }
+
+    /// Pointer motion with no button held: fire hover events and repaint
+    /// pointer-tracking paints.
+    fn handle_pointer_move(&mut self, me: MouseEvent) -> EventOutcome {
+        use crate::smelt_edit::WinEvent;
+        if !self.wants_pointer_motion() {
+            return EventOutcome::Noop;
+        }
+        let target = self
+            .ui
+            .hit_test(me.column, me.row)
+            .and_then(Self::pointer_leaf);
+        if target != self.hovered_leaf {
+            if let Some(previous) = self.hovered_leaf.take() {
+                self.fire_pointer_event(previous, WinEvent::PointerLeave, me, None);
+            }
+            if let Some(next) = target {
+                self.fire_pointer_event(next, WinEvent::PointerEnter, me, None);
+            }
+            self.hovered_leaf = target;
+        }
+        if let Some(leaf) = target {
+            self.fire_pointer_event(leaf, WinEvent::PointerMove, me, None);
+        }
+        EventOutcome::Redraw
     }
 
     pub(crate) fn yank_to_clipboard(&mut self, out: crate::smelt_edit::CopyOutput) {
@@ -1073,9 +1123,11 @@ mod tests {
     fn paint_leaf_press_keeps_capture_until_release() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         app.ui.set_terminal_size(20, 10);
-        let (paint, _) = app
-            .paint_registry
-            .register(1, Some("test.paint_leaf_mouse".into()));
+        let (paint, _) = app.paint_registry.register(
+            1,
+            Some("test.paint_leaf_mouse".into()),
+            crate::lua::paint::PaintOptions::default(),
+        );
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         {
             let events = events.clone();
