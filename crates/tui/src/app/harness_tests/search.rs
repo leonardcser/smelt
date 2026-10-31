@@ -1127,16 +1127,14 @@ fn overlay_viewer_search_targets_focused_overlay() {
     let win = app.ui_probe().win(leaf).expect("overlay window");
     let buf_id = win.buf;
     assert!(
-        win.range_layer(crate::smelt_edit::RangeLayer::Search)
-            .iter()
-            .any(|range| range.line == 1),
+        win.search_ranges().iter().any(|range| range.line == 1),
         "focused overlay search should paint visible matches"
     );
 
     app.set_window_lines(leaf, vec!["gamma moved".into(), "no match".into()]);
     app.render_silent();
     let win = app.ui_probe().win(leaf).expect("overlay window");
-    let ranges = win.range_layer(crate::smelt_edit::RangeLayer::Search);
+    let ranges = win.search_ranges();
     assert!(
         ranges.iter().any(|range| range.line == 0),
         "search paint should follow live buffer contents"
@@ -1171,9 +1169,7 @@ fn viewer_search_ignores_non_selectable_spans() {
         .is_empty());
     app.render_silent();
     let win = app.ui_probe().win(leaf).expect("overlay window");
-    assert!(win
-        .range_layer(crate::smelt_edit::RangeLayer::Search)
-        .is_empty());
+    assert!(win.search_ranges().is_empty());
 
     app.type_char('/');
     app.type_text("real");
@@ -1187,8 +1183,7 @@ fn viewer_search_ignores_non_selectable_spans() {
     app.render_silent();
     let win = app.ui_probe().win(leaf).expect("overlay window");
     assert!(
-        !win.range_layer(crate::smelt_edit::RangeLayer::Search)
-            .is_empty(),
+        !win.search_ranges().is_empty(),
         "selectable match should paint"
     );
 }
@@ -1229,7 +1224,7 @@ fn prompt_search_in_vim_normal_mode_jumps_and_repeats() {
         !app.ui_probe()
             .win(crate::app::PROMPT_WIN)
             .unwrap()
-            .range_layer(crate::smelt_edit::RangeLayer::Search)
+            .search_ranges()
             .is_empty(),
         "prompt matches are painted"
     );

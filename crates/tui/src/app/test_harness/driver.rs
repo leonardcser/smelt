@@ -164,6 +164,51 @@ impl TestApp {
         self.bar_cell_style(frame, 2)
     }
 
+    /// Text of the cells painted with `group`'s background in a fresh frame,
+    /// one line per screen row that has any, so tests assert what the user sees.
+    pub fn highlighted_text(&mut self, group: &str) -> Vec<String> {
+        let bg = self.app.ui.theme().get(group).bg;
+        assert!(bg.is_some(), "highlight group {group} has no background");
+        let frame = self.render_to_frame();
+        frame
+            .rows
+            .iter()
+            .zip(&frame.styles)
+            .filter_map(|(row, styles)| {
+                let text: String = smelt_buffer::cell_width::grapheme_indices(row)
+                    .zip(styles)
+                    .filter(|(_, style)| style.bg == bg)
+                    .map(|((_, grapheme), _)| grapheme)
+                    .collect();
+                (!text.is_empty()).then_some(text)
+            })
+            .collect()
+    }
+
+    /// Feed one mouse event at screen `(column, row)`, then repaint.
+    pub fn mouse(&mut self, kind: crossterm::event::MouseEventKind, (column, row): (u16, u16)) {
+        self.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        )));
+        self.render_silent();
+    }
+
+    /// Screen `(column, row)` where `needle` starts on the last frame row
+    /// that shows it.
+    pub fn screen_position(&mut self, needle: &str) -> Option<(u16, u16)> {
+        let frame = self.render_to_frame();
+        frame.rows.iter().enumerate().rev().find_map(|(y, row)| {
+            let byte = row.find(needle)?;
+            let x = smelt_buffer::cell_width::grapheme_indices(&row[..byte]).count();
+            Some((x as u16, y as u16))
+        })
+    }
+
     /// Style of the cell at `col` on the first rule row of `frame`.
     pub fn bar_cell_style(
         &self,

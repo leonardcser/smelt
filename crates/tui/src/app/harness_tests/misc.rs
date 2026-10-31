@@ -8649,3 +8649,51 @@ fn resumed_block_jumps_reveal_blocks_on_the_loaded_window_edge() {
     let (mut app, _dir) = resumed_varied_chat_app(80);
     assert_block_jumps_from_rows(&mut app, (220..272).step_by(3), "resumed");
 }
+
+#[test]
+fn resume_preview_mouse_drag_paints_selection_and_copies() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let guard = test_home_guard();
+    {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        for index in 0..20 {
+            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                content: format!("resume selectable line {index}").into(),
+            });
+        }
+        app.save_session_and_flush();
+    }
+    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    app.set_terminal_size(120, 32);
+    app.reconcile_session_catalog()
+        .expect("reconcile resume preview fixture");
+    assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
+    app.settle_lua();
+    app.render_silent();
+    app.feed_one(SourceEvent::Tick(50));
+    app.app.tick_timers();
+    app.settle_lua();
+
+    let (col, row) = app
+        .screen_position("resume selectable line 17")
+        .expect("resume preview shows the saved tail");
+    let (_, end_row) = app
+        .screen_position("resume selectable line 18")
+        .expect("resume preview shows the saved tail");
+    let end = (col + 16, end_row);
+    app.mouse(MouseEventKind::Down(MouseButton::Left), (col + 7, row));
+    app.mouse(MouseEventKind::Drag(MouseButton::Left), end);
+
+    // The block cursor paints over the drag endpoint cell.
+    assert_eq!(
+        app.highlighted_text("Visual"),
+        vec!["selectable line 17", " ", "resume selectabl"],
+        "drag must paint the selected resume preview text"
+    );
+
+    app.mouse(MouseEventKind::Up(MouseButton::Left), end);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        "selectable line 17\n\nresume selectable"
+    );
+}
