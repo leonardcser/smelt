@@ -3647,7 +3647,7 @@ mod tests {
             r#"
                 smelt.settings.autoupgrade_channel = "unstable"
                 _G.cli.check = report('{"channel":"unstable","current":"v0.6.2","latest":"main@26c57bd","update":true,"auto_install":false}')
-                _G.cli.install = failure("building main@26c57bd with cargo install; this may take a few minutes...\nwarning: spurious network error: retrying\r\nerror: unexpected argument '--package' found\r\n\nUsage: cargo install [OPTIONS] [CRATE[@<VER>]]...\nerror: cargo install: cargo exited with exit status: 1\n")
+                _G.cli.install = failure("building main@26c57bd with cargo install; this may take a few minutes...\nwarning: spurious network error: retrying\r\nerror: unexpected argument '--package' found\r\n\nUsage: cargo install [OPTIONS] [CRATE[@<VER>]]...\nerror: cargo install: unexpected argument '--package' found\n")
             "#,
         );
 
@@ -3661,7 +3661,7 @@ mod tests {
         );
         assert_eq!(
             drain_errors(&rt),
-            ["upgrade to main@26c57bd failed: unexpected argument '--package' found"]
+            ["upgrade to main@26c57bd failed: cargo install: unexpected argument '--package' found"]
         );
         assert_eq!(
             upgrade_banner(&rt).as_deref(),

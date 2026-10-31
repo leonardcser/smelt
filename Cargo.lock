@@ -3541,6 +3541,7 @@ version = "0.0.0-dev"
 dependencies = [
  "clap",
  "crossterm",
+ "fs4",
  "insta",
  "libc",
  "reqwest",

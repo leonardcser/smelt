@@ -8,7 +8,11 @@
 //! executing its old image; the next launch uses the new one.
 //!
 //! The unstable channel compares the build commit with `main` and rebuilds
-//! with `cargo install`.
+//! with `cargo install` into the install root of the running binary.
+//!
+//! Installs hold an exclusive lock next to the executable, so concurrent
+//! sessions never download or build the same upgrade twice. An install keeps
+//! running if smelt quits meanwhile, and keeps the lock until it ends.
 //!
 //! `--json` prints one [`Report`] line on stdout for the bundled upgrade
 //! plugin. Sessions started before an upgrade run the new binary's CLI, so
@@ -19,6 +23,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -37,6 +42,7 @@ const MAIN_INSTALL_ARGS: &[&str] = &[
     "--locked",
 ];
 const STAGING_PREFIX: &str = ".smelt-upgrade-";
+const LOCK_FILE: &str = ".smelt-upgrade.lock";
 /// Staging directories older than this belong to an interrupted upgrade.
 const STALE_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -136,6 +142,17 @@ impl Default for Source {
     }
 }
 
+/// Write a line to stderr, ignoring a closed pipe. The caller may have quit
+/// while the upgrade runs on; a broken pipe must not abort it.
+fn say_err(line: std::fmt::Arguments) {
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// Write a line to stdout, ignoring a closed pipe.
+fn say_out(line: std::fmt::Arguments) {
+    let _ = writeln!(std::io::stdout(), "{line}");
+}
+
 pub async fn run_upgrade_command(args: UpgradeArgs) {
     let client = smelt_provider::http_client_builder()
         .user_agent(concat!("smelt-upgrade/", env!("CARGO_PKG_VERSION")))
@@ -151,13 +168,13 @@ pub async fn run_upgrade_command(args: UpgradeArgs) {
         },
     };
     match result {
-        Ok(report) if args.json => println!(
+        Ok(report) if args.json => say_out(format_args!(
             "{}",
             serde_json::to_string(&report).expect("report serializes")
-        ),
+        )),
         Ok(report) => print_report(&report, args.command.is_some()),
         Err(err) => {
-            eprintln!("error: {err}");
+            say_err(format_args!("error: {err}"));
             std::process::exit(1);
         }
     }
@@ -165,23 +182,25 @@ pub async fn run_upgrade_command(args: UpgradeArgs) {
 
 fn print_report(report: &Report, check_only: bool) {
     if let Some(installed) = &report.installed {
-        println!("upgraded to {installed}; restart smelt to use it");
+        say_out(format_args!(
+            "upgraded to {installed}; restart smelt to use it"
+        ));
     } else if !check_only && !report.update {
-        println!("smelt is up to date ({})", report.current);
+        say_out(format_args!("smelt is up to date ({})", report.current));
     } else {
         let channel = match report.channel {
             Channel::Stable => "stable",
             Channel::Unstable => "unstable",
         };
-        println!("channel: {channel}");
-        println!("current: {}", report.current);
-        println!("latest:  {}", report.latest);
+        say_out(format_args!("channel: {channel}"));
+        say_out(format_args!("current: {}", report.current));
+        say_out(format_args!("latest:  {}", report.latest));
         let status = if report.update {
             "update available"
         } else {
             "up to date"
         };
-        println!("status:  {status}");
+        say_out(format_args!("status:  {status}"));
     }
 }
 
@@ -220,6 +239,7 @@ async fn upgrade(
     if !report.update {
         return Ok(report);
     }
+    let _lock = InstallLock::acquire(exe)?;
     match channel {
         Channel::Stable => {
             let target = build.target.as_deref().ok_or_else(|| {
@@ -227,7 +247,7 @@ async fn upgrade(
             })?;
             install_release(client, &source.web, &report.latest, target, exe).await?;
         }
-        Channel::Unstable => install_main(&report.latest)?,
+        Channel::Unstable => install_main(&report.latest, exe)?,
     }
     report.installed = Some(report.latest.clone());
     Ok(report)
@@ -327,7 +347,7 @@ async fn install_release(
     let staging = Staging::create(exe)?;
     let asset = release_asset(target);
     let base = format!("{web}/releases/download/{tag}");
-    eprintln!("downloading {asset} from {tag}...");
+    say_err(format_args!("downloading {asset} from {tag}..."));
     let sums = download(client, &format!("{base}/SHA256SUMS"), REQUEST_TIMEOUT).await?;
     let expected = checksum_for(&String::from_utf8_lossy(&sums), &asset)
         .ok_or_else(|| format!("SHA256SUMS of {tag} has no entry for {asset}"))?;
@@ -337,7 +357,7 @@ async fn install_release(
     })?;
     let candidate = staging.unpack(&archive)?;
     self_check(&candidate, tag).await?;
-    eprintln!("installing to {}...", exe.display());
+    say_err(format_args!("installing to {}...", exe.display()));
     staging.install(exe, &candidate)
 }
 
@@ -647,26 +667,101 @@ fn replace_executable(
     }
 }
 
-fn install_main(latest: &str) -> Result<(), String> {
-    eprintln!("building {latest} with cargo install; this may take a few minutes...");
-    run("cargo", MAIN_INSTALL_ARGS, "cargo install")
+/// Held while an upgrade installs. Released when dropped, or by the OS when
+/// the process dies.
+struct InstallLock {
+    _file: fs::File,
+}
+
+impl InstallLock {
+    fn acquire(exe: &Path) -> Result<Self, String> {
+        let dir = exe
+            .parent()
+            .ok_or_else(|| format!("{} has no parent directory", exe.display()))?;
+        let path = dir.join(LOCK_FILE);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| {
+                format!(
+                    "cannot write to {}, where smelt is installed: {e}",
+                    dir.display()
+                )
+            })?;
+        // Fail instead of waiting: a waiter runs the old image and would
+        // install the same version again.
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(fs4::TryLockError::WouldBlock) => {
+                Err("another smelt upgrade is already running".to_string())
+            }
+            Err(fs4::TryLockError::Error(e)) => {
+                Err(format!("lock upgrade {}: {e}", path.display()))
+            }
+        }
+    }
+}
+
+/// The `cargo install --root` that places the binary at `exe`.
+fn install_root(exe: &Path) -> Result<&Path, String> {
+    exe.parent()
+        .filter(|bin| bin.file_name().is_some_and(|name| name == "bin"))
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            format!(
+                "cannot upgrade {} from main: cargo installs into a `bin` directory",
+                exe.display()
+            )
+        })
+}
+
+fn main_install_args(root: &Path) -> Result<Vec<&str>, String> {
+    let mut args = MAIN_INSTALL_ARGS.to_vec();
+    args.extend(["--root", path_str(root)?]);
+    Ok(args)
+}
+
+fn install_main(latest: &str, exe: &Path) -> Result<(), String> {
+    let args = main_install_args(install_root(exe)?)?;
+    say_err(format_args!(
+        "building {latest} with cargo install; this may take a few minutes..."
+    ));
+    run("cargo", &args, "cargo install")
 }
 
 /// Run a helper program. Its output goes to stderr so stdout stays reserved
-/// for the report.
+/// for the report. A failure reports the first `error:` line the program
+/// printed, which names the root cause.
 fn run(program: &str, args: &[&str], label: &str) -> Result<(), String> {
-    let status = Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(std::io::stderr()))
-        .stderr(Stdio::inherit())
-        .status()
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("{label}: failed to spawn {program}: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{label}: {program} exited with {status}"))
+    let mut cause = None;
+    if let Some(stderr) = child.stderr.take() {
+        for line in BufReader::new(stderr).split(b'\n').map_while(Result::ok) {
+            let line = String::from_utf8_lossy(&line);
+            say_err(format_args!("{line}"));
+            if cause.is_none() {
+                cause = line.trim().strip_prefix("error: ").map(str::to_string);
+            }
+        }
     }
+    let status = child
+        .wait()
+        .map_err(|e| format!("{label}: wait for {program}: {e}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(match cause {
+        Some(cause) => format!("{label}: {cause}"),
+        None => format!("{label}: {program} exited with {status}"),
+    })
 }
 
 fn path_str(path: &Path) -> Result<&str, String> {
@@ -729,8 +824,9 @@ mod tests {
     #[test]
     fn unstable_install_arguments_are_accepted_by_cargo() {
         // Exercise Cargo's parser without fetching, building, or installing.
+        let args = main_install_args(Path::new("/tmp/root")).unwrap();
         let output = Command::new("cargo")
-            .args(MAIN_INSTALL_ARGS)
+            .args(args)
             .arg("--help")
             .output()
             .expect("run cargo install --help");
@@ -739,6 +835,49 @@ mod tests {
             "cargo rejected the unstable install arguments: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn unstable_installs_into_the_root_of_the_running_binary() {
+        assert_eq!(
+            install_root(Path::new("/home/me/.cargo/bin/smelt")).unwrap(),
+            Path::new("/home/me/.cargo")
+        );
+        assert_eq!(
+            install_root(Path::new("/usr/local/bin/smelt")).unwrap(),
+            Path::new("/usr/local")
+        );
+        let err = install_root(Path::new("/repo/target/release/smelt")).unwrap_err();
+        assert!(err.contains("`bin` directory"), "{err}");
+        let args = main_install_args(Path::new("/home/me/.cargo")).unwrap();
+        assert_eq!(args[args.len() - 2..], ["--root", "/home/me/.cargo"]);
+    }
+
+    #[test]
+    fn install_lock_admits_one_holder_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("smelt");
+        let first = InstallLock::acquire(&exe).unwrap();
+        let err = InstallLock::acquire(&exe).err().unwrap();
+        assert_eq!(err, "another smelt upgrade is already running");
+        drop(first);
+        assert!(InstallLock::acquire(&exe).is_ok());
+    }
+
+    #[test]
+    fn failed_helper_reports_its_first_error_line() {
+        let err = run(
+            "sh",
+            &[
+                "-c",
+                "echo 'error: root cause' >&2; echo 'error: summary' >&2; exit 3",
+            ],
+            "helper",
+        )
+        .unwrap_err();
+        assert_eq!(err, "helper: root cause");
+        let err = run("sh", &["-c", "exit 3"], "helper").unwrap_err();
+        assert!(err.starts_with("helper: sh exited with"), "{err}");
     }
 
     #[test]
