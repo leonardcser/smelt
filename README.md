@@ -90,7 +90,7 @@ Claude Code owns authentication, the agent loop, native tools, and context
 management. smelt provides the terminal UI, permissions, and additional tools
 through MCP. It does not copy subscription credentials or impersonate Claude
 Code's API requests. See [the Claude Code provider docs](https://smeltagent.dev/latest/customize/providers/#claude-code)
-for configuration and limitations.
+for configuration and limitations. smelt is not affiliated with Anthropic.
 
 **API-key providers** (any OpenAI-compatible endpoint):
 
