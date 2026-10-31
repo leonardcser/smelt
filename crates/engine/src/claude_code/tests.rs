@@ -966,6 +966,43 @@ async fn missing_executable_and_invalid_transport_fail_without_http_fallback() {
     }
 }
 
+#[tokio::test]
+#[serial(claude_code)]
+async fn usage_limit_pauses_the_turn_until_its_reset() {
+    let fixture = Fixture::new("usage-limit");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
+                assert!(
+                    !format!("{:?}", delta.items).contains("hit your"),
+                    "{delta:?}"
+                );
+            }
+            EngineOutput::Event(EngineEvent::TurnError {
+                message,
+                kind,
+                retry_at_ms,
+            }) => {
+                assert!(
+                    message.contains("You've hit your 5-hour limit"),
+                    "{message}"
+                );
+                assert_eq!(kind, Some(EngineAskErrorKind::Quota));
+                let retry_at = retry_at_ms.unwrap() / 1000;
+                assert!((started..=started + 2).contains(&retry_at), "{retry_at}");
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn auxiliary_ask(
     fixture: &Fixture,
     response_format: Option<protocol::AskResponseFormat>,

@@ -8,6 +8,7 @@ mod agents;
 mod catalog;
 mod context;
 mod interaction;
+mod limit;
 mod models;
 mod plans;
 pub use catalog::smelt_tool;
@@ -147,6 +148,7 @@ struct Native<'a> {
     plans: plans::Plans,
     init_deadline: Option<tokio::time::Instant>,
     usage: UsageTracker,
+    limits: limit::Limits,
     agents: agents::Agents,
     shells: shells::Shells,
     /// When the shells' output is read next.
@@ -183,6 +185,7 @@ impl Native<'_> {
             plans: plans::Plans::new(Default::default(), None),
             init_deadline: None,
             usage: UsageTracker::default(),
+            limits: limit::Limits::default(),
             agents: agents::Agents::new(
                 tx.clone(),
                 &payload.session_id,
@@ -286,7 +289,7 @@ pub(crate) async fn run_session(
     let result = match runtime.open().await {
         Ok(true) => runtime.drive().await,
         Ok(false) => Ok(()),
-        Err(message) => Err(message),
+        Err(message) => Err(message.into()),
     };
     runtime.end(result).await;
 }
@@ -860,23 +863,24 @@ impl Runtime<'_> {
         });
     }
 
-    async fn end(mut self, result: Result<(), String>) {
+    async fn end(mut self, result: Result<(), Failure>) {
         let error = result.err();
-        self.retire(error.as_deref()).await;
+        self.retire(error.as_ref().map(|failure| failure.message.as_str()))
+            .await;
         if let Some(turn) = self.turn.take() {
             match error {
                 None => emit_complete(self.tx, turn.id, turn.started.elapsed(), true),
-                Some(message) => emit_error(self.tx, message),
+                Some(failure) => emit_failure(self.tx, failure),
             }
-        } else if let Some(message) = error {
-            emit_error(&self.session_tx(), message);
+        } else if let Some(failure) = error {
+            emit_failure(&self.session_tx(), failure);
         }
         if let Some(turn_id) = self.dispatcher_turn {
             self.dispatcher.end_turn(turn_id);
         }
     }
 
-    async fn drive(&mut self) -> Result<(), String> {
+    async fn drive(&mut self) -> Result<(), Failure> {
         loop {
             self.advance_move().await?;
             self.send_steers().await?;
@@ -957,7 +961,7 @@ impl Runtime<'_> {
                 }
                 frame = read(&mut self.native.process) => match frame? {
                     Some(frame) => self.frame(frame).await?,
-                    None => return Err(exited(&mut self.native.process).await),
+                    None => return Err(exited(&mut self.native.process).await.into()),
                 }
             }
         }
@@ -1041,8 +1045,9 @@ impl Runtime<'_> {
         Ok(true)
     }
 
-    async fn frame(&mut self, frame: Value) -> Result<(), String> {
+    async fn frame(&mut self, frame: Value) -> Result<(), Failure> {
         let now_ms = crate::clock::unix_time_ms(self.config.clock.as_ref());
+        self.native.limits.frame(&frame);
         if frame["type"] == "system" && frame["subtype"] == "session_state_changed" {
             self.native.session_state = frame["state"].as_str().map(str::to_owned);
             if self.native.session_state.as_deref() == Some("idle") {
@@ -1077,7 +1082,8 @@ impl Runtime<'_> {
                             frame["response"]["error"]
                                 .as_str()
                                 .unwrap_or("unknown error")
-                        ));
+                        )
+                        .into());
                     }
                     models::record(&frame["response"]["response"]["models"]);
                     self.native.init_deadline = None;
@@ -1140,7 +1146,9 @@ impl Runtime<'_> {
                     && (frame["is_error"].as_bool().unwrap_or(false)
                         || frame["subtype"].as_str() != Some("success"))
                 {
-                    return Err(result_error(&frame));
+                    return Err(
+                        Failure::from(result_error(&frame)).limited(self.native.limits.take_hit())
+                    );
                 }
                 self.native.root_in_progress = false;
                 let sent = matches!(
@@ -1178,12 +1186,12 @@ impl Runtime<'_> {
             // echoes the message.
             Some("command_lifecycle") => {
                 if frame["state"] == "started" && self.taking(&frame["command_uuid"]) {
-                    return self.take().await;
+                    return Ok(self.take().await?);
                 }
             }
             Some("user") if frame["isReplay"] == true => {
                 if self.taking(&frame["uuid"]) {
-                    return self.take().await;
+                    return Ok(self.take().await?);
                 }
                 let Some(at) = self
                     .steers
@@ -1199,6 +1207,9 @@ impl Runtime<'_> {
                 }
             }
             Some("assistant" | "user" | "stream_event") if self.native.interrupting => {}
+            // Claude Code words a failed request as an assistant message. The
+            // turn's result reports it as the error, so it stays out of history.
+            Some("assistant") if frame["is_api_error_message"] == true => {}
             _ => {
                 if matches!(frame["type"].as_str(), Some("assistant" | "stream_event")) {
                     self.native.root_in_progress = true;
@@ -2100,11 +2111,52 @@ fn user_message(content: Vec<Value>) -> Value {
     json!({"type":"user","session_id":"","parent_tool_use_id":null,"message":{"role":"user","content":content}})
 }
 
+/// Why a turn failed, as the host needs it to report the turn or pause it.
+struct Failure {
+    message: String,
+    kind: EngineAskErrorKind,
+    retry_at_ms: Option<u64>,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            kind: EngineAskErrorKind::Other,
+            retry_at_ms: None,
+        }
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl Failure {
+    /// The failure as a pause until the limit that caused it resets.
+    fn limited(self, hit: Option<limit::Hit>) -> Self {
+        match hit {
+            Some(hit) => Self {
+                kind: hit.kind,
+                retry_at_ms: hit.retry_at_ms,
+                ..self
+            },
+            None => self,
+        }
+    }
+}
+
 fn emit_error(tx: &EngineEventSender, message: String) {
+    emit_failure(tx, message.into());
+}
+
+fn emit_failure(tx: &EngineEventSender, failure: Failure) {
     let _ = tx.send(EngineEvent::TurnError {
-        message,
-        kind: Some(EngineAskErrorKind::Other),
-        retry_at_ms: None,
+        message: failure.message,
+        kind: Some(failure.kind),
+        retry_at_ms: failure.retry_at_ms,
     });
 }
 
@@ -2252,15 +2304,15 @@ pub(crate) fn spawn_ask(
                     (Some(message), None)
                 }
             }
-            Err(message) => (
+            Err(failure) => (
                 None,
                 Some(EngineAskError {
                     kind: if cancel.is_cancelled() {
                         EngineAskErrorKind::Cancelled
                     } else {
-                        EngineAskErrorKind::Other
+                        failure.kind
                     },
-                    message,
+                    message: failure.message,
                 }),
             ),
         };
@@ -2345,7 +2397,7 @@ async fn auxiliary(
     task: &agent::AskTask,
     tx: &EngineEventSender,
     cancel: &CancellationToken,
-) -> Result<AuxiliaryAnswer, String> {
+) -> Result<AuxiliaryAnswer, Failure> {
     let mut process = Process::spawn(transport::LaunchOptions {
         cwd,
         target: &task.target,
@@ -2369,6 +2421,7 @@ async fn auxiliary(
         tokio::pin!(deadline);
         let mut initialized = false;
         let mut usage = UsageTracker::default();
+        let mut limits = limit::Limits::default();
         let mut answer = AuxiliaryAnswer::default();
         loop {
             tokio::select! {
@@ -2377,6 +2430,7 @@ async fn auxiliary(
                 frame = process.read() => {
                     let frame = frame?.ok_or("Claude Code exited before its auxiliary request completed")?;
                     answer.observe(&frame);
+                    limits.frame(&frame);
                     match frame["type"].as_str() {
                         Some("control_response") if !initialized && frame["response"]["request_id"].as_str() == Some("smelt-init") => {
                             if frame["response"]["subtype"].as_str() == Some("error") { return Err("Claude Code auxiliary initialization failed".into()); }
@@ -2391,7 +2445,7 @@ async fn auxiliary(
                         }
                         Some("result") if initialized => {
                             usage.emit(tx, &frame, true, None);
-                            if frame["is_error"].as_bool().unwrap_or(false) || frame["subtype"].as_str() != Some("success") { return Err(result_error(&frame)); }
+                            if frame["is_error"].as_bool().unwrap_or(false) || frame["subtype"].as_str() != Some("success") { return Err(Failure::from(result_error(&frame)).limited(limits.take_hit())); }
                             return Ok(std::mem::take(&mut answer).finish(task, &frame));
                         }
                         _ => {}
