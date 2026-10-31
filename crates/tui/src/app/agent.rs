@@ -21,7 +21,7 @@ pub(crate) struct TurnLifecycle {
     next_continuation_token: u64,
     pending_continuation_token: Option<u64>,
     pub(super) pause: Option<TurnPause>,
-    pub(super) request_overrides: smelt_core::custom_commands::CommandOverrides,
+    pub(super) command: CommandScope,
     pending_meta: Option<protocol::TurnMeta>,
     pending_history_appends: Vec<PendingHistoryAppend>,
     context_tokens_updated: bool,
@@ -30,6 +30,15 @@ pub(crate) struct TurnLifecycle {
     cancel_generation: u64,
     dispatching_turn_id: Option<u64>,
     dispatching_permissions: Option<std::sync::Arc<smelt_core::permissions::Permissions>>,
+}
+
+/// The command a turn runs for and the request settings it scopes to the turn.
+/// A resumed turn keeps the scope of the turn it continues.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CommandScope {
+    /// The custom command's name, or `None` for a plain request.
+    pub(crate) name: Option<String>,
+    pub(crate) overrides: smelt_core::custom_commands::CommandOverrides,
 }
 
 /// Stops automatic dispatch without treating an interrupted turn as idle work.
@@ -65,7 +74,7 @@ impl TurnLifecycle {
             next_continuation_token: 1,
             pending_continuation_token: None,
             pause: None,
-            request_overrides: Default::default(),
+            command: CommandScope::default(),
             pending_meta: None,
             pending_history_appends: Vec::new(),
             context_tokens_updated: false,
@@ -313,13 +322,10 @@ impl TurnLifecycle {
         self.active = Some(dispatch.state);
     }
 
-    pub(crate) fn begin_prepared_turn(
-        &mut self,
-        overrides: smelt_core::custom_commands::CommandOverrides,
-    ) {
+    pub(crate) fn begin_prepared_turn(&mut self, command: CommandScope) {
         self.pending_continuation_token = None;
         self.pause = None;
-        self.request_overrides = overrides;
+        self.command = command;
     }
 
     pub(crate) fn record_started_turn(
@@ -371,7 +377,7 @@ impl TurnLifecycle {
         self.pending_history_appends.clear();
         self.context_tokens_updated = false;
         self.pause = None;
-        self.request_overrides = Default::default();
+        self.command = CommandScope::default();
         self.clear_continuation();
     }
 }
@@ -394,7 +400,7 @@ struct PreparedTurn {
     reasoning_effort: protocol::ReasoningEffort,
     permission_overrides: Option<protocol::PermissionOverrides>,
     permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
-    request_overrides: smelt_core::custom_commands::CommandOverrides,
+    command: CommandScope,
     rewind_history_idx: Option<usize>,
     rollback: Option<StagedTurnRollback>,
 }
@@ -660,7 +666,7 @@ impl TuiApp {
             reasoning_effort: self.core.config.reasoning_effort.clone(),
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
-            request_overrides: Default::default(),
+            command: CommandScope::default(),
             rewind_history_idx: None,
             rollback: None,
         };
@@ -895,7 +901,7 @@ impl TuiApp {
                 reasoning_effort: self.core.config.reasoning_effort.clone(),
                 permission_overrides: None,
                 permissions: self.core.permissions.snapshot(),
-                request_overrides: Default::default(),
+                command: CommandScope::default(),
                 rewind_history_idx: None,
                 rollback: None,
             });
@@ -923,8 +929,7 @@ impl TuiApp {
         turn: PreparedTurn,
         provisional: Option<smelt_core::transcript_model::BlockId>,
     ) -> Option<PreparedTurnDispatch> {
-        self.conversation
-            .begin_prepared_turn(turn.request_overrides.clone());
+        self.conversation.begin_prepared_turn(turn.command.clone());
         let operation_id = self
             .conversation
             .submissions
@@ -1510,7 +1515,7 @@ impl TuiApp {
             reasoning_effort: self.core.config.reasoning_effort.clone(),
             permission_overrides: None,
             permissions: self.core.permissions.snapshot(),
-            request_overrides: Default::default(),
+            command: CommandScope::default(),
             rewind_history_idx: None,
             rollback: (adds_history || adds_block).then_some(rollback),
         })
@@ -1519,12 +1524,12 @@ impl TuiApp {
     fn custom_command_parts(
         &self,
         cmd: smelt_core::custom_commands::CustomCommand,
-    ) -> (
-        String,
-        String,
-        smelt_core::custom_commands::CommandOverrides,
-    ) {
-        (format!("/{}", cmd.display), cmd.body, cmd.overrides)
+    ) -> (String, String, CommandScope) {
+        let scope = CommandScope {
+            name: Some(cmd.name),
+            overrides: cmd.overrides,
+        };
+        (format!("/{}", cmd.display), cmd.body, scope)
     }
 
     pub(crate) fn begin_custom_command_turn(
@@ -1532,11 +1537,11 @@ impl TuiApp {
         cmd: smelt_core::custom_commands::CustomCommand,
         sent_at_ms: u64,
     ) -> Option<TurnState> {
-        let (display, evaluated, overrides) = self.custom_command_parts(cmd);
+        let (display, evaluated, scope) = self.custom_command_parts(cmd);
         self.begin_command_request_turn(
             display,
             evaluated,
-            overrides,
+            scope,
             CommandTurnStart::Fresh,
             sent_at_ms,
         )
@@ -1547,11 +1552,11 @@ impl TuiApp {
         cmd: smelt_core::custom_commands::CustomCommand,
         sent_at_ms: u64,
     ) -> Option<TurnState> {
-        let (display, evaluated, overrides) = self.custom_command_parts(cmd);
+        let (display, evaluated, scope) = self.custom_command_parts(cmd);
         self.begin_command_request_turn(
             display,
             evaluated,
-            overrides,
+            scope,
             CommandTurnStart::ContinueFromLast,
             sent_at_ms,
         )
@@ -1601,10 +1606,11 @@ impl TuiApp {
         &mut self,
         display: String,
         evaluated: String,
-        overrides: smelt_core::custom_commands::CommandOverrides,
+        scope: CommandScope,
         start: CommandTurnStart,
         sent_at_ms: u64,
     ) -> Option<TurnState> {
+        let CommandScope { name, overrides } = scope;
         if self.block_read_only_mutation("submit a turn to this read-only session") {
             return None;
         }
@@ -1762,7 +1768,7 @@ impl TuiApp {
             reasoning_effort: reasoning,
             permission_overrides,
             permissions,
-            request_overrides: overrides,
+            command: CommandScope { name, overrides },
             rewind_history_idx,
             rollback: Some(rollback),
         })
@@ -1894,12 +1900,12 @@ impl TuiApp {
         {
             return false;
         }
-        let overrides = self.conversation.turn_request_overrides().clone();
+        let scope = self.conversation.turn_command().clone();
         let sent_at_ms = engine::clock::unix_time_ms(self.core.clock.as_ref());
         let turn = self.begin_command_request_turn(
             String::new(),
             String::new(),
-            overrides,
+            scope,
             CommandTurnStart::ContinueFromLast,
             sent_at_ms,
         );
@@ -3316,7 +3322,7 @@ mod tests {
         let turn = app.app.begin_command_request_turn(
             "continue".into(),
             String::new(),
-            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandScope::default(),
             crate::app::CommandTurnStart::ContinueFromLast,
             0,
         );
@@ -4857,7 +4863,7 @@ mod tests {
             .begin_command_request_turn(
                 "/retry".into(),
                 "retry command".into(),
-                smelt_core::custom_commands::CommandOverrides::default(),
+                crate::app::CommandScope::default(),
                 crate::app::CommandTurnStart::Fresh,
                 0,
             )
@@ -4890,7 +4896,7 @@ mod tests {
         let turn = app.app.begin_command_request_turn(
             "/retry".into(),
             "retry command".into(),
-            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandScope::default(),
             crate::app::CommandTurnStart::Fresh,
             0,
         );
@@ -4989,7 +4995,7 @@ mod tests {
             .begin_command_request_turn(
                 "/continue".into(),
                 String::new(),
-                smelt_core::custom_commands::CommandOverrides::default(),
+                crate::app::CommandScope::default(),
                 crate::app::CommandTurnStart::ContinueFromLast,
                 0,
             )
@@ -5304,7 +5310,7 @@ mod tests {
         let turn = app.app.begin_command_request_turn(
             "/fix".into(),
             "fix it".into(),
-            smelt_core::custom_commands::CommandOverrides::default(),
+            crate::app::CommandScope::default(),
             crate::app::CommandTurnStart::Fresh,
             0,
         );

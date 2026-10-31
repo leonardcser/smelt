@@ -468,6 +468,7 @@ Current continuation identity and automatic-dispatch pause. Scoped to the curren
 | `paused` | `boolean` | yes | Whether automatic turn dispatch is stopped after an error or cancellation. |
 | `error_kind` | `string` |  | Provider error kind, or `"cancelled"` after a user cancellation. |
 | `retry_at_ms` | `integer` |  | Provider-supplied reset time in Unix milliseconds, if known. |
+| `command` | `string` |  | Name of the custom command the paused turn runs for, or `nil` for a plain request. |
 
 ### `smelt.engine.InheritedAskSpec`
 

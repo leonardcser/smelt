@@ -21,6 +21,8 @@ pub struct LuaContinuationState {
     pub error_kind: Option<String>,
     /// Provider-supplied reset time in Unix milliseconds, if known.
     pub retry_at_ms: Option<u64>,
+    /// Name of the custom command the paused turn runs for, or `nil` for a plain request.
+    pub command: Option<String>,
 }
 
 impl mlua::IntoLua for LuaContinuationState {
@@ -30,6 +32,7 @@ impl mlua::IntoLua for LuaContinuationState {
         table.set("paused", self.paused)?;
         table.set("error_kind", self.error_kind)?;
         table.set("retry_at_ms", self.retry_at_ms)?;
+        table.set("command", self.command)?;
         Ok(mlua::Value::Table(table))
     }
 }
@@ -368,13 +371,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Return the current session's continuation token and pause state. A new turn, cancellation, or session change invalidates scheduled continuations.",
         &[],
         |_, ()| {
-            let (token, pause) = crate::lua::try_with_agent_host(|host| host.continuation_state())
-                .unwrap_or_default();
+            let (token, pause, command) =
+                crate::lua::try_with_agent_host(|host| host.continuation_state()).unwrap_or_default();
             Ok(LuaContinuationState {
                 token,
                 paused: pause.is_some(),
                 error_kind: pause.and_then(|pause| pause.kind).map(|kind| kind.as_str().to_string()),
                 retry_at_ms: pause.and_then(|pause| pause.retry_at_ms),
+                command: pause.and(command),
             })
         },
     )?;

@@ -689,7 +689,10 @@ impl AgentLuaHost<'_> {
             let queued = crate::app::QueuedInput::custom_command_request(
                 format!("/{}", command.display),
                 command.body.clone(),
-                command.overrides,
+                crate::app::CommandScope {
+                    name: Some(command.name),
+                    overrides: command.overrides,
+                },
                 sent_at_ms,
             );
             let target = smelt_core::lua::current_command_queue_target()
@@ -702,10 +705,17 @@ impl AgentLuaHost<'_> {
         self.app.conversation.set_active(turn);
     }
 
-    pub(crate) fn continuation_state(&self) -> (Option<u64>, Option<crate::app::agent::TurnPause>) {
+    pub(crate) fn continuation_state(
+        &self,
+    ) -> (
+        Option<u64>,
+        Option<crate::app::agent::TurnPause>,
+        Option<String>,
+    ) {
         (
             self.app.conversation.continuation_token(),
             self.app.conversation.turn_pause(),
+            self.app.conversation.turn_command().name.clone(),
         )
     }
 

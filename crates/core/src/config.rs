@@ -197,7 +197,7 @@ settings! {
     system_clipboard:      Bool   = true;
     /// Auto-summarize when request context usage crosses `compact_threshold` (forced on in headless).
     auto_compact:          Bool   = true;
-    /// Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session.
+    /// Idle auto-continue policy: `off` disables it, `goal` continues active auto goals, and `always` continues any idle session. Except with `off`, a turn paused by a quota or rate limit resumes on its own.
     auto_continue:         String = "goal", choices: ["off", "goal", "always"];
     /// Display math as Unicode text or Kitty graphics (Unicode fallback when unsupported).
     math_rendering:        String = "graphics", choices: ["unicode", "graphics"];

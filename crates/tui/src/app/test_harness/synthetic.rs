@@ -90,7 +90,10 @@ impl TestApp {
         let turn = self.app.begin_command_request_turn(
             display,
             evaluated,
-            overrides,
+            crate::app::CommandScope {
+                name: None,
+                overrides,
+            },
             start,
             engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
         );

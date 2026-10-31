@@ -320,6 +320,7 @@
 ---@field paused boolean Whether automatic turn dispatch is stopped after an error or cancellation.
 ---@field error_kind? string Provider error kind, or `"cancelled"` after a user cancellation.
 ---@field retry_at_ms? integer Provider-supplied reset time in Unix milliseconds, if known.
+---@field command? string Name of the custom command the paused turn runs for, or `nil` for a plain request.
 
 --- Spec for `smelt.engine.ask_inherited`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

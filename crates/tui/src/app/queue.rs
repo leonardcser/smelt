@@ -204,7 +204,7 @@ impl InputQueues {
 pub(crate) enum QueuedTurnOptions {
     Default,
     CustomCommand {
-        overrides: Box<smelt_core::custom_commands::CommandOverrides>,
+        scope: Box<super::agent::CommandScope>,
     },
 }
 
@@ -240,7 +240,7 @@ impl QueuedRequest {
     pub(crate) fn custom_command(
         display: impl Into<String>,
         text: impl Into<String>,
-        overrides: smelt_core::custom_commands::CommandOverrides,
+        scope: super::agent::CommandScope,
         sent_at_ms: u64,
     ) -> Self {
         Self {
@@ -248,7 +248,7 @@ impl QueuedRequest {
             content: Content::text(text.into()),
             sent_at_ms,
             turn_options: QueuedTurnOptions::CustomCommand {
-                overrides: Box::new(overrides),
+                scope: Box::new(scope),
             },
             replay: None,
         }
@@ -314,11 +314,11 @@ impl QueuedInput {
     pub(crate) fn custom_command_request(
         display: impl Into<String>,
         text: impl Into<String>,
-        overrides: smelt_core::custom_commands::CommandOverrides,
+        scope: super::agent::CommandScope,
         sent_at_ms: u64,
     ) -> Self {
         QueuedInput::Request(Box::new(QueuedRequest::custom_command(
-            display, text, overrides, sent_at_ms,
+            display, text, scope, sent_at_ms,
         )))
     }
 
