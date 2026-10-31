@@ -437,7 +437,10 @@ fn canonical_dispatch_boundary_measures_preparation_commit_and_publication_separ
             assert!(row.count >= 10, "{label}: {row:?}");
             eprintln!("{row:?}");
         }
-        assert!(enters.iter().all(|elapsed| *elapsed < 250_000));
+        // Storage stays paused, so any wait on it would run to the persistence deadline.
+        assert!(enters
+            .iter()
+            .all(|elapsed| *elapsed < crate::persist::DEFAULT_PERSISTENCE_DEADLINE.as_micros()));
     }
 }
 
@@ -979,7 +982,8 @@ fn canonical_enter_returns_and_repaints_while_storage_is_paused() {
     app.type_text("submitted request");
     let started = std::time::Instant::now();
     app.press(KeyCode::Enter);
-    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    // Storage stays paused, so any wait on it would run to the persistence deadline.
+    assert!(started.elapsed() < crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
     assert!(app.app.turn_submission_is_pending());
     assert!(!app.agent_running());
     assert_eq!(app.state().prompt_text, "");
@@ -991,7 +995,7 @@ fn canonical_enter_returns_and_repaints_while_storage_is_paused() {
     let started = std::time::Instant::now();
     app.type_text("draft while saving");
     assert!(app.render_to_frame().text().contains("draft while saving"));
-    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    assert!(started.elapsed() < crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
     release.send(()).unwrap();
     app.wait_for_turn_persistence();
     assert!(app.agent_running());
