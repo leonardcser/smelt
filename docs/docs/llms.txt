@@ -12,6 +12,7 @@ Source: https://github.com/leonardcser/smelt
 - [Common workflows](https://smeltagent.dev/latest/guide/workflows/): attach files, review changes, run hands-off, resume sessions
 - [Headless and CI](https://smeltagent.dev/latest/guide/headless/): run without the TUI in scripts and pipelines
 - [Benchmarks](https://smeltagent.dev/latest/guide/benchmarks/): Terminal-Bench 2.1 resource use against five other agents
+- [Design decisions](https://smeltagent.dev/latest/guide/design/): why smelt has its own renderer, Lua plugins and SQLite sessions, and what each costs
 - [Troubleshooting](https://smeltagent.dev/latest/guide/troubleshooting/): common problems and fixes
 
 ## Customize

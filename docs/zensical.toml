@@ -15,6 +15,7 @@ nav = [
     { "Common workflows" = "guide/workflows.md" },
     { "Headless and CI" = "guide/headless.md" },
     { "Benchmarks" = "guide/benchmarks.md" },
+    { "Design decisions" = "guide/design.md" },
     { "Troubleshooting" = "guide/troubleshooting.md" },
   ]},
   { "Customize" = [
