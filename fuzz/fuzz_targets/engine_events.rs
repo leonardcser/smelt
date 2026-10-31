@@ -144,7 +144,11 @@ impl Model {
         if let (Some(relative), Some(submitted)) =
             (self.submitted_history_idx.checked_sub(first), submitted)
         {
-            if let Some(slot) = self.history.get_mut(first + relative).filter(|_| relative < items.len()) {
+            if let Some(slot) = self
+                .history
+                .get_mut(first + relative)
+                .filter(|_| relative < items.len())
+            {
                 *slot = submitted;
             }
         }

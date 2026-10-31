@@ -71,7 +71,8 @@ enum Op {
 }
 
 /// Vim keys `VimKeys` draws from, Control chords last.
-const VIM_KEYS: &[u8] = b"hjklwbeWBEge0^$GgfFtT;,%()[]{}<>'`\"mxXdDcCsSyYpPrRuU~JiaIAoOvV.nN*#/?123_+-zZ\x1b";
+const VIM_KEYS: &[u8] =
+    b"hjklwbeWBEge0^$GgfFtT;,%()[]{}<>'`\"mxXdDcCsSyYpPrRuU~JiaIAoOvV.nN*#/?123_+-zZ\x1b";
 const VIM_CTRL_KEYS: &[char] = &['a', 'x', 'r', 'o', 'i', 'u', 'd', 'v'];
 
 const SPECIALS: &[KeyCode] = &[

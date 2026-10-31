@@ -42,10 +42,51 @@ struct Cell {
 /// Wide entries exercise continuation reconstruction at arbitrary columns,
 /// including the right edge and overlaps with earlier writes.
 const GRAPHEMES: &[&str] = &[
-    " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
-    "0", "1", "2", "3", "8", "9", ":", ";", "<", "=", ">", "?", "@", "A", "B", "a", "b",
-    "~", "á", "e\u{301}", "a\u{308}", "€", "¶", "漢", "界", "🙂", "👩\u{200d}💻",
-    "9\u{fe0f}", "🇨🇦",
+    " ",
+    "!",
+    "\"",
+    "#",
+    "$",
+    "%",
+    "&",
+    "'",
+    "(",
+    ")",
+    "*",
+    "+",
+    ",",
+    "-",
+    ".",
+    "/",
+    "0",
+    "1",
+    "2",
+    "3",
+    "8",
+    "9",
+    ":",
+    ";",
+    "<",
+    "=",
+    ">",
+    "?",
+    "@",
+    "A",
+    "B",
+    "a",
+    "b",
+    "~",
+    "á",
+    "e\u{301}",
+    "a\u{308}",
+    "€",
+    "¶",
+    "漢",
+    "界",
+    "🙂",
+    "👩\u{200d}💻",
+    "9\u{fe0f}",
+    "🇨🇦",
 ];
 
 /// Palette covers: default; bare fg/bg; basic named colors; ANSI; RGB;
@@ -131,7 +172,8 @@ fn run(input: Input) {
         for x in 0..w {
             let i = (y as usize * w as usize + x as usize) % input.cells.len();
             let cell = input.cells[i];
-            grid.set_symbol(x, y, grapheme(cell.ch_idx), style(cell.style_idx));
+            grid.as_mut_slice()
+                .set_symbol(x, y, grapheme(cell.ch_idx), style(cell.style_idx));
         }
     }
 
