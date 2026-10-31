@@ -1,7 +1,7 @@
 //! Shared storybook harness for the pure-term snapshot tests.
 //!
 //! Each story wires a `Compositor`, paints into its grid via
-//! `paint_layout_tree` against a story-specific layout tree, and
+//! `LayoutTree::resolve(..).paint(..)` against a story-specific layout tree, and
 //! captures a `SnapshotFrame` for `insta`. Two snapshots land per call:
 //! `<name>.snap` for the visible glyph grid and `<name>.styles.snap`
 //! for the per-cell style sidecar.
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use insta::{assert_snapshot, with_settings};
 use smelt_term::{
-    paint_layout_tree, Compositor, Grid, GridSlice, LayoutTree, PaintId, Rect, SnapshotFrame,
+    Compositor, Grid, GridSlice, LayoutStyle, LayoutTree, NoopSizer, PaintId, Rect, SnapshotFrame,
     Style, Theme,
 };
 
@@ -104,16 +104,11 @@ impl StoryCtx {
     fn paint_passes(&mut self, passes: &[(&LayoutTree, Rect, bool)]) {
         let leaf_text = self.leaf_text.clone();
         let theme = Arc::clone(&self.theme);
-        let term_size = (self.width, self.height);
         let mut writer = Discard;
         self.compositor
-            .render_with(&self.theme, &mut writer, |grid, _theme| {
+            .render_with(&mut writer, |grid| {
                 for &(tree, area, clear_leaf) in passes {
-                    let mut dispatch = |id: PaintId,
-                                        leaf: Rect,
-                                        grid: &mut Grid,
-                                        _t: &Arc<Theme>,
-                                        _ts: (u16, u16)| {
+                    let mut dispatch = |id: PaintId, leaf: Rect, grid: &mut Grid| {
                         let mut slice: GridSlice = grid.slice_mut(leaf);
                         if clear_leaf {
                             let leaf_area = slice.grid_rect();
@@ -129,7 +124,13 @@ impl StoryCtx {
                             }
                         }
                     };
-                    paint_layout_tree(grid, &theme, tree, area, term_size, &mut dispatch);
+                    tree.resolve(area, &NoopSizer).paint(
+                        grid,
+                        &theme,
+                        LayoutStyle::default(),
+                        None,
+                        &mut dispatch,
+                    );
                 }
             })
             .expect("render");

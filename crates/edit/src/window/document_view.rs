@@ -427,7 +427,7 @@ impl Window {
         event: MouseEvent,
         viewport: WindowViewport,
     ) -> Option<DocPosition> {
-        let rel_row = match viewport.hit(event.row, event.column) {
+        let rel_row = match viewport.hit(event.column, event.row) {
             Some(ViewportHit::Content { row, .. }) => row,
             _ => return None,
         };
@@ -907,11 +907,11 @@ impl Window {
         let scroll_top = self.scroll_top;
         let rel_row = event
             .row
-            .saturating_sub(viewport.rect.top)
+            .saturating_sub(viewport.rect.y)
             .min(height.saturating_sub(1));
         let rel_col = event
             .column
-            .saturating_sub(viewport.rect.left)
+            .saturating_sub(viewport.rect.x)
             .saturating_sub(viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left)
             .min(viewport.content_width.saturating_sub(1));
@@ -1747,11 +1747,11 @@ fn document_position_at_mouse<D: DisplayDocument + ?Sized>(
     let height = viewport.rect.height.max(1);
     let rel_row = event
         .row
-        .saturating_sub(viewport.rect.top)
+        .saturating_sub(viewport.rect.y)
         .min(height.saturating_sub(1));
     let rel_col = event
         .column
-        .saturating_sub(viewport.rect.left)
+        .saturating_sub(viewport.rect.x)
         .saturating_sub(viewport.gutter_width)
         .saturating_sub(gutter_pad_left)
         .min(viewport.content_width.saturating_sub(1));
@@ -2362,11 +2362,11 @@ mod tests {
         )
     }
 
-    fn mouse_event(kind: MouseEventKind, row: u16, column: u16) -> MouseEvent {
+    fn mouse_event(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
         MouseEvent {
             kind,
-            row,
-            column,
+            row: y,
+            column: x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
     }
@@ -2398,7 +2398,7 @@ mod tests {
         let (status, range) = DocumentViewExecutor::handle_mouse(
             &mut state,
             &mut doc,
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 2),
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
             test_viewport(4),
             0,
             0,
@@ -2421,7 +2421,7 @@ mod tests {
         let (_, range) = DocumentViewExecutor::handle_mouse(
             &mut state,
             &mut doc,
-            mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 2),
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 1),
             test_viewport(4),
             0,
             0,
@@ -2572,7 +2572,7 @@ mod tests {
             DocumentViewExecutor::handle_mouse(
                 state,
                 &mut doc,
-                mouse_event(kind, row, col),
+                mouse_event(kind, col, row),
                 test_viewport(4),
                 0,
                 0,
@@ -2630,7 +2630,7 @@ mod tests {
         let (_, selection) = DocumentViewExecutor::handle_mouse(
             &mut state,
             &mut doc,
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 3),
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1),
             test_viewport(4),
             0,
             0,
@@ -2743,7 +2743,7 @@ mod tests {
         DocumentViewExecutor::handle_mouse(
             &mut state,
             &mut doc,
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 8),
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 8, 0),
             test_viewport(1),
             0,
             0,
@@ -2802,7 +2802,7 @@ mod tests {
         let (_, selection) = DocumentViewExecutor::handle_mouse(
             &mut state,
             &mut doc,
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
             test_viewport(1),
             0,
             0,

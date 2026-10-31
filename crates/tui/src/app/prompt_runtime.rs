@@ -430,11 +430,11 @@ impl PromptRuntime {
 
     pub(crate) fn register_resize_click(
         &mut self,
-        row: u16,
-        column: u16,
+        x: u16,
+        y: u16,
         now: std::time::Instant,
     ) -> bool {
-        self.height.register_click(row, column, now)
+        self.height.register_click(x, y, now)
     }
 
     pub(crate) fn start_resize_drag(&mut self, chrome: &'static str, row: u16, visible_rows: u16) {

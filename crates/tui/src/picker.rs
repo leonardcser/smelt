@@ -10,7 +10,7 @@
 //! Closing the leaf cascades through `overlay_close` to remove the overlay.
 
 use crate::app::TuiApp;
-use crate::smelt_edit::layout::Anchor;
+use crate::smelt_edit::Anchor;
 use crate::smelt_edit::BufCreateOpts;
 use crate::smelt_edit::{
     BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, RowIndex, SplitConfig,

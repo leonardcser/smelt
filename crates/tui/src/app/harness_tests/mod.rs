@@ -198,9 +198,9 @@ fn prompt_content_cell(app: &mut TestApp) -> (u16, u16) {
     let vp = prompt.viewport.expect("prompt viewport after render");
     let pad_left = prompt.gutter_pad_left;
     (
-        vp.rect.top,
+        vp.rect.y,
         vp.rect
-            .left
+            .x
             .saturating_add(vp.gutter_width)
             .saturating_add(pad_left),
     )
@@ -288,10 +288,10 @@ fn drag_transcript_text(
                 "transcript row {absolute_row} is outside the viewport"
             );
             (
-                viewport.rect.top + viewport_row as u16,
+                viewport.rect.y + viewport_row as u16,
                 viewport
                     .rect
-                    .left
+                    .x
                     .saturating_add(viewport.gutter_width)
                     .saturating_add(win.gutter_pad_left)
                     .saturating_add(smelt_buffer::text::byte_to_cell(

@@ -83,7 +83,6 @@ fn tui_session_builder() -> TerminalSessionBuilder {
     TerminalSession::builder()
         .alternate_screen(true)
         .line_wrap(false)
-        .hide_cursor(true)
         .bracketed_paste(true)
         .focus_events(true)
         .keyboard_enhancements(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)

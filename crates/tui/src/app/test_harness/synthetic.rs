@@ -134,8 +134,8 @@ impl TestApp {
         crate::picker::forget(&mut self.app, leaf);
     }
 
-    pub(crate) fn scroll_at(&mut self, row: u16, col: u16, rows: isize) -> bool {
-        self.app.ui.scroll_at(row, col, rows)
+    pub(crate) fn scroll_at(&mut self, x: u16, y: u16, rows: isize) -> bool {
+        self.app.ui.scroll_at(x, y, rows)
     }
 
     pub(crate) fn open_readonly_overlay_fixture(
@@ -179,7 +179,7 @@ impl TestApp {
         self.app.ui.overlay_open(
             crate::smelt_edit::Overlay::new(
                 crate::smelt_edit::LayoutTree::leaf(leaf),
-                crate::smelt_edit::layout::Anchor::ScreenCenter,
+                crate::smelt_edit::Anchor::ScreenCenter,
             )
             .with_size((40, 5))
             .modal(true),

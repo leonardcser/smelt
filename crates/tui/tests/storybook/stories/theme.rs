@@ -2,7 +2,8 @@
 
 use smelt_core::style::Color;
 use smelt_core::theme::intern;
-use tui::smelt_edit::layout::{Constraint, Gutters};
+use tui::smelt_edit::layout::Constraint;
+use tui::smelt_edit::Gutters;
 use tui::smelt_edit::{LayoutTree, SplitConfig};
 
 fn pane(region: &str) -> SplitConfig {

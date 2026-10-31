@@ -430,13 +430,12 @@ impl TestApp {
 
     pub(crate) fn scroll_at_with_transcript_intent(
         &mut self,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
         rows: isize,
         label: &str,
     ) -> bool {
-        self.app
-            .scroll_at_with_transcript_intent(row, col, rows, label)
+        self.app.scroll_at_with_transcript_intent(x, y, rows, label)
     }
 
     pub(crate) fn execute_document_view_command_for_win(
@@ -614,14 +613,10 @@ impl TestApp {
             .transcript_win()
             .viewport
             .expect("transcript viewport");
-        let col = vp
-            .rect
-            .left
-            .saturating_add(vp.gutter_width)
-            .saturating_add(1);
-        let down_row = vp.rect.top.saturating_add(vp.rect.height / 2);
+        let col = vp.rect.x.saturating_add(vp.gutter_width).saturating_add(1);
+        let down_row = vp.rect.y.saturating_add(vp.rect.height / 2);
         let edge_row = match edge {
-            TranscriptScrollProbeEdge::Top => vp.rect.top,
+            TranscriptScrollProbeEdge::Top => vp.rect.y,
             TranscriptScrollProbeEdge::Bottom => vp.rect.bottom().saturating_sub(1),
         };
         self.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
@@ -695,7 +690,7 @@ impl TestApp {
         };
         let row = vp
             .rect
-            .top
+            .y
             .saturating_add(rel_row.min(vp.rect.height.saturating_sub(1)));
         self.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
             MouseEvent {
@@ -899,11 +894,11 @@ impl TestApp {
             .expect("transcript viewport");
         let row = vp
             .rect
-            .top
+            .y
             .saturating_add(rel_row.min(vp.rect.height.saturating_sub(1)));
         let col = vp
             .rect
-            .left
+            .x
             .saturating_add(vp.gutter_width)
             .saturating_add(rel_col.min(vp.content_width.saturating_sub(1)));
         (row, col)

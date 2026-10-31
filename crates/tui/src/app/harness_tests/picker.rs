@@ -238,8 +238,8 @@ fn picker_wheel_pans_viewport_when_unfocused() {
         .paint_rect(crate::smelt_edit::PaintId::from(leaf))
         .expect("picker leaf has a rect after render");
     // Pick a cell inside the picker rect.
-    let row = leaf_rect.top + 1;
-    let col = leaf_rect.left + 1;
+    let row = leaf_rect.y + 1;
+    let col = leaf_rect.x + 1;
 
     let scroll = MouseEvent {
         kind: MouseEventKind::ScrollDown,
@@ -251,7 +251,7 @@ fn picker_wheel_pans_viewport_when_unfocused() {
     let _ = MouseButton::Left;
 
     let pre_scroll = app.ui_probe().win(leaf).unwrap().scroll_top();
-    let _ = app.scroll_at(row, col, 3);
+    let _ = app.scroll_at(col, row, 3);
     let post_scroll = app.ui_probe().win(leaf).unwrap().scroll_top();
     assert!(
         post_scroll > pre_scroll,
@@ -321,7 +321,7 @@ fn prompt_docked_picker_clamps_height_to_headroom() {
         .expect("prompt has a rect");
 
     assert!(
-        picker_rect.top + picker_rect.height <= prompt_rect.top,
+        picker_rect.y + picker_rect.height <= prompt_rect.y,
         "picker at {picker_rect:?} overlaps prompt at {prompt_rect:?}"
     );
 
@@ -373,7 +373,7 @@ fn prompt_docked_picker_relayouts_on_resize() {
         .split_rect(crate::app::PROMPT_WIN)
         .expect("prompt has a rect");
     assert!(
-        short_rect.top + short_rect.height <= prompt_rect.top,
+        short_rect.y + short_rect.height <= prompt_rect.y,
         "shrunk picker at {short_rect:?} overlaps prompt at {prompt_rect:?}"
     );
 }

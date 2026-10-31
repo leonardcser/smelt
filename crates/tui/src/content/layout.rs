@@ -1,6 +1,6 @@
 pub(crate) use crate::smelt_edit::Rect;
 
-use crate::smelt_edit::layout::Anchor;
+use crate::smelt_edit::Anchor;
 use crate::smelt_edit::{Align, Ui};
 
 /// Resolve the window that represents the top edge of the prompt chrome
@@ -26,7 +26,7 @@ pub(crate) fn prompt_chrome_top_win(ui: &Ui) -> crate::smelt_edit::WinId {
 /// more rows than fit without overlapping the prompt block.
 pub(crate) fn available_rows_above_prompt_chrome(ui: &Ui) -> u16 {
     let target = prompt_chrome_top_win(ui);
-    ui.split_rect(target).map(|r| r.top).unwrap_or(0)
+    ui.split_rect(target).map(|r| r.y).unwrap_or(0)
 }
 
 /// Columns the prompt chrome spans: the terminal's width, or less when a
@@ -102,11 +102,11 @@ impl LayoutState {
         self.transcript.height
     }
 
-    pub(crate) fn hit_test(&self, row: u16, col: u16) -> HitRegion {
-        if self.prompt.contains(row, col) {
+    pub(crate) fn hit_test(&self, x: u16, y: u16) -> HitRegion {
+        if self.prompt.contains(x, y) {
             return HitRegion::Prompt;
         }
-        if self.transcript.contains(row, col) {
+        if self.transcript.contains(x, y) {
             return HitRegion::Transcript;
         }
         HitRegion::Outside
@@ -175,9 +175,9 @@ mod tests {
     fn seed_layout_splits_term() {
         let ui = set_up_layout(1, 80, 40);
         let layout = LayoutState::from_ui(&ui);
-        assert_eq!(layout.transcript.top, 0);
+        assert_eq!(layout.transcript.y, 0);
         assert_eq!(layout.transcript.height, 38);
-        assert_eq!(layout.prompt.top, 39);
+        assert_eq!(layout.prompt.y, 39);
         assert_eq!(layout.prompt.height, 1);
     }
 
@@ -186,9 +186,9 @@ mod tests {
         let ui = set_up_layout(1, 80, 40);
         let layout = LayoutState::from_ui(&ui);
         assert_eq!(layout.hit_test(0, 0), HitRegion::Transcript);
-        assert_eq!(layout.hit_test(37, 0), HitRegion::Transcript);
-        assert_eq!(layout.hit_test(38, 0), HitRegion::Outside);
-        assert_eq!(layout.hit_test(39, 0), HitRegion::Prompt);
+        assert_eq!(layout.hit_test(0, 37), HitRegion::Transcript);
+        assert_eq!(layout.hit_test(0, 38), HitRegion::Outside);
+        assert_eq!(layout.hit_test(0, 39), HitRegion::Prompt);
     }
 
     #[test]

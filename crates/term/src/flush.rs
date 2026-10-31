@@ -203,7 +203,7 @@ mod tests {
     fn flush_single_cell_moves_cursor_and_writes_char() {
         let prev = Grid::new(5, 3);
         let mut curr = Grid::new(5, 3);
-        curr.set(2, 1, 'X', Style::default());
+        curr.as_mut_slice().set(2, 1, 'X', Style::default());
         let s = flush_to_string(&curr, &prev);
         // MoveTo(2, 1) emits "\x1b[2;3H" (1-based, row-first).
         assert!(
@@ -219,7 +219,8 @@ mod tests {
     fn flush_styled_cell_emits_an_sgr_before_the_char() {
         let prev = Grid::new(5, 1);
         let mut curr = Grid::new(5, 1);
-        curr.set(0, 0, 'A', Style::new().fg(Color::Red));
+        curr.as_mut_slice()
+            .set(0, 0, 'A', Style::new().fg(Color::Red));
         let s = flush_to_string(&curr, &prev);
         // We don't pin the exact bytes (crossterm picks the encoding for
         // named colors). The contract: a styled cell emits *some* SGR
@@ -237,7 +238,7 @@ mod tests {
         let render = |c: Color| {
             let prev = Grid::new(3, 1);
             let mut curr = Grid::new(3, 1);
-            curr.set(0, 0, 'A', Style::new().fg(c));
+            curr.as_mut_slice().set(0, 0, 'A', Style::new().fg(c));
             flush_to_string(&curr, &prev)
         };
         // Distinct named colors must not collapse to the same SGR.
@@ -249,7 +250,7 @@ mod tests {
     fn flush_resets_style_at_end() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().bold());
+        curr.as_mut_slice().set(0, 0, 'A', Style::new().bold());
         let mut out = Vec::new();
         flush_diff(&mut out, curr.diff(&prev)).unwrap();
         let s = String::from_utf8(out).unwrap();
@@ -260,10 +261,10 @@ mod tests {
     fn flush_never_emits_cell_control_characters() {
         let prev = Grid::new(4, 1);
         let mut curr = Grid::new(4, 1);
-        curr.set(0, 0, 'A', Style::default());
-        curr.set(1, 0, '\r', Style::default());
-        curr.set(2, 0, '\x1b', Style::default());
-        curr.set(3, 0, 'B', Style::default());
+        curr.as_mut_slice().set(0, 0, 'A', Style::default());
+        curr.as_mut_slice().set(1, 0, '\r', Style::default());
+        curr.as_mut_slice().set(2, 0, '\x1b', Style::default());
+        curr.as_mut_slice().set(3, 0, 'B', Style::default());
 
         let s = flush_to_string(&curr, &prev);
         assert!(
@@ -282,7 +283,8 @@ mod tests {
     fn flush_emits_ansi_palette_color_code() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().fg(Color::AnsiValue(208)));
+        curr.as_mut_slice()
+            .set(0, 0, 'A', Style::new().fg(Color::AnsiValue(208)));
         let s = flush_to_string(&curr, &prev);
         // Crossterm encodes ANSI palette fg as "\x1b[38;5;<n>m".
         assert!(s.contains("\x1b[38;5;208m"), "got {s:?}");
@@ -292,7 +294,7 @@ mod tests {
     fn flush_emits_rgb_color_code() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(
+        curr.as_mut_slice().set(
             0,
             0,
             'A',
@@ -311,7 +313,7 @@ mod tests {
     fn flush_snaps_rgb_to_the_palette_on_a_256_color_terminal() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(
+        curr.as_mut_slice().set(
             0,
             0,
             'A',
@@ -343,8 +345,10 @@ mod tests {
     fn flush_leaves_named_and_palette_colors_alone_on_a_256_color_terminal() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().fg(Color::AnsiValue(208)));
-        curr.set(1, 0, 'B', Style::new().fg(Color::Red));
+        curr.as_mut_slice()
+            .set(0, 0, 'A', Style::new().fg(Color::AnsiValue(208)));
+        curr.as_mut_slice()
+            .set(1, 0, 'B', Style::new().fg(Color::Red));
         let truecolor = flush_to_string_at(&curr, &prev, ColorDepth::TrueColor);
         let palette = flush_to_string_at(&curr, &prev, ColorDepth::Palette256);
         assert_eq!(truecolor, palette);
@@ -357,7 +361,7 @@ mod tests {
         let render = |s: Style| {
             let prev = Grid::new(3, 1);
             let mut curr = Grid::new(3, 1);
-            curr.set(0, 0, 'A', s);
+            curr.as_mut_slice().set(0, 0, 'A', s);
             flush_to_string(&curr, &prev)
         };
         let fg_only = render(Style::new().fg(Color::Blue));
@@ -371,7 +375,7 @@ mod tests {
     fn flush_emits_bold_attribute() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().bold());
+        curr.as_mut_slice().set(0, 0, 'A', Style::new().bold());
         let s = flush_to_string(&curr, &prev);
         assert!(s.contains("\x1b[1m"), "got {s:?}");
     }
@@ -380,7 +384,7 @@ mod tests {
     fn flush_emits_dim_attribute() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().dim());
+        curr.as_mut_slice().set(0, 0, 'A', Style::new().dim());
         let s = flush_to_string(&curr, &prev);
         assert!(s.contains("\x1b[2m"), "got {s:?}");
     }
@@ -389,7 +393,7 @@ mod tests {
     fn flush_emits_italic_attribute() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().italic());
+        curr.as_mut_slice().set(0, 0, 'A', Style::new().italic());
         let s = flush_to_string(&curr, &prev);
         assert!(s.contains("\x1b[3m"), "got {s:?}");
     }
@@ -398,7 +402,7 @@ mod tests {
     fn flush_emits_underline_attribute() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().underline());
+        curr.as_mut_slice().set(0, 0, 'A', Style::new().underline());
         let s = flush_to_string(&curr, &prev);
         assert!(s.contains("\x1b[4m"), "got {s:?}");
     }
@@ -407,7 +411,8 @@ mod tests {
     fn flush_emits_crossedout_attribute() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().crossedout());
+        curr.as_mut_slice()
+            .set(0, 0, 'A', Style::new().crossedout());
         let s = flush_to_string(&curr, &prev);
         assert!(s.contains("\x1b[9m"), "got {s:?}");
     }
@@ -416,7 +421,7 @@ mod tests {
     fn flush_emits_reverse_attribute() {
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::new().reverse());
+        curr.as_mut_slice().set(0, 0, 'A', Style::new().reverse());
         let s = flush_to_string(&curr, &prev);
         assert!(s.contains("\x1b[7m"), "got {s:?}");
     }
@@ -429,8 +434,9 @@ mod tests {
         // run - there must be an escape between them.
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
-        curr.set(0, 0, 'A', Style::default());
-        curr.set(1, 0, 'B', Style::new().fg(Color::Red));
+        curr.as_mut_slice().set(0, 0, 'A', Style::default());
+        curr.as_mut_slice()
+            .set(1, 0, 'B', Style::new().fg(Color::Red));
         let s = flush_to_string(&curr, &prev);
         let a_pos = s.find('A').expect("A in output");
         let b_pos = s.find('B').expect("B in output");
@@ -445,8 +451,8 @@ mod tests {
     fn flush_noncontiguous_cells_emit_moveto_between() {
         let prev = Grid::new(10, 2);
         let mut curr = Grid::new(10, 2);
-        curr.set(0, 0, 'A', Style::default());
-        curr.set(5, 1, 'B', Style::default());
+        curr.as_mut_slice().set(0, 0, 'A', Style::default());
+        curr.as_mut_slice().set(5, 1, 'B', Style::default());
         let s = flush_to_string(&curr, &prev);
         // 'A' at (0,0) → MoveTo(0,0) = "\x1b[1;1H". Then 'B' at (5,1) →
         // MoveTo(5,1) = "\x1b[2;6H".
@@ -458,9 +464,9 @@ mod tests {
     fn flush_contiguous_cells_share_one_moveto() {
         let prev = Grid::new(10, 1);
         let mut curr = Grid::new(10, 1);
-        curr.set(0, 0, 'A', Style::default());
-        curr.set(1, 0, 'B', Style::default());
-        curr.set(2, 0, 'C', Style::default());
+        curr.as_mut_slice().set(0, 0, 'A', Style::default());
+        curr.as_mut_slice().set(1, 0, 'B', Style::default());
+        curr.as_mut_slice().set(2, 0, 'C', Style::default());
         let s = flush_to_string(&curr, &prev);
         // Only one MoveTo at the start; the rest stream after.
         assert!(s.contains("\x1b[1;1HABC"), "got {s:?}");
@@ -470,8 +476,8 @@ mod tests {
     fn flush_tracks_cursor_after_wide_glyphs() {
         let prev = Grid::new(10, 1);
         let mut curr = Grid::new(10, 1);
-        curr.set(0, 0, '漢', Style::default());
-        curr.set(2, 0, 'A', Style::default());
+        curr.as_mut_slice().set(0, 0, '漢', Style::default());
+        curr.as_mut_slice().set(2, 0, 'A', Style::default());
         let s = flush_to_string(&curr, &prev);
 
         assert!(
@@ -490,9 +496,11 @@ mod tests {
         ] {
             let prev = Grid::new(10, 1);
             let mut curr = Grid::new(10, 1);
-            let end = curr.put_str(0, 0, grapheme, Style::default());
+            let end = curr
+                .as_mut_slice()
+                .put_str(0, 0, grapheme, Style::default());
             assert_eq!(end, width);
-            curr.set(end, 0, 'X', Style::default());
+            curr.as_mut_slice().set(end, 0, 'X', Style::default());
 
             let s = flush_to_string(&curr, &prev);
 
@@ -507,8 +515,8 @@ mod tests {
     fn flush_streams_private_use_icons_as_narrow_glyphs() {
         let prev = Grid::new(10, 1);
         let mut curr = Grid::new(10, 1);
-        curr.set(0, 0, '\u{e6b2}', Style::default());
-        curr.set(1, 0, 'A', Style::default());
+        curr.as_mut_slice().set(0, 0, '\u{e6b2}', Style::default());
+        curr.as_mut_slice().set(1, 0, 'A', Style::default());
         let s = flush_to_string(&curr, &prev);
 
         assert!(
@@ -539,8 +547,8 @@ mod tests {
     #[test]
     fn flush_clears_wide_glyph_continuation() {
         let mut prev = Grid::new(10, 1);
-        prev.set(0, 0, '漢', Style::default());
-        prev.set(2, 0, 'A', Style::default());
+        prev.as_mut_slice().set(0, 0, '漢', Style::default());
+        prev.as_mut_slice().set(2, 0, 'A', Style::default());
         let curr = Grid::new(10, 1);
         let s = flush_to_string(&curr, &prev);
 

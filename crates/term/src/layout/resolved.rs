@@ -2,7 +2,7 @@
 
 use super::{Chrome, ChromePaintCtx, LayoutTree, LeafSizer, PaintId, Rect};
 use super::{DividerStyles, Split, SplitDivider, SplitGeometry, SplitId};
-use crate::{Grid, PaintDispatch, Theme};
+use crate::{Grid, Theme};
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
@@ -69,6 +69,10 @@ impl ResolvedSplit {
     }
 }
 
+/// Per-leaf paint callback: `(paint_id, leaf_rect, grid)`.
+/// [`ResolvedLayout::paint`] calls it for each resolved leaf.
+pub type PaintDispatch<'a> = dyn FnMut(PaintId, Rect, &mut Grid) + 'a;
+
 /// One operation in painter order, retaining resolved geometry rather than
 /// measuring again during painting. Later entries shadow earlier hit targets.
 #[derive(Clone, Debug)]
@@ -85,12 +89,11 @@ pub enum LayoutPaintOp {
     Divider(SplitDivider),
 }
 
-/// Appearance and active gesture state, independent of geometry or input policy.
+/// Appearance of chrome and dividers, independent of geometry or input.
 #[derive(Clone, Copy, Default)]
 pub struct LayoutStyle {
     pub root_chrome: ChromePaintCtx,
     pub dividers: DividerStyles,
-    pub active_split: Option<SplitId>,
 }
 
 /// An immutable geometry snapshot. Resolve again after changing preferred sizes,
@@ -154,7 +157,7 @@ impl ResolvedLayout {
             });
             match node {
                 LayoutTree::Leaf { id, .. } => {
-                    let rect = super::inset_for_chrome(area, chrome);
+                    let rect = chrome.inner(area);
                     operations.push(LayoutPaintOp::Leaf { id: *id, rect });
                     leaves.insert(
                         *id,
@@ -166,11 +169,9 @@ impl ResolvedLayout {
                     );
                     order += 1;
                 }
-                LayoutTree::Frame { child, .. } => stack.push(Visit::Node(
-                    child,
-                    super::inset_for_chrome(area, chrome),
-                    parent,
-                )),
+                LayoutTree::Frame { child, .. } => {
+                    stack.push(Visit::Node(child, chrome.inner(area), parent))
+                }
                 LayoutTree::Split {
                     split, children, ..
                 } => {
@@ -255,10 +256,10 @@ impl ResolvedLayout {
         self.leaves.get(&id).map(|leaf| leaf.rect)
     }
 
-    pub fn leaf_at(&self, row: u16, col: u16) -> Option<PaintId> {
+    pub fn leaf_at(&self, x: u16, y: u16) -> Option<PaintId> {
         self.leaves()
             .rev()
-            .find_map(|(id, rect)| rect.contains(row, col).then_some(id))
+            .find_map(|(id, rect)| rect.contains(x, y).then_some(id))
     }
 
     pub fn splits(&self) -> impl DoubleEndedIterator<Item = &ResolvedSplit> {
@@ -271,10 +272,10 @@ impl ResolvedLayout {
             .map(|&index| &self.splits[index])
     }
 
-    pub fn divider_at(&self, row: u16, col: u16) -> Option<&ResolvedSplit> {
+    pub fn divider_at(&self, x: u16, y: u16) -> Option<&ResolvedSplit> {
         self.splits()
             .rev()
-            .find(|split| split.divider.rect.contains(row, col))
+            .find(|split| split.divider.rect.contains(x, y))
     }
 
     pub fn split_for_leaf(
@@ -296,9 +297,9 @@ impl ResolvedLayout {
     pub fn paint(
         &self,
         grid: &mut Grid,
-        theme: &Arc<Theme>,
-        term_size: (u16, u16),
+        theme: &Theme,
         style: LayoutStyle,
+        active_split: Option<SplitId>,
         paint: &mut PaintDispatch,
     ) {
         for op in &self.operations {
@@ -307,15 +308,15 @@ impl ResolvedLayout {
                     let context = if *root {
                         style.root_chrome
                     } else {
-                        ChromePaintCtx::empty()
+                        ChromePaintCtx::default()
                     };
-                    super::paint_chrome_with(grid, *area, chrome, theme, context);
+                    super::paint_chrome(grid, *area, chrome, theme, context);
                 }
-                LayoutPaintOp::Leaf { id, rect } => paint(*id, *rect, grid, theme, term_size),
+                LayoutPaintOp::Leaf { id, rect } => paint(*id, *rect, grid),
                 LayoutPaintOp::Divider(divider) => {
                     divider.paint(
                         grid,
-                        divider.style(style.dividers, style.active_split == Some(divider.id)),
+                        divider.style(style.dividers, active_split == Some(divider.id)),
                     );
                 }
             }

@@ -1322,7 +1322,7 @@ fn pin_transcript_bottom_with_click(app: &mut TestApp) {
         .expect("transcript viewport");
     let click = crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        column: viewport.rect.left.saturating_add(4),
+        column: viewport.rect.x.saturating_add(4),
         row: viewport.rect.bottom().saturating_sub(2),
         modifiers: KeyModifiers::empty(),
     };
@@ -1855,11 +1855,11 @@ fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
         .win(top_bar)
         .and_then(|w| w.viewport)
         .expect("prompt top bar viewport");
-    let bar_row = vp.rect.top.saturating_add(vp.rect.height.saturating_sub(1));
+    let bar_row = vp.rect.y.saturating_add(vp.rect.height.saturating_sub(1));
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         row: bar_row,
-        column: vp.rect.left,
+        column: vp.rect.x,
         modifiers: KeyModifiers::empty(),
     })));
 

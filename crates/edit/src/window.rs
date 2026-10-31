@@ -14,8 +14,57 @@ use smelt_buffer::buffer::{LineCursorPolicy, SelectionRange, VirtTextPos};
 use smelt_buffer::theme::{intern, HlGroup};
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_term::grid::{GridSlice, Style};
-use smelt_term::layout::{Gutters, Rect};
+use smelt_term::layout::Rect;
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Gutters {
+    pub pad_left: u16,
+    pub pad_right: u16,
+    pub scrollbar: bool,
+}
+
+impl Default for Gutters {
+    /// Any buffer-backed window is scrollable by default. The scrollbar paints
+    /// only when content overflows; the column it occupies is reserved either
+    /// way so content width is stable across overflow transitions. Surfaces
+    /// that can't scroll by construction (single-line status strips, cursor-
+    /// driven list/option/input panels) must opt out with `scrollbar: false`.
+    fn default() -> Self {
+        Self {
+            pad_left: 0,
+            pad_right: 0,
+            scrollbar: true,
+        }
+    }
+}
+
+impl Gutters {
+    pub fn scrollbar_width(&self) -> u16 {
+        if self.scrollbar {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Width inside the left padding (still includes the scrollbar column if any).
+    pub fn layer_width(&self, total: u16) -> u16 {
+        total.saturating_sub(self.pad_left)
+    }
+
+    /// Inner content width once `pad_left`, `pad_right`, and the scrollbar column are subtracted.
+    pub fn content_width(&self, total: u16) -> u16 {
+        self.layer_width(total)
+            .saturating_sub(self.pad_right)
+            .saturating_sub(self.scrollbar_width())
+    }
+
+    /// Inner content width after a data-driven gutter column has been reserved.
+    pub fn content_width_with_gutter(&self, total: u16, gutter_width: u16) -> u16 {
+        self.content_width(total.saturating_sub(gutter_width))
+    }
+}
 
 mod document_motion;
 mod document_view;
@@ -290,8 +339,8 @@ impl ScrollbarState {
         self.display_scroll_top = scroll_top;
     }
 
-    pub(crate) fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
-        col == self.col && row >= rect.top && row < rect.bottom()
+    pub(crate) fn contains(&self, rect: Rect, x: u16, y: u16) -> bool {
+        x == self.col && y >= rect.y && y < rect.bottom()
     }
 }
 
@@ -330,21 +379,21 @@ impl WindowViewport {
         self
     }
 
-    fn contains(&self, row: u16, col: u16) -> bool {
-        self.rect.contains(row, col)
+    fn contains(&self, x: u16, y: u16) -> bool {
+        self.rect.contains(x, y)
     }
 
-    pub(crate) fn hit(&self, row: u16, col: u16) -> Option<ViewportHit> {
-        if !self.contains(row, col) {
+    pub(crate) fn hit(&self, x: u16, y: u16) -> Option<ViewportHit> {
+        if !self.contains(x, y) {
             return None;
         }
         if let Some(bar) = self.scrollbar {
-            if bar.contains(self.rect, row, col) {
+            if bar.contains(self.rect, x, y) {
                 return Some(ViewportHit::Scrollbar);
             }
         }
-        let rel_row = row - self.rect.top;
-        let rel_col = col.saturating_sub(self.rect.left);
+        let rel_row = y - self.rect.y;
+        let rel_col = x.saturating_sub(self.rect.x);
         let max_col = self.content_width.saturating_sub(1);
         Some(ViewportHit::Content {
             row: rel_row,
@@ -1888,7 +1937,7 @@ impl Window {
         text: &str,
         mode: MouseEndpointMode,
     ) -> Option<MouseTextEndpoint> {
-        let viewport_hit = viewport.hit(event.row, event.column);
+        let viewport_hit = viewport.hit(event.column, event.row);
         let (rel_row, rel_col, hit_is_content) = match mode {
             MouseEndpointMode::RequireContentHit => {
                 let ViewportHit::Content {
@@ -1909,11 +1958,11 @@ impl Window {
                 }
                 let row = event
                     .row
-                    .saturating_sub(viewport.rect.top)
+                    .saturating_sub(viewport.rect.y)
                     .min(viewport.rect.height.saturating_sub(1));
                 let col = event
                     .column
-                    .saturating_sub(viewport.rect.left)
+                    .saturating_sub(viewport.rect.x)
                     .saturating_sub(viewport.gutter_width)
                     .saturating_sub(self.config.gutters.pad_left)
                     .min(viewport.content_width.saturating_sub(1));
@@ -1954,7 +2003,7 @@ impl Window {
         event: MouseEvent,
         viewport: WindowViewport,
     ) -> TextHit<usize> {
-        let Some(hit) = viewport.hit(event.row, event.column) else {
+        let Some(hit) = viewport.hit(event.column, event.row) else {
             return TextHit {
                 row: 0,
                 cell_col: 0,
@@ -4026,11 +4075,11 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
     let width = slice.width();
     let height = slice.height();
     let area = slice.grid_rect();
-    let local_col = bar.col.saturating_sub(area.left);
+    let local_col = bar.col.saturating_sub(area.x);
     if local_col >= width {
         return;
     }
-    let row_offset = viewport.rect.top.saturating_sub(area.top);
+    let row_offset = viewport.rect.y.saturating_sub(area.y);
     if row_offset >= height {
         return;
     }
@@ -5350,14 +5399,14 @@ mod tests {
         assert!(range.is_none());
         let (_, range) = w.handle_row_mouse(
             &buf,
-            click_event(MouseEventKind::Drag(MouseButton::Left), 4, 3),
+            click_event(MouseEventKind::Drag(MouseButton::Left), 3, 4),
             ctx,
             now,
         );
         assert!(range.is_none());
         let (_, range) = w.handle_row_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 4, 3),
+            click_event(MouseEventKind::Up(MouseButton::Left), 3, 4),
             ctx,
             now,
         );
@@ -5398,7 +5447,7 @@ mod tests {
 
         w.handle_row_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Down(MouseButton::Left), 4, 0),
             ctx,
             now,
         );
@@ -5410,12 +5459,12 @@ mod tests {
         assert_eq!(w.cursor_col(), 4);
     }
 
-    fn click_event(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
+    fn click_event(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
         use crossterm::event::KeyModifiers;
         MouseEvent {
             kind,
-            row,
-            column: col,
+            row: y,
+            column: x,
             modifiers: KeyModifiers::NONE,
         }
     }
@@ -5453,7 +5502,7 @@ mod tests {
         let click_byte = buf.byte_at_display_pos(1, 7);
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 1, 7),
+            click_event(MouseEventKind::Down(MouseButton::Left), 7, 1),
             ctx,
         );
         assert_eq!(r, Status::Capture);
@@ -5487,7 +5536,7 @@ mod tests {
         );
         w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 2),
+            click_event(MouseEventKind::Drag(MouseButton::Left), 2, 0),
             ctx,
         );
 
@@ -5497,7 +5546,7 @@ mod tests {
 
         let (_, range) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 2),
+            click_event(MouseEventKind::Up(MouseButton::Left), 2, 0),
             ctx,
         );
         assert_eq!(range, Some((0, 3)));
@@ -5529,12 +5578,12 @@ mod tests {
         );
         w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 3),
+            click_event(MouseEventKind::Drag(MouseButton::Left), 3, 0),
             ctx,
         );
         let (_, range) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 3),
+            click_event(MouseEventKind::Up(MouseButton::Left), 3, 0),
             ctx,
         );
 
@@ -5559,7 +5608,7 @@ mod tests {
 
         w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            click_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
             ctx,
         );
         w.handle_mouse(
@@ -5591,12 +5640,12 @@ mod tests {
 
         w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 9),
+            click_event(MouseEventKind::Down(MouseButton::Left), 9, 0),
             ctx,
         );
         w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 9),
+            click_event(MouseEventKind::Up(MouseButton::Left), 9, 0),
             ctx,
         );
 
@@ -6057,7 +6106,7 @@ mod tests {
         let endpoint = w
             .mouse_text_endpoint(
                 &buf,
-                click_event(MouseEventKind::Down(MouseButton::Left), 3, 2),
+                click_event(MouseEventKind::Down(MouseButton::Left), 2, 3),
                 viewport(20, 5),
                 buf.text().as_str(),
                 MouseEndpointMode::RequireContentHit,
@@ -7480,13 +7529,13 @@ mod tests {
         };
         let (_, _) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Down(MouseButton::Left), 4, 0),
             mk_ctx(),
         );
         assert_eq!(w.vim_mode(), VimMode::Normal, "Down must not enter Visual");
         let (_, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Up(MouseButton::Left), 4, 0),
             mk_ctx(),
         );
         assert!(yank.is_none(), "bare click must not produce a yank range");
@@ -7518,12 +7567,12 @@ mod tests {
         };
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Down(MouseButton::Left), 4, 0),
             mk_ctx(),
         );
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Up(MouseButton::Left), 4, 0),
             mk_ctx(),
         );
         assert_eq!(w.curswant(), Some(4));
@@ -7553,12 +7602,12 @@ mod tests {
         );
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 7),
+            click_event(MouseEventKind::Drag(MouseButton::Left), 7, 0),
             mk_ctx(),
         );
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 7),
+            click_event(MouseEventKind::Up(MouseButton::Left), 7, 0),
             mk_ctx(),
         );
         assert_eq!(w.curswant(), Some(7));
@@ -7597,7 +7646,7 @@ mod tests {
         };
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 7),
+            click_event(MouseEventKind::Drag(MouseButton::Left), 7, 0),
             ctx,
         );
         assert_eq!(r, Status::Consumed);
@@ -7612,7 +7661,7 @@ mod tests {
         };
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 7),
+            click_event(MouseEventKind::Up(MouseButton::Left), 7, 0),
             ctx,
         );
         assert_eq!(r, Status::Consumed);
@@ -7637,7 +7686,7 @@ mod tests {
         };
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 8),
+            click_event(MouseEventKind::Down(MouseButton::Left), 8, 0),
             ctx,
         );
         assert_eq!(r, Status::Capture);
@@ -7652,7 +7701,7 @@ mod tests {
         };
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 8),
+            click_event(MouseEventKind::Up(MouseButton::Left), 8, 0),
             ctx,
         );
         assert_eq!(r, Status::Consumed);
@@ -7677,7 +7726,7 @@ mod tests {
         };
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Down(MouseButton::Left), 4, 0),
             ctx,
         );
         assert_eq!(r, Status::Capture);
@@ -7692,7 +7741,7 @@ mod tests {
         };
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Up(MouseButton::Left), 4, 0),
             ctx,
         );
         assert_eq!(r, Status::Consumed);
@@ -7724,7 +7773,7 @@ mod tests {
         // Click at viewport column 2 → source column 7 → byte for 'h'
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            click_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
             ctx,
         );
         assert_eq!(w.text_state().drag_endpoint, Some(row.find('h').unwrap()));
@@ -7760,7 +7809,7 @@ mod tests {
         };
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+            click_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
             ctx,
         );
 
@@ -7772,7 +7821,7 @@ mod tests {
         };
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 1),
+            click_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
             ctx,
         );
 
@@ -7802,7 +7851,7 @@ mod tests {
         };
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            click_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
             ctx_down,
         );
 
@@ -7815,7 +7864,7 @@ mod tests {
         };
         let _ = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 4),
+            click_event(MouseEventKind::Drag(MouseButton::Left), 4, 0),
             ctx_drag,
         );
         assert_eq!(w.text_state().drag_endpoint, Some(row.find('j').unwrap()));
@@ -8315,7 +8364,7 @@ mod tests {
         };
         let (r, _yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+            click_event(MouseEventKind::Down(MouseButton::Left), 1, 2),
             ctx,
         );
         assert_eq!(r, Status::Capture);
@@ -8329,7 +8378,7 @@ mod tests {
         };
         let (r, yank) = w.handle_mouse(
             &buf,
-            click_event(MouseEventKind::Up(MouseButton::Left), 2, 1),
+            click_event(MouseEventKind::Up(MouseButton::Left), 1, 2),
             ctx,
         );
         assert_eq!(r, Status::Consumed);

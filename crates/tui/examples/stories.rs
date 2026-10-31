@@ -25,9 +25,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
-use smelt_term::{
-    Color, Compositor, Grid, GridSlice, Rect, SnapshotFrame, Style, TerminalSession, Theme,
-};
+use smelt_term::{Color, Compositor, Grid, GridSlice, Rect, SnapshotFrame, Style, TerminalSession};
 
 #[derive(Clone, Debug)]
 struct Story {
@@ -497,7 +495,6 @@ fn run() -> std::io::Result<()> {
     let mut app = App::new(stories);
     let mut size = term.size()?;
     app.set_list_width(app.list_w, size.0);
-    let theme = Theme::default();
     let mut compositor = Compositor::new(size.0, size.1);
 
     let result = (|| -> std::io::Result<()> {
@@ -505,7 +502,7 @@ fn run() -> std::io::Result<()> {
         loop {
             let list_height = (size.1 as usize).saturating_sub(4);
             if dirty {
-                compositor.render_with(&theme, term.writer(), |grid, _theme| {
+                compositor.render_with(term.writer(), |grid| {
                     paint_frame(grid, &app, size.0, size.1);
                 })?;
                 dirty = false;

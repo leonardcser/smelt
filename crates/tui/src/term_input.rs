@@ -139,7 +139,7 @@ impl TerminalReplies {
 /// sends no answer at all.
 #[cfg(unix)]
 pub(crate) fn kitty_probe_query() -> Vec<u8> {
-    let mut query = smelt_term::kitty_control_sequence(KITTY_PROBE);
+    let mut query = smelt_term::kitty::control_sequence(KITTY_PROBE);
     if std::env::var_os("TMUX").is_none() {
         query.extend_from_slice(DEVICE_ATTRIBUTES_QUERY);
     }
@@ -149,7 +149,7 @@ pub(crate) fn kitty_probe_query() -> Vec<u8> {
 /// Asks for the cell size in pixels, answered as [`TerminalReply::CellPixels`].
 #[cfg(unix)]
 pub(crate) fn cell_pixel_query() -> Vec<u8> {
-    smelt_term::kitty_control_sequence(CELL_PIXEL_QUERY)
+    smelt_term::kitty::control_sequence(CELL_PIXEL_QUERY)
 }
 
 #[cfg(unix)]
@@ -1211,7 +1211,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pipe_backed_kitty_probe_preserves_user_input() {
-        assert!(kitty_probe_query().starts_with(&smelt_term::kitty_control_sequence(KITTY_PROBE)));
+        assert!(kitty_probe_query().starts_with(&smelt_term::kitty::control_sequence(KITTY_PROBE)));
         let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
         writer.write_all(b"z\x1b_Gi=16777214;OK\x1b\\").unwrap();
         assert_eq!(

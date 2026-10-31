@@ -263,8 +263,8 @@ impl mlua::UserData for LuaWin {
             match rect {
                 Some(r) => {
                     let t = lua.create_table()?;
-                    t.set("row", r.top)?;
-                    t.set("col", r.left)?;
+                    t.set("row", r.y)?;
+                    t.set("col", r.x)?;
                     t.set("width", r.width)?;
                     t.set("height", r.height)?;
                     Ok(mlua::Value::Table(t))
@@ -929,7 +929,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let new_doc = NEW_DOC.get_or_init(|| {
         format!(
             "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
-            crate::smelt_edit::layout::Gutters::default().scrollbar
+            crate::smelt_edit::Gutters::default().scrollbar
         )
     });
     m.fn_(
@@ -1023,13 +1023,13 @@ pub(super) fn open_or_refresh(
             .unwrap_or(0) as u16;
         let scrollbar = opts
             .and_then(|table| table.get::<Option<bool>>("scrollbar").ok().flatten())
-            .unwrap_or_else(|| crate::smelt_edit::layout::Gutters::default().scrollbar);
+            .unwrap_or_else(|| crate::smelt_edit::Gutters::default().scrollbar);
         let window = host.with_ui(|ui| {
             let window = ui.win_open_split(
                 buf_id,
                 crate::smelt_edit::SplitConfig {
                     region,
-                    gutters: crate::smelt_edit::layout::Gutters {
+                    gutters: crate::smelt_edit::Gutters {
                         pad_left,
                         pad_right,
                         scrollbar,

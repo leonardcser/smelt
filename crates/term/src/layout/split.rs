@@ -1,6 +1,6 @@
 //! Runtime-neutral sizing, geometry, and interaction for two-pane layouts.
 
-use super::{inset_for_chrome, Chrome, LayoutTree, Rect};
+use super::{Chrome, LayoutTree, Rect};
 use crate::Style;
 use std::num::NonZeroU16;
 use std::sync::{
@@ -229,7 +229,7 @@ impl Split {
     }
 
     pub fn layout(&self, area: Rect, chrome: &Chrome) -> SplitGeometry {
-        let inner = inset_for_chrome(area, chrome);
+        let inner = chrome.inner(area);
         let extent = self.axis().extent(inner);
         let gap = u16::from(extent >= 3);
         let available = extent.saturating_sub(gap);
@@ -240,37 +240,27 @@ impl Split {
         let (panes, divider) = match self.axis() {
             Axis::Horizontal => (
                 [
-                    Rect::new(inner.top, inner.left, first, inner.height),
+                    Rect::new(inner.x, inner.y, first, inner.height),
                     Rect::new(
-                        inner.top,
-                        inner.left.saturating_add(first + gap),
+                        inner.x.saturating_add(first + gap),
+                        inner.y,
                         second,
                         inner.height,
                     ),
                 ],
-                Rect::new(
-                    inner.top,
-                    inner.left.saturating_add(first),
-                    gap,
-                    inner.height,
-                ),
+                Rect::new(inner.x.saturating_add(first), inner.y, gap, inner.height),
             ),
             Axis::Vertical => (
                 [
-                    Rect::new(inner.top, inner.left, inner.width, first),
+                    Rect::new(inner.x, inner.y, inner.width, first),
                     Rect::new(
-                        inner.top.saturating_add(first + gap),
-                        inner.left,
+                        inner.x,
+                        inner.y.saturating_add(first + gap),
                         inner.width,
                         second,
                     ),
                 ],
-                Rect::new(
-                    inner.top.saturating_add(first),
-                    inner.left,
-                    inner.width,
-                    gap,
-                ),
+                Rect::new(inner.x, inner.y.saturating_add(first), inner.width, gap),
             ),
         };
         SplitGeometry {
@@ -344,6 +334,7 @@ impl SplitDivider {
             Axis::Horizontal => (self.rect.height, '│', '┬', '┴'),
             Axis::Vertical => (self.rect.width, '─', '├', '┤'),
         };
+        let mut slice = grid.as_mut_slice();
         for n in 0..len {
             let ch = if n == 0 && self.join_start {
                 start
@@ -352,12 +343,11 @@ impl SplitDivider {
             } else {
                 line
             };
-            let (row, col) = match self.axis {
-                Axis::Horizontal => (self.rect.top.saturating_add(n), self.rect.left),
-                Axis::Vertical => (self.rect.top, self.rect.left.saturating_add(n)),
+            let (x, y) = match self.axis {
+                Axis::Horizontal => (self.rect.x, self.rect.y.saturating_add(n)),
+                Axis::Vertical => (self.rect.x.saturating_add(n), self.rect.y),
             };
-            let mut bytes = [0; 4];
-            grid.put_str(col, row, ch.encode_utf8(&mut bytes), style);
+            slice.set(x, y, ch, style);
         }
     }
 }
@@ -412,16 +402,16 @@ impl SplitInteraction {
     pub fn begin(
         &mut self,
         resolved: &super::ResolvedSplit,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
     ) -> Option<SplitResponse> {
-        if self.drag.is_some() || !resolved.divider.rect.contains(row, col) {
+        if self.drag.is_some() || !resolved.divider.rect.contains(x, y) {
             return None;
         }
         let rect = resolved.divider.rect;
         let grab_offset = match resolved.split.axis() {
-            Axis::Horizontal => i32::from(col) - i32::from(rect.left),
-            Axis::Vertical => i32::from(row) - i32::from(rect.top),
+            Axis::Horizontal => i32::from(x) - i32::from(rect.x),
+            Axis::Vertical => i32::from(y) - i32::from(rect.y),
         };
         let id = resolved.split.id();
         self.drag = Some(SplitDrag {
@@ -441,8 +431,8 @@ impl SplitInteraction {
     pub fn update(
         &mut self,
         resolved: Option<&super::ResolvedSplit>,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
     ) -> Option<SplitResponse> {
         let drag = self.drag.as_mut()?;
         let Some(resolved) = resolved.filter(|resolved| resolved.split.id() == drag.id) else {
@@ -450,8 +440,8 @@ impl SplitInteraction {
         };
         let first = resolved.geometry.panes[0];
         let cells = match resolved.split.axis() {
-            Axis::Horizontal => i32::from(col) - i32::from(first.left),
-            Axis::Vertical => i32::from(row) - i32::from(first.top),
+            Axis::Horizontal => i32::from(x) - i32::from(first.x),
+            Axis::Vertical => i32::from(y) - i32::from(first.y),
         } - drag.grab_offset;
         let changed = resolved
             .split
@@ -469,10 +459,10 @@ impl SplitInteraction {
     pub fn release(
         &mut self,
         resolved: Option<&super::ResolvedSplit>,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
     ) -> Option<SplitResponse> {
-        let response = self.update(resolved, row, col)?;
+        let response = self.update(resolved, x, y)?;
         if response.ended() {
             Some(response)
         } else {
@@ -486,6 +476,27 @@ impl SplitInteraction {
             changed: drag.changed,
             phase,
         })
+    }
+
+    /// Route a left-button mouse event against `layout`: press on a divider
+    /// begins a drag, drag moves it, and release ends it. Other events and
+    /// presses away from a divider return `None`.
+    pub fn handle_mouse(
+        &mut self,
+        layout: &super::ResolvedLayout,
+        event: crossterm::event::MouseEvent,
+    ) -> Option<SplitResponse> {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let (x, y) = (event.column, event.row);
+        let active = self.active_id().and_then(|id| layout.split(id));
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => layout
+                .divider_at(x, y)
+                .and_then(|split| self.begin(split, x, y)),
+            MouseEventKind::Drag(MouseButton::Left) => self.update(active, x, y),
+            MouseEventKind::Up(MouseButton::Left) => self.release(active, x, y),
+            _ => None,
+        }
     }
 
     /// Release capture without a final position update, retaining the last size.

@@ -344,7 +344,7 @@ impl TuiApp {
                     "mouse_row": event.row,
                     "mouse_column": event.column,
                     "click_count": click_count,
-                    "viewport_top": viewport.rect.top,
+                    "viewport_top": viewport.rect.y,
                     "viewport_height": viewport.rect.height,
                     "viewport_content_width": viewport.content_width,
                     "window_scroll_top": scroll_top,

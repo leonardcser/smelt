@@ -6,7 +6,8 @@
 //! emits a `.step-N` file so the viewer shows the full sequence.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tui::smelt_edit::layout::{Constraint, Gutters};
+use tui::smelt_edit::layout::Constraint;
+use tui::smelt_edit::Gutters;
 use tui::smelt_edit::{Event, LayoutTree, SplitConfig};
 
 use crate::storybook::StoryCtx;

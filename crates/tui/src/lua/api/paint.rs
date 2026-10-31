@@ -93,8 +93,8 @@ impl mlua::UserData for LuaPaintReg {
             match rect {
                 Some(r) => {
                     let t = lua.create_table()?;
-                    t.set("row", r.top)?;
-                    t.set("col", r.left)?;
+                    t.set("row", r.y)?;
+                    t.set("col", r.x)?;
                     t.set("width", r.width)?;
                     t.set("height", r.height)?;
                     Ok(mlua::Value::Table(t))

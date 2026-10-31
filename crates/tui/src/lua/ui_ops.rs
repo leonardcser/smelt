@@ -10,11 +10,12 @@
 //! write `Overlay::size_override`.
 
 use crate::app::TuiApp;
-use crate::smelt_edit::layout::{Align, Anchor, Corner, PaintId};
+use crate::smelt_edit::layout::PaintId;
 use crate::smelt_edit::{
     add_signed_row, BodyDrag, Callback, CallbackResult, Constraint, Decoration, DragConfig,
     KeyBind, LayoutTree, Overlay, Payload, ResizeConfig, RowIndex, WinEvent, WinId,
 };
+use crate::smelt_edit::{Align, Anchor, Corner};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Resolve a Lua-built layout description against host-owned windows, paints,
@@ -417,7 +418,7 @@ fn parse_win_target(opts: &mlua::Table) -> Result<u64, String> {
 }
 
 /// Parse `opts.anchor` (plus anchor-specific extras) directly into a
-/// `term::Anchor`. The four dock variants resolve to literal screen
+/// `smelt_edit::Anchor`. The four dock variants resolve to literal screen
 /// edges; the host has no `statusline` concept anymore, so plugins that
 /// want their overlay to clear the Lua-allocated statusline pass the
 /// statusline's row count via `opts.above_rows` (typically computed

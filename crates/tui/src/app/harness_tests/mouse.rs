@@ -37,8 +37,8 @@ fn prompt_bottom_chrome_click_focuses_prompt() {
         .expect("transcript rect after render");
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        row: transcript_rect.top,
-        column: transcript_rect.left,
+        row: transcript_rect.y,
+        column: transcript_rect.x,
         modifiers: KeyModifiers::empty(),
     })));
     assert_eq!(app.state().app_focus, AppFocus::Content);
@@ -53,8 +53,8 @@ fn prompt_bottom_chrome_click_focuses_prompt() {
         .expect("bottom prompt chrome rect after render");
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        row: bottom_rect.top,
-        column: bottom_rect.left,
+        row: bottom_rect.y,
+        column: bottom_rect.x,
         modifiers: KeyModifiers::empty(),
     })));
 
@@ -106,8 +106,8 @@ fn top_scroll_pill_click_preserves_focus_and_cursor_and_advances_target() {
         assert_eq!(app.ui_probe().focus(), Some(crate::app::PROMPT_WIN));
         app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            row: pill_rect.top,
-            column: pill_rect.left.saturating_add(1),
+            row: pill_rect.y,
+            column: pill_rect.x.saturating_add(1),
             modifiers: KeyModifiers::empty(),
         })));
 
@@ -248,10 +248,10 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
         .position(|line| line.contains("Bestellung 10500"))
         .expect("target line rendered");
     assert!(line_idx >= scroll_top, "target line should be visible");
-    let row = vp.rect.top + (line_idx - scroll_top) as u16;
+    let row = vp.rect.y + (line_idx - scroll_top) as u16;
     let column = vp
         .rect
-        .left
+        .x
         .saturating_add(vp.gutter_width)
         .saturating_add(pad_left)
         .saturating_add(3);
@@ -392,9 +392,9 @@ fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
         let line = &buf.lines()[line_idx];
         let hit_col = smelt_buffer::text::byte_to_cell(line, line.find("curly").unwrap()) as u16;
         (
-            vp.rect.top + abs_row.saturating_sub(scroll_top) as u16,
+            vp.rect.y + abs_row.saturating_sub(scroll_top) as u16,
             vp.rect
-                .left
+                .x
                 .saturating_add(vp.gutter_width)
                 .saturating_add(pad_left)
                 .saturating_add(hit_col),
@@ -472,13 +472,13 @@ fn user_message_padding_click_snaps_cursor_after_left_pad() {
         .expect("transcript viewport after render");
     let column = vp
         .rect
-        .left
+        .x
         .saturating_add(vp.gutter_width)
         .saturating_add(transcript_win.gutter_pad_left);
 
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        row: vp.rect.top,
+        row: vp.rect.y,
         column,
         modifiers: KeyModifiers::empty(),
     })));
@@ -527,10 +527,10 @@ fn user_message_drag_to_line_end_does_not_select_bottom_padding_row() {
         &buf.lines()[text_row],
         buf.lines()[text_row].find("hello").unwrap(),
     ) as u16;
-    let row = vp.rect.top + text_row as u16;
+    let row = vp.rect.y + text_row as u16;
     let column = vp
         .rect
-        .left
+        .x
         .saturating_add(vp.gutter_width)
         .saturating_add(pad_left)
         .saturating_add(text_col);
@@ -582,10 +582,10 @@ fn transcript_click_drag_in_vim_survives_multiple_drag_events() {
         .viewport
         .expect("transcript viewport after render");
     let pad_left = transcript_win.gutter_pad_left;
-    let row = vp.rect.top;
+    let row = vp.rect.y;
     let column = vp
         .rect
-        .left
+        .x
         .saturating_add(vp.gutter_width)
         .saturating_add(pad_left);
 
@@ -679,12 +679,12 @@ fn prompt_drag_selection_release_paints_flash() {
     let mouse = |kind, column| {
         SourceEvent::Term(Event::Mouse(MouseEvent {
             kind,
-            row: rect.top,
+            row: rect.y,
             column,
             modifiers: KeyModifiers::empty(),
         }))
     };
-    let start = rect.left + 2;
+    let start = rect.x + 2;
     app.feed_one(mouse(MouseEventKind::Down(MouseButton::Left), start));
     app.feed_one(mouse(MouseEventKind::Drag(MouseButton::Left), start + 5));
     app.feed_one(mouse(MouseEventKind::Up(MouseButton::Left), start + 5));

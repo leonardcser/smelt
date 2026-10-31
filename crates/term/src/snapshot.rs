@@ -166,16 +166,18 @@ impl SnapshotFrame {
     /// as `\0` so the destination grid's flush logic advances by the
     /// glyph's visual width and renders the same way the source did.
     pub fn blit_into(&self, grid: &mut Grid, x_off: u16, y_off: u16) {
+        let (width, height) = (grid.width(), grid.height());
+        let mut slice = grid.as_mut_slice();
         for (r, row) in self.rows.iter().enumerate() {
             let y = y_off.saturating_add(r as u16);
-            if y >= grid.height() {
+            if y >= height {
                 break;
             }
             let mut graphemes = cell_width::graphemes(row).peekable();
             let mut cell_index: usize = 0;
             while let Some(grapheme) = graphemes.next() {
                 let x = x_off.saturating_add(cell_index as u16);
-                if x >= grid.width() {
+                if x >= width {
                     break;
                 }
                 let width = cell_width::text_width(grapheme);
@@ -184,7 +186,7 @@ impl SnapshotFrame {
                     .get(r)
                     .and_then(|row| row.get(cell_index).copied())
                     .unwrap_or_default();
-                grid.set_symbol(x, y, grapheme, style);
+                slice.set_symbol(x, y, grapheme, style);
                 if width == 2 {
                     // Snapshot rows serialize the continuation cell as one space.
                     if graphemes.peek() == Some(&" ") {
@@ -435,7 +437,7 @@ mod tests {
     #[test]
     fn roundtrip_ascii_preserves_text_and_styles() {
         let frame = snap_grid(|g| {
-            g.put_str(
+            g.as_mut_slice().put_str(
                 0,
                 0,
                 "hello",
@@ -457,7 +459,7 @@ mod tests {
         // Row ends on a wide glyph - text() removes the continuation
         // slot; the `dim:` header recovers the width.
         let frame = snap_grid(|g| {
-            g.put_str(0, 0, "你好", Style::default());
+            g.as_mut_slice().put_str(0, 0, "你好", Style::default());
         });
         let parsed = SnapshotFrame::parse(&frame.text(), &frame.styles_text());
         assert_eq!(parsed.width, 16);
@@ -468,7 +470,7 @@ mod tests {
     #[test]
     fn text_keeps_spaces_inside_trailing_graphemes() {
         let frame = snap_grid(|g| {
-            g.put_str(0, 0, "\u{600} ", Style::default());
+            g.as_mut_slice().put_str(0, 0, "\u{600} ", Style::default());
         });
 
         assert_eq!(frame.text().lines().next(), Some("\u{600} "));
@@ -483,7 +485,7 @@ mod tests {
         // wide chars at the right offset, with `\0` continuation
         // slots so flush will advance by the visual width.
         let frame = snap_grid(|g| {
-            g.put_str(0, 0, "你好", Style::default());
+            g.as_mut_slice().put_str(0, 0, "你好", Style::default());
         });
         let parsed = SnapshotFrame::parse(&frame.text(), &frame.styles_text());
         let mut dest = Grid::new(20, 3);
@@ -504,7 +506,7 @@ mod tests {
     #[test]
     fn parse_recovers_rgb_and_attrs() {
         let frame = snap_grid(|g| {
-            g.put_str(
+            g.as_mut_slice().put_str(
                 0,
                 0,
                 "x",

@@ -32,9 +32,9 @@ pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 pub use smelt_term::{
-    flush_diff, paint_layout_tree, Align, Border, Cell, CellUpdate, Color, Compositor, Constraint,
-    ContainerId, Corner, Grid, GridSlice, Gutters, HitRegistry, LayoutTree, Line, Natural,
-    NaturalRef, PaintDispatch, PaintId, Rect, SnapshotFrame, Span, StaticNatural, Style, Theme,
+    flush_diff, Border, Cell, CellUpdate, Color, Compositor, Constraint, ContainerId, Grid,
+    GridSlice, HitRegistry, LayoutTree, Line, Natural, NaturalRef, PaintId, Rect, SnapshotFrame,
+    Span, StaticNatural, Style, Theme,
 };
 pub use smelt_term::{grid, layout};
 
@@ -71,8 +71,8 @@ pub use event::{Event, Status};
 pub use modal::{ModalId, ModalOwner};
 pub use motions::{FindKind, LineTo, Motion, WordTo};
 pub use overlay::{
-    BodyDrag, ChromeAction, ChromeOwner, Decoration, DecorationId, DragConfig, HitTarget, Overlay,
-    OverlayId, ResizeConfig, ResizeEdges,
+    Align, Anchor, BodyDrag, ChromeAction, ChromeOwner, Corner, Decoration, DecorationId,
+    DragConfig, HitTarget, Overlay, OverlayId, ResizeConfig, ResizeEdges,
 };
 pub use row::{
     add_signed_row, display_row_matches, doc_range_for_match, row_match_is_selectable,
@@ -85,9 +85,9 @@ pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, BlockMotion, CursorScreenRowSelection,
     CursorShape, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
     DocumentViewExecutor, DocumentViewScreenRowRestore, DocumentViewState, DrawContext, EventCtx,
-    MouseCtx, RowHighlight, RowHighlightMode, RowHighlightRows, RowHighlightWidth, RowYankFlash,
-    ScrollTo, ScrollbarState, SplitConfig, VerticalScroll, ViewportMetrics, Window, WindowSurface,
-    WindowViewport,
+    Gutters, MouseCtx, RowHighlight, RowHighlightMode, RowHighlightRows, RowHighlightWidth,
+    RowYankFlash, ScrollTo, ScrollbarState, SplitConfig, VerticalScroll, ViewportMetrics, Window,
+    WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -357,8 +357,8 @@ struct ChromeDrag {
     owner: overlay::ChromeOwner,
     action: overlay::ChromeAction,
     start_rect: Rect,
-    origin_row: u16,
-    origin_col: u16,
+    origin_x: u16,
+    origin_y: u16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -560,20 +560,20 @@ impl Ui {
     }
 
     /// Returns 1/2/3 for successive Downs on the same cell within 400ms; wraps at 4.
-    fn record_click(&mut self, row: u16, col: u16, now: std::time::Instant) -> u8 {
+    fn record_click(&mut self, x: u16, y: u16, now: std::time::Instant) -> u8 {
         use std::time::Duration;
         let count = match self.last_click {
             Some((t, r, c, n))
                 if now.duration_since(t) < Duration::from_millis(400)
-                    && r == row
-                    && c == col
+                    && r == y
+                    && c == x
                     && n < 3 =>
             {
                 n + 1
             }
             _ => 1,
         };
-        self.last_click = Some((now, row, col, count));
+        self.last_click = Some((now, y, x, count));
         count
     }
 
@@ -599,10 +599,10 @@ impl Ui {
         if viewport.rect.height == 0 {
             return None;
         }
-        let top = viewport.rect.top;
+        let top = viewport.rect.y;
         let bottom = viewport
             .rect
-            .top
+            .y
             .saturating_add(viewport.rect.height.saturating_sub(1));
         if row <= top {
             Some(DragAutoscrollEdge::Top)
@@ -627,14 +627,14 @@ impl Ui {
         use crossterm::event::{MouseButton, MouseEventKind};
         match me.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let target = match self.hit_test(me.row, me.column, None)? {
+                let target = match self.hit_test(me.column, me.row)? {
                     HitTarget::Window(w) => HitTarget::Window(w),
                     HitTarget::Paint(p) => HitTarget::Paint(p),
                     _ => return None,
                 };
                 self.set_capture(target);
                 self.update_drag_autoscroll_pointer(target, me.row);
-                let count = self.record_click(me.row, me.column, now);
+                let count = self.record_click(me.column, me.row, now);
                 Some((target, count))
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.capture {
@@ -1581,11 +1581,11 @@ impl Ui {
     /// `MouseEventKind::Scroll{Up,Down}` arm of `dispatch_event` (which fires
     /// when wheel events bypass coalescing, e.g. an overlay is focused).
     /// Returns `true` when something was actually panned.
-    pub fn scroll_at(&mut self, row: u16, col: u16, delta: isize) -> bool {
+    pub fn scroll_at(&mut self, x: u16, y: u16, delta: isize) -> bool {
         if delta == 0 {
             return false;
         }
-        let target_win = match self.hit_test(row, col, None) {
+        let target_win = match self.hit_test(x, y) {
             Some(HitTarget::Window(w)) => Some(w),
             Some(HitTarget::Scrollbar { owner }) => Some(owner),
             _ => None,
@@ -1617,11 +1617,11 @@ impl Ui {
 
     /// Horizontal twin of [`Self::scroll_at`]. Routes a column-delta to the
     /// hit window's `pan_by_columns`. Returns whether anything panned.
-    pub fn scroll_at_horizontal(&mut self, row: u16, col: u16, delta: isize) -> bool {
+    pub fn scroll_at_horizontal(&mut self, x: u16, y: u16, delta: isize) -> bool {
         if delta == 0 {
             return false;
         }
-        let target_win = match self.hit_test(row, col, None) {
+        let target_win = match self.hit_test(x, y) {
             Some(HitTarget::Window(w)) => Some(w),
             Some(HitTarget::Scrollbar { owner }) => Some(owner),
             _ => None,
@@ -1646,35 +1646,35 @@ impl Ui {
 
     /// Hit-test a screen position. Checks overlays (topmost-z first, modal-aware)
     /// then splits leaves. Scrollbar column returns `HitTarget::Scrollbar`.
-    pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
-        self.hit_test_in(&self.resolve_scene(cursor), row, col)
+    pub fn hit_test(&self, x: u16, y: u16) -> Option<HitTarget> {
+        self.hit_test_in(&self.resolve_scene(None), x, y)
     }
 
-    fn hit_test_in(&self, scene: &ResolvedUiLayout, row: u16, col: u16) -> Option<HitTarget> {
-        if let Some((_, target)) = self.overlay_hit_test_in(scene, row, col) {
+    fn hit_test_in(&self, scene: &ResolvedUiLayout, x: u16, y: u16) -> Option<HitTarget> {
+        if let Some((_, target)) = self.overlay_hit_test_in(scene, x, y) {
             return Some(target);
         }
         for decoration in scene.decorations.iter().rev() {
-            if let Some(target) = self.layout_hit_test(&decoration.layout, row, col) {
+            if let Some(target) = self.layout_hit_test(&decoration.layout, x, y) {
                 return Some(target);
             }
         }
-        self.docked_surface_chrome_hit_test(&scene.root, row, col)
-            .or_else(|| self.layout_hit_test(&scene.root, row, col))
+        self.docked_surface_chrome_hit_test(&scene.root, x, y)
+            .or_else(|| self.layout_hit_test(&scene.root, x, y))
     }
 
     fn docked_surface_chrome_hit_test(
         &self,
         layout: &layout::ResolvedLayout,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
     ) -> Option<HitTarget> {
         layout.containers().rev().find_map(|(id, rect)| {
             let surface = self.docked_surface(id)?;
-            if !rect.contains(row, col) {
+            if !rect.contains(x, y) {
                 return None;
             }
-            let action = resize_chrome_action(rect, surface.resize, row, col);
+            let action = resize_chrome_action(rect, surface.resize, x, y);
             (action != overlay::ChromeAction::None).then_some(HitTarget::Chrome {
                 owner: overlay::ChromeOwner::Container(id),
                 action,
@@ -1688,22 +1688,22 @@ impl Ui {
     fn overlay_hit_test_in(
         &self,
         scene: &ResolvedUiLayout,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
     ) -> Option<(OverlayId, HitTarget)> {
         let modal = self
             .active_modal_overlay()
             .and_then(|id| scene.overlays.iter().find(|overlay| overlay.id == id));
         for resolved in scene.overlays.iter().rev() {
             let (id, rect) = (resolved.id, resolved.rect);
-            if resolved.transparent || !rect.contains(row, col) {
+            if resolved.transparent || !rect.contains(x, y) {
                 continue;
             }
             // The active modal blocks lower-z overlays at its rectangle.
-            if modal.is_some_and(|modal| resolved.z < modal.z && modal.rect.contains(row, col)) {
+            if modal.is_some_and(|modal| resolved.z < modal.z && modal.rect.contains(x, y)) {
                 continue;
             }
-            if let Some(target) = self.layout_hit_test(&resolved.layout, row, col) {
+            if let Some(target) = self.layout_hit_test(&resolved.layout, x, y) {
                 return Some((id, target));
             }
             let overlay = self.overlay(id)?;
@@ -1711,7 +1711,7 @@ impl Ui {
                 id,
                 HitTarget::Chrome {
                     owner: ChromeOwner::Overlay(id),
-                    action: chrome_action(rect, overlay, row, col),
+                    action: chrome_action(rect, overlay, x, y),
                 },
             ));
         }
@@ -1719,13 +1719,8 @@ impl Ui {
     }
 
     #[cfg(test)]
-    fn overlay_hit_test(
-        &self,
-        row: u16,
-        col: u16,
-        cursor: Option<(u16, u16)>,
-    ) -> Option<(OverlayId, HitTarget)> {
-        self.overlay_hit_test_in(&self.resolve_scene(cursor), row, col)
+    fn overlay_hit_test(&self, x: u16, y: u16) -> Option<(OverlayId, HitTarget)> {
+        self.overlay_hit_test_in(&self.resolve_scene(None), x, y)
     }
 
     /// Returns z-ordered (lowest first) overlay rects. Overlays whose anchor
@@ -2500,7 +2495,7 @@ impl Ui {
                 win.pending_scroll_to_cursor = false;
             }
             let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
-                let bar_col = rect.left + rect.width.saturating_sub(1);
+                let bar_col = rect.x + rect.width.saturating_sub(1);
                 window::ScrollbarState::new(bar_col, total_rows, viewport_height)
             } else {
                 None
@@ -2792,45 +2787,42 @@ impl Ui {
         } = prepared;
         let wins = &self.wins;
         let bufs = &self.bufs;
-        let compositor_theme = std::sync::Arc::clone(&theme);
-        self.surface
-            .compositor_mut()
-            .paint_frame(&compositor_theme, move |grid, _| {
-                for command in commands {
-                    match command {
-                        PreparedFrameCommand::Clear(area) => grid.clear(area),
-                        PreparedFrameCommand::Divider { divider, active } => {
-                            let mut normal = theme.get("Comment");
-                            let mut dragging = theme.get("SmeltResizeHandle");
-                            normal.bg = None;
-                            dragging.bg = None;
-                            let styles = layout::DividerStyles {
-                                normal,
-                                active: dragging,
-                            };
-                            divider.paint(grid, divider.style(styles, active));
-                        }
-                        PreparedFrameCommand::Chrome {
-                            area,
-                            chrome,
-                            context,
-                        } => layout::paint_chrome_with(grid, area, &chrome, &theme, context),
-                        PreparedFrameCommand::Window { win, rect, context } => {
-                            let Some(window) = wins.get(&win) else {
-                                continue;
-                            };
-                            let Some(buffer) = bufs.get(&window.buf) else {
-                                continue;
-                            };
-                            window.render(buffer, &mut grid.slice_mut(rect), &context);
-                        }
-                        PreparedFrameCommand::Paint(slot) => {
-                            let leaf = &paint_leaves[slot];
-                            paint(slot, leaf.id, &mut grid.slice_mut(leaf.rect), &leaf.context);
-                        }
+        self.surface.compositor_mut().paint_frame(move |grid| {
+            for command in commands {
+                match command {
+                    PreparedFrameCommand::Clear(area) => grid.slice_mut(area).clear(),
+                    PreparedFrameCommand::Divider { divider, active } => {
+                        let mut normal = theme.get("Comment");
+                        let mut dragging = theme.get("SmeltResizeHandle");
+                        normal.bg = None;
+                        dragging.bg = None;
+                        let styles = layout::DividerStyles {
+                            normal,
+                            active: dragging,
+                        };
+                        divider.paint(grid, divider.style(styles, active));
+                    }
+                    PreparedFrameCommand::Chrome {
+                        area,
+                        chrome,
+                        context,
+                    } => layout::paint_chrome(grid, area, &chrome, &theme, context),
+                    PreparedFrameCommand::Window { win, rect, context } => {
+                        let Some(window) = wins.get(&win) else {
+                            continue;
+                        };
+                        let Some(buffer) = bufs.get(&window.buf) else {
+                            continue;
+                        };
+                        window.render(buffer, &mut grid.slice_mut(rect), &context);
+                    }
+                    PreparedFrameCommand::Paint(slot) => {
+                        let leaf = &paint_leaves[slot];
+                        paint(slot, leaf.id, &mut grid.slice_mut(leaf.rect), &leaf.context);
                     }
                 }
-            })
+            }
+        })
     }
 
     /// Flush an owned frame returned by [`Self::paint_frame_with_prepared_splits_and_paints`].
@@ -2842,15 +2834,6 @@ impl Ui {
         self.surface.compositor_mut().flush_frame(w, frame)
     }
 
-    /// Paint directly into the compositor's `Grid`, bypassing layout and overlay machinery.
-    pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
-    where
-        W: std::io::Write,
-        F: FnOnce(&mut Grid, &Theme),
-    {
-        self.surface.render_raw(w, paint)
-    }
-
     /// Resolved screen rect for a `PaintId` leaf across splits, overlays, and decorations.
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
         let (term_w, term_h) = self.surface.terminal_size();
@@ -2859,22 +2842,19 @@ impl Ui {
             wins: &self.wins,
             bufs: &self.bufs,
         };
-        if let Some(rect) = layout::resolve_layout_with(self.splits(), area, &sizer).get(&id) {
-            return Some(*rect);
+        if let Some(rect) = self.splits().resolve(area, &sizer).leaf_rect(id) {
+            return Some(rect);
         }
         for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
-            if let Some(rect) = layout::resolve_layout_with(&ov.layout, ov_rect, &sizer).get(&id) {
-                return Some(*rect);
+            if let Some(rect) = ov.layout.resolve(ov_rect, &sizer).leaf_rect(id) {
+                return Some(rect);
             }
         }
-        for (_did, _owner, decoration_rect, decoration) in self.resolve_decorations() {
-            if let Some(rect) =
-                layout::resolve_layout_with(&decoration.layout, decoration_rect, &sizer).get(&id)
-            {
-                return Some(*rect);
-            }
-        }
-        None
+        self.resolve_decorations()
+            .into_iter()
+            .find_map(|(_, _, rect, decoration)| {
+                decoration.layout.resolve(rect, &sizer).leaf_rect(id)
+            })
     }
 
     /// Render to a sink and return the resulting grid snapshot. Used by the storybook harness.
@@ -2911,8 +2891,7 @@ impl Ui {
 
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let Some(HitTarget::Scrollbar { owner }) =
-                    self.hit_test(event.row, event.column, None)
+                let Some(HitTarget::Scrollbar { owner }) = self.hit_test(event.column, event.row)
                 else {
                     return Status::Ignored;
                 };
@@ -2963,7 +2942,7 @@ impl Ui {
                 match me.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         let scene = self.resolve_scene(None);
-                        let hit = self.hit_test_in(&scene, me.row, me.column);
+                        let hit = self.hit_test_in(&scene, me.column, me.row);
                         if let Some(HitTarget::Scrollbar { owner }) = hit {
                             self.set_capture(HitTarget::Scrollbar { owner });
                             self.start_scrollbar_drag(owner, me.row);
@@ -2979,7 +2958,7 @@ impl Ui {
                                 owner: ChromeOwner::Split(_),
                                 ..
                             }) => self
-                                .overlay_hit_test_in(&scene, me.row, me.column)
+                                .overlay_hit_test_in(&scene, me.column, me.row)
                                 .map(|(id, _)| id),
                             Some(HitTarget::Window(w)) => self.overlay_for_leaf(w),
                             Some(HitTarget::Paint(p)) => self.overlay_for_paint(p),
@@ -3041,7 +3020,7 @@ impl Ui {
                                 if let Some(resolved) = scene.split(id) {
                                     if self
                                         .split_interaction
-                                        .begin(resolved, me.row, me.column)
+                                        .begin(resolved, me.column, me.row)
                                         .is_some()
                                     {
                                         self.set_capture(HitTarget::Chrome { owner, action });
@@ -3056,8 +3035,8 @@ impl Ui {
                                         owner,
                                         action,
                                         start_rect: rect,
-                                        origin_row: me.row,
-                                        origin_col: me.column,
+                                        origin_x: me.column,
+                                        origin_y: me.row,
                                     });
                                     return Status::Consumed;
                                 }
@@ -3076,14 +3055,14 @@ impl Ui {
                         if let Some(id) = self.split_interaction.active_id() {
                             let resolved = self.resolved_split(id);
                             self.split_interaction
-                                .update(resolved.as_ref(), me.row, me.column);
+                                .update(resolved.as_ref(), me.column, me.row);
                             if self.split_interaction.active_id().is_none() {
                                 self.clear_capture();
                             }
                             return Status::Consumed;
                         }
                         if let Some(drag) = self.chrome_drag {
-                            self.apply_chrome_drag(drag, me.row, me.column);
+                            self.apply_chrome_drag(drag, me.column, me.row);
                             return Status::Consumed;
                         }
                     }
@@ -3095,7 +3074,7 @@ impl Ui {
                         if let Some(id) = self.split_interaction.active_id() {
                             let resolved = self.resolved_split(id);
                             self.split_interaction
-                                .release(resolved.as_ref(), me.row, me.column);
+                                .release(resolved.as_ref(), me.column, me.row);
                             self.clear_capture();
                             return Status::Consumed;
                         }
@@ -3127,10 +3106,10 @@ impl Ui {
                     };
                     let mut consumed = false;
                     if vdelta != 0 {
-                        consumed |= self.scroll_at(me.row, me.column, vdelta);
+                        consumed |= self.scroll_at(me.column, me.row, vdelta);
                     }
                     if hdelta != 0 {
-                        consumed |= self.scroll_at_horizontal(me.row, me.column, hdelta);
+                        consumed |= self.scroll_at_horizontal(me.column, me.row, hdelta);
                     }
                     if consumed || self.focused_overlay().is_some() {
                         return Status::Consumed;
@@ -3178,9 +3157,9 @@ impl Ui {
     }
 
     /// Apply a chrome-drag delta to its overlay or root container owner.
-    fn apply_chrome_drag(&mut self, drag: ChromeDrag, row: u16, col: u16) {
-        let dy = row as i32 - drag.origin_row as i32;
-        let dx = col as i32 - drag.origin_col as i32;
+    fn apply_chrome_drag(&mut self, drag: ChromeDrag, x: u16, y: u16) {
+        let dy = y as i32 - drag.origin_y as i32;
+        let dx = x as i32 - drag.origin_x as i32;
         match drag.action {
             ChromeAction::Resize(edges) => {
                 self.resize_chrome(drag.owner, drag.start_rect, edges, dx, dy)
@@ -3189,9 +3168,9 @@ impl Ui {
                 if let ChromeOwner::Overlay(id) = drag.owner {
                     if let Some((_, overlay)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id)
                     {
-                        overlay.anchor = layout::Anchor::ScreenAt {
-                            row: i32::from(drag.start_rect.top) + dy,
-                            col: i32::from(drag.start_rect.left) + dx,
+                        overlay.anchor = crate::Anchor::ScreenAt {
+                            row: i32::from(drag.start_rect.y) + dy,
+                            col: i32::from(drag.start_rect.x) + dx,
                             corner: Corner::NW,
                         };
                     }
@@ -3237,7 +3216,7 @@ impl Ui {
             self.scrollbar_drag = None;
             return;
         };
-        let rel_row = row.saturating_sub(vp.rect.top);
+        let rel_row = row.saturating_sub(vp.rect.y);
         let metrics = bar.display_metrics(win.scroll_top());
         let thumb_grab_row = if metrics.is_thumb_at(rel_row) {
             rel_row.saturating_sub(metrics.thumb_top)
@@ -3246,7 +3225,7 @@ impl Ui {
         };
         self.scrollbar_drag = Some(ScrollbarDrag {
             owner,
-            rect_top: vp.rect.top,
+            rect_top: vp.rect.y,
             bar,
             thumb_grab_row,
         });
@@ -3263,14 +3242,14 @@ impl Ui {
                 let win = self.wins.get(&owner)?;
                 let viewport = win.viewport?;
                 let bar = viewport.scrollbar?;
-                let rel_row = row.saturating_sub(viewport.rect.top);
+                let rel_row = row.saturating_sub(viewport.rect.y);
                 let metrics = bar.display_metrics(win.scroll_top());
                 let thumb_grab_row = if metrics.is_thumb_at(rel_row) {
                     rel_row.saturating_sub(metrics.thumb_top)
                 } else {
                     metrics.thumb_size / 2
                 };
-                (viewport.rect.top, bar, thumb_grab_row)
+                (viewport.rect.y, bar, thumb_grab_row)
             };
         let rel_row = row.saturating_sub(rect_top);
         let metrics = bar.metrics(0);
@@ -3302,7 +3281,7 @@ impl Ui {
             let Some(bar) = vp.scrollbar else {
                 return;
             };
-            let rel_row = row.saturating_sub(vp.rect.top);
+            let rel_row = row.saturating_sub(vp.rect.y);
             let metrics = bar.metrics(0);
             let thumb_top = metrics.thumb_top_for_click(rel_row);
             metrics.scroll_from_thumb_top(thumb_top)
@@ -3638,8 +3617,8 @@ impl Ui {
             }
             w.last_emitted_resize = Some(cur);
             let payload = Payload::Rect {
-                row: vp.rect.top,
-                col: vp.rect.left,
+                row: vp.rect.y,
+                col: vp.rect.x,
                 width: vp.rect.width,
                 height: vp.rect.height,
                 content_width: vp.content_width,
@@ -3920,8 +3899,8 @@ fn resize_chrome_ctx(edges: overlay::ResizeEdges) -> layout::ChromePaintCtx {
 
 /// Resolve the concrete action for a chrome cell. Resize handles win over drag
 /// handles, but top-row drag remains intact unless top resizing is explicitly enabled.
-fn chrome_action(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeAction {
-    let action = resize_chrome_action(rect, ov.resizable, row, col);
+fn chrome_action(rect: Rect, ov: &Overlay, x: u16, y: u16) -> overlay::ChromeAction {
+    let action = resize_chrome_action(rect, ov.resizable, x, y);
     if action != overlay::ChromeAction::None {
         return action;
     }
@@ -3935,13 +3914,13 @@ fn chrome_action(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::Chrom
 fn resize_chrome_action(
     rect: Rect,
     resize: overlay::ResizeConfig,
-    row: u16,
-    col: u16,
+    x: u16,
+    y: u16,
 ) -> overlay::ChromeAction {
-    let top = row == rect.top;
-    let bottom = row + 1 == rect.bottom();
-    let left = col == rect.left;
-    let right = col + 1 == rect.right();
+    let top = y == rect.y;
+    let bottom = y + 1 == rect.bottom();
+    let left = x == rect.x;
+    let right = x + 1 == rect.right();
 
     if resize.corners {
         if top && left && resize.top && resize.left {
@@ -3988,8 +3967,8 @@ fn resize_chrome_geometry(
     bounds: (u16, u16, u16, u16),
 ) -> (i32, i32, u16, u16) {
     let (min_w, max_w, min_h, max_h) = bounds;
-    let mut top = start.top as i32;
-    let mut left = start.left as i32;
+    let mut top = start.y as i32;
+    let mut left = start.x as i32;
     let mut width = start.width as i32;
     let mut height = start.height as i32;
 
@@ -4009,27 +3988,27 @@ fn resize_chrome_geometry(
     let new_w = width.clamp(min_w as i32, max_w as i32) as u16;
     let new_h = height.clamp(min_h as i32, max_h as i32) as u16;
     if edges.west {
-        left = start.left as i32 + (start.width as i32 - new_w as i32);
+        left = start.x as i32 + (start.width as i32 - new_w as i32);
     }
     if edges.north {
-        top = start.top as i32 + (start.height as i32 - new_h as i32);
+        top = start.y as i32 + (start.height as i32 - new_h as i32);
     }
     (top, left, new_w, new_h)
 }
 
 fn anchor_after_resize(
-    anchor: layout::Anchor,
+    anchor: crate::Anchor,
     edges: overlay::ResizeEdges,
     top: i32,
     left: i32,
-) -> layout::Anchor {
+) -> crate::Anchor {
     match anchor {
-        layout::Anchor::ScreenBottom { .. }
+        crate::Anchor::ScreenBottom { .. }
             if edges.north && !edges.east && !edges.south && !edges.west =>
         {
             anchor
         }
-        _ => layout::Anchor::ScreenAt {
+        _ => crate::Anchor::ScreenAt {
             row: top,
             col: left,
             corner: Corner::NW,
@@ -4098,7 +4077,7 @@ fn overlay_extent(
     split_rects: &HashMap<WinId, Rect>,
 ) -> (u16, u16) {
     match &overlay.anchor {
-        layout::Anchor::Win { target, .. } if overlay.anchor_width => split_rects
+        crate::Anchor::Win { target, .. } if overlay.anchor_width => split_rects
             .get(&WinId(target.0))
             .map_or(term, |r| (r.width.min(term.0), term.1)),
         _ => term,
@@ -4257,7 +4236,7 @@ fn collect_layout_frame_commands(
                     context: if root {
                         root_chrome
                     } else {
-                        layout::ChromePaintCtx::empty()
+                        layout::ChromePaintCtx::default()
                     },
                 });
             }
@@ -4302,7 +4281,7 @@ fn collect_root_frame_commands(
                         .push(PreparedFrameCommand::Clear(decoration.rect));
                     collect_layout_frame_commands(
                         &decoration.layout,
-                        layout::ChromePaintCtx::empty(),
+                        layout::ChromePaintCtx::default(),
                         builder,
                     );
                 }
@@ -4402,7 +4381,7 @@ mod tests {
             buf,
             SplitConfig {
                 region: format!("test:{}", win_id.0),
-                gutters: layout::Gutters::default(),
+                gutters: crate::Gutters::default(),
             },
         ));
         let mut leaves: Vec<(Constraint, LayoutTree)> = ui
@@ -4422,7 +4401,7 @@ mod tests {
             buf,
             SplitConfig {
                 region: format!("test:{}", win_id.0),
-                gutters: layout::Gutters::default(),
+                gutters: crate::Gutters::default(),
             },
         ));
     }
@@ -4534,7 +4513,7 @@ mod tests {
             buffer,
             SplitConfig {
                 region: "test:43".into(),
-                gutters: layout::Gutters::default(),
+                gutters: crate::Gutters::default(),
             },
         ));
         let lines_tick = ui.buf(buffer).unwrap().lines_tick();
@@ -4611,8 +4590,7 @@ mod tests {
         let mut ui = make_ui();
         let paint_id = PaintId(1u64 << 32);
         ui.overlay_open(
-            Overlay::new(LayoutTree::leaf(paint_id), layout::Anchor::ScreenCenter)
-                .with_size((4, 2)),
+            Overlay::new(LayoutTree::leaf(paint_id), crate::Anchor::ScreenCenter).with_size((4, 2)),
         );
         let mut jobs = Vec::new();
         let mut frame = ui.paint_frame_with_prepared_splits_and_paints(
@@ -4635,8 +4613,7 @@ mod tests {
         let mut ui = make_ui();
         let paint_id = PaintId(1u64 << 32);
         let overlay_id = ui.overlay_open(
-            Overlay::new(LayoutTree::leaf(paint_id), layout::Anchor::ScreenCenter)
-                .with_size((4, 2)),
+            Overlay::new(LayoutTree::leaf(paint_id), crate::Anchor::ScreenCenter).with_size((4, 2)),
         );
         let prepared =
             ui.prepare_frame_with_prepared_splits(std::iter::empty(), |_, _| {}, |_, _| {});
@@ -4713,7 +4690,7 @@ mod tests {
 
     fn stub_overlay() -> Overlay {
         let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(99)))]);
-        Overlay::new(layout, layout::Anchor::ScreenCenter)
+        Overlay::new(layout, crate::Anchor::ScreenCenter)
     }
 
     #[test]
@@ -4770,7 +4747,7 @@ mod tests {
         register_window(&mut ui, child);
         ui.overlay_open(Overlay::new(
             LayoutTree::leaf(owner),
-            layout::Anchor::ScreenCenter,
+            crate::Anchor::ScreenCenter,
         ));
         let decoration = ui.decoration_open(Decoration::new(owner, LayoutTree::leaf(child)));
 
@@ -4785,14 +4762,14 @@ mod tests {
     fn overlay_mut_allows_anchor_drag() {
         let mut ui = make_ui();
         let id = ui.overlay_open(stub_overlay());
-        ui.overlay_mut(id).unwrap().anchor = layout::Anchor::ScreenAt {
+        ui.overlay_mut(id).unwrap().anchor = crate::Anchor::ScreenAt {
             row: 5,
             col: 10,
             corner: Corner::NW,
         };
         assert!(matches!(
             ui.overlay(id).unwrap().anchor,
-            layout::Anchor::ScreenAt {
+            crate::Anchor::ScreenAt {
                 row: 5,
                 col: 10,
                 ..
@@ -4816,7 +4793,7 @@ mod tests {
         assert_eq!(order, vec![low_a, low_b, mid, high]);
     }
 
-    fn sized_overlay(width: u16, height: u16, anchor: layout::Anchor) -> Overlay {
+    fn sized_overlay(width: u16, height: u16, anchor: crate::Anchor) -> Overlay {
         // Single-leaf box wrapped in an Hbox of fixed width holding a
         // Vbox of fixed height - exercises both axes' natural-size
         // composition.
@@ -4830,7 +4807,7 @@ mod tests {
         Overlay::new(layout, anchor)
     }
 
-    fn bordered_overlay(width: u16, height: u16, anchor: layout::Anchor) -> Overlay {
+    fn bordered_overlay(width: u16, height: u16, anchor: crate::Anchor) -> Overlay {
         let inner_w = width.saturating_sub(2);
         let inner_h = height.saturating_sub(2);
         let layout = LayoutTree::hbox(vec![(
@@ -4857,7 +4834,7 @@ mod tests {
             buf,
             SplitConfig {
                 region: "fit-list".into(),
-                gutters: layout::Gutters::default(),
+                gutters: crate::Gutters::default(),
             },
         ));
         ui.set_layout(LayoutTree::vbox(vec![
@@ -4865,7 +4842,7 @@ mod tests {
             (Constraint::Fit, LayoutTree::leaf(win)),
         ]));
 
-        let expected = Rect::new(18, 0, 80, 6);
+        let expected = Rect::new(0, 18, 80, 6);
         assert_eq!(ui.split_rect(win), Some(expected));
         assert_eq!(ui.paint_rect(PaintId::from(win)), Some(expected));
 
@@ -4887,7 +4864,7 @@ mod tests {
         for win in [overlay, decoration, hidden] {
             register_window(&mut ui, win);
         }
-        ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter));
         ui.decoration_open(Decoration::new(root, LayoutTree::leaf(decoration)));
         for win in [root, overlay, decoration] {
             let window = ui.win_mut(win).unwrap();
@@ -4915,13 +4892,13 @@ mod tests {
     #[test]
     fn resolve_overlays_centers_screen_center_anchor() {
         let mut ui = make_ui();
-        let id = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        let id = ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter));
         let resolved = ui.resolve_overlays(None);
         assert_eq!(resolved.len(), 1);
         let (got_id, rect, _) = &resolved[0];
         assert_eq!(*got_id, id);
         // Centered: term 80x24, overlay 40x10 → top=7, left=20.
-        assert_eq!(*rect, Rect::new(7, 20, 40, 10));
+        assert_eq!(*rect, Rect::new(20, 7, 40, 10));
     }
 
     #[test]
@@ -4930,7 +4907,7 @@ mod tests {
         ui.overlay_open(sized_overlay(
             10,
             5,
-            layout::Anchor::Cursor {
+            crate::Anchor::Cursor {
                 corner: Corner::NW,
                 row_offset: 0,
                 col_offset: 0,
@@ -4949,9 +4926,9 @@ mod tests {
         ui.overlay_open(sized_overlay(
             10,
             5,
-            layout::Anchor::Win {
+            crate::Anchor::Win {
                 target: WinId(999).into(),
-                attach: layout::Align::NW,
+                attach: crate::Align::NW,
                 row_offset: 0,
                 col_offset: 0,
             },
@@ -4968,7 +4945,7 @@ mod tests {
             buf,
             SplitConfig {
                 region: "anchor".into(),
-                gutters: layout::Gutters::default(),
+                gutters: crate::Gutters::default(),
             },
         ));
         // vbox: 5 rows blank + 8-row hbox (10 cols blank + 30-col leaf
@@ -4986,11 +4963,11 @@ mod tests {
             (Constraint::Fill, LayoutTree::vbox(Vec::new())),
         ]);
         ui.set_layout(tree);
-        assert_eq!(ui.split_rect(target), Some(Rect::new(5, 10, 30, 8)));
+        assert_eq!(ui.split_rect(target), Some(Rect::new(10, 5, 30, 8)));
         let resolved = ui.resolve_overlays(None);
         assert_eq!(resolved.len(), 1);
         let (_, rect, _) = &resolved[0];
-        assert_eq!(*rect, Rect::new(5, 10, 10, 5));
+        assert_eq!(*rect, Rect::new(10, 5, 10, 5));
     }
 
     #[test]
@@ -5003,16 +4980,16 @@ mod tests {
             buf,
             SplitConfig {
                 region: "anchor".into(),
-                gutters: layout::Gutters::default(),
+                gutters: crate::Gutters::default(),
             },
         ));
         ui.set_layout(LayoutTree::hbox(vec![
             (Constraint::Length(30), LayoutTree::leaf(target)),
             (Constraint::Fill, LayoutTree::vbox(Vec::new())),
         ]));
-        let anchor = layout::Anchor::Win {
+        let anchor = crate::Anchor::Win {
             target: target.into(),
-            attach: layout::Align::NW,
+            attach: crate::Align::NW,
             row_offset: 0,
             col_offset: 0,
         };
@@ -5134,12 +5111,12 @@ mod tests {
         make_split(&mut ui, high_win);
         make_split(&mut ui, low_win);
         let high = ui.overlay_open(
-            Overlay::new(LayoutTree::leaf(high_win), layout::Anchor::ScreenCenter)
+            Overlay::new(LayoutTree::leaf(high_win), crate::Anchor::ScreenCenter)
                 .with_z(100)
                 .modal(true),
         );
         let low = ui.overlay_open(
-            Overlay::new(LayoutTree::leaf(low_win), layout::Anchor::ScreenCenter)
+            Overlay::new(LayoutTree::leaf(low_win), crate::Anchor::ScreenCenter)
                 .with_z(10)
                 .modal(true),
         );
@@ -5193,7 +5170,7 @@ mod tests {
         ui.overlay_open(modal_overlay_with_leaves(first, second, third));
         assert!(ui.set_focus(second));
         let stacked = ui.overlay_open(
-            Overlay::new(LayoutTree::leaf(prompt), layout::Anchor::ScreenCenter).modal(true),
+            Overlay::new(LayoutTree::leaf(prompt), crate::Anchor::ScreenCenter).modal(true),
         );
         assert_eq!(ui.focus(), Some(prompt));
         ui.overlay_close(stacked);
@@ -5396,7 +5373,7 @@ mod tests {
     #[test]
     fn overlay_hit_test_returns_none_when_empty() {
         let ui = make_ui();
-        assert_eq!(ui.overlay_hit_test(10, 30, None), None);
+        assert_eq!(ui.overlay_hit_test(30, 10), None);
     }
 
     #[test]
@@ -5404,8 +5381,8 @@ mod tests {
         let mut ui = make_ui();
         register_window(&mut ui, WinId(99));
         // 40x10 overlay centered at (7, 20)..(17, 60); single Leaf.
-        let id = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
-        let hit = ui.overlay_hit_test(10, 30, None).unwrap();
+        let id = ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter));
+        let hit = ui.overlay_hit_test(30, 10).unwrap();
         assert_eq!(hit.0, id);
         assert!(matches!(hit.1, HitTarget::Window(WinId(99))));
     }
@@ -5418,9 +5395,9 @@ mod tests {
         // gives the overlay a concrete (42, 10) natural size centered
         // at (7, 19). Border consumes the top/bottom row + left/right
         // col; leaf occupies rows 8..16, cols 20..60.
-        let id = ui.overlay_open(bordered_overlay(42, 10, layout::Anchor::ScreenCenter));
+        let id = ui.overlay_open(bordered_overlay(42, 10, crate::Anchor::ScreenCenter));
         // Inside overlay rect (row 7 = top border), outside the leaf.
-        let hit = ui.overlay_hit_test(7, 30, None).unwrap();
+        let hit = ui.overlay_hit_test(30, 7).unwrap();
         assert_eq!(hit.0, id);
         assert_eq!(
             hit.1,
@@ -5430,7 +5407,7 @@ mod tests {
             }
         );
         // Inside the leaf → Window.
-        let hit = ui.overlay_hit_test(10, 30, None).unwrap();
+        let hit = ui.overlay_hit_test(30, 10).unwrap();
         assert!(matches!(hit.1, HitTarget::Window(WinId(99))));
     }
 
@@ -5438,14 +5415,14 @@ mod tests {
     fn resizable_true_keeps_title_drag_on_top_chrome() {
         let mut ui = make_ui();
         let id = ui.overlay_open(
-            bordered_overlay(42, 10, layout::Anchor::ScreenCenter)
+            bordered_overlay(42, 10, crate::Anchor::ScreenCenter)
                 .draggable(true)
                 .resizable(true),
         );
         let down = mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            7,
             30,
+            7,
         );
         assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
         let drag = ui.chrome_drag.expect("title row should start drag");
@@ -5457,14 +5434,14 @@ mod tests {
     fn resizable_true_bottom_right_corner_resizes_southeast() {
         let mut ui = make_ui();
         let id = ui.overlay_open(
-            bordered_overlay(42, 10, layout::Anchor::ScreenCenter)
+            bordered_overlay(42, 10, crate::Anchor::ScreenCenter)
                 .draggable(true)
                 .resizable(true),
         );
         let down = mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            16,
             60,
+            16,
         );
         assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
         assert_eq!(
@@ -5474,8 +5451,8 @@ mod tests {
 
         let drag = mouse_event(
             crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
-            18,
             63,
+            18,
         );
         assert_eq!(ui.dispatch_event(drag, &mut |_, _, _| {}), Status::Consumed);
         assert_eq!(ui.overlay(id).unwrap().size_override, Some((45, 12)));
@@ -5493,14 +5470,14 @@ mod tests {
             },
         );
         ui.overlay_open(
-            bordered_overlay(42, 10, layout::Anchor::ScreenCenter)
+            bordered_overlay(42, 10, crate::Anchor::ScreenCenter)
                 .draggable(true)
                 .resizable(true),
         );
         let down = mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            16,
             60,
+            16,
         );
         assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
 
@@ -5515,7 +5492,7 @@ mod tests {
     fn top_resize_config_makes_top_chrome_resize_north() {
         let mut ui = make_ui();
         let id = ui.overlay_open(
-            bordered_overlay(42, 10, layout::Anchor::ScreenCenter).resize_config(
+            bordered_overlay(42, 10, crate::Anchor::ScreenCenter).resize_config(
                 overlay::ResizeConfig {
                     top: true,
                     right: false,
@@ -5527,8 +5504,8 @@ mod tests {
         );
         let down = mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            7,
             30,
+            7,
         );
         assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
         let drag = ui.chrome_drag.expect("top row should start resize");
@@ -5543,7 +5520,7 @@ mod tests {
     fn top_resizing_bottom_docked_overlay_preserves_bottom_anchor() {
         let mut ui = make_ui();
         let id = ui.overlay_open(
-            sized_overlay(20, 6, layout::Anchor::ScreenBottom { above_rows: 0 }).resize_config(
+            sized_overlay(20, 6, crate::Anchor::ScreenBottom { above_rows: 0 }).resize_config(
                 overlay::ResizeConfig {
                     top: true,
                     right: false,
@@ -5554,29 +5531,29 @@ mod tests {
             ),
         );
         let start_rect = ui.resolved_overlay_rect(id).unwrap();
-        assert_eq!(start_rect, Rect::new(18, 30, 20, 6));
+        assert_eq!(start_rect, Rect::new(30, 18, 20, 6));
 
         ui.apply_chrome_drag(
             ChromeDrag {
                 owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::north()),
                 start_rect,
-                origin_row: 18,
-                origin_col: 30,
+                origin_x: 30,
+                origin_y: 18,
             },
-            15,
             30,
+            15,
         );
 
         let ov = ui.overlay(id).unwrap();
         assert_eq!(ov.size_override, Some((20, 9)));
         assert!(matches!(
             ov.anchor,
-            layout::Anchor::ScreenBottom { above_rows: 0 }
+            crate::Anchor::ScreenBottom { above_rows: 0 }
         ));
         assert_eq!(
             ui.resolved_overlay_rect(id).unwrap(),
-            Rect::new(15, 30, 20, 9)
+            Rect::new(30, 15, 20, 9)
         );
     }
 
@@ -5586,7 +5563,7 @@ mod tests {
         let id = ui.overlay_open(
             Overlay::new(
                 LayoutTree::leaf(PaintId(900)),
-                layout::Anchor::ScreenBottom { above_rows: 0 },
+                crate::Anchor::ScreenBottom { above_rows: 0 },
             )
             .with_width(Constraint::Percentage(100))
             .with_height(Constraint::Length(6))
@@ -5599,18 +5576,18 @@ mod tests {
             }),
         );
         let start_rect = ui.resolved_overlay_rect(id).unwrap();
-        assert_eq!(start_rect, Rect::new(18, 0, 80, 6));
+        assert_eq!(start_rect, Rect::new(0, 18, 80, 6));
 
         ui.apply_chrome_drag(
             ChromeDrag {
                 owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::north()),
                 start_rect,
-                origin_row: 18,
-                origin_col: 0,
+                origin_x: 0,
+                origin_y: 18,
             },
-            15,
             0,
+            15,
         );
         assert_eq!(ui.overlay(id).unwrap().size_override, Some((80, 9)));
 
@@ -5618,7 +5595,7 @@ mod tests {
         assert_eq!(ui.overlay(id).unwrap().size_override, Some((100, 9)));
         assert_eq!(
             ui.resolved_overlay_rect(id).unwrap(),
-            Rect::new(15, 0, 100, 9)
+            Rect::new(0, 15, 100, 9)
         );
     }
 
@@ -5628,7 +5605,7 @@ mod tests {
         let id = ui.overlay_open(sized_overlay(
             20,
             6,
-            layout::Anchor::ScreenAt {
+            crate::Anchor::ScreenAt {
                 row: 5,
                 col: 10,
                 corner: Corner::NW,
@@ -5640,18 +5617,18 @@ mod tests {
                 owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::west()),
                 start_rect,
-                origin_row: 5,
-                origin_col: 10,
+                origin_x: 10,
+                origin_y: 5,
             },
-            5,
             14,
+            5,
         );
 
         let ov = ui.overlay(id).unwrap();
         assert_eq!(ov.size_override, Some((16, 6)));
         assert!(matches!(
             ov.anchor,
-            layout::Anchor::ScreenAt {
+            crate::Anchor::ScreenAt {
                 row: 5,
                 col: 14,
                 corner: Corner::NW,
@@ -5666,7 +5643,7 @@ mod tests {
             sized_overlay(
                 20,
                 6,
-                layout::Anchor::ScreenAt {
+                crate::Anchor::ScreenAt {
                     row: 5,
                     col: 10,
                     corner: Corner::NW,
@@ -5681,11 +5658,11 @@ mod tests {
                 owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::east()),
                 start_rect,
-                origin_row: 5,
-                origin_col: 29,
+                origin_x: 29,
+                origin_y: 5,
             },
-            5,
             0,
+            5,
         );
         assert_eq!(ui.overlay(id).unwrap().size_override, Some((15, 6)));
 
@@ -5694,11 +5671,11 @@ mod tests {
                 owner: overlay::ChromeOwner::Overlay(id),
                 action: overlay::ChromeAction::Resize(overlay::ResizeEdges::south()),
                 start_rect,
-                origin_row: 10,
-                origin_col: 29,
+                origin_x: 29,
+                origin_y: 10,
             },
-            20,
             29,
+            20,
         );
         assert_eq!(ui.overlay(id).unwrap().size_override, Some((20, 7)));
     }
@@ -5706,9 +5683,9 @@ mod tests {
     #[test]
     fn overlay_hit_test_returns_none_outside_overlay_rect() {
         let mut ui = make_ui();
-        ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter));
         // (0, 0) is outside the overlay's centered rect.
-        assert_eq!(ui.overlay_hit_test(0, 0, None), None);
+        assert_eq!(ui.overlay_hit_test(0, 0), None);
     }
 
     #[test]
@@ -5737,10 +5714,10 @@ mod tests {
         let perf = ui.overlay_open(
             Overlay::new(
                 perf_layout,
-                layout::Anchor::ScreenAt {
+                crate::Anchor::ScreenAt {
                     row: 0,
                     col: 60,
-                    corner: layout::Corner::NW,
+                    corner: crate::Corner::NW,
                 },
             )
             .draggable(true),
@@ -5795,16 +5772,16 @@ mod tests {
         let perf = ui.overlay_open(
             Overlay::new(
                 perf_layout,
-                layout::Anchor::ScreenAt {
+                crate::Anchor::ScreenAt {
                     row: 0,
                     col: 60,
-                    corner: layout::Corner::NW,
+                    corner: crate::Corner::NW,
                 },
             )
             .draggable(true),
         );
         ui.overlay_open(
-            sized_overlay(80, 8, layout::Anchor::ScreenBottom { above_rows: 1 }).modal(true),
+            sized_overlay(80, 8, crate::Anchor::ScreenBottom { above_rows: 1 }).modal(true),
         );
 
         // Click on the body (inside the leaf, not the border).
@@ -5844,17 +5821,17 @@ mod tests {
         let perf = ui.overlay_open(
             Overlay::new(
                 perf_layout,
-                layout::Anchor::ScreenAt {
+                crate::Anchor::ScreenAt {
                     row: 0,
                     col: 60,
-                    corner: layout::Corner::NW,
+                    corner: crate::Corner::NW,
                 },
             )
             .draggable(true),
         );
         // Messages dialog: bottom-docked modal.
         ui.overlay_open(
-            sized_overlay(80, 8, layout::Anchor::ScreenBottom { above_rows: 1 }).modal(true),
+            sized_overlay(80, 8, crate::Anchor::ScreenBottom { above_rows: 1 }).modal(true),
         );
         // Click on perf's title row (row 0, somewhere on the border).
         let down = crossterm::event::MouseEvent {
@@ -5863,7 +5840,7 @@ mod tests {
             row: 0,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let hit = ui.hit_test(0, 65, None);
+        let hit = ui.hit_test(65, 0);
         let modal = ui.active_modal();
         let status = ui.dispatch_event(Event::Mouse(down), &mut |_, _, _| {});
         assert!(
@@ -5878,21 +5855,21 @@ mod tests {
     fn overlay_hit_test_modal_blocks_only_inside_its_rect() {
         let mut ui = make_ui();
         // Lower-z overlay covering (7,20)..(17,60).
-        let under = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
+        let under = ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter).with_z(10));
         // Higher-z modal at same anchor, smaller (10x4 → centered (10,35)..(14,45)).
         let modal_id = ui.overlay_open(
-            sized_overlay(10, 4, layout::Anchor::ScreenCenter)
+            sized_overlay(10, 4, crate::Anchor::ScreenCenter)
                 .with_z(100)
                 .modal(true),
         );
         // Hit inside the modal → returns the modal (modal is opaque on
         // its own rect).
-        let hit = ui.overlay_hit_test(11, 36, None).unwrap();
+        let hit = ui.overlay_hit_test(36, 11).unwrap();
         assert_eq!(hit.0, modal_id);
         // Hit inside the under overlay but outside the modal - the
         // visible part of the under overlay still receives clicks. The
         // modal only blocks at its own rect, not globally.
-        let outside = ui.overlay_hit_test(8, 22, None).unwrap();
+        let outside = ui.overlay_hit_test(22, 8).unwrap();
         assert_eq!(outside.0, under);
     }
 
@@ -5907,7 +5884,7 @@ mod tests {
                 ]),
             ),
         ]);
-        Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true)
+        Overlay::new(layout, crate::Anchor::ScreenCenter).modal(true)
     }
 
     #[test]
@@ -5976,9 +5953,9 @@ mod tests {
     fn hit_test_returns_overlay_window_when_overlay_covers_point() {
         let mut ui = make_ui();
         register_window(&mut ui, WinId(99));
-        ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter));
         // Centered (7,20)..(17,60); (10,30) lands on the leaf.
-        let hit = ui.hit_test(10, 30, None).unwrap();
+        let hit = ui.hit_test(30, 10).unwrap();
         assert!(matches!(hit, HitTarget::Window(WinId(99))));
     }
 
@@ -5987,9 +5964,9 @@ mod tests {
         let mut ui = make_ui();
         let paint = PaintId(1u64 << 32);
         ui.overlay_open(
-            Overlay::new(LayoutTree::leaf(paint), layout::Anchor::ScreenCenter).with_size((40, 10)),
+            Overlay::new(LayoutTree::leaf(paint), crate::Anchor::ScreenCenter).with_size((40, 10)),
         );
-        let hit = ui.hit_test(10, 30, None).unwrap();
+        let hit = ui.hit_test(30, 10).unwrap();
         assert_eq!(hit, HitTarget::Paint(paint));
     }
 
@@ -6002,9 +5979,9 @@ mod tests {
                 LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
             )])
             .with_border(layout::Border::SINGLE),
-            layout::Anchor::ScreenCenter,
+            crate::Anchor::ScreenCenter,
         ));
-        let hit = ui.hit_test(7, 30, None).unwrap();
+        let hit = ui.hit_test(30, 7).unwrap();
         assert_eq!(
             hit,
             HitTarget::Chrome {
@@ -6017,24 +5994,24 @@ mod tests {
     #[test]
     fn hit_test_returns_none_when_nothing_covers_point() {
         let ui = make_ui();
-        assert_eq!(ui.hit_test(0, 0, None), None);
+        assert_eq!(ui.hit_test(0, 0), None);
     }
 
     #[test]
     fn overlay_hit_test_topmost_wins_when_no_modal() {
         let mut ui = make_ui();
         let _bottom =
-            ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
-        let top = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(50));
-        let hit = ui.overlay_hit_test(10, 30, None).unwrap();
+            ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter).with_z(10));
+        let top = ui.overlay_open(sized_overlay(40, 10, crate::Anchor::ScreenCenter).with_z(50));
+        let hit = ui.overlay_hit_test(30, 10).unwrap();
         assert_eq!(hit.0, top);
     }
 
     #[test]
     fn resolve_overlays_returns_z_ordered_resolved_set() {
         let mut ui = make_ui();
-        let high = ui.overlay_open(sized_overlay(20, 5, layout::Anchor::ScreenCenter).with_z(100));
-        let low = ui.overlay_open(sized_overlay(10, 4, layout::Anchor::ScreenCenter).with_z(10));
+        let high = ui.overlay_open(sized_overlay(20, 5, crate::Anchor::ScreenCenter).with_z(100));
+        let low = ui.overlay_open(sized_overlay(10, 4, crate::Anchor::ScreenCenter).with_z(10));
         let resolved = ui.resolve_overlays(None);
         let ids: Vec<OverlayId> = resolved.iter().map(|(id, _, _)| *id).collect();
         assert_eq!(ids, vec![low, high]);
@@ -6054,7 +6031,7 @@ mod tests {
             )
             .unwrap();
         let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter).modal(true));
         assert_eq!(ui.focus(), Some(win));
     }
 
@@ -6072,7 +6049,7 @@ mod tests {
             )
             .unwrap();
         let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter)); // not modal
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter)); // not modal
         assert!(ui.set_focus(win));
         assert_eq!(ui.focus(), Some(win));
     }
@@ -6252,7 +6229,7 @@ mod tests {
             )
             .unwrap();
         let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
-        let oid = ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+        let oid = ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter).modal(true));
         let cb: Callback = Callback::Rust(Box::new(move |ctx| {
             if let Some(o) = ctx.ui.overlay_for_leaf(ctx.win) {
                 let _ = ctx.ui.overlay_close(o);
@@ -6296,7 +6273,7 @@ mod tests {
         // Wrap the win in a modal overlay so it becomes a focusable
         // leaf reachable via `set_focus`.
         let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter).modal(true));
 
         let submit_cb: Callback = Callback::Rust(Box::new(|_| {
             CallbackResult::Event(WinEvent::Submit, Payload::Selection { index: 7 })
@@ -6623,7 +6600,7 @@ mod tests {
             (Constraint::Length(3), LayoutTree::leaf(win_a)),
             (Constraint::Length(3), LayoutTree::leaf(win_b)),
         ]);
-        let oid = ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+        let oid = ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter).modal(true));
         let cb_noop: Callback = Callback::Rust(Box::new(|_| CallbackResult::Consumed));
         ui.win_on_event(win_a, WinEvent::Dismiss, cb_noop);
         let cb_noop2: Callback = Callback::Rust(Box::new(|_| CallbackResult::Consumed));
@@ -6659,7 +6636,7 @@ mod tests {
             .unwrap();
         ui.name_win("plug.win", win);
         let layout = LayoutTree::leaf(win);
-        let oid = ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        let oid = ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter));
         ui.name_overlay("plug.overlay", oid);
 
         let _ = ui.win_close(win);
@@ -6714,7 +6691,7 @@ mod tests {
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
         .with_border(Border::SINGLE);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter));
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         // Outer overlay: 42×5 (40 leaf width + 2 border, 3 leaf height + 2
@@ -6755,7 +6732,7 @@ mod tests {
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
         .with_border(Border::SINGLE);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter));
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         let vp = ui
@@ -6782,7 +6759,7 @@ mod tests {
         register_window(&mut ui, win);
         let original_bar = ScrollbarState::new(39, 100, 20).expect("overflowing scrollbar");
         ui.win_mut(win).unwrap().viewport = Some(WindowViewport::new(
-            Rect::new(10, 0, 40, 20),
+            Rect::new(0, 10, 40, 20),
             39,
             100,
             0,
@@ -6792,7 +6769,7 @@ mod tests {
         ui.start_scrollbar_drag(win, 10);
         let refined_bar = ScrollbarState::new(39, 1_000, 8).expect("overflowing scrollbar");
         ui.win_mut(win).unwrap().viewport = Some(WindowViewport::new(
-            Rect::new(2, 0, 40, 8),
+            Rect::new(0, 2, 40, 8),
             39,
             1_000,
             0,
@@ -6820,8 +6797,8 @@ mod tests {
         ui.win_mut(win).unwrap().set_resolved_scroll(200);
         let viewport = ui.win(win).unwrap().viewport.expect("window viewport");
         let bar = viewport.scrollbar.expect("overflowing scrollbar");
-        let start_row = viewport.rect.top.saturating_add(bar.metrics(200).thumb_top);
-        let drag_row = viewport.rect.top.saturating_add(15);
+        let start_row = viewport.rect.y.saturating_add(bar.metrics(200).thumb_top);
+        let drag_row = viewport.rect.y.saturating_add(15);
 
         let event = |kind, row| crossterm::event::MouseEvent {
             kind,
@@ -6886,7 +6863,7 @@ mod tests {
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
         .with_border(Border::SINGLE);
-        let ov = Overlay::new(layout, layout::Anchor::ScreenCenter);
+        let ov = Overlay::new(layout, crate::Anchor::ScreenCenter);
         let ov = Overlay { modal: true, ..ov };
         ui.overlay_open(ov);
         // Render once so the pre-pass populates the viewport before wheel routing
@@ -6897,7 +6874,7 @@ mod tests {
         assert_eq!(ui.win(win).unwrap().scroll_top(), 0, "starts at top");
         // Wheel-down over a cell inside the leaf rect (centered overlay puts
         // the leaf at left=20..60, top=7..17 on a 80x24 terminal).
-        let scroll = mouse_event(crossterm::event::MouseEventKind::ScrollDown, 10, 30);
+        let scroll = mouse_event(crossterm::event::MouseEventKind::ScrollDown, 30, 10);
         let status = ui.dispatch_event(scroll, &mut |_, _, _| {});
         assert_eq!(status, Status::Consumed);
         assert!(
@@ -6932,19 +6909,17 @@ mod tests {
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
         .with_border(Border::SINGLE);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter));
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         // bar_col = 59 (see overlay_leaf_with_overflowing_content_auto_attaches_scrollbar).
-        let hit = ui
-            .hit_test(10, 59, None)
-            .expect("rightmost col hits something");
+        let hit = ui.hit_test(59, 10).expect("rightmost col hits something");
         assert!(
             matches!(hit, HitTarget::Scrollbar { owner } if owner == win),
             "rightmost column of overflowing overlay leaf must be Scrollbar, got {hit:?}",
         );
         // Adjacent column to the left is still Window.
-        let hit = ui.hit_test(10, 58, None).expect("interior col hits window");
+        let hit = ui.hit_test(58, 10).expect("interior col hits window");
         assert!(
             matches!(hit, HitTarget::Window(w) if w == win),
             "interior column must still be Window, got {hit:?}",
@@ -6972,7 +6947,7 @@ mod tests {
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
         .with_border(Border::SINGLE);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter));
 
         assert!(ui.wins.get(&win).and_then(|w| w.viewport).is_none());
         ui.prime_overlay_viewports();
@@ -6982,7 +6957,7 @@ mod tests {
             .get(&win)
             .and_then(|w| w.viewport)
             .expect("viewport populated before render");
-        assert_eq!(vp.rect, Rect::new(7, 20, 40, 10));
+        assert_eq!(vp.rect, Rect::new(20, 7, 40, 10));
         assert_eq!(vp.content_width, 39);
     }
 
@@ -7008,7 +6983,7 @@ mod tests {
             LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
         )])
         .with_border(Border::SINGLE);
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter));
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         let vp = ui
@@ -7044,7 +7019,7 @@ mod tests {
         )])
         .with_border(Border::SINGLE)
         .with_title("title");
-        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        ui.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter));
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         // Borrow Compositor's previous grid (post-flush swap) for assertions.
@@ -7086,7 +7061,7 @@ mod tests {
                         LayoutTree::leaf(PaintId(9999)),
                     )]),
                 )]),
-                layout::Anchor::ScreenCenter,
+                crate::Anchor::ScreenCenter,
             )
         };
 
@@ -7094,14 +7069,14 @@ mod tests {
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         assert_eq!(ui.surface.compositor().previous().cell(30, 10).symbol, ' ');
-        assert!(ui.overlay_hit_test(10, 30, None).is_some());
+        assert!(ui.overlay_hit_test(30, 10).is_some());
         ui.overlay_close(opaque);
 
         ui.overlay_open(layer().transparent(true));
         ui.render(&mut out).unwrap();
         assert_eq!(ui.surface.compositor().previous().cell(30, 10).symbol, 'x');
-        assert_eq!(ui.overlay_hit_test(10, 30, None), None);
-        assert_eq!(ui.hit_test(10, 30, None), Some(HitTarget::Window(below)));
+        assert_eq!(ui.overlay_hit_test(30, 10), None);
+        assert_eq!(ui.hit_test(30, 10), Some(HitTarget::Window(below)));
     }
 
     // ── UiHost trait dispatch ────────────────────────────────────────
@@ -7137,7 +7112,7 @@ mod tests {
             // explicit `set_focus` keeps that method on the trait path.
             let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]);
             let oid =
-                host.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+                host.overlay_open(Overlay::new(layout, crate::Anchor::ScreenCenter).modal(true));
             assert!(host.set_focus(win));
             // `ui()` must yield the same compositor every other method
             // mutates; assert the focused window matches what we just set.
@@ -7242,13 +7217,13 @@ mod tests {
         let mut ui = make_ui();
         let t0 = std::time::Instant::now();
         // Same cell, no time gap → climbs to 3, then wraps.
-        assert_eq!(ui.record_click(5, 7, t0), 1);
-        assert_eq!(ui.record_click(5, 7, t0), 2);
-        assert_eq!(ui.record_click(5, 7, t0), 3);
-        assert_eq!(ui.record_click(5, 7, t0), 1);
+        assert_eq!(ui.record_click(7, 5, t0), 1);
+        assert_eq!(ui.record_click(7, 5, t0), 2);
+        assert_eq!(ui.record_click(7, 5, t0), 3);
+        assert_eq!(ui.record_click(7, 5, t0), 1);
         // Different cell resets the count.
-        assert_eq!(ui.record_click(5, 7, t0), 2);
-        assert_eq!(ui.record_click(8, 7, t0), 1);
+        assert_eq!(ui.record_click(7, 5, t0), 2);
+        assert_eq!(ui.record_click(7, 8, t0), 1);
     }
 
     /// Two clicks on the same cell more than 400ms apart count as fresh
@@ -7258,12 +7233,12 @@ mod tests {
     fn record_click_resets_after_400ms_gap() {
         let mut ui = make_ui();
         let t0 = std::time::Instant::now();
-        assert_eq!(ui.record_click(5, 7, t0), 1);
+        assert_eq!(ui.record_click(7, 5, t0), 1);
         let later = t0 + std::time::Duration::from_millis(401);
-        assert_eq!(ui.record_click(5, 7, later), 1);
+        assert_eq!(ui.record_click(7, 5, later), 1);
         // A follow-up within 400ms of `later` still pairs with it.
         let still_near = later + std::time::Duration::from_millis(100);
-        assert_eq!(ui.record_click(5, 7, still_near), 2);
+        assert_eq!(ui.record_click(7, 5, still_near), 2);
     }
 
     /// Set up a single splits leaf at `(0, 0, 20, 10)` with a painted
@@ -7296,11 +7271,11 @@ mod tests {
         win
     }
 
-    fn mouse_event(kind: crossterm::event::MouseEventKind, row: u16, col: u16) -> Event {
+    fn mouse_event(kind: crossterm::event::MouseEventKind, x: u16, y: u16) -> Event {
         Event::Mouse(crossterm::event::MouseEvent {
             kind,
-            row,
-            column: col,
+            row: y,
+            column: x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         })
     }
@@ -7312,11 +7287,11 @@ mod tests {
         // Column 19 is the scrollbar column; rows 0..10 are inside the
         // viewport.
         assert_eq!(
-            ui.hit_test(3, 19, None),
+            ui.hit_test(19, 3),
             Some(HitTarget::Scrollbar { owner: win })
         );
         // Same row, column 18 → content, not scrollbar.
-        assert_eq!(ui.hit_test(3, 18, None), Some(HitTarget::Window(win)));
+        assert_eq!(ui.hit_test(18, 3), Some(HitTarget::Window(win)));
     }
 
     #[test]
@@ -7325,8 +7300,8 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         let down = mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            9,
             19,
+            9,
         );
         let status = ui.dispatch_event(down, &mut |_, _, _| {});
         assert_eq!(status, Status::Consumed);
@@ -7359,8 +7334,8 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         let down = mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            5,
             19,
+            5,
         );
         assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
         let initial_scroll = ui.win(win).unwrap().scroll_top();
@@ -7377,8 +7352,8 @@ mod tests {
 
         let drag = mouse_event(
             crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
-            5,
             19,
+            5,
         );
         assert_eq!(ui.dispatch_event(drag, &mut |_, _, _| {}), Status::Consumed);
         assert_eq!(ui.win(win).unwrap().scroll_top(), initial_scroll);
@@ -7405,8 +7380,8 @@ mod tests {
         let win = make_scrollbar_split(&mut ui);
         let down = mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            3,
             5,
+            3,
         );
         let status = ui.dispatch_event(down, &mut |_, _, _| {});
         // Splits leaf without scrollbar capture is host-routed.
@@ -7417,13 +7392,13 @@ mod tests {
 
     fn raw_mouse_event(
         kind: crossterm::event::MouseEventKind,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
     ) -> crossterm::event::MouseEvent {
         crossterm::event::MouseEvent {
             kind,
-            row,
-            column: col,
+            row: y,
+            column: x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
     }
@@ -7435,8 +7410,8 @@ mod tests {
         // Click on content (col 5, row 3) - not on the scrollbar.
         let me = raw_mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            3,
             5,
+            3,
         );
         let resolved = ui.resolve_split_mouse(me, std::time::Instant::now());
         assert_eq!(resolved, Some((HitTarget::Window(win), 1)));
@@ -7486,8 +7461,8 @@ mod tests {
         // that gesture; resolve_split_mouse declines.
         let me = raw_mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            3,
             19,
+            3,
         );
         assert_eq!(ui.resolve_split_mouse(me, std::time::Instant::now()), None);
         assert_eq!(ui.capture(), None);
@@ -7499,8 +7474,8 @@ mod tests {
         let _win = make_scrollbar_split(&mut ui);
         let drag = raw_mouse_event(
             crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
-            3,
             5,
+            3,
         );
         assert_eq!(
             ui.resolve_split_mouse(drag, std::time::Instant::now()),
@@ -7514,8 +7489,8 @@ mod tests {
         let _win = make_scrollbar_split(&mut ui);
         let me = raw_mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right),
-            3,
             5,
+            3,
         );
         assert_eq!(ui.resolve_split_mouse(me, std::time::Instant::now()), None);
         assert_eq!(ui.capture(), None);

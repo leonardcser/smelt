@@ -81,10 +81,10 @@ impl Ui {
     pub(super) fn layout_hit_test(
         &self,
         resolved: &ResolvedLayout,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
     ) -> Option<HitTarget> {
-        if let Some(resolved) = resolved.divider_at(row, col) {
+        if let Some(resolved) = resolved.divider_at(x, y) {
             let split = &resolved.split;
             let edges = match split.axis() {
                 Axis::Horizontal => ResizeEdges::east(),
@@ -95,13 +95,13 @@ impl Ui {
                 action: ChromeAction::Resize(edges),
             });
         }
-        let id = resolved.leaf_at(row, col)?;
+        let id = resolved.leaf_at(x, y)?;
         let win = WinId(id.0);
         if let Some(window) = self.wins.get(&win) {
             if window
                 .viewport
                 .and_then(|viewport| viewport.scrollbar.map(|bar| (viewport, bar)))
-                .is_some_and(|(viewport, bar)| bar.contains(viewport.rect, row, col))
+                .is_some_and(|(viewport, bar)| bar.contains(viewport.rect, x, y))
             {
                 return Some(HitTarget::Scrollbar { owner: win });
             }

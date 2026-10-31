@@ -17,8 +17,8 @@ expression: frame.text()
  command   ls -ld /Users/leo/.dotfiles; realpath
            /Users/leo/.dotfiles 2>/dev/null || true; cd
            /Users/leo/dev/rust/smelt && cargo test -p smelt-tui
- running tests...
 
+ running tests...
 
 
 

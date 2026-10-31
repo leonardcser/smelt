@@ -32,7 +32,8 @@ use smelt_core::transcript_content::{
 };
 
 use smelt_core::buffer::{AtomicObject, AtomicSpan, SpanMeta};
-use smelt_term::{RasterImage, KITTY_IMAGE_ROWS};
+use smelt_term::kitty;
+use smelt_term::RasterImage;
 
 static NEXT_MATH_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
 const MIN_DISPLAY_MATH_SCALE: f32 = 0.8;
@@ -107,7 +108,7 @@ impl MathImageCache {
                 let id = NEXT_MATH_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
                 Some(MathRaster {
                     rows: (0..rows)
-                        .map(|row| smelt_term::kitty_placeholder_row(row, cols))
+                        .map(|row| kitty::placeholder_row(row, cols))
                         .collect(),
                     id,
                     cols,
@@ -127,7 +128,7 @@ impl MathImageCache {
         if raster.image.is_none() {
             // A full live-asset budget does not discard the raster. Retry admission
             // cheaply when rows or cache entries have released their handles.
-            raster.image = smelt_term::register_kitty_image(
+            raster.image = kitty::register_image(
                 raster.id,
                 Arc::clone(&raster.png),
                 raster.cols,
@@ -265,7 +266,7 @@ fn render_math_png(
         || pixels_h < 1.0
         || pixels_w.ceil() * pixels_h.ceil() > 4_000_000.0
         || pixels_w > (max_cols.min(u16::MAX as usize) as u64 * u64::from(cell_w)) as f64
-        || pixels_h > (if inline { 1 } else { KITTY_IMAGE_ROWS } as u64 * u64::from(cell_h)) as f64
+        || pixels_h > (if inline { 1 } else { kitty::IMAGE_ROWS } as u64 * u64::from(cell_h)) as f64
     {
         return None;
     }
@@ -274,7 +275,7 @@ fn render_math_png(
     let cols = image.width().div_ceil(cell_w).max(1);
     let rows = image.height().div_ceil(cell_h).max(1) as usize;
     if cols > max_cols.min(u16::MAX as usize) as u32
-        || rows > if inline { 1 } else { KITTY_IMAGE_ROWS }
+        || rows > if inline { 1 } else { kitty::IMAGE_ROWS }
     {
         return None;
     }
@@ -1283,7 +1284,7 @@ fn ensure_retained_markdown_layout(
         .math_graphics
         .then(crate::content::display_layout::kitty_cell_pixels)
         .flatten();
-    let image_generation = cell_pixels.map_or(0, |_| smelt_term::kitty_image_generation());
+    let image_generation = cell_pixels.map_or(0, |_| kitty::image_generation());
     let mut layout = parsed
         .layouts
         .iter()
@@ -1334,7 +1335,7 @@ fn ensure_retained_markdown_layout(
         layout.total_state = state;
         layout.suffix_revision = parsed.revision;
     }
-    layout.image_generation = cell_pixels.map_or(0, |_| smelt_term::kitty_image_generation());
+    layout.image_generation = cell_pixels.map_or(0, |_| kitty::image_generation());
     layout.last_used = parsed.layout_clock;
 
     if parsed.layouts.len() >= RETAINED_MARKDOWN_LAYOUT_WIDTHS {
@@ -2739,9 +2740,9 @@ mod tests {
         let (_, image) = cache.raster(key, 80).unwrap();
         let id = image.id;
         drop(image);
-        assert!(smelt_term::kitty_image_exists(id));
+        assert!(kitty::image_exists(id));
         drop(cache);
-        assert!(!smelt_term::kitty_image_exists(id));
+        assert!(!kitty::image_exists(id));
     }
 
     #[test]
@@ -2867,10 +2868,8 @@ mod tests {
             .len()
         );
         let mut compositor = smelt_term::Compositor::new(1, 1);
-        compositor
-            .render_with(&smelt_term::Theme::default(), &mut Vec::new(), |_, _| {})
-            .unwrap();
-        assert!(smelt_term::kitty_image_exists(id.id));
+        compositor.render_with(&mut Vec::new(), |_| {}).unwrap();
+        assert!(kitty::image_exists(id.id));
         let (_, restored_id) = graphic_math_rows(
             r"\[\frac{\partial E}{\partial\theta_0}\approx\boxed{0.37062}\]",
             80,
@@ -2897,9 +2896,9 @@ mod tests {
         let (rows, id) = graphic_math_rows(source, 80, false, (10, 20))
             .expect("RaTeX should render a 3x3 matrix within the viewport");
         assert!(rows.len() >= 3, "matrix must occupy multiple terminal rows");
-        assert!(rows.len() <= KITTY_IMAGE_ROWS);
+        assert!(rows.len() <= kitty::IMAGE_ROWS);
         assert!(rows.iter().all(|row| row.starts_with('\u{10eeee}')));
-        assert!(smelt_term::kitty_image_exists(id.id));
+        assert!(kitty::image_exists(id.id));
 
         let (png, cols, height) = render_math_png(source, 80, false, (10, 20), false, 1.0).unwrap();
         let image = tiny_skia::Pixmap::decode_png(&png).unwrap();

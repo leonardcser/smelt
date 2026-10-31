@@ -99,12 +99,12 @@ struct TranscriptScrollInputCandidate {
 impl TuiApp {
     pub(crate) fn scroll_at_with_transcript_intent(
         &mut self,
-        row: u16,
-        col: u16,
+        x: u16,
+        y: u16,
         delta: isize,
         label: impl Into<String>,
     ) -> bool {
-        if let Some(candidate) = self.transcript_window_at(row, col).and_then(|window| {
+        if let Some(candidate) = self.transcript_window_at(x, y).and_then(|window| {
             self.transcript_scroll_target(window)
                 .map(|target| TranscriptScrollInputCandidate {
                     target,
@@ -118,7 +118,7 @@ impl TuiApp {
         }) {
             return self.apply_transcript_scroll_input(candidate);
         }
-        self.ui.scroll_at(row, col, delta)
+        self.ui.scroll_at(x, y, delta)
     }
 
     pub(crate) fn tick_drag_autoscroll_with_transcript_intent(&mut self) -> bool {
@@ -204,8 +204,8 @@ impl TuiApp {
             .unwrap_or(0)
     }
 
-    fn transcript_window_at(&self, row: u16, col: u16) -> Option<WinId> {
-        match self.ui.hit_test(row, col, None)? {
+    fn transcript_window_at(&self, x: u16, y: u16) -> Option<WinId> {
+        match self.ui.hit_test(x, y)? {
             HitTarget::Window(win) | HitTarget::Scrollbar { owner: win } => Some(win),
             HitTarget::Paint(_) | HitTarget::Chrome { .. } => None,
         }
@@ -231,7 +231,7 @@ impl TuiApp {
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => return None,
             _ => return None,
         };
-        let window = self.transcript_window_at(me.row, me.column)?;
+        let window = self.transcript_window_at(me.column, me.row)?;
         Some(TranscriptScrollInputCandidate {
             target: self.transcript_scroll_target(window)?,
             label: match me.kind {
@@ -251,7 +251,7 @@ impl TuiApp {
     ) -> Option<TranscriptScrollInputCandidate> {
         let owner = match me.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                match self.ui.hit_test(me.row, me.column, None)? {
+                match self.ui.hit_test(me.column, me.row)? {
                     HitTarget::Scrollbar { owner } => owner,
                     _ => return None,
                 }
@@ -415,7 +415,7 @@ impl TuiApp {
         // app_focus to the underlying pane even when the overlay leaf is not
         // focusable or selectable.
         if is_left_down(me.kind) && self.ui.active_modal().is_none() {
-            let hit_target = self.ui.hit_test(me.row, me.column, None);
+            let hit_target = self.ui.hit_test(me.column, me.row);
             let hits_overlay = hit_target.is_some_and(|ht| match ht {
                 HitTarget::Window(w) => self.ui.overlay_for_leaf(w).is_some(),
                 HitTarget::Paint(p) => self.ui.overlay_for_paint(p).is_some(),
@@ -423,7 +423,7 @@ impl TuiApp {
                 _ => false,
             });
             if !hits_overlay {
-                let region = self.layout.hit_test(me.row, me.column);
+                let region = self.layout.hit_test(me.column, me.row);
                 let has_content = self.has_transcript_content();
                 if let Some(focus) = focus_for_region_click(region, has_content) {
                     self.app_focus = focus;
@@ -595,7 +595,7 @@ impl TuiApp {
 
     fn handle_prompt_resize_click(&mut self, me: MouseEvent) -> bool {
         let now = self.core.clock.instant_now();
-        let reset = self.prompt.register_resize_click(me.row, me.column, now);
+        let reset = self.prompt.register_resize_click(me.column, me.row, now);
         if reset {
             self.publish_prompt_resize_state();
         }
@@ -647,8 +647,8 @@ impl TuiApp {
         };
         let (rel_row, rel_col) = match rect {
             Some(rect) => (
-                me.row.saturating_sub(rect.top),
-                me.column.saturating_sub(rect.left),
+                me.row.saturating_sub(rect.y),
+                me.column.saturating_sub(rect.x),
             ),
             None => (0, 0),
         };
@@ -987,29 +987,29 @@ mod tests {
         assert_eq!(focus_for_region_click(HitRegion::Outside, true), None);
     }
 
-    fn left_down(row: u16, column: u16) -> MouseEvent {
+    fn left_down(x: u16, y: u16) -> MouseEvent {
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            row,
-            column,
+            row: y,
+            column: x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
     }
 
-    fn left_drag(row: u16, column: u16) -> MouseEvent {
+    fn left_drag(x: u16, y: u16) -> MouseEvent {
         MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            row,
-            column,
+            row: y,
+            column: x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
     }
 
-    fn left_up(row: u16, column: u16) -> MouseEvent {
+    fn left_up(x: u16, y: u16) -> MouseEvent {
         MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            row,
-            column,
+            row: y,
+            column: x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
     }
@@ -1102,18 +1102,15 @@ mod tests {
         app.ui.overlay_open(
             crate::smelt_edit::Overlay::new(
                 crate::smelt_edit::LayoutTree::leaf(paint),
-                crate::smelt_edit::layout::Anchor::ScreenCenter,
+                crate::smelt_edit::Anchor::ScreenCenter,
             )
             .with_size((4, 2)),
         );
         let rect = app.ui.paint_rect(paint).expect("paint leaf rect");
 
-        app.handle_mouse(left_down(rect.top, rect.left));
+        app.handle_mouse(left_down(rect.x, rect.y));
         assert_eq!(app.ui.capture(), Some(HitTarget::Paint(paint)));
-        app.handle_mouse(left_up(
-            rect.top + rect.height + 1,
-            rect.left + rect.width + 1,
-        ));
+        app.handle_mouse(left_up(rect.x + rect.width + 1, rect.y + rect.height + 1));
 
         assert_eq!(app.ui.capture(), None);
         assert_eq!(&*events.borrow(), &["press", "release"]);
@@ -1122,7 +1119,7 @@ mod tests {
     #[test]
     fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
         let mut app = app_with_seeded_prompt_top_bar();
-        let down = left_down(0, 4);
+        let down = left_down(4, 0);
 
         app.handle_mouse(down);
 
@@ -1152,11 +1149,11 @@ mod tests {
         );
         app.handle_mouse(left_down(0, 0));
         assert_eq!(app.ui.capture(), Some(HitTarget::Window(top)));
-        app.handle_mouse(left_drag(0, 3));
+        app.handle_mouse(left_drag(3, 0));
         assert!(app.ui.win(top).is_some_and(|win| win
             .selection_range(app.ui.buf(win.buf).expect("top bar buffer"))
             .is_some()));
-        app.handle_mouse(left_up(0, 3));
+        app.handle_mouse(left_up(3, 0));
 
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
@@ -1188,7 +1185,7 @@ mod tests {
                 smelt_core::buffer::SpanMeta::unselectable(),
             );
         }
-        (vp.rect.top, vp.rect.left)
+        (vp.rect.y, vp.rect.x)
     }
 
     #[test]
@@ -1230,7 +1227,7 @@ mod tests {
         let (row, col) = prompt_resize_handle_cell(&mut app);
         let start_rows = app.prompt.prompt_rows_for_harness();
 
-        app.handle_mouse(left_down(row, col));
+        app.handle_mouse(left_down(col, row));
         assert_eq!(
             app.core.signals.get::<bool>("prompt_resize_active"),
             Some(true)
@@ -1239,8 +1236,8 @@ mod tests {
             app.core.signals.get::<String>("prompt_resize_chrome"),
             Some("top".to_string())
         );
-        app.handle_mouse(left_drag(row.saturating_sub(2), col));
-        app.handle_mouse(left_up(row.saturating_sub(2), col));
+        app.handle_mouse(left_drag(col, row.saturating_sub(2)));
+        app.handle_mouse(left_up(col, row.saturating_sub(2)));
         assert_eq!(
             app.core.signals.get::<bool>("prompt_resize_active"),
             Some(false)
@@ -1265,9 +1262,9 @@ mod tests {
         app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         let (row, col) = prompt_resize_handle_cell(&mut app);
 
-        app.handle_mouse(left_down(row, col));
-        app.handle_mouse(left_drag(row + 2, col));
-        app.handle_mouse(left_up(row + 2, col));
+        app.handle_mouse(left_down(col, row));
+        app.handle_mouse(left_drag(col, row + 2));
+        app.handle_mouse(left_up(col, row + 2));
         app.render_normal_to(&mut std::io::sink());
 
         assert_eq!(app.prompt.manual_prompt_rows_for_harness(), Some(2));
@@ -1310,10 +1307,10 @@ mod tests {
         app.prompt.set_manual_prompt_rows_for_harness(Some(4));
         let (row, col) = prompt_resize_handle_cell(&mut app);
 
-        app.handle_mouse(left_down(row, col));
-        app.handle_mouse(left_up(row, col));
-        app.handle_mouse(left_down(row, col));
-        app.handle_mouse(left_up(row, col));
+        app.handle_mouse(left_down(col, row));
+        app.handle_mouse(left_up(col, row));
+        app.handle_mouse(left_down(col, row));
+        app.handle_mouse(left_up(col, row));
 
         assert_eq!(app.prompt.manual_prompt_rows_for_harness(), None);
     }
@@ -1329,9 +1326,9 @@ mod tests {
         );
         let (row, col) = prompt_resize_handle_cell(&mut app);
 
-        app.handle_mouse(left_down(row, col));
-        app.handle_mouse(left_drag(row + 20, col));
-        app.handle_mouse(left_up(row + 20, col));
+        app.handle_mouse(left_down(col, row));
+        app.handle_mouse(left_drag(col, row + 20));
+        app.handle_mouse(left_up(col, row + 20));
         app.render_normal_to(&mut std::io::sink());
 
         assert_eq!(app.prompt.manual_prompt_rows_for_harness(), None);
@@ -1412,7 +1409,7 @@ mod tests {
             .win(bottom)
             .and_then(|w| w.viewport)
             .expect("bottom bar viewport");
-        let down = left_down(vp.rect.top, vp.rect.left);
+        let down = left_down(vp.rect.x, vp.rect.y);
 
         app.handle_mouse(down);
 
@@ -1443,8 +1440,8 @@ mod tests {
             .transcript_win()
             .viewport
             .expect("render populated transcript viewport");
-        let click_row = vp.rect.top.saturating_add(3);
-        let click_col = vp.rect.left;
+        let click_row = vp.rect.y.saturating_add(3);
+        let click_col = vp.rect.x;
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             row: click_row,
@@ -1463,7 +1460,7 @@ mod tests {
         let win = app.transcript_win();
         assert_eq!(
             win.cursor_screen_row(vp.rect.height),
-            Some(click_row - vp.rect.top),
+            Some(click_row - vp.rect.y),
             "scroll_top={} local_scroll={} cursor_abs={} cursor_local={} cursor_col={} rows={:?}",
             win.scroll_top(),
             win.local_visual_row(win.scroll_top()),
@@ -1528,8 +1525,8 @@ mod tests {
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
-            row: vp.rect.top,
-            column: vp.rect.left,
+            row: vp.rect.y,
+            column: vp.rect.x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
         app.render_normal_to(&mut std::io::sink());
@@ -1541,8 +1538,8 @@ mod tests {
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
-            row: vp.rect.top,
-            column: vp.rect.left,
+            row: vp.rect.y,
+            column: vp.rect.x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
         app.render_normal_to(&mut std::io::sink());
@@ -1571,8 +1568,8 @@ mod tests {
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
-            row: vp.rect.top,
-            column: vp.rect.left,
+            row: vp.rect.y,
+            column: vp.rect.x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
 
@@ -1672,7 +1669,7 @@ mod tests {
         app.app_focus = AppFocus::Prompt;
         app.ui.set_focus(crate::app::PROMPT_WIN);
 
-        app.handle_mouse(left_down(vp.rect.top, bar.col));
+        app.handle_mouse(left_down(bar.col, vp.rect.y));
         assert_eq!(
             app.ui.capture(),
             Some(HitTarget::Scrollbar {
@@ -1682,16 +1679,16 @@ mod tests {
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
 
-        app.handle_mouse(left_drag(vp.rect.bottom().saturating_sub(1), bar.col));
+        app.handle_mouse(left_drag(bar.col, vp.rect.bottom().saturating_sub(1)));
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
 
-        app.handle_mouse(left_up(vp.rect.bottom().saturating_sub(1), bar.col));
+        app.handle_mouse(left_up(bar.col, vp.rect.bottom().saturating_sub(1)));
         assert_eq!(app.ui.capture(), None);
         assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
 
-        app.handle_mouse(left_down(vp.rect.top, vp.rect.left));
+        app.handle_mouse(left_down(vp.rect.x, vp.rect.y));
         assert_eq!(app.app_focus, AppFocus::Content);
         assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
     }
@@ -1715,8 +1712,8 @@ mod tests {
         for _ in 0..12 {
             app.handle_mouse(MouseEvent {
                 kind: MouseEventKind::ScrollUp,
-                row: vp.rect.top,
-                column: vp.rect.left,
+                row: vp.rect.y,
+                column: vp.rect.x,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             });
         }
@@ -1775,13 +1772,13 @@ mod tests {
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            row: vp.rect.top.saturating_add(start_rel),
-            column: vp.rect.left,
+            row: vp.rect.y.saturating_add(start_rel),
+            column: vp.rect.x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         let drag = MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            row: vp.rect.top.saturating_add(end_rel),
+            row: vp.rect.y.saturating_add(end_rel),
             ..down
         };
         let up = MouseEvent {
@@ -1825,13 +1822,13 @@ mod tests {
         let end_rel = 5u16;
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            row: vp.rect.top.saturating_add(start_rel),
-            column: vp.rect.left,
+            row: vp.rect.y.saturating_add(start_rel),
+            column: vp.rect.x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         let drag = MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            row: vp.rect.top.saturating_add(end_rel),
+            row: vp.rect.y.saturating_add(end_rel),
             ..down
         };
 
@@ -1888,13 +1885,13 @@ mod tests {
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            row: vp.rect.top.saturating_add(start_rel),
-            column: vp.rect.left,
+            row: vp.rect.y.saturating_add(start_rel),
+            column: vp.rect.x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         let drag = MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            row: vp.rect.top.saturating_add(end_rel),
+            row: vp.rect.y.saturating_add(end_rel),
             ..down
         };
         let up = MouseEvent {
@@ -1945,8 +1942,8 @@ mod tests {
             })
             .unwrap();
         let local_top = win.local_visual_row(top) as usize;
-        let row_at = |local: usize| viewport.rect.top + (local - local_top) as u16;
-        let column = viewport.rect.left + viewport.gutter_width + 2;
+        let row_at = |local: usize| viewport.rect.y + (local - local_top) as u16;
+        let column = viewport.rect.x + viewport.gutter_width + 2;
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             row: row_at(before_row),
@@ -1990,7 +1987,7 @@ mod tests {
         }
 
         let viewport = crate::smelt_edit::WindowViewport::new(
-            crate::smelt_edit::Rect::new(5, 3, 40, 2),
+            crate::smelt_edit::Rect::new(3, 5, 40, 2),
             40,
             22,
             20,
@@ -2009,8 +2006,8 @@ mod tests {
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            row: viewport.rect.top,
-            column: viewport.rect.left,
+            row: viewport.rect.y,
+            column: viewport.rect.x,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         let up = MouseEvent {

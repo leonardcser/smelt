@@ -377,8 +377,8 @@ pub(crate) struct PromptResizeDrag {
 
 #[derive(Clone, Copy, Debug)]
 struct PromptResizeClick {
-    row: u16,
-    col: u16,
+    x: u16,
+    y: u16,
     at: Instant,
 }
 
@@ -482,17 +482,17 @@ impl PromptHeightState {
         true
     }
 
-    pub(crate) fn register_click(&mut self, row: u16, col: u16, now: Instant) -> bool {
+    pub(crate) fn register_click(&mut self, x: u16, y: u16, now: Instant) -> bool {
         let double_click = self.last_click.is_some_and(|last| {
-            last.row == row
-                && last.col == col
+            last.x == x
+                && last.y == y
                 && now.saturating_duration_since(last.at) <= Self::DOUBLE_CLICK_WINDOW
         });
         if double_click {
             self.reset();
             return true;
         }
-        self.last_click = Some(PromptResizeClick { row, col, at: now });
+        self.last_click = Some(PromptResizeClick { x, y, at: now });
         false
     }
 
@@ -3976,12 +3976,7 @@ impl TuiApp {
                     }
 
                     if scroll_delta != 0 {
-                        let _ = self.scroll_at_with_transcript_intent(
-                            scroll_row,
-                            scroll_col,
-                            scroll_delta,
-                            format!("coalesced_wheel:{scroll_delta}"),
-                        );
+                        let _ = self.scroll_at_with_transcript_intent(scroll_col, scroll_row, scroll_delta, format!("coalesced_wheel:{scroll_delta}"));
                     }
 
                     self.dispatch_ui_window_events(false);
