@@ -384,8 +384,8 @@ fn click_named_window(app: &mut TestApp, name: &str) {
                 .and_then(|win| win.viewport.map(|viewport| viewport.rect))
         })
         .unwrap_or_else(|| panic!("missing benchmark window rect {name}"));
-    let row = rect.top.saturating_add(rect.height.saturating_sub(1) / 2);
-    let column = rect.left.saturating_add(rect.width.saturating_sub(1) / 2);
+    let row = rect.y.saturating_add(rect.height.saturating_sub(1) / 2);
+    let column = rect.x.saturating_add(rect.width.saturating_sub(1) / 2);
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
@@ -1907,8 +1907,8 @@ fn feed_transcript_wheel(app: &mut TestApp, kind: crossterm::event::MouseEventKi
     app.feed_one(SourceEvent::Term(crossterm::event::Event::Mouse(
         crossterm::event::MouseEvent {
             kind,
-            row: rect.top.saturating_add(rect.height / 2),
-            column: rect.left.saturating_add(rect.width / 2),
+            row: rect.y.saturating_add(rect.height / 2),
+            column: rect.x.saturating_add(rect.width / 2),
             modifiers: KeyModifiers::empty(),
         },
     )));
