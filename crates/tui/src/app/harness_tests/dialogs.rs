@@ -1652,6 +1652,9 @@ fn worktree_permission_dialog_offers_repository_scope_with_main_checkout_label()
             fixture.feature.display()
         )
     );
+    // The label holds the fixture's path, whose length follows `TMPDIR`.
+    let width = (repository.label.chars().count() + 16).max(80) as u16;
+    app.set_terminal_size(width, 24);
     let frame = app.render_to_frame().text();
     assert!(frame.contains("in project"));
     assert!(frame.contains("all worktrees"));
