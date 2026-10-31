@@ -146,6 +146,19 @@ while True:
     if SCENARIO == "error":
         send({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in. Run claude auth login."})
         continue
+    if SCENARIO == "usage-limit" and TOOLS_ENABLED and not os.path.exists(LOG + ".limited"):
+        # Hits the plan's limit once, the way Claude Code reports it, and
+        # answers normally after the reset.
+        open(LOG + ".limited", "w").close()
+        resets_in = int(os.environ.get("SMELT_CLAUDE_FIXTURE_RESET_SECS", "1"))
+        info = {"status": "rejected", "resetsAt": int(time.time()) + resets_in, "rateLimitType": "five_hour", "isUsingOverage": False}
+        send({"type": "rate_limit_event", "rate_limit_info": info, "session_id": SESSION})
+        text = "You've hit your 5-hour limit · resets 12:50pm (Europe/Zurich)"
+        send({"type": "assistant", "uuid": "limit", "message": {"id": "limit", "model": "<synthetic>", "content": [{"type": "text", "text": text}]},
+              "parent_tool_use_id": None, "error": "rate_limit", "is_api_error_message": True, "api_error_status": 429,
+              "api_error": "usage_limit_reached", "api_error_params": {"rate_limit_info": info}})
+        send({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "session_id": SESSION, "result": text})
+        continue
     if SCENARIO == "permission-native-cancel" and TOOLS_ENABLED:
         args = {"command": "echo fixture-native-tool"}
         assistant([{"type": "tool_use", "id": "cancelled-tool", "name": "Bash", "input": args}])
