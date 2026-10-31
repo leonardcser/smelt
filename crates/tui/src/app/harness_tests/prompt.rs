@@ -169,6 +169,55 @@ fn notification_stays_within_a_prompt_narrowed_by_a_sidebar() {
 }
 
 #[test]
+fn prompt_chrome_stays_right_of_a_left_sidebar() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    assert!(app.run_lua(
+        r#"
+        smelt.cmd.register("zzleft", function() end, { desc = "PICKER row" })
+        local side = smelt.buf.new({ readonly = true })
+        local rows = {}
+        for i = 1, 40 do rows[i] = "SIDE" end
+        side:lines(rows)
+        local ui = smelt.ui.layout
+        local default = require("smelt.layout").compose
+        ui.set(function(state)
+            return ui.hbox({
+                { ui.leaf(smelt.win.new(side, { surface = "list_inert" })), width = 18 },
+                { default(state), width = "fill" },
+            })
+        end)
+        "#
+    ));
+    app.render();
+    app.start_turn(1);
+    app.push_queued_message("QUEUED row".into());
+    app.type_text("stashed");
+    app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    app.app.notify("NOTICE row".into());
+    let with_notice = app.render_to_frame().text();
+    // The prompt's picker covers its notice.
+    app.type_text("/zzleft");
+    let with_picker = app.render_to_frame().text();
+
+    for (frame, markers) in [
+        (with_notice, ["NOTICE", "Stashed", "QUEUED"]),
+        (with_picker, ["PICKER", "Stashed", "QUEUED"]),
+    ] {
+        for marker in markers {
+            let row = frame
+                .lines()
+                .find(|line| line.contains(marker))
+                .unwrap_or_else(|| panic!("{marker} row missing:\n{frame}"));
+            assert!(
+                row.starts_with("SIDE"),
+                "the {marker} row should leave the sidebar showing beside it:\n{frame}"
+            );
+        }
+    }
+}
+
+#[test]
 fn slash_completion_accepts_current_command_from_a_terminal_burst() {
     for accept in [KeyCode::Enter, KeyCode::Tab] {
         let mut app = TestApp::builder().with_vim(false).build();
