@@ -1,15 +1,21 @@
 use std::io::{self, BufWriter, Stdout, Write};
+use std::sync::{Mutex, Once};
+use std::time::Duration;
 
 use crossterm::{
     cursor,
     event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     QueueableCommand,
 };
+
+use crate::grid::GridSlice;
+use crate::layout::{PaintId, ResolvedLayout};
+use crate::surface::Surface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SuspendScreen {
@@ -21,8 +27,14 @@ pub struct TerminalSession<W: Write> {
     writer: W,
     raw_mode: bool,
     modes: TerminalModes,
+    /// Stdout sessions publish their state so a panic can restore the terminal.
+    panic_restore: bool,
     _not_send: std::marker::PhantomData<*const ()>,
 }
+
+/// Modes and raw mode the active stdout session has turned on. The panic hook
+/// takes this to restore the terminal before the panic message prints.
+static PANIC_RESTORE: Mutex<Option<(TerminalModes, bool)>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TerminalModes {
@@ -63,6 +75,10 @@ impl Default for TerminalModes {
     }
 }
 
+/// Configures the terminal modes a [`TerminalSession`] enters. The hardware
+/// caret is always hidden while the session is active: paint any visible
+/// cursor into the grid, and use `Grid::set_terminal_cursor_position` to
+/// anchor the hidden caret for input methods.
 #[derive(Clone, Debug)]
 pub struct TerminalSessionBuilder {
     modes: TerminalModes,
@@ -86,11 +102,6 @@ impl TerminalSessionBuilder {
 
     pub fn mouse_capture(mut self, yes: bool) -> Self {
         self.modes.mouse_capture = yes;
-        self
-    }
-
-    pub fn hide_cursor(mut self, yes: bool) -> Self {
-        self.modes.hide_cursor = yes;
         self
     }
 
@@ -119,12 +130,19 @@ impl TerminalSessionBuilder {
         self
     }
 
+    /// Enter on stdout. A panic while the session is active restores the
+    /// terminal first, so the panic message is readable.
     pub fn enter_stdout(self) -> io::Result<TerminalSession<BufWriter<Stdout>>> {
         let capacity = self.buffer_capacity;
-        let stdout = io::stdout();
-        self.enter(BufWriter::with_capacity(capacity, stdout))
+        let mut session = self.enter(BufWriter::with_capacity(capacity, io::stdout()))?;
+        install_panic_hook();
+        session.panic_restore = true;
+        session.publish_state();
+        Ok(session)
     }
 
+    /// Enter on a custom writer. No panic hook is installed, since the hook
+    /// cannot reach `writer`.
     pub fn enter<W: Write>(self, writer: W) -> io::Result<TerminalSession<W>> {
         TerminalSession::enter_with(writer, self)
     }
@@ -147,6 +165,7 @@ impl<W: Write> TerminalSession<W> {
             writer,
             raw_mode: true,
             modes: TerminalModes::inactive(),
+            panic_restore: false,
             _not_send: std::marker::PhantomData,
         };
 
@@ -171,6 +190,36 @@ impl<W: Write> TerminalSession<W> {
         terminal::size()
     }
 
+    /// Match `surface` to the terminal's current size, then render it.
+    /// Returns the painted geometry for hit-testing this frame.
+    pub fn draw<F>(&mut self, surface: &mut Surface, paint: F) -> io::Result<ResolvedLayout>
+    where
+        F: FnMut(PaintId, &mut GridSlice<'_>),
+    {
+        let (width, height) = self.size()?;
+        if surface.terminal_size() != (width, height) {
+            surface.set_terminal_size(width, height);
+        }
+        surface.render(&mut self.writer, paint)
+    }
+
+    /// Wait for input, then return it together with everything already queued.
+    /// `None` waits forever; an expired `timeout` returns no events. Only the
+    /// last `Resize` is kept: a resize drag queues one per step, and
+    /// [`Self::draw`] reads the final size anyway.
+    pub fn events(&self, timeout: Option<Duration>) -> io::Result<Vec<Event>> {
+        if let Some(timeout) = timeout {
+            if !event::poll(timeout)? {
+                return Ok(Vec::new());
+            }
+        }
+        let mut events = vec![event::read()?];
+        while event::poll(Duration::ZERO)? {
+            events.push(event::read()?);
+        }
+        Ok(keep_last_resize(events))
+    }
+
     pub fn suspend<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce() -> R,
@@ -188,13 +237,16 @@ impl<W: Write> TerminalSession<W> {
         if screen == SuspendScreen::LeaveAlternate && modes.alternate_screen {
             let _ = self.writer.queue(LeaveAlternateScreen);
             let _ = self.writer.flush();
+            self.modes.alternate_screen = false;
         }
+        self.publish_state();
         let result = f();
         if modes.alternate_screen {
             let _ = self.writer.queue(EnterAlternateScreen);
         }
         self.modes = modes;
         let _ = self.restore_input_modes(raw_mode);
+        self.publish_state();
         result
     }
 
@@ -231,50 +283,26 @@ impl<W: Write> TerminalSession<W> {
     }
 
     fn restore(&mut self) -> io::Result<()> {
-        self.release_input_modes()?;
-        if self.modes.alternate_screen {
-            self.writer.queue(LeaveAlternateScreen)?;
-            self.modes.alternate_screen = false;
-        }
-        self.writer.flush()?;
-        if self.raw_mode {
-            terminal::disable_raw_mode()?;
+        if self.panic_restore && take_panic_state().is_none() {
+            // The panic hook already restored the terminal.
+            self.modes = TerminalModes::inactive();
             self.raw_mode = false;
+            return Ok(());
         }
-        Ok(())
+        restore_terminal(&mut self.writer, &mut self.modes, &mut self.raw_mode)
     }
 
     fn release_input_modes(&mut self) -> io::Result<()> {
-        if self.modes.mouse_capture {
-            self.writer.queue(DisableMouseCapture)?;
-            self.modes.mouse_capture = false;
-        }
-        if self.modes.keyboard_enhancements.is_some() {
-            self.writer.queue(PopKeyboardEnhancementFlags)?;
-            self.modes.keyboard_enhancements = None;
-        }
-        if self.modes.focus_events {
-            self.writer.queue(DisableFocusChange)?;
-            self.modes.focus_events = false;
-        }
-        if self.modes.bracketed_paste {
-            self.writer.queue(DisableBracketedPaste)?;
-            self.modes.bracketed_paste = false;
-        }
-        if self.modes.hide_cursor {
-            self.writer.queue(cursor::Show)?;
-            self.modes.hide_cursor = false;
-        }
-        if !self.modes.line_wrap {
-            self.writer.queue(EnableLineWrap)?;
-            self.modes.line_wrap = true;
-        }
+        queue_input_release(&mut self.writer, &mut self.modes)?;
         self.writer.flush()?;
-        if self.raw_mode {
-            terminal::disable_raw_mode()?;
-            self.raw_mode = false;
+        disable_raw_mode(&mut self.raw_mode)
+    }
+
+    /// Record the current state for the panic hook. Stdout sessions only.
+    fn publish_state(&self) {
+        if self.panic_restore {
+            *panic_state() = Some((self.modes, self.raw_mode));
         }
-        Ok(())
     }
 
     fn restore_input_modes(&mut self, raw_mode: bool) -> io::Result<()> {
@@ -302,6 +330,95 @@ impl<W: Write> TerminalSession<W> {
         }
         self.writer.flush()
     }
+}
+
+/// Undo every active mode, then leave the alternate screen and raw mode.
+/// Each flag clears once its sequence is queued, so a failed write can retry.
+fn restore_terminal(
+    w: &mut impl Write,
+    modes: &mut TerminalModes,
+    raw_mode: &mut bool,
+) -> io::Result<()> {
+    queue_input_release(w, modes)?;
+    if modes.alternate_screen {
+        w.queue(LeaveAlternateScreen)?;
+        modes.alternate_screen = false;
+    }
+    w.flush()?;
+    disable_raw_mode(raw_mode)
+}
+
+/// Queue the sequences that undo every active mode except the alternate screen.
+fn queue_input_release(w: &mut impl Write, modes: &mut TerminalModes) -> io::Result<()> {
+    if modes.mouse_capture {
+        w.queue(DisableMouseCapture)?;
+        modes.mouse_capture = false;
+    }
+    if modes.keyboard_enhancements.is_some() {
+        w.queue(PopKeyboardEnhancementFlags)?;
+        modes.keyboard_enhancements = None;
+    }
+    if modes.focus_events {
+        w.queue(DisableFocusChange)?;
+        modes.focus_events = false;
+    }
+    if modes.bracketed_paste {
+        w.queue(DisableBracketedPaste)?;
+        modes.bracketed_paste = false;
+    }
+    if modes.hide_cursor {
+        w.queue(cursor::Show)?;
+        modes.hide_cursor = false;
+    }
+    if !modes.line_wrap {
+        w.queue(EnableLineWrap)?;
+        modes.line_wrap = true;
+    }
+    Ok(())
+}
+
+fn disable_raw_mode(raw_mode: &mut bool) -> io::Result<()> {
+    if *raw_mode {
+        terminal::disable_raw_mode()?;
+        *raw_mode = false;
+    }
+    Ok(())
+}
+
+fn panic_state() -> std::sync::MutexGuard<'static, Option<(TerminalModes, bool)>> {
+    PANIC_RESTORE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn take_panic_state() -> Option<(TerminalModes, bool)> {
+    panic_state().take()
+}
+
+/// Chain a hook that restores the terminal before the previous hook prints.
+fn install_panic_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some((mut modes, mut raw_mode)) = take_panic_state() {
+                let _ = restore_terminal(&mut io::stdout(), &mut modes, &mut raw_mode);
+            }
+            previous(info);
+        }));
+    });
+}
+
+/// Drop every `Resize` but the last, keeping all other events in order.
+fn keep_last_resize(mut events: Vec<Event>) -> Vec<Event> {
+    let is_resize = |event: &Event| matches!(event, Event::Resize(..));
+    if let Some(last) = events.iter().rposition(is_resize) {
+        let mut index = 0;
+        events.retain(|event| {
+            let keep = index == last || !is_resize(event);
+            index += 1;
+            keep
+        });
+    }
+    events
 }
 
 impl<W: Write> Drop for TerminalSession<W> {
@@ -335,11 +452,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keep_last_resize_drops_intermediate_sizes_only() {
+        let key = Event::FocusGained;
+        let events = vec![
+            Event::Resize(80, 24),
+            key.clone(),
+            Event::Resize(90, 24),
+            Event::Resize(100, 30),
+            Event::FocusLost,
+        ];
+        assert_eq!(
+            keep_last_resize(events),
+            vec![key, Event::Resize(100, 30), Event::FocusLost]
+        );
+        assert_eq!(keep_last_resize(Vec::new()), Vec::new());
+    }
+
     fn test_session(writer: TestWriter) -> TerminalSession<TestWriter> {
         TerminalSession {
             writer,
             raw_mode: false,
             modes: TerminalModes::inactive(),
+            panic_restore: false,
             _not_send: std::marker::PhantomData,
         }
     }
@@ -381,6 +516,20 @@ mod tests {
         session.writer.fail_flush = false;
         session.restore().unwrap();
         assert_eq!(session.modes, TerminalModes::inactive());
+    }
+
+    #[test]
+    fn restore_is_skipped_after_the_panic_hook_restored_the_terminal() {
+        let mut session = test_session(TestWriter::default());
+        session.modes = all_modes();
+        session.panic_restore = true;
+        // The hook took the published state, so nothing is left to undo.
+        take_panic_state();
+
+        session.restore().unwrap();
+
+        assert_eq!(session.modes, TerminalModes::inactive());
+        assert!(session.writer.bytes.is_empty());
     }
 
     #[test]

@@ -46,12 +46,12 @@ impl<P> HitRegistry<P> {
         self.record(rect.clip_to(bounds).to_grid(origin), payload);
     }
 
-    /// Return the topmost payload whose rect covers `(row, col)`.
-    pub fn hit(&self, row: u16, col: u16) -> Option<&P> {
+    /// Return the topmost payload whose rect covers `(x, y)`.
+    pub fn hit(&self, x: u16, y: u16) -> Option<&P> {
         self.entries
             .iter()
             .rev()
-            .find_map(|(r, p)| r.contains(row, col).then_some(p))
+            .find_map(|(r, p)| r.contains(x, y).then_some(p))
     }
 
     /// All `(Rect, &payload)` pairs in insertion order.
@@ -82,8 +82,8 @@ mod tests {
     fn hit_returns_topmost_payload() {
         let mut reg = HitRegistry::<Tile>::new();
         reg.record(Rect::new(0, 0, 20, 10), Tile::Dir(1));
-        reg.record(Rect::new(2, 5, 5, 3), Tile::File(42));
-        assert_eq!(reg.hit(3, 5), Some(&Tile::File(42)));
+        reg.record(Rect::new(5, 2, 5, 3), Tile::File(42));
+        assert_eq!(reg.hit(5, 3), Some(&Tile::File(42)));
         assert_eq!(reg.hit(0, 0), Some(&Tile::Dir(1)));
     }
 
@@ -113,16 +113,16 @@ mod tests {
     #[test]
     fn record_local_offsets_rect() {
         let mut reg = HitRegistry::<u32>::new();
-        reg.record_local(Rect::new(10, 20, 5, 5), Rect::new(1, 2, 3, 4), 7);
-        assert_eq!(reg.hit(11, 22), Some(&7));
-        assert_eq!(reg.hit(1, 2), None);
+        reg.record_local(Rect::new(20, 10, 5, 5), Rect::new(2, 1, 3, 4), 7);
+        assert_eq!(reg.hit(22, 11), Some(&7));
+        assert_eq!(reg.hit(2, 1), None);
     }
 
     #[test]
     fn record_local_clipped_limits_rect_to_origin() {
         let mut reg = HitRegistry::<u32>::new();
-        reg.record_local_clipped(Rect::new(10, 20, 5, 5), Rect::new(3, 3, 10, 10), 7);
-        assert_eq!(reg.hit(13, 23), Some(&7));
-        assert_eq!(reg.hit(16, 26), None);
+        reg.record_local_clipped(Rect::new(20, 10, 5, 5), Rect::new(3, 3, 10, 10), 7);
+        assert_eq!(reg.hit(23, 13), Some(&7));
+        assert_eq!(reg.hit(26, 16), None);
     }
 }

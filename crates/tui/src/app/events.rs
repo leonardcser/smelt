@@ -3801,7 +3801,7 @@ mod tests {
         app.app.ui.overlay_open(
             crate::smelt_edit::Overlay::new(
                 crate::smelt_edit::LayoutTree::leaf(win),
-                crate::smelt_edit::layout::Anchor::ScreenCenter,
+                crate::smelt_edit::Anchor::ScreenCenter,
             )
             .modal(true),
         );

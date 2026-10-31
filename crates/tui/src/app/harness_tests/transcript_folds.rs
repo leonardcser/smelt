@@ -197,7 +197,7 @@ fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
     let window = app.transcript_window();
     assert!(window.following_tail);
     let viewport = window.viewport.expect("transcript viewport");
-    let click_row = viewport.rect.top.saturating_add(
+    let click_row = viewport.rect.y.saturating_add(
         preview
             .first_row
             .saturating_sub(window.scroll_top)
@@ -205,7 +205,7 @@ fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
     );
     let click_col = viewport
         .rect
-        .left
+        .x
         .saturating_add(viewport.gutter_width)
         .saturating_add(2);
     for kind in [
@@ -279,7 +279,7 @@ fn collapsing_bottom_pinned_block_hides_jump_to_bottom_pill() {
     let row = viewport.rect.bottom().saturating_sub(1);
     let column = viewport
         .rect
-        .left
+        .x
         .saturating_add(viewport.gutter_width)
         .saturating_add(2);
     for kind in [

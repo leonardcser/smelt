@@ -3,7 +3,6 @@ use smelt_term::{
     Split, SplitInteraction, SplitOptions, SplitPane, SplitPhase, SplitResizeMode, SplitSize,
     Style, Surface, Theme,
 };
-use std::sync::Arc;
 
 const FIRST: PaintId = PaintId(1);
 const SECOND: PaintId = PaintId(2);
@@ -126,20 +125,20 @@ fn release_applies_the_last_pointer_position_and_cancel_is_explicit() {
     let resolved = layout.resolve(Rect::new(0, 0, 101, 10), &NoopSizer);
     let target = resolved.split(split.id());
     let mut interaction = SplitInteraction::default();
-    let start = interaction.begin(target.unwrap(), 2, 30).unwrap();
+    let start = interaction.begin(target.unwrap(), 30, 2).unwrap();
     assert_eq!(start.phase, SplitPhase::Started);
-    let end = interaction.release(target, 2, 47).unwrap();
+    let end = interaction.release(target, 47, 2).unwrap();
     assert_eq!(end.phase, SplitPhase::Finished);
     assert!(end.changed);
     assert_eq!(split.preferred_size(), SplitSize::Cells(47));
     let resolved = layout.resolve(Rect::new(0, 0, 101, 10), &NoopSizer);
     let target = resolved.split(split.id());
     assert_eq!(
-        interaction.begin(target.unwrap(), 2, 47).unwrap().phase,
+        interaction.begin(target.unwrap(), 47, 2).unwrap().phase,
         SplitPhase::Started
     );
-    assert!(interaction.update(target, 2, 52).unwrap().changed);
-    assert!(interaction.update(target, 2, 52).unwrap().changed);
+    assert!(interaction.update(target, 52, 2).unwrap().changed);
+    assert!(interaction.update(target, 52, 2).unwrap().changed);
     let cancelled = interaction.cancel().unwrap();
     assert_eq!(cancelled.phase, SplitPhase::Cancelled);
     assert!(cancelled.ended() && cancelled.changed);
@@ -186,7 +185,7 @@ fn deep_and_wide_layouts_route_leaves_without_descendant_copies() {
     );
     let resolved = wide.resolve(Rect::new(0, 0, 4096, 10), &NoopSizer);
     assert_eq!(resolved.leaves().count(), 2048);
-    assert_eq!(resolved.leaf_rect(PaintId(2048)).unwrap().left, 4094);
+    assert_eq!(resolved.leaf_rect(PaintId(2048)).unwrap().x, 4094);
 }
 
 #[test]
@@ -201,12 +200,12 @@ fn no_op_gestures_do_not_overwrite_a_clamped_preference() {
     );
     let layout = tree(&split);
     let resolved = layout.resolve(Rect::new(0, 0, 31, 8), &NoopSizer);
-    let divider = resolved.divider_at(2, 15).unwrap();
+    let divider = resolved.divider_at(15, 2).unwrap();
     let mut interaction = SplitInteraction::default();
-    assert!(interaction.begin(divider, 2, 14).is_none());
-    assert!(interaction.begin(divider, 2, 15).is_some());
-    assert!(!interaction.update(Some(divider), 2, 0).unwrap().changed);
-    let end = interaction.release(Some(divider), 2, 0).unwrap();
+    assert!(interaction.begin(divider, 14, 2).is_none());
+    assert!(interaction.begin(divider, 15, 2).is_some());
+    assert!(!interaction.update(Some(divider), 0, 2).unwrap().changed);
+    let end = interaction.release(Some(divider), 0, 2).unwrap();
     assert_eq!(end.phase, SplitPhase::Finished);
     assert!(!end.changed);
     assert_eq!(split.preferred_size(), SplitSize::Cells(60));
@@ -229,35 +228,35 @@ fn nested_drag_uses_current_geometry_and_reports_gesture_completion() {
         let layout = LayoutTree::frame(tree(&split))
             .with_border(Border::single())
             .with_padding(2);
-        let rect = Rect::new(4, 7, 107, 107);
+        let rect = Rect::new(7, 4, 107, 107);
         let resolved = layout.resolve(rect, &NoopSizer);
         let divider = resolved.split(split.id()).unwrap();
         let at = divider.divider.rect;
         let mut interaction = SplitInteraction::default();
-        let start = interaction.begin(divider, at.top, at.left).unwrap();
+        let start = interaction.begin(divider, at.x, at.y).unwrap();
         assert!(!start.changed && !start.ended());
         assert_eq!(interaction.active_id(), Some(split.id()));
-        assert!(interaction.begin(divider, at.top, at.left).is_none());
-        let (row, col) = match axis {
-            Axis::Horizontal => (at.top, at.left + 9),
-            Axis::Vertical => (at.top + 9, at.left),
+        assert!(interaction.begin(divider, at.x, at.y).is_none());
+        let (x, y) = match axis {
+            Axis::Horizontal => (at.x + 9, at.y),
+            Axis::Vertical => (at.x, at.y + 9),
         };
-        assert!(interaction.update(Some(divider), row, col).unwrap().changed);
-        let resized = layout.resolve(Rect::new(8, 11, 87, 87), &NoopSizer);
+        assert!(interaction.update(Some(divider), x, y).unwrap().changed);
+        let resized = layout.resolve(Rect::new(11, 8, 87, 87), &NoopSizer);
         let first = resized.split(split.id()).unwrap().geometry.panes[0];
-        let (row, col) = match axis {
-            Axis::Horizontal => (first.top, first.left + 45),
-            Axis::Vertical => (first.top + 45, first.left),
+        let (x, y) = match axis {
+            Axis::Horizontal => (first.x + 45, first.y),
+            Axis::Vertical => (first.x, first.y + 45),
         };
         assert!(
             interaction
-                .update(resized.split(split.id()), row, col)
+                .update(resized.split(split.id()), x, y)
                 .unwrap()
                 .changed
         );
         assert_eq!(split.preferred_size(), SplitSize::Cells(45));
         let end = interaction
-            .release(resized.split(split.id()), row, col)
+            .release(resized.split(split.id()), x, y)
             .unwrap();
         assert!(end.changed && end.ended());
         assert_eq!(end.phase, SplitPhase::Finished);
@@ -278,14 +277,14 @@ fn removed_split_cancels_capture_without_touching_a_replacement() {
     let mut interaction = SplitInteraction::default();
     assert_eq!(
         interaction
-            .begin(layout.split(split.id()).unwrap(), 2, 30)
+            .begin(layout.split(split.id()).unwrap(), 30, 2)
             .unwrap()
             .phase,
         SplitPhase::Started
     );
     assert!(
         interaction
-            .update(layout.split(split.id()), 2, 40)
+            .update(layout.split(split.id()), 40, 2)
             .unwrap()
             .changed
     );
@@ -299,7 +298,7 @@ fn removed_split_cancels_capture_without_touching_a_replacement() {
     );
     let layout = tree(&replacement).resolve(Rect::new(0, 0, 101, 20), &NoopSizer);
     let end = interaction
-        .update(layout.split(replacement.id()), 2, 60)
+        .update(layout.split(replacement.id()), 60, 2)
         .unwrap();
     assert!(end.ended() && end.changed);
     assert_eq!(replacement.preferred_size(), SplitSize::Cells(50));
@@ -335,8 +334,8 @@ fn nested_leaf_routing_resizes_only_the_nearest_matching_split() {
     assert_eq!(next.leaf_rect(FIRST).unwrap().width, 26);
     assert_eq!(outer.preferred_size(), SplitSize::Cells(70));
     assert_eq!(resolved.leaf_at(2, 2), Some(FIRST));
-    assert_eq!(resolved.leaf_at(2, 30), None);
-    assert_eq!(resolved.divider_at(2, 30).unwrap().split.id(), inner.id());
+    assert_eq!(resolved.leaf_at(30, 2), None);
+    assert_eq!(resolved.divider_at(30, 2).unwrap().split.id(), inner.id());
 }
 
 #[test]
@@ -355,7 +354,7 @@ fn snapshot_painting_and_surface_callbacks_use_the_resolved_leaf_rects() {
     split.set_preferred_size(SplitSize::Cells(50));
     let mut painted = Vec::new();
     surface
-        .render_resolved(&mut Vec::new(), &resolved, |id, slice, _| {
+        .render_resolved(&mut Vec::new(), &resolved, |id, slice| {
             painted.push((id, slice.grid_rect()));
             slice.put_str(0, 0, "界e\u{301}", Style::new());
         })
@@ -391,16 +390,15 @@ fn divider_styles_preserve_backgrounds_and_allow_per_split_overrides() {
         for active in [false, true] {
             let style = LayoutStyle {
                 dividers: defaults,
-                active_split: active.then_some(split.id()),
                 ..LayoutStyle::default()
             };
             let mut grid = Grid::new(101, 8);
             resolved.paint(
                 &mut grid,
-                &Arc::new(Theme::new()),
-                (101, 8),
+                &Theme::new(),
                 style,
-                &mut |_, _, _, _, _| {},
+                active.then_some(split.id()),
+                &mut |_, _, _| {},
             );
             assert_eq!(grid.cell(30, 2).symbol.as_str(), "│");
             assert_eq!(
@@ -411,7 +409,7 @@ fn divider_styles_preserve_backgrounds_and_allow_per_split_overrides() {
             surface.set_layout(tree(&split));
             surface.set_layout_style(style);
             let mut output = Vec::new();
-            surface.render(&mut output, |_, _, _| {}).unwrap();
+            surface.render(&mut output, |_, _| {}).unwrap();
             assert!(String::from_utf8(output).unwrap().contains('│'));
         }
     }
@@ -444,4 +442,49 @@ fn all_terminal_extents_preserve_coverage_and_preference() {
             assert_eq!(split.preferred_size(), SplitSize::Cells(60));
         }
     }
+}
+
+#[test]
+fn surface_routes_mouse_drags_to_dividers() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let mouse = |kind, column| MouseEvent {
+        kind,
+        column,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    };
+    let split = Split::new(
+        Axis::Horizontal,
+        SplitOptions {
+            size: SplitSize::Cells(30),
+            resize_mode: SplitResizeMode::Cells,
+            ..SplitOptions::default()
+        },
+    );
+    let mut surface = Surface::new(101, 8);
+    surface.set_layout(tree(&split));
+
+    let press_away = mouse(MouseEventKind::Down(MouseButton::Left), 5);
+    assert!(surface.handle_mouse(press_away).is_none());
+
+    let press = mouse(MouseEventKind::Down(MouseButton::Left), 30);
+    let start = surface.handle_mouse(press).unwrap();
+    assert_eq!(start.phase, SplitPhase::Started);
+    assert_eq!(surface.active_split(), Some(split.id()));
+
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 40);
+    assert_eq!(
+        surface.handle_mouse(drag).unwrap().phase,
+        SplitPhase::Dragging
+    );
+    let release = mouse(MouseEventKind::Up(MouseButton::Left), 45);
+    let end = surface.handle_mouse(release).unwrap();
+    assert!(end.ended() && end.changed);
+    assert_eq!(surface.active_split(), None);
+    assert_eq!(surface.paint_rect(FIRST).unwrap().width, 45);
+
+    surface.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 45));
+    let cancelled = surface.cancel_split_drag().unwrap();
+    assert_eq!(cancelled.phase, SplitPhase::Cancelled);
+    assert_eq!(surface.active_split(), None);
 }

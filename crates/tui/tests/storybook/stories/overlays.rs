@@ -1,6 +1,7 @@
 //! Overlay stories.
 
-use tui::smelt_edit::layout::{Align, Anchor, Border, Constraint, Corner, Gutters};
+use tui::smelt_edit::layout::{Border, Constraint};
+use tui::smelt_edit::{Align, Anchor, Corner, Gutters};
 use tui::smelt_edit::{LayoutTree, Overlay, SplitConfig};
 
 fn pane(region: &str) -> SplitConfig {

@@ -3270,7 +3270,7 @@ fn empty_banner_returns_to_startup_position_after_resize_round_trip() {
 #[test]
 fn empty_banner_stays_inside_transcript_when_prompt_grows() {
     fn rects_intersect(a: crate::smelt_edit::Rect, b: crate::smelt_edit::Rect) -> bool {
-        a.left < b.right() && a.right() > b.left && a.top < b.bottom() && a.bottom() > b.top
+        a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
     }
 
     fn banner_label_rect(app: &TestApp) -> crate::smelt_edit::Rect {
@@ -3307,7 +3307,7 @@ fn empty_banner_stays_inside_transcript_when_prompt_grows() {
         .expect("prompt rect");
 
     assert!(
-        label.top >= transcript.top && label.bottom() <= transcript.bottom(),
+        label.y >= transcript.y && label.bottom() <= transcript.bottom(),
         "banner label should stay inside transcript: label={label:?} transcript={transcript:?}"
     );
     assert!(
@@ -3337,8 +3337,8 @@ fn win_rect_prefers_current_layout_after_resize_before_paint() {
             assert(r.width == {width}, "width " .. tostring(r.width))
             assert(r.height == {height}, "height " .. tostring(r.height))
         "#,
-        row = expected.top,
-        col = expected.left,
+        row = expected.y,
+        col = expected.x,
         width = expected.width,
         height = expected.height,
     );

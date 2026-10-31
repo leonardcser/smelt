@@ -5,11 +5,11 @@
 use super::*;
 use crossterm::event::{MouseButton, MouseEventKind};
 
-fn mouse(kind: MouseEventKind, row: u16, column: u16) -> SourceEvent {
+fn mouse(kind: MouseEventKind, x: u16, y: u16) -> SourceEvent {
     SourceEvent::Term(Event::Mouse(crossterm::event::MouseEvent {
         kind,
-        row,
-        column,
+        row: y,
+        column: x,
         modifiers: KeyModifiers::empty(),
     }))
 }
@@ -199,24 +199,24 @@ fn drag_thumb_down(app: &mut TestApp) -> Vec<View> {
     let grab = thumb.thumb_top + thumb.thumb_size / 2;
     app.feed_one(mouse(
         MouseEventKind::Down(MouseButton::Left),
-        vp.rect.top + grab,
         bar.col,
+        vp.rect.y + grab,
     ));
     app.render_silent();
     let mut views = Vec::new();
     for row in 0..vp.rect.height + 3 {
         app.feed_one(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            vp.rect.top + row,
             bar.col,
+            vp.rect.y + row,
         ));
         app.render_silent();
         views.push(view(app));
     }
     app.feed_one(mouse(
         MouseEventKind::Up(MouseButton::Left),
-        vp.rect.bottom() + 2,
         bar.col,
+        vp.rect.bottom() + 2,
     ));
     app.render_silent();
     views
@@ -229,7 +229,7 @@ fn click_track(app: &mut TestApp, rel_row: u16) {
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
     ] {
-        app.feed_one(mouse(kind, vp.rect.top + rel_row, bar.col));
+        app.feed_one(mouse(kind, bar.col, vp.rect.y + rel_row));
         app.render_silent();
     }
 }
@@ -317,7 +317,7 @@ fn wheel_glitches(app: &mut TestApp, down: bool, ticks: usize) -> Vec<(usize, us
     let mut previous = view(app).first_record;
     let mut glitches = Vec::new();
     for _ in 0..ticks {
-        app.feed_one(mouse(kind, vp.rect.top + 5, 5));
+        app.feed_one(mouse(kind, 5, vp.rect.y + 5));
         app.render_silent();
         let first = view(app).first_record;
         if let (Some(before), Some(after)) = (previous, first) {

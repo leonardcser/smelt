@@ -23,7 +23,7 @@ fn assert_safe_dialog_fallback(app: &TestApp) {
         .split_rect(statusline)
         .expect("fallback keeps statusline mounted");
     assert_eq!(
-        status_rect.top + status_rect.height,
+        status_rect.y + status_rect.height,
         app.ui_probe().terminal_size().1
     );
 }
@@ -500,10 +500,10 @@ fn splash_paint_stays_below_global_overlays() {
         .and_then(|win| win.viewport.map(|viewport| viewport.rect))
         .expect("overlay viewport");
 
-    for row in overlay_rect.top..overlay_rect.bottom() {
+    for row in overlay_rect.y..overlay_rect.bottom() {
         let cells: Vec<char> = frame.rows[row as usize].chars().collect();
         assert!(
-            cells[overlay_rect.left as usize..overlay_rect.right() as usize]
+            cells[overlay_rect.x as usize..overlay_rect.right() as usize]
                 .iter()
                 .all(|cell| *cell == 'X'),
             "splash paint escaped its transcript layer into the overlay:\n{}",
@@ -1369,8 +1369,8 @@ fn vim_readonly_dialog_visual_selection_is_painted() {
     let win = app.ui_probe().win(win_id).expect("window");
     let rect = win.viewport.expect("dialog viewport").rect;
     let selection_bg = app.ui_probe().theme().get("Visual").bg;
-    let painted = (rect.top..rect.top + rect.height).any(|row| {
-        (rect.left..rect.left + rect.width)
+    let painted = (rect.y..rect.y + rect.height).any(|row| {
+        (rect.x..rect.x + rect.width)
             .any(|col| frame.styles[row as usize][col as usize].bg == selection_bg)
     });
 
@@ -2976,7 +2976,7 @@ fn confirm_top_border_drag_resizes_dialog() {
         .ui_probe()
         .split_rect(first_leaf)
         .expect("confirm dialog leaf rect")
-        .top
+        .y
         .saturating_sub(1);
     let target_top = before_top.saturating_sub(3);
 
@@ -3002,7 +3002,7 @@ fn confirm_top_border_drag_resizes_dialog() {
         .ui_probe()
         .split_rect(first_leaf)
         .expect("resized confirm dialog leaf rect")
-        .top
+        .y
         .saturating_sub(1);
     assert_eq!(after_top, target_top);
 }
@@ -3033,7 +3033,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
         .docked_surface(dialog)
         .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
         .expect("custom-composed dialog rect");
-    let target_top = before.top.saturating_sub(2);
+    let target_top = before.y.saturating_sub(2);
 
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
@@ -3043,7 +3043,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
         app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
             kind,
             row: if matches!(kind, MouseEventKind::Down(_)) {
-                before.top
+                before.y
             } else {
                 target_top
             },
@@ -3058,7 +3058,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
         .docked_surface(dialog)
         .and_then(crate::smelt_edit::DockedSurface::resolved_rect)
         .expect("resized custom-composed dialog rect");
-    assert_eq!(resized.top, target_top);
+    assert_eq!(resized.y, target_top);
     assert_eq!(resized.height, before.height + 2);
 
     app.set_terminal_size(80, 3);
@@ -3421,7 +3421,7 @@ fn ask_user_question_wrapped_options_keep_selection_aligned() {
         let rect = win.viewport.unwrap().rect;
         let visible_rows = (end - win.cursor_row() as usize).min(usize::from(rect.height));
         assert!(
-            row + visible_rows <= usize::from(rect.top + rect.height),
+            row + visible_rows <= usize::from(rect.y + rect.height),
             "show as much of the selected description as fits: {}",
             frame.text()
         );

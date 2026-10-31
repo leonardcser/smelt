@@ -246,48 +246,15 @@ impl Grid {
     /// Mutable cell access; returns `None` when out of bounds.
     ///
     /// Escape hatch that **bypasses** the wide-char continuation invariant
-    /// upheld by `set` / `put_char` / `fill`. Callers must own the entire
-    /// region they write into and re-establish the invariant themselves. For
-    /// any normal painting, prefer `set` / `put_str` / `put_char` / `fill`.
+    /// upheld by [`GridSlice`] drawing. Callers must own the entire region they
+    /// write into and re-establish the invariant themselves. For any normal
+    /// painting, use [`Grid::as_mut_slice`] or [`Grid::slice_mut`].
     pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         if x < self.width && y < self.height {
             let idx = self.idx(x, y);
             Some(&mut self.cells[idx])
         } else {
             None
-        }
-    }
-
-    pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
-        let mut buf = [0; 4];
-        self.set_symbol(x, y, symbol.encode_utf8(&mut buf), style);
-    }
-
-    pub fn set_image_symbol(
-        &mut self,
-        x: u16,
-        y: u16,
-        symbol: &str,
-        style: Style,
-        image: Arc<RasterImage>,
-    ) {
-        self.write_cell_clipped(x, y, Cell::new(symbol, style).with_image(image), self.width);
-    }
-
-    pub fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style) {
-        if y >= self.height {
-            return;
-        }
-        let mut graphemes = cell_width::graphemes(symbol);
-        let Some(first) = graphemes.next() else {
-            return;
-        };
-        if graphemes.next().is_none() {
-            self.write_symbol_clipped(x, y, first, style, self.width);
-        } else {
-            write_text(x, self.width, symbol, |col, grapheme| {
-                self.write_symbol_clipped(col, y, grapheme, style, self.width)
-            });
         }
     }
 
@@ -400,21 +367,6 @@ impl Grid {
         }
     }
 
-    pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) -> u16 {
-        if y >= self.height {
-            return x.min(self.width);
-        }
-        write_text(x, self.width, text, |col, grapheme| {
-            self.write_symbol_clipped(col, y, grapheme, style, self.width)
-        })
-    }
-
-    /// Overwrites `symbol` and `style.fg`; preserves the existing cell's
-    /// `bg` and text attributes. Use for fg-only painting over a filled background.
-    pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
-        self.put_char_clipped(x, y, symbol, fg, self.width);
-    }
-
     fn put_char_clipped(&mut self, x: u16, y: u16, symbol: char, fg: Color, right_limit: u16) {
         let mut buf = [0; 4];
         self.put_symbol_clipped(x, y, symbol.encode_utf8(&mut buf), fg, right_limit);
@@ -434,28 +386,7 @@ impl Grid {
         self.write_cell_clipped(x, y, Cell::new(symbol, style), right_limit);
     }
 
-    /// String form of [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
-    pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) -> u16 {
-        if y >= self.height {
-            return x.min(self.width);
-        }
-        write_text(x, self.width, text, |col, grapheme| {
-            self.put_symbol_clipped(col, y, grapheme, fg, self.width)
-        })
-    }
-
-    /// Paint a [`Line`](crate::line::Line) of styled spans at `(x, y)`, clipping at the right edge.
-    /// Graphemes that cross span boundaries use the style of their first scalar.
-    pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) -> u16 {
-        if y >= self.height {
-            return x.min(self.width);
-        }
-        write_line(x, self.width, line, |col, grapheme, style| {
-            self.write_symbol_clipped(col, y, grapheme, style, self.width)
-        })
-    }
-
-    pub fn fill(&mut self, area: Rect, symbol: char, style: Style) {
+    fn fill(&mut self, area: Rect, symbol: char, style: Style) {
         let mut buf = [0; 4];
         let symbol = symbol.encode_utf8(&mut buf);
         let symbol = if symbol_width(symbol) == 0 {
@@ -466,8 +397,8 @@ impl Grid {
         let new_cell = Cell::new(symbol, style);
         let right = area.right().min(self.width);
         let width = new_cell.symbol.width();
-        for row in area.top..area.bottom().min(self.height) {
-            let mut col = area.left;
+        for row in area.y..area.bottom().min(self.height) {
+            let mut col = area.x;
             while col < right {
                 self.write_cell_clipped(col, row, new_cell.clone(), right);
                 let step = if width == 2 && col.saturating_add(1) < right {
@@ -480,10 +411,6 @@ impl Grid {
         }
     }
 
-    pub fn clear(&mut self, area: Rect) {
-        self.fill(area, ' ', Style::default());
-    }
-
     pub fn clear_all(&mut self) {
         for cell in &mut self.cells {
             *cell = Cell::default();
@@ -491,12 +418,18 @@ impl Grid {
         self.terminal_cursor_position = None;
     }
 
+    /// A slice covering the whole grid. All drawing goes through [`GridSlice`].
+    pub fn as_mut_slice(&mut self) -> GridSlice<'_> {
+        let area = Rect::new(0, 0, self.width, self.height);
+        GridSlice { grid: self, area }
+    }
+
     pub fn slice_mut(&mut self, area: Rect) -> GridSlice<'_> {
         let area = Rect::new(
-            area.top.min(self.height),
-            area.left.min(self.width),
-            area.width.min(self.width.saturating_sub(area.left)),
-            area.height.min(self.height.saturating_sub(area.top)),
+            area.x.min(self.width),
+            area.y.min(self.height),
+            area.width.min(self.width.saturating_sub(area.x)),
+            area.height.min(self.height.saturating_sub(area.y)),
         );
         GridSlice { grid: self, area }
     }
@@ -569,8 +502,8 @@ impl<'a> GridSlice<'a> {
     pub fn set_terminal_cursor_position(&mut self, x: u16, y: u16) {
         if x < self.area.width && y < self.area.height {
             self.grid.set_terminal_cursor_position(
-                self.area.left.saturating_add(x),
-                self.area.top.saturating_add(y),
+                self.area.x.saturating_add(x),
+                self.area.y.saturating_add(y),
             );
         }
     }
@@ -587,8 +520,8 @@ impl<'a> GridSlice<'a> {
         let parent = Rect::new(0, 0, self.area.width, self.area.height);
         let clipped = area.clip_to(parent);
         let area = Rect::new(
-            self.area.top.saturating_add(clipped.top),
-            self.area.left.saturating_add(clipped.left),
+            self.area.x.saturating_add(clipped.x),
+            self.area.y.saturating_add(clipped.y),
             clipped.width,
             clipped.height,
         );
@@ -613,8 +546,8 @@ impl<'a> GridSlice<'a> {
     ) {
         if x < self.area.width && y < self.area.height {
             self.grid.write_cell_clipped(
-                self.area.left + x,
-                self.area.top + y,
+                self.area.x + x,
+                self.area.y + y,
                 Cell::new(symbol, style).with_image(image),
                 self.area.right(),
             );
@@ -631,8 +564,8 @@ impl<'a> GridSlice<'a> {
         };
         if graphemes.next().is_none() {
             self.grid.write_symbol_clipped(
-                self.area.left + x,
-                self.area.top + y,
+                self.area.x + x,
+                self.area.y + y,
                 first,
                 style,
                 self.area.right(),
@@ -645,9 +578,7 @@ impl<'a> GridSlice<'a> {
     /// Read a cell at slice-local coords; returns default `Cell` when out of bounds.
     pub fn cell(&self, x: u16, y: u16) -> Cell {
         if x < self.area.width && y < self.area.height {
-            self.grid
-                .cell(self.area.left + x, self.area.top + y)
-                .clone()
+            self.grid.cell(self.area.x + x, self.area.y + y).clone()
         } else {
             Cell::default()
         }
@@ -656,7 +587,7 @@ impl<'a> GridSlice<'a> {
     /// Mutable cell access at slice-local coords. See [`Grid::cell_mut`] for caveats.
     pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
         if x < self.area.width && y < self.area.height {
-            self.grid.cell_mut(self.area.left + x, self.area.top + y)
+            self.grid.cell_mut(self.area.x + x, self.area.y + y)
         } else {
             None
         }
@@ -677,11 +608,11 @@ impl<'a> GridSlice<'a> {
         if y >= self.area.height {
             return x.min(self.area.width);
         }
-        let abs_y = self.area.top + y;
+        let abs_y = self.area.y + y;
         let limit = x
             .saturating_add(max_width.unwrap_or(u16::MAX))
             .min(self.area.width);
-        let abs_left = self.area.left;
+        let abs_left = self.area.x;
         let right = self.area.right();
         write_text(x, limit, text, |col, grapheme| {
             self.grid
@@ -727,7 +658,7 @@ impl<'a> GridSlice<'a> {
     }
 
     pub fn fill_row(&mut self, y: u16, style: Style) {
-        self.fill(Rect::new(y, 0, self.area.width, 1), ' ', style);
+        self.fill(Rect::new(0, y, self.area.width, 1), ' ', style);
     }
 
     pub fn rule_h(&mut self, y: u16, style: Style) {
@@ -758,12 +689,13 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Slice-local [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
+    /// Overwrites `symbol` and `style.fg`; preserves the existing cell's `bg` and
+    /// text attributes. Use for fg-only painting over a filled background.
     pub fn put_char(&mut self, x: u16, y: u16, symbol: char, fg: Color) {
         if x < self.area.width && y < self.area.height {
             self.grid.put_char_clipped(
-                self.area.left + x,
-                self.area.top + y,
+                self.area.x + x,
+                self.area.y + y,
                 symbol,
                 fg,
                 self.area.right(),
@@ -771,13 +703,14 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Slice-local [`Grid::put_line`]: paint styled graphemes left-to-right.
+    /// Paint a [`Line`](crate::line::Line) of styled spans at `(x, y)`, clipping at the right edge.
+    /// Graphemes that cross span boundaries use the style of their first scalar.
     pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) -> u16 {
         if y >= self.area.height {
             return x.min(self.area.width);
         }
-        let abs_y = self.area.top + y;
-        let abs_left = self.area.left;
+        let abs_y = self.area.y + y;
+        let abs_left = self.area.x;
         let right = self.area.right();
         write_line(x, self.area.width, line, |col, grapheme, style| {
             self.grid
@@ -785,13 +718,13 @@ impl<'a> GridSlice<'a> {
         })
     }
 
-    /// Slice-local [`Grid::put_str_fg`]: overwrites symbol + fg per char, preserves bg and attrs.
+    /// String form of [`GridSlice::put_char`]: overwrites symbol + fg, preserves bg and attrs.
     pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) -> u16 {
         if y >= self.area.height {
             return x.min(self.area.width);
         }
-        let abs_y = self.area.top + y;
-        let abs_left = self.area.left;
+        let abs_y = self.area.y + y;
+        let abs_left = self.area.x;
         let right = self.area.right();
         write_text(x, self.area.width, text, |col, grapheme| {
             self.grid
@@ -801,16 +734,16 @@ impl<'a> GridSlice<'a> {
 
     pub fn fill(&mut self, area: Rect, symbol: char, style: Style) {
         let abs = Rect::new(
-            self.area.top + area.top,
-            self.area.left + area.left,
-            area.width.min(self.area.width.saturating_sub(area.left)),
-            area.height.min(self.area.height.saturating_sub(area.top)),
+            self.area.x + area.x,
+            self.area.y + area.y,
+            area.width.min(self.area.width.saturating_sub(area.x)),
+            area.height.min(self.area.height.saturating_sub(area.y)),
         );
         self.grid.fill(abs, symbol, style);
     }
 
     pub fn clear(&mut self) {
-        self.grid.clear(self.area);
+        self.grid.fill(self.area, ' ', Style::default());
     }
 }
 
@@ -830,7 +763,7 @@ mod tests {
     #[test]
     fn private_use_icons_are_narrow_cells() {
         let mut grid = Grid::new(4, 1);
-        grid.set(0, 0, '\u{e6b2}', Style::default());
+        grid.as_mut_slice().set(0, 0, '\u{e6b2}', Style::default());
 
         assert_eq!(cell_width::char_width('\u{e6b2}'), 1);
         assert_eq!(grid.cell(0, 0).symbol, '\u{e6b2}');
@@ -842,7 +775,7 @@ mod tests {
         let mut grid = Grid::new(80, 1);
         let text = "Bestellung 10500 besta\u{308}tigt.pdf";
 
-        let end = grid.put_str(0, 0, text, Style::default());
+        let end = grid.as_mut_slice().put_str(0, 0, text, Style::default());
 
         assert_eq!(end, display_width(text));
     }
@@ -851,7 +784,8 @@ mod tests {
     fn set_symbol_preserves_invariants_for_multiple_graphemes() {
         let mut grid = Grid::new(5, 1);
 
-        grid.set_symbol(0, 0, "a👩\u{200d}💻b", Style::default());
+        grid.as_mut_slice()
+            .set_symbol(0, 0, "a👩\u{200d}💻b", Style::default());
 
         assert_eq!(grid.cell(0, 0).symbol, "a");
         assert_eq!(grid.cell(1, 0).symbol, "👩\u{200d}💻");
@@ -863,15 +797,15 @@ mod tests {
     fn scalar_writes_repair_continuations_when_combining_changes_width() {
         let mut grid = Grid::new(4, 1);
 
-        grid.set(0, 0, '9', Style::default());
-        grid.set(1, 0, '\u{fe0f}', Style::default());
+        grid.as_mut_slice().set(0, 0, '9', Style::default());
+        grid.as_mut_slice().set(1, 0, '\u{fe0f}', Style::default());
 
         assert_eq!(grid.cell(0, 0).symbol, "9\u{fe0f}");
         assert!(grid.cell(1, 0).symbol.is_continuation());
 
-        grid.set(0, 0, '⌚', Style::default());
+        grid.as_mut_slice().set(0, 0, '⌚', Style::default());
         assert!(grid.cell(1, 0).symbol.is_continuation());
-        grid.set(2, 0, '\u{fe0e}', Style::default());
+        grid.as_mut_slice().set(2, 0, '\u{fe0e}', Style::default());
 
         assert_eq!(grid.cell(0, 0).symbol, "⌚\u{fe0e}");
         assert_eq!(grid.cell(1, 0).symbol, ' ');
@@ -896,7 +830,7 @@ mod tests {
             let line = Line::from_spans(spans);
             let mut grid = Grid::new(8, 1);
 
-            let end = grid.put_line(0, 0, &line);
+            let end = grid.as_mut_slice().put_line(0, 0, &line);
 
             assert_eq!(end, line.width());
             let text: String = line.spans.iter().map(|span| span.text.as_ref()).collect();
@@ -911,7 +845,7 @@ mod tests {
     fn set_and_read_cell() {
         let mut grid = Grid::new(10, 5);
         let style = Style::new().fg(Color::Red);
-        grid.set(3, 2, 'X', style);
+        grid.as_mut_slice().set(3, 2, 'X', style);
         assert_eq!(grid.cell(3, 2).symbol, 'X');
         assert_eq!(grid.cell(3, 2).style.fg, Some(Color::Red));
     }
@@ -919,7 +853,7 @@ mod tests {
     #[test]
     fn put_str_writes_chars() {
         let mut grid = Grid::new(10, 5);
-        grid.put_str(2, 1, "hello", Style::default());
+        grid.as_mut_slice().put_str(2, 1, "hello", Style::default());
         assert_eq!(grid.cell(2, 1).symbol, 'h');
         assert_eq!(grid.cell(3, 1).symbol, 'e');
         assert_eq!(grid.cell(6, 1).symbol, 'o');
@@ -929,7 +863,7 @@ mod tests {
     #[test]
     fn put_str_clips_at_width() {
         let mut grid = Grid::new(5, 1);
-        grid.put_str(3, 0, "hello", Style::default());
+        grid.as_mut_slice().put_str(3, 0, "hello", Style::default());
         assert_eq!(grid.cell(3, 0).symbol, 'h');
         assert_eq!(grid.cell(4, 0).symbol, 'e');
     }
@@ -938,7 +872,7 @@ mod tests {
     fn fill_region() {
         let mut grid = Grid::new(10, 5);
         let style = Style::new().bg(Color::Blue);
-        grid.fill(Rect::new(1, 2, 3, 2), '#', style);
+        grid.fill(Rect::new(2, 1, 3, 2), '#', style);
         assert_eq!(grid.cell(2, 1).symbol, '#');
         assert_eq!(grid.cell(4, 2).symbol, '#');
         assert_eq!(grid.cell(5, 1).symbol, ' ');
@@ -948,8 +882,8 @@ mod tests {
     fn diff_yields_changed_cells() {
         let prev = Grid::new(5, 3);
         let mut curr = Grid::new(5, 3);
-        curr.set(1, 0, 'A', Style::default());
-        curr.set(3, 2, 'B', Style::default());
+        curr.as_mut_slice().set(1, 0, 'A', Style::default());
+        curr.as_mut_slice().set(3, 2, 'B', Style::default());
 
         let updates: Vec<_> = curr.diff(&prev).collect();
         assert_eq!(updates.len(), 2);
@@ -967,7 +901,7 @@ mod tests {
     #[test]
     fn slice_writes_offset_correctly() {
         let mut grid = Grid::new(20, 10);
-        let area = Rect::new(2, 5, 10, 4);
+        let area = Rect::new(5, 2, 10, 4);
         {
             let mut slice = grid.slice_mut(area);
             assert_eq!(slice.width(), 10);
@@ -1072,10 +1006,10 @@ mod tests {
     #[test]
     fn slice_mut_is_relative_to_parent() {
         let mut grid = Grid::new(20, 10);
-        let mut parent = grid.slice_mut(Rect::new(2, 5, 10, 5));
+        let mut parent = grid.slice_mut(Rect::new(5, 2, 10, 5));
         {
-            let mut child = parent.slice_mut(Rect::new(1, 2, 3, 2));
-            assert_eq!(child.grid_rect(), Rect::new(3, 7, 3, 2));
+            let mut child = parent.slice_mut(Rect::new(2, 1, 3, 2));
+            assert_eq!(child.grid_rect(), Rect::new(7, 3, 3, 2));
             child.set(0, 0, 'x', Style::default());
         }
         assert_eq!(grid.cell(7, 3).symbol, 'x');
@@ -1084,9 +1018,9 @@ mod tests {
     #[test]
     fn slice_mut_clips_fully_outside_child_to_empty() {
         let mut grid = Grid::new(20, 10);
-        let mut parent = grid.slice_mut(Rect::new(2, 5, 10, 5));
+        let mut parent = grid.slice_mut(Rect::new(5, 2, 10, 5));
         let child = parent.slice_mut(Rect::new(99, 99, 3, 2));
-        assert_eq!(child.grid_rect(), Rect::new(7, 15, 0, 0));
+        assert_eq!(child.grid_rect(), Rect::new(15, 7, 0, 0));
     }
 
     #[test]
@@ -1099,7 +1033,7 @@ mod tests {
     #[test]
     fn resize_clears_grid() {
         let mut grid = Grid::new(5, 3);
-        grid.set(2, 1, 'A', Style::default());
+        grid.as_mut_slice().set(2, 1, 'A', Style::default());
         grid.resize(10, 5);
         assert_eq!(grid.width(), 10);
         assert_eq!(grid.height(), 5);
@@ -1110,8 +1044,8 @@ mod tests {
     fn put_char_preserves_bg_and_attrs() {
         let mut grid = Grid::new(10, 3);
         let base = Style::new().fg(Color::Yellow).bg(Color::Blue).bold();
-        grid.set(2, 1, '#', base);
-        grid.put_char(2, 1, 'X', Color::Red);
+        grid.as_mut_slice().set(2, 1, '#', base);
+        grid.as_mut_slice().put_char(2, 1, 'X', Color::Red);
         let cell = grid.cell(2, 1);
         assert_eq!(cell.symbol, 'X');
         assert_eq!(cell.style.fg, Some(Color::Red));
@@ -1122,7 +1056,7 @@ mod tests {
     #[test]
     fn put_char_on_empty_cell_leaves_bg_none() {
         let mut grid = Grid::new(5, 2);
-        grid.put_char(0, 0, 'A', Color::Green);
+        grid.as_mut_slice().put_char(0, 0, 'A', Color::Green);
         let cell = grid.cell(0, 0);
         assert_eq!(cell.symbol, 'A');
         assert_eq!(cell.style.fg, Some(Color::Green));
@@ -1135,7 +1069,7 @@ mod tests {
         let mut grid = Grid::new(15, 1);
         let red = Style::new().fg(Color::Red);
         let line = Line::from_spans([Span::raw("ab"), Span::styled("CD", red), Span::raw("ef")]);
-        grid.put_line(1, 0, &line);
+        grid.as_mut_slice().put_line(1, 0, &line);
         assert_eq!(grid.cell(1, 0).symbol, 'a');
         assert_eq!(grid.cell(1, 0).style.fg, None);
         assert_eq!(grid.cell(3, 0).symbol, 'C');
@@ -1149,7 +1083,7 @@ mod tests {
         use crate::line::{Line, Span};
         let mut grid = Grid::new(10, 1);
         {
-            let mut slice = grid.slice_mut(Rect::new(0, 2, 5, 1));
+            let mut slice = grid.slice_mut(Rect::new(2, 0, 5, 1));
             slice.put_line(0, 0, &Line::from_spans([Span::raw("abcdefgh")]));
         }
         assert_eq!(grid.cell(2, 0).symbol, 'a');
@@ -1174,7 +1108,7 @@ mod tests {
     #[test]
     fn slice_terminal_cursor_position_uses_screen_coordinates_and_clears_with_the_frame() {
         let mut grid = Grid::new(8, 4);
-        grid.slice_mut(Rect::new(1, 2, 4, 2))
+        grid.slice_mut(Rect::new(2, 1, 4, 2))
             .set_terminal_cursor_position(1, 1);
         assert_eq!(grid.terminal_cursor_position(), Some((3, 2)));
 
@@ -1186,9 +1120,9 @@ mod tests {
     fn swap_grids() {
         let mut a = Grid::new(5, 3);
         let mut b = Grid::new(5, 3);
-        a.set(0, 0, 'A', Style::default());
+        a.as_mut_slice().set(0, 0, 'A', Style::default());
         a.set_terminal_cursor_position(1, 1);
-        b.set(0, 0, 'B', Style::default());
+        b.as_mut_slice().set(0, 0, 'B', Style::default());
         b.set_terminal_cursor_position(2, 2);
         a.swap_with(&mut b);
         assert_eq!(a.cell(0, 0).symbol, 'B');
@@ -1204,7 +1138,7 @@ mod tests {
         // CJK chars have display width 2. The continuation cell carries
         // '\0' so flush/diff can skip it.
         let mut grid = Grid::new(5, 1);
-        grid.set(1, 0, '漢', Style::default());
+        grid.as_mut_slice().set(1, 0, '漢', Style::default());
         assert_eq!(grid.cell(1, 0).symbol, '漢');
         assert_eq!(grid.cell(2, 0).symbol, '\0');
     }
@@ -1212,7 +1146,7 @@ mod tests {
     #[test]
     fn put_str_lays_wide_chars_two_columns_apart() {
         let mut grid = Grid::new(10, 1);
-        grid.put_str(0, 0, "a漢b", Style::default());
+        grid.as_mut_slice().put_str(0, 0, "a漢b", Style::default());
         assert_eq!(grid.cell(0, 0).symbol, 'a');
         assert_eq!(grid.cell(1, 0).symbol, '漢');
         assert_eq!(grid.cell(3, 0).symbol, 'b');
@@ -1227,17 +1161,17 @@ mod tests {
         // half on the terminal.
         let via_set = {
             let mut g = Grid::new(5, 1);
-            g.set(0, 0, '漢', Style::default());
+            g.as_mut_slice().set(0, 0, '漢', Style::default());
             g
         };
         let via_put_str = {
             let mut g = Grid::new(5, 1);
-            g.put_str(0, 0, "漢", Style::default());
+            g.as_mut_slice().put_str(0, 0, "漢", Style::default());
             g
         };
         let via_put_char = {
             let mut g = Grid::new(5, 1);
-            g.put_char(0, 0, '漢', Color::Reset);
+            g.as_mut_slice().put_char(0, 0, '漢', Color::Reset);
             g
         };
         assert_eq!(via_set.cell(1, 0).symbol, via_put_str.cell(1, 0).symbol);
@@ -1251,9 +1185,9 @@ mod tests {
         // it, diff must not yield an update for the continuation column -
         // otherwise flush_diff overwrites the right half of the wide char.
         let mut prev = Grid::new(5, 1);
-        prev.set(1, 0, 'X', Style::default());
+        prev.as_mut_slice().set(1, 0, 'X', Style::default());
         let mut curr = Grid::new(5, 1);
-        curr.put_str(0, 0, "漢", Style::default());
+        curr.as_mut_slice().put_str(0, 0, "漢", Style::default());
         let updates: Vec<_> = curr.diff(&prev).collect();
         let cols: Vec<u16> = updates.iter().map(|u| u.x).collect();
         assert_eq!(
@@ -1284,9 +1218,9 @@ mod tests {
         // skips that cell (because it filters '\0'), and the terminal keeps
         // showing whatever was at col N+1 in the previous frame.
         let mut grid = Grid::new(5, 1);
-        grid.set(0, 0, '漢', Style::default());
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
         assert_eq!(grid.cell(1, 0).symbol, '\0');
-        grid.set(0, 0, 'A', Style::default());
+        grid.as_mut_slice().set(0, 0, 'A', Style::default());
         assert_ne!(
             grid.cell(1, 0).symbol,
             '\0',
@@ -1303,10 +1237,10 @@ mod tests {
         // its wide glyph so flush/diff don't try to render a 2-cell-wide
         // char that's been broken.
         let mut grid = Grid::new(5, 1);
-        grid.set(0, 0, '漢', Style::default());
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
         assert_eq!(grid.cell(0, 0).symbol, '漢');
         assert_eq!(grid.cell(1, 0).symbol, '\0');
-        grid.set(1, 0, 'A', Style::default());
+        grid.as_mut_slice().set(1, 0, 'A', Style::default());
         assert_ne!(
             grid.cell(0, 0).symbol,
             '漢',
@@ -1327,11 +1261,11 @@ mod tests {
         // still emit an update for col 1 so the terminal clears the right
         // half of the previous wide char - otherwise that half lingers.
         let mut prev = Grid::new(5, 1);
-        prev.set(0, 0, '漢', Style::default());
+        prev.as_mut_slice().set(0, 0, '漢', Style::default());
 
         let mut curr = Grid::new(5, 1);
-        curr.set(0, 0, '漢', Style::default()); // first paint: wide
-        curr.set(0, 0, 'A', Style::default()); // second paint: narrow overwrite
+        curr.as_mut_slice().set(0, 0, '漢', Style::default()); // first paint: wide
+        curr.as_mut_slice().set(0, 0, 'A', Style::default()); // second paint: narrow overwrite
 
         let updates: Vec<_> = curr.diff(&prev).collect();
         let cols: Vec<u16> = updates.iter().map(|u| u.x).collect();
@@ -1376,7 +1310,7 @@ mod tests {
     fn wide_char_at_right_edge_paints_space() {
         let mut grid = Grid::new(2, 1);
         let style = Style::new().fg(Color::Red);
-        grid.set(1, 0, '漢', style);
+        grid.as_mut_slice().set(1, 0, '漢', style);
 
         assert_eq!(grid.cell(1, 0).symbol, ' ');
         assert_eq!(grid.cell(1, 0).style.fg, Some(Color::Red));
@@ -1388,7 +1322,7 @@ mod tests {
         let mut grid = Grid::new(4, 1);
         let style = Style::new().fg(Color::Red);
         {
-            let mut slice = grid.slice_mut(Rect::new(0, 1, 2, 1));
+            let mut slice = grid.slice_mut(Rect::new(1, 0, 2, 1));
             slice.set(1, 0, '漢', style);
         }
 
@@ -1403,7 +1337,7 @@ mod tests {
     fn slice_put_char_wide_at_right_edge_paints_space_inside_slice() {
         let mut grid = Grid::new(4, 1);
         {
-            let mut slice = grid.slice_mut(Rect::new(0, 1, 2, 1));
+            let mut slice = grid.slice_mut(Rect::new(1, 0, 2, 1));
             slice.put_char(1, 0, '漢', Color::Red);
         }
 
@@ -1417,7 +1351,7 @@ mod tests {
     fn slice_put_str_wide_at_right_edge_does_not_spill_outside_slice() {
         let mut grid = Grid::new(4, 1);
         {
-            let mut slice = grid.slice_mut(Rect::new(0, 1, 2, 1));
+            let mut slice = grid.slice_mut(Rect::new(1, 0, 2, 1));
             let end = slice.put_str(1, 0, "漢", Style::default());
             assert_eq!(end, 1);
         }
@@ -1431,7 +1365,7 @@ mod tests {
     fn fill_wide_char_at_rect_edge_does_not_spill_outside_rect() {
         let mut grid = Grid::new(4, 1);
         let style = Style::new().bg(Color::Blue);
-        grid.fill(Rect::new(0, 1, 1, 1), '漢', style);
+        grid.fill(Rect::new(1, 0, 1, 1), '漢', style);
 
         assert_eq!(grid.cell(1, 0).symbol, ' ');
         assert_eq!(grid.cell(1, 0).style.bg, Some(Color::Blue));
@@ -1460,8 +1394,8 @@ mod tests {
     #[test]
     fn overwriting_continuation_with_right_edge_wide_clears_old_wide() {
         let mut grid = Grid::new(2, 1);
-        grid.set(0, 0, '漢', Style::default());
-        grid.set(1, 0, '漢', Style::default());
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
+        grid.as_mut_slice().set(1, 0, '漢', Style::default());
 
         assert_eq!(grid.cell(0, 0).symbol, ' ');
         assert_eq!(grid.cell(1, 0).symbol, ' ');
@@ -1471,8 +1405,8 @@ mod tests {
     #[test]
     fn put_char_narrow_over_wide_keeps_invariant() {
         let mut grid = Grid::new(5, 1);
-        grid.set(0, 0, '漢', Style::default());
-        grid.put_char(0, 0, 'A', Color::Red);
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
+        grid.as_mut_slice().put_char(0, 0, 'A', Color::Red);
         assert_grid_invariants(&grid);
         assert_eq!(grid.cell(0, 0).symbol, 'A');
         assert_ne!(grid.cell(1, 0).symbol, '\0');
@@ -1481,8 +1415,8 @@ mod tests {
     #[test]
     fn put_char_on_continuation_breaks_leading_wide() {
         let mut grid = Grid::new(5, 1);
-        grid.set(0, 0, '漢', Style::default());
-        grid.put_char(1, 0, 'B', Color::Green);
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
+        grid.as_mut_slice().put_char(1, 0, 'B', Color::Green);
         assert_grid_invariants(&grid);
         assert_ne!(grid.cell(0, 0).symbol, '漢');
         assert_eq!(grid.cell(1, 0).symbol, 'B');
@@ -1493,7 +1427,7 @@ mod tests {
         // Wide at col 3 (continuation at col 4). Fill clobbers cols 0..4
         // inclusive of the leading wide but not its continuation.
         let mut grid = Grid::new(6, 1);
-        grid.set(3, 0, '漢', Style::default());
+        grid.as_mut_slice().set(3, 0, '漢', Style::default());
         grid.fill(Rect::new(0, 0, 4, 1), '#', Style::default());
         assert_grid_invariants(&grid);
         assert_eq!(grid.cell(3, 0).symbol, '#');
@@ -1506,8 +1440,8 @@ mod tests {
         // - leaves the leading slot at col 0 untouched. The leading wide
         // must be broken because its right half is gone.
         let mut grid = Grid::new(5, 1);
-        grid.set(0, 0, '漢', Style::default());
-        grid.fill(Rect::new(0, 1, 2, 1), '#', Style::default());
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
+        grid.fill(Rect::new(1, 0, 2, 1), '#', Style::default());
         assert_grid_invariants(&grid);
         assert_ne!(grid.cell(0, 0).symbol, '漢');
         assert_eq!(grid.cell(1, 0).symbol, '#');
@@ -1520,9 +1454,9 @@ mod tests {
         // After the write, the new wide owns cols 1+2; col 0 should be broken (its
         // continuation got reassigned) and col 3 should no longer be a stale '\0'.
         let mut grid = Grid::new(6, 1);
-        grid.set(0, 0, '漢', Style::default());
-        grid.set(2, 0, '字', Style::default());
-        grid.set(1, 0, '日', Style::default());
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
+        grid.as_mut_slice().set(2, 0, '字', Style::default());
+        grid.as_mut_slice().set(1, 0, '日', Style::default());
         assert_grid_invariants(&grid);
         assert_eq!(grid.cell(1, 0).symbol, '日');
         assert_eq!(grid.cell(2, 0).symbol, '\0');
@@ -1535,9 +1469,9 @@ mod tests {
     #[test]
     fn clear_all_holds_invariant_after_arbitrary_paint() {
         let mut grid = Grid::new(8, 2);
-        grid.set(0, 0, '漢', Style::default());
-        grid.set(3, 0, '字', Style::default());
-        grid.put_str(0, 1, "a漢b", Style::default());
+        grid.as_mut_slice().set(0, 0, '漢', Style::default());
+        grid.as_mut_slice().set(3, 0, '字', Style::default());
+        grid.as_mut_slice().put_str(0, 1, "a漢b", Style::default());
         grid.clear_all();
         assert_grid_invariants(&grid);
         for y in 0..2 {
@@ -1554,10 +1488,10 @@ mod tests {
         // narrow before flushing. The continuation cell must end up in the
         // diff stream so the terminal clears the right half.
         let mut prev = Grid::new(6, 1);
-        prev.set(2, 0, '漢', Style::default());
+        prev.as_mut_slice().set(2, 0, '漢', Style::default());
         let mut curr = Grid::new(6, 1);
-        curr.set(2, 0, '漢', Style::default());
-        curr.set(2, 0, 'A', Style::default());
+        curr.as_mut_slice().set(2, 0, '漢', Style::default());
+        curr.as_mut_slice().set(2, 0, 'A', Style::default());
         let updates: Vec<_> = curr.diff(&prev).collect();
         let cols: Vec<u16> = updates.iter().map(|u| u.x).collect();
         assert!(
@@ -1570,7 +1504,7 @@ mod tests {
     #[test]
     fn slice_fill_partial_wide_overlap_keeps_invariant() {
         let mut grid = Grid::new(10, 1);
-        grid.set(4, 0, '漢', Style::default());
+        grid.as_mut_slice().set(4, 0, '漢', Style::default());
         {
             let mut slice = grid.slice_mut(Rect::new(0, 0, 5, 1));
             slice.fill(Rect::new(0, 0, 5, 1), '#', Style::default());
@@ -1581,8 +1515,8 @@ mod tests {
     #[test]
     fn put_str_fg_over_wide_keeps_invariant() {
         let mut grid = Grid::new(6, 1);
-        grid.set(1, 0, '漢', Style::default());
-        grid.put_str_fg(0, 0, "abc", Color::Red);
+        grid.as_mut_slice().set(1, 0, '漢', Style::default());
+        grid.as_mut_slice().put_str_fg(0, 0, "abc", Color::Red);
         assert_grid_invariants(&grid);
         assert_eq!(grid.cell(0, 0).symbol, 'a');
         assert_eq!(grid.cell(1, 0).symbol, 'b');
@@ -1595,7 +1529,7 @@ mod tests {
         // would need col 3 too - fits. Try "abc漢" in width 4: 'c' at 2,
         // wide char needs 3+4 → overflows, breaks before writing.
         let mut grid = Grid::new(4, 1);
-        grid.put_str(0, 0, "abc漢", Style::default());
+        grid.as_mut_slice().put_str(0, 0, "abc漢", Style::default());
         assert_eq!(grid.cell(0, 0).symbol, 'a');
         assert_eq!(grid.cell(1, 0).symbol, 'b');
         assert_eq!(grid.cell(2, 0).symbol, 'c');
@@ -1608,9 +1542,10 @@ mod tests {
     #[test]
     fn diff_picks_up_style_only_change() {
         let mut prev = Grid::new(5, 1);
-        prev.set(0, 0, 'X', Style::default());
+        prev.as_mut_slice().set(0, 0, 'X', Style::default());
         let mut curr = Grid::new(5, 1);
-        curr.set(0, 0, 'X', Style::new().fg(Color::Red));
+        curr.as_mut_slice()
+            .set(0, 0, 'X', Style::new().fg(Color::Red));
         let updates: Vec<_> = curr.diff(&prev).collect();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].cell.style.fg, Some(Color::Red));
@@ -1621,7 +1556,7 @@ mod tests {
     #[test]
     fn set_out_of_bounds_is_silent_noop() {
         let mut grid = Grid::new(3, 2);
-        grid.set(99, 99, 'X', Style::default());
+        grid.as_mut_slice().set(99, 99, 'X', Style::default());
         // No panic; nothing changed.
         assert_eq!(grid.cell(0, 0).symbol, ' ');
         assert_eq!(grid.cell(2, 1).symbol, ' ');
@@ -1630,7 +1565,8 @@ mod tests {
     #[test]
     fn put_str_skips_when_y_out_of_bounds() {
         let mut grid = Grid::new(5, 2);
-        grid.put_str(0, 99, "hello", Style::default());
+        grid.as_mut_slice()
+            .put_str(0, 99, "hello", Style::default());
         // First row unchanged.
         assert_eq!(grid.cell(0, 0).symbol, ' ');
     }

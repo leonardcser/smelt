@@ -6,7 +6,7 @@ use crate::app::{
     CommandAction, TuiApp,
 };
 
-use crate::smelt_edit::layout::Anchor;
+use crate::smelt_edit::Anchor;
 use crate::smelt_edit::BufCreateOpts;
 use crate::smelt_edit::UiHost;
 use crate::smelt_edit::{Constraint, LayoutTree, Overlay, SplitConfig, WinId};

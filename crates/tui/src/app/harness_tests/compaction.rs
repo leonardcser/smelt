@@ -710,8 +710,8 @@ async fn timed_render_loop_shows_compaction_preview_only_while_following_tail() 
             for _ in 0..6 {
                 app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
                     kind: MouseEventKind::ScrollUp,
-                    column: viewport.rect.left.saturating_add(2),
-                    row: viewport.rect.top.saturating_add(2),
+                    column: viewport.rect.x.saturating_add(2),
+                    row: viewport.rect.y.saturating_add(2),
                     modifiers: KeyModifiers::NONE,
                 })));
                 app.render_to_frame();
@@ -820,8 +820,8 @@ fn wheel_scroll_moves_while_compaction_preview_streams() {
         let before = app.app.transcript_scroll_top();
         app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
-            column: viewport.rect.left.saturating_add(2),
-            row: viewport.rect.top.saturating_add(2),
+            column: viewport.rect.x.saturating_add(2),
+            row: viewport.rect.y.saturating_add(2),
             modifiers: KeyModifiers::NONE,
         })));
         app.dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {

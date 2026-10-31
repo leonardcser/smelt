@@ -2,36 +2,32 @@
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rect {
-    pub top: u16,
-    pub left: u16,
+    pub x: u16,
+    pub y: u16,
     pub width: u16,
     pub height: u16,
 }
 
 impl Rect {
-    pub fn new(top: u16, left: u16, width: u16, height: u16) -> Self {
+    pub fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
         Self {
-            top,
-            left,
+            x,
+            y,
             width,
             height,
         }
     }
 
     pub fn bottom(&self) -> u16 {
-        self.top.saturating_add(self.height)
+        self.y.saturating_add(self.height)
     }
 
     pub fn right(&self) -> u16 {
-        self.left.saturating_add(self.width)
+        self.x.saturating_add(self.width)
     }
 
-    pub fn contains(&self, row: u16, col: u16) -> bool {
-        row >= self.top && row < self.bottom() && col >= self.left && col < self.right()
-    }
-
-    pub fn contains_xy(&self, x: u16, y: u16) -> bool {
-        self.contains(y, x)
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
 
     pub fn area(&self) -> u32 {
@@ -50,17 +46,17 @@ impl Rect {
         let dx = insets.left.saturating_add(insets.right);
         let dy = insets.top.saturating_add(insets.bottom);
         Rect::new(
-            self.top.saturating_add(insets.top),
-            self.left.saturating_add(insets.left),
+            self.x.saturating_add(insets.left),
+            self.y.saturating_add(insets.top),
             self.width.saturating_sub(dx),
             self.height.saturating_sub(dy),
         )
     }
 
-    pub fn translate(self, rows: i32, cols: i32) -> Rect {
+    pub fn translate(self, dx: i32, dy: i32) -> Rect {
         Rect::new(
-            translate_u16(self.top, rows),
-            translate_u16(self.left, cols),
+            translate_u16(self.x, dx),
+            translate_u16(self.y, dy),
             self.width,
             self.height,
         )
@@ -68,8 +64,8 @@ impl Rect {
 
     pub fn to_grid(self, origin: Rect) -> Rect {
         Rect::new(
-            origin.top.saturating_add(self.top),
-            origin.left.saturating_add(self.left),
+            origin.x.saturating_add(self.x),
+            origin.y.saturating_add(self.y),
             self.width,
             self.height,
         )
@@ -77,21 +73,21 @@ impl Rect {
 
     pub fn to_local(self, origin: Rect) -> Rect {
         Rect::new(
-            self.top.saturating_sub(origin.top),
-            self.left.saturating_sub(origin.left),
+            self.x.saturating_sub(origin.x),
+            self.y.saturating_sub(origin.y),
             self.width,
             self.height,
         )
     }
 
     pub fn intersection(self, other: Rect) -> Rect {
-        let top = self.top.max(other.top);
-        let left = self.left.max(other.left);
+        let top = self.y.max(other.y);
+        let left = self.x.max(other.x);
         let bottom = self.bottom().min(other.bottom());
         let right = self.right().min(other.right());
         Rect::new(
-            top.min(bottom),
             left.min(right),
+            top.min(bottom),
             right.saturating_sub(left),
             bottom.saturating_sub(top),
         )
@@ -103,10 +99,10 @@ impl Rect {
 
     pub fn split_top(self, height: u16) -> (Rect, Rect) {
         let top_height = height.min(self.height);
-        let top = Rect::new(self.top, self.left, self.width, top_height);
+        let top = Rect::new(self.x, self.y, self.width, top_height);
         let rest = Rect::new(
-            self.top.saturating_add(top_height),
-            self.left,
+            self.x,
+            self.y.saturating_add(top_height),
             self.width,
             self.height.saturating_sub(top_height),
         );
@@ -116,10 +112,10 @@ impl Rect {
     pub fn split_bottom(self, height: u16) -> (Rect, Rect) {
         let bottom_height = height.min(self.height);
         let rest_height = self.height.saturating_sub(bottom_height);
-        let rest = Rect::new(self.top, self.left, self.width, rest_height);
+        let rest = Rect::new(self.x, self.y, self.width, rest_height);
         let bottom = Rect::new(
-            self.top.saturating_add(rest_height),
-            self.left,
+            self.x,
+            self.y.saturating_add(rest_height),
             self.width,
             bottom_height,
         );
@@ -128,10 +124,10 @@ impl Rect {
 
     pub fn split_left(self, width: u16) -> (Rect, Rect) {
         let left_width = width.min(self.width);
-        let left = Rect::new(self.top, self.left, left_width, self.height);
+        let left = Rect::new(self.x, self.y, left_width, self.height);
         let rest = Rect::new(
-            self.top,
-            self.left.saturating_add(left_width),
+            self.x.saturating_add(left_width),
+            self.y,
             self.width.saturating_sub(left_width),
             self.height,
         );
@@ -141,10 +137,10 @@ impl Rect {
     pub fn split_right(self, width: u16) -> (Rect, Rect) {
         let right_width = width.min(self.width);
         let rest_width = self.width.saturating_sub(right_width);
-        let rest = Rect::new(self.top, self.left, rest_width, self.height);
+        let rest = Rect::new(self.x, self.y, rest_width, self.height);
         let right = Rect::new(
-            self.top,
-            self.left.saturating_add(rest_width),
+            self.x.saturating_add(rest_width),
+            self.y,
             right_width,
             self.height,
         );
@@ -153,12 +149,12 @@ impl Rect {
 
     pub fn split_y(self, top_height: u16, gap: u16) -> (Rect, Rect) {
         let top_height = top_height.min(self.height);
-        let bottom_top = self.top.saturating_add(top_height).saturating_add(gap);
+        let bottom_top = self.y.saturating_add(top_height).saturating_add(gap);
         let used = top_height.saturating_add(gap).min(self.height);
-        let top = Rect::new(self.top, self.left, self.width, top_height);
+        let top = Rect::new(self.x, self.y, self.width, top_height);
         let bottom = Rect::new(
+            self.x,
             bottom_top.min(self.bottom()),
-            self.left,
             self.width,
             self.height.saturating_sub(used),
         );
@@ -167,12 +163,12 @@ impl Rect {
 
     pub fn split_x(self, left_width: u16, gap: u16) -> (Rect, Rect) {
         let left_width = left_width.min(self.width);
-        let right_left = self.left.saturating_add(left_width).saturating_add(gap);
+        let right_left = self.x.saturating_add(left_width).saturating_add(gap);
         let used = left_width.saturating_add(gap).min(self.width);
-        let left = Rect::new(self.top, self.left, left_width, self.height);
+        let left = Rect::new(self.x, self.y, left_width, self.height);
         let right = Rect::new(
-            self.top,
             right_left.min(self.right()),
+            self.y,
             self.width.saturating_sub(used),
             self.height,
         );
@@ -183,8 +179,8 @@ impl Rect {
         let width = width.min(self.width);
         let height = height.min(self.height);
         Rect::new(
-            self.top.saturating_add((self.height - height) / 2),
-            self.left.saturating_add((self.width - width) / 2),
+            self.x.saturating_add((self.width - width) / 2),
+            self.y.saturating_add((self.height - height) / 2),
             width,
             height,
         )
@@ -227,14 +223,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bottom_is_top_plus_height() {
-        let r = Rect::new(3, 0, 10, 7);
+    fn bottom_is_y_plus_height() {
+        let r = Rect::new(0, 3, 10, 7);
         assert_eq!(r.bottom(), 10);
     }
 
     #[test]
-    fn right_is_left_plus_width() {
-        let r = Rect::new(0, 5, 12, 4);
+    fn right_is_x_plus_width() {
+        let r = Rect::new(5, 0, 12, 4);
         assert_eq!(r.right(), 17);
     }
 
@@ -246,13 +242,12 @@ mod tests {
 
     #[test]
     fn contains_includes_top_left_excludes_bottom_right() {
-        // Half-open ranges: [top, bottom) × [left, right). The contains
-        // signature is (row, col), not (x, y).
-        let r = Rect::new(5, 10, 4, 3); // rows 5..8, cols 10..14
-        assert!(r.contains(5, 10), "top-left corner should be inside");
-        assert!(r.contains(7, 13), "last inclusive cell should be inside");
-        assert!(!r.contains(8, 10), "bottom edge is exclusive");
-        assert!(!r.contains(5, 14), "right edge is exclusive");
+        // Half-open ranges: [x, right) × [y, bottom).
+        let r = Rect::new(10, 5, 4, 3); // x 10..14, y 5..8
+        assert!(r.contains(10, 5), "top-left corner should be inside");
+        assert!(r.contains(13, 7), "last inclusive cell should be inside");
+        assert!(!r.contains(10, 8), "bottom edge is exclusive");
+        assert!(!r.contains(14, 5), "right edge is exclusive");
     }
 
     #[test]
@@ -263,35 +258,33 @@ mod tests {
 
     #[test]
     fn inset_clamps_tiny_rects() {
-        assert_eq!(Rect::new(1, 2, 3, 2).inset(2), Rect::new(3, 4, 0, 0));
+        assert_eq!(Rect::new(2, 1, 3, 2).inset(2), Rect::new(4, 3, 0, 0));
         assert_eq!(
             Rect::new(0, 0, 10, 8).inset_by(Insets::new(1, 2, 3, 4)),
-            Rect::new(1, 4, 4, 4)
+            Rect::new(4, 1, 4, 4)
         );
     }
 
     #[test]
     fn splits_with_gap_do_not_underflow() {
-        let r = Rect::new(2, 3, 5, 4);
+        let r = Rect::new(3, 2, 5, 4);
         assert_eq!(
             r.split_y(3, 10),
-            (Rect::new(2, 3, 5, 3), Rect::new(6, 3, 5, 0))
+            (Rect::new(3, 2, 5, 3), Rect::new(3, 6, 5, 0))
         );
         assert_eq!(
             r.split_x(4, 10),
-            (Rect::new(2, 3, 4, 4), Rect::new(2, 8, 0, 4))
+            (Rect::new(3, 2, 4, 4), Rect::new(8, 2, 0, 4))
         );
     }
 
     #[test]
     fn centered_clamps_oversized_child() {
-        let r = Rect::new(10, 20, 6, 4);
-        assert_eq!(r.centered(2, 2), Rect::new(11, 22, 2, 2));
+        let r = Rect::new(20, 10, 6, 4);
+        assert_eq!(r.centered(2, 2), Rect::new(22, 11, 2, 2));
         assert_eq!(r.centered(99, 99), r);
         assert_eq!(
-            Rect::new(u16::MAX - 1, u16::MAX - 1, 4, 4)
-                .centered(2, 2)
-                .top,
+            Rect::new(u16::MAX - 1, u16::MAX - 1, 4, 4).centered(2, 2).y,
             u16::MAX
         );
     }
@@ -299,8 +292,8 @@ mod tests {
     #[test]
     fn intersection_returns_overlap_or_empty_rect() {
         assert_eq!(
-            Rect::new(2, 3, 10, 8).intersection(Rect::new(5, 1, 6, 4)),
-            Rect::new(5, 3, 4, 4)
+            Rect::new(3, 2, 10, 8).intersection(Rect::new(1, 5, 6, 4)),
+            Rect::new(3, 5, 4, 4)
         );
         assert_eq!(
             Rect::new(0, 0, 2, 2).intersection(Rect::new(5, 5, 2, 2)),
@@ -311,21 +304,21 @@ mod tests {
     #[test]
     fn translate_saturates_at_zero() {
         assert_eq!(
-            Rect::new(2, 3, 4, 5).translate(-10, -1),
-            Rect::new(0, 2, 4, 5)
+            Rect::new(3, 2, 4, 5).translate(-1, -10),
+            Rect::new(2, 0, 4, 5)
         );
         assert_eq!(
-            Rect::new(60_000, 3, 4, 5).translate(-60_000, 4),
-            Rect::new(0, 7, 4, 5)
+            Rect::new(3, 60_000, 4, 5).translate(4, -60_000),
+            Rect::new(7, 0, 4, 5)
         );
-        assert_eq!(Rect::new(2, 3, 4, 5).translate(2, 4), Rect::new(4, 7, 4, 5));
+        assert_eq!(Rect::new(3, 2, 4, 5).translate(4, 2), Rect::new(7, 4, 4, 5));
     }
 
     #[test]
     fn grid_and_local_convert_coordinate_spaces() {
-        let origin = Rect::new(10, 20, 30, 40);
-        let local = Rect::new(2, 3, 4, 5);
-        let grid = Rect::new(12, 23, 4, 5);
+        let origin = Rect::new(20, 10, 30, 40);
+        let local = Rect::new(3, 2, 4, 5);
+        let grid = Rect::new(23, 12, 4, 5);
         assert_eq!(local.to_grid(origin), grid);
         assert_eq!(grid.to_local(origin), local);
     }

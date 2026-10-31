@@ -166,7 +166,7 @@ mod tests {
             rows: 1,
         });
         let object = smelt_core::buffer::AtomicObject::new(image);
-        let placeholder = smelt_term::kitty_placeholder_row(0, 2);
+        let placeholder = smelt_term::kitty::placeholder_row(0, 2);
         let mut source = Buffer::new(BufId(1), BufCreateOpts::default());
         {
             let mut out = LineBuilder::new(&mut source, &theme, 80);

@@ -1,122 +1,47 @@
+//! Resizable panes: drag the divider with the mouse.
 //! Run with `cargo run -p smelt-term --example split`.
-//! Keys and persistence belong to the host; geometry and dragging belong to term.
+//! `q` or `Esc` quits.
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{Event, KeyCode};
 use smelt_term::{
-    Axis, Color, DividerStyles, LayoutStyle, LayoutTree, PaintId, Split, SplitInteraction,
-    SplitOptions, SplitPane, SplitResizeMode, SplitSize, Style, Surface, TerminalSession,
+    Axis, Color, DividerStyles, LayoutStyle, LayoutTree, PaintId, Split, SplitOptions, Style,
+    Surface, TerminalSession,
 };
 
+const LEFT: PaintId = PaintId(1);
+const RIGHT: PaintId = PaintId(2);
+
 fn main() -> std::io::Result<()> {
-    let mut terminal = TerminalSession::builder()
-        .focus_events(true)
-        .enter_stdout()?;
-    let (width, height) = terminal.size()?;
-    let mut surface = Surface::new(width, height);
-    let split = Split::new(
-        Axis::Horizontal,
-        SplitOptions {
-            size: SplitSize::Cells(30),
-            minimum: [12, 20],
-            resize_mode: SplitResizeMode::Cells,
-            ..SplitOptions::default()
-        },
-    );
+    let mut terminal = TerminalSession::enter_stdout()?;
+    let mut surface = Surface::default();
     surface.set_layout(LayoutTree::split(
-        split.clone(),
-        LayoutTree::leaf(PaintId(1)),
-        LayoutTree::leaf(PaintId(2)),
+        Split::new(Axis::Horizontal, SplitOptions::default()),
+        LayoutTree::leaf(LEFT),
+        LayoutTree::leaf(RIGHT),
     ));
-    let mut interaction = SplitInteraction::default();
-    let mut saved = split.preferred_size();
+    surface.set_layout_style(LayoutStyle {
+        dividers: DividerStyles {
+            normal: Style::new().fg(Color::DarkGrey),
+            active: Style::new().fg(Color::Cyan),
+        },
+        ..LayoutStyle::default()
+    });
     loop {
-        let layout = surface.resolve_layout();
-        surface.set_layout_style(LayoutStyle {
-            dividers: DividerStyles {
-                normal: Style::new().fg(Color::DarkGrey),
-                active: Style::new().fg(Color::Cyan),
-            },
-            active_split: interaction.active_id(),
-            ..LayoutStyle::default()
-        });
-        surface.render_resolved(terminal.writer(), &layout, |id, slice, _| {
-            let heading = if id == PaintId(1) {
-                "sidebar"
-            } else {
-                "preview"
-            };
-            slice.put_str(1, 1, heading, Style::new().bold());
-            if id == PaintId(2) {
-                for (row, text) in [
-                    "drag the divider or use H/L",
-                    "= equalize; r reset; q quit",
-                    "shrink and restore the terminal",
-                    "cell preferences survive clamping",
-                ]
-                .iter()
-                .enumerate()
-                {
-                    slice.put_str(1, 3 + row as u16, text, Style::new());
-                }
-                slice.put_str(1, 8, &format!("saved size: {saved:?}"), Style::new().dim());
-            }
+        terminal.draw(&mut surface, |id, slice| {
+            let text = if id == LEFT { "left" } else { "right" };
+            slice.put_str(1, 1, text, Style::new().bold());
+            slice.put_str(1, 3, "drag the divider, q to quit", Style::new().dim());
         })?;
-        let response = match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                interaction.cancel();
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('H' | 'L') => {
-                        if let Some(resolved) = layout.split(split.id()) {
-                            resolved.resize(
-                                SplitPane::First,
-                                if key.code == KeyCode::Char('H') {
-                                    -2
-                                } else {
-                                    2
-                                },
-                            );
-                        }
-                    }
-                    KeyCode::Char('=') => {
-                        if let Some(resolved) = layout.split(split.id()) {
-                            resolved.equalize();
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        split.reset();
-                    }
-                    _ => {}
+        for event in terminal.events(None)? {
+            match event {
+                Event::Mouse(mouse) => {
+                    surface.handle_mouse(mouse);
                 }
-                saved = split.preferred_size();
-                None
-            }
-            Event::Mouse(mouse) => {
-                let active = interaction.active_id().and_then(|id| layout.split(id));
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => layout
-                        .divider_at(mouse.row, mouse.column)
-                        .and_then(|resolved| interaction.begin(resolved, mouse.row, mouse.column)),
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        interaction.update(active, mouse.row, mouse.column)
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        interaction.release(active, mouse.row, mouse.column)
-                    }
-                    _ => None,
+                Event::Key(key) if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) => {
+                    return Ok(());
                 }
+                _ => {}
             }
-            Event::Resize(width, height) => {
-                surface.set_terminal_size(width, height);
-                None
-            }
-            Event::FocusLost => interaction.cancel(),
-            _ => None,
-        };
-        if response.is_some_and(|response| response.ended() && response.changed) {
-            // Serialize this value in the host's settings, not the handle's id.
-            saved = split.preferred_size();
         }
     }
-    Ok(())
 }

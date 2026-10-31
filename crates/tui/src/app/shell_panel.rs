@@ -66,7 +66,7 @@ impl TuiApp {
         let overlay = self.ui.overlay_open(
             crate::smelt_edit::Overlay::new(
                 layout,
-                crate::smelt_edit::layout::Anchor::ScreenBottom { above_rows: 1 },
+                crate::smelt_edit::Anchor::ScreenBottom { above_rows: 1 },
             )
             .modal(true)
             .with_z(crate::content::layout::z::SHELL_PANEL)

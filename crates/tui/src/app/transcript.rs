@@ -9358,7 +9358,7 @@ mod document_tests {
             crate::smelt_edit::BufId(1),
             crate::smelt_edit::SplitConfig {
                 region: "transcript".into(),
-                gutters: smelt_term::layout::Gutters::default(),
+                gutters: crate::smelt_edit::Gutters::default(),
             },
         )
     }

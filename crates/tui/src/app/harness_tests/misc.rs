@@ -1825,15 +1825,15 @@ fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
     assert_resume_preview_is_visible(&preview, "initial tail");
 
     let preview_win = preview.win;
-    let pointer_column = preview.viewport.rect.left.saturating_add(2);
-    let pointer_row = preview.viewport.rect.top.saturating_add(2);
+    let pointer_column = preview.viewport.rect.x.saturating_add(2);
+    let pointer_row = preview.viewport.rect.y.saturating_add(2);
     let initial_scroll_top = preview.scroll_top;
     assert!(
         app.scroll_at_with_transcript_intent(
-            pointer_row,
             pointer_column,
+            pointer_row,
             -3,
-            "coalesced_resume_preview_wheel",
+            "coalesced_resume_preview_wheel"
         ),
         "coalesced wheel input should be handled by the preview transcript",
     );
@@ -1899,7 +1899,7 @@ fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
     let scrollbar_column = returned_to_tail
         .viewport
         .rect
-        .left
+        .x
         .saturating_add(returned_to_tail.viewport.rect.width.saturating_sub(1));
     for kind in [
         crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -1909,7 +1909,7 @@ fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
             crossterm::event::MouseEvent {
                 kind,
                 column: scrollbar_column,
-                row: returned_to_tail.viewport.rect.top,
+                row: returned_to_tail.viewport.rect.y,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         )));
@@ -3311,12 +3311,8 @@ fn transcript_pinned_bottom_resize_click_selects_clicked_row_without_tail_snap()
         .transcript_window()
         .viewport
         .expect("transcript viewport after resize");
-    let click_row = vp.rect.top.saturating_add(2);
-    let click_col = vp
-        .rect
-        .left
-        .saturating_add(vp.gutter_width)
-        .saturating_add(3);
+    let click_row = vp.rect.y.saturating_add(2);
+    let click_col = vp.rect.x.saturating_add(vp.gutter_width).saturating_add(3);
     let mouse = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         row: click_row,
@@ -3371,11 +3367,7 @@ fn transcript_scroll_state_does_not_request_tail_repin_when_pinned_at_bottom() {
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         row: vp.rect.bottom().saturating_sub(2),
-        column: vp
-            .rect
-            .left
-            .saturating_add(vp.gutter_width)
-            .saturating_add(3),
+        column: vp.rect.x.saturating_add(vp.gutter_width).saturating_add(3),
         modifiers: KeyModifiers::empty(),
     })));
     assert!(
@@ -3428,12 +3420,8 @@ fn transcript_interaction_trace_records_click_and_retained_frame_events() {
         .expect("transcript viewport");
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        row: vp.rect.top.saturating_add(2),
-        column: vp
-            .rect
-            .left
-            .saturating_add(vp.gutter_width)
-            .saturating_add(3),
+        row: vp.rect.y.saturating_add(2),
+        column: vp.rect.x.saturating_add(vp.gutter_width).saturating_add(3),
         modifiers: KeyModifiers::empty(),
     })));
     app.render_silent();
@@ -3500,11 +3488,7 @@ fn transcript_fast_scroll_jump_bottom_then_click_preserves_bottom_viewport() {
     let mouse = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         row: vp.rect.bottom().saturating_sub(2),
-        column: vp
-            .rect
-            .left
-            .saturating_add(vp.gutter_width)
-            .saturating_add(3),
+        column: vp.rect.x.saturating_add(vp.gutter_width).saturating_add(3),
         modifiers: KeyModifiers::empty(),
     };
     let expected = app
@@ -3551,12 +3535,8 @@ fn resumed_sparse_bottom_click_keeps_clicked_row_and_viewport() {
         .viewport
         .expect("transcript viewport");
     let click_row = vp.rect.bottom().saturating_sub(1);
-    let click_col = vp
-        .rect
-        .left
-        .saturating_add(vp.gutter_width)
-        .saturating_add(3);
-    let rel_row = click_row.saturating_sub(vp.rect.top) as crate::smelt_edit::RowIndex;
+    let click_col = vp.rect.x.saturating_add(vp.gutter_width).saturating_add(3);
+    let rel_row = click_row.saturating_sub(vp.rect.y) as crate::smelt_edit::RowIndex;
     let before_scroll = app.transcript_window().scroll_top;
     let total_rows = app
         .transcript_window()
@@ -3644,10 +3624,10 @@ fn visible_transcript_record_word(app: &TestApp) -> VisibleTranscriptWord {
     ) as u16;
     let abs_row = materialized.absolute_row(line_idx as RowIndex);
     VisibleTranscriptWord {
-        screen_row: vp.rect.top + abs_row.saturating_sub(scroll_top) as u16,
+        screen_row: vp.rect.y + abs_row.saturating_sub(scroll_top) as u16,
         screen_col: vp
             .rect
-            .left
+            .x
             .saturating_add(vp.gutter_width)
             .saturating_add(pad_left)
             .saturating_add(hit_col),
@@ -4595,8 +4575,8 @@ fn scroll_pill_clicks_jump_to_previous_user_then_back_to_tail() {
         ] {
             app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
                 kind,
-                row: rect.top,
-                column: rect.left,
+                row: rect.y,
+                column: rect.x,
                 modifiers: KeyModifiers::empty(),
             })));
         }
@@ -5382,10 +5362,10 @@ impl TranscriptScrollReplay {
                     let (row, col) = transcript_content_point(app, 1);
                     assert!(
                         app.scroll_at_with_transcript_intent(
-                            row,
                             col,
+                            row,
                             rows,
-                            &format!("coalesced_wheel:{rows}"),
+                            &format!("coalesced_wheel:{rows}")
                         ),
                         "coalesced wheel replay should pan the transcript"
                     );
@@ -5554,12 +5534,9 @@ fn transcript_content_point(app: &TestApp, rel_row: u16) -> (u16, u16) {
         .expect("transcript viewport");
     (
         vp.rect
-            .top
+            .y
             .saturating_add(rel_row.min(vp.rect.height.saturating_sub(1))),
-        vp.rect
-            .left
-            .saturating_add(vp.gutter_width)
-            .saturating_add(1),
+        vp.rect.x.saturating_add(vp.gutter_width).saturating_add(1),
     )
 }
 
@@ -5573,7 +5550,7 @@ fn transcript_scrollbar_point(app: &TestApp, rel_row: u16) -> (u16, u16, u64, u6
     let numerator = u64::from(rel_row.min(vp.rect.height.saturating_sub(1)));
     (
         vp.rect
-            .top
+            .y
             .saturating_add(rel_row.min(vp.rect.height.saturating_sub(1))),
         scrollbar.col,
         numerator,
@@ -5586,14 +5563,10 @@ fn start_transcript_edge_drag(app: &mut TestApp, edge: TranscriptDragEdge) {
         .transcript_window()
         .viewport
         .expect("transcript viewport");
-    let col = vp
-        .rect
-        .left
-        .saturating_add(vp.gutter_width)
-        .saturating_add(1);
-    let down_row = vp.rect.top.saturating_add(vp.rect.height / 2);
+    let col = vp.rect.x.saturating_add(vp.gutter_width).saturating_add(1);
+    let down_row = vp.rect.y.saturating_add(vp.rect.height / 2);
     let edge_row = match edge {
-        TranscriptDragEdge::Top => vp.rect.top,
+        TranscriptDragEdge::Top => vp.rect.y,
         TranscriptDragEdge::Bottom => vp.rect.bottom().saturating_sub(1),
     };
     app.feed_one(SourceEvent::Term(Event::Mouse(
@@ -5761,8 +5734,8 @@ fn resumed_sparse_top_scroll_pill_click_advances_without_extra_scroll() {
 
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        row: pill_rect.top,
-        column: pill_rect.left.saturating_add(1),
+        row: pill_rect.y,
+        column: pill_rect.x.saturating_add(1),
         modifiers: KeyModifiers::empty(),
     })));
     app.render_silent();
@@ -6972,7 +6945,7 @@ fn resumed_transcript_scrollbar_drag_is_continuous_through_exact_boundaries() {
     let mouse = |kind, rel_row: u16| {
         SourceEvent::Term(Event::Mouse(crossterm::event::MouseEvent {
             kind,
-            row: viewport.rect.top.saturating_add(rel_row),
+            row: viewport.rect.y.saturating_add(rel_row),
             column: scrollbar.col,
             modifiers: KeyModifiers::empty(),
         }))
@@ -7106,7 +7079,7 @@ fn scrollbar_drag_retains_exact_viewport_while_far_seek_hydrates() {
     let mouse = |kind, rel_row: u16| {
         SourceEvent::Term(Event::Mouse(crossterm::event::MouseEvent {
             kind,
-            row: viewport.rect.top.saturating_add(rel_row),
+            row: viewport.rect.y.saturating_add(rel_row),
             column: scrollbar.col,
             modifiers: KeyModifiers::empty(),
         }))
@@ -7151,7 +7124,7 @@ fn scrollbar_drag_retains_exact_viewport_while_far_seek_hydrates() {
         ));
         let frame = app.render_unsettled_silent();
         let transcript_rows =
-            &frame.rows[usize::from(viewport.rect.top)..usize::from(viewport.rect.bottom())];
+            &frame.rows[usize::from(viewport.rect.y)..usize::from(viewport.rect.bottom())];
         assert!(
             transcript_rows.iter().any(|line| line.contains("record-")),
             "pending far seek painted an empty transcript frame: {transcript_rows:?}"
@@ -7192,7 +7165,7 @@ fn scrollbar_drag_retains_exact_viewport_while_far_seek_hydrates() {
     ));
     let released_frame = app.render_unsettled_silent();
     let released_rows =
-        &released_frame.rows[usize::from(viewport.rect.top)..usize::from(viewport.rect.bottom())];
+        &released_frame.rows[usize::from(viewport.rect.y)..usize::from(viewport.rect.bottom())];
     assert!(
         released_rows.iter().any(|line| line.contains("record-")),
         "releasing a pending seek exposed an empty transcript frame: {released_rows:?}"
@@ -7564,12 +7537,8 @@ fn wheel_transcript(app: &mut TestApp, kind: crossterm::event::MouseEventKind) {
     app.feed_one(SourceEvent::Term(Event::Mouse(
         crossterm::event::MouseEvent {
             kind,
-            row: vp.rect.top.saturating_add(1),
-            column: vp
-                .rect
-                .left
-                .saturating_add(vp.gutter_width)
-                .saturating_add(1),
+            row: vp.rect.y.saturating_add(1),
+            column: vp.rect.x.saturating_add(vp.gutter_width).saturating_add(1),
             modifiers: KeyModifiers::empty(),
         },
     )));

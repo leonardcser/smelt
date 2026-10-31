@@ -22,11 +22,11 @@ fn rect(app: &TestApp, name: &str) -> Rect {
         .rect
 }
 
-fn mouse(app: &mut TestApp, kind: MouseEventKind, row: u16, col: u16) {
+fn mouse(app: &mut TestApp, kind: MouseEventKind, x: u16, y: u16) {
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
         kind,
-        row,
-        column: col,
+        row: y,
+        column: x,
         modifiers: KeyModifiers::NONE,
     })));
     paint(app);
@@ -73,17 +73,12 @@ fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
     app.type_text("first line\nsecond line\nthird line");
     paint(&mut app);
     let top = rect(&app, "smelt.prompt_bar.top");
-    mouse(
-        &mut app,
-        MouseEventKind::Down(MouseButton::Left),
-        top.top,
-        1,
-    );
-    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 0, 1);
-    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 0, 1);
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, top.y);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 1, 0);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1, 0);
     let before = app.render_to_frame().text();
     assert!(before.contains("test-model"), "{before}");
-    let expanded_top = rect(&app, "smelt.prompt_bar.top").top;
+    let expanded_top = rect(&app, "smelt.prompt_bar.top").y;
 
     app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
     let frame = app.render_to_frame().text();
@@ -97,7 +92,7 @@ fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
 
     app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
     paint(&mut app);
-    assert_eq!(rect(&app, "smelt.prompt_bar.top").top, expanded_top);
+    assert_eq!(rect(&app, "smelt.prompt_bar.top").y, expanded_top);
     assert_eq!(
         app.state().prompt_text,
         "first line\nsecond line\nthird line"
@@ -106,18 +101,18 @@ fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
     paint(&mut app);
 
     let top = rect(&app, "smelt.prompt_bar.top");
-    let row = top.top + top.height - 1;
-    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), row, 1);
+    let row = top.y + top.height - 1;
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, row);
     mouse(
         &mut app,
         MouseEventKind::Drag(MouseButton::Left),
-        row + 1,
         1,
+        row + 1,
     );
-    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), row + 1, 1);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1, row + 1);
     assert_eq!(
-        rect(&app, "smelt.prompt_bar.top").top,
-        top.top + 1,
+        rect(&app, "smelt.prompt_bar.top").y,
+        top.y + 1,
         "the first drag step must resize from the visible prompt height"
     );
 }
@@ -299,24 +294,24 @@ fn resizable_layouts_compose_in_root_overlay_and_dialog() {
         let lower = rect(&app, "resize.c");
         assert!(left.width.abs_diff(upper.width) <= 1);
         assert!(upper.height.abs_diff(lower.height) <= 1);
-        let border = upper.top + upper.height;
+        let border = upper.y + upper.height;
         mouse(
             &mut app,
             MouseEventKind::Down(MouseButton::Left),
+            upper.x + 3,
             border,
-            upper.left + 3,
         );
         mouse(
             &mut app,
             MouseEventKind::Drag(MouseButton::Left),
+            upper.x + 3,
             border + 3,
-            upper.left + 3,
         );
         mouse(
             &mut app,
             MouseEventKind::Up(MouseButton::Left),
+            upper.x + 3,
             border + 3,
-            upper.left + 3,
         );
         assert_eq!(rect(&app, "resize.b").height, upper.height + 3);
         assert_eq!(rect(&app, "resize.c").height, lower.height - 3);
@@ -330,25 +325,25 @@ fn split_drag_clamps_and_keyboard_cancels_capture() {
     let mut app = TestApp::builder().build();
     open(&mut app, "overlay");
     let left = rect(&app, "resize.a");
-    let col = left.left + left.width;
+    let col = left.x + left.width;
     mouse(
         &mut app,
         MouseEventKind::Down(MouseButton::Left),
-        left.top + 3,
         col,
+        left.y + 3,
     );
     mouse(
         &mut app,
         MouseEventKind::Drag(MouseButton::Left),
-        left.top + 3,
         u16::MAX,
+        left.y + 3,
     );
     assert_eq!(rect(&app, "resize.b").width, 18);
     mouse(
         &mut app,
         MouseEventKind::Drag(MouseButton::Left),
-        left.top + 3,
         0,
+        left.y + 3,
     );
     assert_eq!(rect(&app, "resize.a").width, 15);
     chord(&mut app, '=');
@@ -357,23 +352,23 @@ fn split_drag_clamps_and_keyboard_cancels_capture() {
     mouse(
         &mut app,
         MouseEventKind::Drag(MouseButton::Left),
-        left.top + 3,
         u16::MAX,
+        left.y + 3,
     );
     assert_eq!(rect(&app, "resize.a"), balanced);
     mouse(
         &mut app,
         MouseEventKind::Up(MouseButton::Left),
-        left.top + 3,
         u16::MAX,
+        left.y + 3,
     );
 
-    let col = balanced.left + balanced.width;
+    let col = balanced.x + balanced.width;
     mouse(
         &mut app,
         MouseEventKind::Down(MouseButton::Left),
-        balanced.top + 3,
         col,
+        balanced.y + 3,
     );
     assert!(app.ui_probe().capture().is_some());
     app.run_lua_result("surface:close()").unwrap();
@@ -610,8 +605,8 @@ fn removing_a_captured_split_restores_content_dragging() {
     mouse(
         &mut app,
         MouseEventKind::Down(MouseButton::Left),
-        initial.top + 2,
-        initial.left + initial.width,
+        initial.x + initial.width,
+        initial.y + 2,
     );
     assert!(app.ui_probe().capture().is_some());
     app.run_lua_result("smelt.ui.layout.set(function() return smelt.ui.layout.leaf(a) end)")
@@ -622,14 +617,14 @@ fn removing_a_captured_split_restores_content_dragging() {
     mouse(
         &mut app,
         MouseEventKind::Down(MouseButton::Left),
-        area.top,
-        area.left,
+        area.x,
+        area.y,
     );
     mouse(
         &mut app,
         MouseEventKind::Drag(MouseButton::Left),
-        area.top + 3,
-        area.left + 2,
+        area.x + 2,
+        area.y + 3,
     );
     assert!(app
         .ui_probe()
@@ -639,7 +634,7 @@ fn removing_a_captured_split_restores_content_dragging() {
     mouse(
         &mut app,
         MouseEventKind::Up(MouseButton::Left),
-        area.top + 3,
-        area.left + 2,
+        area.x + 2,
+        area.y + 3,
     );
 }

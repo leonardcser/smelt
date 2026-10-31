@@ -1,9 +1,10 @@
 pub use super::geometry::Rect;
-use std::collections::HashMap;
 
 mod resolved;
 mod split;
-pub use resolved::{LayoutPaintOp, LayoutStyle, ResolvedLayout, ResolvedSplit, SplitPane};
+pub use resolved::{
+    LayoutPaintOp, LayoutStyle, PaintDispatch, ResolvedLayout, ResolvedSplit, SplitPane,
+};
 pub use split::{
     Axis, DividerStyles, Split, SplitDivider, SplitGeometry, SplitId, SplitInteraction,
     SplitOptions, SplitPhase, SplitRatio, SplitResizeMode, SplitResponse, SplitSize,
@@ -26,18 +27,16 @@ pub struct ContainerId(pub u64);
 
 /// Sizing constraint for a layout child along the parent's primary
 /// axis. Resolved by `resolve_constraints` against the parent's total
-/// size, in declaration order:
+/// size in four passes:
 ///
-/// 1. Hard sizes first (`Length`, `Percentage`, `Ratio`, `Max`) and
-///    `Fit` (resolved against the leaf's natural size via the active
-///    `LeafSizer`) consume their exact share of the available space.
-/// 2. `Min(n)` reserves at least `n` cells, then competes with
-///    `Fill` for the remainder.
-/// 3. `Fill` (and any unsatisfied `Min`) splits whatever remains
-///    evenly.
+/// 1. `Length` and `Percentage` take their exact size.
+/// 2. `Ratio` siblings split what remains proportionally.
+/// 3. `Fit` children take their natural size, leaving room for `Min`
+///    floors. When their naturals overflow, the largest shrinks first.
+/// 4. `Fill`, `Min`, and `Max` share the rest evenly within their bounds.
 ///
-/// `Fit` reports the leaf's natural size from `LeafSizer`; with the
-/// default `NoopSizer` it contributes 0 (i.e. behaves like `Fill`).
+/// `Fit` reads the natural size from a leaf's `Natural` hook or the active
+/// `LeafSizer`. With the default `NoopSizer` and no hook it gets 0 cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Constraint {
     /// Exactly `n` cells along the axis.
@@ -55,8 +54,7 @@ pub enum Constraint {
     Max(u16),
     /// Fill the remaining space; siblings split evenly.
     Fill,
-    /// Size to the leaf's natural content. Falls back to `Fill`
-    /// until leaves expose a natural-size hook.
+    /// Size to the child's natural content (pass 3 above).
     Fit,
 }
 
@@ -93,6 +91,24 @@ pub struct Chrome {
     pub padding: u16,
     /// Stable host identity for this node when it represents an interactive container.
     pub container: Option<ContainerId>,
+}
+
+impl Chrome {
+    /// Inner area after the border's per-side reservations and the uniform
+    /// padding. Returns `area` unchanged when both are absent.
+    pub fn inner(&self, area: Rect) -> Rect {
+        let side = |on: Option<EdgeStyle>| u16::from(on.is_some());
+        let (top, right, bottom, left) = self.border.map_or((0, 0, 0, 0), |b| {
+            (side(b.top), side(b.right), side(b.bottom), side(b.left))
+        });
+        let p = self.padding;
+        area.inset_by(crate::geometry::Insets::new(
+            top + p,
+            right + p,
+            bottom + p,
+            left + p,
+        ))
+    }
 }
 
 /// Per-leaf natural-size hook. Plugins attach one to a leaf to drive
@@ -240,6 +256,11 @@ impl LayoutTree {
             *natural = Some(n);
         }
         self
+    }
+
+    /// Give a leaf a fixed natural `(width, height)` for `Fit` sizing.
+    pub fn with_natural_size(self, width: u16, height: u16) -> Self {
+        self.with_natural(std::sync::Arc::new(StaticNatural(width, height)))
     }
 
     pub fn chrome_mut(&mut self) -> &mut Chrome {
@@ -469,7 +490,7 @@ impl LayoutTree {
         match self {
             Self::Leaf { .. } => {}
             Self::Frame { child, chrome } => {
-                child.visit_with_geometry(inset_for_chrome(area, chrome), sizer, visit)
+                child.visit_with_geometry(chrome.inner(area), sizer, visit)
             }
             Self::Split { children, .. } => {
                 for (child, rect) in children.iter().zip(geometry.unwrap().panes) {
@@ -609,77 +630,6 @@ fn natural_box(
     (w.min(cap_w), h.min(cap_h))
 }
 
-/// Which corner of a rectangle serves as its anchor point. Used by
-/// `ScreenAt` and `Cursor` (whose flip-on-overflow logic specifically
-/// pivots on real corners). For window-relative anchoring see [`Align`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Corner {
-    NW,
-    NE,
-    SW,
-    SE,
-}
-
-/// 9-point alignment inside a rectangle. Used by `Anchor::Win`: the
-/// chosen alignment picks the same point on both the target and the
-/// overlay, so `Center` places the overlay's center on the target's
-/// center, `NW` flush-mounts top-left to top-left, `N` puts the
-/// overlay's top edge midpoint on the target's top edge midpoint, etc.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Align {
-    NW,
-    N,
-    NE,
-    W,
-    Center,
-    E,
-    SW,
-    S,
-    SE,
-}
-
-impl From<Corner> for Align {
-    fn from(c: Corner) -> Self {
-        match c {
-            Corner::NW => Align::NW,
-            Corner::NE => Align::NE,
-            Corner::SW => Align::SW,
-            Corner::SE => Align::SE,
-        }
-    }
-}
-
-/// Screen position for an anchored overlay. Carries position only;
-/// sizing lives on the container's layout.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Anchor {
-    /// Centered on screen.
-    ScreenCenter,
-    /// Absolute screen position; `corner` is placed at `(row, col)`.
-    ScreenAt { row: i32, col: i32, corner: Corner },
-    /// Anchored to the text cursor; flips to the opposite corner on screen overflow.
-    Cursor {
-        corner: Corner,
-        row_offset: i32,
-        col_offset: i32,
-    },
-    /// Anchored to another window. `attach` picks the alignment point on
-    /// both the target rect and the overlay rect - see [`Align`]. `NW`
-    /// flush-mounts top-left; `Center` centers the overlay inside the
-    /// target; `N`/`S`/`E`/`W` align the overlay's matching edge midpoint
-    /// to the target's. `row_offset`/`col_offset` nudge the resolved rect
-    /// away from the alignment point - useful for compensating chrome
-    /// rows (gutter, status line) the host adds inside the target.
-    Win {
-        target: PaintId,
-        attach: Align,
-        row_offset: i32,
-        col_offset: i32,
-    },
-    /// Docked to the bottom of the screen; height clamps to `term_h - above_rows`.
-    ScreenBottom { above_rows: u16 },
-}
-
 /// Glyph family painted along a border edge.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BorderStyle {
@@ -786,18 +736,8 @@ impl Border {
         self.top.is_some() || self.right.is_some() || self.bottom.is_some() || self.left.is_some()
     }
 
-    /// `Border::single().all(())` - single glyphs on all four sides, default color.
-    pub fn single_all() -> Self {
-        Self::single().all(())
-    }
-    pub fn rounded_all() -> Self {
-        Self::rounded().all(())
-    }
-    pub fn double_all() -> Self {
-        Self::double().all(())
-    }
-
-    /// Compatibility shortcuts for the three most common presets.
+    /// All four sides in the default color. Start from `single()`, `rounded()`, or
+    /// `double()` and add sides to draw only some of them.
     pub const SINGLE: Border = Border {
         style: BorderStyle::Single,
         top: Some(EdgeStyle::new()),
@@ -821,147 +761,6 @@ impl Border {
     };
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Gutters {
-    pub pad_left: u16,
-    pub pad_right: u16,
-    pub scrollbar: bool,
-}
-
-impl Default for Gutters {
-    /// Any buffer-backed window is scrollable by default. The scrollbar paints
-    /// only when content overflows; the column it occupies is reserved either
-    /// way so content width is stable across overflow transitions. Surfaces
-    /// that can't scroll by construction (single-line status strips, cursor-
-    /// driven list/option/input panels) must opt out with `scrollbar: false`.
-    fn default() -> Self {
-        Self {
-            pad_left: 0,
-            pad_right: 0,
-            scrollbar: true,
-        }
-    }
-}
-
-impl Gutters {
-    pub fn scrollbar_width(&self) -> u16 {
-        if self.scrollbar {
-            1
-        } else {
-            0
-        }
-    }
-
-    /// Width inside the left padding (still includes the scrollbar column if any).
-    pub fn layer_width(&self, total: u16) -> u16 {
-        total.saturating_sub(self.pad_left)
-    }
-
-    /// Inner content width once `pad_left`, `pad_right`, and the scrollbar column are subtracted.
-    pub fn content_width(&self, total: u16) -> u16 {
-        self.layer_width(total)
-            .saturating_sub(self.pad_right)
-            .saturating_sub(self.scrollbar_width())
-    }
-
-    /// Inner content width after a data-driven gutter column has been reserved.
-    pub fn content_width_with_gutter(&self, total: u16, gutter_width: u16) -> u16 {
-        self.content_width(total.saturating_sub(gutter_width))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LayoutRect {
-    pub id: PaintId,
-    pub rect: Rect,
-}
-
-/// Resolve the tree against `area` and return the rect of every leaf. `Fit`
-/// constraints contribute `0` (no leaf-size hook); use `resolve_layout_with`
-/// to drive content-aware sizing.
-pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<PaintId, Rect> {
-    resolve_layout_with(tree, area, &NoopSizer)
-}
-
-/// Resolve the tree against `area` using `sizer` to size `Fit` constraints
-/// from each leaf's natural size. `Fit` items claim their natural primary
-/// extent before `Fill` siblings split the remainder.
-pub fn resolve_layout_with(
-    tree: &LayoutTree,
-    area: Rect,
-    sizer: &dyn LeafSizer,
-) -> HashMap<PaintId, Rect> {
-    resolve_layout_ordered_with(tree, area, sizer)
-        .into_iter()
-        .map(|r| (r.id, r.rect))
-        .collect()
-}
-
-/// Resolve the tree against `area` and return every leaf in declaration order.
-/// Unlike [`resolve_layout`], repeated `PaintId`s are preserved.
-pub fn resolve_layout_ordered(tree: &LayoutTree, area: Rect) -> Vec<LayoutRect> {
-    resolve_layout_ordered_with(tree, area, &NoopSizer)
-}
-
-/// Resolve the tree against `area` using `sizer` and preserve every leaf in
-/// declaration order. Repeated `PaintId`s appear once per leaf.
-pub fn resolve_layout_ordered_with(
-    tree: &LayoutTree,
-    area: Rect,
-    sizer: &dyn LeafSizer,
-) -> Vec<LayoutRect> {
-    let mut result = Vec::new();
-    resolve_node_ordered(tree, area, sizer, &mut result);
-    result
-}
-
-/// Resolve every stable host-owned container to its outer node rectangle.
-pub fn resolve_containers_with(
-    tree: &LayoutTree,
-    area: Rect,
-    sizer: &dyn LeafSizer,
-) -> HashMap<ContainerId, Rect> {
-    let mut result = HashMap::new();
-    resolve_container_nodes(tree, area, sizer, &mut result);
-    result
-}
-
-/// Inner area after subtracting the border's per-side reservations.
-/// Returns `area` unchanged when `border` is `None`. Does not account for
-/// `Chrome.padding`; prefer [`inset_for_chrome`] when you have the full
-/// `Chrome`.
-pub fn inset_for_border(area: Rect, border: Option<Border>) -> Rect {
-    let Some(b) = border else {
-        return area;
-    };
-    let top_pad = if b.top.is_some() { 1 } else { 0 };
-    let bot_pad = if b.bottom.is_some() { 1 } else { 0 };
-    let left_pad = if b.left.is_some() { 1 } else { 0 };
-    let right_pad = if b.right.is_some() { 1 } else { 0 };
-    let h = area.height.saturating_sub(top_pad).saturating_sub(bot_pad);
-    let w = area
-        .width
-        .saturating_sub(left_pad)
-        .saturating_sub(right_pad);
-    Rect::new(area.top + top_pad, area.left + left_pad, w, h)
-}
-
-/// Inner area after subtracting both `chrome.border` reservations and
-/// `chrome.padding` (uniform on all four sides). Returns `area` unchanged
-/// when both are zero.
-pub fn inset_for_chrome(area: Rect, chrome: &Chrome) -> Rect {
-    let bordered = inset_for_border(area, chrome.border);
-    let p = chrome.padding;
-    if p == 0 {
-        return bordered;
-    }
-    let top = bordered.top + p;
-    let left = bordered.left + p;
-    let w = bordered.width.saturating_sub(p).saturating_sub(p);
-    let h = bordered.height.saturating_sub(p).saturating_sub(p);
-    Rect::new(top, left, w, h)
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChromePaintCtx {
     pub top: Option<smelt_style::theme::HlGroup>,
@@ -970,26 +769,11 @@ pub struct ChromePaintCtx {
     pub left: Option<smelt_style::theme::HlGroup>,
 }
 
-impl ChromePaintCtx {
-    pub fn empty() -> Self {
-        Self::default()
-    }
-}
-
 /// Paint a container's border and title into `grid` at `area`.
 /// Corners are drawn only when both adjacent edges are enabled. Active side
 /// edges own their endpoint corners; otherwise top/bottom wins when adjacent
 /// edge colors disagree. Title requires `border.top.is_some()`.
 pub fn paint_chrome(
-    grid: &mut crate::grid::Grid,
-    area: Rect,
-    chrome: &Chrome,
-    theme: &crate::Theme,
-) {
-    paint_chrome_with(grid, area, chrome, theme, ChromePaintCtx::empty());
-}
-
-pub fn paint_chrome_with(
     grid: &mut crate::grid::Grid,
     area: Rect,
     chrome: &Chrome,
@@ -1047,50 +831,50 @@ pub fn paint_chrome_with(
     let top_right_style = corner_style(top_style, ctx.top, right_style, ctx.right);
     let bot_left_style = corner_style(bot_style, ctx.bottom, left_style, ctx.left);
     let bot_right_style = corner_style(bot_style, ctx.bottom, right_style, ctx.right);
-    let right = area.left + area.width - 1;
-    let bottom = area.top + area.height - 1;
+    let mut slice = grid.as_mut_slice();
+    let right = area.x + area.width - 1;
+    let bottom = area.y + area.height - 1;
 
     if border.top.is_some() {
-        for col in area.left..=right {
-            grid.set(col, area.top, h, top_style);
+        for col in area.x..=right {
+            slice.set(col, area.y, h, top_style);
         }
     }
-    if border.bottom.is_some() && bottom != area.top {
-        for col in area.left..=right {
-            grid.set(col, bottom, h, bot_style);
+    if border.bottom.is_some() && bottom != area.y {
+        for col in area.x..=right {
+            slice.set(col, bottom, h, bot_style);
         }
     }
     if border.left.is_some() {
-        for row in area.top..=bottom {
-            grid.set(area.left, row, v, left_style);
+        for row in area.y..=bottom {
+            slice.set(area.x, row, v, left_style);
         }
     }
-    if border.right.is_some() && right != area.left {
-        for row in area.top..=bottom {
-            grid.set(right, row, v, right_style);
+    if border.right.is_some() && right != area.x {
+        for row in area.y..=bottom {
+            slice.set(right, row, v, right_style);
         }
     }
     // Corners only when both adjacent edges are present. Active side edges own
     // their endpoint corners; otherwise top/bottom keeps the existing priority.
     if border.top.is_some() && border.left.is_some() {
-        grid.set(area.left, area.top, tl, top_left_style);
+        slice.set(area.x, area.y, tl, top_left_style);
     }
-    if border.top.is_some() && border.right.is_some() && right != area.left {
-        grid.set(right, area.top, tr, top_right_style);
+    if border.top.is_some() && border.right.is_some() && right != area.x {
+        slice.set(right, area.y, tr, top_right_style);
     }
-    if border.bottom.is_some() && border.left.is_some() && bottom != area.top {
-        grid.set(area.left, bottom, bl, bot_left_style);
+    if border.bottom.is_some() && border.left.is_some() && bottom != area.y {
+        slice.set(area.x, bottom, bl, bot_left_style);
     }
-    if border.bottom.is_some() && border.right.is_some() && bottom != area.top && right != area.left
-    {
-        grid.set(right, bottom, br, bot_right_style);
+    if border.bottom.is_some() && border.right.is_some() && bottom != area.y && right != area.x {
+        slice.set(right, bottom, br, bot_right_style);
     }
 
     if border.top.is_some() {
         if let Some(title) = chrome.title.as_ref() {
             // Inset title by one cell from each end so it reads as `─title──`
             // regardless of whether the left/right sides are enabled.
-            let title_left = area.left + 1;
+            let title_left = area.x + 1;
             let title_right_excl = right;
             if title_right_excl > title_left {
                 let limit = title_right_excl;
@@ -1106,7 +890,7 @@ pub fn paint_chrome_with(
                         if col + width > limit {
                             break;
                         }
-                        grid.set_symbol(col, area.top, grapheme, span_style);
+                        slice.set_symbol(col, area.y, grapheme, span_style);
                         col += width;
                         written = true;
                     }
@@ -1136,46 +920,17 @@ fn merge_title_span_style(
     }
 }
 
-fn resolve_container_nodes(
-    node: &LayoutTree,
-    area: Rect,
-    sizer: &dyn LeafSizer,
-    out: &mut HashMap<ContainerId, Rect>,
-) {
-    node.visit(area, sizer, &mut |node, area| {
-        if let Some(id) = node.chrome().container {
-            out.insert(id, area);
-        }
-    });
-}
-
-fn resolve_node_ordered(
-    node: &LayoutTree,
-    area: Rect,
-    sizer: &dyn LeafSizer,
-    out: &mut Vec<LayoutRect>,
-) {
-    node.visit(area, sizer, &mut |node, area| {
-        if let LayoutTree::Leaf { id, chrome, .. } = node {
-            out.push(LayoutRect {
-                id: *id,
-                rect: inset_for_chrome(area, chrome),
-            });
-        }
-    });
-}
-
 /// Lay out a container's children. Returns `(inner_area, child_rects)`. Both
-/// `resolve_box` and the renderer in `term::paint_layout_tree_with` call this
+/// `resolve_box` and [`ResolvedLayout`] call this
 /// to keep their geometry in sync (hit-test rects must match painted rects).
-pub fn layout_box_children(
+pub(crate) fn layout_box_children(
     items: &[Item],
     chrome: &Chrome,
     area: Rect,
     vertical: bool,
     sizer: &dyn LeafSizer,
 ) -> (Rect, Vec<Rect>) {
-    let inner = inset_for_chrome(area, chrome);
+    let inner = chrome.inner(area);
     let total_gap = chrome
         .gap
         .saturating_mul(items.len().saturating_sub(1) as u16);
@@ -1199,7 +954,7 @@ pub fn layout_box_children(
         })
         .collect();
 
-    let sizes = resolve_constraints_with_fit_caps(items, available, &fit_caps);
+    let sizes = resolve_constraints(items, available, &fit_caps);
     let used_sizes = sizes
         .iter()
         .fold(0u16, |acc, size| acc.saturating_add(*size));
@@ -1217,9 +972,9 @@ pub fn layout_box_children(
     let mut offset = 0u16;
     for (i, &size) in sizes.iter().enumerate() {
         let r = if vertical {
-            Rect::new(inner.top + offset, inner.left, inner.width, size)
+            Rect::new(inner.x, inner.y + offset, inner.width, size)
         } else {
-            Rect::new(inner.top, inner.left + offset, size, inner.height)
+            Rect::new(inner.x + offset, inner.y, size, inner.height)
         };
         rects.push(r);
         offset = offset.saturating_add(size);
@@ -1236,22 +991,12 @@ pub fn layout_box_children(
     (inner, rects)
 }
 
-pub fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
-    let caps: Vec<Option<u16>> = vec![None; items.len()];
-    resolve_constraints_with_fit_caps(items, total, &caps)
-}
-
 /// Resolve item sizes given pre-computed natural-size caps for `Fit` children.
 /// `fit_caps[i]` is the natural size along the primary axis for a `Fit` child;
 /// `None` means uncapped (used for non-Fit children or when the caller has no
-/// sizer). Container resolvers (`resolve_box`, `paint_layout_tree_with`)
-/// compute these and pass them through; the bare `resolve_constraints` wrapper
-/// treats `Fit` as uncapped (equivalent to `Fill`).
-pub fn resolve_constraints_with_fit_caps(
-    items: &[Item],
-    total: u16,
-    fit_caps: &[Option<u16>],
-) -> Vec<u16> {
+/// sizer). Container resolvers (`resolve_box`, [`ResolvedLayout`])
+/// compute these and pass them through.
+fn resolve_constraints(items: &[Item], total: u16, fit_caps: &[Option<u16>]) -> Vec<u16> {
     let mut sizes = vec![0u16; items.len()];
     let mut remaining = total;
 
@@ -1293,15 +1038,10 @@ pub fn resolve_constraints_with_fit_caps(
     }
     remaining -= consumed.min(remaining);
 
-    // Pass 3: elastic children (`Fill`, `Fit`, `Min`, `Max`) share the remainder.
-    // Each elastic child has a `(floor, cap)`:
-    //   * `Fill`     → `(0, MAX)`
-    //   * `Fit`      → `(0, natural)`     - natural comes from `fit_caps`
-    //   * `Min(n)`   → `(n, MAX)`
-    //   * `Max(n)`   → `(0, n)`
-    // Equal-share baseline; clamp to caps; surplus from cap-hit children
-    // redistributes to siblings with headroom; floors raising the total over
-    // budget claw back proportionally.
+    // Pass 3: `Fit` children with a known natural size are content-sized.
+    // They claim their natural size before `Fill` / `Max` siblings, leaving
+    // room for `Min` floors. When their naturals overflow the budget, the
+    // largest gives way first, so small panels keep their size.
     let elastic: Vec<(usize, u16, u16)> = items
         .iter()
         .enumerate()
@@ -1309,11 +1049,33 @@ pub fn resolve_constraints_with_fit_caps(
             elastic_bounds(*c, fit_caps.get(i).copied().flatten()).map(|(f, cap)| (i, f, cap))
         })
         .collect();
+    let (content, flexible): (Vec<_>, Vec<_>) = elastic.into_iter().partition(|&(i, _, _)| {
+        matches!(items[i].0, Constraint::Fit) && fit_caps.get(i).copied().flatten().is_some()
+    });
+    let floors: u16 = flexible
+        .iter()
+        .fold(0u16, |acc, &(_, floor, _)| acc.saturating_add(floor));
+    let content_shares = share_elastic(&content, remaining.saturating_sub(floors));
+    for (&(i, _, _), &share) in content.iter().zip(&content_shares) {
+        sizes[i] = share;
+        remaining -= share;
+    }
+
+    // Pass 4: the remaining elastic children (`Fill`, `Min`, `Max`, and `Fit`
+    // without a natural size) share what is left.
+    for (&(i, _, _), &share) in flexible.iter().zip(&share_elastic(&flexible, remaining)) {
+        sizes[i] = share;
+    }
+    sizes
+}
+
+/// Share `remaining` across elastic `(index, floor, cap)` children.
+/// Equal-share baseline; clamp to caps; surplus from cap-hit children
+/// redistributes to siblings with headroom; floors raising the total over
+/// budget claw back from unfloored children first, then proportionally.
+fn share_elastic(elastic: &[(usize, u16, u16)], remaining: u16) -> Vec<u16> {
     if elastic.is_empty() || remaining == 0 {
-        // Still need to honor floors (`Min(n)`) even when no remainder - they
-        // can claim space by displacing earlier hard claimants? No: passes
-        // 1-2 already locked those in. Min with no remainder gets 0.
-        return sizes;
+        return vec![0; elastic.len()];
     }
 
     // Distribute `remaining` across elastic children, never exceeding each
@@ -1401,10 +1163,7 @@ pub fn resolve_constraints_with_fit_caps(
         }
     }
 
-    for (k, &(i, _, _)) in elastic.iter().enumerate() {
-        sizes[i] = shares[k];
-    }
-    sizes
+    shares
 }
 
 /// `(floor, cap)` bounds for an elastic constraint. `Length`/`Percentage`/`Ratio`
@@ -1422,30 +1181,23 @@ fn elastic_bounds(c: Constraint, fit_cap: Option<u16>) -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<PaintId, Rect> {
+        resolve_layout_with(tree, area, &NoopSizer)
+    }
+
+    fn resolve_layout_with(
+        tree: &LayoutTree,
+        area: Rect,
+        sizer: &dyn LeafSizer,
+    ) -> HashMap<PaintId, Rect> {
+        tree.resolve(area, sizer).leaves().collect()
+    }
 
     const A: PaintId = PaintId(100);
     const B: PaintId = PaintId(101);
     const C: PaintId = PaintId(102);
-
-    #[test]
-    fn gutters_content_width_reserves_data_gutter_and_scrollbar() {
-        let gutters = Gutters {
-            pad_left: 2,
-            pad_right: 1,
-            scrollbar: true,
-        };
-        assert_eq!(gutters.content_width_with_gutter(20, 3), 13);
-    }
-
-    #[test]
-    fn gutters_content_width_saturates_when_gutter_consumes_area() {
-        let gutters = Gutters {
-            pad_left: 2,
-            pad_right: 1,
-            scrollbar: true,
-        };
-        assert_eq!(gutters.content_width_with_gutter(4, 4), 0);
-    }
 
     #[test]
     fn single_leaf_fills_area() {
@@ -1462,7 +1214,7 @@ mod tests {
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
         assert_eq!(result[&A], Rect::new(0, 0, 80, 19));
-        assert_eq!(result[&B], Rect::new(19, 0, 80, 5));
+        assert_eq!(result[&B], Rect::new(0, 19, 80, 5));
     }
 
     #[test]
@@ -1475,7 +1227,7 @@ mod tests {
         .with_justify(Justify::SpaceBetween);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 10));
         assert_eq!(result[&A], Rect::new(0, 0, 80, 2));
-        assert_eq!(result[&B], Rect::new(7, 0, 80, 3));
+        assert_eq!(result[&B], Rect::new(0, 7, 80, 3));
     }
 
     #[test]
@@ -1497,7 +1249,7 @@ mod tests {
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
         assert_eq!(result[&A], Rect::new(0, 0, 20, 24));
-        assert_eq!(result[&B], Rect::new(0, 20, 60, 24));
+        assert_eq!(result[&B], Rect::new(20, 0, 60, 24));
     }
 
     #[test]
@@ -1513,11 +1265,11 @@ mod tests {
 
     #[test]
     fn rect_contains() {
-        let r = Rect::new(5, 10, 20, 10);
-        assert!(r.contains(5, 10));
-        assert!(r.contains(14, 29));
-        assert!(!r.contains(15, 10));
-        assert!(!r.contains(5, 30));
+        let r = Rect::new(10, 5, 20, 10);
+        assert!(r.contains(10, 5));
+        assert!(r.contains(29, 14));
+        assert!(!r.contains(10, 15));
+        assert!(!r.contains(30, 5));
     }
 
     #[test]
@@ -1533,9 +1285,9 @@ mod tests {
             (Constraint::Length(4), LayoutTree::leaf(C)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result[&C], Rect::new(20, 0, 80, 4));
+        assert_eq!(result[&C], Rect::new(0, 20, 80, 4));
         assert_eq!(result[&A], Rect::new(0, 0, 40, 20));
-        assert_eq!(result[&B], Rect::new(0, 40, 40, 20));
+        assert_eq!(result[&B], Rect::new(40, 0, 40, 20));
     }
 
     #[test]
@@ -1544,19 +1296,13 @@ mod tests {
             (Constraint::Length(1), LayoutTree::leaf(A)),
             (Constraint::Length(1), LayoutTree::leaf(A)),
         ]);
-        let result = resolve_layout_ordered(&tree, Rect::new(0, 0, 10, 2));
+        let result: Vec<_> = tree
+            .resolve(Rect::new(0, 0, 10, 2), &NoopSizer)
+            .leaves()
+            .collect();
         assert_eq!(
             result,
-            vec![
-                LayoutRect {
-                    id: A,
-                    rect: Rect::new(0, 0, 10, 1),
-                },
-                LayoutRect {
-                    id: A,
-                    rect: Rect::new(1, 0, 10, 1),
-                },
-            ]
+            vec![(A, Rect::new(0, 0, 10, 1)), (A, Rect::new(0, 1, 10, 1))]
         );
     }
 
@@ -1567,7 +1313,7 @@ mod tests {
             (Constraint::Length(1), LayoutTree::leaf(A)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 10, 2));
-        assert_eq!(result[&A], Rect::new(1, 0, 10, 1));
+        assert_eq!(result[&A], Rect::new(0, 1, 10, 1));
     }
 
     #[test]
@@ -1796,9 +1542,20 @@ mod tests {
     }
 
     #[test]
-    fn fit_shares_with_fill_when_sizer_overflows() {
-        // `Fit` is elastic-with-cap; when its natural exceeds the budget it
-        // still shares fairly with `Fill` siblings instead of starving them.
+    fn fit_claims_natural_before_fill() {
+        let tree = LayoutTree::hbox(vec![
+            (Constraint::Fit, LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
+        ]);
+        // The sidebar keeps its natural width even when `Fill` would get less.
+        let sizer = StaticWidthSizer(22);
+        let result = resolve_layout_with(&tree, Rect::new(0, 0, 30, 10), &sizer);
+        assert_eq!(result[&A].width, 22);
+        assert_eq!(result[&B].width, 8);
+    }
+
+    #[test]
+    fn fit_takes_whole_budget_when_natural_overflows() {
         let tree = LayoutTree::vbox(vec![
             (Constraint::Fit, LayoutTree::leaf(A)),
             (Constraint::Fill, LayoutTree::leaf(B)),
@@ -1806,8 +1563,28 @@ mod tests {
         // Sizer reports 50, but parent only has 10 rows.
         let sizer = FixedSizer(50);
         let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, 10), &sizer);
-        assert_eq!(result[&A].height, 5);
-        assert_eq!(result[&B].height, 5);
+        assert_eq!(result[&A].height, 10);
+        assert_eq!(result[&B].height, 0);
+    }
+
+    #[test]
+    fn fit_leaves_room_for_min_floors() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Fit, LayoutTree::leaf(A)),
+            (Constraint::Min(4), LayoutTree::leaf(B)),
+        ]);
+        let sizer = FixedSizer(50);
+        let result = resolve_layout_with(&tree, Rect::new(0, 0, 80, 10), &sizer);
+        assert_eq!(result[&A].height, 6);
+        assert_eq!(result[&B].height, 4);
+    }
+
+    struct StaticWidthSizer(u16);
+
+    impl LeafSizer for StaticWidthSizer {
+        fn leaf_natural_size(&self, _id: PaintId, cap: (u16, u16)) -> (u16, u16) {
+            (self.0.min(cap.0), 0)
+        }
     }
 
     #[test]
@@ -1847,8 +1624,8 @@ mod tests {
         .with_gap(2);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
         assert_eq!(result[&A], Rect::new(0, 0, 80, 7));
-        assert_eq!(result[&B].top, 9);
-        assert_eq!(result[&C].top, 18);
+        assert_eq!(result[&B].y, 9);
+        assert_eq!(result[&C].y, 18);
     }
 
     #[test]
@@ -1869,9 +1646,9 @@ mod tests {
         .with_gap(1)
         .with_title("dialog");
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result[&A].top, 1);
+        assert_eq!(result[&A].y, 1);
         assert_eq!(result[&A].height + result[&B].height, 21);
-        assert_eq!(result[&B].top, result[&A].top + result[&A].height + 1);
+        assert_eq!(result[&B].y, result[&A].y + result[&A].height + 1);
     }
 
     #[test]
@@ -2035,6 +1812,7 @@ mod tests {
             Rect::new(0, 0, 10, 5),
             &chrome,
             &crate::Theme::default(),
+            ChromePaintCtx::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, ' ');
     }
@@ -2051,6 +1829,7 @@ mod tests {
             Rect::new(0, 0, 10, 5),
             &chrome,
             &crate::Theme::default(),
+            ChromePaintCtx::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(9, 0).symbol, '┐');
@@ -2076,7 +1855,7 @@ mod tests {
             border: Some(Border::SINGLE),
             ..Chrome::default()
         };
-        paint_chrome_with(
+        paint_chrome(
             &mut grid,
             Rect::new(0, 0, 10, 5),
             &chrome,
@@ -2084,7 +1863,7 @@ mod tests {
             ChromePaintCtx {
                 right: Some(active),
                 bottom: Some(active),
-                ..ChromePaintCtx::empty()
+                ..ChromePaintCtx::default()
             },
         );
         assert_eq!(grid.cell(9, 2).style.fg, Some(crate::grid::Color::Yellow));
@@ -2113,14 +1892,14 @@ mod tests {
             title: Some("title".into()),
             ..Chrome::default()
         };
-        paint_chrome_with(
+        paint_chrome(
             &mut grid,
             Rect::new(0, 0, 12, 4),
             &chrome,
             &theme,
             ChromePaintCtx {
                 top: Some(active),
-                ..ChromePaintCtx::empty()
+                ..ChromePaintCtx::default()
             },
         );
 
@@ -2148,6 +1927,7 @@ mod tests {
             Rect::new(0, 0, 20, 3),
             &chrome,
             &crate::Theme::default(),
+            ChromePaintCtx::default(),
         );
         assert_eq!(grid.cell(1, 0).symbol, 'o');
         assert_eq!(grid.cell(1, 0).style.fg, None);
@@ -2168,6 +1948,7 @@ mod tests {
             Rect::new(0, 0, 20, 5),
             &chrome,
             &crate::Theme::default(),
+            ChromePaintCtx::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '╭');
         assert_eq!(grid.cell(1, 0).symbol, 'h');
@@ -2188,6 +1969,7 @@ mod tests {
             Rect::new(0, 0, 8, 3),
             &chrome,
             &crate::Theme::default(),
+            ChromePaintCtx::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(1, 0).symbol, 'm');
@@ -2208,12 +1990,15 @@ mod tests {
             ),
         ]);
 
-        let rects = resolve_containers_with(&tree, Rect::new(2, 4, 20, 8), &NoopSizer);
+        let rects: HashMap<_, _> = tree
+            .resolve(Rect::new(4, 2, 20, 8), &NoopSizer)
+            .containers()
+            .collect();
 
-        assert_eq!(rects.get(&container), Some(&Rect::new(5, 4, 20, 5)));
+        assert_eq!(rects.get(&container), Some(&Rect::new(4, 5, 20, 5)));
         assert_eq!(
-            resolve_layout(&tree, Rect::new(2, 4, 20, 8))[&B],
-            Rect::new(6, 5, 18, 3)
+            resolve_layout(&tree, Rect::new(4, 2, 20, 8))[&B],
+            Rect::new(5, 6, 18, 3)
         );
     }
 }

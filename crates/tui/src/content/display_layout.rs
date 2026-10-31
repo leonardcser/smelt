@@ -89,7 +89,7 @@ pub(crate) fn transcript_renderer_cache_key(
     if inline_options.math_graphics {
         let geometry = KITTY_CELL_PIXELS.load(Ordering::Relaxed);
         let images = (geometry != 0)
-            .then(smelt_term::kitty_image_generation)
+            .then(smelt_term::kitty::image_generation)
             .unwrap_or_default();
         key = Some(key.unwrap_or_default() ^ geometry.rotate_left(31) ^ images.rotate_left(7));
     }

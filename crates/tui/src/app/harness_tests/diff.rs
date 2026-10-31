@@ -90,8 +90,8 @@ fn click_diff_row(app: &mut TestApp, win: WinId, row: u16) {
         // Match the terminal loop: observe native focus before flushing Lua callbacks.
         app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
             kind,
-            row: rect.top + row,
-            column: rect.left + 3,
+            row: rect.y + row,
+            column: rect.x + 3,
             modifiers: KeyModifiers::NONE,
         }));
         app.dispatch_ui_window_events(false);
@@ -116,8 +116,8 @@ fn drag_diff_divider(app: &mut TestApp, delta: i16) {
     ] {
         app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
             kind,
-            row: rect.top + 4,
-            column: (rect.left - 1).saturating_add_signed(delta),
+            row: rect.y + 4,
+            column: (rect.x - 1).saturating_add_signed(delta),
             modifiers: KeyModifiers::NONE,
         })));
         paint_diff(app);
@@ -477,9 +477,9 @@ fn diff_sidebar_wheel_keeps_selection_attached_to_the_file() {
     let rect = app.ui_probe().win(sidebar).unwrap().viewport.unwrap().rect;
     let selected_bg = app.ui_probe().theme().clone().get("Visual").bg;
     assert!(selected_bg.is_some());
-    for row in rect.top..rect.top + rect.height {
+    for row in rect.y..rect.y + rect.height {
         assert_ne!(
-            frame.styles[row as usize][rect.left as usize + 3].bg,
+            frame.styles[row as usize][rect.x as usize + 3].bg,
             selected_bg,
             "an unrelated visible file acquired the offscreen selection: {}",
             frame.text()
@@ -577,11 +577,11 @@ async fn diff_groups_show_distinct_partial_patches_totals_and_file_dividers() {
             .viewport
             .unwrap()
             .rect;
-        let dividers: Vec<_> = (rect.top..rect.top + rect.height)
+        let dividers: Vec<_> = (rect.y..rect.y + rect.height)
             .filter(|row| {
                 frame.rows[*row as usize]
                     .chars()
-                    .skip(rect.left as usize)
+                    .skip(rect.x as usize)
                     .take(rect.width as usize)
                     .all(|ch| ch == '─')
             })
@@ -590,10 +590,10 @@ async fn diff_groups_show_distinct_partial_patches_totals_and_file_dividers() {
         for row in dividers {
             assert!(frame.rows[row as usize - 1]
                 .chars()
-                .skip(rect.left as usize)
+                .skip(rect.x as usize)
                 .take(rect.width as usize)
                 .all(|ch| ch == ' '));
-            assert!(frame.styles[row as usize][rect.left as usize].dim);
+            assert!(frame.styles[row as usize][rect.x as usize].dim);
         }
     }
 }
@@ -740,7 +740,7 @@ fn diff_sidebar_has_neutral_names_colored_status_and_green_red_counts() {
         let line = &lines[index];
         assert!(line.contains(added) && line.contains(deleted), "{line}");
         let window = app.ui_probe().win(sidebar).unwrap();
-        let row = usize::from(window.viewport.unwrap().rect.top) + index;
+        let row = usize::from(window.viewport.unwrap().rect.y) + index;
         let name_col =
             smelt_buffer::text::byte_to_cell(&frame.rows[row], frame.rows[row].find(name).unwrap());
         let left = name_col - smelt_buffer::text::byte_to_cell(line, line.find(name).unwrap());
@@ -844,7 +844,7 @@ fn diff_sidebar_keeps_tree_layout_and_tab_switches_panes() {
         .unwrap();
     let frame = app.render_to_frame();
     let rect = app.ui_probe().win(sidebar).unwrap().viewport.unwrap().rect;
-    let row = usize::from(rect.top) + file;
+    let row = usize::from(rect.y) + file;
     let col = smelt_buffer::text::byte_to_cell(
         &frame.rows[row],
         frame.rows[row].find("filename.rs").unwrap(),
@@ -852,7 +852,7 @@ fn diff_sidebar_keeps_tree_layout_and_tab_switches_panes() {
     let theme = app.ui_probe().theme().clone();
     assert_eq!(frame.styles[row][col].fg, theme.get("Normal").fg);
     assert_eq!(
-        frame.styles[usize::from(rect.top) + 1][usize::from(rect.left) + 3].fg,
+        frame.styles[usize::from(rect.y) + 1][usize::from(rect.x) + 3].fg,
         theme.get("Comment").fg
     );
 }
@@ -1331,8 +1331,8 @@ fn diff_tree_folder_click_selects_on_press_and_toggles_on_release() {
                 source.snapshot().generation + u64::from(matches!(kind, MouseEventKind::Up(_)));
             app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
                 kind,
-                row: rect.top + row,
-                column: rect.left + 3,
+                row: rect.y + row,
+                column: rect.x + 3,
                 modifiers: KeyModifiers::NONE,
             })));
             for _ in 0..3 {
@@ -1352,9 +1352,8 @@ fn diff_tree_folder_click_selects_on_press_and_toggles_on_release() {
                     frame.text()
                 );
                 assert_eq!(
-                    frame.styles[usize::from(rect.top + row)]
-                        [usize::from(rect.left + rect.width - 4)]
-                    .bg,
+                    frame.styles[usize::from(rect.y + row)][usize::from(rect.x + rect.width - 4)]
+                        .bg,
                     app.ui_probe().theme().clone().get("CursorLine").bg,
                     "the pressed folder must stay highlighted: {}",
                     frame.text()
@@ -1435,8 +1434,8 @@ fn diff_tree_consecutive_folder_clicks_work_after_projection_changes() {
             // The terminal loop publishes native focus changes before flushing Lua callbacks.
             app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
                 kind,
-                row: rect.top + screen_row as u16,
-                column: rect.left + 1,
+                row: rect.y + screen_row as u16,
+                column: rect.x + 1,
                 modifiers: KeyModifiers::NONE,
             }));
             app.dispatch_ui_window_events(false);
@@ -1493,8 +1492,8 @@ fn diff_tree_folder_click_cancels_when_its_target_changes() {
         let rect = app.ui_probe().win(sidebar).unwrap().viewport.unwrap().rect;
         let mut event = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            row: rect.top + 1,
-            column: rect.left + 3,
+            row: rect.y + 1,
+            column: rect.x + 3,
             modifiers: KeyModifiers::NONE,
         };
         app.feed_one(SourceEvent::Term(Event::Mouse(event)));
@@ -1822,7 +1821,7 @@ fn diff_full_width_backgrounds_markers_and_inline_changes_survive_pan_and_theme(
                 .char_indices()
                 .take_while(|(index, _)| *index < byte)
                 .count();
-            for col in rect.left as usize..usize::from(rect.left + rect.width) {
+            for col in rect.x as usize..usize::from(rect.x + rect.width) {
                 assert_eq!(
                     frame.styles[row][col].bg,
                     if (start..start + 3).contains(&col) {
@@ -1977,8 +1976,8 @@ fn diff_wheel_scroll_updates_sidebar_in_both_directions() {
     for _ in 0..8 {
         app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
-            row: rect.top + 2,
-            column: rect.left + 2,
+            row: rect.y + 2,
+            column: rect.x + 2,
             modifiers: KeyModifiers::NONE,
         })));
         app.render_silent();
@@ -2815,8 +2814,8 @@ fn wheel_diff(app: &mut TestApp, win: WinId, down: bool) {
         } else {
             MouseEventKind::ScrollUp
         },
-        row: rect.top + 2,
-        column: rect.left + 3,
+        row: rect.y + 2,
+        column: rect.x + 3,
         modifiers: KeyModifiers::NONE,
     })));
     paint_diff(app);
@@ -2827,7 +2826,7 @@ fn show_tree_row(app: &mut TestApp, win: WinId, row: usize) -> u16 {
     let window = app.ui_probe().win(win).unwrap();
     let rect = window.viewport.unwrap().rect;
     let delta = row as isize - window.scroll_top() as isize;
-    app.scroll_at(rect.top, rect.left + 3, delta);
+    app.scroll_at(rect.x + 3, rect.y, delta);
     paint_diff(app);
     (row as u64 - app.ui_probe().win(win).unwrap().scroll_top()) as u16
 }
@@ -3384,8 +3383,8 @@ fn diff_interaction_benchmark() {
                 } else {
                     MouseEventKind::ScrollUp
                 },
-                row: rect.top + 2,
-                column: rect.left + 3,
+                row: rect.y + 2,
+                column: rect.x + 3,
                 modifiers: KeyModifiers::NONE,
             }));
         }
@@ -3423,7 +3422,7 @@ fn diff_interaction_benchmark() {
     summarize("random NG", samples);
     let samples = (0..100)
         .map(|i| {
-            let row = rect.top + (i * 7 % rect.height as u64) as u16;
+            let row = rect.y + (i * 7 % rect.height as u64) as u16;
             frame(&mut app, &mut |app| {
                 for kind in [
                     MouseEventKind::Down(MouseButton::Left),
@@ -3432,7 +3431,7 @@ fn diff_interaction_benchmark() {
                     app.app.dispatch_terminal_event(Event::Mouse(MouseEvent {
                         kind,
                         row,
-                        column: rect.left + rect.width - 1,
+                        column: rect.x + rect.width - 1,
                         modifiers: KeyModifiers::NONE,
                     }));
                 }

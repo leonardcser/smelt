@@ -9,7 +9,10 @@ use smelt_style::theme::Theme;
 
 use crate::compositor::Compositor;
 use crate::grid::{Grid, GridSlice};
-use crate::layout::{LayoutStyle, LayoutTree, NoopSizer, PaintId, Rect, ResolvedLayout};
+use crate::layout::{
+    LayoutStyle, LayoutTree, NoopSizer, PaintId, Rect, ResolvedLayout, SplitId, SplitInteraction,
+    SplitResponse,
+};
 
 #[derive(Clone)]
 pub struct Surface {
@@ -18,6 +21,15 @@ pub struct Surface {
     theme: Arc<Theme>,
     size: (u16, u16),
     layout_style: LayoutStyle,
+    split_drag: SplitInteraction,
+}
+
+/// An empty surface. [`TerminalSession::draw`](crate::TerminalSession::draw)
+/// sizes it to the terminal on the first frame.
+impl Default for Surface {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
 }
 
 impl Surface {
@@ -32,6 +44,7 @@ impl Surface {
             theme: Arc::new(theme),
             size: (width, height),
             layout_style: LayoutStyle::default(),
+            split_drag: SplitInteraction::default(),
         }
     }
 
@@ -80,9 +93,27 @@ impl Surface {
         self.layout.resolve(self.area(), &NoopSizer)
     }
 
-    /// Configure divider appearance and the active split without replacing layout.
+    /// Configure chrome and divider appearance without replacing layout.
     pub fn set_layout_style(&mut self, style: LayoutStyle) {
         self.layout_style = style;
+    }
+
+    /// Drag split dividers with the mouse. Returns `None` for events that
+    /// did not touch a divider. Persist the split's preferred size when
+    /// `response.ended() && response.changed`.
+    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> Option<SplitResponse> {
+        let layout = self.resolve_layout();
+        self.split_drag.handle_mouse(&layout, event)
+    }
+
+    /// End a divider drag without a final move, for example on focus loss.
+    pub fn cancel_split_drag(&mut self) -> Option<SplitResponse> {
+        self.split_drag.cancel()
+    }
+
+    /// The split whose divider is being dragged, painted with the active style.
+    pub fn active_split(&self) -> Option<SplitId> {
+        self.split_drag.active_id()
     }
 
     pub fn compositor(&self) -> &Compositor {
@@ -93,14 +124,16 @@ impl Surface {
         &mut self.compositor
     }
 
-    /// Walk the layout tree, paint chrome, and hand each leaf's `GridSlice` to `paint`.
-    pub fn render<W, F>(&mut self, w: &mut W, mut paint: F) -> std::io::Result<()>
+    /// Walk the layout tree, paint chrome, and hand each leaf's `GridSlice` to
+    /// `paint`. Returns the painted geometry for hit-testing this frame.
+    pub fn render<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<ResolvedLayout>
     where
         W: Write,
-        F: FnMut(PaintId, &mut GridSlice<'_>, &Arc<Theme>),
+        F: FnMut(PaintId, &mut GridSlice<'_>),
     {
         let layout = self.resolve_layout();
-        self.render_resolved(w, &layout, &mut paint)
+        self.render_resolved(w, &layout, paint)?;
+        Ok(layout)
     }
 
     /// Paint a geometry snapshot already used for viewport setup or hit-testing.
@@ -113,33 +146,17 @@ impl Surface {
     ) -> std::io::Result<()>
     where
         W: Write,
-        F: FnMut(PaintId, &mut GridSlice<'_>, &Arc<Theme>),
+        F: FnMut(PaintId, &mut GridSlice<'_>),
     {
-        let size = self.size;
         let style = self.layout_style;
-        let theme_arc = Arc::clone(&self.theme);
-        self.compositor
-            .render_with(&self.theme, w, move |grid, _theme| {
-                let theme = &theme_arc;
-                let mut dispatch = |id: PaintId,
-                                    leaf: Rect,
-                                    grid: &mut Grid,
-                                    theme: &Arc<Theme>,
-                                    _ts: (u16, u16)| {
-                    let mut slice = grid.slice_mut(leaf);
-                    paint(id, &mut slice, theme);
-                };
-                layout.paint(grid, theme, size, style, &mut dispatch);
-            })
-    }
-
-    /// Paint directly into the compositor's grid, bypassing the layout tree.
-    pub fn render_raw<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
-    where
-        W: Write,
-        F: FnOnce(&mut Grid, &Theme),
-    {
-        self.compositor.render_with(&self.theme, w, paint)
+        let active_split = self.active_split();
+        let theme = &self.theme;
+        self.compositor.render_with(w, |grid| {
+            let mut dispatch = |id: PaintId, leaf: Rect, grid: &mut Grid| {
+                paint(id, &mut grid.slice_mut(leaf));
+            };
+            layout.paint(grid, theme, style, active_split, &mut dispatch);
+        })
     }
 }
 

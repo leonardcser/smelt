@@ -211,8 +211,8 @@ impl PaintLayer {
     fn mark_rect(&mut self, rect: Rect) {
         let right = rect.right().min(self.grid.width());
         let bottom = rect.bottom().min(self.grid.height());
-        for row in rect.top.min(self.grid.height())..bottom {
-            for col in rect.left.min(self.grid.width())..right {
+        for row in rect.y.min(self.grid.height())..bottom {
+            for col in rect.x.min(self.grid.width())..right {
                 self.touched[row as usize * self.grid.width() as usize + col as usize] = true;
             }
         }
@@ -248,12 +248,12 @@ impl PaintSurface for PaintLayer {
     }
 
     fn put_str(&mut self, col: u16, row: u16, text: &str, style: crate::smelt_edit::Style) {
-        let end = self.grid.put_str(col, row, text, style);
-        self.mark_rect(Rect::new(row, col, end.saturating_sub(col), 1));
+        let end = self.grid.as_mut_slice().put_str(col, row, text, style);
+        self.mark_rect(Rect::new(col, row, end.saturating_sub(col), 1));
     }
 
     fn fill(&mut self, rect: Rect, symbol: char, style: crate::smelt_edit::Style) {
-        self.grid.fill(rect, symbol, style);
+        self.grid.as_mut_slice().fill(rect, symbol, style);
         self.mark_rect(rect);
     }
 }
@@ -345,7 +345,7 @@ impl mlua::UserData for PaintSliceUd {
                     Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
                     None => crate::smelt_edit::Style::new(),
                 };
-                let rect = crate::smelt_edit::layout::Rect::new(row, col, w, h);
+                let rect = crate::smelt_edit::layout::Rect::new(col, row, w, h);
                 with_slice(|s| s.fill(rect, symbol, resolved_style))
             },
         );
@@ -482,7 +482,7 @@ mod tests {
         let mut layer = PaintLayer::new(3, 1);
         PaintSurface::put_str(&mut layer, 1, 0, " ", crate::smelt_edit::Style::default());
         let mut grid = Grid::new(3, 1);
-        grid.fill(
+        grid.as_mut_slice().fill(
             Rect::new(0, 0, 3, 1),
             'X',
             crate::smelt_edit::Style::default(),
@@ -502,7 +502,7 @@ mod tests {
         PaintSurface::put_str(&mut layer, 0, 0, "@", Style::default().fg(Color::Red));
         PaintSurface::put_str(&mut layer, 1, 0, "@", Style::default().bg(Color::Blue));
         let mut grid = Grid::new(2, 1);
-        grid.fill(
+        grid.as_mut_slice().fill(
             Rect::new(0, 0, 2, 1),
             ' ',
             Style::default().bg(Color::Green),

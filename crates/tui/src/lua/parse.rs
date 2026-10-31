@@ -1,7 +1,8 @@
 //! Lua-value → typed-Rust converters (pure, no `TuiApp` dependencies).
 //! Errors are returned as `String`; call sites wrap them in `LuaError::RuntimeError`.
 
-use crate::smelt_edit::layout::{Border, BorderStyle, Constraint, Corner, EdgeStyle};
+use crate::smelt_edit::layout::{Border, BorderStyle, Constraint, EdgeStyle};
+use crate::smelt_edit::Corner;
 use crate::smelt_edit::{Line, Span, Style};
 use smelt_core::style::Color;
 

@@ -75,7 +75,7 @@ fn cmdline_completion_renders_prompt_style_list_above_cmdline() {
         .ui_probe()
         .paint_rect(crate::smelt_edit::PaintId::from(cmdline))
         .expect("cmdline rect");
-    assert_eq!(picker_rect.top + picker_rect.height, cmdline_rect.top);
+    assert_eq!(picker_rect.y + picker_rect.height, cmdline_rect.y);
 }
 
 #[test]
