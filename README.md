@@ -22,9 +22,8 @@
 
 ## Why
 
-Most coding agents are heavy and hard to change. smelt runs in a fraction of
-their memory and CPU, and keymaps, commands, tools and the UI itself are plain
-Lua files with no build step.
+Most coding agents are heavy and hard to change. smelt uses a fraction of their
+memory and CPU, and you reshape it with plain Lua files that reload live.
 
 <p align="center">
   <img src="assets/demo.gif" alt="smelt running a coding task in the terminal" width="800">
@@ -32,12 +31,18 @@ Lua files with no build step.
 
 ## What's inside
 
-- **Lua plugins.** Keymaps, commands, custom tools and modes, and the UI itself,
-  from the statusline to the spinner. No build step.
-- **Terminal renderer.** Its own grid and layout engine, not `ratatui`.
-- **Vim editor.** Motions, text objects, registers, undo.
+- **Lua plugins.** Edit a Lua file to change keymaps, commands, tools or the UI.
+  Changes apply live, with no restart and no build.
+- **Own terminal renderer.** Built from scratch for the terminal, so typing and
+  scrolling stay instant even in sessions with tens of thousands of messages.
+  [Why not `ratatui`?](https://smeltagent.dev/guide/design/#a-terminal-renderer-of-our-own)
+- **Vim editor.** The same motions work in the prompt and the transcript, so you
+  can search and yank agent output without the mouse.
 - **No config needed.** Run with flags, or use `smelt auth` for ChatGPT, GitHub
   Copilot, and Kimi Code.
+
+Why we made these choices, and what they cost:
+[Design decisions](https://smeltagent.dev/guide/design/).
 
 ## Benchmarks
 
@@ -53,6 +58,8 @@ lower is better.
 | opencode       | 2.80 GiB     | 116 s     | 421 s     |
 | mini-swe-agent | 1.49 GiB     | 13.1 s    | 570 s     |
 
+Measured per container (agent, tools and task): 20 tasks, 3 attempts each,
+2 CPUs and 4 GiB.
 [Full results](https://smeltagent.dev/guide/benchmarks/)
 
 ## Install
