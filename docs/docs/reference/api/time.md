@@ -33,7 +33,7 @@ Format Unix seconds in UTC with a strftime-style format string.
 fun(): integer
 ```
 
-Return milliseconds elapsed from a runtime-local monotonic clock. Use this for deadlines, never as a timestamp.
+Return milliseconds since smelt started, on a monotonic clock that never jumps. Use it for deadlines and animation, never as a timestamp. Paint callbacks see the same clock as `ctx.now_ms`.
 
 ## `smelt.time.now`
 
@@ -49,7 +49,7 @@ Return the current Unix timestamp in seconds. Backed by the host clock so tests 
 fun(): integer
 ```
 
-Return the current Unix timestamp in milliseconds. Backed by the host clock so tests can freeze time by swapping in a virtual clock.
+Return the current Unix timestamp in milliseconds: wall time, which can jump when the system clock is set. Animate with `monotonic_ms()` instead. Backed by the host clock so tests can freeze time by swapping in a virtual clock.
 
 ## `smelt.time.parse_iso8601`
 

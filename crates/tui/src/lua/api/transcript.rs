@@ -85,6 +85,7 @@ pub(crate) fn block_snapshot_table(
     t.set("first_row", snap.first_row)?;
     t.set("rows", snap.rows)?;
     t.set("first_line", snap.first_line)?;
+    t.set("streaming", snap.streaming)?;
     Ok(t)
 }
 
@@ -617,7 +618,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "loaded_blocks_expensive",
-        "Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. In sparse sessions, the no-callback form can return an empty table while background hydration is pending. Pass `callback` to receive the active loaded-window blocks once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty table. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. Prefer `visible_blocks()` when possible.",
+        "Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line, streaming }`. In sparse sessions, the no-callback form can return an empty table while background hydration is pending. Pass `callback` to receive the active loaded-window blocks once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty table. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. Prefer `visible_blocks()` when possible.",
         &["callback"],
         |lua, callback: Option<LuaCallback<(mlua::Table,), ()>>| -> LuaResult<mlua::Table> {
             if let Some(callback) = callback {
@@ -637,14 +638,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "visible_blocks",
-        "Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.",
+        "Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line, streaming, rect? }` entries. `rect` is `{ x, y, width, height }`: the screen cells of the block's rows that are on screen, inside the transcript's gutter and padding; it is absent while the block is scrolled out of view. Called from a paint, it matches the frame being painted. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let snaps = crate::lua::try_with_conversation_host(|host| host.visible_transcript_blocks())
+            let blocks = crate::lua::try_with_conversation_host(|host| host.visible_transcript_blocks())
                 .unwrap_or_default();
-            let out = lua.create_table_with_capacity(snaps.len(), 0)?;
-            for (i, snap) in snaps.into_iter().enumerate() {
-                out.set(i + 1, block_snapshot_table(lua, snap)?)?;
+            let out = lua.create_table_with_capacity(blocks.len(), 0)?;
+            for (i, visible) in blocks.into_iter().enumerate() {
+                let t = block_snapshot_table(lua, visible.block)?;
+                if let Some(rect) = visible.screen {
+                    t.set("rect", crate::lua::parse::rect_to_lua(lua, rect)?)?;
+                }
+                out.set(i + 1, t)?;
             }
             Ok(out)
         },
@@ -665,7 +670,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "loaded_block_at_row",
-        "Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ record_index, block_id, role, first_row, rows, first_line }`.",
+        "Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ record_index, block_id, role, first_row, rows, first_line, streaming }`.",
         &["row"],
         |lua, row: crate::smelt_edit::RowIndex| -> LuaResult<Option<mlua::Table>> {
             let snap = crate::lua::try_with_conversation_host(|host| {

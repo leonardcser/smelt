@@ -15,4 +15,4 @@ pub mod wrap_layout;
 
 pub use attachment::ATTACHMENT_MARKER;
 pub use clipboard::{Clipboard, NullSink, Osc52Sink, Sink, SystemSink};
-pub use smelt_style::{cell_width, style, theme};
+pub use smelt_style::{cell_width, palette, style, theme};

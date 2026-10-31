@@ -765,6 +765,33 @@ Overlay resize configuration table. Use `true` for the floating default: left/ri
 | `left` | `boolean` |  | Enable left-edge resize. |
 | `corners` | `boolean` |  | Upgrade cells where two enabled edges meet into diagonal resize handles. |
 
+### `smelt.paint.FrameOpts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Options for `smelt.paint.frame`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` |  | Keep the paint id across `/reload` and swap in the new callback. |
+| `fps` | `integer` |  | Repaint at this rate while the paint is registered. |
+| `pointer` | `boolean` |  | Repaint when the mouse moves and expose `ctx.pointer`. |
+| `order` | `integer` |  | Frame paints run from the lowest `order` up, so a higher order draws over the effects below it. Ties run in registration order. Default 0. |
+| `history` | `boolean` |  | Expose `ctx.prev`, the screen as smelt drew it on the previous frame before any frame paint, and `ctx.damage`, the cells that changed since. |
+| `map_pointer` | `fun(arg1: integer, arg2: integer, arg3: integer, arg4: integer): integer?, integer?` |  | For an effect that moves cells, `map_pointer(x, y, width, height)` returns the cell smelt laid out at screen cell `(x, y)` of a `width` x `height` screen, so clicks, drags, and wheel scrolls land where the user sees them. Return `nil` to keep the position. The top effect maps first. `ctx.pointer` stays in screen cells. |
+
+### `smelt.paint.Opts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Options for `smelt.paint.register`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` |  | Keep the paint id across `/reload` and swap in the new callback. |
+| `fps` | `integer` |  | Repaint at this rate while the paint is on screen. |
+| `pointer` | `boolean` |  | Repaint when the mouse moves and expose `ctx.pointer`. |
+
 ### `smelt.paint.Paint`
 
 **Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
@@ -776,13 +803,24 @@ Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.l
 | `remove` | `fun(): boolean` | yes | Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op. |
 | `rect` | `fun(): any` | yes | Return the paint leaf's current screen rect as `{ x, y, width, height }`, or `nil` until the first render lays it out. |
 | `set_fps` | `fun(fps: integer?): boolean` | yes | Repaint at `fps` frames per second while the paint is on screen, or only on change with `nil`. Returns `false` once the paint is removed. |
+| `redraw` | `fun(): boolean` | yes | Repaint once on the next frame, for example after a timer changes what the callback draws. Returns `false` once the paint is removed. |
 | `on` | `fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription. |
+
+### `smelt.paint.RecolorOpts`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+Options for `slice:recolor`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `defaults` | `boolean` |  | Also recolor cells that use the terminal's default foreground or background, writing an explicit color in their place. Off by default, because an explicit background is opaque on a translucent terminal. |
 
 ### `smelt.paint.Slice`
 
 **Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
-The area a paint callback draws into: its layout leaf, or the whole screen for `smelt.paint.frame`. Coordinates are `(x, y)` from the top-left, in cells. The slice already holds what was painted below it, so a callback can read cells and draw over them. Writes whose style leaves `bg` unset keep the background underneath.
+The area a paint callback draws into: its layout leaf, or the whole screen for `smelt.paint.frame`. Coordinates are `(x, y)` from the top-left, in cells, and may be negative or past the edge: writes outside the slice are dropped and reads outside it return `nil`. The slice already holds what was painted below it, so a callback can read cells and draw over them. Writes whose style leaves `bg` unset keep the background underneath; `bg = false` writes the terminal default instead.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -790,10 +828,26 @@ The area a paint callback draws into: its layout leaf, or the whole screen for `
 | `height` | `fun(): integer` | yes | Return the slice height in cells. |
 | `get` | `fun(x: integer, y: integer): table?` | yes | Return the cell at `(x, y)` as `{ ch, width, style, image? }`, or `nil` outside the slice. The right half of a wide glyph has `ch = ""` and `width = 0`. |
 | `set` | `fun(x: integer, y: integer, ch: string?, style: table?): nil` | yes | Write one grapheme cluster (default a space) at `(x, y)`. |
-| `put_str` | `fun(x: integer, y: integer, text: string, style: table?): integer` | yes | Write `text` from `(x, y)`, clipped at the right edge. Returns the column after the last cell written. |
-| `fill` | `fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: table?): nil` | yes | Fill a rectangle with one grapheme cluster (default a space). |
+| `put_str` | `fun(x: integer, y: integer, text: string, style: table?): integer` | yes | Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width. |
+| `fill` | `fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: table?): nil` | yes | Fill the part of a rectangle inside the slice with one grapheme cluster (default a space). |
 | `set_style` | `fun(x: integer, y: integer, w: integer, h: integer, patch: table): nil` | yes | Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color. |
 | `map` | `fun(f: function): nil` | yes | Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style. |
+| `recolor` | `fun(f: function, opts: smelt.paint.RecolorOpts?): nil` | yes | Pass every color on the slice through `f(r, g, b, layer)`, where `layer` is `"fg"` or `"bg"` and the channels are 0-255 as the terminal shows them. Return new `r, g, b` (rounded and clamped), or `nil` to keep the color. `f` runs once per distinct color, not per cell, so screen-wide filters such as night shift or color-blind simulation stay cheap. Image cells keep their colors. |
+| `snapshot` | `fun(): smelt.paint.Snapshot` | yes | Copy the slice into a `Snapshot` that stays valid after the callback, for example to keep the screen as it was before a change. |
+| `blit` | `fun(snapshot: smelt.paint.Snapshot, x: integer?, y: integer?): nil` | yes | Draw `snapshot` with its top-left cell at `(x, y)` (default `0, 0`). Cells outside the slice are dropped. |
+| `set_cursor` | `fun(x: integer, y: integer): nil` | yes | Move the hidden terminal cursor to `(x, y)`; outside the slice it stays put. Terminals anchor input-method text there, so an effect that moves the caret cell should move the cursor with it. The visible caret is an ordinary cell and moves with the cells. |
+
+### `smelt.paint.Snapshot`
+
+**Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+
+A read-only copy of screen cells: `ctx.prev` in a frame paint with `history`, or the result of `slice:snapshot()`. Draw it back with `slice:blit`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `width` | `fun(): integer` | yes | Return the snapshot width in cells. |
+| `height` | `fun(): integer` | yes | Return the snapshot height in cells. |
+| `get` | `fun(x: integer, y: integer): table?` | yes | Return the cell at `(x, y)` in the same shape as `Slice:get`, or `nil` outside the snapshot. |
 
 ### `smelt.permissions.EffectRules`
 
@@ -1771,7 +1825,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Most setters return the s
 | `buf` | `fun(): smelt.buf.Buf?` | yes | Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone. |
 | `document` | `fun(source: smelt.document.Document?): smelt.win.Win` | yes | Attach a native indexed row source to a plugin window, or detach with nil. Each window owns private viewport-sized scratch storage and an independent highlighting subscription; the original backing buffer is retained unchanged and may be shared. Attachment resets view position, disables wrapping and makes text windows read-only, preserving list interaction. Detachment restores the original buffer, input state, surface, wrapping and scroll position. Navigation, selection and copy resolve against the entire source in bounded row batches; copying does not request highlighting. Built-in windows reject this call. |
 | `pan` | `fun(delta: integer): smelt.win.Win` | yes | Pan an unwrapped window horizontally by delta terminal cells. Negative pans left; clamps to the supported column range. Returns the handle. |
-| `rect` | `fun(): any` | yes | Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
+| `rect` | `fun(): any` | yes | Return the window's current viewport rect as `{ x, y, width, height }`, or `nil` until the first render lays it out. |
 | `content_width` | `fun(): any` | yes | Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget. |
 | `decorate` | `fun(opts: table): smelt.win.Decoration` | yes | Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays. |
 | `cursor` | `fun(row: integer?): any` | yes | Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
@@ -1844,6 +1898,14 @@ Variants: `"allow"` \| `"ask"` \| `"deny"`
 Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 
 Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"auto_continue_status"` \| `"branch"` \| `"confirm_requested"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"fast_mode"` \| `"history_epoch"` \| `"input_epoch"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_queue_revision"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_epoch"` \| `"session_slug"` \| `"session_title"` \| `"settings_auto_continue"` \| `"settings_terminal_title"` \| `"task_label"` \| `"tokens_used"` \| `"tps"` \| `"viewport_pos"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_continuation_token"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_pause_kind"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
+
+### `smelt.theme.Layer`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Which side of a cell a color paints, for `smelt.theme.rgb`.
+
+Variants: `"fg"` \| `"bg"`
 
 ### `smelt.tools.Decision`
 

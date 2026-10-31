@@ -500,8 +500,8 @@ impl ConversationLuaHost<'_> {
 
     pub(crate) fn visible_transcript_blocks(
         &self,
-    ) -> Vec<crate::app::transcript::TranscriptBlockSnapshot> {
-        self.app.visible_transcript_block_snapshots()
+    ) -> Vec<crate::app::transcript::VisibleTranscriptBlock> {
+        self.app.visible_transcript_blocks()
     }
 
     pub(crate) fn transcript_rows(
@@ -1245,10 +1245,19 @@ impl UiLuaHost<'_> {
         paint: crate::smelt_edit::layout::PaintId,
         fps: Option<u16>,
     ) -> bool {
-        let known = self
-            .app
-            .paint_registry
-            .update(paint, |options| options.fps = fps);
+        let mut changed = false;
+        let known = self.app.paint_registry.update(paint, |options| {
+            changed = options.fps != fps;
+            options.fps = fps;
+        });
+        if changed {
+            self.app.request_urgent_render();
+        }
+        known
+    }
+
+    pub(crate) fn redraw_paint(&mut self, paint: crate::smelt_edit::layout::PaintId) -> bool {
+        let known = self.app.paint_registry.contains(paint);
         if known {
             self.app.request_urgent_render();
         }
@@ -1260,12 +1269,13 @@ impl UiLuaHost<'_> {
         for callback_id in self.app.ui.leaf_clear_callbacks(paint) {
             self.app.lua.remove_callback(callback_id);
         }
-        if let Some(callback_id) = self.app.paint_registry.unregister(paint) {
+        let Some(slot) = self.app.paint_registry.unregister(paint) else {
+            return false;
+        };
+        for callback_id in slot.callbacks() {
             self.app.lua.remove_callback(callback_id);
-            true
-        } else {
-            false
         }
+        true
     }
 
     pub(crate) fn register_paint(
@@ -1279,8 +1289,8 @@ impl UiLuaHost<'_> {
         for stale in self.app.ui.leaf_clear_callbacks(paint_id) {
             self.app.lua.remove_callback(stale);
         }
-        if let Some(previous) = previous {
-            self.app.lua.remove_callback(previous);
+        for stale in previous.iter().flat_map(|slot| slot.callbacks()) {
+            self.app.lua.remove_callback(stale);
         }
         paint_id
     }

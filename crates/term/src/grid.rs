@@ -468,6 +468,39 @@ impl Grid {
         })
     }
 
+    /// Cells that differ from `prev`, as one-row rects of adjacent changed
+    /// cells in reading order. A size change damages the whole grid.
+    pub fn damage(&self, prev: &Grid) -> Vec<Rect> {
+        if self.width != prev.width || self.height != prev.height {
+            return (self.width > 0 && self.height > 0)
+                .then(|| Rect::new(0, 0, self.width, self.height))
+                .into_iter()
+                .collect();
+        }
+        let width = self.width as usize;
+        let mut runs = Vec::new();
+        for (y, (row, prev_row)) in self
+            .cells
+            .chunks(width.max(1))
+            .zip(prev.cells.chunks(width.max(1)))
+            .enumerate()
+        {
+            let mut start = None;
+            for x in 0..=row.len() {
+                let changed = x < row.len() && row[x] != prev_row[x];
+                match (changed, start) {
+                    (true, None) => start = Some(x),
+                    (false, Some(from)) => {
+                        runs.push(Rect::new(from as u16, y as u16, (x - from) as u16, 1));
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        runs
+    }
+
     pub fn swap_with(&mut self, other: &mut Grid) {
         std::mem::swap(&mut self.cells, &mut other.cells);
         std::mem::swap(&mut self.width, &mut other.width);
@@ -586,6 +619,26 @@ impl<'a> GridSlice<'a> {
         } else {
             self.write_str_at(x, y, symbol, None, style);
         }
+    }
+
+    /// Copy the slice into a new grid of its size. A wide glyph cut by either
+    /// edge becomes a styled space, so the copy keeps the continuation invariant.
+    pub fn snapshot(&self) -> Grid {
+        let mut out = Grid::new(self.area.width, self.area.height);
+        for y in 0..self.area.height {
+            for x in 0..self.area.width {
+                let cell = self.grid.cell(self.area.x + x, self.area.y + y);
+                let cut = (x == 0 && cell.symbol.is_continuation())
+                    || (x + 1 == self.area.width && cell.symbol.width() == 2);
+                let idx = out.idx(x, y);
+                out.cells[idx] = if cut {
+                    Cell::new(" ", cell.style)
+                } else {
+                    cell.clone()
+                };
+            }
+        }
+        out
     }
 
     /// Read a cell at slice-local coords; returns `None` when out of bounds.
@@ -1579,5 +1632,48 @@ mod tests {
             .put_str(0, 99, "hello", Style::default());
         // First row unchanged.
         assert_eq!(grid.cell(0, 0).symbol, ' ');
+    }
+
+    // ── History ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn damage_merges_adjacent_changes_per_row() {
+        let prev = Grid::new(6, 2);
+        let mut curr = Grid::new(6, 2);
+        curr.as_mut_slice().put_str(1, 0, "ab", Style::default());
+        curr.as_mut_slice().set(5, 0, 'c', Style::default());
+        curr.as_mut_slice()
+            .set(0, 1, ' ', Style::new().fg(Color::Red));
+
+        assert_eq!(
+            curr.damage(&prev),
+            [
+                Rect::new(1, 0, 2, 1),
+                Rect::new(5, 0, 1, 1),
+                Rect::new(0, 1, 1, 1),
+            ]
+        );
+        assert!(curr.damage(&curr.clone()).is_empty());
+    }
+
+    #[test]
+    fn damage_covers_everything_after_a_resize() {
+        assert_eq!(
+            Grid::new(3, 2).damage(&Grid::new(4, 2)),
+            [Rect::new(0, 0, 3, 2)]
+        );
+        assert!(Grid::new(0, 0).damage(&Grid::new(4, 2)).is_empty());
+    }
+
+    #[test]
+    fn snapshot_blanks_wide_glyphs_cut_by_the_edges() {
+        let mut grid = Grid::new(6, 1);
+        grid.as_mut_slice().put_str(0, 0, "語a語", Style::default());
+        let snap = grid.slice_mut(Rect::new(1, 0, 4, 1)).snapshot();
+
+        let symbols: Vec<_> = (0..4).map(|x| snap.cell(x, 0).symbol.as_str()).collect();
+        assert_eq!(symbols, [" ", "a", "語", "\0"]);
+        let snap = grid.slice_mut(Rect::new(0, 0, 4, 1)).snapshot();
+        assert_eq!(snap.cell(3, 0).symbol, ' ');
     }
 }

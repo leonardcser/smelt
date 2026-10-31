@@ -70,6 +70,11 @@ mod test_util;
 // Re-exported from `smelt-buffer` so call sites (`smelt_core::buffer::Buffer`, etc.) keep resolving.
 pub use smelt_buffer::{attachment, buffer, clipboard, kill_ring, undo};
 
+/// The terminal's palette, re-exported from `smelt-buffer`.
+pub mod palette {
+    pub use smelt_buffer::palette::*;
+}
+
 /// Style primitives re-exported from `smelt-buffer`.
 pub mod style {
     pub use smelt_buffer::style::*;

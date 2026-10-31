@@ -31,7 +31,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "now_ms",
-        "Return the current Unix timestamp in milliseconds. Backed by the host clock so tests can freeze time by swapping in a virtual clock.",
+        "Return the current Unix timestamp in milliseconds: wall time, which can jump when the system clock is set. Animate with `monotonic_ms()` instead. Backed by the host clock so tests can freeze time by swapping in a virtual clock.",
         &[],
         |_, ()| {
             let ms = crate::host::try_with_core(|core| {
@@ -41,12 +41,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(ms)
         },
     )?;
-    let monotonic_origin = std::time::Instant::now();
     m.fn_(
         "monotonic_ms",
-        "Return milliseconds elapsed from a runtime-local monotonic clock. Use this for deadlines, never as a timestamp.",
+        "Return milliseconds since smelt started, on a monotonic clock that never jumps. Use it for deadlines and animation, never as a timestamp. Paint callbacks see the same clock as `ctx.now_ms`.",
         &[],
-        move |_, ()| Ok(monotonic_origin.elapsed().as_millis() as u64),
+        |_, ()| Ok(crate::host::try_with_core(|core| core.monotonic_ms()).unwrap_or(0)),
     )?;
     m.fn_(
         "parse_iso8601",

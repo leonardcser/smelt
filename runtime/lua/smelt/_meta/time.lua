@@ -16,7 +16,7 @@ time.format = nil
 ---@type fun(timestamp: integer, format: string): string?
 time.format_utc = nil
 
---- Return milliseconds elapsed from a runtime-local monotonic clock. Use this for deadlines, never as a timestamp.
+--- Return milliseconds since smelt started, on a monotonic clock that never jumps. Use it for deadlines and animation, never as a timestamp. Paint callbacks see the same clock as `ctx.now_ms`.
 ---@type fun(): integer
 time.monotonic_ms = nil
 
@@ -24,7 +24,7 @@ time.monotonic_ms = nil
 ---@type fun(): integer
 time.now = nil
 
---- Return the current Unix timestamp in milliseconds. Backed by the host clock so tests can freeze time by swapping in a virtual clock.
+--- Return the current Unix timestamp in milliseconds: wall time, which can jump when the system clock is set. Animate with `monotonic_ms()` instead. Backed by the host clock so tests can freeze time by swapping in a virtual clock.
 ---@type fun(): integer
 time.now_ms = nil
 

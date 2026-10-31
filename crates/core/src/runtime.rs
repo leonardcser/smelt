@@ -61,6 +61,8 @@ pub struct Core {
     /// engine task; swap in [`engine::clock::VirtualClock`] for tests
     /// that need to drive time deterministically.
     pub clock: Arc<dyn engine::clock::Clock>,
+    /// When this runtime started, on `clock`. [`Core::monotonic_ms`] counts from here.
+    started_at: std::time::Instant,
     /// Recent user choices rooted in this runtime's application state path.
     pub recent: crate::state::RecentStore,
     /// Canonical session storage and its derived catalog, rooted in the runtime state path.
@@ -122,11 +124,21 @@ impl Core {
             permissions,
             permission_store,
             mcp: None,
+            started_at: clock.instant_now(),
             clock,
             recent,
             sessions,
             env,
         }
+    }
+
+    /// Milliseconds since this runtime started, on the monotonic `clock`. The
+    /// one animation clock: `smelt.time.monotonic_ms()` and paint `ctx.now_ms`.
+    pub fn monotonic_ms(&self) -> u64 {
+        self.clock
+            .instant_now()
+            .saturating_duration_since(self.started_at)
+            .as_millis() as u64
     }
 
     /// Read live session approvals and both persisted scopes as one coherent

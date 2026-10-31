@@ -2,5 +2,6 @@
 
 pub mod cell_width;
 pub mod image;
+pub mod palette;
 pub mod style;
 pub mod theme;

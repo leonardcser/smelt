@@ -3043,6 +3043,7 @@ impl TranscriptDocument {
             first_row,
             rows,
             first_line: history.first_line(block_id).unwrap_or_default(),
+            streaming: history.status(block_id) == Some(Status::Streaming),
         })
     }
 
@@ -10615,6 +10616,38 @@ pub(crate) struct TranscriptBlockSnapshot {
     pub(crate) first_row: crate::smelt_edit::RowIndex,
     pub(crate) rows: crate::smelt_edit::RowIndex,
     pub(crate) first_line: String,
+    /// The block is still receiving streamed text.
+    pub(crate) streaming: bool,
+}
+
+/// A block of the visible projection and the screen rect its rows occupy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VisibleTranscriptBlock {
+    pub(crate) block: TranscriptBlockSnapshot,
+    /// The block's rows inside the transcript text area, or `None` while
+    /// they are scrolled out of view.
+    pub(crate) screen: Option<crate::smelt_edit::Rect>,
+}
+
+/// The part of rows `[first_row, first_row + rows)` that `text` shows when
+/// its top row is absolute row `scroll_top`.
+fn rows_on_screen(
+    text: crate::smelt_edit::Rect,
+    scroll_top: crate::smelt_edit::RowIndex,
+    first_row: crate::smelt_edit::RowIndex,
+    rows: crate::smelt_edit::RowIndex,
+) -> Option<crate::smelt_edit::Rect> {
+    let bottom = scroll_top.saturating_add(crate::smelt_edit::RowIndex::from(text.height));
+    let start = first_row.max(scroll_top);
+    let end = first_row.saturating_add(rows).min(bottom);
+    (start < end && text.width > 0).then(|| {
+        crate::smelt_edit::Rect::new(
+            text.x,
+            text.y + (start - scroll_top) as u16,
+            text.width,
+            (end - start) as u16,
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10828,12 +10861,22 @@ impl TuiApp {
         cpos
     }
 
-    /// Snapshot of the laid-out transcript blocks. `record_index` is the
-    /// stable sparse record index accepted by `transcript.reveal_block`,
-    /// while `block_id` is the stable block identity. Returns empty when no
-    /// projection has run yet.
-    pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
-        self.conversation.transcript().visible_block_snapshots()
+    /// The blocks of the visible projection with their screen rects. Empty
+    /// when no projection has run yet.
+    pub(crate) fn visible_transcript_blocks(&self) -> Vec<VisibleTranscriptBlock> {
+        let win = self.transcript_win();
+        let text = win.text_rect();
+        let scroll_top = win.scroll_top();
+        self.conversation
+            .transcript()
+            .visible_block_snapshots()
+            .into_iter()
+            .map(|block| VisibleTranscriptBlock {
+                screen: text
+                    .and_then(|text| rows_on_screen(text, scroll_top, block.first_row, block.rows)),
+                block,
+            })
+            .collect()
     }
 
     pub(crate) fn loaded_transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {

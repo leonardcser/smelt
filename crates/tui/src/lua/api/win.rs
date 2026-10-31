@@ -272,14 +272,7 @@ impl mlua::UserData for LuaWin {
             })
             .flatten();
             match rect {
-                Some(r) => {
-                    let t = lua.create_table()?;
-                    t.set("x", r.x)?;
-                    t.set("y", r.y)?;
-                    t.set("width", r.width)?;
-                    t.set("height", r.height)?;
-                    Ok(mlua::Value::Table(t))
-                }
+                Some(r) => Ok(mlua::Value::Table(crate::lua::parse::rect_to_lua(lua, r)?)),
                 None => Ok(mlua::Value::Nil),
             }
         });
@@ -871,7 +864,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the original backing Buf handle, including while a native document is attached, or `nil` if the window is gone.",
             "document" => fn(source: Option<smelt_core::lua::api::document::LuaDocument>) -> LuaWin, "Attach a native indexed row source to a plugin window, or detach with nil. Each window owns private viewport-sized scratch storage and an independent highlighting subscription; the original backing buffer is retained unchanged and may be shared. Attachment resets view position, disables wrapping and makes text windows read-only, preserving list interaction. Detachment restores the original buffer, input state, surface, wrapping and scroll position. Navigation, selection and copy resolve against the entire source in bounded row batches; copying does not request highlighting. Built-in windows reject this call.",
             "pan" => fn(delta: i16) -> LuaWin, "Pan an unwrapped window horizontally by delta terminal cells. Negative pans left; clamps to the supported column range. Returns the handle.",
-            "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
+            "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ x, y, width, height }`, or `nil` until the first render lays it out.",
             "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays it out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
             "decorate" => fn(opts: mlua::Table) -> LuaDecoration, "Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.",
             "cursor" => fn(row: Option<u64>) -> mlua::Value, "Read or write the absolute cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",

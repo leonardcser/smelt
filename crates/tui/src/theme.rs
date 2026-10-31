@@ -487,19 +487,19 @@ fn resolve_group(
 // Light / dark terminal detection
 // ---------------------------------------------------------------------------
 
-/// Probe terminal background and set the light flag on `theme`.
-/// Must be called before entering raw mode / alternate screen.
+/// Probe the terminal's colors, record them as the process palette, and set
+/// the light flag on `theme`. Must be called before entering raw mode /
+/// alternate screen.
 pub(crate) fn detect_background(theme: &mut Theme) {
-    if let Some(light) = detect_light_background() {
+    let replies = query_terminal_colors();
+    let light = match replies.bg {
+        Some(_) => Some(replies.palette(false).is_light()),
+        None => colorfgbg_is_light(),
+    };
+    smelt_core::palette::set_terminal(replies.palette(light.unwrap_or(false)));
+    if let Some(light) = light {
         theme.set_light(light);
     }
-}
-
-fn detect_light_background() -> Option<bool> {
-    if let Some(luma) = osc_background_luma() {
-        return Some(luma > 0.6);
-    }
-    colorfgbg_is_light()
 }
 
 /// Parse `$COLORFGBG` (`"fg;bg"` or `"fg;default;bg"`).
@@ -515,33 +515,59 @@ fn colorfgbg_is_light() -> Option<bool> {
     Some(matches!(code, 7 | 9..=15)) // ANSI: 0-6,8 dark; 7,9-15 light
 }
 
-/// OSC 11 query: returns luma of the terminal background (0.0 = black, 1.0 = white).
+/// Colors the terminal reported. Each is `None` when it did not answer.
+#[derive(Debug, Default, PartialEq)]
+struct ColorReplies {
+    fg: Option<smelt_core::palette::Rgb>,
+    bg: Option<smelt_core::palette::Rgb>,
+    ansi: [Option<smelt_core::palette::Rgb>; 16],
+}
+
+impl ColorReplies {
+    /// The reported colors over the xterm palette for a `light` or dark background.
+    fn palette(&self, light: bool) -> smelt_core::palette::Palette {
+        let mut palette = smelt_core::palette::Palette::xterm(light);
+        palette.fg = self.fg.unwrap_or(palette.fg);
+        palette.bg = self.bg.unwrap_or(palette.bg);
+        for (slot, reply) in palette.ansi.iter_mut().zip(self.ansi) {
+            *slot = reply.unwrap_or(*slot);
+        }
+        palette
+    }
+}
+
+/// Ask for the default foreground (OSC 10), background (OSC 11) and the 16
+/// ANSI colors (OSC 4) in one round trip, fenced by a status report so
+/// terminals that ignore some queries still end the wait.
 #[cfg(unix)]
-fn osc_background_luma() -> Option<f32> {
+fn query_terminal_colors() -> ColorReplies {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
 
-    // Don't query if TERM=dumb.
     if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
-        return None;
+        return ColorReplies::default();
     }
 
     let switch_raw = !is_raw_mode_enabled().unwrap_or(false);
-    if switch_raw {
-        enable_raw_mode().ok()?;
+    if switch_raw && enable_raw_mode().is_err() {
+        return ColorReplies::default();
     }
 
-    let result = (|| -> Option<f32> {
+    let response = (|| -> Option<Vec<u8>> {
+        let mut query = String::from("\x1b]10;?\x07\x1b]11;?\x07");
+        for index in 0..16 {
+            query.push_str(&format!("\x1b]4;{index};?\x07"));
+        }
+        query.push_str("\x1b[5n");
         let mut stdout = std::io::stdout().lock();
-        write!(stdout, "\x1b]11;?\x07\x1b[5n").ok()?; // OSC 11 + DSR fence
+        stdout.write_all(query.as_bytes()).ok()?;
         stdout.flush().ok()?;
 
         let mut tty = File::open("/dev/tty").ok()?;
-        let mut buf = [0u8; 100];
+        let mut buf = vec![0u8; 2048];
         let mut written = 0;
-
         while written < buf.len() {
             if !wait_for_input(tty.as_raw_fd(), 100) {
                 break;
@@ -551,45 +577,81 @@ fn osc_background_luma() -> Option<f32> {
                 break;
             }
             written += n;
-            if buf[..written].contains(&b'n') {
+            if ends_with_status_report(&buf[..written]) {
                 break;
             }
         }
-
-        let response = std::str::from_utf8(&buf[..written]).ok()?;
-        parse_osc11_response(response)
+        buf.truncate(written);
+        Some(buf)
     })();
 
     if switch_raw {
         let _ = disable_raw_mode();
     }
 
-    result
+    response
+        .map(|bytes| parse_color_replies(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
 }
 
 #[cfg(not(unix))]
-fn osc_background_luma() -> Option<f32> {
-    None
+fn query_terminal_colors() -> ColorReplies {
+    ColorReplies::default()
 }
 
-/// Parse `\x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\` and return luma.
+/// Whether `bytes` ends with the device status report (`ESC [ <n> n`) that fences the queries.
 #[cfg(any(unix, test))]
-fn parse_osc11_response(response: &str) -> Option<f32> {
-    let rgb_start = response.find("rgb:")?;
-    let raw = &response[rgb_start + 4..];
-    let parts: Vec<&str> = raw.split('/').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    let r = u8::from_str_radix(parts[0].get(..2)?, 16).ok()?;
-    let g = u8::from_str_radix(parts[1].get(..2)?, 16).ok()?;
-    let blue_str: String = parts[2]
-        .chars()
-        .take_while(|c| c.is_ascii_hexdigit())
-        .collect();
-    let b = u8::from_str_radix(blue_str.get(..2)?, 16).ok()?;
+fn ends_with_status_report(bytes: &[u8]) -> bool {
+    let Some(rest) = bytes.strip_suffix(b"n") else {
+        return false;
+    };
+    let digits = rest.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && rest[..rest.len() - digits].ends_with(b"\x1b[")
+}
 
-    Some((0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0) // sRGB luma
+/// Parse OSC 10, 11 and 4 color replies such as `ESC ] 4;1;rgb:cd/00/00 ST`.
+#[cfg(any(unix, test))]
+fn parse_color_replies(response: &str) -> ColorReplies {
+    let mut replies = ColorReplies::default();
+    for reply in response.split("\x1b]").skip(1) {
+        let reply = reply.trim_end_matches(['\x07', '\x1b', '\\']);
+        let mut rest = reply.split(';');
+        let Some(code) = rest.next() else {
+            continue;
+        };
+        match code {
+            "10" => replies.fg = rest.next().and_then(parse_xparse_color),
+            "11" => replies.bg = rest.next().and_then(parse_xparse_color),
+            "4" => {
+                let index = rest.next().and_then(|index| index.parse::<usize>().ok());
+                if let (Some(slot), Some(color)) = (
+                    index.and_then(|index| replies.ansi.get_mut(index)),
+                    rest.next().and_then(parse_xparse_color),
+                ) {
+                    *slot = Some(color);
+                }
+            }
+            _ => {}
+        }
+    }
+    replies
+}
+
+/// Parse an X11 `rgb:R/G/B` color with 1 to 4 hex digits per channel.
+#[cfg(any(unix, test))]
+fn parse_xparse_color(text: &str) -> Option<smelt_core::palette::Rgb> {
+    let text = text.split(['\x07', '\x1b']).next()?;
+    let mut channels = text.strip_prefix("rgb:")?.split('/').map(|channel| {
+        let digits = channel.len();
+        if !(1..=4).contains(&digits) {
+            return None;
+        }
+        let value = u32::from_str_radix(channel, 16).ok()?;
+        let max = (1u32 << (4 * digits)) - 1;
+        Some(((value * 255 + max / 2) / max) as u8)
+    });
+    let rgb = (channels.next()??, channels.next()??, channels.next()??);
+    channels.next().is_none().then_some(rgb)
 }
 
 /// Returns `true` if the fd is readable within `timeout_ms`.
@@ -820,40 +882,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_osc11_dark_background() {
-        let resp = "\x1b]11;rgb:1c1c/1c1c/1c1c\x1b\\";
-        let luma = parse_osc11_response(resp).unwrap();
-        assert!(luma < 0.2, "luma {luma} should indicate dark");
+    fn parse_color_replies_reads_every_answer() {
+        let replies = parse_color_replies(
+            "\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:1c/1c/1c\x07\x1b]4;1;rgb:cdcd/0000/0000\x1b\\\x1b]4;15;rgb:f/f/f\x07\x1b[0n",
+        );
+        assert_eq!(replies.fg, Some((229, 229, 229)));
+        assert_eq!(replies.bg, Some((28, 28, 28)));
+        assert_eq!(replies.ansi[1], Some((205, 0, 0)));
+        assert_eq!(replies.ansi[15], Some((255, 255, 255)));
+        assert_eq!(replies.ansi[2], None);
+
+        let palette = replies.palette(false);
+        assert_eq!(palette.bg, (28, 28, 28));
+        assert_eq!(palette.ansi[2], smelt_core::palette::XTERM_ANSI[2]);
+        assert!(!palette.is_light());
     }
 
     #[test]
-    fn parse_osc11_light_background() {
-        let resp = "\x1b]11;rgb:ffff/ffff/ffff\x1b\\";
-        let luma = parse_osc11_response(resp).unwrap();
-        assert!(luma > 0.9, "luma {luma} should indicate light");
-    }
-
-    #[test]
-    fn parse_osc11_mid_tone() {
-        let resp = "\x1b]11;rgb:8080/8080/8080\x1b\\";
-        let luma = parse_osc11_response(resp).unwrap();
-        assert!(
-            (0.4..0.6).contains(&luma),
-            "luma {luma} should be mid-range"
+    fn parse_color_replies_ignores_garbage() {
+        assert_eq!(parse_color_replies("garbage"), ColorReplies::default());
+        assert_eq!(parse_color_replies(""), ColorReplies::default());
+        assert_eq!(
+            parse_color_replies("\x1b]11;rgb:12345/0/0\x07\x1b]4;99;rgb:0/0/0\x07"),
+            ColorReplies::default()
         );
     }
 
     #[test]
-    fn parse_osc11_short_hex() {
-        let resp = "\x1b]11;rgb:ff/ff/ff\x1b\\";
-        let luma = parse_osc11_response(resp).unwrap();
-        assert!(luma > 0.9);
-    }
-
-    #[test]
-    fn parse_osc11_garbage() {
-        assert!(parse_osc11_response("garbage").is_none());
-        assert!(parse_osc11_response("").is_none());
+    fn status_report_fences_the_replies() {
+        assert!(ends_with_status_report(b"\x1b]11;rgb:0/0/0\x07\x1b[0n"));
+        assert!(ends_with_status_report(b"\x1b[3n"));
+        assert!(!ends_with_status_report(b"\x1b]11;rgb:0/0/0\x07"));
+        assert!(!ends_with_status_report(b"[n"));
     }
 
     #[test]

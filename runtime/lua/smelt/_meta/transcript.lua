@@ -69,12 +69,12 @@ transcript.invalidate_renderer = nil
 transcript.is_empty = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ record_index, block_id, role, first_row, rows, first_line }`.
+--- Return the exact loaded transcript block containing absolute display row `row`, or nil when the row is outside a loaded block. This may materialize loaded-window block layout and returns `{ record_index, block_id, role, first_row, rows, first_line, streaming }`.
 ---@type fun(row: integer): table?
 transcript.loaded_block_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line }`. In sparse sessions, the no-callback form can return an empty table while background hydration is pending. Pass `callback` to receive the active loaded-window blocks once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty table. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. Prefer `visible_blocks()` when possible.
+--- Return loaded transcript blocks as `{ record_index, block_id, role, first_row, rows, first_line, streaming }`. In sparse sessions, the no-callback form can return an empty table while background hydration is pending. Pass `callback` to receive the active loaded-window blocks once hydration completes without blocking Lua; the callback is retained for one invocation and the immediate return is an empty table. `record_index` describes sparse transcript ordering but is not a navigation handle; use committed view targets with `reveal`. Prefer `visible_blocks()` when possible.
 ---@type fun(callback: fun(value: table)?): table
 transcript.loaded_blocks_expensive = nil
 
@@ -137,7 +137,7 @@ transcript.top_inset = nil
 transcript.view = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line }` entries. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
+--- Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line, streaming, rect? }` entries. `rect` is `{ x, y, width, height }`: the screen cells of the block's rows that are on screen, inside the transcript's gutter and padding; it is absent while the block is scrolled out of view. Called from a paint, it matches the frame being painted. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
 ---@type fun(): table
 transcript.visible_blocks = nil
 

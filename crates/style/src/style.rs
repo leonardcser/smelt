@@ -105,26 +105,8 @@ fn mix_channel(value: u8, target: u8, amount: f32) -> u8 {
 }
 
 fn ansi_value_rgb(value: u8) -> (u8, u8, u8) {
-    const BASIC: [(u8, u8, u8); 16] = [
-        (0, 0, 0),
-        (128, 0, 0),
-        (0, 128, 0),
-        (128, 128, 0),
-        (0, 0, 128),
-        (128, 0, 128),
-        (0, 128, 128),
-        (192, 192, 192),
-        (128, 128, 128),
-        (255, 0, 0),
-        (0, 255, 0),
-        (255, 255, 0),
-        (0, 0, 255),
-        (255, 0, 255),
-        (0, 255, 255),
-        (255, 255, 255),
-    ];
     if value < 16 {
-        return BASIC[value as usize];
+        return crate::palette::XTERM_ANSI[value as usize];
     }
     if value < 232 {
         let idx = value - 16;

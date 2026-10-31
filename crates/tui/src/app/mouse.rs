@@ -304,8 +304,28 @@ impl TuiApp {
     }
 
     // ── Mouse event dispatch ─────────────────────────────────────────────
+    /// Move `me` from where the user sees it to the cell smelt laid out,
+    /// through the `map_pointer` of every frame effect, top effect first.
+    fn unmap_pointer(&mut self, mut me: MouseEvent) -> MouseEvent {
+        let maps = self.paint_registry.pointer_maps();
+        if maps.is_empty() {
+            return me;
+        }
+        let size = self.ui.terminal_size();
+        let lua = self.lua.execution();
+        let mut at = (me.column, me.row);
+        crate::lua::scope_app(self, || {
+            for map in maps {
+                at = crate::lua::paint::map_pointer(&lua, map, at, size);
+            }
+        });
+        (me.column, me.row) = at;
+        me
+    }
+
     pub(crate) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         self.paint_timeline.pointer = Some((me.column, me.row));
+        let me = self.unmap_pointer(me);
         if matches!(me.kind, MouseEventKind::Moved) {
             return self.handle_pointer_move(me);
         }

@@ -7,11 +7,31 @@
 //! `theme.use("<name>")`.
 
 use crate::theme::{StyleDecl, ThemeSpec};
+use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
 use smelt_core::content::highlight::syntax_theme_names;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::style::Style;
+
+/// Which side of a cell a color paints, for `smelt.theme.rgb`.
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.theme.Layer")]
+pub enum LuaColorLayer {
+    /// The glyph color. A missing color is the terminal's default foreground.
+    Fg,
+    /// The cell background. A missing color is the terminal's default background.
+    Bg,
+}
+
+impl From<LuaColorLayer> for smelt_core::palette::Layer {
+    fn from(layer: LuaColorLayer) -> Self {
+        match layer {
+            LuaColorLayer::Fg => Self::Fg,
+            LuaColorLayer::Bg => Self::Bg,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ThemeMetadata {
@@ -88,20 +108,20 @@ resolve to an empty table.",
     m.fn_(
         "rgb",
         "Resolve any color (`{ ansi = n }`, `{ rgb = { r, g, b } }`, a name such \
-as `\"red\"`, or `\"#rrggbb\"`) to `{ rgb = { r, g, b } }`, using the standard \
-xterm palette for indexed colors. Use it to blend colors, for example in a \
-paint. Returns `nil` for `nil` and `\"reset\"`, whose real value is up to the \
-terminal.",
-        &["color"],
-        |lua, color: mlua::Value| -> LuaResult<Option<mlua::Table>> {
+as `\"red\"`, or `\"#rrggbb\"`) to `{ rgb = { r, g, b } }` as the terminal shows \
+it. The 16 ANSI colors and `nil` / `\"reset\"` use the terminal's own palette \
+when it reports one at startup, and the xterm palette otherwise; `nil` and \
+`\"reset\"` resolve to the default for `layer` (`\"fg\"` when omitted). Use it \
+to blend colors, for example in a paint.",
+        &["color", "layer"],
+        |lua, (color, layer): (mlua::Value, Option<LuaColorLayer>)| -> LuaResult<mlua::Table> {
             let color =
                 crate::lua::parse::color_opt(Some(color)).map_err(LuaError::RuntimeError)?;
-            let Some((r, g, b)) = color.and_then(|color| color.rgb()) else {
-                return Ok(None);
-            };
+            let layer = layer.map_or(smelt_core::palette::Layer::Fg, Into::into);
+            let (r, g, b) = smelt_core::palette::terminal().rgb(color, layer);
             let t = lua.create_table()?;
             t.set("rgb", [r, g, b])?;
-            Ok(Some(t))
+            Ok(t)
         },
     )?;
 

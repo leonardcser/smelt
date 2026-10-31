@@ -199,44 +199,104 @@ A paint is a Lua function that draws cells directly. There are two kinds:
   filters, melting text, a mouse trail.
 
 Both call `fn(slice, ctx)`. Coordinates are `(x, y)` cells from the top-left.
-The slice already holds what was painted below it, so a paint can read cells
-and draw over them. A write whose style leaves `bg` unset keeps the background
-underneath.
+They may be negative or past the edge: writes outside the slice are dropped and
+reads return `nil`, so a moving effect never clamps by hand. The slice already
+holds what was painted below it, so a paint can read cells and draw over them.
+A write whose style leaves `bg` unset keeps the background underneath; pass
+`bg = false` for the terminal's default background instead.
 
 | Method | Does |
 | ------ | ---- |
 | `get(x, y)` | Read a cell as `{ ch, width, style, image? }` |
 | `set(x, y, ch, style)` | Write one grapheme |
-| `put_str(x, y, text, style)` | Write a string, clipped at the right edge |
+| `put_str(x, y, text, style)` | Write a string, clipped at the edges |
 | `fill(x, y, w, h, ch, style)` | Fill a rectangle |
 | `set_style(x, y, w, h, patch)` | Change only the style of a rectangle, keeping the glyphs |
 | `map(fn(cell, x, y))` | Visit every cell; return `{ ch?, style? }` to replace it |
+| `recolor(fn(r, g, b, layer), opts)` | Pass every color through `fn`, once per distinct color |
+| `snapshot()` | Copy the slice into a `Snapshot` you can keep |
+| `blit(snapshot, x, y)` | Draw a snapshot back, shifted by `(x, y)` |
+| `set_cursor(x, y)` | Move the hidden terminal cursor, where input-method text appears |
 
 `ctx` holds `x`, `y` (the slice's screen position), `now_ms` and `frame` for
-animation, `focused`, and the terminal size. A frame paint also gets
+animation, `focused`, and the terminal size. `ctx.now_ms` is the same monotonic
+clock as `smelt.time.monotonic_ms()`, so a timer and a paint agree on time;
+`smelt.time.now_ms()` is wall time, for timestamps only. A frame paint also gets
 `ctx.cursor = { x, y }` while a cursor is visible, so an effect can follow it.
-To blend colors, `smelt.theme.rgb(color)` turns any color, including the theme's
-indexed ones, into `{ rgb = { r, g, b } }`.
+
+### Colors
+
+`recolor` hands `fn` each color as the terminal shows it, `r, g, b` from 0 to
+255, with `layer` set to `"fg"` or `"bg"`. Return new channels, or `nil` to
+keep the color. It calls `fn` once per distinct color, not once per cell, so a
+screen-wide filter costs almost nothing:
 
 ```lua
--- Grayscale everything on screen.
-local gray = smelt.paint.frame(function(slice)
-  slice:map(function(cell)
-    local fg = cell.style.fg
-    if type(fg) ~= "table" or not fg.rgb then return end
-    local v = math.floor((fg.rgb[1] + fg.rgb[2] + fg.rgb[3]) / 3)
-    cell.style.fg = { rgb = { v, v, v } }
-    return { style = cell.style }
-  end)
-end, { name = "myplugin.gray" })
+-- Night shift: warm everything on screen.
+local warm = smelt.paint.frame(function(slice)
+  slice:recolor(function(r, g, b) return r, g * 0.85, b * 0.6 end)
+end, { name = "myplugin.nightshift" })
 
-gray:remove() -- stop the effect
+warm:remove() -- stop the effect
 ```
+
+Cells that use the terminal's default foreground or background keep it unless
+you pass `{ defaults = true }`. An explicit color replaces the default, which
+makes the background opaque on a translucent terminal.
+
+At startup smelt asks the terminal for its default colors and its 16 ANSI
+colors. `smelt.theme.rgb(color, layer)` uses them to turn any color, including
+`nil` (the default for `layer`), into `{ rgb = { r, g, b } }`. Terminals that
+do not answer get the xterm palette.
+
+### Repainting
 
 A paint repaints only when something under it changes. For animation, pass
 `fps`: smelt repaints at that rate while the paint is on screen and goes idle
-again once you remove it or call `handle:set_fps(nil)`. The built-in `/donut`
-is a full example.
+again once you remove it or call `handle:set_fps(nil)`. A paint may change its
+own rate while it runs. When a timer or event
+changes what a paint draws, call `handle:redraw()` for one repaint. The
+built-in `/donut` is a full example.
+
+Frame paints run from the lowest `order` up (default 0), and in registration
+order for equal orders. Give a filter that must see everything, such as a
+color-blind simulation, a high order.
+
+### Transitions
+
+Pass `history = true` to `smelt.paint.frame` for effects that need to know what
+changed:
+
+- `ctx.prev` is a `Snapshot` of the screen as smelt drew it on the previous
+  frame, before any frame paint. It is absent on the first frame.
+- `ctx.damage` lists the `{ x, y, width, height }` rects that changed since
+  then. The first frame and a resize damage the whole screen.
+
+Damage is visual: when the transcript scrolls, every scrolled row changes. To
+follow content instead, read `smelt.transcript.visible_blocks()`. Each block
+has a screen `rect` while it is on screen and `streaming` while the model is
+still writing it, and both match the frame being painted.
+
+```lua
+-- Dissolve: what disappeared fades out over a few frames.
+local fading, fx = {}, nil
+fx = smelt.paint.frame(function(slice, ctx)
+  for _, r in ipairs(ctx.damage) do
+    for x = r.x, r.x + r.width - 1 do
+      local old = ctx.prev and ctx.prev:get(x, r.y)
+      if old and old.ch ~= " " then fading[#fading + 1] = { x = x, y = r.y, ch = old.ch, t = 4 } end
+    end
+  end
+  local kept = {}
+  for _, f in ipairs(fading) do
+    if slice:get(f.x, f.y).ch == " " then slice:set(f.x, f.y, f.ch, { dim = true }) end
+    f.t = f.t - 1
+    if f.t > 0 then kept[#kept + 1] = f end
+  end
+  fading = kept
+  fx:set_fps(#fading > 0 and 30 or nil) -- animate only while something fades
+end, { name = "myplugin.dissolve", history = true })
+```
 
 ### Pointer events
 
@@ -261,6 +321,31 @@ button:on("press", function(ev) smelt.notify.info("clicked at " .. ev.x) end)
 Pass `pointer = true` to repaint on every pointer move and get
 `ctx.pointer = { x, y }` (relative to the slice). A frame paint with
 `pointer = true` is all a mouse trail needs.
+
+A frame effect that moves cells must also move the mouse. Pass
+`map_pointer(x, y, width, height)`, a function from the screen cell the user
+points at to the cell smelt laid out there, and clicks, drags, and wheel scrolls land where they look. With several
+effects, the top one maps first. `ctx.pointer` stays in screen cells. The
+visible caret is an ordinary cell and moves with the others; call
+`slice:set_cursor` so input-method text follows it:
+
+```lua
+-- Upside down.
+smelt.paint.frame(function(slice, ctx)
+  local snap, w, h = slice:snapshot(), slice:width(), slice:height()
+  for y = 0, h - 1 do
+    for x = 0, w - 1 do
+      local cell = snap:get(x, h - 1 - y)
+      if cell.width > 0 then slice:set(x, y, cell.ch, cell.style) end
+    end
+  end
+  if ctx.cursor then slice:set_cursor(ctx.cursor.x, h - 1 - ctx.cursor.y) end
+end, {
+  name = "myplugin.flip",
+  order = 100,
+  map_pointer = function(x, y, _, height) return x, height - 1 - y end,
+})
+```
 
 ## Statusline and prompt bars
 

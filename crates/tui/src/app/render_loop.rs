@@ -1181,7 +1181,7 @@ impl TuiApp {
         // borrow. The frame owns its grid and borrows the UI only while painting
         // built-in commands, so each Lua leaf paints directly into the frame in
         // its layer order. Frame-stage paints then see the finished screen.
-        let clock = self.paint_timeline.advance(self.core.clock.instant_now());
+        let clock = self.paint_timeline.advance(self.core.monotonic_ms());
         let mut animation: Option<std::time::Duration> = None;
         let mut frame = self.ui.begin_frame(prepared_frame);
         while let Some(leaf) = frame.paint_to_next_leaf(&self.ui) {
@@ -1194,26 +1194,27 @@ impl TuiApp {
                 &mut frame.grid_mut().slice_mut(leaf.rect),
                 &leaf.context,
                 &clock,
+                None,
             );
         }
         let mut frame = frame.into_grid();
         let frame_paints = self.paint_registry.frame_paints();
-        if !frame_paints.is_empty() {
-            let clock = crate::lua::paint::PaintClock {
-                cursor: frame.terminal_cursor_position(),
-                ..clock
-            };
-            let area = crate::smelt_edit::Rect::new(0, 0, frame.width(), frame.height());
-            let context = crate::smelt_edit::DrawContext {
-                terminal_width: frame.width(),
-                terminal_height: frame.height(),
-                theme: std::sync::Arc::clone(self.ui.theme()),
-                ..Default::default()
-            };
-            for (_, slot) in frame_paints {
-                animation = animation.into_iter().chain(slot.options.interval()).min();
-                self.run_paint(slot, &mut frame.slice_mut(area), &context, &clock);
-            }
+        let changes = frame_paints
+            .iter()
+            .any(|slot| slot.options.history())
+            .then(|| self.paint_timeline.begin_history(&frame));
+        if changes.is_none() {
+            self.paint_timeline.drop_history();
+        }
+        self.run_frame_paints(
+            &frame_paints,
+            &mut frame,
+            &clock,
+            changes.as_ref(),
+            &mut animation,
+        );
+        if let Some(changes) = changes {
+            self.paint_timeline.end_history(changes);
         }
         if let Some(interval) = animation {
             self.request_animation_render(interval);
@@ -1224,16 +1225,49 @@ impl TuiApp {
         }
     }
 
+    /// Run frame-stage paints over the finished screen, in order.
+    fn run_frame_paints(
+        &mut self,
+        paints: &[crate::lua::paint::PaintSlot],
+        frame: &mut crate::smelt_edit::Grid,
+        clock: &crate::lua::paint::PaintClock,
+        changes: Option<&crate::lua::paint::FrameChanges>,
+        animation: &mut Option<std::time::Duration>,
+    ) {
+        if paints.is_empty() {
+            return;
+        }
+        let clock = crate::lua::paint::PaintClock {
+            cursor: frame.terminal_cursor_position(),
+            ..*clock
+        };
+        let area = crate::smelt_edit::Rect::new(0, 0, frame.width(), frame.height());
+        let context = crate::smelt_edit::DrawContext {
+            terminal_width: frame.width(),
+            terminal_height: frame.height(),
+            theme: std::sync::Arc::clone(self.ui.theme()),
+            ..Default::default()
+        };
+        for slot in paints {
+            *animation = (*animation)
+                .into_iter()
+                .chain(slot.options.interval())
+                .min();
+            self.run_paint(*slot, &mut frame.slice_mut(area), &context, &clock, changes);
+        }
+    }
+
     fn run_paint(
         &mut self,
         slot: crate::lua::paint::PaintSlot,
         slice: &mut crate::smelt_edit::GridSlice<'_>,
         context: &crate::smelt_edit::DrawContext,
         clock: &crate::lua::paint::PaintClock,
+        changes: Option<&crate::lua::paint::FrameChanges>,
     ) {
         let lua = self.lua.execution();
         crate::lua::scope_app(self, || {
-            crate::lua::paint::paint(&lua, slot, slice, context, clock);
+            crate::lua::paint::paint(&lua, slot, slice, context, clock, changes);
         });
     }
 

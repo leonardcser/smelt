@@ -85,13 +85,18 @@ fn color_str(s: &str) -> Result<Color, String> {
 // ── style + span + title ───────────────────────────────────────────────
 
 /// Read style fields (`fg`, `bg`, `bold`, `dim`, `italic`, `underline`, `crossedout`, `reverse`)
-/// off a table. Unrecognised keys are ignored.
+/// off a table. Unrecognised keys are ignored. `fg = false` / `bg = false`
+/// ask for the terminal default, as `"reset"` does.
 pub(crate) fn style(t: &mlua::Table) -> Result<Style, String> {
+    let color = |key: &str| match t.get::<mlua::Value>(key).ok() {
+        Some(mlua::Value::Boolean(false)) => Ok(Some(Color::Reset)),
+        value => color_opt(value),
+    };
     let mut style = Style::new();
-    if let Some(c) = color_opt(t.get::<mlua::Value>("fg").ok())? {
+    if let Some(c) = color("fg")? {
         style = style.fg(c);
     }
-    if let Some(c) = color_opt(t.get::<mlua::Value>("bg").ok())? {
+    if let Some(c) = color("bg")? {
         style = style.bg(c);
     }
     if t.get::<bool>("bold").unwrap_or(false) {
@@ -165,6 +170,16 @@ pub(crate) fn style_patch(t: &mlua::Table) -> Result<StylePatch, String> {
         *slot = t.get::<Option<bool>>(key).map_err(|e| e.to_string())?;
     }
     Ok(patch)
+}
+
+/// A rect as the `{ x, y, width, height }` table every Lua API uses.
+pub(crate) fn rect_to_lua(lua: &Lua, rect: crate::smelt_edit::Rect) -> LuaResult<mlua::Table> {
+    let t = lua.create_table_with_capacity(0, 4)?;
+    t.set("x", rect.x)?;
+    t.set("y", rect.y)?;
+    t.set("width", rect.width)?;
+    t.set("height", rect.height)?;
+    Ok(t)
 }
 
 /// Project a `Style` to a Lua style table. Unset fields are omitted so the

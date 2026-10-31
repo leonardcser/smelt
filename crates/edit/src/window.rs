@@ -64,6 +64,17 @@ impl Gutters {
     pub fn content_width_with_gutter(&self, total: u16, gutter_width: u16) -> u16 {
         self.content_width(total.saturating_sub(gutter_width))
     }
+
+    /// Where text sits in a row `total` cells wide after a `gutter_width`
+    /// column: its start column and width.
+    pub fn text_columns(&self, total: u16, gutter_width: u16) -> (u16, u16) {
+        let gutter_width = gutter_width.min(total);
+        let offset = gutter_width + self.pad_left.min(total - gutter_width);
+        let width = self
+            .content_width_with_gutter(total, gutter_width)
+            .min(total - offset);
+        (offset, width)
+    }
 }
 
 mod document_motion;
@@ -1339,6 +1350,19 @@ impl Window {
 
     pub fn scroll_top(&self) -> RowIndex {
         self.scroll_top
+    }
+
+    /// The screen rect where buffer text was laid out this frame: the
+    /// viewport inside the gutter column and left padding. Row `r` of it
+    /// shows absolute row `scroll_top() + r`. `None` before the first layout.
+    pub fn text_rect(&self) -> Option<Rect> {
+        let viewport = self.viewport?;
+        let rect = viewport.rect;
+        let (offset, width) = self
+            .config
+            .gutters
+            .text_columns(rect.width, viewport.gutter_width);
+        Some(Rect::new(rect.x + offset, rect.y, width, rect.height))
     }
 
     pub fn scroll_state(&self) -> VerticalScroll {
@@ -3484,18 +3508,8 @@ impl Window {
         let viewport_height = self.prepared_viewport_height.unwrap_or(height).min(height);
         let scroll = row_to_usize(self.local_scroll_top());
         let gutter_width = self.gutter_width(buf).min(width);
-        let pad_left = self
-            .config
-            .gutters
-            .pad_left
-            .min(width.saturating_sub(gutter_width));
         // `content_offset` is where source text begins on each row.
-        let content_offset = gutter_width + pad_left;
-        let content_width = self
-            .config
-            .gutters
-            .content_width_with_gutter(width, gutter_width)
-            .min(width.saturating_sub(content_offset));
+        let (content_offset, content_width) = self.config.gutters.text_columns(width, gutter_width);
         // The host's prep pass refreshes the layout before paint. Tests that
         // skip the prep pass build a one-shot fallback so render stays correct
         // without requiring &mut self.

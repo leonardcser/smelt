@@ -105,7 +105,7 @@ fn frame_paint_sees_the_visible_cursor() {
 }
 
 #[test]
-fn theme_rgb_resolves_indexed_and_named_colors() {
+fn theme_rgb_resolves_every_color_through_the_palette() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(
         r##"
@@ -114,8 +114,9 @@ fn theme_rgb_resolves_indexed_and_named_colors() {
         assert(rgb({ ansi = 244 }) == "128,128,128", rgb({ ansi = 244 }))
         assert(rgb("#102030") == "16,32,48")
         assert(rgb("red") == "255,0,0")
-        assert(smelt.theme.rgb("reset") == nil)
-        assert(smelt.theme.rgb(nil) == nil)
+        assert(rgb(nil) == "229,229,229", rgb(nil))
+        assert(rgb("reset") == rgb(nil))
+        assert(table.concat(smelt.theme.rgb(nil, "bg").rgb, ",") == "0,0,0")
         "##
     ));
 }
@@ -280,4 +281,287 @@ fn pointer_paint_sees_leaf_relative_pointer() {
         app.eval_lua::<String>("return _G.__pointer").unwrap(),
         "3,1"
     );
+}
+
+#[test]
+fn redraw_requests_one_frame() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(r#"_G.__fx = smelt.paint.frame(function() end)"#));
+    app.render_silent();
+    assert!(app.app.scheduled_frame_delay().is_none());
+
+    assert!(app.eval_lua::<bool>("return _G.__fx:redraw()").unwrap());
+    assert!(
+        app.app.scheduled_frame_delay().is_some(),
+        "redraw asks for a frame"
+    );
+    app.render_silent();
+    assert!(
+        app.app.scheduled_frame_delay().is_none(),
+        "redraw is one frame, not an animation"
+    );
+
+    assert!(app.run_lua("_G.__fx:remove()"));
+    assert!(!app.eval_lua::<bool>("return _G.__fx:redraw()").unwrap());
+}
+
+#[test]
+fn frame_paints_run_by_order() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        _G.__runs = {}
+        local function fx(name) return function() table.insert(_G.__runs, name) end end
+        smelt.paint.frame(fx("top"), { order = 10 })
+        smelt.paint.frame(fx("first"))
+        smelt.paint.frame(fx("under"), { order = -1 })
+        smelt.paint.frame(fx("second"))
+        "#
+    ));
+
+    app.render_silent();
+
+    assert_eq!(
+        app.eval_lua::<String>("return table.concat(_G.__runs, ' ')")
+            .unwrap(),
+        "under first second top"
+    );
+}
+
+#[test]
+fn history_shows_the_previous_frame_before_effects_and_what_changed() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        _G.__seen = {}
+        smelt.paint.frame(function(slice, ctx)
+          local damaged = 0
+          for _, rect in ipairs(ctx.damage) do damaged = damaged + rect.width * rect.height end
+          table.insert(_G.__seen, {
+            prev = ctx.prev and ctx.prev:get(0, 0).ch,
+            damaged = damaged,
+            area = slice:width() * slice:height(),
+          })
+          slice:set(0, 0, "@")
+        end, { history = true })
+        smelt.paint.frame(function(_, ctx) _G.__plain = ctx.prev == nil and ctx.damage == nil end)
+        "#
+    ));
+
+    app.render_silent();
+    app.render_silent();
+    app.type_text("x");
+    app.render_silent();
+
+    let mut seen = |i: u32, key: &str| {
+        app.eval_lua::<mlua::Value>(&format!("return _G.__seen[{i}].{key}"))
+            .unwrap()
+    };
+    assert!(seen(1, "prev").is_nil(), "the first frame has no previous");
+    assert_eq!(seen(1, "damaged").as_u32(), seen(1, "area").as_u32());
+    assert_eq!(
+        seen(2, "prev").as_string().unwrap().to_str().unwrap(),
+        " ",
+        "prev holds smelt's frame, not the effect drawn over it"
+    );
+    assert_eq!(seen(2, "damaged").as_u32(), Some(0), "nothing changed");
+    let typed = seen(3, "damaged").as_u32().unwrap();
+    assert!(
+        typed > 0 && typed < 480 / 4,
+        "typing damages a few rows: {typed}"
+    );
+    assert!(app.eval_lua::<bool>("return _G.__plain").unwrap());
+}
+
+#[test]
+fn visible_blocks_report_screen_rects_and_streaming() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 30);
+    app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+        content: "settled reply".into(),
+    });
+    app.start_submitted_turn("question");
+    app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+        delta: "streaming words".into(),
+    });
+    assert!(app.run_lua(
+        r#"
+        smelt.paint.frame(function(slice)
+          _G.__blocks = {}
+          for _, block in ipairs(smelt.transcript.visible_blocks()) do
+            local r = block.rect
+            if r then
+              local text = {}
+              for x = r.x, r.x + r.width - 1 do text[#text + 1] = slice:get(x, r.y).ch end
+              table.insert(_G.__blocks, {
+                role = block.role, streaming = block.streaming, text = table.concat(text),
+              })
+            end
+          end
+        end)
+        "#
+    ));
+    for _ in 0..5 {
+        app.render_silent();
+    }
+
+    let blocks: Vec<(String, bool, String)> = app
+        .eval_lua::<mlua::Table>("return _G.__blocks")
+        .unwrap()
+        .sequence_values::<mlua::Table>()
+        .map(|block| {
+            let block = block.unwrap();
+            (
+                block.get("role").unwrap(),
+                block.get("streaming").unwrap(),
+                block.get("text").unwrap(),
+            )
+        })
+        .collect();
+    let settled = blocks
+        .iter()
+        .find(|(_, _, text)| text.contains("settled reply"))
+        .unwrap_or_else(|| panic!("the settled block row is on screen: {blocks:?}"));
+    assert!(!settled.1, "{blocks:?}");
+    let streaming = blocks
+        .iter()
+        .find(|(_, streaming, _)| *streaming)
+        .unwrap_or_else(|| panic!("the streaming block is on screen: {blocks:?}"));
+    assert_eq!(streaming.0, "assistant");
+    let shown = streaming.2.trim_end();
+    assert!(
+        !shown.is_empty() && "streaming words".starts_with(shown),
+        "the rect starts at the streamed text: {shown:?}"
+    );
+}
+
+#[test]
+fn dissolve_example_fades_deleted_text_then_goes_idle() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(40, 12);
+    let guide = include_str!("../../../../../docs/docs/extend/ui.md");
+    let start = guide.find("-- Dissolve:").expect("dissolve example");
+    let example = &guide[start..start + guide[start..].find("```").unwrap()];
+    assert!(app.run_lua(example), "{example}");
+    app.type_text("zq");
+    for _ in 0..8 {
+        app.render_silent();
+    }
+    assert!(
+        app.app.scheduled_frame_delay().is_none(),
+        "idle once fades end"
+    );
+
+    app.press(KeyCode::Backspace);
+    let frame = app.render_to_frame();
+    let (y, row) = frame
+        .rows
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.contains("zq"))
+        .unwrap_or_else(|| panic!("the deleted q fades out:\n{}", frame.text()));
+    let x = row.chars().position(|c| c == 'q').unwrap();
+    assert!(frame.styles[y][x].dim, "the fading glyph is dim");
+    assert!(app.app.scheduled_frame_delay().is_some(), "fading animates");
+
+    for _ in 0..6 {
+        app.render_silent();
+    }
+    let frame = app.render_to_frame();
+    assert!(!frame.text().contains("zq"), "{}", frame.text());
+    assert!(
+        app.app.scheduled_frame_delay().is_none(),
+        "the paint goes idle once nothing fades"
+    );
+}
+
+#[test]
+fn paint_time_is_the_monotonic_clock() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        smelt.paint.frame(function(slice, ctx)
+          _G.__times = { ctx.now_ms, smelt.time.monotonic_ms() }
+        end)
+        "#
+    ));
+    app.clock.advance(std::time::Duration::from_millis(250));
+    app.render_silent();
+
+    let (paint, monotonic) = app
+        .eval_lua::<(u64, u64)>("return _G.__times[1], _G.__times[2]")
+        .unwrap();
+    assert_eq!(paint, monotonic);
+    assert!(paint >= 250, "both follow the host clock: {paint}");
+}
+
+#[test]
+fn map_pointer_sends_clicks_to_the_cell_the_user_sees() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    overlay_paint(&mut app, "", "nil");
+    assert!(app.run_lua(
+        r#"
+        _G.__presses = {}
+        _G.__paint:on("press", function(ev)
+          table.insert(_G.__presses, ("%d,%d"):format(ev.x, ev.y))
+        end)
+        -- Upside down: screen row y shows laid-out row h - 1 - y.
+        _G.__flip = smelt.paint.frame(function(slice)
+          local snap = slice:snapshot()
+          local h = slice:height()
+          for y = 0, h - 1 do
+            for x = 0, slice:width() - 1 do
+              local cell = snap:get(x, h - 1 - y)
+              if cell.width > 0 then slice:set(x, y, cell.ch, cell.style) end
+            end
+          end
+        end, { map_pointer = function(x, y, _, h) return x, h - 1 - y end })
+        _G.__noop = smelt.paint.frame(function() end, {
+          order = 5, map_pointer = function() end,
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let left = crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left);
+    app.mouse(left, (5, 8));
+    assert_eq!(
+        app.eval_lua::<String>("return table.concat(_G.__presses, ' ')")
+            .unwrap(),
+        "1,1",
+        "the click on the flipped leaf lands on it"
+    );
+
+    assert!(app.run_lua("_G.__flip:remove()"));
+    app.mouse(left, (5, 8));
+    assert_eq!(
+        app.eval_lua::<String>("return table.concat(_G.__presses, ' ')")
+            .unwrap(),
+        "1,1",
+        "without the effect the click misses the leaf"
+    );
+}
+
+#[test]
+fn flip_example_turns_the_screen_upside_down() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(40, 12);
+    app.type_text("flipme");
+    app.render_silent();
+    let before = app.render_to_frame();
+
+    let guide = include_str!("../../../../../docs/docs/extend/ui.md");
+    let start = guide.find("-- Upside down.").expect("flip example");
+    let example = &guide[start..start + guide[start..].find("```").unwrap()];
+    assert!(app.run_lua(example), "{example}");
+    let after = app.render_to_frame();
+
+    let mut flipped = before.rows.clone();
+    flipped.reverse();
+    assert_eq!(after.rows, flipped, "\n{}", after.text());
 }
