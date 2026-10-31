@@ -365,6 +365,62 @@ fn goal_auto_continues_after_recoverable_quota_error() {
 }
 
 #[test]
+fn quota_pause_resumes_without_goal() {
+    let mut app = isolated_app();
+    // A goal cleared before the turn does not stop the turn's own work.
+    create_auto_goal(&mut app, "earlier work");
+    clear_goal(&mut app);
+    start_canonical_turn(&mut app);
+
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+        message: "quota exceeded".to_string(),
+        kind: Some(protocol::EngineAskErrorKind::Quota),
+        retry_at_ms: Some(0),
+    }));
+    app.wait_for_turn_persistence();
+
+    let cmds = run_due_timers(&mut app, 1300);
+    assert!(cmds.iter().any(|cmd| matches!(cmd, protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().is_empty())));
+}
+
+#[test]
+fn clearing_a_goal_stops_only_its_own_paused_turns() {
+    for (queued, goal_turn) in [(false, false), (false, true), (true, true)] {
+        let mut app = isolated_app();
+        create_auto_goal(&mut app, "scoped work");
+        if queued {
+            // The goal turn waits behind another turn, so it starts from the queue.
+            let turn_id = start_canonical_turn(&mut app);
+            assert!(app.run_lua(r#"require("smelt.goal").start("queued goal")"#));
+            app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+                turn_id,
+                history: None,
+                meta: None,
+            }));
+            app.wait_for_turn_persistence();
+        } else if goal_turn {
+            assert!(app.run_lua(r#"require("smelt.goal").start("goal work")"#));
+            app.wait_for_turn_persistence();
+        } else {
+            start_canonical_turn(&mut app);
+        }
+        assert!(app.agent_running());
+        clear_goal(&mut app);
+        quota_error(&mut app, Some(0));
+        assert_eq!(
+            app.eval_lua::<Option<String>>("return smelt.engine.continuation_state().command")
+                .unwrap(),
+            goal_turn.then(|| "goal".to_string()),
+        );
+        assert_eq!(
+            has_started_turn(&run_due_timers(&mut app, 1300)),
+            !goal_turn,
+            "queued={queued} goal_turn={goal_turn}"
+        );
+    }
+}
+
+#[test]
 fn auto_continue_off_disables_quota_retry() {
     let mut app = isolated_app();
     assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
@@ -454,7 +510,8 @@ fn quota_pause_blocks_idle_dispatch_and_keeps_both_queue_stages_visible() {
     app.type_text("next turn");
     app.press(crossterm::event::KeyCode::Enter);
     let _ = app.drain_engine_sends();
-    quota_error(&mut app, Some(123_000));
+    let reset_at_ms = engine::clock::unix_time_ms(app.clock.as_ref()) + 3_600_000;
+    quota_error(&mut app, Some(reset_at_ms));
 
     assert!(!app.start_next_queued_input_if_idle());
     assert_eq!(app.state().queued_inputs.len(), 2);

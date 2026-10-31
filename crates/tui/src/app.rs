@@ -1,4 +1,5 @@
 pub(crate) mod agent;
+pub(crate) use agent::CommandScope;
 pub(crate) mod cmdline;
 pub(crate) mod cmdline_edit;
 pub(crate) mod cmdline_history;
@@ -1759,12 +1760,12 @@ impl TuiApp {
             QueuedInput::Request(req) => {
                 let req = *req;
                 match req.turn_options {
-                    QueuedTurnOptions::CustomCommand { overrides } => {
+                    QueuedTurnOptions::CustomCommand { scope } => {
                         let text = req.content.text_content().into_owned();
                         let turn = self.begin_command_request_turn(
                             req.display,
                             text,
-                            *overrides,
+                            *scope,
                             CommandTurnStart::Fresh,
                             req.sent_at_ms,
                         );

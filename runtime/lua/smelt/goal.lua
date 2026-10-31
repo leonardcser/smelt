@@ -3,6 +3,8 @@
 local M = {}
 
 local CONTEXT_NOTE = "goal"
+-- The custom command that goal turns run as.
+local COMMAND = "goal"
 local AUTO_DELAY_MS = 1200
 
 local STATE = {
@@ -396,17 +398,25 @@ function M.auto_continue_request()
   local goal = session_goal()
   if not is_active(goal) or goal.auto_continue == false then return nil end
   return {
-    name = "goal",
+    name = COMMAND,
     body = continuation_prompt(goal),
     display = "goal continue",
   }
+end
+
+-- An unfinished goal resumes a paused turn only while it runs on auto. A goal's
+-- own turn also stops once the goal is cleared or done; other turns resume.
+function M.allows_resume(continuation)
+  local goal = session_goal()
+  if is_unfinished(goal) then return is_active(goal) and goal.auto_continue ~= false end
+  return continuation.command ~= COMMAND
 end
 
 function M.continue(reason, continuation_token)
   local goal = session_goal()
   if not is_active(goal) then return false end
   local request = {
-    name = "goal",
+    name = COMMAND,
     body = continuation_prompt(goal),
     display = reason == "auto" and "goal continue" or "goal",
   }
@@ -440,7 +450,7 @@ end
 function M.start(text)
   local goal, err = M.create(text, { auto_continue = true })
   if not goal then return nil, err end
-  smelt.engine.submit_command("goal", continuation_prompt(goal), nil, "goal " .. goal.objective)
+  smelt.engine.submit_command(COMMAND, continuation_prompt(goal), nil, "goal " .. goal.objective)
   return goal
 end
 
@@ -631,6 +641,7 @@ function M.setup()
   auto_continue.set_provider(function()
     return M.auto_continue_request()
   end)
+  auto_continue.set_resume_policy(M.allows_resume)
   auto_continue.setup()
 end
 

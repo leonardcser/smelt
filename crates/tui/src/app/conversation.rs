@@ -2270,15 +2270,12 @@ impl ConversationRuntime {
         self.turn.finish_dispatch(dispatch);
     }
 
-    pub(crate) fn begin_prepared_turn(
-        &mut self,
-        overrides: smelt_core::custom_commands::CommandOverrides,
-    ) {
-        self.turn.begin_prepared_turn(overrides);
+    pub(crate) fn begin_prepared_turn(&mut self, command: super::agent::CommandScope) {
+        self.turn.begin_prepared_turn(command);
     }
 
-    pub(crate) fn turn_request_overrides(&self) -> &smelt_core::custom_commands::CommandOverrides {
-        &self.turn.request_overrides
+    pub(crate) fn turn_command(&self) -> &super::agent::CommandScope {
+        &self.turn.command
     }
 
     pub(crate) fn record_started_turn(

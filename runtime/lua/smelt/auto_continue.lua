@@ -12,6 +12,7 @@ local timer
 local subscriptions = {}
 local setup_done = false
 local provider
+local resume_policy
 
 local function trim(s)
   return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -72,6 +73,16 @@ local function recoverable_pause(state)
     and (state.error_kind == "quota" or state.error_kind == "rate_limited")
 end
 
+-- Resuming a paused turn finishes work the user already asked for, so only
+-- `off` or the resume policy stops it. New work follows the continuation policy.
+local function can_continue(state)
+  if state.paused then
+    return recoverable_pause(state) and mode() ~= "off"
+      and (not resume_policy or resume_policy(state))
+  end
+  return auto_continue_request() ~= nil
+end
+
 local function current(schedule, state)
   return schedule and schedule.session == smelt.session.id() and schedule.token == state.token
 end
@@ -110,7 +121,7 @@ local function publish_status()
   local status
   if state.paused and state.error_kind ~= "cancelled" then
     status = { kind = state.error_kind or "other", phase = "paused" }
-    if current(pending, state) and recoverable_pause(state) and auto_continue_request() then
+    if current(pending, state) and can_continue(state) then
       status.next_attempt_at_ms = pending.at_ms
       status.phase = now_ms() >= pending.at_ms and "waiting_for_idle" or "scheduled"
     end
@@ -129,10 +140,9 @@ local function clear_pending()
 end
 
 function M.continue(continuation_token)
-  local request = auto_continue_request()
-  if not request then return false end
   local state = smelt.engine.continuation_state()
   if state.paused then
+    if not can_continue(state) then return false end
     local started = continuation_token ~= nil and smelt.engine.resume_paused(continuation_token)
     local retry = retry_state.recovery
     if started and current(retry, state) then
@@ -145,6 +155,8 @@ function M.continue(continuation_token)
     end
     return started
   end
+  local request = auto_continue_request()
+  if not request then return false end
   if continuation_token then
     return smelt.engine.submit_command_continuation(
       request.name, request.body, nil, request.display, continuation_token
@@ -161,7 +173,7 @@ local function arm(delay)
     if pending ~= scheduled then return end
     timer = nil
     local state = smelt.engine.continuation_state()
-    if not current(scheduled, state) or not auto_continue_request() then
+    if not current(scheduled, state) or not can_continue(state) then
       clear_pending()
     elseif smelt.engine.has_active_turn() or smelt.work.is_busy() or smelt.prompt.is_modal()
       or not prompt_is_empty() or (not state.paused and #smelt.prompt.queued() > 0) then
@@ -190,7 +202,7 @@ function M.refresh()
     and retry.awaiting_result and smelt.engine.has_active_turn()) then
     retry_state.recovery = nil
   end
-  if not state.token or not auto_continue_request() or (state.paused and not recovery) then
+  if not state.token or not can_continue(state) or (state.paused and not recovery) then
     clear_pending()
   else
     if not current(pending, state) then
@@ -208,6 +220,12 @@ end
 
 function M.set_provider(fn)
   provider = fn
+end
+
+-- `fn(state)` says whether the turn `smelt.engine.continuation_state()` reports
+-- as paused by a quota or rate limit may resume.
+function M.set_resume_policy(fn)
+  resume_policy = fn
 end
 
 function M.schedule(continuation_token)

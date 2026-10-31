@@ -141,8 +141,12 @@ Set it with `smelt.settings.auto_continue`: `"goal"` (default) continues active
 goals, `"off"` never continues, and `"always"` continues any idle session.
 
 If a provider reports a quota or rate-limit error, smelt pauses and queues
-anything you type. When the provider gives a reset time and auto-continue allows
-it, smelt retries on its own and shows `quota exceeded · resuming at 14:30`.
+anything you type, then resumes the interrupted turn on its own. When the
+provider gives a reset time, smelt shows `quota exceeded · resuming at 14:30` and
+resumes then. Otherwise it retries with a growing delay. This finishes work you
+already asked for, so it happens in `"goal"` mode without a goal too. It does
+not happen with `"off"`, while a goal is paused or blocked, or for a goal's own
+turn once that goal is done or cleared.
 Press `Enter` on an empty prompt to retry now, or `Esc Esc` to stop the retry
 (queued messages are kept).
 
