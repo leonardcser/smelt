@@ -21,6 +21,10 @@ const DROP_PERSISTENCE_DEADLINE: Duration = Duration::from_millis(250);
 const IDLE_RECLAMATION_INTERVAL: Duration = Duration::from_secs(1);
 /// Every save restarts a reclamation pass, so passes wait for the head to settle.
 const RECLAMATION_QUIET: Duration = Duration::from_secs(5);
+/// Lock contention clears on its own, so a transient block retries itself, backing off from the
+/// first delay up to the cap while the lock stays held.
+const AUTOMATIC_RETRY_FIRST_DELAY: Duration = Duration::from_millis(250);
+const AUTOMATIC_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SessionEpoch(u64);
@@ -59,7 +63,11 @@ enum CanonicalCommitStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PersistenceRecoveryAction {
+    /// Waits for `/retry-save` after the storage problem is fixed.
     Retry,
+    /// The actor retries on its own because the failure was lock contention; `/retry-save`
+    /// retries at once.
+    AutomaticRetry,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,6 +76,9 @@ pub(crate) struct PersistenceCause {
     pub(crate) message: String,
     canonical_commit: CanonicalCommitStatus,
     recovery_action: Option<PersistenceRecoveryAction>,
+    /// Another connection or process held a lock the operation needed, so the same operation
+    /// can succeed once it frees.
+    transient: bool,
 }
 
 impl PersistenceCause {
@@ -77,7 +88,13 @@ impl PersistenceCause {
             message: message.into(),
             canonical_commit: CanonicalCommitStatus::NotCommitted,
             recovery_action: None,
+            transient: false,
         }
+    }
+
+    fn transient(mut self) -> Self {
+        self.transient = true;
+        self
     }
 
     fn with_unknown_commit(mut self) -> Self {
@@ -109,7 +126,11 @@ impl PersistenceCause {
 
     fn with_explicit_retry(mut self) -> Self {
         if self.supports_explicit_retry() {
-            self.recovery_action = Some(PersistenceRecoveryAction::Retry);
+            self.recovery_action = Some(if self.transient {
+                PersistenceRecoveryAction::AutomaticRetry
+            } else {
+                PersistenceRecoveryAction::Retry
+            });
         }
         self
     }
@@ -147,7 +168,13 @@ impl PersistenceCause {
                 PersistenceFailureClass::Environment
             }
         };
-        Self::new(class, format!("{operation}: {error}"))
+        let transient = matches!(error, smelt_store::StoreError::Busy { .. });
+        let cause = Self::new(class, format!("{operation}: {error}"));
+        if transient {
+            cause.transient()
+        } else {
+            cause
+        }
     }
 
     fn from_commit(error: &smelt_store::SessionCommitFailure) -> Self {
@@ -177,7 +204,12 @@ impl PersistenceCause {
                 PersistenceFailureClass::Invariant
             }
         };
-        Self::new(class, describe_commit_failure(error))
+        let cause = Self::new(class, describe_commit_failure(error));
+        if matches!(error, smelt_store::SessionCommitFailure::Busy { .. }) {
+            cause.transient()
+        } else {
+            cause
+        }
     }
 }
 
@@ -1983,6 +2015,8 @@ struct RetainedSessionSave {
 struct PersistenceBlock {
     cause: PersistenceCause,
     retained_canonical_operation: Option<RetainedCanonicalOperation>,
+    /// When the actor retries a transient block on its own.
+    automatic_retry_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2033,6 +2067,8 @@ struct PersistenceActor {
     last_publication: Option<PersistenceAcknowledgement>,
     retained_save: Option<RetainedSessionSave>,
     blocked: Option<PersistenceBlock>,
+    /// The last automatic retry delay, doubled for each transient block in a row.
+    automatic_retry_delay: Option<Duration>,
     audits: VecDeque<QueuedAudit>,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
@@ -2161,6 +2197,7 @@ fn persistence_actor(
         last_publication: None,
         retained_save: None,
         blocked: None,
+        automatic_retry_delay: None,
         audits: VecDeque::new(),
         pending_audits,
         pending_full_audit_bytes,
@@ -2197,17 +2234,16 @@ impl PersistenceActor {
                     match controls.try_recv() {
                         Ok(control) => control,
                         Err(TryRecvError::Empty) if self.drive_one_audit() => continue,
+                        Err(TryRecvError::Empty) if self.drive_automatic_retry() => continue,
                         Err(TryRecvError::Empty) if self.drive_one_reclamation() => continue,
-                        Err(TryRecvError::Empty) => {
-                            match controls.recv_timeout(IDLE_RECLAMATION_INTERVAL) {
-                                Ok(control) => control,
-                                Err(RecvTimeoutError::Timeout) => continue,
-                                Err(RecvTimeoutError::Disconnected) => {
-                                    self.finish_after_control_disconnect();
-                                    return;
-                                }
+                        Err(TryRecvError::Empty) => match controls.recv_timeout(self.idle_wait()) {
+                            Ok(control) => control,
+                            Err(RecvTimeoutError::Timeout) => continue,
+                            Err(RecvTimeoutError::Disconnected) => {
+                                self.finish_after_control_disconnect();
+                                return;
                             }
-                        }
+                        },
                         Err(TryRecvError::Disconnected) => {
                             self.finish_after_control_disconnect();
                             return;
@@ -2648,6 +2684,38 @@ impl PersistenceActor {
             .publish_command_failure(command_id, desired, cause);
     }
 
+    fn clear_block(&mut self) {
+        self.blocked = None;
+        self.automatic_retry_delay = None;
+    }
+
+    fn automatic_retry_at(&self) -> Option<Instant> {
+        self.blocked
+            .as_ref()
+            .and_then(|blocked| blocked.automatic_retry_at)
+    }
+
+    fn drive_automatic_retry(&mut self) -> bool {
+        if self
+            .automatic_retry_at()
+            .is_none_or(|at| at > Instant::now())
+        {
+            return false;
+        }
+        smelt_perf::perf::record_value("persist:recovery:automatic_retry", 1);
+        self.retry_blocked_operation();
+        true
+    }
+
+    /// Sleeps until the next control, but no longer than idle reclamation or a due retry allow.
+    fn idle_wait(&self) -> Duration {
+        self.automatic_retry_at()
+            .map_or(IDLE_RECLAMATION_INTERVAL, |at| {
+                at.saturating_duration_since(Instant::now())
+                    .min(IDLE_RECLAMATION_INTERVAL)
+            })
+    }
+
     fn block_persistence(
         &mut self,
         desired: PersistenceGeneration,
@@ -2655,9 +2723,30 @@ impl PersistenceActor {
         retained_canonical_operation: Option<RetainedCanonicalOperation>,
     ) {
         let cause = cause.with_explicit_retry();
+        let automatic_retry_at =
+            (cause.recovery_action == Some(PersistenceRecoveryAction::AutomaticRetry)).then(|| {
+                let delay = self
+                    .automatic_retry_delay
+                    .map_or(AUTOMATIC_RETRY_FIRST_DELAY, |delay| {
+                        delay.saturating_mul(2).min(AUTOMATIC_RETRY_MAX_DELAY)
+                    });
+                self.automatic_retry_delay = Some(delay);
+                Instant::now() + delay
+            });
+        engine::log::entry(
+            engine::log::Level::Warn,
+            "session_persistence_blocked",
+            &serde_json::json!({
+                "class": format!("{:?}", cause.class),
+                "message": cause.message,
+                "desired_generation": desired.get(),
+                "automatic_retry_ms": automatic_retry_at.and(self.automatic_retry_delay).map(|delay| delay.as_millis() as u64),
+            }),
+        );
         self.blocked = Some(PersistenceBlock {
             cause: cause.clone(),
             retained_canonical_operation,
+            automatic_retry_at,
         });
         let state = if cause.class == PersistenceFailureClass::Ownership {
             record_failure_transition("persist:ownership_lost:transitions", cause.class);
@@ -2723,7 +2812,7 @@ impl PersistenceActor {
             Ok(result) => {
                 self.head = result.receipt.current;
                 self.durable = save.prepared.generation;
-                self.blocked = None;
+                self.clear_block();
                 self.last_publication =
                     Some(self.publisher.publish_durable(&save.prepared, result, None));
             }
@@ -3108,7 +3197,7 @@ impl PersistenceActor {
         };
         self.head = receipt.session.current;
         self.durable = intent.session.generation;
-        self.blocked = None;
+        self.clear_block();
         let persistence = self.publisher.publish_durable(
             &prepared,
             result.session,
@@ -3174,7 +3263,7 @@ impl PersistenceActor {
         };
         self.head = receipt.session.current;
         self.durable = intent.session.generation;
-        self.blocked = None;
+        self.clear_block();
         let persistence = self.publisher.publish_durable(
             &prepared,
             result.session,
@@ -4820,6 +4909,85 @@ mod tests {
         );
         let reader = lineage_reader();
         assert_eq!(reader.turns().unwrap().len(), 1);
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    fn busy_commit_failure() -> smelt_store::SessionCommitFailure {
+        smelt_store::SessionCommitFailure::Busy {
+            operation: "lock session catalog marker".into(),
+            attempts: 1731,
+            waited_ms: 2000,
+        }
+    }
+
+    /// Flushes until the actor stops reporting the block, without ever asking it to retry.
+    fn flush_until_recovered(
+        actor: &ActorFixture,
+        target: PersistenceGeneration,
+    ) -> PersistenceFlushOutcome {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let outcome = actor.flush(target, deadline);
+            match &outcome {
+                PersistenceFlushOutcome::Blocked { cause, .. } if Instant::now() < deadline => {
+                    assert_eq!(
+                        cause.recovery_action(),
+                        Some(PersistenceRecoveryAction::AutomaticRetry)
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                _ => return outcome,
+            }
+        }
+    }
+
+    #[test]
+    fn busy_save_retries_without_an_explicit_retry() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.inject_commit_failure(busy_commit_failure());
+        actor.inject_commit_failure(busy_commit_failure());
+        actor.submit(actor.prepare_save(1, &["saved"])).unwrap();
+
+        assert!(matches!(
+            flush_until_recovered(&actor, PersistenceGeneration::new(1)),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        assert_eq!(lineage_reader().store_head().unwrap().history_len.get(), 1);
+        let _ = actor.close(
+            PersistenceGeneration::new(1),
+            deadline(),
+            ClosePolicy::RequireDurable,
+        );
+    }
+
+    #[test]
+    fn busy_turn_submission_retries_without_an_explicit_retry() {
+        let _home = crate::app::test_harness::initialized_test_home_guard();
+        let mut actor = actor();
+        actor.inject_commit_failure(busy_commit_failure());
+
+        let outcome = actor
+            .submit_turn(actor.prepare_submit(1, &["contended submit"]), deadline())
+            .expect("busy submission remains pending");
+        assert!(matches!(outcome, SubmitTurnOutcome::Pending { .. }));
+
+        assert!(matches!(
+            flush_until_recovered(&actor, PersistenceGeneration::new(1)),
+            PersistenceFlushOutcome::Durable { durable, .. }
+                if durable == PersistenceGeneration::new(1)
+        ));
+        assert!(actor
+            .take_status()
+            .canonical_completions
+            .iter()
+            .any(|completion| matches!(completion, CanonicalCommandCompletion::Submit(_))));
+        assert_eq!(lineage_reader().turns().unwrap().len(), 1);
         let _ = actor.close(
             PersistenceGeneration::new(1),
             deadline(),
