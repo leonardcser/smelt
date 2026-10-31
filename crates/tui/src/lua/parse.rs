@@ -115,30 +115,56 @@ pub(crate) fn style(t: &mlua::Table) -> Result<Style, String> {
     Ok(style)
 }
 
-/// Apply a partial style table over `base`: only keys present in `t` change.
+/// A partial style: `None` fields keep the base style's value.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StylePatch {
+    fg: Option<Option<Color>>,
+    bg: Option<Option<Color>>,
+    bold: Option<bool>,
+    dim: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    crossedout: Option<bool>,
+    reverse: Option<bool>,
+}
+
+impl StylePatch {
+    pub(crate) fn apply(self, base: Style) -> Style {
+        Style {
+            fg: self.fg.unwrap_or(base.fg),
+            bg: self.bg.unwrap_or(base.bg),
+            bold: self.bold.unwrap_or(base.bold),
+            dim: self.dim.unwrap_or(base.dim),
+            italic: self.italic.unwrap_or(base.italic),
+            underline: self.underline.unwrap_or(base.underline),
+            crossedout: self.crossedout.unwrap_or(base.crossedout),
+            reverse: self.reverse.unwrap_or(base.reverse),
+        }
+    }
+}
+
+/// Parse a partial style table: only keys present in `t` change.
 /// `fg = false` / `bg = false` clear a color.
-pub(crate) fn style_patch(t: &mlua::Table, base: Style) -> Result<Style, String> {
-    let mut style = base;
-    for (key, slot) in [("fg", &mut style.fg), ("bg", &mut style.bg)] {
+pub(crate) fn style_patch(t: &mlua::Table) -> Result<StylePatch, String> {
+    let mut patch = StylePatch::default();
+    for (key, slot) in [("fg", &mut patch.fg), ("bg", &mut patch.bg)] {
         match t.get::<mlua::Value>(key).map_err(|e| e.to_string())? {
             mlua::Value::Nil => {}
-            mlua::Value::Boolean(false) => *slot = None,
-            value => *slot = color_opt(Some(value))?,
+            mlua::Value::Boolean(false) => *slot = Some(None),
+            value => *slot = Some(color_opt(Some(value))?),
         }
     }
     for (key, slot) in [
-        ("bold", &mut style.bold),
-        ("dim", &mut style.dim),
-        ("italic", &mut style.italic),
-        ("underline", &mut style.underline),
-        ("crossedout", &mut style.crossedout),
-        ("reverse", &mut style.reverse),
+        ("bold", &mut patch.bold),
+        ("dim", &mut patch.dim),
+        ("italic", &mut patch.italic),
+        ("underline", &mut patch.underline),
+        ("crossedout", &mut patch.crossedout),
+        ("reverse", &mut patch.reverse),
     ] {
-        if let Some(on) = t.get::<Option<bool>>(key).map_err(|e| e.to_string())? {
-            *slot = on;
-        }
+        *slot = t.get::<Option<bool>>(key).map_err(|e| e.to_string())?;
     }
-    Ok(style)
+    Ok(patch)
 }
 
 /// Project a `Style` to a Lua style table. Unset fields are omitted so the

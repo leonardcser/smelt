@@ -116,10 +116,6 @@ impl CellSymbol {
         Self(CompactString::from(symbol))
     }
 
-    fn continuation() -> Self {
-        Self::new(Self::CONTINUATION)
-    }
-
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -138,6 +134,12 @@ impl CellSymbol {
 
     fn push_str(&mut self, suffix: &str) {
         self.0.push_str(suffix);
+    }
+
+    /// Replace the symbol, reusing its storage.
+    fn set(&mut self, symbol: &str) {
+        self.0.clear();
+        self.0.push_str(symbol);
     }
 }
 
@@ -170,18 +172,18 @@ impl Cell {
             image: None,
         }
     }
+}
 
-    fn with_image(mut self, image: Arc<RasterImage>) -> Self {
-        let id = image.id;
-        self.style.fg = Some(Color::Rgb {
-            r: (id >> 16) as u8,
-            g: (id >> 8) as u8,
-            b: id as u8,
-        });
-        self.style.reverse = false;
-        self.image = Some(image);
-        self
-    }
+/// Kitty Unicode placeholders carry the image id in their foreground color.
+fn image_style(mut style: Style, image: &RasterImage) -> Style {
+    let id = image.id;
+    style.fg = Some(Color::Rgb {
+        r: (id >> 16) as u8,
+        g: (id >> 8) as u8,
+        b: id as u8,
+    });
+    style.reverse = false;
+    style
 }
 
 impl Default for Cell {
@@ -269,7 +271,7 @@ impl Grid {
         if symbol_width(symbol) == 0 {
             self.append_zero_width(x, y, symbol, right_limit);
         } else {
-            self.write_cell_clipped(x, y, Cell::new(symbol, style), right_limit);
+            self.write_cell_clipped(x, y, symbol, style, None, right_limit);
         }
     }
 
@@ -292,7 +294,7 @@ impl Grid {
         let mut combined = self.cells[idx].symbol.clone();
         combined.push_str(symbol);
         let style = self.cells[idx].style;
-        self.write_cell_clipped(lead_x, y, Cell::new(combined.as_str(), style), right_limit);
+        self.write_cell_clipped(lead_x, y, combined.as_str(), style, None, right_limit);
     }
 
     /// Single mutation entry point. Every cell write - `set`, `put_char`,
@@ -319,18 +321,26 @@ impl Grid {
     ///
     /// Cleared cells inherit the new cell's style so a styled background
     /// stays visually contiguous across the now-narrow run.
-    fn write_cell_clipped(&mut self, x: u16, y: u16, new_cell: Cell, right_limit: u16) {
+    fn write_cell_clipped(
+        &mut self,
+        x: u16,
+        y: u16,
+        symbol: &str,
+        new_style: Style,
+        image: Option<Arc<RasterImage>>,
+        right_limit: u16,
+    ) {
         if x >= self.width || y >= self.height {
             return;
         }
         let right_limit = right_limit.min(self.width);
-        let new_cell = if new_cell.symbol.width() == 2 && x + 1 >= right_limit {
-            Cell::new(" ", new_cell.style)
+        let mut new_width = symbol_width(symbol);
+        let (symbol, image) = if new_width == 2 && x + 1 >= right_limit {
+            new_width = 1;
+            (" ", None)
         } else {
-            new_cell
+            (symbol, image)
         };
-        let new_width = new_cell.symbol.width();
-        let new_style = new_cell.style;
         let idx = self.idx(x, y);
         let old_width = self.cells[idx].symbol.width();
         let old_was_continuation = self.cells[idx].symbol.is_continuation();
@@ -348,7 +358,10 @@ impl Grid {
             }
         }
 
-        self.cells[idx] = new_cell;
+        let cell = &mut self.cells[idx];
+        cell.symbol.set(symbol);
+        cell.style = new_style;
+        cell.image = image;
 
         if new_width == 2 && x + 1 < self.width {
             let cont = self.idx(x + 1, y);
@@ -359,11 +372,10 @@ impl Grid {
                     self.cells[dispcont] = Cell::new(" ", new_style);
                 }
             }
-            self.cells[cont] = Cell {
-                symbol: CellSymbol::continuation(),
-                style: new_style,
-                image: None,
-            };
+            let cell = &mut self.cells[cont];
+            cell.symbol.set(CellSymbol::CONTINUATION);
+            cell.style = new_style;
+            cell.image = None;
         }
     }
 
@@ -383,7 +395,7 @@ impl Grid {
         let idx = self.idx(x, y);
         let mut style = self.cells[idx].style;
         style.fg = Some(fg);
-        self.write_cell_clipped(x, y, Cell::new(symbol, style), right_limit);
+        self.write_cell_clipped(x, y, symbol, style, None, right_limit);
     }
 
     fn fill(&mut self, area: Rect, symbol: char, style: Style) {
@@ -394,13 +406,12 @@ impl Grid {
         } else {
             symbol
         };
-        let new_cell = Cell::new(symbol, style);
         let right = area.right().min(self.width);
-        let width = new_cell.symbol.width();
+        let width = symbol_width(symbol);
         for row in area.y..area.bottom().min(self.height) {
             let mut col = area.x;
             while col < right {
-                self.write_cell_clipped(col, row, new_cell.clone(), right);
+                self.write_cell_clipped(col, row, symbol, style, None, right);
                 let step = if width == 2 && col.saturating_add(1) < right {
                     2
                 } else {
@@ -548,7 +559,9 @@ impl<'a> GridSlice<'a> {
             self.grid.write_cell_clipped(
                 self.area.x + x,
                 self.area.y + y,
-                Cell::new(symbol, style).with_image(image),
+                symbol,
+                image_style(style, &image),
+                Some(image),
                 self.area.right(),
             );
         }
@@ -575,13 +588,10 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Read a cell at slice-local coords; returns default `Cell` when out of bounds.
-    pub fn cell(&self, x: u16, y: u16) -> Cell {
-        if x < self.area.width && y < self.area.height {
-            self.grid.cell(self.area.x + x, self.area.y + y).clone()
-        } else {
-            Cell::default()
-        }
+    /// Read a cell at slice-local coords; returns `None` when out of bounds.
+    pub fn cell(&self, x: u16, y: u16) -> Option<&Cell> {
+        (x < self.area.width && y < self.area.height)
+            .then(|| self.grid.cell(self.area.x + x, self.area.y + y))
     }
 
     /// Mutable cell access at slice-local coords. See [`Grid::cell_mut`] for caveats.
