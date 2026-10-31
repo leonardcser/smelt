@@ -1034,7 +1034,8 @@ impl TranscriptDocument {
             previous_record_index = Some(*record_index);
         }
         smelt_perf::perf::record_value("transcript:hydration:ensure_ids:ranges", range_count);
-        self.pending_hydration.request_blocks(requested);
+        self.pending_hydration
+            .request_blocks(requested.into_iter().map(|(_, id, stored)| (id, stored)));
         self.touch_hydrated(ids);
         self.enforce_hydrated_budget();
         ids.iter()
@@ -7105,6 +7106,133 @@ mod document_tests {
 
         assert_eq!(document.history().order.len(), 1);
         assert!(document.history().block(last_id).is_none());
+    }
+
+    #[test]
+    fn hydration_read_after_a_shifting_save_stays_saveable() {
+        let mut source = fixed_transcript(3);
+        let records = source.history.block_records_with_ids();
+        let dir = tempfile::tempdir().unwrap();
+        let store_address = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix_with_ids(&store_address, 0, &records)
+            .unwrap();
+        source.history.clear_record_dirty();
+        let last_id = source.history.order[2];
+        let stored = source
+            .history
+            .stored_ref_for_materialized(last_id, 2)
+            .unwrap();
+        let mut document = TranscriptDocument::from_transcript(source);
+        document.set_store_address(Some(store_address.clone()));
+        assert!(document.history_mut().dematerialize_live(last_id, stored) > 0);
+        assert!(!document.ensure_hydrated_ids(&[last_id]));
+        let stale_request = document.take_pending_hydration_request().unwrap();
+
+        document.insert_checkpoint_marker_at(
+            1,
+            0,
+            Block::Text {
+                content: "inserted".into(),
+            },
+        );
+        let mut shifted = document.history().block_records_with_ids_from(1);
+        shifted.truncate(1);
+        shifted.extend(records[1..].iter().cloned());
+        crate::persist::write_transcript_record_suffix_with_ids(&store_address, 1, &shifted)
+            .unwrap();
+        let bounds = TranscriptRecordSaveBounds {
+            order_start: 1,
+            record_start_idx: 1,
+            record_end_idx: 4,
+        };
+        document.apply_persisted_record_suffix(bounds, 4);
+        assert_eq!(
+            document.history().stored_ref(last_id).unwrap().record_index,
+            3
+        );
+
+        let result =
+            super::super::transcript_hydration::execute_hydration_request_for_test(stale_request)
+                .unwrap();
+        document.install_hydration_result(result);
+
+        let save_bounds = TranscriptRecordSaveBounds {
+            order_start: 3,
+            record_start_idx: 3,
+            record_end_idx: 4,
+        };
+        assert_ne!(
+            document.pin_record_suffix_for_save(Some(save_bounds)),
+            Err(TranscriptSaveHydrationError::Failed),
+            "a read against a newer head must not fail the save"
+        );
+        document.unpin_record_suffix_after_save();
+        hydrate_ids(&mut document, &[last_id]);
+        assert!(
+            matches!(document.history().block(last_id), Some(Block::Text { content }) if content == "block 2")
+        );
+    }
+
+    #[test]
+    fn hydration_installed_after_a_shifting_save_keeps_the_new_record_index() {
+        let mut source = fixed_transcript(3);
+        let records = source.history.block_records_with_ids();
+        let dir = tempfile::tempdir().unwrap();
+        let store_address = create_test_lineage_session(dir.path());
+        crate::persist::write_transcript_record_suffix_with_ids(&store_address, 0, &records)
+            .unwrap();
+        source.history.clear_record_dirty();
+        let last_id = source.history.order[2];
+        let stored = source
+            .history
+            .stored_ref_for_materialized(last_id, 2)
+            .unwrap();
+        let mut document = TranscriptDocument::from_transcript(source);
+        document.set_store_address(Some(store_address.clone()));
+        assert!(
+            document
+                .history_mut()
+                .dematerialize_live(last_id, Arc::clone(&stored))
+                > 0
+        );
+        assert!(!document.ensure_hydrated_ids(&[last_id]));
+        let request = document.take_pending_hydration_request().unwrap();
+        let early_result =
+            super::super::transcript_hydration::execute_hydration_request_for_test(request)
+                .unwrap();
+
+        document.insert_checkpoint_marker_at(
+            1,
+            0,
+            Block::Text {
+                content: "inserted".into(),
+            },
+        );
+        let mut shifted = document.history().block_records_with_ids_from(1);
+        shifted.truncate(1);
+        shifted.extend(records[1..].iter().cloned());
+        crate::persist::write_transcript_record_suffix_with_ids(&store_address, 1, &shifted)
+            .unwrap();
+        document.apply_persisted_record_suffix(
+            TranscriptRecordSaveBounds {
+                order_start: 1,
+                record_start_idx: 1,
+                record_end_idx: 4,
+            },
+            4,
+        );
+        document.install_hydration_result(early_result);
+
+        assert_eq!(
+            document.history().stored_ref(last_id).unwrap().record_index,
+            3,
+            "a result read before the save must not restore the old record index"
+        );
+        assert!(document.history_mut().evict_hydrated(last_id) > 0);
+        hydrate_ids(&mut document, &[last_id]);
+        assert!(
+            matches!(document.history().block(last_id), Some(Block::Text { content }) if content == "block 2")
+        );
     }
 
     #[test]

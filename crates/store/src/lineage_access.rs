@@ -1452,6 +1452,91 @@ impl LineageSessionReader {
         Ok(result)
     }
 
+    /// Read records by block id from one head. Each block's record index is a hint: a save can
+    /// move records, so a block missing from its hint is looked up by id. Blocks the head no
+    /// longer holds are left out. Results keep the request order with their current indices.
+    pub fn transcript_blocks_by_id(
+        &self,
+        blocks: &[crate::TranscriptBlockLookup],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<(usize, StoredTranscriptBlock)>> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let head = lineage::lineage_session_head(&transaction, &self.lineage, &self.branch)?;
+        let root = &head.transcript_root;
+        let total = root.item_count();
+        let mut hinted = blocks
+            .iter()
+            .filter_map(|block| block.record_index_hint)
+            .map(|index| index as u64)
+            .filter(|index| *index < total)
+            .collect::<Vec<_>>();
+        hinted.sort_unstable();
+        hinted.dedup();
+        let mut at_hint = std::collections::HashMap::new();
+        let mut cursor = 0;
+        while cursor < hinted.len() {
+            if cancelled() {
+                return Err(StoreError::Cancelled);
+            }
+            let start = hinted[cursor];
+            let mut end = start + 1;
+            cursor += 1;
+            while hinted.get(cursor) == Some(&end) {
+                end += 1;
+                cursor += 1;
+            }
+            let records: Vec<StoredTranscriptBlock> =
+                lineage::deserialize_sequence_range(&transaction, &self.lineage, root, start, end)?;
+            for (offset, record) in records.into_iter().enumerate() {
+                at_hint.insert(start as usize + offset, record);
+            }
+        }
+        let mut found = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            if cancelled() {
+                return Err(StoreError::Cancelled);
+            }
+            let hit = block.record_index_hint.and_then(|index| {
+                at_hint
+                    .get(&index)
+                    .filter(|record| record.block_idx == block.block_idx)
+                    .map(|record| (index, record.clone()))
+            });
+            if let Some(hit) = hit {
+                found.push(hit);
+                continue;
+            }
+            let Some(index) = lineage::lineage_transcript_record_index_for_block_idx(
+                &transaction,
+                &self.lineage,
+                root,
+                block.block_idx,
+            )?
+            else {
+                continue;
+            };
+            let mut records: Vec<StoredTranscriptBlock> = lineage::deserialize_sequence_range(
+                &transaction,
+                &self.lineage,
+                root,
+                index as u64,
+                index as u64 + 1,
+            )?;
+            match records.pop() {
+                Some(record) if record.block_idx == block.block_idx && records.is_empty() => {
+                    found.push((index, record));
+                }
+                _ => {
+                    return Err(StoreError::Integrity(
+                        "transcript block lookup disagrees with its target record".into(),
+                    ));
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(found)
+    }
+
     /// Read the newest records of `kind` strictly before a history boundary.
     /// The page uses one consistent head and reads profiles, not record bodies.
     pub fn transcript_records_before_kind(
@@ -4298,6 +4383,55 @@ mod tests {
             Some(0)
         );
         assert!(reader.transcript_object_backed_range(50, 51).is_err());
+    }
+
+    #[test]
+    fn transcript_blocks_by_id_follow_moved_records_and_skip_missing_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('9');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records: (0..10)
+                .map(|index| transcript_record(index, format!("record {index}")))
+                .collect(),
+        });
+        writer.commit_session(&command).unwrap();
+
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        let lookup = |block_idx, record_index_hint| crate::TranscriptBlockLookup {
+            block_idx,
+            record_index_hint,
+        };
+        let found = reader
+            .transcript_blocks_by_id(
+                &[
+                    lookup(4, Some(2)),
+                    lookup(6, Some(5)),
+                    lookup(7, Some(3)),
+                    lookup(18, None),
+                    lookup(2, Some(99)),
+                ],
+                &|| false,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(index, record)| (index, record.block_idx, record.indexed_text))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            [
+                (2, 4, "record 2".to_owned()),
+                (3, 6, "record 3".to_owned()),
+                (9, 18, "record 9".to_owned()),
+                (1, 2, "record 1".to_owned()),
+            ]
+        );
+        assert!(matches!(
+            reader.transcript_blocks_by_id(&[lookup(4, Some(2))], &|| true),
+            Err(StoreError::Cancelled)
+        ));
     }
 
     #[test]

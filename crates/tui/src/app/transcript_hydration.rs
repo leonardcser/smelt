@@ -64,17 +64,9 @@ impl LoadedRecordWindow {
                 .into_records()
                 .into_iter()
                 .enumerate()
-                .map(|(offset, mut row)| {
-                    let indexed_text = std::mem::take(&mut row.indexed_text);
-                    let estimated_text_bytes = row.estimated_text_bytes;
-                    let record = TranscriptBlockRecordWithId::try_from(row).ok()?;
-                    let (block_id, stored) = StoredBlockRef::from_record(
-                        start.get().saturating_add(offset),
-                        record.block_id,
-                        &record.record,
-                        &indexed_text,
-                        estimated_text_bytes,
-                    );
+                .map(|(offset, row)| {
+                    let (block_id, stored, record) =
+                        stored_block_from_row(start.get().saturating_add(offset), row)?;
                     if materialize_block_ids.contains(&block_id) {
                         materialized.insert(block_id, (Arc::clone(&stored), record));
                     }
@@ -94,6 +86,23 @@ impl LoadedRecordWindow {
     }
 }
 
+fn stored_block_from_row(
+    record_index: usize,
+    mut row: smelt_store::StoredTranscriptBlock,
+) -> Option<(BlockId, Arc<StoredBlockRef>, TranscriptBlockRecordWithId)> {
+    let indexed_text = std::mem::take(&mut row.indexed_text);
+    let estimated_text_bytes = row.estimated_text_bytes;
+    let record = TranscriptBlockRecordWithId::try_from(row).ok()?;
+    let (block_id, stored) = StoredBlockRef::from_record(
+        record_index,
+        record.block_id,
+        &record.record,
+        &indexed_text,
+        estimated_text_bytes,
+    );
+    Some((block_id, stored, record))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingRecordHydration {
     pub(super) projection_range: Range<smelt_store::TranscriptRecordOffset>,
@@ -105,7 +114,7 @@ pub(super) struct PendingRecordHydration {
 pub(super) struct TranscriptHydrationQueue {
     record: Option<PendingRecordHydration>,
     record_semantic: bool,
-    blocks: BTreeMap<usize, (BlockId, Arc<StoredBlockRef>)>,
+    blocks: BTreeMap<BlockId, Arc<StoredBlockRef>>,
     revision: u64,
     dispatched_revision: u64,
 }
@@ -183,18 +192,16 @@ impl TranscriptHydrationQueue {
 
     pub(super) fn request_blocks(
         &mut self,
-        blocks: impl IntoIterator<Item = (usize, BlockId, Arc<StoredBlockRef>)>,
+        blocks: impl IntoIterator<Item = (BlockId, Arc<StoredBlockRef>)>,
     ) {
         let mut changed = false;
-        for (record_index, id, stored) in blocks {
-            let already_requested =
-                self.blocks
-                    .get(&record_index)
-                    .is_some_and(|(previous_id, previous)| {
-                        *previous_id == id && Arc::ptr_eq(previous, &stored)
-                    });
+        for (id, stored) in blocks {
+            let already_requested = self
+                .blocks
+                .get(&id)
+                .is_some_and(|previous| Arc::ptr_eq(previous, &stored));
             if !already_requested {
-                self.blocks.insert(record_index, (id, stored));
+                self.blocks.insert(id, stored);
                 changed = true;
             }
         }
@@ -237,8 +244,8 @@ impl TranscriptHydrationQueue {
             self.record = None;
             self.record_semantic = false;
         }
-        for record_index in &result.requested_block_indices {
-            self.blocks.remove(record_index);
+        for id in &result.requested_block_ids {
+            self.blocks.remove(id);
         }
     }
 
@@ -277,7 +284,7 @@ pub(super) struct TranscriptHydrationRequest {
     pub(super) store_address: TranscriptStoreAddress,
     pub(super) total_count: usize,
     pub(super) record: Option<PendingRecordHydration>,
-    pub(super) blocks: BTreeMap<usize, (BlockId, Arc<StoredBlockRef>)>,
+    pub(super) blocks: BTreeMap<BlockId, Arc<StoredBlockRef>>,
 }
 
 #[derive(Debug)]
@@ -289,7 +296,7 @@ pub struct TranscriptHydrationWorkerResult {
     pub(super) record: Option<PendingRecordHydration>,
     pub(super) record_windows: Vec<LoadedRecordWindow>,
     pub(super) record_complete: bool,
-    pub(super) requested_block_indices: Vec<usize>,
+    pub(super) requested_block_ids: Vec<BlockId>,
     pub(super) hydrated_blocks: Vec<(BlockId, Arc<StoredBlockRef>, TranscriptBlockRecordWithId)>,
     pub(super) failed_block_ids: Vec<BlockId>,
     pub(super) blocks_complete: bool,
@@ -510,13 +517,8 @@ pub(super) fn execute_hydration_request(
     cancelled: impl Fn() -> bool,
 ) -> Option<TranscriptHydrationWorkerResult> {
     let started_at = Instant::now();
-    let requested_block_indices = request.blocks.keys().copied().collect::<Vec<_>>();
-    let requested_by_id = request
-        .blocks
-        .values()
-        .map(|(id, stored)| (*id, Arc::clone(stored)))
-        .collect::<BTreeMap<_, _>>();
-    let mut materialize_block_ids = requested_by_id.keys().copied().collect::<HashSet<_>>();
+    let requested_block_ids = request.blocks.keys().copied().collect::<Vec<_>>();
+    let mut materialize_block_ids = requested_block_ids.iter().copied().collect::<HashSet<_>>();
     if let Some(record) = request.record.as_ref() {
         materialize_block_ids.extend(record.materialize_block_ids.iter().copied());
     }
@@ -543,50 +545,40 @@ pub(super) fn execute_hydration_request(
                 break;
             };
             for (block_id, (stored, record)) in materialized {
-                let stored = requested_by_id.get(&block_id).cloned().unwrap_or(stored);
+                let stored = request.blocks.get(&block_id).cloned().unwrap_or(stored);
                 hydrated_by_id.insert(block_id, (stored, record));
             }
             record_windows.push(window);
         }
     }
 
-    let mut ranges = Vec::<Range<usize>>::new();
-    for (record_index, (block_id, _)) in &request.blocks {
-        if hydrated_by_id.contains_key(block_id) {
-            continue;
-        }
-        match ranges.last_mut() {
-            Some(range) if range.end == *record_index => {
-                range.end = range.end.saturating_add(1);
+    // Saves can move records, so blocks are read by id and their known index is only a hint.
+    let lookups = materialize_block_ids
+        .iter()
+        .filter(|block_id| !hydrated_by_id.contains_key(*block_id))
+        .map(|block_id| smelt_store::TranscriptBlockLookup {
+            block_idx: block_id.get(),
+            record_index_hint: request
+                .blocks
+                .get(block_id)
+                .map(|stored| stored.record_index),
+        })
+        .collect::<Vec<_>>();
+    if !lookups.is_empty() {
+        hydration_ranges = hydration_ranges.saturating_add(block_lookup_ranges(&lookups));
+        match reader.transcript_blocks_by_id(&lookups, &cancelled) {
+            Ok(rows) => {
+                for (record_index, row) in rows {
+                    let Some((block_id, stored, record)) = stored_block_from_row(record_index, row)
+                    else {
+                        continue;
+                    };
+                    let stored = request.blocks.get(&block_id).cloned().unwrap_or(stored);
+                    hydrated_by_id.insert(block_id, (stored, record));
+                }
             }
-            Some(range) if range.end > *record_index => {}
-            _ => ranges.push(*record_index..record_index.saturating_add(1)),
-        }
-    }
-    for range in ranges {
-        if cancelled() {
-            return None;
-        }
-        hydration_ranges = hydration_ranges.saturating_add(1);
-        let records = reader
-            .transcript_record_slice_with_total(range.into(), request.total_count)
-            .ok()
-            .and_then(|slice| {
-                slice
-                    .into_records()
-                    .into_iter()
-                    .map(TranscriptBlockRecordWithId::try_from)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()
-            });
-        let Some(records) = records else {
-            continue;
-        };
-        for record in records {
-            let Some(stored) = requested_by_id.get(&record.block_id) else {
-                continue;
-            };
-            hydrated_by_id.insert(record.block_id, (Arc::clone(stored), record));
+            Err(smelt_store::StoreError::Cancelled) => return None,
+            Err(_) => {}
         }
     }
     let hydrated_blocks = hydrated_by_id
@@ -613,13 +605,34 @@ pub(super) fn execute_hydration_request(
         record: request.record,
         record_windows,
         record_complete,
-        requested_block_indices,
+        requested_block_ids,
         hydrated_blocks,
         failed_block_ids,
         blocks_complete,
         hydration_ranges,
         duration_us: u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
     })
+}
+
+/// Ranges a by-id read takes when every hint holds: one per run of adjacent hints, and one per
+/// block without a hint.
+fn block_lookup_ranges(lookups: &[smelt_store::TranscriptBlockLookup]) -> u64 {
+    let mut hints = lookups
+        .iter()
+        .filter_map(|lookup| lookup.record_index_hint)
+        .collect::<Vec<_>>();
+    hints.sort_unstable();
+    hints.dedup();
+    let runs = hints
+        .iter()
+        .enumerate()
+        .filter(|(position, index)| *position == 0 || hints[position - 1] + 1 != **index)
+        .count();
+    let unhinted = lookups
+        .iter()
+        .filter(|lookup| lookup.record_index_hint.is_none())
+        .count();
+    (runs + unhinted) as u64
 }
 
 pub(super) fn failed_hydration_result(
@@ -629,15 +642,11 @@ pub(super) fn failed_hydration_result(
     hydration_ranges: u64,
     started_at: Instant,
 ) -> TranscriptHydrationWorkerResult {
-    let requested_block_indices = request.blocks.keys().copied().collect();
+    let requested_block_ids = request.blocks.keys().copied().collect();
     let failed_block_ids = if blocks_complete {
         Vec::new()
     } else {
-        let mut failed = request
-            .blocks
-            .values()
-            .map(|(id, _)| *id)
-            .collect::<HashSet<_>>();
+        let mut failed = request.blocks.keys().copied().collect::<HashSet<_>>();
         if let Some(record) = request.record.as_ref() {
             failed.extend(record.materialize_block_ids.iter().copied());
         }
@@ -651,7 +660,7 @@ pub(super) fn failed_hydration_result(
         record: request.record,
         record_windows: Vec::new(),
         record_complete,
-        requested_block_indices,
+        requested_block_ids,
         hydrated_blocks: Vec::new(),
         failed_block_ids,
         blocks_complete,
@@ -855,7 +864,7 @@ mod tests {
             estimated_text_bytes,
         );
         let mut request = record_request(1, address, 0..10);
-        request.blocks.insert(5, (block_id, stored));
+        request.blocks.insert(block_id, stored);
 
         let result = execute_hydration_request(&reader, request, || false).unwrap();
 

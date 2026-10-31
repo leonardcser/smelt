@@ -37,6 +37,13 @@ impl From<usize> for TranscriptRecordOffset {
     }
 }
 
+/// A transcript block to read by id, with the record index it was last known at.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TranscriptBlockLookup {
+    pub block_idx: u64,
+    pub record_index_hint: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TranscriptRecordRange {
     start: TranscriptRecordOffset,

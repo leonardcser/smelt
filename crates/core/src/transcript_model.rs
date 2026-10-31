@@ -3389,6 +3389,9 @@ impl BlockHistory {
         stored: Arc<StoredBlockRef>,
         record: TranscriptBlockRecord,
     ) -> bool {
+        // A save may reindex the entry while the read is in flight, so its current reference
+        // wins over the one the read was requested with.
+        let stored = self.stored_ref(id).cloned().unwrap_or(stored);
         if stored.content_hash != 0
             && record.content_hash != 0
             && stored.content_hash != record.content_hash

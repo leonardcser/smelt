@@ -3559,6 +3559,23 @@ pub(crate) fn write_transcript_record_suffix(
     start_record_idx: usize,
     records: &[smelt_core::TranscriptBlockRecord],
 ) -> Result<(), smelt_store::StoreError> {
+    let records = records
+        .iter()
+        .enumerate()
+        .map(|(offset, record)| smelt_core::TranscriptBlockRecordWithId {
+            block_id: smelt_core::BlockId::new((start_record_idx + offset) as u64),
+            record: record.clone(),
+        })
+        .collect::<Vec<_>>();
+    write_transcript_record_suffix_with_ids(store, start_record_idx, &records)
+}
+
+#[cfg(any(test, feature = "harness"))]
+pub(crate) fn write_transcript_record_suffix_with_ids(
+    store: &smelt_core::session::SessionStoreAddress,
+    start_record_idx: usize,
+    records: &[smelt_core::TranscriptBlockRecordWithId],
+) -> Result<(), smelt_store::StoreError> {
     let session_id = store.session_id.as_str();
     let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
         &store.sessions_root,
@@ -3570,13 +3587,8 @@ pub(crate) fn write_transcript_record_suffix(
         .iter()
         .enumerate()
         .map(|(offset, record)| {
-            let record_idx = start_record_idx + offset;
-            let record = smelt_core::TranscriptBlockRecordWithId {
-                block_id: smelt_core::BlockId::new(record_idx as u64),
-                record: record.clone(),
-            };
             smelt_core::transcript_model::transcript_block_row_with_block_idx(
-                record_idx,
+                start_record_idx + offset,
                 record.block_id.get(),
                 &record.record,
             )
