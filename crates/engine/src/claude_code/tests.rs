@@ -1689,27 +1689,6 @@ async fn native_question_policy_change_rejects_stale_evaluation() {
 
 #[tokio::test]
 #[serial(claude_code)]
-async fn redaction_refusal_does_not_launch_native_process() {
-    let fixture = Fixture::new("text");
-    let mut handle = fixture.handle();
-    let UiCommand::StartTurn(mut request) = payload(fixture.root.path(), 1, Vec::new()) else {
-        unreachable!()
-    };
-    request.request_config.redact_secrets = true;
-    handle.send(UiCommand::StartTurn(request));
-    loop {
-        if let EngineOutput::Event(EngineEvent::TurnError { message, .. }) =
-            output(&mut handle).await
-        {
-            assert!(message.contains("redact_secrets"));
-            break;
-        }
-    }
-    assert!(!fixture.root.path().join("calls.jsonl").exists());
-}
-
-#[tokio::test]
-#[serial(claude_code)]
 async fn cancelled_native_control_ignores_late_permission_response() {
     let fixture = Fixture::new("permission-cancelled");
     let mut handle = fixture.handle();

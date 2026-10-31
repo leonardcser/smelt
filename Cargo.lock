@@ -3657,7 +3657,6 @@ dependencies = [
  "keyring-core",
  "libc",
  "rand 0.10.3",
- "regex",
  "reqwest",
  "serde",
  "serde_json",

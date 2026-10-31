@@ -1524,17 +1524,7 @@ impl TuiApp {
         String,
         smelt_core::custom_commands::CommandOverrides,
     ) {
-        let evaluated = if self.core.config.settings.redact_secrets {
-            engine::redact::redact(&cmd.body)
-        } else {
-            cmd.body
-        };
-        let display = if self.core.config.settings.redact_secrets {
-            engine::redact::redact(&format!("/{}", cmd.display))
-        } else {
-            format!("/{}", cmd.display)
-        };
-        (display, evaluated, cmd.overrides)
+        (format!("/{}", cmd.display), cmd.body, cmd.overrides)
     }
 
     pub(crate) fn begin_custom_command_turn(
@@ -3698,7 +3688,7 @@ mod tests {
 
         assert!(result.is_err(), "busy lineage deletion fails safely");
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
+            elapsed < crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
             "delete waited {elapsed:?} for busy lineage persistence"
         );
         release.send(()).expect("resume persistence actor");

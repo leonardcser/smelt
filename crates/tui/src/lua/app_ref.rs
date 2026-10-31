@@ -686,19 +686,9 @@ impl AgentLuaHost<'_> {
         if self.app.prompt_input_is_busy()
             || self.app.prompt_work_state() == crate::app::PromptWorkState::Paused
         {
-            let text = if self.app.core.config.settings.redact_secrets {
-                engine::redact::redact(&command.body)
-            } else {
-                command.body.clone()
-            };
-            let display = if self.app.core.config.settings.redact_secrets {
-                engine::redact::redact(&format!("/{}", command.display))
-            } else {
-                format!("/{}", command.display)
-            };
             let queued = crate::app::QueuedInput::custom_command_request(
-                display,
-                text,
+                format!("/{}", command.display),
+                command.body.clone(),
                 command.overrides,
                 sent_at_ms,
             );

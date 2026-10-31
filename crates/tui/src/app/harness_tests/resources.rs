@@ -1438,7 +1438,6 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
     };
     app.replace_active_model_for_harness(active);
     let mut settings = app.core_probe().config.settings.clone();
-    settings.redact_secrets = true;
     settings.cache_ttl_long = true;
     app.set_settings_for_harness(settings);
     app.set_available_models(vec![smelt_core::config::ResolvedModel {
@@ -1496,7 +1495,6 @@ fn custom_command_override_dispatches_its_complete_target_and_request_config() {
     assert_eq!(payload.model_target.config.input_cost, None);
     assert_eq!(payload.model_target.config.tool_calling, Some(false));
     assert_eq!(payload.reasoning_effort, protocol::ReasoningEffort::Low);
-    assert!(payload.request_config.redact_secrets);
     assert!(payload.request_config.cache_ttl_long);
 }
 
@@ -1829,7 +1827,6 @@ fn request_settings_changes_only_affect_requests_created_after_reconciliation() 
 
     assert!(app.run_lua(
         r#"
-            smelt.settings.redact_secrets = true
             smelt.settings.cache_ttl_long = true
             smelt.settings.request_audit = "full"
         "#,
@@ -1853,10 +1850,8 @@ fn request_settings_changes_only_affect_requests_created_after_reconciliation() 
         })
         .expect("second probe should send EngineAsk");
 
-    assert!(!before.redact_secrets);
     assert!(!before.cache_ttl_long);
     assert_eq!(before.request_audit, protocol::RequestAuditMode::Summary);
-    assert!(after.redact_secrets);
     assert!(after.cache_ttl_long);
     assert_eq!(after.request_audit, protocol::RequestAuditMode::Full);
 }

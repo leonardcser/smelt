@@ -175,7 +175,6 @@ macro_rules! settings {
     (@effect restrict_to_workspace) => { SettingEffect::Permissions };
     (@effect worktree_root) => { SettingEffect::Permissions };
     (@effect auto_reload) => { SettingEffect::AutoReload };
-    (@effect redact_secrets) => { SettingEffect::FutureRequests };
     (@effect fast_mode) => { SettingEffect::FutureRequests };
     (@effect cache_ttl_long) => { SettingEffect::FutureRequests };
     (@effect request_audit) => { SettingEffect::FutureRequests };
@@ -222,8 +221,6 @@ settings! {
     terminal_title:        Bool   = true;
     /// Downgrade `Allow` to `Ask` for paths outside the workspace.
     restrict_to_workspace: Bool   = true;
-    /// Scrub detected secrets from user input and tool results before they reach the LLM.
-    redact_secrets:        Bool   = false;
     /// Watch Lua config inputs (init.lua, plugins/, commands/,
     /// completers/, tools/, dialogs/, runtime overrides) and dispatch
     /// `/reload` when any of them changes. Prompt inputs such as
@@ -962,7 +959,6 @@ mod tests {
             ("restrict_to_workspace", SettingEffect::Permissions),
             ("worktree_root", SettingEffect::Permissions),
             ("auto_reload", SettingEffect::AutoReload),
-            ("redact_secrets", SettingEffect::FutureRequests),
             ("fast_mode", SettingEffect::FutureRequests),
             ("cache_ttl_long", SettingEffect::FutureRequests),
             ("request_audit", SettingEffect::FutureRequests),

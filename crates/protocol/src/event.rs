@@ -1297,7 +1297,6 @@ mod tests {
             },
         };
         let request_config = RequestRuntimeConfig {
-            redact_secrets: true,
             cache_ttl_long: true,
             request_audit: crate::RequestAuditMode::Full,
         };
@@ -1345,7 +1344,6 @@ mod tests {
             },
         };
         let request_config = RequestRuntimeConfig {
-            redact_secrets: true,
             cache_ttl_long: false,
             request_audit: crate::RequestAuditMode::Summary,
         };

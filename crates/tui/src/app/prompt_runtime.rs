@@ -126,7 +126,6 @@ impl PromptRuntime {
         ctx: PromptCtxRef<'_>,
         edit: &SubmitEdit,
         replay: crate::input::PromptReplay,
-        redact_secrets: bool,
     ) -> PendingPromptRecovery {
         let removed = match edit {
             SubmitEdit::Clear => None,
@@ -139,11 +138,7 @@ impl PromptRuntime {
                 let marker_count = source.matches(crate::input::ATTACHMENT_MARKER).count();
                 Some(RemovedPromptRange {
                     start,
-                    source: if redact_secrets {
-                        engine::redact::redact_with_markers(source)
-                    } else {
-                        source.to_owned()
-                    },
+                    source: source.to_owned(),
                     ids: ctx.buf.attachment_ids[marker_start..marker_start + marker_count].to_vec(),
                     buffer_id: ctx.buf.id(),
                     source_tick: ctx.buf.source_tick(),
@@ -237,6 +232,7 @@ impl PromptRuntime {
         &self.input
     }
 
+    #[cfg(test)]
     pub(crate) fn attachment_store(
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<smelt_core::attachment::AttachmentStore>> {
