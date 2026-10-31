@@ -254,6 +254,9 @@ pub struct Decoration {
     pub min_height: Option<Constraint>,
     /// Stacking order relative to other decorations on the same owner.
     pub z: u16,
+    /// Leave the rect uncleared, so the owner shows through every cell the
+    /// decoration's leaves do not draw.
+    pub transparent: bool,
 }
 
 impl Decoration {
@@ -271,6 +274,7 @@ impl Decoration {
             min_width: None,
             min_height: None,
             z: 0,
+            transparent: false,
         }
     }
 
@@ -317,6 +321,11 @@ impl Decoration {
 
     pub fn with_min_height(mut self, min_height: Option<Constraint>) -> Self {
         self.min_height = min_height;
+        self
+    }
+
+    pub fn transparent(mut self, b: bool) -> Self {
+        self.transparent = b;
         self
     }
 }

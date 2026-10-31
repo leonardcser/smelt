@@ -1731,6 +1731,7 @@ Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.l
 | `row_offset` | `integer` |  | Rows to offset after alignment. |
 | `col_offset` | `integer` |  | Columns to offset after alignment. |
 | `z` | `integer` |  | Owner-local stacking order. |
+| `transparent` | `boolean` |  | Leave the decoration's rect uncleared, so the owner window shows through every cell its leaves do not draw. |
 | `width` | `any` |  | Width constraint; defaults to `fit`. |
 | `height` | `any` |  | Height constraint; defaults to `fit`. |
 | `max_width` | `any` |  | Optional width cap. |

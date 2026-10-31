@@ -4229,9 +4229,11 @@ fn collect_root_frame_commands(
                     .iter()
                     .filter(|decoration| decoration.owner == WinId(id.0))
                 {
-                    builder
-                        .commands
-                        .push(PreparedFrameCommand::Clear(decoration.rect));
+                    if !decoration.transparent {
+                        builder
+                            .commands
+                            .push(PreparedFrameCommand::Clear(decoration.rect));
+                    }
                     collect_layout_frame_commands(
                         &decoration.layout,
                         layout::ChromePaintCtx::default(),
