@@ -2649,7 +2649,10 @@ impl SessionStorage {
         }
     }
 
-    /// Publish a verified native result without rebuilding archived metadata.
+    /// Publish a verified native result without rebuilding archived metadata. Only a result that
+    /// does not belong to `prepared` or this storage root fails. The commit is already durable
+    /// and left its catalog marker pending, so storage trouble while publishing defers the row to
+    /// the catalog repair instead of failing the save.
     pub fn publish_archive_save_catalog(
         &self,
         writer: &smelt_store::OwnedLineageWriter,
@@ -2663,16 +2666,24 @@ impl SessionStorage {
             ));
         }
         let message = prepared.catalog_message(result)?;
-        let (snapshot, pending_token) = {
+        let captured = (|| {
             let _lock =
                 smelt_store::CatalogMarkerLock::acquire(&sessions_root, writer.session_id())?;
             let snapshot = writer.catalog_session_for_result(result, message)?;
             let pending_token =
                 smelt_store::catalog_session_pending_token(&sessions_root, writer.session_id())?;
-            (snapshot, pending_token)
-        };
-        if let Ok(catalog) = self.catalog() {
-            catalog.publish_native(snapshot, pending_token);
+            Ok::<_, smelt_store::StoreError>((snapshot, pending_token))
+        })();
+        match captured {
+            Ok((snapshot, pending_token)) => {
+                if let Ok(catalog) = self.catalog() {
+                    catalog.publish_native(snapshot, pending_token);
+                }
+            }
+            Err(_) => self.request_session_catalog_repair(
+                writer.session_id(),
+                result.receipt.current.revision.get(),
+            ),
         }
         Ok(())
     }
@@ -3366,6 +3377,53 @@ mod tests {
         assert_eq!(resumed.session_usage.prompt_tokens, Some(30));
         assert_eq!(resumed.session_usage.completion_tokens, Some(10));
         assert_eq!(resumed.context_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn contended_catalog_marker_defers_publication_instead_of_failing_the_commit() {
+        let state = tempfile::tempdir().unwrap();
+        let storage = SessionStorage::new(state.path().to_path_buf());
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.title = Some("published after contention".into());
+        session.history = vec![user_item("request")];
+        let mut writer =
+            smelt_store::OwnedLineageWriter::open(storage.sessions_dir(), &session.id).unwrap();
+        let prepared = session
+            .prepare_archive_save(
+                smelt_store::StoreHead::default(),
+                smelt_store::HistorySuffix {
+                    start: smelt_store::HistoryIndex::new(0),
+                    final_len: smelt_store::HistoryLen::new(1),
+                    items: session.history.clone(),
+                },
+                None,
+            )
+            .unwrap();
+        let result = writer.commit_compact_session(prepared.command()).unwrap();
+
+        // Another process's catalog maintenance holds the marker past the publication timeout.
+        let marker =
+            smelt_store::CatalogMarkerLock::acquire(storage.sessions_dir(), &session.id).unwrap();
+        storage
+            .publish_archive_save_catalog(&writer, &prepared, &result)
+            .expect("a busy catalog marker must not fail a durable commit");
+        drop(marker);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            storage.wait_for_session_catalog(std::time::Duration::from_secs(1));
+            let listed = storage.list_sessions();
+            if listed.iter().any(|meta| {
+                meta.id == session.id && meta.title.as_deref() == Some("published after contention")
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "deferred catalog publication never landed: {listed:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]

@@ -1041,17 +1041,11 @@ fn repair_session(
         .get(id)
         .cloned();
     let cached = observed.as_deref().or(cached);
-    let (pending_token, mut repaired) = {
-        let _lock = CatalogMarkerLock::acquire(&handle.sessions_root, id)
-            .map_err(|error| format!("lock session catalog repair: {error}"))?;
-        let pending_token =
-            smelt_store::catalog_session_pending_token(&handle.sessions_root, id)
-                .map_err(|error| format!("read pending catalog repair for {id}: {error}"))?;
-        let repaired = load_repair_session(&handle.sessions_root, id, lineage_id, cached);
-        (pending_token, repaired)
-    };
-    // Clearing compares the captured token, so slow catalog I/O can run outside the marker lock.
-    // A concurrent canonical commit replaces the token and keeps its newer repair pending.
+    let pending_token = pending_catalog_token(handle, id)?;
+    // Clearing compares the captured token, so slow lineage and catalog I/O can run outside the
+    // marker lock. A concurrent canonical commit replaces the token and keeps its newer repair
+    // pending.
+    let mut repaired = load_repair_session(&handle.sessions_root, id, lineage_id, cached);
     if repaired.as_ref().is_ok_and(|session| {
         session
             .as_ref()
@@ -1167,16 +1161,9 @@ fn reconcile_all_sessions(handle: &ServiceHandle) -> Result<Vec<String>, String>
         if tombstones.contains(&id) {
             seen_tombstones.insert(id.clone());
         }
-        let (pending_token, repaired) = {
-            let _lock = CatalogMarkerLock::acquire(&handle.sessions_root, &id)
-                .map_err(|error| format!("lock session catalog scan snapshot for {id}: {error}"))?;
-            let pending_token =
-                smelt_store::catalog_session_pending_token(&handle.sessions_root, &id)
-                    .map_err(|error| format!("read pending catalog repair for {id}: {error}"))?;
-            let repaired =
-                load_repair_session(&handle.sessions_root, &id, Some(&location.lineage_id), None);
-            (pending_token, repaired)
-        };
+        let pending_token = pending_catalog_token(handle, &id)?;
+        let repaired =
+            load_repair_session(&handle.sessions_root, &id, Some(&location.lineage_id), None);
         match repaired {
             Ok(Some(session)) => {
                 available += 1;
@@ -1254,12 +1241,44 @@ struct CatalogRepairError {
     summary: String,
 }
 
+/// Reads a session's pending catalog token under its marker lock. A canonical commit holds that
+/// lock until its transaction ends, so every revision behind the token is readable afterwards.
+/// Only the token read is locked: the owner's commit waits on this lock, and lineage reads in
+/// another process must never stall it.
+fn pending_catalog_token(handle: &ServiceHandle, id: &str) -> Result<Option<Vec<u8>>, String> {
+    let _lock = CatalogMarkerLock::acquire(&handle.sessions_root, id)
+        .map_err(|error| format!("lock session catalog snapshot for {id}: {error}"))?;
+    smelt_store::catalog_session_pending_token(&handle.sessions_root, id)
+        .map_err(|error| format!("read pending catalog repair for {id}: {error}"))
+}
+
+#[cfg(test)]
+type LineageLoadProbe = Arc<dyn Fn(&Path, &str) + Send + Sync>;
+
+/// Runs before every catalog lineage load whose sessions root matches, so tests can observe what
+/// the loader holds.
+#[cfg(test)]
+fn lineage_load_probe() -> &'static Mutex<Option<(PathBuf, LineageLoadProbe)>> {
+    static PROBE: OnceLock<Mutex<Option<(PathBuf, LineageLoadProbe)>>> = OnceLock::new();
+    PROBE.get_or_init(|| Mutex::new(None))
+}
+
 fn load_repair_session(
     root: &Path,
     id: &str,
     lineage_id: Option<&str>,
     cached: Option<&CatalogSession>,
 ) -> Result<Option<CatalogSession>, CatalogRepairError> {
+    #[cfg(test)]
+    {
+        let probe = lineage_load_probe()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some((_, probe)) = probe.filter(|(probe_root, _)| probe_root == root) {
+            probe(root, id);
+        }
+    }
     let reader = match lineage_id {
         Some(lineage_id) => {
             smelt_store::LineageSessionReader::try_open_existing_in_lineage(root, lineage_id, id)
@@ -1294,21 +1313,41 @@ fn load_repair_session(
     Ok(Some(session))
 }
 
+/// Prints at most one catalog warning per interval. Failed work retries every few milliseconds
+/// and its messages carry changing details such as lock wait times, so a limiter keyed on the
+/// text would let every retry through.
 #[derive(Default)]
 struct WarningLimiter {
-    last: Option<(String, Instant)>,
+    last_at: Option<Instant>,
+    suppressed: u64,
 }
 
 impl WarningLimiter {
     fn warn(&mut self, message: &str) {
-        let now = Instant::now();
-        let should_warn = self.last.as_ref().is_none_or(|(last, at)| {
-            last != message || now.duration_since(*at) >= WARNING_INTERVAL
-        });
-        if should_warn {
+        let Some(suppressed) = self.admit(Instant::now()) else {
+            return;
+        };
+        if suppressed == 0 {
             eprintln!("smelt: session catalog warning: {message}");
-            self.last = Some((message.to_string(), now));
+        } else {
+            eprintln!(
+                "smelt: session catalog warning: {message} ({suppressed} more since the last warning)"
+            );
         }
+    }
+
+    /// Returns how many warnings were held back since the last printed one, or `None` while the
+    /// interval is still running.
+    fn admit(&mut self, now: Instant) -> Option<u64> {
+        if self
+            .last_at
+            .is_some_and(|at| now.duration_since(at) < WARNING_INTERVAL)
+        {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return None;
+        }
+        self.last_at = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
     }
 }
 
@@ -2069,5 +2108,57 @@ mod tests {
         request_reconciliation();
         assert!(wait_for_queued_work(Duration::from_secs(2)));
         assert_eq!(read_page(&CatalogQuery::default()).sessions.len(), 1);
+    }
+
+    #[test]
+    fn warning_limiter_holds_back_retries_whose_details_change() {
+        let mut limiter = WarningLimiter::default();
+        let start = Instant::now();
+        assert_eq!(limiter.admit(start), Some(0));
+        for attempt in 1..=40 {
+            assert_eq!(
+                limiter.admit(start + Duration::from_millis(50 * attempt)),
+                None
+            );
+        }
+        assert_eq!(limiter.admit(start + WARNING_INTERVAL), Some(40));
+        assert_eq!(limiter.admit(start + WARNING_INTERVAL), None);
+    }
+
+    #[test]
+    fn repair_and_reconciliation_read_lineages_without_holding_the_commit_marker() {
+        let state = tempfile::tempdir().unwrap();
+        let _guard = crate::test_util::isolate_xdg_state(state.path());
+        let session = canonical_session("canonical");
+        let receipt = crate::session::save_result(&session).unwrap();
+        assert!(wait_for_queued_work(Duration::from_secs(2)));
+        let sessions_root = crate::session::sessions_dir();
+
+        // A commit in the owning process waits on this marker, so a slow lineage read in any
+        // catalog must leave it free.
+        let loads = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&loads);
+        *lineage_load_probe().lock().unwrap() = Some((
+            sessions_root.clone(),
+            Arc::new(move |root: &Path, id: &str| {
+                let free = CatalogMarkerLock::acquire(root, id).is_ok();
+                recorded.lock().unwrap().push(free);
+            }),
+        ));
+        request_repair(SESSION_ID, receipt.current.revision);
+        assert!(wait_for_queued_work(Duration::from_secs(2)));
+        request_reconciliation();
+        assert!(wait_for_queued_work(Duration::from_secs(2)));
+        lineage_load_probe().lock().unwrap().take();
+
+        let loads = loads.lock().unwrap();
+        assert!(
+            loads.len() >= 2,
+            "repair and reconciliation loaded {loads:?}"
+        );
+        assert!(
+            loads.iter().all(|free| *free),
+            "a lineage load held the marker: {loads:?}"
+        );
     }
 }
