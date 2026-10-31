@@ -3141,10 +3141,20 @@ impl TuiApp {
     }
 
     pub(crate) fn notify_session_save_failure(&mut self, session_id: &str, message: &str) {
+        engine::log::entry(
+            engine::log::Level::Error,
+            "session_save_failed",
+            &serde_json::json!({
+                "session_id": session_id,
+                "message": message,
+            }),
+        );
+        // A prefix still resumes the session and leaves the one-line notice room for the cause.
+        let short_id = session_id.get(..8).unwrap_or(session_id);
         self.record_notice_with_lifetime(
             smelt_core::messages::MessageKind::Error,
             "smelt".into(),
-            format!("failed to save session {session_id}: {message}"),
+            format!("failed to save session {short_id}: {message}"),
             NotificationLifetime::Sticky,
             NotificationScope::Operation(NotificationOperation::SessionPersistence(
                 session_id.to_string(),
@@ -3160,6 +3170,10 @@ impl TuiApp {
         let message = match cause.recovery_action() {
             Some(crate::persist::PersistenceRecoveryAction::Retry) => format!(
                 "{}; fix the storage problem, then run /retry-save to continue this session",
+                cause.message
+            ),
+            Some(crate::persist::PersistenceRecoveryAction::AutomaticRetry) => format!(
+                "{}; smelt keeps retrying, or run /retry-save to retry now",
                 cause.message
             ),
             None => cause.message.clone(),
