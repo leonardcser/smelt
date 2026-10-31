@@ -471,6 +471,7 @@ local function open_splash()
 	state.decoration = smelt.win.transcript():decorate({
 		align = "center",
 		z = 0,
+		transparent = true,
 		layout = sized,
 	})
 end

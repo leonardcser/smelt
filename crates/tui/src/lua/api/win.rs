@@ -924,6 +924,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             LuaClassField { name: "row_offset", ty: "integer".into(), optional: true, doc: "Rows to offset after alignment." },
             LuaClassField { name: "col_offset", ty: "integer".into(), optional: true, doc: "Columns to offset after alignment." },
             LuaClassField { name: "z", ty: "integer".into(), optional: true, doc: "Owner-local stacking order." },
+            LuaClassField { name: "transparent", ty: "boolean".into(), optional: true, doc: "Leave the decoration's rect uncleared, so the owner window shows through every cell its leaves do not draw." },
             LuaClassField { name: "width", ty: "any".into(), optional: true, doc: "Width constraint; defaults to `fit`." },
             LuaClassField { name: "height", ty: "any".into(), optional: true, doc: "Height constraint; defaults to `fit`." },
             LuaClassField { name: "max_width", ty: "any".into(), optional: true, doc: "Optional width cap." },

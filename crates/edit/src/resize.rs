@@ -14,6 +14,7 @@ pub(super) struct ResolvedOverlay {
 pub(super) struct ResolvedDecoration {
     pub owner: WinId,
     pub rect: Rect,
+    pub transparent: bool,
     pub layout: ResolvedLayout,
 }
 
@@ -62,6 +63,7 @@ impl Ui {
             .map(|(_, owner, rect, decoration)| ResolvedDecoration {
                 owner,
                 rect,
+                transparent: decoration.transparent,
                 layout: decoration.layout.resolve(rect, self),
             })
             .collect();

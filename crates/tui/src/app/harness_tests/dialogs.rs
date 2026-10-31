@@ -513,6 +513,34 @@ fn splash_paint_stays_below_global_overlays() {
 }
 
 #[test]
+fn splash_shows_the_theme_background_around_the_logo() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    assert!(app.run_lua(r#"smelt.theme.set("Normal", { bg = { rgb = { 22, 10, 30 } } })"#));
+    app.drain_launch_ready_hooks();
+
+    let frame = app.render_to_frame();
+    let row = frame
+        .rows
+        .iter()
+        .position(|row| row.contains(['▀', '▄']))
+        .expect("splash logo on screen");
+    let styles = &frame.styles[row];
+    let theme_bg = styles[0].bg;
+    assert!(theme_bg.is_some(), "the theme paints a background");
+    for (x, ch) in frame.rows[row].chars().enumerate() {
+        if ch == ' ' {
+            assert_eq!(
+                styles[x].bg,
+                theme_bg,
+                "blank splash cell at column {x} covers the theme background:\n{}",
+                frame.text()
+            );
+        }
+    }
+}
+
+#[test]
 fn root_dialog_replaces_composer_and_restores_prompt_state() {
     let mut app = TestApp::builder().build();
     app.type_text("draft response");

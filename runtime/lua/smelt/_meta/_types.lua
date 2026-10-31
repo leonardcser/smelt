@@ -1164,6 +1164,7 @@
 ---@field row_offset? integer Rows to offset after alignment.
 ---@field col_offset? integer Columns to offset after alignment.
 ---@field z? integer Owner-local stacking order.
+---@field transparent? boolean Leave the decoration's rect uncleared, so the owner window shows through every cell its leaves do not draw.
 ---@field width? any Width constraint; defaults to `fit`.
 ---@field height? any Height constraint; defaults to `fit`.
 ---@field max_width? any Optional width cap.

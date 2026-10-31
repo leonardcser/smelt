@@ -282,6 +282,7 @@ pub(crate) fn open_decoration(
     let row_offset: i32 = opts.get("row_offset").unwrap_or(0);
     let col_offset: i32 = opts.get("col_offset").unwrap_or(0);
     let z: u16 = opts.get("z").unwrap_or(0);
+    let transparent: bool = opts.get("transparent").unwrap_or(false);
     let width = parse_overlay_constraint(&opts, "width", "decoration.width")?;
     let height = parse_overlay_constraint(&opts, "height", "decoration.height")?;
     let max_width = parse_overlay_constraint_opt(&opts, "max_width", "decoration.max_width")?;
@@ -311,7 +312,8 @@ pub(crate) fn open_decoration(
         .with_max_width(max_width)
         .with_max_height(max_height)
         .with_min_width(min_width)
-        .with_min_height(min_height);
+        .with_min_height(min_height)
+        .transparent(transparent);
     let id = app.ui.decoration_open(decoration);
     app.ui.prime_decoration_viewports();
     Ok(id)
