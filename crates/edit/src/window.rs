@@ -3875,20 +3875,24 @@ impl Window {
                             } else {
                                 [after, before]
                             };
-                            let Some(boundary) = candidates
-                                .into_iter()
-                                .flatten()
-                                .find(|col| slice.cell(*col, screen_row).image.is_none())
-                            else {
+                            let Some(boundary) = candidates.into_iter().flatten().find(|col| {
+                                slice
+                                    .cell(*col, screen_row)
+                                    .is_none_or(|cell| cell.image.is_none())
+                            }) else {
                                 return;
                             };
                             cursor_col = boundary;
                         }
-                        let under = slice.cell(cursor_col, screen_row).symbol;
-                        if under.is_continuation() || under == ' ' {
-                            slice.set(cursor_col, screen_row, glyph, style);
-                        } else {
-                            slice.set_symbol(cursor_col, screen_row, under.as_str(), style);
+                        let under = slice
+                            .cell(cursor_col, screen_row)
+                            .map(|cell| cell.symbol.clone())
+                            .filter(|under| !under.is_continuation() && *under != ' ');
+                        match under {
+                            Some(under) => {
+                                slice.set_symbol(cursor_col, screen_row, under.as_str(), style)
+                            }
+                            None => slice.set(cursor_col, screen_row, glyph, style),
                         }
                         slice.set_terminal_cursor_position(cursor_col, screen_row);
                     }
@@ -4022,8 +4026,8 @@ fn paint_span_cells(
             .copied()
             .unwrap_or(" ");
         let image = image
-            .cloned()
-            .or_else(|| slice.cell(pad_left + c, row).image.clone());
+            .or_else(|| slice.cell(pad_left + c, row)?.image.as_ref())
+            .cloned();
         if let Some(image) = image {
             slice.set_image_symbol(pad_left + c, row, grapheme, style, image);
         } else {

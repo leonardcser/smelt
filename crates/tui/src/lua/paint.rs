@@ -235,7 +235,7 @@ impl PaintRegistry {
 trait Canvas {
     fn width(&self) -> u16;
     fn height(&self) -> u16;
-    fn cell(&self, x: u16, y: u16) -> Option<Cell>;
+    fn cell(&self, x: u16, y: u16) -> Option<&Cell>;
     fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style);
     fn restyle(&mut self, x: u16, y: u16, style: Style);
 }
@@ -249,8 +249,8 @@ impl Canvas for GridSlice<'_> {
         GridSlice::height(self)
     }
 
-    fn cell(&self, x: u16, y: u16) -> Option<Cell> {
-        (x < self.width() && y < self.height()).then(|| GridSlice::cell(self, x, y))
+    fn cell(&self, x: u16, y: u16) -> Option<&Cell> {
+        GridSlice::cell(self, x, y)
     }
 
     fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style) {
@@ -369,7 +369,7 @@ impl mlua::UserData for PaintSliceUd {
         methods.add_method("width", |_, _, ()| with_canvas(|c| Ok(c.width())));
         methods.add_method("height", |_, _, ()| with_canvas(|c| Ok(c.height())));
         methods.add_method("get", |lua, _, (x, y): (u16, u16)| {
-            with_canvas(|c| c.cell(x, y).map(|cell| cell_to_lua(lua, &cell)).transpose())
+            with_canvas(|c| c.cell(x, y).map(|cell| cell_to_lua(lua, cell)).transpose())
         });
         methods.add_method(
             "set",
@@ -415,6 +415,8 @@ impl mlua::UserData for PaintSliceUd {
         methods.add_method(
             "set_style",
             |_, _, (x, y, w, h, patch): (u16, u16, u16, u16, mlua::Table)| {
+                let patch =
+                    crate::lua::parse::style_patch(&patch).map_err(LuaError::RuntimeError)?;
                 with_canvas(|c| {
                     let rect =
                         Rect::new(x, y, w, h).clip_to(Rect::new(0, 0, c.width(), c.height()));
@@ -423,8 +425,7 @@ impl mlua::UserData for PaintSliceUd {
                             let Some(cell) = c.cell(x, y) else {
                                 continue;
                             };
-                            let style = crate::lua::parse::style_patch(&patch, cell.style)
-                                .map_err(LuaError::RuntimeError)?;
+                            let style = patch.apply(cell.style);
                             c.restyle(x, y, style);
                         }
                     }
@@ -437,7 +438,7 @@ impl mlua::UserData for PaintSliceUd {
                 for y in 0..c.height() {
                     let mut x = 0;
                     while x < c.width() {
-                        let Some(cell) = c.cell(x, y) else {
+                        let Some(cell) = c.cell(x, y).cloned() else {
                             break;
                         };
                         let width = cell.symbol.width().max(1);
