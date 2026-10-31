@@ -88,7 +88,7 @@ impl SearchRenderSession {
             visible_rows,
             visible_buffer_matches(win, buf, visible_rows, &self.query),
         );
-        win.set_range_layer(crate::smelt_edit::RangeLayer::Search, ranges);
+        win.set_search_ranges(ranges);
     }
 }
 
@@ -225,7 +225,7 @@ impl TuiApp {
             return;
         };
         if let Some(win) = self.ui.win_mut(session.target) {
-            win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
+            win.clear_search_ranges();
         }
     }
 

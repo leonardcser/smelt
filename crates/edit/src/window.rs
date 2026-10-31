@@ -74,7 +74,7 @@ pub use document_view::{
 };
 
 /// Per-frame paint context for `Window::render`.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -91,6 +91,22 @@ pub struct DrawContext {
     pub theme: std::sync::Arc<Theme>,
     /// Used by `Window::render` to auto-derive visual selection ranges.
     pub vim_mode: VimMode,
+    /// Host time the frame is painted at; decides which yank flashes show.
+    pub now: std::time::Instant,
+}
+
+impl Default for DrawContext {
+    fn default() -> Self {
+        Self {
+            terminal_width: 0,
+            terminal_height: 0,
+            focused: false,
+            cursor_shape: CursorShape::default(),
+            theme: std::sync::Arc::default(),
+            vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -650,13 +666,6 @@ impl WindowSurface {
     }
 }
 
-#[derive(Clone, Default)]
-struct WindowRangeLayers {
-    search: Vec<SelectionRange>,
-    selection: Vec<SelectionRange>,
-    yank_flash: Vec<SelectionRange>,
-}
-
 #[derive(Clone)]
 struct BufferView {
     buf: BufId,
@@ -669,7 +678,7 @@ struct BufferView {
     scroll_anchor: Option<(u64, usize, usize)>,
     pending_recenter: bool,
     pending_scroll_to_cursor: bool,
-    range_layers: WindowRangeLayers,
+    search_ranges: Vec<SelectionRange>,
 }
 
 #[derive(Clone)]
@@ -723,7 +732,7 @@ pub struct Window {
     /// document with window-owned projection storage and a viewport subscription.
     document: DocumentBinding,
 
-    range_layers: WindowRangeLayers,
+    search_ranges: Vec<SelectionRange>,
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
@@ -783,7 +792,7 @@ impl Window {
             row_highlights: Vec::new(),
             hide_cursor: false,
             document: DocumentBinding::Buffer,
-            range_layers: WindowRangeLayers::default(),
+            search_ranges: Vec::new(),
             viewport: None,
             prepared_viewport_height: None,
             jumps: crate::jumplist::JumpList::default(),
@@ -867,7 +876,7 @@ impl Window {
                 scroll_anchor: self.scroll_anchor,
                 pending_recenter: self.pending_recenter,
                 pending_scroll_to_cursor: self.pending_scroll_to_cursor,
-                range_layers: self.range_layers.clone(),
+                search_ranges: self.search_ranges.clone(),
             },
         };
         let total_rows = source.snapshot().total_rows;
@@ -882,7 +891,7 @@ impl Window {
             vim_enabled: self.surface.text.vim_enabled,
             ..Default::default()
         };
-        self.range_layers = WindowRangeLayers::default();
+        self.search_ranges.clear();
         self.scroll_anchor = None;
         self.pending_recenter = false;
         self.pending_scroll_to_cursor = false;
@@ -918,7 +927,7 @@ impl Window {
         self.scroll_anchor = backing.scroll_anchor;
         self.pending_recenter = backing.pending_recenter;
         self.pending_scroll_to_cursor = backing.pending_scroll_to_cursor;
-        self.range_layers = backing.range_layers;
+        self.search_ranges = backing.search_ranges;
         self.document = backing
             .host
             .map_or(DocumentBinding::Buffer, DocumentBinding::Host);
@@ -1000,36 +1009,18 @@ impl Window {
         }
     }
 
-    fn range_layer_slot(&self, layer: crate::RangeLayer) -> &Vec<SelectionRange> {
-        match layer {
-            crate::RangeLayer::Search => &self.range_layers.search,
-            crate::RangeLayer::Selection => &self.range_layers.selection,
-            crate::RangeLayer::YankFlash => &self.range_layers.yank_flash,
-        }
+    /// Search matches to highlight in this window. Selection and yank flash
+    /// are derived from the window's own state at paint time.
+    pub fn set_search_ranges(&mut self, ranges: Vec<SelectionRange>) {
+        self.search_ranges = ranges;
     }
 
-    fn range_layer_slot_mut(&mut self, layer: crate::RangeLayer) -> &mut Vec<SelectionRange> {
-        match layer {
-            crate::RangeLayer::Search => &mut self.range_layers.search,
-            crate::RangeLayer::Selection => &mut self.range_layers.selection,
-            crate::RangeLayer::YankFlash => &mut self.range_layers.yank_flash,
-        }
+    pub fn search_ranges(&self) -> &[SelectionRange] {
+        &self.search_ranges
     }
 
-    pub fn set_range_layer(&mut self, layer: crate::RangeLayer, ranges: Vec<SelectionRange>) {
-        let slot = self.range_layer_slot_mut(layer);
-        if *slot == ranges {
-            return;
-        }
-        *slot = ranges;
-    }
-
-    pub fn range_layer(&self, layer: crate::RangeLayer) -> &[SelectionRange] {
-        self.range_layer_slot(layer)
-    }
-
-    pub fn clear_range_layer(&mut self, layer: crate::RangeLayer) {
-        self.range_layer_slot_mut(layer).clear();
+    pub fn clear_search_ranges(&mut self) {
+        self.search_ranges.clear();
     }
 
     pub fn set_row_highlights(&mut self, highlights: Vec<RowHighlight>) {
@@ -1076,19 +1067,8 @@ impl Window {
         self.text_state().yank_flash.map(|flash| flash.until)
     }
 
-    pub fn clear_expired_byte_yank_flash(&mut self, now: std::time::Instant) {
-        if self
-            .text_state()
-            .yank_flash
-            .is_some_and(|flash| now >= flash.until)
-        {
-            self.clear_byte_yank_flash();
-        }
-    }
-
     pub fn clear_byte_yank_flash(&mut self) {
         self.text_state_mut().yank_flash = None;
-        self.clear_range_layer(crate::RangeLayer::YankFlash);
     }
 
     pub fn yank_flash_until(&self) -> Option<std::time::Instant> {
@@ -1100,50 +1080,45 @@ impl Window {
         }
     }
 
-    pub fn sync_byte_yank_flash_layer(&mut self, buf: &mut Buffer, now: std::time::Instant) {
-        if self.text_state().yank_flash.is_none()
-            && self.range_layer(crate::RangeLayer::YankFlash).is_empty()
-            && buf.range_layer(crate::RangeLayer::YankFlash).is_empty()
-        {
-            return;
-        }
-
-        self.clear_expired_byte_yank_flash(now);
-        if let Some(range) = self.byte_yank_flash_range(now) {
-            let ranges =
-                smelt_buffer::coords::byte_range_to_row_ranges(buf, range.start, range.end);
-            self.set_range_layer(crate::RangeLayer::YankFlash, ranges);
-        } else {
-            self.clear_range_layer(crate::RangeLayer::YankFlash);
-        }
-        buf.clear_range_layer(crate::RangeLayer::YankFlash);
-    }
-
-    fn painted_range_layer<'a>(
+    /// Ranges painted for `layer`. A buffer layer set by its owner (the
+    /// prompt) overrides what the window derives from its own state.
+    fn painted_ranges<'a>(
         &'a self,
         buf: &'a Buffer,
         layer: crate::RangeLayer,
-        selection_ranges: &'a [SelectionRange],
-    ) -> &'a [SelectionRange] {
+        ctx: &DrawContext,
+        viewport_rows: u16,
+    ) -> std::borrow::Cow<'a, [SelectionRange]> {
+        use std::borrow::Cow;
         match layer {
-            crate::RangeLayer::Search => self.range_layer(layer),
+            crate::RangeLayer::Search => Cow::Borrowed(&self.search_ranges),
+            _ if !buf.range_layer(layer).is_empty() => Cow::Borrowed(buf.range_layer(layer)),
             crate::RangeLayer::Selection => {
-                let ranges = self.range_layer(layer);
-                if ranges.is_empty() {
-                    selection_ranges
-                } else {
-                    ranges
-                }
+                Cow::Owned(self.selection_ranges(buf, ctx.vim_mode, viewport_rows))
             }
             crate::RangeLayer::YankFlash => {
-                let ranges = self.range_layer(layer);
-                if ranges.is_empty() {
-                    buf.range_layer(layer)
-                } else {
-                    ranges
-                }
+                Cow::Owned(self.yank_flash_ranges(buf, ctx.now, viewport_rows))
             }
         }
+    }
+
+    fn yank_flash_ranges(
+        &self,
+        buf: &Buffer,
+        now: std::time::Instant,
+        viewport_rows: u16,
+    ) -> Vec<SelectionRange> {
+        if self.has_materialized_rows() {
+            return self
+                .row_yank_flash_range(now)
+                .map(|range| self.doc_range_to_row_ranges(buf, viewport_rows, range))
+                .unwrap_or_default();
+        }
+        self.byte_yank_flash_range(now)
+            .map(|range| {
+                smelt_buffer::coords::byte_range_to_row_ranges(buf, range.start, range.end)
+            })
+            .unwrap_or_default()
     }
 
     pub fn surface(&self) -> WindowSurface {
@@ -2457,19 +2432,21 @@ impl Window {
         }
     }
 
-    /// Derive selection ranges from this window's own anchors; used when the buffer
-    /// has no explicit `set_selection` override. Empty result means no paint.
-    fn auto_selection_ranges(
+    /// Derive selection ranges from this window's own anchors. Empty result
+    /// means no paint.
+    fn selection_ranges(
         &self,
         buf: &Buffer,
         vim_mode: VimMode,
-    ) -> Vec<smelt_buffer::buffer::SelectionRange> {
-        // Row-backed documents manage selection via sync_row_render_state (which writes
-        // the buffer's Selection range layer); falling back to byte-backed vim::visual_range
-        // uses vim_state.visual_anchor which is never set for row documents and
-        // would spuriously select from byte 0.
+        viewport_rows: u16,
+    ) -> Vec<SelectionRange> {
+        // Row documents keep their selection in document coordinates; the
+        // byte-backed anchors below are never set for them.
         if self.has_materialized_rows() {
-            return Vec::new();
+            return self
+                .row_selection_anchor_range(buf)
+                .map(|range| self.doc_range_to_row_ranges(buf, viewport_rows, range))
+                .unwrap_or_default();
         }
         let in_vim_visual =
             self.vim_enabled() && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
@@ -3551,16 +3528,8 @@ impl Window {
         let cursor_screen_row =
             Self::screen_row_at(cursor_abs_row, self.scroll_top, viewport_height);
         let normal_style = ctx.theme.get("Normal");
-        // Buffer override wins; fall back to window anchors.
-        let selection_owned: Vec<smelt_buffer::buffer::SelectionRange>;
-        let selection_layer = buf.range_layer(crate::RangeLayer::Selection);
-        let selection_ranges: &[smelt_buffer::buffer::SelectionRange] =
-            if !selection_layer.is_empty() {
-                selection_layer
-            } else {
-                selection_owned = self.auto_selection_ranges(buf, ctx.vim_mode);
-                &selection_owned[..]
-            };
+        let range_layers = crate::RangeLayer::paint_order()
+            .map(|layer| (layer, self.painted_ranges(buf, layer, ctx, viewport_height)));
         // Reused per-row scratch - avoids `height` allocations of each Vec.
         let mut col_to_grapheme: Vec<usize> = Vec::with_capacity(content_width as usize);
         let mut painted_graphemes: Vec<&str> = Vec::with_capacity(content_width as usize);
@@ -3769,11 +3738,9 @@ impl Window {
             // selection span placed after the chrome by `byte_range_to_row_ranges` will
             // paint there, keeping multi-line selections visually continuous without
             // highlighting the chrome itself.
-            let line_has_highlight = crate::RangeLayer::paint_order().into_iter().any(|layer| {
-                self.painted_range_layer(buf, layer, selection_ranges)
-                    .iter()
-                    .any(|r| r.line == logical_row)
-            });
+            let line_has_highlight = range_layers
+                .iter()
+                .any(|(_, ranges)| ranges.iter().any(|r| r.line == logical_row));
             let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
             let any_selectable =
                 cell_range_contains_selectable(&spans_buf, 0, text::byte_to_cell(line, line.len()));
@@ -3814,8 +3781,7 @@ impl Window {
                             }
                         }
                     };
-                for layer in crate::RangeLayer::paint_order() {
-                    let ranges = self.painted_range_layer(buf, layer, selection_ranges);
+                for (layer, ranges) in &range_layers {
                     let style =
                         merge_span_style(row_style, &ctx.theme.get(layer.highlight_group()));
                     paint_ranges(ranges, style);
@@ -4510,6 +4476,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(Theme::default()),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         }
     }
 
@@ -5540,7 +5507,7 @@ mod tests {
             ctx,
         );
 
-        let ranges = w.auto_selection_ranges(&buf, VimMode::Normal);
+        let ranges = w.selection_ranges(&buf, VimMode::Normal, 10);
         assert_eq!(ranges.len(), 1);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 3));
 
@@ -6407,7 +6374,7 @@ mod tests {
             .collect();
         buf.set_all_lines(rows);
         w.set_materialized_rows(1, 10, 30);
-        w.sync_row_render_state(&mut buf, 10, now);
+        w.refresh_document_view_position_from_buffer(&buf);
 
         let state = w.document_view_state_ref();
         assert_eq!(state.cursor.row, 10);
@@ -6843,6 +6810,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 3);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
@@ -6874,6 +6842,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
@@ -6899,6 +6868,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -6965,6 +6935,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -7001,6 +6972,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -7032,6 +7004,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
@@ -7065,6 +7038,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 4);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 4));
@@ -7098,6 +7072,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -7127,6 +7102,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -7152,6 +7128,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(5, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 5, 1));
@@ -7185,6 +7162,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -7390,6 +7368,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(20, 10);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));
@@ -7464,6 +7443,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(rect.width, rect.height);
         let mut slice = grid.slice_mut(rect);
@@ -7501,6 +7481,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(20, 10);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));
@@ -7903,6 +7884,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(Theme::default()),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(60, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 60, 1));
@@ -8027,6 +8009,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 3);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
@@ -8055,6 +8038,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(Theme::default()),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -8113,6 +8097,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(10, 1);
         w.render(&buf, &mut grid.slice_mut(Rect::new(0, 0, 10, 1)), &ctx);
@@ -8153,6 +8138,7 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: std::sync::Arc::new(theme),
             vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
         };
         let mut grid = Grid::new(20, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));

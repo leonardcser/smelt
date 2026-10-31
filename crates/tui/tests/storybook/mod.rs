@@ -23,7 +23,7 @@ impl StoryCtx {
     pub fn new(name: &str) -> Self {
         let mut ui = Ui::new();
         ui.set_terminal_size(80, 24);
-        // Register a `Visual` style so `Window::auto_selection_ranges` paints the
+        // Register a `Visual` style so `Window::selection_ranges` paints the
         // visual selection with a recognisable bg in snapshots.
         ui.theme_mut().set(
             "Visual",

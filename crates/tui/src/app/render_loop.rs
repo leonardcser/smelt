@@ -207,7 +207,6 @@ fn transcript_search_range_matches_buffer(
 fn sync_retained_transcript_window(
     ui: &mut crate::smelt_edit::Ui,
     request: crate::smelt_edit::MaterializeRequest,
-    render_now: std::time::Instant,
 ) {
     let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
     let (Some(win), Some(buf)) = (win, buf) else {
@@ -225,7 +224,6 @@ fn sync_retained_transcript_window(
                         .min(request.rect.height)
                 }
             });
-        win.sync_yank_flash_layer(buf, viewport_rows, render_now);
         if win.is_following_tail() {
             win.reveal_row_cursor(buf, viewport_rows);
         }
@@ -249,8 +247,6 @@ fn sync_retained_transcript_window(
     } else {
         let text = buf.text();
         win.clamp_anchors_to_source(&text);
-        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
-        win.sync_yank_flash_layer(buf, request.rect.height, render_now);
     }
     win.scroll_left = 0;
 }
@@ -261,7 +257,6 @@ pub(super) fn prepare_transcript_window(
     theme: &std::sync::Arc<crate::smelt_edit::Theme>,
     ui: &mut crate::smelt_edit::Ui,
     request: crate::smelt_edit::MaterializeRequest,
-    render_now: std::time::Instant,
     search_projection: TranscriptSearchProjection<'_>,
 ) {
     if crate::app::document::DocumentRegistry::resolve_optional(request.document_handle)
@@ -302,7 +297,7 @@ pub(super) fn prepare_transcript_window(
             Ok(plan) => plan,
             Err(error) => {
                 record_transcript_projection_hydration_deferred(error);
-                sync_retained_transcript_window(ui, request, render_now);
+                sync_retained_transcript_window(ui, request);
                 return;
             }
         };
@@ -479,7 +474,7 @@ pub(super) fn prepare_transcript_window(
             }
         }
     }
-    sync_retained_transcript_window(ui, request, render_now);
+    sync_retained_transcript_window(ui, request);
 }
 
 impl TuiApp {
@@ -489,7 +484,6 @@ impl TuiApp {
     ) -> Option<crate::smelt_edit::PreparedWindowRequest> {
         self.complete_pending_transcript_details();
         let theme = self.ui.theme().clone();
-        let render_now = self.core.clock.instant_now();
         let transcript_search_anchor = self
             .overlays
             .search_session()
@@ -576,14 +570,13 @@ impl TuiApp {
                                 request.rect.height,
                             );
                         }
-                        sync_retained_transcript_window(ui, request, render_now);
+                        sync_retained_transcript_window(ui, request);
                     } else {
                         conversation.prepare_transcript_window(
                             &lua,
                             &theme,
                             ui,
                             request,
-                            render_now,
                             TranscriptSearchProjection {
                                 anchor: transcript_search_anchor.clone(),
                                 range_after: &mut transcript_search_range_after_projection,
@@ -1150,7 +1143,6 @@ impl TuiApp {
         // prepare pass still materializes other row-backed windows and applies search.
         let prepared_frame = {
             let overlays = &mut self.overlays;
-            let render_now = self.core.clock.instant_now();
             let search_session = overlays
                 .search_session()
                 .map(crate::app::search::SearchRenderSession::from);
@@ -1175,12 +1167,7 @@ impl TuiApp {
                     let (Some(win), Some(buf)) = (win, buf) else {
                         return;
                     };
-                    // The prompt's flash layer is owned by `sync_prompt_overlays`; this
-                    // pass would wipe it before paint.
-                    if !win.has_materialized_rows() && request.win != crate::app::PROMPT_WIN {
-                        win.sync_yank_flash_layer(buf, request.viewport_rect.height, render_now);
-                    }
-                    win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
+                    win.clear_search_ranges();
                     if let Some(search) =
                         search_session.as_ref().filter(|s| s.target == request.win)
                     {

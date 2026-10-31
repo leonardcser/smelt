@@ -9260,7 +9260,6 @@ mod document_tests {
         if let Some(screen_row) = cursor_screen_row {
             win.restore_cursor_screen_row(buf, screen_row);
         }
-        win.sync_row_render_state(buf, ctx.viewport_rows, std::time::Instant::now());
         rows
     }
 
@@ -9314,7 +9313,6 @@ mod document_tests {
                 },
             );
         }
-        win.sync_row_render_state(buf, ctx.viewport_rows, std::time::Instant::now());
         rows
     }
 
@@ -9348,7 +9346,6 @@ mod document_tests {
         win.set_resolved_scroll(applied.materialized_rows.clamped_scroll);
         win.ensure_layout(buf, ctx.width);
         win.refresh_document_view_position_from_buffer(buf);
-        win.sync_row_render_state(buf, ctx.viewport_rows, std::time::Instant::now());
         applied
     }
 

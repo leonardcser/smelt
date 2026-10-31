@@ -272,37 +272,19 @@ fn vim_yank_in_overlay_viewer_writes_system_clipboard() {
         "byte-backed overlay yank should record a source-local flash"
     );
 
-    app.render_silent();
-
-    assert!(
-        !app.ui_probe()
-            .win(leaf)
-            .expect("overlay window")
-            .range_layer(crate::smelt_edit::RangeLayer::YankFlash)
-            .is_empty(),
+    // The block cursor paints over the last yanked cell.
+    assert_eq!(
+        app.highlighted_text("YankFlash"),
+        vec!["alph"],
         "yanked overlay selection should flash in the focused dialog viewer"
     );
 
     app.clock.advance(
         smelt_buffer::kill_ring::YANK_FLASH_DURATION + std::time::Duration::from_millis(1),
     );
-    app.render_silent();
-
     assert!(
-        app.ui_probe()
-            .win(leaf)
-            .expect("overlay window")
-            .range_layer(crate::smelt_edit::RangeLayer::YankFlash)
-            .is_empty(),
+        app.highlighted_text("YankFlash").is_empty(),
         "expired overlay yank flash should clear like transcript flashes"
-    );
-    assert!(
-        app.ui_probe()
-            .win(leaf)
-            .expect("overlay window")
-            .byte_yank_flash_until()
-            .is_none(),
-        "expired overlay yank flash state should be cleared"
     );
 }
 

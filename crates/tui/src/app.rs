@@ -1956,6 +1956,8 @@ impl TuiApp {
         let prompt_placeholder_display = placeholder_state.prompt_display();
         let (ui, well_known) = {
             let mut ui = crate::smelt_edit::Ui::new();
+            let ui_clock = Arc::clone(&clock);
+            ui.set_clock(Arc::new(move || ui_clock.instant_now()));
             ui.set_terminal_size(term_w, term_h);
             // Install the baked default theme up-front. `run()` may
             // overwrite it after detecting light/dark, and Lua's

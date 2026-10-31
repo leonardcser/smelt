@@ -581,7 +581,6 @@ impl ConversationRuntime {
         theme: &std::sync::Arc<crate::smelt_edit::Theme>,
         ui: &mut crate::smelt_edit::Ui,
         request: crate::smelt_edit::MaterializeRequest,
-        render_now: std::time::Instant,
         search_projection: super::render_loop::TranscriptSearchProjection<'_>,
     ) {
         super::render_loop::prepare_transcript_window(
@@ -590,7 +589,6 @@ impl ConversationRuntime {
             theme,
             ui,
             request,
-            render_now,
             search_projection,
         );
     }

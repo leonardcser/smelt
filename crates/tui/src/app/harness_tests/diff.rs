@@ -3543,3 +3543,33 @@ fn diff_search_keeps_preview_focus_across_repeated_searches() {
     assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), first + 2);
     assert_eq!(app.ui_probe().focus(), Some(win));
 }
+
+#[test]
+fn diff_preview_mouse_drag_paints_selection_and_copies() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(160, 32);
+    open_fixture(&mut app, 3);
+    paint_diff(&mut app);
+    let (col, row) = app
+        .screen_position("abcdefghij")
+        .expect("added row on screen");
+    let start = (col + 2, row - 2);
+    let end = (col + 10, row);
+    app.mouse(MouseEventKind::Down(MouseButton::Left), start);
+    app.mouse(MouseEventKind::Drag(MouseButton::Left), end);
+
+    let line = "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789";
+    // The block cursor paints over the drag endpoint cell.
+    assert_eq!(
+        app.highlighted_text("Visual"),
+        vec![&line[2..], line, &line[..10]],
+        "drag must paint the selected diff text"
+    );
+
+    app.mouse(MouseEventKind::Up(MouseButton::Left), end);
+    assert_eq!(
+        app.core_probe().clipboard.kill_ring.current(),
+        format!("{}\n{line}\n{}", &line[2..], &line[..11])
+    );
+}

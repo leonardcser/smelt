@@ -1891,14 +1891,15 @@ mod tests {
 
         let win = app.transcript_win();
         assert_eq!(win.cursor_screen_row(vp.rect.height), Some(end_rel));
-        let selection = app
-            .ui
-            .buf(win.buf)
-            .expect("transcript buffer")
-            .range_layer(crate::smelt_edit::RangeLayer::Selection);
+        let visual = app.ui.theme().get("Visual").bg;
         assert!(
-            !selection.is_empty(),
-            "row-backed drag selection should be projected while capture freezes transcript materialization"
+            app.ui
+                .flushed_snapshot()
+                .styles
+                .iter()
+                .flatten()
+                .any(|style| style.bg == visual),
+            "row-backed drag selection should paint while capture freezes transcript materialization"
         );
     }
 

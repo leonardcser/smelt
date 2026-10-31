@@ -139,6 +139,7 @@ mod tests {
             },
             theme,
             vim_mode: crate::smelt_edit::VimMode::Insert,
+            now: std::time::Instant::now(),
         };
         win.render(&buf, &mut slice, &ctx);
 

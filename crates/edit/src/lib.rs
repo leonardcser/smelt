@@ -309,6 +309,8 @@ pub struct Ui {
     last_click: Option<(std::time::Instant, u16, u16, u8)>,
     /// Global cursor shape; only the focused window honours it.
     cursor_shape: CursorShape,
+    /// Host time source for time-based paint such as yank flashes.
+    clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
     /// Timestamp when edge-drag autoscroll last engaged; drives host tick-rate ramp.
     drag_autoscroll_since: Option<std::time::Instant>,
     /// In-flight content drag position used for edge autoscroll. The pointer,
@@ -447,6 +449,7 @@ impl Ui {
             capture: None,
             last_click: None,
             cursor_shape: CursorShape::Hidden,
+            clock: std::sync::Arc::new(std::time::Instant::now),
             drag_autoscroll_since: None,
             drag_autoscroll: None,
             chrome_drag: None,
@@ -486,6 +489,7 @@ impl Ui {
             capture: self.capture,
             last_click: self.last_click,
             cursor_shape: self.cursor_shape,
+            clock: std::sync::Arc::clone(&self.clock),
             drag_autoscroll_since: self.drag_autoscroll_since,
             drag_autoscroll: self.drag_autoscroll,
             chrome_drag: self.chrome_drag,
@@ -493,6 +497,15 @@ impl Ui {
             scrollbar_drag: self.scrollbar_drag,
             scroll_groups: self.scroll_groups.clone(),
         }
+    }
+
+    /// Replace the time source frames are painted against. Defaults to
+    /// `Instant::now`; hosts with a controllable clock install theirs.
+    pub fn set_clock(
+        &mut self,
+        clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+    ) {
+        self.clock = clock;
     }
 
     /// Preserve callbacks installed by Rust when replacing the committed Lua
@@ -2717,6 +2730,7 @@ impl Ui {
             cursor_shape: self.cursor_shape,
             term_size,
             theme: &theme,
+            now: (self.clock)(),
         };
         collect_root_frame_commands(&scene.root, &scene.decorations, active_resize, &mut builder);
         for overlay in &scene.overlays {
@@ -4105,6 +4119,7 @@ struct PreparedFrameBuilder<'a> {
     cursor_shape: CursorShape,
     term_size: (u16, u16),
     theme: &'a std::sync::Arc<Theme>,
+    now: std::time::Instant,
 }
 
 impl PreparedFrameBuilder<'_> {
@@ -4137,6 +4152,7 @@ impl PreparedFrameBuilder<'_> {
                     },
                     theme: std::sync::Arc::clone(self.theme),
                     vim_mode: win.vim_mode(),
+                    now: self.now,
                 },
             });
             return;
@@ -4153,6 +4169,7 @@ impl PreparedFrameBuilder<'_> {
                     cursor_shape: CursorShape::Hidden,
                     theme: std::sync::Arc::clone(self.theme),
                     vim_mode: VimMode::default(),
+                    now: self.now,
                 },
             }));
     }

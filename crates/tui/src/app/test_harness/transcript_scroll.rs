@@ -138,9 +138,7 @@ impl TestApp {
             cursor_absolute_row: win
                 .cursor_screen_row(u16::MAX)
                 .map(|row| scroll_top.saturating_add(row.into())),
-            search_ranges: win
-                .range_layer(crate::smelt_edit::RangeLayer::Search)
-                .to_vec(),
+            search_ranges: win.search_ranges().to_vec(),
         }
     }
 
