@@ -305,7 +305,6 @@ impl SessionLoadRuntime {
         self.pending.set(false);
     }
 
-    #[cfg(any(test, feature = "harness"))]
     pub(super) fn is_pending(&self) -> bool {
         self.pending.get() || self.adoption.is_some() || self.ready.is_some()
     }
@@ -424,7 +423,158 @@ pub(super) fn prepare_session_load(
     })
 }
 
+pub(super) struct RecoveredSession {
+    prepared: PreparedSessionLoad,
+    writer: crate::persist::SessionWriterHandoff,
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OwnershipRecoveryEvent {
+    Waiting,
+    Ready,
+    Stopped,
+}
+
+#[derive(Default)]
+pub(super) struct OwnershipRecovery {
+    operations: SessionOperationRuntime,
+    result: Option<std::sync::mpsc::Receiver<Result<RecoveredSession, String>>>,
+    #[cfg(test)]
+    observer: Option<std::sync::mpsc::Receiver<OwnershipRecoveryEvent>>,
+}
+
+impl OwnershipRecovery {
+    pub(super) fn request(
+        &mut self,
+        sessions: smelt_core::session::SessionStorage,
+        id: String,
+        width: u16,
+        target_rows: u16,
+        events: tokio::sync::mpsc::UnboundedSender<super::AppEvent>,
+    ) -> Result<(), String> {
+        self.cancel();
+        let (send, receive) = std::sync::mpsc::channel();
+        #[cfg(test)]
+        let (observe, observer) = std::sync::mpsc::channel();
+        self.operations.request(move |token| {
+            let cancelled = || token.cancelled();
+            let outcome = (|| {
+                while !cancelled() {
+                    match smelt_store::SessionWriter::open_existing(sessions.sessions_dir(), &id) {
+                        Ok(mut writer) => {
+                            let prepared = prepare_session_load(
+                                &sessions,
+                                &id,
+                                width,
+                                target_rows,
+                                &cancelled,
+                            )?;
+                            // The snapshot already includes interrupted-turn recovery.
+                            if writer.take_startup_recovery().is_some() {
+                                sessions.request_session_catalog_repair(
+                                    &id,
+                                    prepared.head.revision.get(),
+                                );
+                            }
+                            return Ok((prepared, writer));
+                        }
+                        Err(smelt_store::StoreError::OwnershipConflict { .. }) => {
+                            #[cfg(test)]
+                            let _ = observe.send(OwnershipRecoveryEvent::Waiting);
+                            thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        Err(error) => return Err(format!("recover session writer: {error}")),
+                    }
+                }
+                Err("session ownership recovery cancelled".into())
+            })();
+            let (outcome, handoff) = match outcome {
+                Ok((prepared, writer)) => {
+                    let (transfer, receive) = crate::persist::SessionWriterHandoff::channel();
+                    (
+                        Ok(RecoveredSession {
+                            prepared,
+                            writer: receive,
+                        }),
+                        Some((transfer, writer)),
+                    )
+                }
+                Err(error) => (Err(error), None),
+            };
+            let delivered = if cancelled() {
+                drop(outcome);
+                false
+            } else {
+                send.send(outcome).is_ok()
+            };
+            if delivered {
+                #[cfg(test)]
+                let _ = observe.send(OwnershipRecoveryEvent::Ready);
+                let _ = events.send(super::AppEvent::OwnershipRecoveryReady);
+            }
+            if let Some((transfer, writer)) = handoff {
+                let _ = transfer.send(writer);
+            }
+            #[cfg(test)]
+            let _ = observe.send(OwnershipRecoveryEvent::Stopped);
+        })?;
+        self.result = Some(receive);
+        #[cfg(test)]
+        {
+            self.observer = Some(observer);
+        }
+        Ok(())
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.operations.cancel();
+        self.result = None;
+    }
+
+    pub(super) fn take_result(&mut self) -> Option<Result<RecoveredSession, String>> {
+        let result = match self.result.as_ref()?.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("session ownership recovery stopped unexpectedly".into())
+            }
+        };
+        self.result = None;
+        Some(result)
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_observer(&mut self) -> std::sync::mpsc::Receiver<OwnershipRecoveryEvent> {
+        self.observer.take().expect("ownership recovery observer")
+    }
+}
+
 impl super::TuiApp {
+    pub(super) fn poll_ownership_recovery(&mut self) {
+        if self.session_load.is_pending() {
+            return;
+        }
+        let Some(outcome) = self.conversation.take_ownership_recovery() else {
+            return;
+        };
+        match outcome {
+            Ok(recovered) => {
+                let (document, warnings) = recovered.prepared.finish();
+                if !self.load_store_backed_session_with_writer(document, Some(recovered.writer)) {
+                    self.conversation
+                        .mark_read_only("failed to restore session writer".into());
+                    return;
+                }
+                self.finish_loaded_transcript(&warnings);
+            }
+            Err(error) => {
+                self.conversation.mark_read_only(error.clone());
+                self.notify_session_error_sticky(error);
+            }
+        }
+    }
+
     pub(crate) fn request_session_load(&mut self, id: &str) {
         let target_rows = super::transcript::record_tail_target_rows(self.last_height);
         let request = SessionLoadRequest {
@@ -481,15 +631,19 @@ impl super::TuiApp {
         if !self.load_store_backed_session(document) {
             return false;
         }
-        if !degraded_warnings.is_empty() {
+        self.finish_loaded_transcript(&degraded_warnings);
+        true
+    }
+
+    fn finish_loaded_transcript(&mut self, warnings: &[String]) {
+        if !warnings.is_empty() {
             self.notify_session_error_sticky(format!(
                 "session loaded with unavailable attachments: {}",
-                degraded_warnings.join("; ")
+                warnings.join("; ")
             ));
         }
         self.finish_transcript_turn();
         self.transcript_win_mut().follow_tail();
-        true
     }
 
     pub(super) fn handle_session_load_worker_result(&mut self, result: SessionLoadWorkerResult) {
@@ -518,15 +672,8 @@ impl super::TuiApp {
                         self.lua.cancel_tasks();
                         self.finish_session_replacement();
                         let (document, warnings) = prepared.finish();
-                        self.adopt_store_backed_session(document);
-                        if !warnings.is_empty() {
-                            self.notify_session_error_sticky(format!(
-                                "session loaded with unavailable attachments: {}",
-                                warnings.join("; ")
-                            ));
-                        }
-                        self.finish_transcript_turn();
-                        self.transcript_win_mut().follow_tail();
+                        self.adopt_store_backed_session(document, None);
+                        self.finish_loaded_transcript(&warnings);
                         if let Some(source_id) = forked_from {
                             self.publish_history_delta(super::history::HistoryDeltaKind::Forked);
                             self.notify(format!("forked from {source_id}"));

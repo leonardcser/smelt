@@ -635,6 +635,24 @@ pub(crate) struct SessionPersistenceStartup {
     pub(crate) latest_terminal_turn_id: Option<smelt_store::TurnId>,
 }
 
+/// Abandoned handoffs release SQLite on the sending worker, never on UI.
+pub(crate) struct SessionWriterHandoff {
+    receive: Receiver<smelt_store::SessionWriter>,
+}
+
+impl SessionWriterHandoff {
+    pub(crate) fn channel() -> (SyncSender<smelt_store::SessionWriter>, Self) {
+        let (send, receive) = mpsc::sync_channel(0);
+        (send, Self { receive })
+    }
+
+    fn receive(self) -> Result<smelt_store::SessionWriter, PersistenceCause> {
+        self.receive.recv().map_err(|_| {
+            PersistenceCause::unavailable("session writer handoff stopped before startup")
+        })
+    }
+}
+
 pub(crate) struct SessionPersistence {
     session_id: smelt_core::session_id::SessionId,
     epoch: SessionEpoch,
@@ -657,6 +675,7 @@ impl SessionPersistence {
         epoch: SessionEpoch,
         generation: PersistenceGeneration,
         acknowledged_head: smelt_store::StoreHead,
+        writer: Option<SessionWriterHandoff>,
     ) -> Result<Self, PersistenceCause> {
         let latest = Arc::new(Mutex::new(PendingBatchState {
             accepting: true,
@@ -705,6 +724,7 @@ impl SessionPersistence {
                         worker_pending_audits,
                         worker_pending_full_audit_bytes,
                         started_tx,
+                        writer,
                     );
                 }));
                 if result.is_err() {
@@ -2100,16 +2120,22 @@ fn persistence_actor(
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
     started: mpsc::Sender<Result<SessionPersistenceStartup, PersistenceCause>>,
+    writer: Option<SessionWriterHandoff>,
 ) {
     let publisher = StatusPublisher {
         status,
         wake: status_wake,
     };
     let sessions_root = sessions.sessions_dir();
-    let mut writer = match smelt_store::SessionWriter::open(&sessions_root, session_id.as_str()) {
+    let mut writer = match writer.map_or_else(
+        || {
+            smelt_store::SessionWriter::open(&sessions_root, session_id.as_str())
+                .map_err(|error| PersistenceCause::from_store("open session writer", error))
+        },
+        SessionWriterHandoff::receive,
+    ) {
         Ok(writer) => writer,
-        Err(error) => {
-            let cause = PersistenceCause::from_store("open session writer", error);
+        Err(cause) => {
             publisher.publish_state(PersistenceState::Stopped {
                 durable: generation,
                 omitted: None,
@@ -3649,6 +3675,7 @@ mod tests {
             SessionEpoch::new(1),
             PersistenceGeneration::ZERO,
             smelt_store::StoreHead::default(),
+            None,
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3805,6 +3832,7 @@ mod tests {
             SessionEpoch::new(1),
             PersistenceGeneration::ZERO,
             expected.head,
+            None,
         )
         .unwrap();
         let startup_deadline = Instant::now() + Duration::from_secs(5);
@@ -3890,6 +3918,7 @@ mod tests {
             SessionEpoch::new(1),
             PersistenceGeneration::ZERO,
             expected.head,
+            None,
         )
         .unwrap();
         let startup_deadline = deadline();
@@ -4079,6 +4108,7 @@ mod tests {
                 SessionEpoch::new(1),
                 PersistenceGeneration::ZERO,
                 head,
+                None,
             )
             .unwrap();
             let deadline = deadline();
@@ -4147,6 +4177,7 @@ mod tests {
             SessionEpoch::new(1),
             PersistenceGeneration::ZERO,
             head,
+            None,
         )
         .unwrap();
         let deadline = deadline();

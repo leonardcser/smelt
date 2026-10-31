@@ -151,6 +151,7 @@ pub(crate) struct ConversationRuntime {
     inflight_canonical_commands:
         std::collections::HashMap<crate::persist::CanonicalCommandId, InflightCanonicalCommand>,
     access: SessionAccess,
+    ownership_recovery: super::session_load::OwnershipRecovery,
     sessions: smelt_core::session::SessionStorage,
     storage: SessionPersistence,
 }
@@ -194,6 +195,7 @@ impl ConversationRuntime {
             canonical_operations: std::collections::VecDeque::new(),
             inflight_canonical_commands: std::collections::HashMap::new(),
             access: SessionAccess::Owned,
+            ownership_recovery: Default::default(),
             sessions,
             storage,
         }
@@ -2666,14 +2668,57 @@ impl ConversationRuntime {
     pub(crate) fn read_only_reason(&self) -> String {
         match &self.access {
             SessionAccess::Opening => "session writer is opening".into(),
+            SessionAccess::WaitingForOwnership => {
+                "this session is already open in another window".into()
+            }
             SessionAccess::ReadOnly { reason } => reason.clone(),
             SessionAccess::Owned => "session is read-only".to_string(),
         }
     }
 
     pub(crate) fn mark_read_only(&mut self, reason: String) {
+        self.ownership_recovery.cancel();
         self.access = SessionAccess::ReadOnly { reason };
         self.document.disable_change_tracking();
+    }
+
+    pub(super) fn wait_for_ownership(
+        &mut self,
+        width: u16,
+        target_rows: u16,
+        events: tokio::sync::mpsc::UnboundedSender<super::AppEvent>,
+    ) -> Result<(), String> {
+        self.ownership_recovery.request(
+            self.sessions.clone(),
+            self.session.id.clone(),
+            width,
+            target_rows,
+            events,
+        )?;
+        self.access = SessionAccess::WaitingForOwnership;
+        self.document.disable_change_tracking();
+        Ok(())
+    }
+
+    pub(super) fn take_ownership_recovery(
+        &mut self,
+    ) -> Option<Result<super::session_load::RecoveredSession, String>> {
+        if !matches!(self.access, SessionAccess::WaitingForOwnership)
+            || self
+                .persistence
+                .as_ref()
+                .is_some_and(|actor| !actor.is_finished())
+        {
+            return None;
+        }
+        self.ownership_recovery.take_result()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_ownership_observer(
+        &mut self,
+    ) -> std::sync::mpsc::Receiver<super::session_load::OwnershipRecoveryEvent> {
+        self.ownership_recovery.take_observer()
     }
 
     pub(crate) fn has_persistence(&self) -> bool {
@@ -2769,6 +2814,7 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn reset(&mut self, pid: u32, cwd: std::path::PathBuf) -> String {
+        self.ownership_recovery.cancel();
         let old_id = self.session.id.clone();
         self.session = smelt_core::session::Session::new(pid, cwd);
         self.clear_live_session();
@@ -2790,6 +2836,7 @@ impl ConversationRuntime {
         &mut self,
         loaded: smelt_core::session::Session,
     ) -> Option<String> {
+        self.ownership_recovery.cancel();
         self.session = loaded;
         self.clear_live_session();
         self.turn.reset_session();
@@ -2799,6 +2846,13 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn claim_writer_access(&mut self) -> Result<(), crate::persist::PersistenceCause> {
+        self.claim_writer_access_with_writer(None)
+    }
+
+    pub(super) fn claim_writer_access_with_writer(
+        &mut self,
+        writer: Option<crate::persist::SessionWriterHandoff>,
+    ) -> Result<(), crate::persist::PersistenceCause> {
         debug_assert!(self.persistence.is_none());
         if self.is_ephemeral() {
             self.access = SessionAccess::Owned;
@@ -2819,6 +2873,7 @@ impl ConversationRuntime {
             epoch,
             self.document.durable_generation(),
             self.document.published_head(),
+            writer,
         )?;
         self.persistence_epoch = epoch;
         self.observed_persistence_status = None;
@@ -3290,7 +3345,10 @@ impl ConversationRuntime {
                 return Err(cause);
             }
         }
-        if matches!(self.access, SessionAccess::ReadOnly { .. }) {
+        if matches!(
+            self.access,
+            SessionAccess::ReadOnly { .. } | SessionAccess::WaitingForOwnership
+        ) {
             return Err(crate::persist::PersistenceCause::unavailable(
                 "session is read-only",
             ));

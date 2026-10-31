@@ -254,6 +254,7 @@ impl Default for TuiAppOptions {
 #[derive(Clone, Debug)]
 pub(crate) enum SessionAccess {
     Opening,
+    WaitingForOwnership,
     Owned,
     ReadOnly { reason: String },
 }
@@ -536,6 +537,7 @@ pub enum AppEvent {
     ),
     TurnInputPrepared(Box<crate::app::agent::TurnInputPrepared>),
     SessionLoadCompleted(Box<crate::app::session_load::SessionLoadWorkerResult>),
+    OwnershipRecoveryReady,
     RewindPrepared(Box<crate::app::history::RewindWorkerResult>),
     SessionPreviewCompleted(crate::app::session_preview::SessionPreviewWorkerResult),
     ShutdownSignal,
@@ -2894,6 +2896,7 @@ impl TuiApp {
         let Some(report) = self.conversation.drain_persistence_report() else {
             self.drive_canonical_operations();
             self.poll_session_adoption();
+            self.poll_ownership_recovery();
             return;
         };
         if let Some(Err(cause)) = report.startup {
@@ -2929,6 +2932,7 @@ impl TuiApp {
         }
         self.drive_canonical_operations();
         self.poll_session_adoption();
+        self.poll_ownership_recovery();
     }
 
     fn handle_canonical_completion(
@@ -3071,6 +3075,7 @@ impl TuiApp {
             AppEvent::SessionLoadCompleted(result) => {
                 self.handle_session_load_worker_result(*result)
             }
+            AppEvent::OwnershipRecoveryReady => self.poll_ownership_recovery(),
             AppEvent::RewindPrepared(result) => self.handle_rewind_worker_result(*result),
             AppEvent::SessionPreviewCompleted(result) => {
                 self.handle_session_preview_worker_result(result)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::session_load::OwnershipRecoveryEvent;
 use protocol::{
     AssistantStep, Content, EngineEvent, HistoryAppend, HistoryAppendResult, HistoryItem, Role,
     TokenUsage, ToolInvocation, ToolOutcome,
@@ -4266,6 +4267,256 @@ fn resuming_session_with_active_writer_is_read_only() {
             .len(),
         1
     );
+}
+
+#[test]
+fn read_only_session_becomes_writable_after_owner_closes() {
+    let guard = test_home_guard();
+    let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_full_history_fixture(&mut owner);
+    let session_id = owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&session_id));
+    assert!(reader.session_is_read_only());
+    reader.type_text("draft survives takeover");
+    reader.press(crossterm::event::KeyCode::Enter);
+    assert!(reader.session_is_read_only());
+    assert_eq!(reader.prompt_source(), "draft survives takeover");
+
+    owner.session_append_history(HistoryItem::user(Content::text("owner's last message")));
+    owner.save_session_and_flush();
+    drop(owner);
+
+    wait_for_ownership_recovery(&mut reader);
+    assert_eq!(reader.prompt_source(), "draft survives takeover");
+    assert_eq!(reader.session_message_count(), 2);
+    assert!(reader.overlays_probe().notification().is_none());
+    reader.press(crossterm::event::KeyCode::Enter);
+    reader.wait_for_turn_persistence();
+    assert!(reader.current_turn_id().is_some());
+    assert!(!reader.session_is_read_only());
+    let stored = lineage_reader(&session_id);
+    let history = stored
+        .history_range(0, stored.snapshot().unwrap().head.history_len.get())
+        .unwrap();
+    assert_eq!(
+        &history[..2],
+        &[
+            HistoryItem::user(Content::text("shared history")),
+            HistoryItem::user(Content::text("owner's last message")),
+        ]
+    );
+    assert!(matches!(
+        history.last().unwrap(),
+        HistoryItem::User { content, .. } if content.text_content() == "draft survives takeover"
+    ));
+}
+
+fn wait_for_ownership_recovery(app: &mut TestApp) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while app.session_is_read_only() {
+        app.app.drain_persist_reports();
+        if let Some(event) = app.app.platform.try_recv_app_event() {
+            app.app.handle_app_event(event);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ownership recovery timed out"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_for_ownership_event(
+    observer: &std::sync::mpsc::Receiver<OwnershipRecoveryEvent>,
+    expected: OwnershipRecoveryEvent,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let event = observer
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("ownership recovery event timed out");
+        if event == expected {
+            return;
+        }
+        assert_ne!(
+            event,
+            OwnershipRecoveryEvent::Stopped,
+            "worker stopped before {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn failed_manual_load_does_not_cancel_ownership_recovery() {
+    let guard = test_home_guard();
+    let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_full_history_fixture(&mut owner);
+    let session_id = owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&session_id));
+    let observer = reader.app.conversation.take_ownership_observer();
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
+    reader.app.request_session_load("missing-session");
+    reader.wait_for_session_lifecycle();
+    assert_eq!(reader.session_snapshot().id, session_id);
+    assert!(reader.session_is_read_only());
+    drop(owner);
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Ready);
+    wait_for_ownership_recovery(&mut reader);
+    assert_eq!(reader.session_snapshot().id, session_id);
+}
+
+#[test]
+fn leaving_read_only_session_cancels_ownership_wait() {
+    let guard = test_home_guard();
+    let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_full_history_fixture(&mut owner);
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&owner.session_snapshot().id));
+    assert!(reader.session_is_read_only());
+    let observer = reader.app.conversation.take_ownership_observer();
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
+    reader.app.reset_session();
+    let new_id = reader.session_snapshot().id.clone();
+    reader.type_text("new session draft");
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Stopped);
+    drop(owner);
+
+    reader.app.drain_persist_reports();
+    while let Some(event) = reader.app.platform.try_recv_app_event() {
+        reader.app.handle_app_event(event);
+    }
+    assert_eq!(reader.session_snapshot().id, new_id);
+    assert_eq!(reader.prompt_source(), "new session draft");
+    assert!(!reader.session_is_read_only());
+}
+
+#[test]
+fn ownership_recovery_keeps_lease_until_writer_startup() {
+    let guard = test_home_guard();
+    let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_full_history_fixture(&mut owner);
+    let session_id = owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&session_id));
+    let observer = reader.app.conversation.take_ownership_observer();
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
+    drop(owner);
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Ready);
+
+    let root = smelt_core::session::sessions_dir();
+    assert!(reader.session_is_read_only());
+    assert!(matches!(
+        smelt_store::SessionWriter::open_existing(&root, &session_id),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    ));
+    wait_for_ownership_recovery(&mut reader);
+    assert!(matches!(
+        smelt_store::SessionWriter::open_existing(&root, &session_id),
+        Err(smelt_store::StoreError::OwnershipConflict { .. })
+    ));
+    reader.start_submitted_turn("continue after handoff");
+    assert!(reader.current_turn_id().is_some());
+}
+
+#[test]
+fn successful_manual_load_discards_ready_ownership_recovery() {
+    let guard = test_home_guard();
+    let target_id = saved_one_row_session(&guard);
+    let mut owner = TestApp::builder().build_without_test_home_reset(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_full_history_fixture(&mut owner);
+    let source_id = owner.session_snapshot().id.clone();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&source_id));
+    let observer = reader.app.conversation.take_ownership_observer();
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
+    drop(owner);
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Ready);
+
+    reader.app.request_session_load(&target_id);
+    reader.wait_for_session_lifecycle();
+    assert_eq!(reader.session_snapshot().id, target_id);
+    assert!(!reader.session_is_read_only());
+    wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Stopped);
+    let _released =
+        smelt_store::SessionWriter::open_existing(smelt_core::session::sessions_dir(), &source_id)
+            .expect("leaving a session must release its recovered writer");
+}
+
+#[test]
+fn competing_readers_recover_latest_history_in_sequence() {
+    let guard = test_home_guard();
+    let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+    owner.session_append_history(HistoryItem::user(Content::text("shared history")));
+    save_full_history_fixture(&mut owner);
+    let session_id = owner.session_snapshot().id.clone();
+    let mut first = TestApp::builder().build_without_test_home_reset(&guard);
+    let mut second = TestApp::builder().build_without_test_home_reset(&guard);
+    for reader in [&mut first, &mut second] {
+        assert!(reader.load_session_by_id(&session_id));
+        let observer = reader.app.conversation.take_ownership_observer();
+        wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Waiting);
+    }
+    drop(owner);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while first.session_is_read_only() && second.session_is_read_only() {
+        for reader in [&mut first, &mut second] {
+            reader.app.drain_persist_reports();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no reader acquired ownership"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (winner, waiter) = if first.session_is_read_only() {
+        (&mut second, &mut first)
+    } else {
+        (&mut first, &mut second)
+    };
+    assert!(waiter.session_is_read_only());
+    winner.session_append_history(HistoryItem::user(Content::text("winner continues")));
+    winner.save_session_and_flush();
+    winner.app.reset_session();
+    wait_for_ownership_recovery(waiter);
+    assert_eq!(waiter.session_message_count(), 2);
+    assert_eq!(
+        lineage_reader(&session_id).history_range(0, 2).unwrap(),
+        vec![
+            HistoryItem::user(Content::text("shared history")),
+            HistoryItem::user(Content::text("winner continues")),
+        ]
+    );
+}
+
+#[test]
+fn ownership_recovery_loads_interrupted_turn_before_writer_startup() {
+    let guard = test_home_guard();
+    let mut owner = TestApp::builder().build_with_test_home_guard(&guard);
+    owner.start_submitted_turn("interrupted request");
+    owner.save_session_and_flush();
+    let session_id = owner.session_snapshot().id.clone();
+    let interrupted_turn = owner.current_turn_id().unwrap();
+    let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
+    assert!(reader.load_session_by_id(&session_id));
+    assert!(reader.session_is_read_only());
+    drop(owner);
+    wait_for_ownership_recovery(&mut reader);
+    assert_eq!(
+        reader.app.conversation.last_terminal_turn_id(),
+        Some(interrupted_turn)
+    );
+    reader.start_submitted_turn("continue after interruption");
+    assert!(reader
+        .current_turn_id()
+        .is_some_and(|turn| turn > interrupted_turn));
 }
 
 #[test]

@@ -2070,6 +2070,14 @@ impl TuiApp {
                 crate::app::NotificationLifetime::Sticky,
                 crate::app::NotificationScope::Session(self.conversation.session().id.clone()),
             );
+            if let Err(error) = self.conversation.wait_for_ownership(
+                self.last_width,
+                super::transcript::record_tail_target_rows(self.last_height),
+                self.platform.app_event_sender(),
+            ) {
+                self.conversation.mark_read_only(error.clone());
+                self.notify_session_error_sticky(error);
+            }
         } else {
             self.conversation.mark_read_only(cause.message.clone());
             self.notify_session_error_sticky(format!(
@@ -2246,16 +2254,25 @@ impl TuiApp {
         &mut self,
         document: crate::app::session_document::StoreBackedSessionDocument,
     ) -> bool {
+        self.load_store_backed_session_with_writer(document, None)
+    }
+
+    pub(super) fn load_store_backed_session_with_writer(
+        &mut self,
+        document: crate::app::session_document::StoreBackedSessionDocument,
+        writer: Option<crate::persist::SessionWriterHandoff>,
+    ) -> bool {
         if !self.begin_session_replacement(crate::persist::ClosePolicy::RequireDurable) {
             return false;
         }
-        self.adopt_store_backed_session(document);
+        self.adopt_store_backed_session(document, writer);
         true
     }
 
     pub(super) fn adopt_store_backed_session(
         &mut self,
         document: crate::app::session_document::StoreBackedSessionDocument,
+        writer: Option<crate::persist::SessionWriterHandoff>,
     ) {
         debug_assert!(
             !self.conversation.has_persistence(),
@@ -2268,6 +2285,7 @@ impl TuiApp {
             store_head,
         } = document;
         let old_id = self.conversation.session().id.clone();
+        let preserve_prompt = old_id == loaded.id && self.session_is_read_only();
 
         if self.core.startup_overrides.mode.is_none() {
             if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
@@ -2306,13 +2324,17 @@ impl TuiApp {
         );
         self.bump_epoch("session_epoch");
         self.clear_session_scoped_permissions_for_session_boundary();
-        self.prompt.clear_queue();
-        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        self.prompt.clear_for_session_change(&mut pctx);
+        if !preserve_prompt {
+            self.prompt.clear_queue();
+            let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+            self.prompt.clear_for_session_change(&mut pctx);
+        }
         self.clear_transcript();
         self.conversation
             .install_loaded_store_session(transcript, live_session, store_head);
-        self.claim_writer_access_for_current_session();
+        if let Err(cause) = self.conversation.claim_writer_access_with_writer(writer) {
+            self.notify_writer_startup_failure(&cause);
+        }
         self.publish_shared_session_state();
         self.core
             .signals

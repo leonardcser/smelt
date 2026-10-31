@@ -3840,6 +3840,7 @@ mod tests {
             SessionEpoch::new(1),
             PersistenceGeneration::ZERO,
             target_head,
+            None,
         )
         .expect("persistence actor");
         persistence.submit(intent).expect("submit sparse save");
