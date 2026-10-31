@@ -222,7 +222,7 @@ fn assert_invariants(grid: &Grid, label: &str) {
 fn assert_diff_replay_parity(prev: &Grid, curr: &Grid) {
     let mut replay = prev.clone();
     for update in curr.diff(prev) {
-        replay.set_symbol(
+        replay.as_mut_slice().set_symbol(
             update.x,
             update.y,
             update.cell.symbol.as_str(),
@@ -255,16 +255,20 @@ fuzz_target!(|input: FuzzInput| {
                 y,
                 symbol,
                 style,
-            } => curr.set_symbol(x, y, grapheme(symbol), style),
+            } => curr
+                .as_mut_slice()
+                .set_symbol(x, y, grapheme(symbol), style),
             Op::PutStr { x, y, chars, style } => {
-                curr.put_str(x, y, &indices_to_string(&chars), style);
+                curr.as_mut_slice()
+                    .put_str(x, y, &indices_to_string(&chars), style);
             }
-            Op::PutChar { x, y, ch, fg } => curr.put_char(x, y, ch, fg),
+            Op::PutChar { x, y, ch, fg } => curr.as_mut_slice().put_char(x, y, ch, fg),
             Op::PutStrFg { x, y, chars, fg } => {
-                curr.put_str_fg(x, y, &indices_to_string(&chars), fg);
+                curr.as_mut_slice()
+                    .put_str_fg(x, y, &indices_to_string(&chars), fg);
             }
-            Op::Fill { rect, ch, style } => curr.fill(rect, ch, style),
-            Op::Clear { rect } => curr.clear(rect),
+            Op::Fill { rect, ch, style } => curr.as_mut_slice().fill(rect, ch, style),
+            Op::Clear { rect } => curr.slice_mut(rect).clear(),
             Op::ClearAll => curr.clear_all(),
             Op::Frame => {
                 assert_invariants(&curr, "frame-curr");

@@ -767,7 +767,7 @@ impl Sim {
             Pending::Permission { request_id } => {
                 self.handle.send(UiCommand::PermissionDecision {
                     request_id,
-                    approved: outcome % 2 == 0,
+                    approved: outcome.is_multiple_of(2),
                     message: None,
                 });
             }

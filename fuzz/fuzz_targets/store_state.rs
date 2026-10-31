@@ -298,11 +298,7 @@ fn backup(root: &Path, sessions_root: &Path, model: &mut Model) {
     assert!(report.healthy, "backup doctor issues: {:?}", report.issues);
 }
 
-fn maintain(
-    writer: &mut Option<OwnedLineageWriter>,
-    model: &Model,
-    kind: u8,
-) {
+fn maintain(writer: &mut Option<OwnedLineageWriter>, model: &Model, kind: u8) {
     if model.identity.is_none() {
         return;
     }
