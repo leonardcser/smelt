@@ -182,19 +182,70 @@ pub struct PreparedPaintLeaf {
     pub context: DrawContext,
 }
 
-/// Resolved frame geometry and painter-order operations.
-///
-/// Hosts may render [`Self::paint_leaves`] off-screen, then pass this plan back
-/// to [`Ui::paint_prepared_frame_with_paints`] without resolving layout again.
+/// Resolved frame geometry and painter-order operations. Paint it with
+/// [`Ui::begin_frame`] or [`Ui::paint_frame`] without resolving layout again.
 pub struct PreparedFrame {
     commands: Vec<PreparedFrameCommand>,
-    paint_leaves: Vec<PreparedPaintLeaf>,
     theme: std::sync::Arc<Theme>,
 }
 
-impl PreparedFrame {
-    pub fn paint_leaves(&self) -> &[PreparedPaintLeaf] {
-        &self.paint_leaves
+/// A frame being painted. Built-in commands paint in order until the next
+/// host-owned leaf, which the host then draws directly into [`Self::grid_mut`].
+/// Later commands paint over it, so host leaves keep their layer order.
+pub struct Frame {
+    grid: Grid,
+    commands: std::vec::IntoIter<PreparedFrameCommand>,
+    theme: std::sync::Arc<Theme>,
+}
+
+impl Frame {
+    /// Paint built-in commands up to the next host-owned leaf and return it,
+    /// or `None` once the frame is complete.
+    pub fn paint_to_next_leaf(&mut self, ui: &Ui) -> Option<PreparedPaintLeaf> {
+        let grid = &mut self.grid;
+        let theme = &self.theme;
+        for command in self.commands.by_ref() {
+            match command {
+                PreparedFrameCommand::Clear(area) => grid.slice_mut(area).clear(),
+                PreparedFrameCommand::Divider { divider, active } => {
+                    let mut normal = theme.get("Comment");
+                    let mut dragging = theme.get("SmeltResizeHandle");
+                    normal.bg = None;
+                    dragging.bg = None;
+                    let styles = layout::DividerStyles {
+                        normal,
+                        active: dragging,
+                    };
+                    divider.paint(grid, divider.style(styles, active));
+                }
+                PreparedFrameCommand::Chrome {
+                    area,
+                    chrome,
+                    context,
+                } => layout::paint_chrome(grid, area, &chrome, theme, context),
+                PreparedFrameCommand::Window { win, rect, context } => {
+                    let Some(window) = ui.wins.get(&win) else {
+                        continue;
+                    };
+                    let Some(buffer) = ui.bufs.get(&window.buf) else {
+                        continue;
+                    };
+                    window.render(buffer, &mut grid.slice_mut(rect), &context);
+                }
+                PreparedFrameCommand::Paint(leaf) => return Some(leaf),
+            }
+        }
+        None
+    }
+
+    pub fn grid_mut(&mut self) -> &mut Grid {
+        &mut self.grid
+    }
+
+    /// Finish the frame. Remaining commands are dropped; call
+    /// [`Self::paint_to_next_leaf`] until it returns `None` first.
+    pub fn into_grid(self) -> Grid {
+        self.grid
     }
 }
 
@@ -214,7 +265,7 @@ enum PreparedFrameCommand {
         rect: Rect,
         context: DrawContext,
     },
-    Paint(usize),
+    Paint(PreparedPaintLeaf),
 }
 
 pub struct Ui {
@@ -1917,6 +1968,11 @@ impl Ui {
         self.callbacks.on_event(win, ev, cb);
     }
 
+    /// Whether any window or leaf has a callback for `ev`.
+    pub fn listens_for(&self, ev: WinEvent) -> bool {
+        self.callbacks.listens_for(ev)
+    }
+
     pub fn has_win_event(&self, win: WinId, ev: WinEvent) -> bool {
         self.callbacks.has_event(win, ev)
     }
@@ -2371,7 +2427,7 @@ impl Ui {
     // ── Renderer ─────────────────────────────────────────────────
 
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
-        self.render_with_paints(w, |_, _, _| {})
+        self.render_with(w, |_, _| {}, |_, _| {})
     }
 
     /// Resolve overlay leaf geometry into `Window::viewport` before the next paint.
@@ -2571,115 +2627,28 @@ impl Ui {
         Some(request)
     }
 
-    /// Render one frame, delegating non-Window `Paint(id)` leaves to `paint(id, slice, ctx)`.
-    pub fn render_with_paints<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
-    where
-        W: std::io::Write,
-        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
-    {
-        self.render_with_paints_prepared(w, |_, _| {}, paint)
-    }
-
-    /// Render one frame with a host preparation hook for row-backed windows.
+    /// Render one frame with host hooks.
     ///
-    /// `prepare` runs after split/overlay geometry is known and before the backing
-    /// buffer is rendered/layouted for paint. Row-backed sources can materialize a
-    /// bounded row slice into `request.buf`, apply row metadata to `request.win`,
-    /// and then let the normal `Window::render` path handle painting.
-    pub fn render_with_paints_prepared<W, P, F>(
-        &mut self,
-        w: &mut W,
-        prepare: P,
-        paint: F,
-    ) -> std::io::Result<()>
+    /// `prepare` runs after geometry is known and before each backing buffer is
+    /// laid out, so row-backed sources can materialize a bounded row slice into
+    /// `request.buf`. `paint` draws every host-owned `PaintId` leaf.
+    pub fn render_with<W, P, F>(&mut self, w: &mut W, prepare: P, paint: F) -> std::io::Result<()>
     where
         W: std::io::Write,
         P: FnMut(&mut Ui, MaterializeRequest),
-        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+        F: FnMut(&PreparedPaintLeaf, &mut GridSlice<'_>),
     {
-        self.render_with_paints_prepared_and_after_layout(w, prepare, |_, _| {}, paint)
-    }
-
-    /// Render one frame with host preparation and an after-layout hook for windows.
-    ///
-    /// `prepare` runs before the backing buffer is rendered/layouted so row-backed
-    /// sources can materialize content. `after_layout` runs after each prepared
-    /// window has current buffer content, layout, and viewport metadata, but before paint.
-    pub fn render_with_paints_prepared_and_after_layout<W, P, D, F>(
-        &mut self,
-        w: &mut W,
-        prepare: P,
-        after_layout: D,
-        paint: F,
-    ) -> std::io::Result<()>
-    where
-        W: std::io::Write,
-        P: FnMut(&mut Ui, MaterializeRequest),
-        D: FnMut(&mut Ui, PreparedWindowRequest),
-        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
-    {
-        self.render_with_prepared_splits_and_paints(
-            w,
-            std::iter::empty(),
-            prepare,
-            after_layout,
-            paint,
-        )
-    }
-
-    /// Paint and flush a frame while reusing split windows prepared by an earlier host phase.
-    pub fn render_with_prepared_splits_and_paints<W, I, P, D, F>(
-        &mut self,
-        w: &mut W,
-        prepared_splits: I,
-        prepare: P,
-        after_layout: D,
-        paint: F,
-    ) -> std::io::Result<()>
-    where
-        W: std::io::Write,
-        I: IntoIterator<Item = PreparedWindowRequest>,
-        P: FnMut(&mut Ui, MaterializeRequest),
-        D: FnMut(&mut Ui, PreparedWindowRequest),
-        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
-    {
-        let frame = self.paint_frame_with_prepared_splits_and_paints(
-            prepared_splits,
-            prepare,
-            after_layout,
-            paint,
-        );
-        self.flush_prepared_frame(w, frame)
-    }
-
-    /// Paint a frame into an owned grid while reusing previously prepared splits.
-    ///
-    /// Reused requests are still passed to `after_layout`; overlays, decorations,
-    /// and all remaining splits are prepared from their current state. The owned
-    /// grid can be amended after this method releases its UI borrow, then passed to
-    /// [`Self::flush_prepared_frame`].
-    pub fn paint_frame_with_prepared_splits_and_paints<I, P, D, F>(
-        &mut self,
-        prepared_splits: I,
-        prepare: P,
-        after_layout: D,
-        mut paint: F,
-    ) -> Grid
-    where
-        I: IntoIterator<Item = PreparedWindowRequest>,
-        P: FnMut(&mut Ui, MaterializeRequest),
-        D: FnMut(&mut Ui, PreparedWindowRequest),
-        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
-    {
-        let prepared =
-            self.prepare_frame_with_prepared_splits(prepared_splits, prepare, after_layout);
-        self.paint_prepared_frame_with_paints(prepared, |_, id, slice, context| {
-            paint(id, slice, context);
-        })
+        let prepared = self.prepare_frame(std::iter::empty(), prepare, |_, _| {});
+        let frame = self.paint_frame(prepared, paint);
+        self.flush_frame(w, frame)
     }
 
     /// Materialize windows and resolve one immutable frame plan.
-    pub fn prepare_frame_with_prepared_splits<I, P, D>(
+    ///
+    /// Splits already prepared by an earlier host phase are reused rather than
+    /// prepared again. `after_layout` runs for every prepared window once its
+    /// buffer content, layout, and viewport are current, before paint.
+    pub fn prepare_frame<I, P, D>(
         &mut self,
         prepared_splits: I,
         mut prepare: P,
@@ -2740,7 +2709,6 @@ impl Ui {
         });
         let mut builder = PreparedFrameBuilder {
             commands: Vec::new(),
-            paint_leaves: Vec::new(),
             wins: &self.wins,
             bufs: &self.bufs,
             focus: self.focus,
@@ -2766,67 +2734,37 @@ impl Ui {
         }
         PreparedFrame {
             commands: builder.commands,
-            paint_leaves: builder.paint_leaves,
             theme,
         }
     }
 
-    /// Paint a previously resolved frame without consulting layout again.
-    pub fn paint_prepared_frame_with_paints<F>(
-        &mut self,
-        prepared: PreparedFrame,
-        mut paint: F,
-    ) -> Grid
-    where
-        F: FnMut(usize, PaintId, &mut GridSlice<'_>, &DrawContext),
-    {
-        let PreparedFrame {
-            commands,
-            paint_leaves,
-            theme,
-        } = prepared;
-        let wins = &self.wins;
-        let bufs = &self.bufs;
-        self.surface.compositor_mut().paint_frame(move |grid| {
-            for command in commands {
-                match command {
-                    PreparedFrameCommand::Clear(area) => grid.slice_mut(area).clear(),
-                    PreparedFrameCommand::Divider { divider, active } => {
-                        let mut normal = theme.get("Comment");
-                        let mut dragging = theme.get("SmeltResizeHandle");
-                        normal.bg = None;
-                        dragging.bg = None;
-                        let styles = layout::DividerStyles {
-                            normal,
-                            active: dragging,
-                        };
-                        divider.paint(grid, divider.style(styles, active));
-                    }
-                    PreparedFrameCommand::Chrome {
-                        area,
-                        chrome,
-                        context,
-                    } => layout::paint_chrome(grid, area, &chrome, &theme, context),
-                    PreparedFrameCommand::Window { win, rect, context } => {
-                        let Some(window) = wins.get(&win) else {
-                            continue;
-                        };
-                        let Some(buffer) = bufs.get(&window.buf) else {
-                            continue;
-                        };
-                        window.render(buffer, &mut grid.slice_mut(rect), &context);
-                    }
-                    PreparedFrameCommand::Paint(slot) => {
-                        let leaf = &paint_leaves[slot];
-                        paint(slot, leaf.id, &mut grid.slice_mut(leaf.rect), &leaf.context);
-                    }
-                }
-            }
-        })
+    /// Start painting a prepared frame into the compositor's next grid.
+    ///
+    /// Drive it with [`Frame::paint_to_next_leaf`]: the frame owns its grid and
+    /// borrows the UI only while painting built-in commands, so hosts can run
+    /// code that needs the whole UI between leaves.
+    pub fn begin_frame(&mut self, prepared: PreparedFrame) -> Frame {
+        Frame {
+            grid: self.surface.compositor_mut().begin_frame(),
+            commands: prepared.commands.into_iter(),
+            theme: prepared.theme,
+        }
     }
 
-    /// Flush an owned frame returned by [`Self::paint_frame_with_prepared_splits_and_paints`].
-    pub fn flush_prepared_frame<W: std::io::Write>(
+    /// Paint a prepared frame, calling `paint` for each host-owned leaf in painter order.
+    pub fn paint_frame<F>(&mut self, prepared: PreparedFrame, mut paint: F) -> Grid
+    where
+        F: FnMut(&PreparedPaintLeaf, &mut GridSlice<'_>),
+    {
+        let mut frame = self.begin_frame(prepared);
+        while let Some(leaf) = frame.paint_to_next_leaf(self) {
+            paint(&leaf, &mut frame.grid_mut().slice_mut(leaf.rect));
+        }
+        frame.into_grid()
+    }
+
+    /// Flush a painted frame and recycle its grid.
+    pub fn flush_frame<W: std::io::Write>(
         &mut self,
         w: &mut W,
         frame: Grid,
@@ -3617,8 +3555,8 @@ impl Ui {
             }
             w.last_emitted_resize = Some(cur);
             let payload = Payload::Rect {
-                row: vp.rect.y,
-                col: vp.rect.x,
+                x: vp.rect.x,
+                y: vp.rect.y,
                 width: vp.rect.width,
                 height: vp.rect.height,
                 content_width: vp.content_width,
@@ -4159,7 +4097,6 @@ fn resolve_decoration_size(
 
 struct PreparedFrameBuilder<'a> {
     commands: Vec<PreparedFrameCommand>,
-    paint_leaves: Vec<PreparedPaintLeaf>,
     wins: &'a HashMap<WinId, Window>,
     bufs: &'a HashMap<BufId, Buffer>,
     focus: Option<WinId>,
@@ -4205,20 +4142,19 @@ impl PreparedFrameBuilder<'_> {
             return;
         }
 
-        let slot = self.paint_leaves.len();
-        self.paint_leaves.push(PreparedPaintLeaf {
-            id,
-            rect,
-            context: DrawContext {
-                terminal_width: self.term_size.0,
-                terminal_height: self.term_size.1,
-                focused: false,
-                cursor_shape: CursorShape::Hidden,
-                theme: std::sync::Arc::clone(self.theme),
-                vim_mode: VimMode::default(),
-            },
-        });
-        self.commands.push(PreparedFrameCommand::Paint(slot));
+        self.commands
+            .push(PreparedFrameCommand::Paint(PreparedPaintLeaf {
+                id,
+                rect,
+                context: DrawContext {
+                    terminal_width: self.term_size.0,
+                    terminal_height: self.term_size.1,
+                    focused: false,
+                    cursor_shape: CursorShape::Hidden,
+                    theme: std::sync::Arc::clone(self.theme),
+                    vim_mode: VimMode::default(),
+                },
+            }));
     }
 }
 
@@ -4550,7 +4486,7 @@ mod tests {
         let mut requests = Vec::new();
         let mut out = Vec::new();
 
-        ui.render_with_paints_prepared(
+        ui.render_with(
             &mut out,
             |ui, request| {
                 requests.push(request);
@@ -4566,7 +4502,7 @@ mod tests {
                         materialized_rows: 1,
                     });
             },
-            |_, _, _| {},
+            |_, _| {},
         )
         .unwrap();
 
@@ -4592,18 +4528,18 @@ mod tests {
         ui.overlay_open(
             Overlay::new(LayoutTree::leaf(paint_id), crate::Anchor::ScreenCenter).with_size((4, 2)),
         );
-        let mut jobs = Vec::new();
-        let mut frame = ui.paint_frame_with_prepared_splits_and_paints(
-            std::iter::empty(),
-            |_, _| {},
-            |_, _| {},
-            |id, slice, _| jobs.push((id, slice.grid_rect())),
-        );
-
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].0, paint_id);
-        frame.slice_mut(jobs[0].1).set(0, 0, 'X', Style::default());
-        ui.flush_prepared_frame(&mut Vec::new(), frame).unwrap();
+        let prepared = ui.prepare_frame(std::iter::empty(), |_, _| {}, |_, _| {});
+        let mut frame = ui.begin_frame(prepared);
+        let leaf = frame.paint_to_next_leaf(&ui).expect("host leaf");
+        assert_eq!(leaf.id, paint_id);
+        // The UI is free between leaves: a host may mutate it before painting.
+        ui.clear_capture();
+        frame
+            .grid_mut()
+            .slice_mut(leaf.rect)
+            .set(0, 0, 'X', Style::default());
+        assert!(frame.paint_to_next_leaf(&ui).is_none());
+        ui.flush_frame(&mut Vec::new(), frame.into_grid()).unwrap();
 
         assert!(ui.flushed_snapshot().text().contains('X'));
     }
@@ -4615,31 +4551,27 @@ mod tests {
         let overlay_id = ui.overlay_open(
             Overlay::new(LayoutTree::leaf(paint_id), crate::Anchor::ScreenCenter).with_size((4, 2)),
         );
-        let prepared =
-            ui.prepare_frame_with_prepared_splits(std::iter::empty(), |_, _| {}, |_, _| {});
-        let leaf = prepared
-            .paint_leaves()
-            .first()
-            .expect("prepared paint leaf");
-        let planned_rect = leaf.rect;
-        assert_eq!((planned_rect.width, planned_rect.height), (4, 2));
-        assert_eq!(
-            (leaf.context.terminal_width, leaf.context.terminal_height),
-            ui.terminal_size()
-        );
-        assert!(std::sync::Arc::ptr_eq(&leaf.context.theme, ui.theme()));
+        let prepared = ui.prepare_frame(std::iter::empty(), |_, _| {}, |_, _| {});
 
+        // Resize the overlay after planning: the frame keeps the planned geometry.
         let overlay = ui.overlay_mut(overlay_id).expect("overlay");
         overlay.width = Constraint::Length(20);
         overlay.height = Constraint::Length(10);
-        let mut painted_rects = Vec::new();
-        let _frame = ui.paint_prepared_frame_with_paints(prepared, |slot, id, slice, _context| {
-            assert_eq!(slot, 0);
-            assert_eq!(id, paint_id);
-            painted_rects.push(slice.grid_rect());
+        let terminal = ui.terminal_size();
+        let theme = std::sync::Arc::clone(ui.theme());
+        let mut painted = Vec::new();
+        let _frame = ui.paint_frame(prepared, |leaf, slice| {
+            assert_eq!(leaf.id, paint_id);
+            assert_eq!(
+                (leaf.context.terminal_width, leaf.context.terminal_height),
+                terminal
+            );
+            assert!(std::sync::Arc::ptr_eq(&leaf.context.theme, &theme));
+            assert_eq!(slice.grid_rect(), leaf.rect);
+            painted.push((leaf.rect.width, leaf.rect.height));
         });
 
-        assert_eq!(painted_rects, [planned_rect]);
+        assert_eq!(painted, [(4, 2)]);
     }
 
     #[test]
@@ -4658,17 +4590,16 @@ mod tests {
         let mut after_layout_calls = 0;
         let mut out = Vec::new();
 
-        ui.render_with_prepared_splits_and_paints(
-            &mut out,
+        let frame = ui.prepare_frame(
             Some(prepared),
             |_, _| late_prepare_calls += 1,
             |_, request| {
                 assert_eq!(request.win, win);
                 after_layout_calls += 1;
             },
-            |_, _, _| {},
-        )
-        .unwrap();
+        );
+        let frame = ui.paint_frame(frame, |_, _| {});
+        ui.flush_frame(&mut out, frame).unwrap();
 
         assert_eq!(early_prepare_calls, 1);
         assert_eq!(late_prepare_calls, 0);
@@ -7889,14 +7820,14 @@ mod tests {
         ui.win_mut(win).unwrap().follow_tail();
         let mut request_follow_tail = None;
         let mut out = Vec::new();
-        ui.render_with_paints_prepared(
+        ui.render_with(
             &mut out,
             |_, request| {
                 if request.win == win {
                     request_follow_tail = Some(request.follow_tail);
                 }
             },
-            |_, _, _| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(request_follow_tail, Some(true));
@@ -7906,14 +7837,14 @@ mod tests {
         ui.set_capture(HitTarget::Scrollbar { owner: win });
         let mut request_follow_tail = None;
         let mut out = Vec::new();
-        ui.render_with_paints_prepared(
+        ui.render_with(
             &mut out,
             |_, request| {
                 if request.win == win {
                     request_follow_tail = Some(request.follow_tail);
                 }
             },
-            |_, _, _| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(request_follow_tail, Some(false));

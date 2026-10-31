@@ -63,6 +63,16 @@ fun(): table[]
 
 Return built-in colorschemes as `{ name, module, syntax, light, detail? }` rows.
 
+## `smelt.theme.rgb`
+
+```lua
+fun(color: any): table?
+```
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Resolve any color (`{ ansi = n }`, `{ rgb = { r, g, b } }`, a name such as `"red"`, or `"#rrggbb"`) to `{ rgb = { r, g, b } }`, using the standard xterm palette for indexed colors. Use it to blend colors, for example in a paint. Returns `nil` for `nil` and `"reset"`, whose real value is up to the terminal.
+
 ## `smelt.theme.set`
 
 ```lua

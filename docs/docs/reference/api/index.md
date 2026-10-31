@@ -9,7 +9,7 @@ description: "Reference for every namespace of the smelt Lua API: commands, keym
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 95 namespace(s), 466 function(s), 114 class(es), 13 alias(es).
+**Coverage:** 95 namespace(s), 471 function(s), 114 class(es), 13 alias(es).
 
 Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).
 
@@ -69,7 +69,7 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.clipboard`](clipboard.md): Read and write the system clipboard.
 - [`smelt.confirm`](confirm.md) (UI only): Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution. 1 advanced function(s).
 - [`smelt.dialog`](dialog.md) (UI only): Root-docked modal dialog primitives.
-- [`smelt.headerline`](headerline.md): Optional row above the transcript.
+- [`smelt.headerline`](headerline.md): Optional rows above the transcript, built like the statusline.
 - [`smelt.input`](input.md) (UI only): Single-line input handle constructor.
 - [`smelt.layout`](layout.md): Declarative, width-independent content layout primitives for transcript/tool display. Advanced.
 - [`smelt.notify`](notify.md) (some UI only): Status-area toasts.

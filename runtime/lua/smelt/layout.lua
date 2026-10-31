@@ -1,12 +1,12 @@
 -- Default main TUI layout composer.
 --
 -- Splits the screen vertically into:
---   * headerline           (1 row when a header source is visible)
+--   * headerline           (its rows while a header source shows items)
 --   * transcript           (fill)
 --   * composer or dialog
 --       - normal composer: auxiliary row, queued/stash top bar, prompt, bottom bar
 --       - active dialog: root-docked modal content replacing the whole composer
---   * statusline           (1 row, always visible)
+--   * statusline           (its rows, at least 1)
 --
 -- A blocking dialog removes the auxiliary row and every composer-chrome row so
 -- queued input, stash state, tips, and notifications cannot compete with the
@@ -36,7 +36,8 @@ local M = {}
 function M.compose(state)
   local term_h = state.term_h or 24
   local input_rows = state.prompt_input_rows or 1
-  local header_rows = headerline.rows()
+  local header, header_rows = headerline.node()
+  local status, status_rows = statusline.node()
 
   local content
   if state.dialog then
@@ -46,10 +47,10 @@ function M.compose(state)
     -- Keep the indicator and stash rows visible before allocating prompt input
     -- space. Queued messages use the remaining headroom above the prompt.
     local min_top_rows = prompt_bar.min_top_rows()
-    local composer_budget = term_h - header_rows - MIN_TRANSCRIPT_ROWS - aux_rows
-    -- Reserve the prompt bottom bar and the root statusline as well.
-    input_rows = math.min(input_rows, math.max(1, composer_budget - min_top_rows - 2))
-    local max_top_rows = math.max(min_top_rows, composer_budget - input_rows - 2)
+    local composer_budget = term_h - header_rows - status_rows - MIN_TRANSCRIPT_ROWS - aux_rows
+    -- Reserve the prompt bottom bar as well.
+    input_rows = math.min(input_rows, math.max(1, composer_budget - min_top_rows - 1))
+    local max_top_rows = math.max(min_top_rows, composer_budget - input_rows - 1)
     local top_rows = prompt_bar.top_rows(max_top_rows)
     local composer_height = top_rows + input_rows + 1
 
@@ -84,14 +85,14 @@ function M.compose(state)
 
   local main = smelt.ui.layout.vbox({
     { height = "fill", content },
-    { height = 1, smelt.ui.layout.leaf(statusline.win) },
+    { height = status_rows, status },
   })
 
   if header_rows == 0 then return main end
   return smelt.ui.layout.vbox({
     {
       height = header_rows,
-      smelt.ui.layout.leaf(headerline.win),
+      header,
     },
     {
       height = "fill",

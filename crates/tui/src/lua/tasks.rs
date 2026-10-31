@@ -105,17 +105,19 @@ fn populate_payload_table(
         crate::smelt_edit::Payload::Paste { content } => table.set("text", content.clone()),
         crate::smelt_edit::Payload::Selection { index } => table.set("index", *index + 1),
         crate::smelt_edit::Payload::Text { content } => table.set("text", content.clone()),
-        crate::smelt_edit::Payload::Mouse { row, col, button } => {
-            table.set("row", *row)?;
-            table.set("col", *col)?;
-            table.set(
-                "button",
-                match button {
-                    crate::smelt_edit::MouseButton::Left => "left",
-                    crate::smelt_edit::MouseButton::Right => "right",
-                    crate::smelt_edit::MouseButton::Middle => "middle",
-                },
-            )?;
+        crate::smelt_edit::Payload::Mouse { x, y, button } => {
+            table.set("x", *x)?;
+            table.set("y", *y)?;
+            if let Some(button) = button {
+                table.set(
+                    "button",
+                    match button {
+                        crate::smelt_edit::MouseButton::Left => "left",
+                        crate::smelt_edit::MouseButton::Right => "right",
+                        crate::smelt_edit::MouseButton::Middle => "middle",
+                    },
+                )?;
+            }
             Ok(())
         }
         crate::smelt_edit::Payload::Scroll { top, follow } => {
@@ -124,14 +126,14 @@ fn populate_payload_table(
             Ok(())
         }
         crate::smelt_edit::Payload::Rect {
-            row,
-            col,
+            x,
+            y,
             width,
             height,
             content_width,
         } => {
-            table.set("row", *row)?;
-            table.set("col", *col)?;
+            table.set("x", *x)?;
+            table.set("y", *y)?;
             table.set("width", *width)?;
             table.set("height", *height)?;
             table.set("content_width", *content_width)?;

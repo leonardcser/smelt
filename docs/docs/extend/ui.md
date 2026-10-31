@@ -188,29 +188,91 @@ end)
 
 Event names and `mark` options are type-checked in your editor.
 
-## Paint leaves and pointer events
+## Paint
 
-For canvas-like overlays that don't need a buffer, register a paint function and
-handle pointer events directly. The leaf that received `press` keeps receiving
-`drag` and `release` even if the pointer leaves its rectangle.
+A paint is a Lua function that draws cells directly. There are two kinds:
+
+- `smelt.paint.register(fn, opts)` returns a handle you place in a layout or
+  overlay like a window. `fn` draws that leaf's rectangle.
+- `smelt.paint.frame(fn, opts)` draws over the whole finished screen, just
+  before smelt sends the frame. Use it for screen-wide effects: fades, color
+  filters, melting text, a mouse trail.
+
+Both call `fn(slice, ctx)`. Coordinates are `(x, y)` cells from the top-left.
+The slice already holds what was painted below it, so a paint can read cells
+and draw over them. A write whose style leaves `bg` unset keeps the background
+underneath.
+
+| Method | Does |
+| ------ | ---- |
+| `get(x, y)` | Read a cell as `{ ch, width, style, image? }` |
+| `set(x, y, ch, style)` | Write one grapheme |
+| `put_str(x, y, text, style)` | Write a string, clipped at the right edge |
+| `fill(x, y, w, h, ch, style)` | Fill a rectangle |
+| `set_style(x, y, w, h, patch)` | Change only the style of a rectangle, keeping the glyphs |
+| `map(fn(cell, x, y))` | Visit every cell; return `{ ch?, style? }` to replace it |
+
+`ctx` holds `x`, `y` (the slice's screen position), `now_ms` and `frame` for
+animation, `focused`, and the terminal size. A frame paint also gets
+`ctx.cursor = { x, y }` while a cursor is visible, so an effect can follow it.
+To blend colors, `smelt.theme.rgb(color)` turns any color, including the theme's
+indexed ones, into `{ rgb = { r, g, b } }`.
 
 ```lua
-local paint = smelt.paint.register(draw_fn, { name = "myplugin.paint" })
-paint:on("press",   function(ev) smelt.notify.info("down @ "..ev.row..","..ev.col) end)
-paint:on("drag",    function(ev) ... end)
-paint:on("release", function(ev) ... end)
+-- Grayscale everything on screen.
+local gray = smelt.paint.frame(function(slice)
+  slice:map(function(cell)
+    local fg = cell.style.fg
+    if type(fg) ~= "table" or not fg.rgb then return end
+    local v = math.floor((fg.rgb[1] + fg.rgb[2] + fg.rgb[3]) / 3)
+    cell.style.fg = { rgb = { v, v, v } }
+    return { style = cell.style }
+  end)
+end, { name = "myplugin.gray" })
+
+gray:remove() -- stop the effect
 ```
+
+A paint repaints only when something under it changes. For animation, pass
+`fps`: smelt repaints at that rate while the paint is on screen and goes idle
+again once you remove it or call `handle:set_fps(nil)`. The built-in `/donut`
+is a full example.
+
+### Pointer events
+
+Paint leaves and windows receive pointer events through `handle:on(event, fn)`.
+Payloads hold leaf-relative `x` and `y`.
+
+| Event | When |
+| ----- | ---- |
+| `press`, `release`, `drag` | A button goes down, comes up, or moves while held. The leaf that got `press` keeps `drag` and `release` even if the pointer leaves it. Payload adds `button` |
+| `enter`, `leave`, `move` | The pointer hovers onto, off, or within the leaf with no button held |
+
+```lua
+local hot = false
+local button = smelt.paint.register(function(slice)
+  slice:put_str(0, 0, " run ", { reverse = hot })
+end, { name = "myplugin.button" })
+button:on("enter", function() hot = true end)
+button:on("leave", function() hot = false end)
+button:on("press", function(ev) smelt.notify.info("clicked at " .. ev.x) end)
+```
+
+Pass `pointer = true` to repaint on every pointer move and get
+`ctx.pointer = { x, y }` (relative to the slice). A frame paint with
+`pointer = true` is all a mouse trail needs.
 
 ## Statusline and prompt bars
 
-The statusline and the two rules around the prompt are bars. A bar holds named
-sources: functions that run on every repaint and return a list of items. smelt
-lays the items out by priority and drops the least important ones when the line
-is narrow.
+The statusline, the headerline and the two rules around the prompt are bars. A
+bar holds named sources: functions that run on every repaint and return a list
+of items. smelt lays the items out by priority and drops the least important
+ones when the line is narrow.
 
 | Bar | Where | Built-in sources |
 | --- | ----- | ---------------- |
-| `smelt.statusline` | The bottom row | `core` |
+| `smelt.statusline` | The bottom rows | `core` |
+| `smelt.headerline` | Above the transcript, only while a source shows items | `goal` |
 | `smelt.prompt_bar.top` | The rule above the prompt | `pause`, `indicator`, `elapsed`, `retry` on the left; `model`, `tokens`, `cost` on the right |
 | `smelt.prompt_bar.bottom` | The rule below the prompt | None |
 
@@ -236,6 +298,8 @@ A source returns one item or a list of them. Each item is a table:
 | `separated` | Put a `·` between this item and the previous separated one |
 | `truncatable`, `truncate` | Shrink the text with `…` before dropping it, from the end or the `"middle"` |
 | `selectable` | Include the text in drag-copy (default `true`) |
+| `row` | Row of the statusline or headerline, from `1` at the top. The bar grows to fit |
+| `fill` | A theme group that styles the empty space of the item's row |
 
 Neighbouring items get one space between them. The prompt bars draw the rule
 and its edges themselves, so a source only returns what sits on it.
@@ -255,6 +319,29 @@ smelt.prompt_bar.top.add("indicator", function()
 end)
 
 smelt.prompt_bar.top.remove("cost")
+```
+
+A multi-row statusline only needs items with `row` set; the layout makes room
+for it in the same frame:
+
+```lua
+smelt.statusline.add("cwd", function()
+  return { text = smelt.session.cwd(), row = 2, style = { fg = "Comment" } }
+end)
+```
+
+To draw the statusline or headerline yourself, swap it for any layout node with
+`set_view(node, rows)`, and pass `nil` to restore it. A paint leaf can draw
+anything, including animation:
+
+```lua
+local paint = smelt.paint.register(function(slice, ctx)
+  for x = 0, slice:width() - 1 do
+    local hue = (x * 4 + ctx.now_ms // 20) % 256
+    slice:set(x, 0, " ", { bg = { rgb = { hue, 80, 255 - hue } } })
+  end
+end, { fps = 30 })
+smelt.statusline.set_view(smelt.ui.layout.leaf(paint), 1)
 ```
 
 A bar repaints only when something it shows changes. A source that animates

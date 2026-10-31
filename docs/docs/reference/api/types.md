@@ -55,6 +55,8 @@ shrink first. An item whose text is empty is skipped.
 | `truncate` | `"end"\|"middle"` |  | Where to cut a truncated item. Defaults to `"end"`. |
 | `align_right` | `boolean` |  | Pack against the right edge instead of the left. |
 | `selectable` | `boolean` |  | Include the text in drag-copy. Defaults to true. |
+| `row` | `integer` |  | Row of a multi-row bar, from 1 at the top. Defaults to 1. The statusline and headerline grow to fit; the prompt rules ignore it. |
+| `fill` | `string` |  | Theme group that styles the empty space of this item's row instead of the bar's background. |
 
 ### `smelt.bar.Run`
 
@@ -771,22 +773,26 @@ Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.l
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `remove` | `fun(): boolean` | yes | Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op. |
-| `rect` | `fun(): any` | yes | Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
+| `rect` | `fun(): any` | yes | Return the paint leaf's current screen rect as `{ x, y, width, height }`, or `nil` until the first render lays it out. |
+| `set_fps` | `fun(fps: integer?): boolean` | yes | Repaint at `fps` frames per second while the paint is on screen, or only on change with `nil`. Returns `false` once the paint is removed. |
 | `on` | `fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription. |
 
 ### `smelt.paint.Slice`
 
 **Classification:** `Advanced` - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 
-Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly. Cells the callback leaves alone show what is under the paint, and a cell written without `bg` keeps the background under it.
+The area a paint callback draws into: its layout leaf, or the whole screen for `smelt.paint.frame`. Coordinates are `(x, y)` from the top-left, in cells. The slice already holds what was painted below it, so a callback can read cells and draw over them. Writes whose style leaves `bg` unset keep the background underneath.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `width` | `fun(): integer` | yes | Return the slice width in cells. |
 | `height` | `fun(): integer` | yes | Return the slice height in cells. |
-| `set` | `fun(row: integer, col: integer, ch: string, style: table?): nil` | yes | Write exactly one grapheme cluster with optional style at (row, col). |
-| `put_str` | `fun(row: integer, col: integer, text: string, style: table?): nil` | yes | Write a string with optional style at (row, col). |
-| `fill_rect` | `fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil` | yes | Fill a rectangle with one optional Unicode scalar and style. |
+| `get` | `fun(x: integer, y: integer): table?` | yes | Return the cell at `(x, y)` as `{ ch, width, style, image? }`, or `nil` outside the slice. The right half of a wide glyph has `ch = ""` and `width = 0`. |
+| `set` | `fun(x: integer, y: integer, ch: string?, style: table?): nil` | yes | Write one grapheme cluster (default a space) at `(x, y)`. |
+| `put_str` | `fun(x: integer, y: integer, text: string, style: table?): integer` | yes | Write `text` from `(x, y)`, clipped at the right edge. Returns the column after the last cell written. |
+| `fill` | `fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: table?): nil` | yes | Fill a rectangle with one grapheme cluster (default a space). |
+| `set_style` | `fun(x: integer, y: integer, w: integer, h: integer, patch: table): nil` | yes | Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color. |
+| `map` | `fun(f: function): nil` | yes | Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style. |
 
 ### `smelt.permissions.EffectRules`
 
@@ -1819,7 +1825,7 @@ Variants: `"change"` \| `"submit"` \| `"cancel"`
 
 Paint-leaf events accepted by `paint:on(event, fn)`.
 
-Variants: `"press"` \| `"release"` \| `"drag"`
+Variants: `"press"` \| `"release"` \| `"drag"` \| `"enter"` \| `"leave"` \| `"move"`
 
 ### `smelt.permissions.Decision`
 
@@ -1879,5 +1885,5 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
-Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"scrolled"` \| `"resized"` \| `"placeholder_accepted"` \| `"placeholder_dismissed"`
+Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"enter"` \| `"leave"` \| `"move"` \| `"scrolled"` \| `"resized"` \| `"placeholder_accepted"` \| `"placeholder_dismissed"`
 

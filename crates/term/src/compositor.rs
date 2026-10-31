@@ -39,22 +39,21 @@ impl Compositor {
         self.force_redraw = true;
     }
 
-    /// Paint a frame into an owned grid without flushing it.
+    /// Hand out a cleared grid at the current size for the next frame.
     ///
-    /// Separating paint from flush lets callers safely run callbacks against the
-    /// completed frame after releasing borrows of the UI that produced it.
-    pub fn paint_frame<F: FnOnce(&mut Grid)>(&mut self, paint: F) -> Grid {
+    /// The caller owns the grid while painting, so paint phases can release and
+    /// reacquire other borrows freely. Pass it back to [`Self::flush_frame`].
+    pub fn begin_frame(&mut self) -> Grid {
         let mut frame = std::mem::replace(&mut self.current, Grid::new(0, 0));
         if frame.width() != self.width || frame.height() != self.height {
             frame.resize(self.width, self.height);
         } else {
             frame.clear_all();
         }
-        paint(&mut frame);
         frame
     }
 
-    /// Flush a frame returned by [`Self::paint_frame`] and recycle its grid.
+    /// Flush a frame from [`Self::begin_frame`] and recycle its grid.
     pub fn flush_frame<W: Write>(&mut self, w: &mut W, mut frame: Grid) -> std::io::Result<()> {
         let mut images = HashMap::new();
         for y in 0..frame.height() {
@@ -119,7 +118,8 @@ impl Compositor {
         w: &mut W,
         paint: F,
     ) -> std::io::Result<()> {
-        let frame = self.paint_frame(paint);
+        let mut frame = self.begin_frame();
+        paint(&mut frame);
         self.flush_frame(w, frame)
     }
 
@@ -383,10 +383,9 @@ mod tests {
                 grid.as_mut_slice().set(3, 1, 'y', Style::default());
             })
             .unwrap();
-        let frame = staged.paint_frame(|grid| {
-            grid.as_mut_slice().set(1, 0, 'x', Style::default());
-            grid.as_mut_slice().set(3, 1, 'y', Style::default());
-        });
+        let mut frame = staged.begin_frame();
+        frame.as_mut_slice().set(1, 0, 'x', Style::default());
+        frame.as_mut_slice().set(3, 1, 'y', Style::default());
         staged.flush_frame(&mut staged_out, frame).unwrap();
 
         assert_eq!(staged_out, direct_out);
@@ -429,20 +428,18 @@ mod tests {
     fn failed_flush_recycles_frame_and_forces_full_redraw() {
         let _lock = registry_test_lock();
         let mut compositor = Compositor::new(3, 1);
-        let failed = compositor.paint_frame(|grid| {
-            grid.as_mut_slice().set(0, 0, 'x', Style::default());
-        });
+        let mut failed = compositor.begin_frame();
+        failed.as_mut_slice().set(0, 0, 'x', Style::default());
 
         assert!(compositor.flush_frame(&mut FailingWriter, failed).is_err());
         assert!(compositor.force_redraw);
         assert_eq!(compositor.previous().cell(0, 0).symbol, ' ');
 
-        let recovered = compositor.paint_frame(|grid| {
-            assert_eq!(grid.width(), 3);
-            assert_eq!(grid.height(), 1);
-            assert_eq!(grid.cell(0, 0).symbol, ' ');
-            grid.as_mut_slice().set(1, 0, 'y', Style::default());
-        });
+        let mut recovered = compositor.begin_frame();
+        assert_eq!(recovered.width(), 3);
+        assert_eq!(recovered.height(), 1);
+        assert_eq!(recovered.cell(0, 0).symbol, ' ');
+        recovered.as_mut_slice().set(1, 0, 'y', Style::default());
         compositor.flush_frame(&mut Vec::new(), recovered).unwrap();
 
         assert!(!compositor.force_redraw);

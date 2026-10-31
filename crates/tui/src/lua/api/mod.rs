@@ -132,7 +132,7 @@ impl LuaRuntime {
         );
         record_module_doc(
             "smelt.statusline",
-            "The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority. `add` returns a `Reg` that removes the source. UiHost-only.",
+            "The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority, one row per item `row`. `set_view` swaps the whole statusline for any layout node, such as a paint. `add` returns a `Reg` that removes the source. UiHost-only.",
             ApiClassification::Supported,
         );
         record_module_doc(
@@ -152,7 +152,7 @@ impl LuaRuntime {
         );
         record_module_doc(
             "smelt.headerline",
-            "Optional row above the transcript. Register named sources with `smelt.headerline.add(name, spec)`; the first source whose `visible` returns true owns the row, and the row is reserved only while one is visible. `add` returns a `Reg` that removes the source. UiHost-only.",
+            "Optional rows above the transcript, built like the statusline. Register named sources with `smelt.headerline.add(name, handler)`; each returns `smelt.bar.Item`s, and the header takes rows only while some source shows an item. `add` returns a `Reg` that removes the source. UiHost-only.",
             ApiClassification::Supported,
         );
         record_module_doc(
@@ -297,7 +297,7 @@ impl LuaRuntime {
 /// snapped to the nearest 6×6×6 cube entry. Used by call sites that ship
 /// colors out to Lua (e.g. `statusline.snapshot`) where mlua tables are
 /// keyed by ANSI index.
-pub(super) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
+pub(crate) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
     use smelt_core::style::Color;
     match color {
         Color::AnsiValue(v) => Some(v),

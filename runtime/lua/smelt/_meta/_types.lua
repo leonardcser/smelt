@@ -32,6 +32,8 @@
 ---@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
 ---@field align_right? boolean Pack against the right edge instead of the left.
 ---@field selectable? boolean Include the text in drag-copy. Defaults to true.
+---@field row? integer Row of a multi-row bar, from 1 at the top. Defaults to 1. The statusline and headerline grow to fit; the prompt rules ignore it.
+---@field fill? string Theme group that styles the empty space of this item's row instead of the bar's background.
 
 --- A styled piece of a `runs` item.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -519,17 +521,21 @@
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Paint
 ---@field remove fun(): boolean Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.
----@field rect fun(): any Return the paint leaf's current screen rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
+---@field rect fun(): any Return the paint leaf's current screen rect as `{ x, y, width, height }`, or `nil` until the first render lays it out.
+---@field set_fps fun(fps: integer?): boolean Repaint at `fps` frames per second while the paint is on screen, or only on change with `nil`. Returns `false` once the paint is removed.
 ---@field on fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription.
 
---- Grid slice passed to paint callbacks. Methods delegate to the live grid slice for the current frame; out-of-scope calls fail cleanly. Cells the callback leaves alone show what is under the paint, and a cell written without `bg` keeps the background under it.
+--- The area a paint callback draws into: its layout leaf, or the whole screen for `smelt.paint.frame`. Coordinates are `(x, y)` from the top-left, in cells. The slice already holds what was painted below it, so a callback can read cells and draw over them. Writes whose style leaves `bg` unset keep the background underneath.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Slice
 ---@field width fun(): integer Return the slice width in cells.
 ---@field height fun(): integer Return the slice height in cells.
----@field set fun(row: integer, col: integer, ch: string, style: table?): nil Write exactly one grapheme cluster with optional style at (row, col).
----@field put_str fun(row: integer, col: integer, text: string, style: table?): nil Write a string with optional style at (row, col).
----@field fill_rect fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill a rectangle with one optional Unicode scalar and style.
+---@field get fun(x: integer, y: integer): table? Return the cell at `(x, y)` as `{ ch, width, style, image? }`, or `nil` outside the slice. The right half of a wide glyph has `ch = ""` and `width = 0`.
+---@field set fun(x: integer, y: integer, ch: string?, style: table?): nil Write one grapheme cluster (default a space) at `(x, y)`.
+---@field put_str fun(x: integer, y: integer, text: string, style: table?): integer Write `text` from `(x, y)`, clipped at the right edge. Returns the column after the last cell written.
+---@field fill fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill a rectangle with one grapheme cluster (default a space).
+---@field set_style fun(x: integer, y: integer, w: integer, h: integer, patch: table): nil Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.
+---@field map fun(f: function): nil Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style.
 
 --- Effect-level decisions that apply to tools without a more specific rule.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1221,7 +1227,7 @@
 
 --- Paint-leaf events accepted by `paint:on(event, fn)`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
----@alias smelt.paint.Event "press"|"release"|"drag"
+---@alias smelt.paint.Event "press"|"release"|"drag"|"enter"|"leave"|"move"
 
 --- Decision accepted by effect-level permission rules.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1251,5 +1257,5 @@
 
 --- Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
----@alias smelt.win.Event "open"|"close"|"focus"|"blur"|"selection_changed"|"submit"|"text_changed"|"dismiss"|"tick"|"press"|"release"|"drag"|"scrolled"|"resized"|"placeholder_accepted"|"placeholder_dismissed"
+---@alias smelt.win.Event "open"|"close"|"focus"|"blur"|"selection_changed"|"submit"|"text_changed"|"dismiss"|"tick"|"press"|"release"|"drag"|"enter"|"leave"|"move"|"scrolled"|"resized"|"placeholder_accepted"|"placeholder_dismissed"
 

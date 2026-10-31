@@ -1,6 +1,6 @@
 ---
 title: "smelt.headerline: Lua API reference"
-description: "Optional row above the transcript. Lua API reference for smelt.headerline in smelt, the Lua-scriptable terminal coding agent."
+description: "Optional rows above the transcript, built like the statusline. Lua API reference for smelt.headerline in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.headerline`
@@ -9,5 +9,5 @@ description: "Optional row above the transcript. Lua API reference for smelt.hea
 
 **Availability:** Everywhere, including headless mode.
 
-Optional row above the transcript. Register named sources with `smelt.headerline.add(name, spec)`; the first source whose `visible` returns true owns the row, and the row is reserved only while one is visible. `add` returns a `Reg` that removes the source. UiHost-only.
+Optional rows above the transcript, built like the statusline. Register named sources with `smelt.headerline.add(name, handler)`; each returns `smelt.bar.Item`s, and the header takes rows only while some source shows an item. `add` returns a `Reg` that removes the source. UiHost-only.
 

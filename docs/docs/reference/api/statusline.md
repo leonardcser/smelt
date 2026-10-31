@@ -9,7 +9,7 @@ description: "The statusline at the bottom of the screen. Lua API reference for 
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority. `add` returns a `Reg` that removes the source. UiHost-only.
+The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority, one row per item `row`. `set_view` swaps the whole statusline for any layout node, such as a paint. `add` returns a `Reg` that removes the source. UiHost-only.
 
 ## `smelt.statusline.add`
 
@@ -21,7 +21,8 @@ Types: [`smelt.bar.Item`](types.md#smeltbaritem), [`smelt.Reg`](types.md#smeltre
 
 Add a named source of statusline items. `handler` runs on every repaint and
 returns a list of items (see `smelt.bar.Item`); errors are reported on
-stderr and skip the source. Adding a name that already exists replaces that
+stderr and skip the source. Items with `row = 2` or more make the
+statusline taller. Adding a name that already exists replaces that
 source in place, keeping its position. Returns a `Reg` that removes this
 source, unless a later `add` with the same name has replaced it.
 
@@ -55,6 +56,14 @@ fun(ms: integer)
 Repaint after `ms` milliseconds. An animated source calls it on every paint
 to ask for its next frame; the earliest pending request wins.
 
+## `smelt.statusline.node`
+
+```lua
+fun(): smelt.ui.layout, integer
+```
+
+The statusline's layout node and row count, for layout composers.
+
 ## `smelt.statusline.remove`
 
 ```lua
@@ -62,4 +71,23 @@ fun(name: string)
 ```
 
 Remove every source named `name`.
+
+## `smelt.statusline.rows`
+
+```lua
+fun(): integer
+```
+
+Rows the statusline takes: its lowest item row, at least 1, or the rows
+passed to `set_view`.
+
+## `smelt.statusline.set_view`
+
+```lua
+fun(node: smelt.ui.layout?, rows: integer?)
+```
+
+Replace the statusline with any layout node, such as a paint leaf from
+`smelt.ui.layout.leaf(smelt.paint.register(fn))`, taking `rows` rows
+(default 1). Pass `nil` to restore the built-in statusline.
 

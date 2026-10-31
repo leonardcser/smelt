@@ -330,7 +330,7 @@ local function paint_logo(slice)
 	local w = banner.logo_mark_size()
 	local col0 = math.max(0, math.floor((slice:width() - w) / 2))
 	local row0 = state.fire_pixels and 0 or FIRE_HEADROOM
-	banner.paint_pixels(slice, row0, col0, paint_rows_for_frame())
+	banner.paint_pixels(slice, col0, row0, paint_rows_for_frame())
 end
 
 -- One tick of the animation loop. While `held`, advances the sim with
