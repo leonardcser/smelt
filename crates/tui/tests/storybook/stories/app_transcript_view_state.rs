@@ -126,7 +126,7 @@ app_story!(compacted_block_states, |ctx| {
 app_story!(compacted_block_kept_states, |ctx| {
     // Expanded, the marker repeats what the model still sees verbatim after
     // the summary, rendered like the original transcript entries.
-    ctx.set_viewport(60, 16);
+    ctx.set_viewport(60, 18);
     ctx.push_compacted_kept(
         COMPACTED_SUMMARY,
         vec![
@@ -137,9 +137,18 @@ app_story!(compacted_block_kept_states, |ctx| {
                 content: "Reading the session loader first.".into(),
             },
             KeptHistoryItem::Tool {
-                name: "read".into(),
+                name: "read_file".into(),
                 summary: StyledLines::from_plain("crates/core/src/session.rs"),
                 status: ToolStatus::Ok,
+                presentation: Some(Box::new(
+                    smelt_core::tool_presentation::ToolPresentation::from_result(
+                        std::collections::HashMap::from([(
+                            "file_path".into(),
+                            json!("crates/core/src/session.rs"),
+                        )]),
+                        &protocol::ToolOutcome::new("first\nsecond\nthird".into(), false, None),
+                    ),
+                )),
             },
         ],
     );

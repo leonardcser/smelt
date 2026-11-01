@@ -12,7 +12,9 @@ wiring, three bug fixes.
 
 Reading the session loader first.
 
-* read crates/core/src/session.rs
+* read_file crates/core/src/session.rs
+  3 lines
+
   tip ctrl+enter / ctrl+q, steer the current response wit…
 ────────────────────────────────────────────────────────────
 

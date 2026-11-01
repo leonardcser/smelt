@@ -406,6 +406,200 @@ fn compact_command_keeps_completed_block_at_compaction_position() {
 }
 
 #[test]
+fn compact_command_preserves_kept_tool_presentations() {
+    use protocol::ToolOutcome;
+    use serde_json::json;
+
+    let read_args = json!({"file_path":"example.rs", "offset":1, "limit":3});
+    let mut inserted_cell = ToolOutcome::new(
+        "inserted cell".into(),
+        false,
+        Some(json!({"edit_mode":"insert", "cell_type":"code"})),
+    );
+    inserted_cell
+        .display_content
+        .push(protocol::ToolDisplayContent {
+            name: "new_source".into(),
+            content: "first\nsecond\n".to_owned().into(),
+        });
+    let attached_image = ToolOutcome::new(
+        "image attached".into(),
+        false,
+        Some(
+            json!({"kind":"file_attachment", "modality":"image", "mime":"image/png", "data_url":format!("data:image/png;base64,{}", "a".repeat(2_000_000))}),
+        ),
+    );
+    assert!(attached_image.attachment.is_some());
+    let cases = [
+        (
+            "read_file",
+            read_args.clone(),
+            ToolOutcome::new("first\nsecond\nthird".into(), false, None),
+            "3 lines",
+        ),
+        (
+            "read_file",
+            read_args.clone(),
+            ToolOutcome::new("first\nsecond\nthird\n".into(), false, None),
+            "3 lines",
+        ),
+        (
+            "read_file",
+            read_args,
+            ToolOutcome::new("".into(), false, None),
+            "0 lines",
+        ),
+        (
+            "read_file",
+            json!({"file_path":"diagram.png"}),
+            attached_image,
+            "1 lines",
+        ),
+        (
+            "write_file",
+            json!({"file_path":"example.rs", "content":"one\ntwo\n"}),
+            ToolOutcome::new("wrote file".into(), false, None),
+            "wrote 2 lines",
+        ),
+        (
+            "edit_file",
+            json!({"file_path":"example.rs", "old_string":"one", "new_string":"two\nthree"}),
+            ToolOutcome::new("edited file".into(), false, None),
+            "1 old line, 2 new lines",
+        ),
+        (
+            "edit_notebook",
+            json!({"notebook_path":"example.ipynb", "edit_mode":"delete"}),
+            ToolOutcome::new(
+                "deleted cell".into(),
+                false,
+                Some(json!({"edit_mode":"delete", "cell_type":"code"})),
+            ),
+            "deleted code cell",
+        ),
+        (
+            "edit_notebook",
+            json!({"notebook_path":"example.ipynb", "edit_mode":"insert"}),
+            inserted_cell,
+            "inserted code cell, 2 lines",
+        ),
+        (
+            "grep",
+            json!({"pattern":"example", "output_mode":"content"}),
+            ToolOutcome::new(
+                "grep output".into(),
+                false,
+                Some(
+                    json!({"aaa": vec!["padding ".repeat(128); 32], "display_count":{"value":7,"unit":"match"}}),
+                ),
+            ),
+            "7 matches",
+        ),
+        (
+            "glob",
+            json!({"pattern":"*.rs"}),
+            ToolOutcome::new(
+                "glob output".into(),
+                false,
+                Some(json!({"display_count":{"value":9,"unit":"file"}})),
+            ),
+            "9 files",
+        ),
+        (
+            "find_symbol",
+            json!({"query":"example"}),
+            ToolOutcome::new(
+                "symbol output".into(),
+                false,
+                Some(json!({"display_count":{"value":4,"unit":"symbol"}})),
+            ),
+            "4 symbols",
+        ),
+        (
+            "load_skill",
+            json!({"name":"example"}),
+            ToolOutcome::new("first\nsecond".into(), false, None),
+            "2 lines",
+        ),
+        (
+            "write_file",
+            json!({"file_path":"example.rs", "content":"one"}),
+            ToolOutcome::new("permission denied marker".into(), true, None),
+            "permission denied marker",
+        ),
+        (
+            "edit_file",
+            json!({"file_path":"example.rs", "old_string":"one", "new_string":"two"}),
+            ToolOutcome::new("permission denied marker".into(), true, None),
+            "permission denied marker",
+        ),
+    ];
+    for (name, args, result, expected) in cases {
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua(r#"require('smelt.plugins.lsp').setup({})"#));
+        app.set_terminal_size(100, 40);
+        let mut history = protocol::history_from_messages(vec![
+            user_message("old user"),
+            assistant_message("old assistant"),
+        ]);
+        history.push(protocol::HistoryItem::Assistant(
+            protocol::AssistantStep::with_invocations(
+                None,
+                None,
+                Vec::new(),
+                vec![protocol::ToolInvocation {
+                    call_id: "tool".into(),
+                    name: name.into(),
+                    arguments: args.to_string(),
+                    result,
+                    elapsed_ms: None,
+                    called_at_ms: None,
+                    provider: None,
+                }],
+            ),
+        ));
+        for item in history {
+            app.session_append_history(item);
+        }
+        app.set_context_token_baseline_for_harness(Some(500));
+        assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+            id: app.pending_ask_id().expect("pending compaction"),
+            message: Some(assistant_message("# Goal\ncontinue")),
+            error: None,
+        });
+        app.drive_lua_tasks();
+        assert!(app.run_lua(r#"smelt.transcript.fold_kind('compacted', 'open')"#));
+        let frame = app.render_to_frame().text();
+        assert!(frame.contains(expected), "{name}: {frame}");
+        let history = app.conversation_probe().transcript().history();
+        let marker = history
+            .block(*history.order.last().expect("compaction marker"))
+            .unwrap();
+        let serialized = serde_json::to_string(marker).unwrap();
+        assert!(
+            serialized.len() < 100_000,
+            "{name}: checkpoint is {} bytes",
+            serialized.len()
+        );
+        assert!(
+            !serialized.contains("data_url"),
+            "{name}: checkpoint retained attachment payload"
+        );
+
+        app.save_session_and_flush();
+        let session_id = app.session_snapshot().id.clone();
+        assert!(app.resume_session(&session_id));
+        assert!(app.run_lua(r#"smelt.transcript.fold_kind('compacted', 'open')"#));
+        let resumed_frame = app.render_to_frame().text();
+        assert!(
+            resumed_frame.contains(expected),
+            "resumed {name}: {resumed_frame}"
+        );
+    }
+}
+
+#[test]
 fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);

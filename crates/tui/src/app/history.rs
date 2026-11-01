@@ -544,6 +544,12 @@ fn kept_history_items(
                         name: inv.name.clone(),
                         summary: summary_resolver.resolve(&inv.name, &args),
                         status: invocation_status(inv),
+                        presentation: Some(Box::new(
+                            smelt_core::tool_presentation::ToolPresentation::from_result(
+                                args,
+                                &inv.result,
+                            ),
+                        )),
                     });
                 }
             }
@@ -1189,6 +1195,12 @@ mod tests {
                             serde_json::json!("ok"),
                         )])),
                         status: ToolStatus::Ok,
+                        presentation: Some(Box::new(
+                            smelt_core::tool_presentation::ToolPresentation::from_result(
+                                HashMap::from([("label".into(), serde_json::json!("ok"))]),
+                                &protocol::ToolOutcome::new("done".into(), false, None),
+                            )
+                        )),
                     },
                     KeptHistoryItem::Assistant {
                         content: "done".into(),

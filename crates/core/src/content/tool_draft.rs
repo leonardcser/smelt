@@ -14,7 +14,9 @@ use std::ops::Range;
 const LUA_ARGUMENT_PREVIEW_BYTES: usize = 4 * 1024;
 const STRUCTURED_ARGUMENT_PREVIEW_BYTES: usize = 64 * 1024;
 
-fn json_map_dynamic_retained_bytes(values: &HashMap<String, serde_json::Value>) -> usize {
+pub(crate) fn json_map_dynamic_retained_bytes(
+    values: &HashMap<String, serde_json::Value>,
+) -> usize {
     values
         .capacity()
         .saturating_mul(
@@ -62,6 +64,7 @@ impl ToolArguments {
         let mut entries = values.into_iter().collect::<Vec<_>>();
         entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         for (name, value) in entries {
+            preview.insert(name.clone(), argument_preview(&value));
             match value {
                 serde_json::Value::String(value) => {
                     let content = draft
@@ -73,10 +76,6 @@ impl ToolArguments {
                         })
                         .map(|field| field.content.clone())
                         .unwrap_or_else(|| TranscriptContent::from(value.clone()));
-                    preview.insert(
-                        name.clone(),
-                        serde_json::Value::String(bounded_preview(&value)),
-                    );
                     string_fields.push(ToolArgumentField {
                         name,
                         content,
@@ -84,7 +83,6 @@ impl ToolArguments {
                     });
                 }
                 value => {
-                    preview.insert(name.clone(), structured_preview(&value));
                     structured_values.insert(name, value);
                 }
             }
@@ -902,6 +900,13 @@ fn decode_escape(ch: char) -> char {
         '\\' => '\\',
         '/' => '/',
         other => other,
+    }
+}
+
+pub(crate) fn argument_preview(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(value) => serde_json::Value::String(bounded_preview(value)),
+        value => structured_preview(value),
     }
 }
 

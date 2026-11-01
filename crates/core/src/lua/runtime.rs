@@ -19,6 +19,13 @@ use crate::lua::{
     ToolEnv, ToolExecResult, TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
+#[cfg(test)]
+use crate::tool_presentation::LUA_CONTENT_PREVIEW_BYTES;
+use crate::tool_presentation::{
+    transcript_argument_field_metadata, transcript_content_metadata,
+    transcript_tool_output_metadata, ToolPresentation, TranscriptArgumentFieldMetadata,
+    TranscriptContentMetadata, TranscriptToolOutputMetadata,
+};
 use crate::transcript_model::{
     Block, BlockId, KeptHistoryItem, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
@@ -3278,6 +3285,22 @@ fn tool_output_to_lua_table(
     Ok(table)
 }
 
+fn set_tool_presentation(
+    lua: &Lua,
+    table: &mlua::Table,
+    presentation: &ToolPresentation,
+) -> LuaResult<()> {
+    table.set("args", args_to_lua_table(lua, &presentation.args)?)?;
+    table.set(
+        "argument_fields",
+        argument_fields_to_lua_table(lua, &presentation.argument_fields)?,
+    )?;
+    if let Some(output) = &presentation.output {
+        table.set("output", tool_output_to_lua_table(lua, output)?)?;
+    }
+    Ok(())
+}
+
 fn transcript_render_node_to_lua_table(
     lua: &Lua,
     node: &TranscriptRenderNode,
@@ -3404,25 +3427,19 @@ fn transcript_render_node_to_lua_table(
             name,
             summary,
             summary_text,
-            args,
-            argument_fields,
+            presentation,
             status,
             called_at_ms,
             elapsed_ms,
             elapsed_active,
             user_message,
             preview_output,
-            output,
         } => {
             table.set("call_id", call_id.as_str())?;
             table.set("name", name.as_str())?;
             table.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
             table.set("summary_text", summary_text.as_str())?;
-            table.set("args", args_to_lua_table(lua, args)?)?;
-            table.set(
-                "argument_fields",
-                argument_fields_to_lua_table(lua, argument_fields)?,
-            )?;
+            set_tool_presentation(lua, &table, presentation)?;
             table.set("status", *status)?;
             if let Some(called_at_ms) = called_at_ms {
                 table.set("called_at_ms", *called_at_ms)?;
@@ -3439,9 +3456,6 @@ fn transcript_render_node_to_lua_table(
                     "preview_output",
                     tool_output_to_lua_table(lua, preview_output)?,
                 )?;
-            }
-            if let Some(output) = output {
-                table.set("output", tool_output_to_lua_table(lua, output)?)?;
             }
         }
         TranscriptRenderFields::Exec {
@@ -3581,41 +3595,11 @@ pub struct TranscriptRenderNode {
 }
 
 #[derive(Clone, Debug)]
-struct TranscriptContentMetadata {
-    content_id: u64,
-    content_revision: u64,
-    content_bytes: usize,
-    content_lines: usize,
-    content_preview: String,
-}
-
-#[derive(Clone, Debug)]
 struct TranscriptProcessStatusMetadata {
     event_type: &'static str,
     process_id: Option<String>,
     exit_code: Option<i32>,
     termination: protocol::JobTermination,
-}
-
-#[derive(Clone, Debug)]
-struct TranscriptToolOutputContentFieldMetadata {
-    name: String,
-    content: TranscriptContentMetadata,
-}
-
-#[derive(Clone, Debug)]
-struct TranscriptToolOutputMetadata {
-    content: TranscriptContentMetadata,
-    is_error: bool,
-    metadata: Option<serde_json::Value>,
-    content_fields: Vec<TranscriptToolOutputContentFieldMetadata>,
-}
-
-#[derive(Clone, Debug)]
-struct TranscriptArgumentFieldMetadata {
-    name: String,
-    content: TranscriptContentMetadata,
-    complete: bool,
 }
 
 fn kept_history_to_lua(lua: &Lua, kept: &[KeptHistoryItem]) -> LuaResult<mlua::Table> {
@@ -3635,7 +3619,11 @@ fn kept_history_to_lua(lua: &Lua, kept: &[KeptHistoryItem]) -> LuaResult<mlua::T
                 name,
                 summary,
                 status,
+                presentation,
             } => {
+                if let Some(presentation) = presentation {
+                    set_tool_presentation(lua, &row, presentation)?;
+                }
                 row.set("kind", "tool")?;
                 row.set("name", name.as_str())?;
                 row.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
@@ -3695,15 +3683,13 @@ enum TranscriptRenderFields {
         name: String,
         summary: protocol::StyledLines,
         summary_text: String,
-        args: HashMap<String, serde_json::Value>,
-        argument_fields: Vec<TranscriptArgumentFieldMetadata>,
+        presentation: ToolPresentation,
         status: &'static str,
         called_at_ms: Option<u64>,
         elapsed_ms: Option<u64>,
         elapsed_active: bool,
         user_message: Option<String>,
         preview_output: Option<Box<TranscriptToolOutputMetadata>>,
-        output: Option<Box<TranscriptToolOutputMetadata>>,
     },
     Exec {
         command: String,
@@ -3755,71 +3741,6 @@ impl TranscriptRenderNode {
 
     pub fn index(&self) -> usize {
         self.index
-    }
-}
-
-const LUA_CONTENT_PREVIEW_BYTES: usize = 4 * 1024;
-
-fn transcript_content_metadata(
-    content: &crate::transcript_content::TranscriptContent,
-) -> TranscriptContentMetadata {
-    let read = content.read();
-    let mut content_preview = if read.len() <= LUA_CONTENT_PREVIEW_BYTES {
-        read.to_string()
-    } else {
-        const OMISSION_MARKER: &str = "\n…\n";
-        let payload_bytes = LUA_CONTENT_PREVIEW_BYTES.saturating_sub(OMISSION_MARKER.len());
-        let head_end = payload_bytes / 2;
-        let tail_bytes = payload_bytes.saturating_sub(head_end);
-        let tail_start = read.len().saturating_sub(tail_bytes);
-        format!(
-            "{}{}{}",
-            read.slice(0..head_end),
-            OMISSION_MARKER,
-            read.slice(tail_start..read.len())
-        )
-    };
-    if content_preview.len() > LUA_CONTENT_PREVIEW_BYTES {
-        content_preview =
-            smelt_buffer::text::slice(&content_preview, 0..LUA_CONTENT_PREVIEW_BYTES).to_owned();
-    }
-    TranscriptContentMetadata {
-        content_id: content.id().get(),
-        content_revision: read.revision(),
-        content_bytes: read.len(),
-        content_lines: read.logical_line_count(),
-        content_preview,
-    }
-}
-
-fn transcript_argument_field_metadata(
-    fields: &[crate::content::tool_draft::ToolArgumentField],
-) -> Vec<TranscriptArgumentFieldMetadata> {
-    fields
-        .iter()
-        .map(|field| TranscriptArgumentFieldMetadata {
-            name: field.name.clone(),
-            content: transcript_content_metadata(&field.content),
-            complete: field.complete,
-        })
-        .collect()
-}
-
-fn transcript_tool_output_metadata(
-    output: &crate::transcript_model::ToolOutput,
-) -> TranscriptToolOutputMetadata {
-    TranscriptToolOutputMetadata {
-        content: transcript_content_metadata(&output.content),
-        is_error: output.is_error,
-        metadata: output.metadata.clone(),
-        content_fields: output
-            .content_fields
-            .iter()
-            .map(|field| TranscriptToolOutputContentFieldMetadata {
-                name: field.name.clone(),
-                content: transcript_content_metadata(&field.content),
-            })
-            .collect(),
     }
 }
 
@@ -3922,8 +3843,10 @@ pub fn transcript_block_render_node(
                 name: name.clone(),
                 summary: summary.clone(),
                 summary_text: summary.as_plain_text(),
-                args: args.preview().clone(),
-                argument_fields: transcript_argument_field_metadata(args.string_fields()),
+                presentation: ToolPresentation::new(
+                    args,
+                    state.and_then(|state| state.output.as_deref()),
+                ),
                 status: status.label(),
                 called_at_ms: state.and_then(|state| state.called_at_ms),
                 elapsed_ms,
@@ -3931,10 +3854,6 @@ pub fn transcript_block_render_node(
                 user_message: state.and_then(|state| state.user_message.clone()),
                 preview_output: state
                     .and_then(|state| state.preview_output.as_deref())
-                    .map(transcript_tool_output_metadata)
-                    .map(Box::new),
-                output: state
-                    .and_then(|state| state.output.as_deref())
                     .map(transcript_tool_output_metadata)
                     .map(Box::new),
             }
@@ -4114,12 +4033,15 @@ fn fallback_transcript_node_layout(node: &TranscriptRenderNode) -> BlockLayout {
             output: content, ..
         } => Some(content),
         TranscriptRenderFields::ToolDraft { raw_arguments, .. } => Some(raw_arguments),
-        TranscriptRenderFields::ToolCall { output, .. } => {
-            output.as_ref().map(|output| &output.content)
+        TranscriptRenderFields::ToolCall { presentation, .. } => {
+            presentation.output.as_ref().map(|output| &output.content)
         }
         _ => None,
     };
     if let Some(content) = content {
+        let Some(id) = content.content_id else {
+            return layout_text(content.content_preview.clone(), Some("ErrorMsg"), false);
+        };
         let render = if matches!(node.kind, "assistant" | "thinking") {
             ContentRenderSpec::Markdown {
                 dim: node.kind == "thinking",
@@ -4133,7 +4055,7 @@ fn fallback_transcript_node_layout(node: &TranscriptRenderNode) -> BlockLayout {
             }
         };
         return BlockLayout::Leaf(LuaLeaf::Content(ContentSpec {
-            id: crate::transcript_content::ContentId::new(content.content_id),
+            id: crate::transcript_content::ContentId::new(id),
             render,
         }));
     }

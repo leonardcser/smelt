@@ -273,6 +273,8 @@ pub enum KeptHistoryItem {
         name: String,
         summary: protocol::StyledLines,
         status: ToolStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<Box<crate::tool_presentation::ToolPresentation>>,
     },
 }
 
@@ -280,9 +282,18 @@ impl KeptHistoryItem {
     fn dynamic_retained_bytes(&self) -> usize {
         match self {
             Self::User { text } | Self::Assistant { content: text } => text.capacity(),
-            Self::Tool { name, summary, .. } => name
+            Self::Tool {
+                name,
+                summary,
+                presentation,
+                ..
+            } => name
                 .capacity()
-                .saturating_add(summary.dynamic_retained_bytes()),
+                .saturating_add(summary.dynamic_retained_bytes())
+                .saturating_add(presentation.as_ref().map_or(0, |presentation| {
+                    std::mem::size_of::<crate::tool_presentation::ToolPresentation>()
+                        .saturating_add(presentation.dynamic_retained_bytes())
+                })),
         }
     }
 }

@@ -55,6 +55,7 @@ pub mod session_store;
 pub mod signals;
 pub mod state;
 pub mod timers;
+pub mod tool_presentation;
 pub mod tools;
 pub mod transcript_content;
 pub mod transcript_model;
