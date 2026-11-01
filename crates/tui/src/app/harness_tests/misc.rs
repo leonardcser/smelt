@@ -1116,6 +1116,33 @@ fn a_running_turn_repaints_only_when_the_working_indicator_asks() {
 }
 
 #[test]
+fn a_focused_overlay_runs_the_frame_loop_only_for_tick_handlers() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        win = smelt.win.new(smelt.buf.new())
+        smelt.overlay.new({layout = smelt.ui.layout.leaf(win), width = 20, height = 5})
+        win:focus()
+        "#,
+    )
+    .unwrap();
+    app.drive_lua_tasks();
+    assert!(app.app.ui.focused_overlay().is_some());
+    assert_eq!(
+        app.app.animation_frame_interval(),
+        None,
+        "an idle overlay repaints on demand"
+    );
+    app.run_lua_result(r#"win:on("tick", function() end)"#)
+        .unwrap();
+    assert_eq!(
+        app.app.animation_frame_interval(),
+        Some(std::time::Duration::from_millis(16)),
+        "tick handlers keep their per-frame cadence"
+    );
+}
+
+#[test]
 fn tick_every_runs_while_idle_and_only_now_listeners_wake_each_second() {
     let mut app = TestApp::builder().build();
     app.clear_timers();

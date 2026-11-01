@@ -3556,6 +3556,11 @@ impl Ui {
         }
     }
 
+    /// Some window handles `tick`, which fires once per main-loop pass.
+    pub fn wants_ticks(&self) -> bool {
+        self.callbacks.listens_for(WinEvent::Tick)
+    }
+
     pub fn dispatch_tick(&mut self, lua_invoke: &mut LuaInvoke) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {

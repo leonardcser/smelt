@@ -3483,7 +3483,9 @@ impl TuiApp {
     /// `refresh_after`, Lua with timers.
     pub(crate) fn animation_frame_interval(&self) -> Option<Duration> {
         let now = self.core.clock.instant_now();
-        let animating = self.ui.focused_overlay().is_some()
+        // A focused overlay animates only for its `tick` handlers; everything
+        // else in it repaints on demand like the rest of the UI.
+        let animating = (self.ui.focused_overlay().is_some() && self.ui.wants_ticks())
             || self
                 .core
                 .clipboard
