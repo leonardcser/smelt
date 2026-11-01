@@ -8,19 +8,20 @@
 ---@class smelt.statusline
 local statusline = {}
 
---- Add a named source of statusline items. `handler` runs on every repaint and
---- returns a list of items (see `smelt.bar.Item`); errors are reported on
---- stderr and skip the source. Items with `row = 2` or more make the
+--- Add a named source of statusline items. `handler(ctx)` runs on every
+--- repaint, with `ctx.width` the statusline's width in cells, and returns a
+--- list of items (see `smelt.bar.Item`); an error skips the source and shows a
+--- notification. Items with `row = 2` or more make the
 --- statusline taller. Adding a name that already exists replaces that
 --- source in place, keeping its position. Returns a `Reg` that removes this
 --- source, unless a later `add` with the same name has replaced it.
 ---@see smelt.bar.Item
----@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+---@type fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
 statusline.add = nil
 
 --- The built-in `core` source, so a replacement can wrap it instead of
 --- dropping it.
----@type fun(name: string): (fun(): smelt.bar.Item[]?)?
+---@type fun(name: string): (fun(ctx: { width: integer }): smelt.bar.Item[]?)?
 statusline.builtin = nil
 
 --- Repaint after plugin-owned state changes that are not represented by a

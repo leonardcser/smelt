@@ -16,8 +16,8 @@
 -- functions below.
 --
 -- `style` is a subset of `smelt.buf.MarkOpts` (`fg`, `bg`, `hl_group`, `bold`,
--- `dim`, `italic`). `fg` / `bg` accept a theme group name (string) or a direct
--- `{ r, g, b }` triple. The same table is forwarded verbatim to `buf:mark`.
+-- `dim`, `italic`). `fg` / `bg` take any color form, including a theme group
+-- name. The same table is forwarded verbatim to `buf:mark`.
 --
 -- A laid-out row is `{ text, highlights }` where each highlight carries
 -- `bytes_start` / `bytes_end` (byte offsets, the unit `buf:mark` expects), the
@@ -355,24 +355,27 @@ function M.layout_strip(items, width, opts)
 
   local right_start = math.max(width - text_width(right_runs), 0)
 
+  -- What still overflows is clipped at the edge rather than dropped.
   local segs = {}
   local col = 0
-  for _, run in ipairs(left_runs) do
-    local w = smelt.text.width(run.text)
-    if col + w > width then break end
-    segs[#segs + 1] = run
-    col = col + w
+  local function place(runs)
+    for _, run in ipairs(runs) do
+      if col >= width then return end
+      local w = smelt.text.width(run.text)
+      if col + w > width then
+        run = { text = smelt.text.fit(run.text, width - col, { suffix = "…" }), style = run.style, selectable = run.selectable }
+        w = smelt.text.width(run.text)
+      end
+      segs[#segs + 1] = run
+      col = col + w
+    end
   end
+  place(left_runs)
   if col < right_start then
     segs[#segs + 1] = { text = string.rep(" ", right_start - col), style = fill_style, selectable = fill_selectable }
     col = right_start
   end
-  for _, run in ipairs(right_runs) do
-    local w = smelt.text.width(run.text)
-    if col + w > width then break end
-    segs[#segs + 1] = run
-    col = col + w
-  end
+  place(right_runs)
   if col < width then
     segs[#segs + 1] = { text = string.rep(" ", width - col), style = fill_style, selectable = fill_selectable }
   end
@@ -464,14 +467,15 @@ function M.new(opts)
   }
 end
 
--- Every source's items in registration order. A source may return a single
--- item instead of a list; a failing source is reported and skipped.
-local function collect(bar)
+-- Every source's items in registration order, for a bar `width` cells wide.
+-- A source may return a single item instead of a list. A failing source is
+-- skipped and notified; the message log folds the repeats.
+local function collect(bar, width)
   local items = {}
   for _, src in ipairs(bar.sources) do
-    local ok, result = pcall(src.handler)
+    local ok, result = pcall(src.handler, { width = width })
     if not ok then
-      io.stderr:write(bar.name .. " source `" .. src.name .. "`: " .. tostring(result) .. "\n")
+      smelt.notify.error(bar.name .. " source `" .. src.name .. "`: " .. tostring(result))
     elseif type(result) == "table" then
       if result.text or result.runs then result = { result } end
       for _, item in ipairs(result) do
@@ -482,8 +486,13 @@ local function collect(bar)
   return items
 end
 
-local function items_of(bar)
-  if not bar.items then bar.items = collect(bar) end
+-- The items for `width`, collected again when the width changes. Without a
+-- width, the last one laid out, or the terminal's before the first layout.
+local function items_of(bar, width)
+  width = width or bar.items_width or smelt.terminal.size().width
+  if not bar.items or bar.items_width ~= width then
+    bar.items, bar.items_width = collect(bar, width), width
+  end
   return bar.items
 end
 
@@ -581,7 +590,7 @@ end
 --- The bar laid out for `width` cells as one row. A strip uses its row-1 items.
 function M.row(bar, width)
   if bar.layout == "rule" then
-    return M.layout_rule(items_of(bar), width, { bar_style = bar.bar_style and bar.bar_style() })
+    return M.layout_rule(items_of(bar, width), width, { bar_style = bar.bar_style and bar.bar_style() })
   end
   return M.rows_for(bar, width, 1)[1]
 end
@@ -590,7 +599,7 @@ end
 --- the bar's own row count.
 function M.rows_for(bar, width, rows)
   local by_row = {}
-  for _, item in ipairs(items_of(bar)) do
+  for _, item in ipairs(items_of(bar, width)) do
     local r = item.row or 1
     by_row[r] = by_row[r] or {}
     table.insert(by_row[r], item)

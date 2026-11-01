@@ -1003,6 +1003,7 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
             format_cost = function(value) return string.format("$%.2f", value) end,
             format_duration = function(value) return tostring(value) .. "s" end,
           },
+          notify = { error = function(msg) table.insert(_G.__notified_errors, msg) end },
           reg = { new = function(fn) return { remove = fn } end },
           events = { on = function() end },
           prompt = {
@@ -1285,7 +1286,12 @@ fn prompt_bar_skips_failing_sources_and_accepts_a_single_item() {
               return { text = "solo", align_right = true, priority = 3 }
             end)
             local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            _G.__notified_errors = {}
             top:renderer()
+            smelt.prompt_bar.top.invalidate()
+            top:renderer()
+            assert(#_G.__notified_errors == 2, "the source is notified on each failing repaint")
+            assert(_G.__notified_errors[1]:find("source `broken`: .*boom"), _G.__notified_errors[1])
             return top:buf()._lines[1]
             "#,
         )

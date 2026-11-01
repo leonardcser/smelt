@@ -12,7 +12,7 @@ local prompt_bar_bottom = {}
 --- no built-in sources, so the rule stays plain until a plugin adds one. Same
 --- contract as `smelt.prompt_bar.top.add`.
 ---@see smelt.prompt_bar.top.add
----@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+---@type fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
 prompt_bar_bottom.add = nil
 
 --- Repaint after plugin-owned state changes that are not represented by a

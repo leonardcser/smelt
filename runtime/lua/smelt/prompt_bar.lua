@@ -202,7 +202,7 @@ local builtin = {}
 --- `elapsed`, `retry`, `model`, `tokens` or `cost`), or nil. A replacement
 --- source can call it to keep the default for the cases it does not draw.
 ---@tier ui_host
----@type fun(name: string): (fun(): smelt.bar.Item[]?)?
+---@type fun(name: string): (fun(ctx: { width: integer }): smelt.bar.Item[]?)?
 function smelt.prompt_bar.top.builtin(name)
   return builtin[name]
 end
@@ -225,14 +225,15 @@ function smelt.prompt_bar.top.invalidate_after(ms)
 end
 
 --- Add a named source of items to the rule of the bar above the prompt.
---- `handler` runs on every repaint and returns a list of items (see
---- `smelt.bar.Item`); errors are reported on stderr and skip the source. The
+--- `handler(ctx)` runs on every repaint, with `ctx.width` the bar's width in
+--- cells, and returns a list of items (see `smelt.bar.Item`); an error skips the
+--- source and shows a notification. The
 --- built-in sources are `pause`, `indicator`, `elapsed`, `retry`, `model`,
 --- `tokens` and `cost`; adding one of those names replaces it in place, keeping
 --- its position. Returns a `Reg` that removes this source, unless a later `add`
 --- with the same name has replaced it.
 ---@tier ui_host
----@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+---@type fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
 function smelt.prompt_bar.top.add(name, handler)
   return bar.add(top_bar, name, handler)
 end
@@ -265,7 +266,7 @@ end
 --- no built-in sources, so the rule stays plain until a plugin adds one. Same
 --- contract as `smelt.prompt_bar.top.add`.
 ---@tier ui_host
----@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+---@type fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
 function smelt.prompt_bar.bottom.add(name, handler)
   return bar.add(bottom_bar, name, handler)
 end

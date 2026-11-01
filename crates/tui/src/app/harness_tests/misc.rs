@@ -8847,3 +8847,31 @@ fn lua_examples_load_as_init_lua_and_render_without_errors() {
         assert_eq!(notification, None, "{name}.lua\n{}", frame.text());
     }
 }
+
+#[test]
+fn statusline_sources_get_the_width_and_clip_what_overflows() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(
+        r#"
+        smelt.statusline.add("core", function(ctx)
+          _G.__width = ctx.width
+          return { { text = string.rep("=", ctx.width), row = 2 }, { text = string.rep("x", 60), row = 3 } }
+        end)
+        "#,
+    ));
+    let frame = app.render_to_frame();
+    let width = app.eval_lua::<u16>("return _G.__width").unwrap();
+    assert_eq!(width, 40);
+    assert_eq!(frame.rows[10], "=".repeat(40), "{}", frame.text());
+    assert_eq!(
+        frame.rows[11],
+        format!("{}…", "x".repeat(39)),
+        "an item wider than the bar is cut, not dropped"
+    );
+
+    app.set_terminal_size(30, 12);
+    let frame = app.render_to_frame();
+    assert_eq!(app.eval_lua::<u16>("return _G.__width").unwrap(), 30);
+    assert_eq!(frame.rows[10], "=".repeat(30), "{}", frame.text());
+}

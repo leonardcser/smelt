@@ -435,14 +435,16 @@ smelt.prompt_bar.bottom.add("hint", function()
 end)
 ```
 
-A source returns one item or a list of them. Each item is a table:
+A source is called with `ctx`, where `ctx.width` is the bar's width in cells, for
+items that span the line. It returns one item or a list of them. A source that
+raises an error is skipped and shows a notification. Each item is a table:
 
 | Field | Meaning |
 | ----- | ------- |
 | `text` | What to show. Items with empty text are skipped |
 | `runs` | A list of `{ text, style }` pieces instead of `text`, for coloring each character; the pieces drop together |
-| `style` | `fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`; colors are theme group names or `{ r, g, b }` |
-| `priority` | Higher drops first when the line is narrow; `0` (the default) never drops |
+| `style` | `fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`; colors take any color form, including theme group names |
+| `priority` | Higher drops first when the line is narrow; `0` (the default) never drops; in the statusline and headerline it is cut at the edge with `…` when it does not fit |
 | `align_right` | Pack against the right edge |
 | `separated` | Put a `·` between this item and the previous separated one |
 | `truncatable`, `truncate` | Shrink the text with `…` before dropping it, from the end or the `"middle"` |

@@ -38,14 +38,16 @@ function smelt.headerline.invalidate_after(ms)
   bar.invalidate_after(line, ms)
 end
 
---- Add a named source of header items. `handler` runs on every repaint and
---- returns a list of items (see `smelt.bar.Item`), or nothing to take no room.
+--- Add a named source of header items. `handler(ctx)` runs on every repaint,
+--- with `ctx.width` the header's width in cells, and returns a list of items
+--- (see `smelt.bar.Item`), or nothing to take no room. An error skips the
+--- source and shows a notification.
 --- The header is as tall as its lowest visible item row and disappears when
 --- no source shows anything. Adding a name that already exists replaces that
 --- source in place. Returns a `Reg` that removes this source, unless a later
 --- `add` with the same name has replaced it.
 ---@tier ui_host
----@type fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+---@type fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
 function smelt.headerline.add(name, handler)
   return bar.add(line, name, handler)
 end

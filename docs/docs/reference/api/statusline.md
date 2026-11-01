@@ -14,14 +14,15 @@ The statusline at the bottom of the screen. Register named sources with `smelt.s
 ## `smelt.statusline.add`
 
 ```lua
-fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
 ```
 
 Types: [`smelt.bar.Item`](types.md#smeltbaritem), [`smelt.Reg`](types.md#smeltreg)
 
-Add a named source of statusline items. `handler` runs on every repaint and
-returns a list of items (see `smelt.bar.Item`); errors are reported on
-stderr and skip the source. Items with `row = 2` or more make the
+Add a named source of statusline items. `handler(ctx)` runs on every
+repaint, with `ctx.width` the statusline's width in cells, and returns a
+list of items (see `smelt.bar.Item`); an error skips the source and shows a
+notification. Items with `row = 2` or more make the
 statusline taller. Adding a name that already exists replaces that
 source in place, keeping its position. Returns a `Reg` that removes this
 source, unless a later `add` with the same name has replaced it.
@@ -29,7 +30,7 @@ source, unless a later `add` with the same name has replaced it.
 ## `smelt.statusline.builtin`
 
 ```lua
-fun(name: string): (fun(): smelt.bar.Item[]?)?
+fun(name: string): (fun(ctx: { width: integer }): smelt.bar.Item[]?)?
 ```
 
 Types: [`smelt.bar.Item`](types.md#smeltbaritem)

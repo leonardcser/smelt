@@ -14,7 +14,7 @@ The rule below the prompt, empty by default. Register named sources with `smelt.
 ## `smelt.prompt_bar.bottom.add`
 
 ```lua
-fun(name: string, handler: fun(): smelt.bar.Item[]?): smelt.Reg
+fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
 ```
 
 Types: [`smelt.bar.Item`](types.md#smeltbaritem), [`smelt.Reg`](types.md#smeltreg)
