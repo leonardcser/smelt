@@ -13,6 +13,7 @@ mod gen_file_icons;
 mod gen_lua_docs;
 mod prepare_release;
 mod synth;
+mod update_model_catalog;
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,6 +64,7 @@ fn main() {
         Some("gen-lua-docs") => gen_lua_docs::run(),
         Some("prepare-release") => prepare_release::run(args.collect()),
         Some("synth") => synth::run(),
+        Some("update-model-catalog") => update_model_catalog::run(args.collect()),
         Some("fuzz") => fuzz::run(args.collect()),
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
@@ -102,6 +104,7 @@ fn print_usage() {
     eprintln!(
         "  synth                                 generate a synthetic session for perf testing"
     );
+    eprintln!("  update-model-catalog [API_JSON]       refresh the embedded models.dev snapshot");
     eprintln!("  fuzz run <target> [--fork N] [--cmin] fuzz a target until crash or Ctrl-C");
     eprintln!(
         "  fuzz triage <target> <artifact>       shrink a crash and print the minimal scenario"

@@ -1,17 +1,21 @@
 //! Models.dev catalog: pricing + capabilities + context limits.
 //!
-//! One background fetch populates an in-memory map; consumers (`pricing`,
-//! provider context-window lookup) read through it. Filesystem-cached
-//! with a 1h TTL so cold starts after the first run are instant. The catalog
-//! is several megabytes, so a request never waits on it for more than
-//! `FIRST_REQUEST_WAIT`; the download carries on in the background.
+//! Lookups never wait on the network. The first lookup loads the disk cache,
+//! or the snapshot embedded at build time when the cache is missing or
+//! expired. A background download replaces it with the live catalog and
+//! refreshes the cache, which has a 1h TTL. The snapshot and the cache hold
+//! the models.dev JSON trimmed to the fields smelt reads, so one parser reads
+//! all three sources. `cargo xtask update-model-catalog` regenerates the
+//! snapshot.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use crate::pricing::ModelPricing;
 
@@ -59,7 +63,7 @@ fn cache_put_with_ttl(cache_dir: Option<&Path>, key: &str, value: &str, ttl: Dur
 
 /// One row in the catalog. New fields slot in here as they're needed -
 /// new consumers don't pay a separate fetch.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelEntry {
     pub pricing: Option<ModelPricing>,
     pub context_window: Option<u32>,
@@ -68,32 +72,88 @@ pub struct ModelEntry {
     pub input_modalities: Option<Vec<String>>,
 }
 
-const MODELS_API_URL: &str = "https://models.dev/api.json";
+type Catalog = HashMap<(String, String), ModelEntry>;
+
+pub const MODELS_API_URL: &str = "https://models.dev/api.json";
 const CACHE_KEY: &str = "models_dev";
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Bound on the whole catalog download. It runs in the background, so this
 /// only has to outlast a slow link for the multi-megabyte body.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long the first request waits for the catalog before it goes ahead
-/// without it, so a slow or unreachable network cannot hold it up.
-const FIRST_REQUEST_WAIT: Duration = Duration::from_secs(3);
 /// How long to skip the network after a failed fetch, so every request does
 /// not start another download while offline.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 
-static CATALOG: OnceLock<HashMap<(String, String), ModelEntry>> = OnceLock::new();
+/// Trimmed models.dev catalog from the last `cargo xtask update-model-catalog`,
+/// zstd-compressed.
+static SNAPSHOT: &[u8] = include_bytes!("../data/models.json.zst");
+
+/// Cache directory of the local load. Set by `init`; until then the catalog
+/// is off and every lookup returns `None`.
+static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+static CATALOG: RwLock<Option<Arc<Catalog>>> = RwLock::new(None);
+/// Whether `CATALOG` holds a cached or downloaded catalog rather than the
+/// embedded snapshot.
+static FRESH: AtomicBool = AtomicBool::new(false);
 static LAST_FAILURE: Mutex<Option<Instant>> = Mutex::new(None);
 static FETCHING: AtomicBool = AtomicBool::new(false);
-static WAITED: AtomicBool = AtomicBool::new(false);
 
 fn recently_failed(failed_at: Option<Instant>, now: Instant) -> bool {
     failed_at.is_some_and(|at| now.duration_since(at) < RETRY_AFTER)
 }
 
-/// Start the one background load (disk cache, else network) unless the
-/// catalog is loaded, a load is running, or the last one failed recently.
-fn start_fetch(client: &reqwest::Client, cache_dir: Option<&Path>) {
-    if CATALOG.get().is_some() {
+/// Turn the catalog on, keeping its disk cache in `cache_dir`. Only the first
+/// call counts.
+pub fn init(cache_dir: Option<PathBuf>) {
+    let _ = CACHE_DIR.set(cache_dir);
+}
+
+/// The loaded catalog, loading the local copy on first use. Concurrent first
+/// callers wait for the one load instead of parsing it again.
+fn current() -> Option<Arc<Catalog>> {
+    if let Some(catalog) = CATALOG.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(catalog);
+    }
+    let cache_dir = CACHE_DIR.get()?;
+    let mut slot = CATALOG.write().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        let (catalog, fresh) = load_local(cache_dir.as_deref());
+        *slot = Some(Arc::new(catalog));
+        FRESH.store(fresh, Ordering::Release);
+    }
+    slot.clone()
+}
+
+/// The disk cache if it is valid, else the embedded snapshot. The flag tells
+/// which one it is.
+fn load_local(cache_dir: Option<&Path>) -> (Catalog, bool) {
+    match cache_get(cache_dir, CACHE_KEY)
+        .as_deref()
+        .and_then(parse)
+        .filter(|map| !map.is_empty())
+    {
+        Some(map) => (map, true),
+        None => (snapshot(), false),
+    }
+}
+
+fn snapshot() -> Catalog {
+    zstd::decode_all(SNAPSHOT)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .as_deref()
+        .and_then(parse)
+        .unwrap_or_default()
+}
+
+/// Load the catalog in the background: the local copy first, then the
+/// network unless the cache was fresh. A no-op before `init`, while a load
+/// runs, once a fresh catalog is loaded, and shortly after a failed download.
+pub fn refresh(client: &reqwest::Client) {
+    let Some(cache_dir) = CACHE_DIR.get() else {
+        return;
+    };
+    if FRESH.load(Ordering::Acquire) {
         return;
     }
     let failed_at = *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner());
@@ -104,45 +164,31 @@ fn start_fetch(client: &reqwest::Client, cache_dir: Option<&Path>) {
         return;
     }
     let client = client.clone();
-    let cache_dir = cache_dir.map(Path::to_path_buf);
     tokio::spawn(async move {
-        let map = load_or_fetch(&client, cache_dir.as_deref()).await;
-        if map.is_empty() {
-            *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-        } else {
-            let _ = CATALOG.set(map);
+        let _ = tokio::task::spawn_blocking(current).await;
+        if !FRESH.load(Ordering::Acquire) {
+            let installed = match download(&client, MODELS_API_URL, FETCH_TIMEOUT).await {
+                Some(json) => {
+                    tokio::task::spawn_blocking(move || install(&json, cache_dir.as_deref()))
+                        .await
+                        .unwrap_or(false)
+                }
+                None => false,
+            };
+            if !installed {
+                *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            }
         }
         FETCHING.store(false, Ordering::Release);
     });
 }
 
-/// Fetch the catalog in the background. Only the first call starts a load;
-/// subsequent calls are a no-op while it runs or once it has loaded.
-pub fn spawn_fetch(client: reqwest::Client, cache_dir: Option<PathBuf>) {
-    start_fetch(&client, cache_dir.as_deref());
-}
-
-/// Give the catalog a moment to load before a caller needs a synchronous
-/// lookup. Only the first call waits, and for at most `FIRST_REQUEST_WAIT`;
-/// the load continues in the background either way, so later requests find the
-/// catalog without waiting once it arrives.
-pub async fn ensure_loaded(client: &reqwest::Client, cache_dir: Option<&Path>) {
-    start_fetch(client, cache_dir);
-    if WAITED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let deadline = Instant::now() + FIRST_REQUEST_WAIT;
-    while CATALOG.get().is_none() && FETCHING.load(Ordering::Acquire) && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 /// Look up `(provider_type, api_base, model)` in the catalog. Returns `None`
-/// if the catalog isn't loaded yet or the entry isn't listed. The `api_base`
-/// is used to disambiguate providers that share a wire format (e.g. Kimi
-/// exposes an Anthropic-compatible endpoint but has its own catalog key).
+/// if the catalog is off or the entry isn't listed. The `api_base` is used to
+/// disambiguate providers that share a wire format (e.g. Kimi exposes an
+/// Anthropic-compatible endpoint but has its own catalog key).
 pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelEntry> {
-    let catalog = CATALOG.get()?;
+    let catalog = current()?;
     for key in catalog_keys(provider_type, api_base) {
         if let Some(entry) = catalog.get(&(key.clone(), model.to_string())) {
             return Some(entry.clone());
@@ -178,36 +224,28 @@ pub fn input_modalities(provider_type: &str, api_base: &str, model: &str) -> Opt
     lookup(provider_type, api_base, model).and_then(|e| e.input_modalities)
 }
 
-async fn load_or_fetch(
-    client: &reqwest::Client,
-    cache_dir: Option<&Path>,
-) -> HashMap<(String, String), ModelEntry> {
-    load_or_fetch_from(client, MODELS_API_URL, FETCH_TIMEOUT, cache_dir).await
+async fn download(client: &reqwest::Client, url: &str, timeout: Duration) -> Option<String> {
+    let resp = client.get(url).timeout(timeout).send().await.ok()?;
+    resp.error_for_status().ok()?.text().await.ok()
 }
 
-async fn load_or_fetch_from(
-    client: &reqwest::Client,
-    url: &str,
-    timeout: Duration,
-    cache_dir: Option<&Path>,
-) -> HashMap<(String, String), ModelEntry> {
-    if let Some(json) = cache_get(cache_dir, CACHE_KEY) {
-        if let Some(map) = parse(&json) {
-            return map;
-        }
-    }
-    let json = match client.get(url).timeout(timeout).send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(t) => t,
-            Err(_) => return HashMap::new(),
-        },
-        Err(_) => return HashMap::new(),
+/// Make a downloaded catalog the current one and cache it trimmed. Returns
+/// `false`, changing nothing, when `json` is not a catalog.
+fn install(json: &str, cache_dir: Option<&Path>) -> bool {
+    let Some(root) = deserialize(json) else {
+        return false;
     };
-    let map = parse(&json).unwrap_or_default();
-    if !map.is_empty() {
-        cache_put_with_ttl(cache_dir, CACHE_KEY, &json, CACHE_TTL);
+    let Ok(trimmed) = serde_json::to_string(&root) else {
+        return false;
+    };
+    let map = index(root);
+    if map.is_empty() {
+        return false;
     }
-    map
+    cache_put_with_ttl(cache_dir, CACHE_KEY, &trimmed, CACHE_TTL);
+    *CATALOG.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(map));
+    FRESH.store(true, Ordering::Release);
+    true
 }
 
 /// Maps smelt's `provider_type` + `api_base` to the candidate catalog keys
@@ -284,7 +322,7 @@ fn model_slug(name: &str) -> String {
 }
 
 fn insert_entry(
-    map: &mut HashMap<(String, String), ModelEntry>,
+    map: &mut Catalog,
     provider_keys: &[String],
     model_keys: &[String],
     entry: ModelEntry,
@@ -297,48 +335,81 @@ fn insert_entry(
     }
 }
 
-fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
-    // Typed deserialization to skip building a `serde_json::Value` tree for
-    // the entire ~50 KB response. Unknown fields on providers/models are
-    // ignored automatically.
-    #[derive(serde::Deserialize)]
-    struct CatalogProvider {
-        name: Option<String>,
-        api: Option<String>,
-        #[serde(default)]
-        models: HashMap<String, CatalogModel>,
-    }
-    #[derive(serde::Deserialize)]
-    struct CatalogModel {
-        name: Option<String>,
-        release_date: Option<String>,
-        last_updated: Option<String>,
-        cost: Option<CatalogCost>,
-        limit: Option<CatalogLimit>,
-        modalities: Option<CatalogModalities>,
-        #[serde(default)]
-        reasoning: Option<bool>,
-    }
-    // `Option<f64>` (not `#[serde(default)] f64`) so a stray null / string for any single
-    // cost field doesn't fail the whole catalog - fall back to 0.0 per field.
-    #[derive(serde::Deserialize)]
-    struct CatalogCost {
-        input: Option<f64>,
-        output: Option<f64>,
-        cache_read: Option<f64>,
-        cache_write: Option<f64>,
-    }
-    #[derive(serde::Deserialize)]
-    struct CatalogLimit {
-        context: Option<u32>,
-        output: Option<u32>,
-    }
-    #[derive(serde::Deserialize)]
-    struct CatalogModalities {
-        input: Option<Vec<String>>,
-    }
+// Only the fields smelt reads. `trim` writes them back out, skipping absent
+// ones, so a trimmed catalog parses to the same map as the full one.
+#[derive(Serialize, Deserialize)]
+struct CatalogProvider {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api: Option<String>,
+    #[serde(default)]
+    models: BTreeMap<String, CatalogModel>,
+}
 
-    let root: HashMap<String, CatalogProvider> = serde_json::from_str(json).ok()?;
+#[derive(Serialize, Deserialize)]
+struct CatalogModel {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_updated: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<CatalogCost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<CatalogLimit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modalities: Option<CatalogModalities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<bool>,
+}
+
+// `Option<f64>` (not `#[serde(default)] f64`) so a null for any single cost
+// field doesn't fail the whole catalog - fall back to 0.0 per field.
+#[derive(Serialize, Deserialize)]
+struct CatalogCost {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_read: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_write: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CatalogLimit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CatalogModalities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<Vec<String>>,
+}
+
+type CatalogRoot = BTreeMap<String, CatalogProvider>;
+
+fn deserialize(json: &str) -> Option<CatalogRoot> {
+    serde_json::from_str(json).ok()
+}
+
+/// Cut a models.dev catalog down to the fields smelt reads. Returns `None`
+/// for JSON that isn't a catalog.
+pub fn trim(json: &str) -> Option<String> {
+    serde_json::to_string(&deserialize(json)?).ok()
+}
+
+fn parse(json: &str) -> Option<Catalog> {
+    deserialize(json).map(index)
+}
+
+fn index(root: CatalogRoot) -> Catalog {
     let mut map = HashMap::new();
     for (provider, provider_val) in root {
         let mut provider_keys = vec![provider.clone()];
@@ -436,7 +507,7 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
             }
         }
     }
-    Some(map)
+    map
 }
 
 #[cfg(any(test, feature = "fuzz"))]
@@ -454,16 +525,90 @@ mod tests {
         let url = format!("http://{}/api.json", listener.local_addr().unwrap());
         let started = std::time::Instant::now();
 
-        let map = load_or_fetch_from(
-            &crate::http::client(),
-            &url,
-            Duration::from_millis(100),
-            None,
-        )
-        .await;
+        let json = download(&crate::http::client(), &url, Duration::from_millis(100)).await;
 
-        assert!(map.is_empty());
+        assert!(json.is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn snapshot_lists_the_main_providers() {
+        let catalog = snapshot();
+        for provider in ["anthropic", "openai", "github-copilot"] {
+            assert!(
+                catalog.keys().any(|(key, _)| key == provider),
+                "snapshot has no {provider} models"
+            );
+        }
+    }
+
+    #[test]
+    fn trimmed_catalog_parses_like_the_full_one() {
+        let json = r#"{
+            "openai": {
+                "id": "openai",
+                "name": "OpenAI",
+                "api": "https://api.openai.com/v1",
+                "doc": "https://platform.openai.com/docs",
+                "models": {
+                    "gpt-4o": {
+                        "id": "gpt-4o",
+                        "name": "GPT-4o",
+                        "tool_call": true,
+                        "last_updated": "2024-05",
+                        "cost": {"input": 2.5, "output": 10, "cache_read": 1.25},
+                        "limit": {"context": 128000, "output": 16384},
+                        "modalities": {"input": ["text", "image"], "output": ["text"]},
+                        "reasoning": false
+                    },
+                    "o1": {"name": "o1", "release_date": "2024-12", "reasoning": true}
+                }
+            }
+        }"#;
+        let trimmed = trim(json).unwrap();
+
+        assert!(trimmed.len() < json.len());
+        assert!(!trimmed.contains("tool_call"));
+        assert!(!trimmed.contains("null"));
+        assert_eq!(parse(&trimmed).unwrap(), parse(json).unwrap());
+    }
+
+    #[test]
+    fn local_load_prefers_a_valid_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"openai": {"models": {"gpt-4": {"limit": {"output": 4096}}}}}"#;
+        cache_put_with_ttl(Some(dir.path()), CACHE_KEY, json, CACHE_TTL);
+
+        let (catalog, fresh) = load_local(Some(dir.path()));
+
+        assert!(fresh);
+        assert_eq!(catalog, parse(json).unwrap());
+    }
+
+    #[test]
+    fn local_load_falls_back_to_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        cache_put_with_ttl(Some(dir.path()), CACHE_KEY, "not json", CACHE_TTL);
+
+        let (catalog, fresh) = load_local(Some(dir.path()));
+
+        assert!(!fresh);
+        assert_eq!(catalog, snapshot());
+    }
+
+    #[test]
+    fn install_rejects_a_download_that_is_not_a_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(!install("<html>rate limited</html>", Some(dir.path())));
+        assert!(!install("{}", Some(dir.path())));
+        assert!(cache_get(Some(dir.path()), CACHE_KEY).is_none());
+    }
+
+    #[test]
+    fn trim_rejects_non_catalog_json() {
+        assert!(trim("[]").is_none());
+        assert!(trim("not json").is_none());
     }
 
     #[test]

@@ -32,6 +32,14 @@ never edits `main`, creates commits, pushes generated changes, or moves tags.
    release workflow publishes the page as the GitHub release notes and fails
    when it is missing or still has the draft summary. Pre-release tags need no
    page.
+
+   In the same change, refresh the models.dev snapshot that the binary uses
+   until the live catalog loads:
+
+   ```bash
+   cargo xtask update-model-catalog
+   ```
+
 3. Run the full validation suite on the exact source commit:
 
    ```bash

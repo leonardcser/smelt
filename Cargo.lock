@@ -3723,6 +3723,7 @@ dependencies = [
  "tokio-util",
  "url",
  "webpki-root-certs",
+ "zstd",
 ]
 
 [[package]]
@@ -4896,11 +4897,13 @@ dependencies = [
  "smelt-core",
  "smelt-perf",
  "smelt-protocol",
+ "smelt-provider",
  "smelt-store",
  "smelt-tui",
  "tempfile",
  "tokio",
  "toml_edit",
+ "zstd",
 ]
 
 [[package]]

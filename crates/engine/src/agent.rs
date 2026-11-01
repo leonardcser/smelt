@@ -144,10 +144,8 @@ pub(crate) async fn engine_task(
         .build()
         .unwrap_or_else(|_| smelt_provider::http_client());
     if config.transport.is_none() {
-        smelt_provider::catalog::spawn_fetch(
-            client.clone(),
-            Some(crate::paths::cache_dir().join("web")),
-        );
+        smelt_provider::catalog::init(Some(crate::paths::cache_dir().join("web")));
+        smelt_provider::catalog::refresh(&client);
     }
 
     let _ = event_tx.send(EngineEvent::Ready);

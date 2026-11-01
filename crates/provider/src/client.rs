@@ -40,10 +40,6 @@ impl ProviderClient {
         self
     }
 
-    pub fn has_transport(&self) -> bool {
-        self.transport.is_some()
-    }
-
     async fn send_chat(
         &self,
         request: reqwest::RequestBuilder,

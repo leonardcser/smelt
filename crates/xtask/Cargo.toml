@@ -22,3 +22,5 @@ process-wrap = { version = "10.0.1", default-features = false, features = ["toki
 tempfile.workspace = true
 libc.workspace = true
 clap = { version = "4", features = ["derive"] }
+smelt-provider.workspace = true
+zstd = "0.14.3"

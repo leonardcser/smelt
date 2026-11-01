@@ -535,7 +535,7 @@ impl EngineProvider {
             return config;
         }
 
-        self.ensure_catalog_loaded().await;
+        smelt_provider::catalog::refresh(self.client.http());
         if let Some(tokens) = smelt_provider::catalog::output_tokens(
             self.backend.as_config_str(),
             &self.api_base,
@@ -553,7 +553,7 @@ impl EngineProvider {
         model: &str,
     ) -> ReasoningEffort {
         if config.supports_reasoning.is_none() {
-            self.ensure_catalog_loaded().await;
+            smelt_provider::catalog::refresh(self.client.http());
         }
         let supports_reasoning = config.supports_reasoning.or_else(|| {
             smelt_provider::catalog::supports_reasoning(
@@ -567,14 +567,6 @@ impl EngineProvider {
             self.backend.as_config_str(),
             supports_reasoning,
         )
-    }
-
-    async fn ensure_catalog_loaded(&self) {
-        if self.client.has_transport() {
-            return;
-        }
-        let catalog_cache_dir = crate::paths::cache_dir().join("web");
-        smelt_provider::catalog::ensure_loaded(self.client.http(), Some(&catalog_cache_dir)).await;
     }
 
     pub async fn fetch_context_window(&self, model: &str) -> Result<Option<u32>, String> {
