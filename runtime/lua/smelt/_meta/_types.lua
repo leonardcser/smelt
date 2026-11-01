@@ -14,6 +14,44 @@
 ---@class smelt.Reg
 ---@field remove fun(): boolean Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone.
 
+--- A bar: named sources whose items lay out in a strip or a rule. It owns a
+--- window and its renderer; `bar:node()` places it in a layout.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.bar.Bar
+---@field name string The name given to `smelt.bar.new`.
+---@field win smelt.win.Win The window the bar renders into.
+---@field add fun(self: smelt.bar.Bar, name: string, handler: fun(ctx: smelt.bar.Context): smelt.bar.Item[]?, opts?: { builtin?: boolean }): smelt.Reg Add a named source. `handler(ctx)` runs on every repaint (see `smelt.bar.Context`) and returns an item or a list of them; an error skips the source and shows a notification. Sources run in the order they were added. Adding an existing name replaces that source in place. `opts.builtin` also records it as the default that `bar:builtin(name)` returns, for features that ship a source. Returns a `Reg` that removes the source, unless a later `add` replaced it.
+---@field remove fun(self: smelt.bar.Bar, name: string) Remove every source named `name`.
+---@field clear fun(self: smelt.bar.Bar) Remove every source, built-in ones included.
+---@field builtin fun(self: smelt.bar.Bar, name: string): (fun(ctx: smelt.bar.Context): smelt.bar.Item[]?)? The built-in source named `name`, so a replacement can fall back to it.
+---@field configure fun(self: smelt.bar.Bar, config: smelt.bar.Config) Change the look. Absent keys stay; `false` restores a key's default.
+---@field config fun(self: smelt.bar.Bar): smelt.bar.Config The current look.
+---@field invalidate fun(self: smelt.bar.Bar) Repaint after state a source reads changes outside a built-in signal. Adding, replacing and removing sources repaint on their own.
+---@field invalidate_after fun(self: smelt.bar.Bar, ms: integer) Repaint after `ms` milliseconds. An animated source asks for its next frame on every paint; the earliest pending request wins.
+---@field rows fun(self: smelt.bar.Bar): integer Rows the bar wants: 0 while hidden, the view rows when a view replaces it, 1 for a rule, otherwise one per distinct item `row` and at least `min_rows`.
+---@field highlight fun(self: smelt.bar.Bar, style: smelt.buf.MarkOpts?) Paint the rule and the separators with `style` until called with nil, for example while the bar is dragged. The look stays as configured.
+---@field node fun(self: smelt.bar.Bar): smelt.ui.layout, integer The bar's layout node and rows, for layout composers.
+---@field set_view fun(self: smelt.bar.Bar, node: smelt.ui.layout?, rows: integer?) Replace the bar with any layout node, such as a paint leaf, taking `rows` rows (default 1). `nil` restores the bar.
+
+--- Look of a bar, set with `bar:configure(config)`. Absent keys keep their
+--- current value; `false` resets a key to its default.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.bar.Config
+---@field layout? "strip"|"rule" `"strip"` fills the row; `"rule"` draws a horizontal line with the items set into it.
+---@field bg? string|false Theme group that fills the empty cells and backs items without their own background.
+---@field separator? string|false Text between neighbouring `separated` items. Defaults to `" · "`.
+---@field separator_style? smelt.buf.MarkOpts|false Style of the separator text.
+---@field rule? string|false Cell repeated to draw a rule. Defaults to `"─"`.
+---@field rule_style? smelt.buf.MarkOpts|false Style of the rule. Defaults to `{ fg = "SmeltSeparator" }`.
+---@field fill_selectable? boolean Include the filler between items in drag-copy.
+---@field visible? boolean `false` hides the bar: it takes no rows and its sources stay registered.
+
+--- What a source gets on every repaint.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.bar.Context
+---@field width integer The bar's width in cells.
+---@field rows? integer Rows left for this source while the layout gives the bar fewer rows than it wants: the bar's rows minus the rows earlier sources took. Nil when every row fits.
+
 --- One piece of bar content. Items are laid out left to right, with
 --- `align_right` items packed against the right edge. Give an item either
 --- `text`, or `runs` to color its characters individually. Neighbouring items
@@ -32,8 +70,25 @@
 ---@field truncate? "end"|"middle" Where to cut a truncated item. Defaults to `"end"`.
 ---@field align_right? boolean Pack against the right edge instead of the left.
 ---@field selectable? boolean Include the text in drag-copy. Defaults to true.
----@field row? integer Row of a multi-row bar, from 1 at the top. Defaults to 1. The statusline and headerline grow to fit; the prompt rules ignore it.
+---@field row? integer Orders the rows of a strip: rows with lower numbers sit higher, negative rows count from the bottom (`-1` is the last row), and a row with no items takes no space. Defaults to 1. A rule ignores it.
 ---@field fill? string Theme group that styles the empty space of this item's row instead of the bar's background.
+
+--- Options for `smelt.bar.new`. The look keys of `smelt.bar.Config` set the
+--- defaults that `bar:configure({ key = false })` restores.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.bar.Opts
+---@field name string Unique name; it labels errors and names the bar's window.
+---@field layout? "strip"|"rule" Defaults to `"strip"`.
+---@field bg? string Theme group behind the empty cells.
+---@field separator? string Text between neighbouring `separated` items.
+---@field separator_style? smelt.buf.MarkOpts Style of the separator text.
+---@field rule? string Cell repeated to draw a rule.
+---@field rule_style? smelt.buf.MarkOpts Style of the rule.
+---@field fill_selectable? boolean Include the filler between items in drag-copy.
+---@field visible? boolean Defaults to `true`.
+---@field min_rows? integer Rows kept even when no source shows an item. Defaults to 1; 0 makes the bar collapse while empty.
+---@field sources? { [1]: string, [2]: fun(ctx: smelt.bar.Context): smelt.bar.Item[]? }[] Built-in sources added in order; `bar:builtin(name)` returns them.
+---@field win_opts? table Extra `smelt.win.new` options for the bar's window, such as `focus_on_click` or `resize`.
 
 --- A styled piece of a `runs` item.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -574,7 +629,7 @@
 --- How one window's text moved since the previous frame: the screen area of the text and the rows it moved. Screen row `y` inside the area shows what `ctx.prev` had at row `y + dy`, unless a window above covers it.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Scroll
----@field win smelt.win.Win The window that scrolled. Compare it with `==`, for example to `smelt.win.transcript()`.
+---@field win smelt.win.Win The window that scrolled. Compare it with `==`, for example to `smelt.transcript.win`.
 ---@field x integer Left column of the area.
 ---@field y integer Top row of the area.
 ---@field width integer Width of the area.
@@ -1282,6 +1337,7 @@
 ---@field placeholder fun(text: string, opts: table?): smelt.win.Win Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.
 ---@field clear_placeholder fun(): nil Clear the window's placeholder text and opts. Idempotent.
 ---@field placeholder_text fun(): string? Return the current placeholder text, or `nil` if none is set.
+---@field configure fun(opts: table): smelt.win.Win Change the window's live options and return the handle. Works on built-in windows such as `smelt.prompt.win`. Absent keys stay unchanged. Accepts `style` (theme group layered over `Normal` as the window's base, filling every row including padding; `false` clears it), `prefix` (text painted into the left padding: a string for the first row, or `{ first, rest?, style? }` where `rest` goes on every later content row and `style` is a theme group; it is clipped to `pad_left`, so widen the padding to fit; `false` clears it), `focus_on_click` (a `Win` that a click on this window focuses instead, as the bars around the prompt do; `false` clears it), `resize = "prompt"` (dragging this window resizes the prompt and a double click resets it; `false` clears it), `pad_left`, `pad_right`, `scrollbar`, `wrap`, `surface`, `cursor_line`, `selection_highlight`, `hide_cursor`, `vim_enabled` and `gutter`.
 ---@field row_highlights fun(specs: table?): smelt.win.Win Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.
 ---@field link_scroll fun(others: smelt.win.Win): smelt.win.Win Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.
 ---@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
@@ -1313,7 +1369,7 @@
 
 --- Name of a state signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"task_label"|"tokens_used"|"tps"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
+---@alias smelt.signal.Name string|"agent_mode"|"auto_continue_status"|"branch"|"confirm_requested"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"fast_mode"|"history_epoch"|"input_epoch"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_queue_revision"|"prompt_resize_active"|"reasoning"|"running_procs"|"session_epoch"|"session_slug"|"session_title"|"settings_auto_continue"|"settings_terminal_title"|"task_label"|"tokens_used"|"tps"|"viewport_pos"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_continuation_token"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_pause_kind"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Which side of a cell a color paints, for `smelt.theme.rgb`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

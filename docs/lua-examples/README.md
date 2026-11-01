@@ -16,8 +16,7 @@ your own `init.lua`) to try them out. Copy `plugin.lua` to
 - **mode_keybinds.lua**: `<C-y>` in normal mode copies the transcript or the
   prompt depending on which pane has focus, using `smelt.focus()` to branch.
 - **statusline.lua**: three additional statusline sources (cwd label, git branch
-  pill, right-aligned clock) registered via `require("smelt.statusline")` and
-  `statusline.add`.
+  pill, right-aligned clock) registered with `smelt.statusline:add`.
 - **override.lua**: register a `/hello` command that greets via `smelt.notify`,
   and remap `<C-s>` in normal mode to run `/fork`.
 

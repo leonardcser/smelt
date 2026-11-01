@@ -170,7 +170,6 @@ impl TestApp {
             .win_open_split(
                 buf,
                 crate::smelt_edit::SplitConfig {
-                    region: "dialog".into(),
                     gutters: Default::default(),
                 },
             )

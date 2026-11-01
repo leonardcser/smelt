@@ -43,7 +43,7 @@ end
 
 local function bind_manual_tab()
   if manual_tab_reg then return end
-  manual_tab_reg = smelt.prompt.win():key("tab", function() M._tab() end)
+  manual_tab_reg = smelt.prompt.win:key("tab", function() M._tab() end)
 end
 
 local function clear_manual_tab_binding()
@@ -216,7 +216,7 @@ local function picker_bindings(self)
     fire_on_select()
   end
 
-  local win = smelt.prompt.win()
+  local win = smelt.prompt.win
   table.insert(self.regs, win:key("up",    function() move(1)  end))
   table.insert(self.regs, win:key("down",  function() move(-1) end))
   table.insert(self.regs, win:key("c-k",   function() move(1)  end))
@@ -427,7 +427,7 @@ end
 -- declare `smelt.prompt.register_completer(...)`. Attach the listener only when this chunk
 -- is running inside an active terminal UI scope.
 if __smelt_internal.__ui_host_available() then
-  smelt.prompt.win():on("text_changed", function() M._recompute() end)
+  smelt.prompt.win:on("text_changed", function() M._recompute() end)
 end
 
 --- Completer specification handed to `smelt.prompt.register_completer` for full candidate

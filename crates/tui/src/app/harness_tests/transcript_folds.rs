@@ -166,7 +166,7 @@ fn expanding_bottom_pinned_preview_while_streaming_restores_tail_follow() {
     assert!(app.run_lua(
         r#"
         smelt.keymap.set("n", "<space>", function()
-            local transcript = smelt.win.transcript()
+            local transcript = smelt.transcript.win
             smelt.transcript.fold_at_row(transcript:cursor(), "toggle")
         end)
         "#

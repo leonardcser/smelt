@@ -593,7 +593,7 @@ fn lua_goal_banner_stays_above_transcript_scroll_pill() {
         });
     }
     app.render_silent();
-    assert!(app.run_lua(r#"smelt.win.transcript():reveal(30, { cursor = true })"#));
+    assert!(app.run_lua(r#"smelt.transcript.win:reveal(30, { cursor = true })"#));
 
     let frame = app.render_to_frame();
     assert!(

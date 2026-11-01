@@ -618,7 +618,6 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("permission_pending"),
     state("prompt_queue_revision"),
     state("prompt_resize_active"),
-    state("prompt_resize_chrome"),
     state("reasoning"),
     state("running_procs"),
     event("session_ended"),
@@ -946,7 +945,6 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("notification_visible", false);
     signals.declare("prompt_queue_revision", 0u64);
     signals.declare("prompt_resize_active", false);
-    signals.declare("prompt_resize_chrome", String::new());
     signals.declare("cursor_pos", CursorPos::default());
     signals.declare("viewport_pos", ViewportPos::default());
 

@@ -6,18 +6,20 @@ use crate::smelt_edit::{Align, Ui};
 /// Resolve the window that represents the top edge of the prompt chrome
 /// stack. Used by overlays that want to float above the prompt block.
 ///
-/// The resolved target is the Lua-allocated top bar window when the
-/// default `prompt_bar.lua` is loaded, otherwise the engine-owned
-/// `PROMPT_WIN`. The host knows the *name* of the default top bar but
-/// not its layout shape: a plugin that replaces the bar with a wider
-/// or differently-named window will fall through to the `PROMPT_WIN`
-/// branch and the picker will sit immediately above the input row.
+/// The default prompt block (`runtime/lua/smelt/prompt_chrome.lua`) stacks
+/// the queue window over the top bar over the input. The first of those with
+/// rows on screen is the top edge, so hidden bars and an empty queue fall
+/// through to the input, `PROMPT_WIN`. A custom layout that leaves those
+/// windows out falls through the same way.
 ///
-/// Screen-bottom overlays that need to clear the Lua-owned statusline still
-/// anchor against `require("smelt.statusline").win` directly from Lua. The
-/// render loop only resolves that named window in its emergency fallback layout.
+/// Screen-bottom overlays that need to clear the statusline anchor against
+/// `smelt.statusline.win` directly from Lua. The render loop only resolves
+/// that named window in its emergency fallback layout.
 pub(crate) fn prompt_chrome_top_win(ui: &Ui) -> crate::smelt_edit::WinId {
-    ui.named_win("smelt.prompt_bar.top")
+    ["smelt.prompt.queue", "smelt.prompt.top"]
+        .into_iter()
+        .filter_map(|name| ui.named_win(name))
+        .find(|&win| ui.split_rect(win).is_some_and(|rect| rect.height > 0))
         .unwrap_or(crate::app::PROMPT_WIN)
 }
 
@@ -59,6 +61,24 @@ pub(crate) fn anchor_above_prompt_chrome(ui: &Ui, height: u16) -> Anchor {
         attach: Align::NW,
         row_offset: -(height as i32),
         col_offset: 0,
+    }
+}
+
+/// Anchor for a one-row toast: over the prompt's auxiliary row, the row the
+/// default layout keeps free between the transcript and the prompt block, or
+/// one row above the prompt chrome when no auxiliary row is on screen.
+pub(crate) fn anchor_for_prompt_toast(ui: &Ui) -> Anchor {
+    let aux = ui
+        .named_win("smelt.prompt.aux")
+        .filter(|&win| ui.split_rect(win).is_some_and(|rect| rect.height > 0));
+    match aux {
+        Some(aux) => Anchor::Win {
+            target: aux.into(),
+            attach: Align::NW,
+            row_offset: 0,
+            col_offset: 0,
+        },
+        None => anchor_above_prompt_chrome(ui, 1),
     }
 }
 
@@ -125,16 +145,9 @@ mod tests {
     use super::*;
     use crate::smelt_edit::{Gutters, WinId};
 
-    fn open_split(ui: &mut crate::smelt_edit::Ui, win: WinId, region: &str, gutters: Gutters) {
+    fn open_split(ui: &mut crate::smelt_edit::Ui, win: WinId, gutters: Gutters) {
         let buf = ui.buf_create(crate::smelt_edit::BufCreateOpts::default());
-        assert!(ui.win_open_split_at(
-            win,
-            buf,
-            crate::smelt_edit::SplitConfig {
-                region: region.into(),
-                gutters,
-            },
-        ));
+        assert!(ui.win_open_split_at(win, buf, crate::smelt_edit::SplitConfig { gutters },));
     }
 
     fn set_up_layout(
@@ -144,16 +157,10 @@ mod tests {
     ) -> crate::smelt_edit::Ui {
         let mut ui = crate::smelt_edit::Ui::new();
         ui.set_terminal_size(term_width, term_height);
-        open_split(
-            &mut ui,
-            crate::app::TRANSCRIPT_WIN,
-            "transcript",
-            Gutters::default(),
-        );
+        open_split(&mut ui, crate::app::TRANSCRIPT_WIN, Gutters::default());
         open_split(
             &mut ui,
             crate::app::PROMPT_WIN,
-            "prompt",
             Gutters {
                 pad_left: 1,
                 pad_right: 1,

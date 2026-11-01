@@ -18,7 +18,7 @@ local function refresh()
         or f.status == "D" and "removed" or "modified"
       counts[kind] = counts[kind] + 1
     end
-    smelt.statusline.invalidate()
+    smelt.statusline:invalidate()
   end)
 end
 smelt.events.on("tool_end", refresh)
@@ -28,8 +28,8 @@ local function text(items, s, bg, fg, bold)
   table.insert(items, { text = s, style = { bg = bg, fg = fg, bold = bold } })
 end
 
-smelt.statusline.remove("core")
-smelt.statusline.add("line", function()
+smelt.statusline:clear()
+smelt.statusline:add("line", function()
   local items = {}
   local cwd = smelt.path.basename(smelt.os.cwd())
   text(items, " " .. (smelt.signal.get("agent_mode") or "") .. " ", A, DARK, true)

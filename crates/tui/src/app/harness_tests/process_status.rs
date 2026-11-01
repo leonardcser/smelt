@@ -70,7 +70,7 @@ fn statusline_can_truncate_items_in_the_middle() {
                 truncatable = true,
                 truncate = "middle",
               },
-            }, 14, { bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
+            }, 14, { bg = "SmeltStatusBg", separator_style = { fg = "SmeltSeparator", dim = true } })
             return row.text
             "#,
         )
@@ -92,7 +92,7 @@ fn statusline_spacing_respects_text_and_block_items() {
               { text = " INSERT ", style = { hl_group = "SmeltVimInsert" } },
               { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
               { text = "procs", style = { fg = "SmeltProcess" }, separated = true },
-            }, 80, { bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
+            }, 80, { bg = "SmeltStatusBg", separator_style = { fg = "SmeltSeparator", dim = true } })
             return row.text
             "#,
         )
@@ -116,7 +116,7 @@ fn statusline_separates_first_inline_indicator_after_pills() {
               { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
               { text = "14 procs", style = { fg = "SmeltProcess" }, separated = true },
               { text = "permission pending", style = { fg = "SmeltAccent" }, separated = true },
-            }, 80, { bg_group = "SmeltStatusBg", sep_group = "SmeltSeparator" })
+            }, 80, { bg = "SmeltStatusBg", separator_style = { fg = "SmeltSeparator", dim = true } })
             return row.text
             "#,
         )
@@ -173,7 +173,7 @@ fn working_indicator_follows_the_turn_lifecycle() {
     let at = |app: &mut TestApp, now_ms: u32| {
         assert!(app.run_lua(&format!(
             "smelt.time.now_ms = function() return {now_ms} end
-             smelt.prompt_bar.top.invalidate()"
+             smelt.prompt.top:invalidate()"
         )));
         bar_row(app.render_to_frame().text())
     };
@@ -248,7 +248,7 @@ fn working_indicator_follows_the_turn_lifecycle() {
     let dot_style = |app: &mut TestApp, now_ms: u32| {
         assert!(app.run_lua(&format!(
             "smelt.time.now_ms = function() return {now_ms} end
-             smelt.prompt_bar.top.invalidate()"
+             smelt.prompt.top:invalidate()"
         )));
         let frame = app.render_to_frame();
         let text = frame.text();
@@ -309,7 +309,7 @@ fn working_coal_heats_while_a_tool_call_is_pending_and_cools_after() {
         assert!(app.run_lua(&format!(
             "smelt.time.now_ms = function() return {now_ms} end
              {emit}
-             smelt.prompt_bar.top.invalidate()"
+             smelt.prompt.top:invalidate()"
         )));
         let frame = app.render_to_frame();
         green(&app.working_dot_style(&frame).expect("styled coal"))
@@ -365,7 +365,7 @@ fn working_word_rests_in_gray_and_a_sweep_flares_it() {
     let first_letter = |app: &mut TestApp, now_ms: u32| {
         assert!(app.run_lua(&format!(
             "smelt.time.now_ms = function() return {now_ms} end
-             smelt.prompt_bar.top.invalidate()"
+             smelt.prompt.top:invalidate()"
         )));
         let frame = app.render_to_frame();
         green(&app.bar_cell_style(&frame, 4).expect("styled letter"))
@@ -400,7 +400,7 @@ fn working_word_sweep_is_locked_to_the_wall_clock() {
         let mut paint = |now_ms: u32| {
             assert!(app.run_lua(&format!(
                 "smelt.time.now_ms = function() return {now_ms} end
-                 smelt.prompt_bar.top.invalidate()"
+                 smelt.prompt.top:invalidate()"
             )));
             app.render_to_frame()
         };
@@ -428,7 +428,7 @@ fn gallery_glitch_plugin_glitches_words_in_and_out_and_decodes_done() {
     let at = |app: &mut TestApp, now_ms: u32| {
         assert!(app.run_lua(&format!(
             "smelt.time.now_ms = function() return {now_ms} end
-             smelt.prompt_bar.top.invalidate()"
+             smelt.prompt.top:invalidate()"
         )));
         app.render_to_frame()
             .text()

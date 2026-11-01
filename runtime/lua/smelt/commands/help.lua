@@ -215,7 +215,6 @@ local function toggle()
 
     local buf = smelt.buf.new({ readonly = true })
     local leaf = smelt.win.new(buf, {
-      region      = "help_overlay",
       surface     = "readonly_text",
       wrap        = false,
       hide_cursor = true,

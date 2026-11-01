@@ -12,6 +12,12 @@ local smelt = {}
 ---@type fun(): string
 smelt.focus = nil
 
+--- The strip above the transcript, a `smelt.bar.Bar`. It takes rows only
+--- while some source shows an item.
+---@see smelt.bar.Bar
+---@type smelt.bar.Bar
+smelt.headerline = nil
+
 --- Tier: Host - Available in every runtime, including headless mode.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 --- Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.
@@ -59,5 +65,13 @@ smelt.sleep = nil
 ---@see smelt.task.wait
 ---@type fun(handler: fun()): smelt.Reg
 smelt.spawn = nil
+
+--- The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
+--- sources: `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`,
+--- `procs`, `worktree`, `vim_pending` and `cursor`. Items with `row = 2` or
+--- more make it taller.
+---@see smelt.bar.Bar
+---@type smelt.bar.Bar
+smelt.statusline = nil
 
 return smelt

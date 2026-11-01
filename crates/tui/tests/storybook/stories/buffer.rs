@@ -13,9 +13,8 @@ use tui::smelt_edit::{BufId, LayoutTree, SplitConfig};
 
 use crate::storybook::StoryCtx;
 
-fn pane(region: &str) -> SplitConfig {
+fn pane() -> SplitConfig {
     SplitConfig {
-        region: region.to_string(),
         gutters: Gutters::default(),
     }
 }
@@ -23,7 +22,7 @@ fn pane(region: &str) -> SplitConfig {
 fn open_with_lines(ctx: &mut StoryCtx, lines: &[&str], w: u16, h: u16) -> BufId {
     ctx.set_viewport(w, h);
     let buf = ctx.buf_with_lines(lines.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    let win = ctx.open_split(buf, pane("only"));
+    let win = ctx.open_split(buf, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(win),
@@ -111,7 +110,7 @@ story!(table_selection_masks_chrome_and_padding, |ctx| {
         let selection = smelt_buffer::coords::byte_range_to_row_ranges(buf, 0, buf.text().len());
         buf.set_range_layer(tui::smelt_edit::RangeLayer::Selection, selection);
     }
-    let win = ctx.open_split(buf_id, pane("only"));
+    let win = ctx.open_split(buf_id, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(win),
@@ -169,7 +168,7 @@ story!(mixed_ascii_and_cjk, |ctx| {
 story!(empty_buffer_fills_with_blanks, |ctx| {
     ctx.set_viewport(8, 3);
     let buf = ctx.buf();
-    let win = ctx.open_split(buf, pane("only"));
+    let win = ctx.open_split(buf, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(win),

@@ -34,8 +34,7 @@ function M.open()
   local function window(name, surface)
     local buf = smelt.buf.new({ readonly = true })
     local win = smelt.win.new(buf, {
-      name = "smelt.subagents." .. name, region = "subagents_overlay",
-      surface = surface, vim_enabled = surface == "readonly_text",
+      name = "smelt.subagents." .. name, surface = surface, vim_enabled = surface == "readonly_text",
       wrap = false, scrollbar = true, pad_left = 1, pad_right = 1,
     })
     return win, buf

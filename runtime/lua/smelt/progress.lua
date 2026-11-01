@@ -1,4 +1,4 @@
--- Small styled progress-bar helpers shared by Lua commands.
+-- Styled progress bars shared by Lua commands.
 
 local M = {}
 
@@ -9,7 +9,7 @@ local function clamp(n)
   return n
 end
 
-function M.progress(ratio, opts)
+function M.bar(ratio, opts)
   opts = opts or {}
   ratio = clamp(ratio)
   local width = opts.width or 20

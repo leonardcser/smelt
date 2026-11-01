@@ -9,7 +9,7 @@
 //! the Rust closure's argument-tuple and return types so drift becomes a
 //! compile error.
 
-use mlua::{FromLuaMulti, IntoLuaMulti, Lua, MaybeSend};
+use mlua::{FromLuaMulti, IntoLua, IntoLuaMulti, Lua, MaybeSend};
 use std::sync::{Mutex, OnceLock};
 
 use super::doc::{record_module, register_fn_inner, ApiClassification, Tier};
@@ -321,6 +321,26 @@ impl<'a> LuaMod<'a> {
         R: IntoLuaMulti + LuaType,
     {
         self.register(FunctionTarget::Facade, name, doc, params, false, f)
+    }
+
+    /// Set the value field `<self.path>.<name>` and document it as type `ty`.
+    pub fn value(
+        &self,
+        name: &'static str,
+        doc: &'static str,
+        ty: &str,
+        value: impl IntoLua,
+    ) -> mlua::Result<()> {
+        self.tbl.set(name, value)?;
+        super::doc::record(super::doc::LuaFnMeta {
+            module: self.path,
+            name,
+            doc,
+            sig: ty.to_string(),
+            tier: self.tier,
+            classification: self.classification,
+        });
+        Ok(())
     }
 
     pub fn advanced_fn<F, A, R>(

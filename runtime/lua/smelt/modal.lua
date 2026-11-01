@@ -100,14 +100,12 @@ function M.open(opts)
   render_actions(actions_buf, actions, selected, action_width)
 
   local body = smelt.win.new(body_buf, {
-    region = "modal_overlay",
     surface = "readonly_text",
     wrap = true,
     hide_cursor = true,
     scrollbar = false,
   })
   local action_leaf = smelt.win.new(actions_buf, {
-    region = "modal_overlay",
     surface = "readonly_text",
     hide_cursor = true,
     scrollbar = false,
@@ -115,7 +113,6 @@ function M.open(opts)
   local spacer_buf = smelt.buf.new({ readonly = true })
   spacer_buf:lines({ "" })
   local spacer = smelt.win.new(spacer_buf, {
-    region = "modal_overlay",
     surface = "readonly_text",
     hide_cursor = true,
     scrollbar = false,

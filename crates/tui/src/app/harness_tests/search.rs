@@ -872,7 +872,7 @@ fn transcript_reveal_api_keeps_cursor_below_top_padding() {
     let mut app = row_document_transcript_app(100, true);
     app.type_char('G');
 
-    assert!(app.run_lua("smelt.win.transcript():reveal(10, { top_padding = 1 })"));
+    assert!(app.run_lua("smelt.transcript.win:reveal(10, { top_padding = 1 })"));
     app.render_silent();
 
     assert_eq!(transcript_row_cursor_row(&app), 10);
@@ -885,7 +885,7 @@ fn transcript_reveal_api_keeps_cursor_above_bottom_padding() {
     app.type_char('g');
     app.type_char('g');
 
-    assert!(app.run_lua("smelt.win.transcript():reveal(90, { bottom_padding = 1 })"));
+    assert!(app.run_lua("smelt.transcript.win:reveal(90, { bottom_padding = 1 })"));
     app.render_silent();
 
     let viewport_rows = app
@@ -908,8 +908,8 @@ fn transcript_cursor_api_reads_absolute_row_after_scroll() {
 
     assert!(app.run_lua(
         r#"
-        smelt.win.transcript():reveal(90)
-        _G.transcript_cursor_row = smelt.win.transcript():cursor()
+        smelt.transcript.win:reveal(90)
+        _G.transcript_cursor_row = smelt.transcript.win:cursor()
         "#
     ));
 

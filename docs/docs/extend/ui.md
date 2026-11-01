@@ -1,6 +1,6 @@
 ---
 title: "Plugin UI: overlays, dialogs and bars"
-description: "Build overlays, dialogs, pickers, resizable splits, statusline segments and prompt bar items for the terminal UI of a smelt Lua plugin."
+description: "Build overlays, dialogs, pickers, resizable splits, statusline segments and bars for the terminal UI of a smelt Lua plugin."
 ---
 
 # UI
@@ -172,7 +172,7 @@ To decorate an existing buffer, subscribe to window events and draw marks in a
 namespace you own:
 
 ```lua
-local prompt = smelt.prompt.win()
+local prompt = smelt.prompt.win
 local ns     = smelt.ns("my_plugin")
 
 prompt:on("text_changed", function()
@@ -310,7 +310,7 @@ changed:
 - `ctx.scrolls` lists every window whose text scrolled since then, such as the
   conversation or a long dialog: `{ win, x, y, width, height, dy }`, the window,
   the screen area of its text and the rows it moved up (negative for down).
-  Compare `win` with `==`, for example to `smelt.win.transcript()`. Inside that area,
+  Compare `win` with `==`, for example to `smelt.transcript.win`. Inside that area,
   row `y` shows what `ctx.prev` had at row `y + dy`, unless a window above
   covers it.
 - `ctx.damage` lists the cells that changed, as one-row
@@ -411,32 +411,38 @@ end, {
 })
 ```
 
-## Statusline and prompt bars
+## Bars
 
-The statusline, the headerline and the two rules around the prompt are bars. A
-bar holds named sources: functions that run on every repaint and return a list
-of items. smelt lays the items out by priority and drops the least important
-ones when the line is narrow.
+The statusline, the headerline and the rows around the prompt are bars. A bar
+holds named sources: functions that run on every repaint and return a list of
+items. smelt lays the items out by priority and drops the least important ones
+when the line is narrow. Every bar is a `smelt.bar.Bar` with the same methods,
+called with `:`.
 
 | Bar | Where | Built-in sources |
 | --- | ----- | ---------------- |
-| `smelt.statusline` | The bottom rows | `core` |
-| `smelt.headerline` | Above the transcript, only while a source shows items | `goal` |
-| `smelt.prompt_bar.top` | The rule above the prompt | `pause`, `indicator`, `elapsed`, `retry` on the left; `model`, `tokens`, `cost` on the right |
-| `smelt.prompt_bar.bottom` | The rule below the prompt | None |
+| `smelt.statusline` | The bottom rows | `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`, `procs`, `worktree` on the left; `vim_pending`, `cursor` on the right |
+| `smelt.headerline` | Above the transcript, only while a source shows items | `goal`, while a goal is set |
+| `smelt.prompt.aux` | The row between the transcript and the prompt block; notifications float over it | `tip` |
+| `smelt.prompt.queue` | Above the prompt, one row per queued message, only while there is one | `stash`, `queued` |
+| `smelt.prompt.top` | The rule right above the prompt input | `pause`, `indicator`, `elapsed`, `retry` on the left; `model`, `tokens`, `cost` on the right |
+| `smelt.prompt.bottom` | The rule right below the prompt input | None |
 
 ```lua
-smelt.statusline.add("clock", function()
+smelt.statusline:add("clock", function()
   return { text = os.date("%H:%M"), align_right = true, priority = 2 }
 end)
 
-smelt.prompt_bar.bottom.add("hint", function()
+smelt.prompt.bottom:add("hint", function()
   return { text = "ctrl+s stash", style = { fg = "Comment" }, align_right = true }
 end)
 ```
 
 A source is called with `ctx`, where `ctx.width` is the bar's width in cells, for
-items that span the line. It returns one item or a list of them. A source that
+items that span the line. When the layout gives a strip fewer rows than it
+wants, `ctx.rows` is how many rows are left for this source after the sources
+added before it; otherwise it is nil. The queue uses it to fold old messages
+into a `+N more` row while the `stash` source, added first, keeps its row. It returns one item or a list of them. A source that
 raises an error is skipped and shows a notification. Each item is a table:
 
 | Field | Meaning |
@@ -444,45 +450,46 @@ raises an error is skipped and shows a notification. Each item is a table:
 | `text` | What to show. Items with empty text are skipped |
 | `runs` | A list of `{ text, style }` pieces instead of `text`, for coloring each character; the pieces drop together |
 | `style` | `fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`; colors take any color form, including theme group names |
-| `priority` | Higher drops first when the line is narrow; `0` (the default) never drops; in the statusline and headerline it is cut at the edge with `…` when it does not fit |
+| `priority` | Higher drops first when the line is narrow; `0` (the default) never drops; in a strip it is cut at the edge with `…` when it does not fit |
 | `align_right` | Pack against the right edge |
 | `separated` | Put a `·` between this item and the previous separated one |
 | `truncatable`, `truncate` | Shrink the text with `…` before dropping it, from the end or the `"middle"` |
 | `selectable` | Include the text in drag-copy (default `true`) |
-| `row` | Row of the statusline or headerline, from `1` at the top. The bar grows to fit |
+| `row` | Orders the rows of a strip: lower numbers sit higher, negative rows count from the bottom (`-1` is the last row), and a row with no items takes no space. The bar grows to fit |
 | `fill` | A theme group that styles the empty space of the item's row |
 
-Neighbouring items get one space between them. The prompt bars draw the rule
-and its edges themselves, so a source only returns what sits on it.
+Neighbouring items get one space between them. A rule draws the line and its
+edges itself, so a source only returns what sits on it.
 
 Adding a name that already exists replaces that source where it stood, so
 `add("model", fn)` swaps the model display and keeps its place. `remove(name)`
-drops a source, and `add` returns a `Reg` that removes the one it added.
+drops a source, `clear()` drops all of them to build a bar from scratch, and
+`add` returns a `Reg` that removes the one it added.
 `builtin(name)` returns a built-in source, so a replacement can fall back to it
 for the cases it does not draw:
 
 ```lua
-local fallback = smelt.prompt_bar.top.builtin("indicator")
+local fallback = smelt.prompt.top:builtin("indicator")
 
-smelt.prompt_bar.top.add("indicator", function()
+smelt.prompt.top:add("indicator", function()
   if smelt.signal.get("work_state") ~= "working" then return fallback() end
   return { text = "thinking", style = { fg = "SmeltAccent" }, priority = 1 }
 end)
 
-smelt.prompt_bar.top.remove("cost")
+smelt.prompt.top:remove("cost")
 ```
 
 A multi-row statusline only needs items with `row` set; the layout makes room
 for it in the same frame:
 
 ```lua
-smelt.statusline.add("cwd", function()
+smelt.statusline:add("cwd", function()
   return { text = smelt.session.cwd(), row = 2, style = { fg = "Comment" } }
 end)
 ```
 
-To draw the statusline or headerline yourself, swap it for any layout node with
-`set_view(node, rows)`, and pass `nil` to restore it. A paint leaf can draw
+To draw a bar yourself, swap it for any layout node with `set_view(node, rows)`,
+and pass `nil` to restore it. A paint leaf can draw
 anything, including animation:
 
 ```lua
@@ -494,7 +501,7 @@ paint = smelt.paint.register(function(slice, ctx)
   end
   paint:invalidate_after(33)
 end)
-smelt.statusline.set_view(smelt.ui.layout.leaf(paint), 1)
+smelt.statusline:set_view(smelt.ui.layout.leaf(paint), 1)
 ```
 
 A bar repaints only when something it shows changes. A source that animates
@@ -503,5 +510,118 @@ paint with `invalidate_after(ms)`, the way the built-in `indicator` breathes whi
 works and cools its dot after. The `indicator` uses wall time,
 `smelt.time.now_ms()`, on purpose: it keeps the animation in step across
 several smelt windows. A source that depends on state of its own calls
-`invalidate()` on its bar when that state changes. A failing source is reported
-on stderr and skipped.
+`invalidate()` on its bar when that state changes.
+
+### Bar look
+
+Every bar takes the same look options through `configure`. Absent keys stay as
+they are, and `false` restores a key's default. `config()` returns the current
+look.
+
+| Key | Meaning |
+| --- | ------- |
+| `layout` | `"strip"` fills the row; `"rule"` draws a line with the items set into it. The statusline and headerline default to `"strip"`, the prompt bars to `"rule"` |
+| `bg` | Theme group behind the empty cells and the items without their own background |
+| `separator`, `separator_style` | The text between `separated` items (default `" · "`) and its style |
+| `rule`, `rule_style` | The cell a rule repeats (default `"─"`) and its style (default `{ fg = "SmeltSeparator" }`) |
+| `fill_selectable` | Include the filler between items in drag-copy |
+| `visible` | `false` hides the bar and frees its rows; its sources stay registered |
+
+```lua
+smelt.statusline:configure({ separator = " | " })
+smelt.prompt.bottom:configure({ rule = "╌", rule_style = { fg = "Comment" } })
+```
+
+Each bar renders into its own window, `bar.win`. A window takes a base style
+with `Win:configure({ style = group })`, which fills every row, its padding
+included, and sits under the text and row highlights. Together with bar looks
+this reshapes the prompt. A filled block with no rules, in the color of sent
+messages:
+
+```lua
+local prompt = smelt.prompt
+for _, win in ipairs({ prompt.top.win, prompt.win, prompt.bottom.win }) do
+  win:configure({ style = "SmeltUserBg" })
+end
+for _, bar in ipairs({ prompt.top, prompt.bottom }) do
+  bar.win:configure({ pad_left = 1, pad_right = 1 })
+  bar:configure({ layout = "strip" })
+end
+```
+
+`pad_left` and `pad_right` move where the text starts and ends, and `prefix`
+paints a marker into the left padding. A shell-style prompt flush with the left
+edge:
+
+```lua
+smelt.prompt.win:configure({
+  pad_left = 2,
+  prefix = { first = "> ", style = "SmeltAccent" },
+})
+```
+
+`prefix.rest` goes on the later rows of a multi-line prompt. The prefix
+only uses the padding cells, so a prefix wider than `pad_left` is cut.
+
+A one-row prompt, with the model in the statusline instead:
+
+```lua
+smelt.prompt.top:configure({ visible = false })
+smelt.prompt.bottom:configure({ visible = false })
+smelt.statusline:add("model", smelt.prompt.top:builtin("model"))
+for _, name in ipairs({ "model", "reasoning" }) do
+  smelt.signal.subscribe(name, function() smelt.statusline:invalidate() end)
+end
+```
+
+Queued messages and the stash marker still show above a prompt whose top bar
+is hidden: they live in their own bar, `smelt.prompt.queue`. Hiding the top bar
+also removes the handle that resizes the prompt with the mouse. While you drag
+that handle the top bar calls `bar:highlight(style)`, which paints its rule and
+separators without changing its look; your own bars can do the same.
+
+The stash marker can move, for example into the statusline:
+
+```lua
+local stash = smelt.prompt.queue:builtin("stash")
+smelt.prompt.queue:remove("stash")
+smelt.statusline:add("stash", function(ctx)
+  local item = stash(ctx)
+  if item then item.row, item.text = nil, "stashed" end
+  return item
+end)
+```
+
+The goal header is the `goal` source of `smelt.headerline`. Its state is the
+`goal` signal (the session's goal table, or nil), so a plugin can show it
+anywhere: `smelt.statusline:add("goal", smelt.headerline:builtin("goal"))`
+plus a subscription to `goal` that invalidates the statusline.
+
+### Your own bars
+
+`smelt.bar.new(opts)` makes a bar like the built-in ones. It takes a unique
+`name`, the look keys above as its defaults, `min_rows` (rows kept while no
+source shows an item, default `1`), `sources`, a list of `{ name, fn }` pairs
+that `bar:builtin(name)` returns later, and `win_opts` for its window. A
+feature that ships a source for an existing bar adds it with
+`bar:add(name, fn, { builtin = true })`, so users can wrap it the same way.
+Place a bar in a layout with `bar:node()`, which returns the node and the rows
+the bar wants:
+
+```lua
+local tabs = smelt.bar.new({ name = "tabs", bg = "SmeltStatusBg", min_rows = 0 })
+tabs:add("sessions", function() return { text = " main " } end)
+
+local default = require("smelt.layout").compose
+smelt.ui.layout.set(function(state)
+  local node, rows = tabs:node()
+  return smelt.ui.layout.vbox({
+    { height = rows, node },
+    { height = "fill", default(state) },
+  })
+end)
+```
+
+`smelt.prompt.node({ input_rows, max_rows })` returns the whole prompt block,
+from the auxiliary row down to the bottom bar, and its rows, so a custom layout
+can place it anywhere. The default layout is `require("smelt.layout").compose`.

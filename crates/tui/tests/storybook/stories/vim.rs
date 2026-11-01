@@ -7,9 +7,8 @@ use tui::smelt_edit::{Event, LayoutTree, SplitConfig};
 
 use crate::storybook::StoryCtx;
 
-fn pane(region: &str) -> SplitConfig {
+fn pane() -> SplitConfig {
     SplitConfig {
-        region: region.to_string(),
         gutters: Gutters::default(),
     }
 }
@@ -25,7 +24,7 @@ fn special(code: KeyCode) -> Event {
 fn open_buffer(ctx: &mut StoryCtx, lines: &[&str], w: u16, h: u16) {
     ctx.set_viewport(w, h);
     let buf = ctx.buf_with_lines(lines.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    let win = ctx.open_split(buf, pane("only"));
+    let win = ctx.open_split(buf, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(win),
@@ -127,7 +126,7 @@ story!(operator_2x_deletes_two_chars, |ctx| {
 story!(empty_buffer_normal_mode_no_panic, |ctx| {
     ctx.set_viewport(10, 3);
     let buf = ctx.buf();
-    let win = ctx.open_split(buf, pane("only"));
+    let win = ctx.open_split(buf, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(win),

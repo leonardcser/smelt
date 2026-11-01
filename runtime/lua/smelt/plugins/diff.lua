@@ -23,7 +23,6 @@ function M.open()
   local function window(name, opts)
     local buf = smelt.buf.new()
     opts.name = "smelt.diff." .. name
-    opts.region = "diff_overlay"
     opts.wrap = false
     local win = smelt.win.new(buf, opts)
     return win, buf

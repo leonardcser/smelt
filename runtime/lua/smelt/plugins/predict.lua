@@ -7,7 +7,7 @@
 -- quoted in a single user message: a request ending on an assistant message
 -- would have the model continue the assistant instead of predicting the user.
 
-local prompt = smelt.prompt.win()
+local prompt = smelt.prompt.win
 
 local function clear_prediction()
   prompt:clear_placeholder()

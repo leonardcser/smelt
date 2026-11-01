@@ -486,6 +486,20 @@ impl mlua::UserData for LuaWin {
             },
         );
 
+        // ── configure(opts) - chainable ────────────────────────────
+        methods.add_function(
+            "configure",
+            |_,
+             (this_ud, opts): (mlua::AnyUserData, mlua::Table)|
+             -> LuaResult<mlua::AnyUserData> {
+                let this = *this_ud.borrow::<LuaWin>()?;
+                crate::lua::with_ui_host(|host| {
+                    host.with_ui(|ui| apply_window_opts(ui, this.id, &opts));
+                });
+                Ok(this_ud)
+            },
+        );
+
         // ── row_highlights(specs?) - chainable ─────────────────────
         methods.add_function(
             "row_highlights",
@@ -881,6 +895,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.",
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
+            "configure" => fn(opts: mlua::Table) -> LuaWin, "Change the window's live options and return the handle. Works on built-in windows such as `smelt.prompt.win`. Absent keys stay unchanged. Accepts `style` (theme group layered over `Normal` as the window's base, filling every row including padding; `false` clears it), `prefix` (text painted into the left padding: a string for the first row, or `{ first, rest?, style? }` where `rest` goes on every later content row and `style` is a theme group; it is clipped to `pad_left`, so widen the padding to fit; `false` clears it), `focus_on_click` (a `Win` that a click on this window focuses instead, as the bars around the prompt do; `false` clears it), `resize = \"prompt\"` (dragging this window resizes the prompt and a double click resets it; `false` clears it), `pad_left`, `pad_right`, `scrollbar`, `wrap`, `surface`, `cursor_line`, `selection_highlight`, `hide_cursor`, `vim_enabled` and `gutter`.",
             "row_highlights" => fn(specs: Option<mlua::Table>) -> LuaWin, "Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
             "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
@@ -938,7 +953,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     static NEW_DOC: OnceLock<String> = OnceLock::new();
     let new_doc = NEW_DOC.get_or_init(|| {
         format!(
-            "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
+            "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell. `opts.pad_left` / `opts.pad_right` inset the content. `opts.style` names a theme group layered over `Normal` as the window's base style. `opts.prefix` paints text into the left padding (see `Win:configure`). `Win:configure(opts)` changes these later.",
             crate::smelt_edit::Gutters::default().scrollbar
         )
     });
@@ -974,29 +989,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     )?;
 
-    m.fn_(
-        "transcript",
-        "Return a `Win` handle for the built-in transcript window. Useful as an `anchor = \"win\"` / `\"win_center\"` target so plugins can float overlays over the transcript without hard-coding its id.",
-        &[],
-        |_, ()| -> LuaResult<LuaWin> { Ok(LuaWin { id: crate::app::TRANSCRIPT_WIN }) },
-    )?;
-
-    // Well-known window constants. After the layout/bars/statusline
-    // migration these are the only two engine-owned windows -
-    // everything else (top bar, bottom bar, statusline, plugin
-    // sidebars, …) is Lua-allocated via `smelt.win.new`.
-    m.tbl.set(
-        "TRANSCRIPT",
-        LuaWin {
-            id: crate::app::TRANSCRIPT_WIN,
-        },
-    )?;
-    m.tbl.set(
-        "PROMPT",
-        LuaWin {
-            id: crate::app::PROMPT_WIN,
-        },
-    )?;
     Ok(())
 }
 
@@ -1022,9 +1014,6 @@ pub(super) fn open_or_refresh(
                 return Some(existing);
             }
         }
-        let region = opts
-            .and_then(|table| table.get::<String>("region").ok())
-            .unwrap_or_else(|| "lua_overlay".to_string());
         let pad_left = opts
             .and_then(|table| table.get::<u64>("pad_left").ok())
             .unwrap_or(0) as u16;
@@ -1038,7 +1027,6 @@ pub(super) fn open_or_refresh(
             let window = ui.win_open_split(
                 buf_id,
                 crate::smelt_edit::SplitConfig {
-                    region,
                     gutters: crate::smelt_edit::Gutters {
                         pad_left,
                         pad_right,
@@ -1128,6 +1116,63 @@ fn apply_window_opts(
             "none" | "" => None,
             _ => None,
         };
+    }
+    if let Ok(Some(pad_left)) = opts.get::<Option<u16>>("pad_left") {
+        w.config.gutters.pad_left = pad_left;
+    }
+    if let Ok(Some(pad_right)) = opts.get::<Option<u16>>("pad_right") {
+        w.config.gutters.pad_right = pad_right;
+    }
+    if let Ok(Some(scrollbar)) = opts.get::<Option<bool>>("scrollbar") {
+        w.config.gutters.scrollbar = scrollbar;
+    }
+    match opts.get::<mlua::Value>("style") {
+        Ok(mlua::Value::String(group)) => {
+            w.set_style(Some(smelt_core::theme::intern(&group.to_string_lossy())));
+        }
+        Ok(mlua::Value::Boolean(false)) => w.set_style(None),
+        _ => {}
+    }
+    match opts.get::<mlua::Value>("prefix") {
+        Ok(mlua::Value::String(first)) => w.set_prefix(Some(crate::smelt_edit::PadPrefix {
+            first: first.to_string_lossy(),
+            ..Default::default()
+        })),
+        Ok(mlua::Value::Table(spec)) => w.set_prefix(Some(crate::smelt_edit::PadPrefix {
+            first: spec
+                .get::<Option<String>>("first")
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+            rest: spec
+                .get::<Option<String>>("rest")
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+            style: spec
+                .get::<Option<String>>("style")
+                .ok()
+                .flatten()
+                .map(|group| smelt_core::theme::intern(&group)),
+        })),
+        Ok(mlua::Value::Boolean(false)) => w.set_prefix(None),
+        _ => {}
+    }
+    match opts.get::<mlua::Value>("focus_on_click") {
+        Ok(mlua::Value::UserData(ud)) => {
+            if let Ok(target) = ud.borrow::<LuaWin>() {
+                w.click_focus = Some(target.id);
+            }
+        }
+        Ok(mlua::Value::Boolean(false)) => w.click_focus = None,
+        _ => {}
+    }
+    match opts.get::<mlua::Value>("resize") {
+        Ok(mlua::Value::String(target)) => {
+            w.prompt_resize_handle = target.to_string_lossy() == "prompt";
+        }
+        Ok(mlua::Value::Boolean(false)) => w.prompt_resize_handle = false,
+        _ => {}
     }
 }
 

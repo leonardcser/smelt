@@ -27,6 +27,33 @@ pop while the caller owns the screen. Returns a `Reg` whose
 `:remove()` releases the lock; the last release re-runs the
 recompute pass. Idempotent - multiple acquirers stack.
 
+## `smelt.prompt.aux`
+
+```lua
+smelt.bar.Bar
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+The strip between the transcript and the prompt block. It keeps one row
+even when empty so tips and notifications do not shift the transcript. Its
+built-in source is `tip`.
+
+## `smelt.prompt.bottom`
+
+```lua
+smelt.bar.Bar
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+The bar right below the prompt input, a plain rule with no sources by
+default.
+
 ## `smelt.prompt.cursor`
 
 ```lua
@@ -58,6 +85,36 @@ fun(): boolean
 True while at least one `smelt.prompt.acquire()` lock is outstanding.
 Plugins read this to skip non-blocking work that would race the
 modal owner.
+
+## `smelt.prompt.node`
+
+```lua
+fun(opts?: { input_rows?: integer, max_rows?: integer }): smelt.ui.layout, integer
+```
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+── layout ──────────────────────────────────────────────────────────
+The prompt block as one layout node: the auxiliary bar, the queue, the top
+bar, the input and the bottom bar, stacked. Returns the node and its rows.
+`opts.input_rows` is the input's wanted height (default 1). With
+`opts.max_rows`, the block fits in that many rows: the input shrinks first
+(to one row), then the queue folds, keeping at least one row.
+
+## `smelt.prompt.queue`
+
+```lua
+smelt.bar.Bar
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Queued messages and the stash marker, between the auxiliary bar and the
+bar above the prompt. Built-in sources: `queued` (one row per message,
+folding the oldest into "+N more" when rows run short) and `stash`, which
+keeps the last row.
 
 ## `smelt.prompt.queued`
 
@@ -122,15 +179,29 @@ fun(): string
 
 Return the prompt input buffer's current text. Internal attachment markers are stripped - plugins see only the user-visible characters.
 
+## `smelt.prompt.top`
+
+```lua
+smelt.bar.Bar
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+The bar right above the prompt input, a rule by default. Built-in sources:
+`pause`, `indicator`, `elapsed` and `retry` on the left, `model`, `tokens`
+and `cost` on the right. Dragging it resizes the prompt.
+
 ## `smelt.prompt.win`
 
 ```lua
-fun(): smelt.win.Win
+smelt.win.Win
 ```
 
 Types: [`smelt.win.Win`](types.md#smeltwinwin)
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.
+The prompt input window. Attach behaviour with `win:key(...)` and `win:on(...)`, and restyle it with `win:configure(...)`.
 

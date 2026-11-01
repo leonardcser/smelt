@@ -93,7 +93,6 @@ smelt.cmd.register("mcp", function()
     end
 
     local leaf = smelt.win.new(buf, {
-      region      = "mcp_overlay",
       surface     = "readonly_text",
       wrap        = true,
       vim_enabled = smelt.settings.vim and true or false,

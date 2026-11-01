@@ -19,5 +19,5 @@ fun(opts: table?): smelt.input.Input?
 
 Types: [`smelt.input.Input`](types.md#smeltinputinput)
 
-Create a single-line input and return an `Input` handle. Options: `text?`, `placeholder?`, plus window opts accepted by `smelt.win.new` (`region`, `name`, `pad_left`, `pad_right`, `wrap`, `scrollbar`, etc.).
+Create a single-line input and return an `Input` handle. Options: `text?`, `placeholder?`, plus window opts accepted by `smelt.win.new` (`name`, `pad_left`, `pad_right`, `wrap`, `scrollbar`, etc.).
 

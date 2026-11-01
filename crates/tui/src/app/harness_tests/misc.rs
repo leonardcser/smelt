@@ -305,9 +305,8 @@ fn statusline_explicit_invalidation_repaints_plugin_state() {
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(
         r#"
-        local statusline = require("smelt.statusline")
         _G.__plugin_status_text = "retained status before"
-        statusline.win:set_renderer(function(win)
+        smelt.statusline.win:set_renderer(function(win)
           win:buf():lines({ _G.__plugin_status_text })
         end)
         "#,
@@ -321,7 +320,7 @@ fn statusline_explicit_invalidation_repaints_plugin_state() {
     assert!(retained.rows[11].contains("retained status before"));
     assert!(!retained.rows[11].contains("retained status after"));
 
-    assert!(app.run_lua(r#"require("smelt.statusline").invalidate()"#));
+    assert!(app.run_lua(r#"smelt.statusline:invalidate()"#));
     let invalidated = app.render_to_frame();
     assert!(invalidated.rows[11].contains("retained status after"));
 }
@@ -332,9 +331,8 @@ fn headerline_explicit_invalidation_recomposes_plugin_visibility() {
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(
         r#"
-        local headerline = require("smelt.headerline")
         _G.__plugin_header_visible = false
-        headerline.add("retained-visibility-probe", function()
+        smelt.headerline:add("retained-visibility-probe", function()
           if _G.__plugin_header_visible then return { text = "retained header visible" } end
         end)
         "#,
@@ -347,7 +345,7 @@ fn headerline_explicit_invalidation_recomposes_plugin_visibility() {
     let retained = app.render_to_frame();
     assert!(!retained.text().contains("retained header visible"));
 
-    assert!(app.run_lua(r#"require("smelt.headerline").invalidate()"#));
+    assert!(app.run_lua(r#"smelt.headerline:invalidate()"#));
     let invalidated = app.render_to_frame();
     assert!(invalidated.rows[0].contains("retained header visible"));
 }
@@ -359,7 +357,7 @@ fn statusline_grows_with_item_rows_in_the_same_frame() {
     app.render_silent();
     assert!(app.run_lua(
         r#"
-        _G.__reg = smelt.statusline.add("rows", function()
+        _G.__reg = smelt.statusline:add("rows", function()
           return {
             { text = "second row", row = 2 },
             { text = "third row", row = 3, align_right = true },
@@ -370,7 +368,7 @@ fn statusline_grows_with_item_rows_in_the_same_frame() {
 
     let grown = app.render_to_frame();
     assert_eq!(
-        app.eval_lua::<u16>("return smelt.statusline.rows()")
+        app.eval_lua::<u16>("return smelt.statusline:rows()")
             .unwrap(),
         3
     );
@@ -392,11 +390,34 @@ fn statusline_grows_with_item_rows_in_the_same_frame() {
     assert!(app.run_lua("_G.__reg:remove()"));
     let shrunk = app.render_to_frame();
     assert_eq!(
-        app.eval_lua::<u16>("return smelt.statusline.rows()")
+        app.eval_lua::<u16>("return smelt.statusline:rows()")
             .unwrap(),
         1
     );
     assert!(!shrunk.text().contains("second row"), "{}", shrunk.text());
+}
+
+#[test]
+fn statusline_negative_rows_count_from_the_bottom() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    app.render_silent();
+    assert!(app.run_lua(
+        r#"
+        smelt.statusline:add("rows", function()
+          return {
+            { text = "last row", row = -1 },
+            { text = "above last", row = -2 },
+            { text = "after top", row = 5 },
+          }
+        end)
+        "#,
+    ));
+
+    let frame = app.render_to_frame();
+    assert!(frame.rows[9].contains("after top"), "{}", frame.text());
+    assert!(frame.rows[10].contains("above last"), "{}", frame.text());
+    assert!(frame.rows[11].contains("last row"), "{}", frame.text());
 }
 
 #[test]
@@ -408,7 +429,7 @@ fn statusline_view_can_be_replaced_by_a_paint() {
         local paint = smelt.paint.register(function(slice)
           for y = 0, slice:height() - 1 do slice:put_str(0, y, "painted " .. y) end
         end)
-        smelt.statusline.set_view(smelt.ui.layout.leaf(paint), 2)
+        smelt.statusline:set_view(smelt.ui.layout.leaf(paint), 2)
         "#,
     ));
 
@@ -416,7 +437,7 @@ fn statusline_view_can_be_replaced_by_a_paint() {
     assert!(frame.rows[10].starts_with("painted 0"), "{}", frame.text());
     assert!(frame.rows[11].starts_with("painted 1"), "{}", frame.text());
 
-    assert!(app.run_lua("smelt.statusline.set_view(nil)"));
+    assert!(app.run_lua("smelt.statusline:set_view(nil)"));
     let restored = app.render_to_frame();
     assert!(!restored.text().contains("painted"), "{}", restored.text());
 }
@@ -439,7 +460,7 @@ fn statusline_add_returns_identity_guarded_reg() {
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(
         r#"
-        _G.__first = smelt.statusline.add("probe", function()
+        _G.__first = smelt.statusline:add("probe", function()
           return { { text = "first source", align_right = true } }
         end)
         "#,
@@ -448,7 +469,7 @@ fn statusline_add_returns_identity_guarded_reg() {
 
     assert!(app.run_lua(
         r#"
-        smelt.statusline.add("probe", function()
+        smelt.statusline:add("probe", function()
           return { { text = "second source", align_right = true } }
         end)
         _G.__first:remove()
@@ -458,7 +479,7 @@ fn statusline_add_returns_identity_guarded_reg() {
     assert!(replaced.rows[11].contains("second source"));
     assert!(!replaced.rows[11].contains("first source"));
 
-    assert!(app.run_lua(r#"smelt.statusline.remove("probe")"#));
+    assert!(app.run_lua(r#"smelt.statusline:remove("probe")"#));
     assert!(!app.render_to_frame().rows[11].contains("second source"));
 }
 
@@ -481,7 +502,7 @@ fn headerline_add_reg_removes_only_its_own_source() {
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(
         r#"
-        _G.__reg = smelt.headerline.add("probe", function()
+        _G.__reg = smelt.headerline:add("probe", function()
           return { text = "header one" }
         end)
         "#,
@@ -490,7 +511,7 @@ fn headerline_add_reg_removes_only_its_own_source() {
 
     assert!(app.run_lua(
         r#"
-        smelt.headerline.add("probe", function()
+        smelt.headerline:add("probe", function()
           return { text = "header two" }
         end)
         _G.__reg:remove()
@@ -498,7 +519,7 @@ fn headerline_add_reg_removes_only_its_own_source() {
     ));
     assert!(app.render_to_frame().rows[0].contains("header two"));
 
-    assert!(app.run_lua(r#"smelt.headerline.remove("probe")"#));
+    assert!(app.run_lua(r#"smelt.headerline:remove("probe")"#));
     assert!(!app.render_to_frame().text().contains("header two"));
 }
 
@@ -1075,7 +1096,7 @@ fn a_running_turn_repaints_only_when_the_working_indicator_asks() {
         app.advance_animation(150);
     }
     app.clear_timers();
-    app.run_lua("smelt.prompt_bar.top.invalidate()");
+    app.run_lua("smelt.prompt.top:invalidate()");
     app.advance_animation(150);
     assert_eq!(
         app.app.core.timers.next_deadline(),
@@ -1133,7 +1154,7 @@ fn the_working_indicator_paints_on_a_wall_clock_grid_its_letter_steps_fit() {
     app.run_lua(
         r#"
         _G.paints = {}
-        smelt.prompt_bar.top.add("zz_probe", function()
+        smelt.prompt.top:add("zz_probe", function()
           _G.paints[#_G.paints + 1] = smelt.time.now_ms()
           return nil
         end)
@@ -3462,7 +3483,7 @@ fn transcript_scroll_state_does_not_request_tail_repin_when_pinned_at_bottom() {
 
     assert!(app.run_lua(
         r#"
-        local scroll = assert(smelt.win.transcript():scroll())
+        local scroll = assert(smelt.transcript.win:scroll())
         _G.transcript_scroll_at_bottom = scroll.at_bottom
         _G.transcript_scroll_needs_tail_repin = scroll.needs_tail_repin
         _G.transcript_scroll_follow = scroll.follow
@@ -4201,7 +4222,7 @@ fn resumed_sparse_scroll_up_reports_tail_repin_needed() {
     app.render_silent();
     assert!(app.run_lua(
         r#"
-        local scroll = assert(smelt.win.transcript():scroll())
+        local scroll = assert(smelt.transcript.win:scroll())
         _G.transcript_scroll_at_bottom = scroll.at_bottom
         _G.transcript_scroll_needs_tail_repin = scroll.needs_tail_repin
         _G.transcript_scroll_follow = scroll.follow
@@ -4542,7 +4563,7 @@ fn resumed_sparse_scroll_down_to_tail_hides_jump_to_bottom() {
     );
     assert!(app.run_lua(
         r#"
-        local scroll = assert(smelt.win.transcript():scroll())
+        local scroll = assert(smelt.transcript.win:scroll())
         _G.transcript_scroll_at_bottom = scroll.at_bottom
         _G.transcript_scroll_needs_tail_repin = scroll.needs_tail_repin
         "#
@@ -8238,7 +8259,7 @@ fn jump_list_returns_from_searches() {
 
 fn lua_jump(app: &mut TestApp, opts: &str) -> bool {
     let moved = app
-        .eval_lua::<bool>(&format!("return smelt.win.TRANSCRIPT:jump({opts})"))
+        .eval_lua::<bool>(&format!("return smelt.transcript.win:jump({opts})"))
         .expect("win:jump");
     app.render_silent();
     moved
@@ -8262,10 +8283,10 @@ fn lua_walks_the_jump_list() {
 #[test]
 fn lua_reveal_leaves_a_jump_only_when_asked() {
     let (mut app, _) = jump_app();
-    app.run_lua("smelt.win.TRANSCRIPT:reveal(20)");
+    app.run_lua("smelt.transcript.win:reveal(20)");
     app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), 20);
-    app.run_lua("smelt.win.TRANSCRIPT:reveal(40, { jump = true })");
+    app.run_lua("smelt.transcript.win:reveal(40, { jump = true })");
     app.render_silent();
     assert_eq!(transcript_row_cursor_row(&app), 40);
     assert!(lua_jump(&mut app, "{ older = 1 }"));
@@ -8281,7 +8302,7 @@ fn lua_jump_rejects_ambiguous_options() {
         "{ older = 1, previous = true }",
     ] {
         let result = app.eval_lua::<bool>(&format!(
-            "return pcall(smelt.win.TRANSCRIPT.jump, smelt.win.TRANSCRIPT, {opts})"
+            "return pcall(smelt.transcript.win.jump, smelt.transcript.win, {opts})"
         ));
         assert_eq!(result, Ok(false), "{opts}");
     }
@@ -8854,7 +8875,8 @@ fn statusline_sources_get_the_width_and_clip_what_overflows() {
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(
         r#"
-        smelt.statusline.add("core", function(ctx)
+        smelt.statusline:clear()
+        smelt.statusline:add("rows", function(ctx)
           _G.__width = ctx.width
           return { { text = string.rep("=", ctx.width), row = 2 }, { text = string.rep("x", 60), row = 3 } }
         end)

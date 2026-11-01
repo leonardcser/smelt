@@ -358,7 +358,7 @@ fn transcript_probe(app: &mut TestApp, kind: u8, row: u16, count: u8) {
         7 => "assert(type(smelt.transcript.fold_kind('thinking', 'toggle')) == \"boolean\")"
             .to_string(),
         8 => "smelt.transcript.fold_all('open')".to_string(),
-        _ => format!("smelt.win.transcript():reveal({row}, {{ top_padding = 1 }})"),
+        _ => format!("smelt.transcript.win:reveal({row}, {{ top_padding = 1 }})"),
     };
     app.run_lua_result(&snippet)
         .unwrap_or_else(|error| panic!("transcript probe failed: {error}\n{snippet}"));

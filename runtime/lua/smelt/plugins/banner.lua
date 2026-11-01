@@ -423,7 +423,7 @@ local function ensure_label_window(lines, width)
 end
 
 local function transcript_rect()
-	local transcript = smelt.win.transcript()
+	local transcript = smelt.transcript.win
 	return transcript and transcript:rect() or nil
 end
 
@@ -468,7 +468,7 @@ local function open_splash()
 			height = label_h,
 		},
 	})
-	state.decoration = smelt.win.transcript():decorate({
+	state.decoration = smelt.transcript.win:decorate({
 		align = "center",
 		z = 0,
 		transparent = true,
@@ -530,7 +530,7 @@ smelt.events.on("history", refresh)
 smelt.lifecycle.on_ready(function(ctx)
 	-- The decoration is transcript-owned, so any transcript resize can make it fit
 	-- or stop fitting without needing screen-position bookkeeping.
-	local t = smelt.win.transcript()
+	local t = smelt.transcript.win
 	if t and t.on then
 		t:on("resized", refresh)
 	end

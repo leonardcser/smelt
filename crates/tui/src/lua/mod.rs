@@ -1623,7 +1623,6 @@ mod tests {
         for (call, api) in [
             ("return smelt.model.current()", "smelt.model.current"),
             ("return smelt.mode.set('normal')", "smelt.mode.set"),
-            ("return smelt.prompt.win()", "smelt.prompt.win"),
             (
                 "return smelt.transcript.watch_view(function() end)",
                 "smelt.transcript.watch_view",

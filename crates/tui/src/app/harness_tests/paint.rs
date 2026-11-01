@@ -232,7 +232,7 @@ fn pointer_motion_is_ignored_without_listeners() {
         "pointer motion must not redraw when nothing listens"
     );
 
-    assert!(app.run_lua(r#"_G.__reg = smelt.win.transcript():on("enter", function() end)"#));
+    assert!(app.run_lua(r#"_G.__reg = smelt.transcript.win:on("enter", function() end)"#));
     assert!(motion_redraws(&mut app, 5, 3), "a hover listener opts in");
     assert!(app.run_lua("_G.__reg:remove()"));
     assert!(
@@ -469,7 +469,7 @@ fn any_window_that_scrolls_is_reported_and_taken_out_of_damage() {
             end
           end
           _G.__last = { count = #ctx.scrolls, dy = s and s.dy, height = s and s.height, inside = inside,
-            is_float = s and s.win == float and s.win ~= smelt.win.transcript() }
+            is_float = s and s.win == float and s.win ~= smelt.transcript.win }
         end, { history = true })
         "#
     ));
@@ -510,7 +510,7 @@ fn scrolling_reports_the_move_and_leaves_only_new_rows_as_damage() {
         r#"
         smelt.paint.frame(function(slice, ctx)
           local s = ctx.scrolls[1]
-          assert(not s or s.win == smelt.win.transcript())
+          assert(not s or s.win == smelt.transcript.win)
           local damaged = {}
           for _, d in ipairs(ctx.damage) do
             if s and d.y >= s.y and d.y < s.y + s.height then
@@ -533,7 +533,7 @@ fn scrolling_reports_the_move_and_leaves_only_new_rows_as_damage() {
     app.render_silent();
 
     let view = app
-        .eval_lua::<mlua::Table>("return smelt.win.transcript():rect()")
+        .eval_lua::<mlua::Table>("return smelt.transcript.win:rect()")
         .unwrap();
     let (x, y): (u16, u16) = (view.get("x").unwrap(), view.get("y").unwrap());
     app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {

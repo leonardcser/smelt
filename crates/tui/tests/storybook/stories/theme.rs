@@ -6,9 +6,8 @@ use tui::smelt_edit::layout::Constraint;
 use tui::smelt_edit::Gutters;
 use tui::smelt_edit::{LayoutTree, SplitConfig};
 
-fn pane(region: &str) -> SplitConfig {
+fn pane() -> SplitConfig {
     SplitConfig {
-        region: region.to_string(),
         gutters: Gutters::default(),
     }
 }
@@ -16,7 +15,7 @@ fn pane(region: &str) -> SplitConfig {
 fn one_line_pane(ctx: &mut crate::storybook::StoryCtx) {
     ctx.set_viewport(20, 3);
     let buf = ctx.buf_with_lines(["hello world"]);
-    let w = ctx.open_split(buf, pane("only"));
+    let w = ctx.open_split(buf, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(w),

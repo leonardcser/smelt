@@ -1,31 +1,23 @@
--- Default main TUI layout composer.
+-- Default main TUI layout composer, top to bottom:
+--   * `smelt.headerline`  (its rows while a header source shows items)
+--   * the transcript       (fill)
+--   * `smelt.prompt.node` or the active dialog
+--   * `smelt.statusline`   (its rows, at least 1)
 --
--- Splits the screen vertically into:
---   * headerline           (its rows while a header source shows items)
---   * transcript           (fill)
---   * composer or dialog
---       - normal composer: auxiliary row, queued/stash top bar, prompt, bottom bar
---       - active dialog: root-docked modal content replacing the whole composer
---   * statusline           (its rows, at least 1)
+-- A blocking dialog replaces the whole prompt block so queued input, stash
+-- state, tips and notifications cannot compete with the decision. Their state
+-- remains intact and returns after the dialog closes.
 --
--- A blocking dialog removes the auxiliary row and every composer-chrome row so
--- queued input, stash state, tips, and notifications cannot compete with the
--- decision. Their state remains intact and returns after the dialog closes.
---
--- Plugins that want a different shape call `smelt.ui.layout.set(fn)`
--- with their own composer; passing `nil` (or never calling `set`) means
--- the engine falls back to its hardcoded seed layout, not this one.
--- Loading this module installs the default composer and returns it as
--- `compose`, so a plugin can wrap the default tree instead of rebuilding it:
+-- Plugins that want a different shape call `smelt.ui.layout.set(fn)` with
+-- their own composer; passing `nil` (or never calling `set`) means the engine
+-- falls back to its hardcoded seed layout, not this one. Loading this module
+-- installs the default composer and returns it as `compose`, so a plugin can
+-- wrap the default tree instead of rebuilding it:
 --
 --   local default = require("smelt.layout").compose
 --   smelt.ui.layout.set(function(state)
 --     return smelt.ui.layout.hbox({ { default(state), width = "fill" }, ... })
 --   end)
-
-local prompt_bar = require("smelt.prompt_bar")
-local statusline = require("smelt.statusline")
-local headerline = require("smelt.headerline")
 
 -- Minimum rows kept for the transcript even when the prompt block wants
 -- to grow.
@@ -34,70 +26,26 @@ local MIN_TRANSCRIPT_ROWS = 2
 local M = {}
 
 function M.compose(state)
-  local term_h = state.term_h or 24
-  local input_rows = state.prompt_input_rows or 1
-  local header, header_rows = headerline.node()
-  local status, status_rows = statusline.node()
+  local layout = smelt.ui.layout
+  local header, header_rows = smelt.headerline:node()
+  local status, status_rows = smelt.statusline:node()
 
-  local content
-  if state.dialog then
-    content = state.dialog
-  else
-    local aux_rows = 1
-    -- Keep the indicator and stash rows visible before allocating prompt input
-    -- space. Queued messages use the remaining headroom above the prompt.
-    local min_top_rows = prompt_bar.min_top_rows()
-    local composer_budget = term_h - header_rows - status_rows - MIN_TRANSCRIPT_ROWS - aux_rows
-    -- Reserve the prompt bottom bar as well.
-    input_rows = math.min(input_rows, math.max(1, composer_budget - min_top_rows - 1))
-    local max_top_rows = math.max(min_top_rows, composer_budget - input_rows - 1)
-    local top_rows = prompt_bar.top_rows(max_top_rows)
-    local composer_height = top_rows + input_rows + 1
-
-    content = smelt.ui.layout.vbox({
-      {
-        height = "fill",
-        smelt.ui.layout.leaf(smelt.win.TRANSCRIPT),
-      },
-      {
-        height = aux_rows,
-        smelt.ui.layout.leaf(prompt_bar.aux_win),
-      },
-      {
-        height = composer_height,
-        smelt.ui.layout.vbox({
-          {
-            height = top_rows,
-            smelt.ui.layout.leaf(prompt_bar.top_win),
-          },
-          {
-            height = input_rows,
-            smelt.ui.layout.leaf(smelt.win.PROMPT),
-          },
-          {
-            height = 1,
-            smelt.ui.layout.leaf(prompt_bar.bottom_win),
-          },
-        }),
-      },
+  local content = state.dialog
+  if not content then
+    local prompt, prompt_rows = smelt.prompt.node({
+      input_rows = state.prompt_input_rows or 1,
+      max_rows = (state.term_h or 24) - header_rows - status_rows - MIN_TRANSCRIPT_ROWS,
+    })
+    content = layout.vbox({
+      { height = "fill", layout.leaf(smelt.transcript.win) },
+      { height = prompt_rows, prompt },
     })
   end
 
-  local main = smelt.ui.layout.vbox({
+  return layout.vbox({
+    { height = header_rows, header },
     { height = "fill", content },
     { height = status_rows, status },
-  })
-
-  if header_rows == 0 then return main end
-  return smelt.ui.layout.vbox({
-    {
-      height = header_rows,
-      header,
-    },
-    {
-      height = "fill",
-      main,
-    },
   })
 end
 

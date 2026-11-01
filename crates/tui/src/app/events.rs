@@ -3701,7 +3701,6 @@ mod tests {
             .win_open_split(
                 buf,
                 crate::smelt_edit::SplitConfig {
-                    region: "event-test-overlay".into(),
                     gutters: crate::smelt_edit::Gutters::default(),
                 },
             )

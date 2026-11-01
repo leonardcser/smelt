@@ -146,4 +146,9 @@ transcript.visible_blocks = nil
 ---@type fun(callback: fun(value: smelt.transcript.View)): smelt.Reg
 transcript.watch_view = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- The transcript window, for key bindings, events and anchoring overlays over the transcript.
+---@type smelt.win.Win
+transcript.win = nil
+
 return transcript

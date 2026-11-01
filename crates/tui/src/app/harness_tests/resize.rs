@@ -72,13 +72,13 @@ fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
     app.set_terminal_size(60, 20);
     app.type_text("first line\nsecond line\nthird line");
     paint(&mut app);
-    let top = rect(&app, "smelt.prompt_bar.top");
+    let top = rect(&app, "smelt.prompt.top");
     mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, top.y);
     mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 1, 0);
     mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1, 0);
     let before = app.render_to_frame().text();
     assert!(before.contains("test-model"), "{before}");
-    let expanded_top = rect(&app, "smelt.prompt_bar.top").y;
+    let expanded_top = rect(&app, "smelt.prompt.top").y;
 
     app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
     let frame = app.render_to_frame().text();
@@ -88,11 +88,12 @@ fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
         frame.contains("test-model"),
         "top bar disappeared:\n{frame}"
     );
-    assert_eq!(rect(&app, "smelt.prompt_bar.top").height, 2);
+    assert_eq!(rect(&app, "smelt.prompt.queue").height, 1);
+    assert_eq!(rect(&app, "smelt.prompt.top").height, 1);
 
     app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
     paint(&mut app);
-    assert_eq!(rect(&app, "smelt.prompt_bar.top").y, expanded_top);
+    assert_eq!(rect(&app, "smelt.prompt.top").y, expanded_top);
     assert_eq!(
         app.state().prompt_text,
         "first line\nsecond line\nthird line"
@@ -100,7 +101,7 @@ fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
     app.press_mod(KeyCode::Char('s'), KeyModifiers::CONTROL);
     paint(&mut app);
 
-    let top = rect(&app, "smelt.prompt_bar.top");
+    let top = rect(&app, "smelt.prompt.top");
     let row = top.y + top.height - 1;
     mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, row);
     mouse(
@@ -111,7 +112,7 @@ fn stashing_expanded_multiline_prompt_keeps_top_bar_visible() {
     );
     mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1, row + 1);
     assert_eq!(
-        rect(&app, "smelt.prompt_bar.top").y,
+        rect(&app, "smelt.prompt.top").y,
         top.y + 1,
         "the first drag step must resize from the visible prompt height"
     );

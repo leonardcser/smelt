@@ -21,8 +21,7 @@ smelt.cmd.register("example-ping", ping, {
 -- UiHost APIs are available in on_ready. The hook is registered in module body,
 -- so it fires again after /reload and replaces the statusline source in place.
 smelt.lifecycle.on_ready(function(ctx)
-  local statusline = require("smelt.statusline")
-  statusline.add("example_plugin", function()
+  smelt.statusline:add("example_plugin", function()
     if (state.pings or 0) == 0 then return {} end
     return { {
       text = " pings " .. state.pings,

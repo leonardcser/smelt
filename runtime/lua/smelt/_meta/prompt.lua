@@ -16,6 +16,17 @@ local prompt = {}
 ---@type fun(): smelt.Reg
 prompt.acquire = nil
 
+--- The strip between the transcript and the prompt block. It keeps one row
+--- even when empty so tips and notifications do not shift the transcript. Its
+--- built-in source is `tip`.
+---@type smelt.bar.Bar
+prompt.aux = nil
+
+--- The bar right below the prompt input, a plain rule with no sources by
+--- default.
+---@type smelt.bar.Bar
+prompt.bottom = nil
+
 --- Read or write the prompt cursor as a byte offset into `text()`. Without an argument returns the current offset; with one snaps it to a char boundary and clamps to source length. Returns the resulting offset.
 ---@type fun(pos: integer?): integer
 prompt.cursor = nil
@@ -30,6 +41,22 @@ prompt.has_stash = nil
 ---@see smelt.prompt.acquire
 ---@type fun(): boolean
 prompt.is_modal = nil
+
+--- ── layout ──────────────────────────────────────────────────────────
+--- The prompt block as one layout node: the auxiliary bar, the queue, the top
+--- bar, the input and the bottom bar, stacked. Returns the node and its rows.
+--- `opts.input_rows` is the input's wanted height (default 1). With
+--- `opts.max_rows`, the block fits in that many rows: the input shrinks first
+--- (to one row), then the queue folds, keeping at least one row.
+---@type fun(opts?: { input_rows?: integer, max_rows?: integer }): smelt.ui.layout, integer
+prompt.node = nil
+
+--- Queued messages and the stash marker, between the auxiliary bar and the
+--- bar above the prompt. Built-in sources: `queued` (one row per message,
+--- folding the oldest into "+N more" when rows run short) and `stash`, which
+--- keeps the last row.
+---@type smelt.bar.Bar
+prompt.queue = nil
 
 --- Return the queued prompt text rows, including while execution is paused. Queue changes invalidate the retained top bar so waiting messages remain visible above the input.
 ---@type fun(): string[]
@@ -57,8 +84,14 @@ prompt.set_text = nil
 ---@type fun(): string
 prompt.text = nil
 
---- Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.
----@type fun(): smelt.win.Win
+--- The bar right above the prompt input, a rule by default. Built-in sources:
+--- `pause`, `indicator`, `elapsed` and `retry` on the left, `model`, `tokens`
+--- and `cost` on the right. Dragging it resizes the prompt.
+---@type smelt.bar.Bar
+prompt.top = nil
+
+--- The prompt input window. Attach behaviour with `win:key(...)` and `win:on(...)`, and restyle it with `win:configure(...)`.
+---@type smelt.win.Win
 prompt.win = nil
 
 return prompt

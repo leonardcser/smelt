@@ -300,29 +300,64 @@ correctly before writing.
 `/settings` and `--set KEY=VALUE` exist as runtime/CLI overrides but do not
 persist; always make the change in `init.lua` so it survives a restart.
 
-### Customize the status line
+### Customize the status line and other bars
 
-The status line is a pure-Lua module that ships as `smelt.statusline`. Register
-a named source via `M.add(name, handler)`. The retained renderer calls sources
-when status signals or explicit plugin invalidation make their output dirty:
+The statusline is a bar, `smelt.statusline`, and so are `smelt.headerline`
+(source `goal`), `smelt.prompt.aux` (the tip row above the prompt, source
+`tip`), `smelt.prompt.queue` (queued messages and the stash marker, sources
+`queued` and `stash`), `smelt.prompt.top` (the rule with the working
+indicator, model, tokens and cost) and `smelt.prompt.bottom`.
+Every bar is a `smelt.bar.Bar`; call its methods with `:`. Register a named
+source with `bar:add(name, handler)`. The retained renderer calls sources when
+signals or explicit invalidation make their output dirty:
 
 ```lua
-local sl = require("smelt.statusline")
-sl.add("greeting", function()
+smelt.statusline:add("greeting", function()
   return { { text = "hi", style = { fg = "SmeltAccent" } } }
 end)
 ```
 
 The handler returns an item or a list of them. Each item is
 `{ text, style?, priority?, align_right?, truncatable?, separated?, row? }`
-(`smelt.bar.Item`); `row = 2` and up make the statusline taller. To draw the
-statusline yourself, `sl.set_view(smelt.ui.layout.leaf(paint), rows)` swaps it
-for any layout node, and `sl.set_view(nil)` restores it.
-`sl.add` and `sl.remove` invalidate automatically. If a source closes over
-plugin-owned state that changes independently of a built-in signal, call
-`sl.invalidate()` after changing it. The canonical worked example lives at
-`$XDG_DATA_HOME/smelt/builtins/lua/smelt/statusline.lua`; its `core` source is
-what draws the built-in segments (vim mode, agent mode, tps, task label, etc.).
+(`smelt.bar.Item`); `row = 2` and up make a strip taller. To draw a bar
+yourself, `bar:set_view(smelt.ui.layout.leaf(paint), rows)` swaps it for any
+layout node, and `bar:set_view(nil)` restores it. `add` and `remove`
+invalidate automatically. If a source closes over plugin-owned state that
+changes independently of a built-in signal, call `bar:invalidate()` after
+changing it. The canonical worked example lives at
+`$XDG_DATA_HOME/smelt/builtins/lua/smelt/statusline.lua`. Each built-in segment
+is its own source (statusline: `slug`, `vim_mode`, `agent_mode`, `tps`,
+`permission`, `keymap`, `procs`, `worktree`, `vim_pending`, `cursor`; prompt
+top: `pause`, `indicator`, `elapsed`, `retry`, `model`, `tokens`, `cost`):
+`bar:remove(name)` drops one, `bar:builtin(name)` returns it for wrapping, and
+`bar:clear()` drops them all. `smelt.bar.new({ name = ... })` makes a new bar;
+place it in a layout with `bar:node()`.
+
+### Restyle the bars and the prompt
+
+Every bar takes `bar:configure(config)` (`smelt.bar.Config`):
+`layout = "strip" | "rule"`, `bg`, `separator`, `separator_style`, `rule`,
+`rule_style`, `fill_selectable` and `visible`. `false` restores a key's
+default. Any window, `smelt.prompt.win` and each bar's `bar.win` included,
+takes `win:configure({ style = group, pad_left = n, pad_right = n, prefix = ...
+})`; `style` is a theme group painted as the window's base, and `prefix` paints
+a marker such as `"> "` into the left padding. A filled prompt block:
+
+```lua
+local prompt = smelt.prompt
+for _, win in ipairs({ prompt.top.win, prompt.win, prompt.bottom.win }) do
+  win:configure({ style = "SmeltUserBg" })
+end
+for _, bar in ipairs({ prompt.top, prompt.bottom }) do
+  bar.win:configure({ pad_left = 1, pad_right = 1 })
+  bar:configure({ layout = "strip" })
+end
+```
+
+A one-row prompt: `smelt.prompt.top:configure({ visible = false })` and
+`smelt.prompt.bottom:configure({ visible = false })`.
+`smelt.prompt.node({ input_rows, max_rows })` returns the whole prompt block
+for a custom `smelt.ui.layout.set` composer.
 
 ### Pin startup defaults (model / mode / reasoning)
 
@@ -567,7 +602,6 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.agent` - Agent-facing prompt customization for Lua plugins.
 - `smelt.auth` - Authenticated provider helpers.
 - `smelt.banner` - Startup banner extension point.
-- `smelt.bar` - The item shape shared by smelt's bars: the statusline and the rules above and below the prompt.
 - `smelt.build` - Compile-time build identity and version metadata for plugins.
 - `smelt.builtins` - Opt out of bundled `smelt.<dotted>` modules.
 - `smelt.cli` - Declare and read CLI flags from Lua.
@@ -583,7 +617,6 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.fuzzy` - Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
 - `smelt.git` - Asynchronous Git snapshots and explicit file-level staging.
 - `smelt.grep` - Ripgrep wrapper for searching files.
-- `smelt.headerline` - Optional rows above the transcript, built like the statusline.
 - `smelt.html` - HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 - `smelt.http` - Asynchronous HTTP get/post.
 - `smelt.http.cache` - Runtime-owned HTTP response cache.
@@ -622,6 +655,7 @@ Use the generated Lua API reference for complete signatures and types.
 
 ### UiHost tier
 
+- `smelt.bar` - Bars: rows of items from named sources, laid out as a filled strip or a rule.
 - `smelt.buf` - Buffer handle constructor.
 - `smelt.config` - Resolved application configuration introspection.
 - `smelt.confirm` - Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution.
@@ -635,15 +669,12 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.overlay` - Overlay handle constructor.
 - `smelt.paint` - Register Lua callbacks against custom paint regions.
 - `smelt.picker` - Picker facade.
-- `smelt.prompt_bar.bottom` - The rule below the prompt, empty by default.
-- `smelt.prompt_bar.top` - The rule above the prompt, which holds the working indicator, model, tokens and cost.
 - `smelt.render` - Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`.
 - `smelt.search` - Search controls for the active UI session.
 - `smelt.session` - Current session metadata, turn list, message snapshots, rewind, and persisted session management.
 - `smelt.session.messages` - Session messages.
 - `smelt.session.slug` - Session slug.
 - `smelt.session.title` - Session title.
-- `smelt.statusline` - The statusline at the bottom of the screen.
 - `smelt.terminal` - Terminal integration helpers.
 - `smelt.tips` - Discovery tips shown in the prompt bar and banner.
 - `smelt.ui` - Screen-composition primitives: main layout composer and per-window renderer registration.

@@ -477,6 +477,14 @@ fn node_snapshot_table(
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let transcript: mlua::Table = smelt.get("transcript")?;
     let m = LuaMod::extend_supported(lua, transcript, "smelt.transcript", Tier::UiHost);
+    m.value(
+        "win",
+        "The transcript window, for key bindings, events and anchoring overlays over the transcript.",
+        "smelt.win.Win",
+        super::win::LuaWin {
+            id: crate::app::TRANSCRIPT_WIN,
+        },
+    )?;
     let _ = LuaTranscriptStreamOpts::lua_type();
     let navigation_opts_type = LuaTranscriptNavigationOpts::lua_type();
     let _ = LuaTranscriptRevealOpts::lua_type();

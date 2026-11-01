@@ -427,10 +427,10 @@ fn parse_win_target(opts: &mlua::Table) -> Result<u64, String> {
 /// edges; the host has no `statusline` concept anymore, so plugins that
 /// want their overlay to clear the Lua-allocated statusline pass the
 /// statusline's row count via `opts.above_rows` (typically computed
-/// from `require("smelt.statusline").win:rect().height`):
+/// from `smelt.statusline.win:rect().height`):
 ///
 /// ```lua
-/// local sl = require("smelt.statusline").win
+/// local sl = smelt.statusline.win
 /// smelt.overlay.new({
 ///   anchor = "dock_bottom",
 ///   above_rows = (sl and sl:rect() or {}).height or 0,

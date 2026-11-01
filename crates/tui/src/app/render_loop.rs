@@ -2076,7 +2076,7 @@ mod tests {
     }
 
     #[test]
-    fn animation_only_frames_refresh_prompt_bar_without_reprojecting_transcript() {
+    fn animation_only_frames_refresh_prompt_top_without_reprojecting_transcript() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
         app.dispatch_engine_event(protocol::EngineEvent::Text {
@@ -2084,9 +2084,8 @@ mod tests {
         });
         app.run_lua_result(
             r#"
-            local prompt_bar = require("smelt.prompt_bar")
             _G.animation_renderer_calls = 0
-            prompt_bar.top_win:set_renderer(function(win)
+            smelt.prompt.top.win:set_renderer(function(win)
               _G.animation_renderer_calls = _G.animation_renderer_calls + 1
               win:buf():lines({ tostring(smelt.signal.get("work_elapsed_ms")) })
               smelt.timer.set(16, function() win:invalidate_renderer() end)
@@ -2260,17 +2259,16 @@ mod tests {
     }
 
     #[test]
-    fn lua_prompt_text_replacement_invalidates_prompt_bar() {
+    fn lua_prompt_text_replacement_invalidates_prompt_aux() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.run_lua_result(
             r#"
-            local prompt_bar = require("smelt.prompt_bar")
             _G.prompt_aux_renderer_calls = 0
-            prompt_bar.aux_win:set_renderer(function()
+            smelt.prompt.aux.win:set_renderer(function()
               _G.prompt_aux_renderer_calls = _G.prompt_aux_renderer_calls + 1
             end)
             smelt.ui.layout.set(function()
-              return smelt.ui.layout.leaf(prompt_bar.aux_win)
+              return smelt.ui.layout.leaf(smelt.prompt.aux.win)
             end)
             "#,
         )
@@ -2288,30 +2286,29 @@ mod tests {
     }
 
     #[test]
-    fn prompt_queue_revision_invalidates_top_bar_and_layout() {
+    fn prompt_queue_revision_invalidates_queue_and_layout() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
         app.run_lua_result(
             r#"
-            local prompt_bar = require("smelt.prompt_bar")
-            _G.prompt_top_renderer_calls = 0
+            _G.prompt_queue_renderer_calls = 0
             _G.prompt_queue_layout_calls = 0
-            prompt_bar.top_win:set_renderer(function()
-              _G.prompt_top_renderer_calls = _G.prompt_top_renderer_calls + 1
+            smelt.prompt.queue.win:set_renderer(function()
+              _G.prompt_queue_renderer_calls = _G.prompt_queue_renderer_calls + 1
             end)
             smelt.ui.layout.set(function()
               _G.prompt_queue_layout_calls = _G.prompt_queue_layout_calls + 1
-              return smelt.ui.layout.leaf(prompt_bar.top_win)
+              return (smelt.prompt.queue:node())
             end)
             "#,
         )
         .expect("install retained prompt queue probes");
 
         app.render_silent();
-        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(1));
+        assert_eq!(app.lua_int_global("prompt_queue_renderer_calls"), Some(1));
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(1));
         app.render_silent();
-        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(1));
+        assert_eq!(app.lua_int_global("prompt_queue_renderer_calls"), Some(1));
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(1));
 
         assert!(app
@@ -2322,10 +2319,10 @@ mod tests {
             )));
         app.render_silent();
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(2));
-        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(2));
+        assert_eq!(app.lua_int_global("prompt_queue_renderer_calls"), Some(2));
         app.render_silent();
         assert_eq!(app.lua_int_global("prompt_queue_layout_calls"), Some(2));
-        assert_eq!(app.lua_int_global("prompt_top_renderer_calls"), Some(2));
+        assert_eq!(app.lua_int_global("prompt_queue_renderer_calls"), Some(2));
     }
 
     #[test]
@@ -2336,7 +2333,7 @@ mod tests {
             _G.retained_layout_calls = 0
             smelt.ui.layout.set(function()
               _G.retained_layout_calls = _G.retained_layout_calls + 1
-              return smelt.ui.layout.leaf(smelt.win.TRANSCRIPT)
+              return smelt.ui.layout.leaf(smelt.transcript.win)
             end)
             "#,
         )

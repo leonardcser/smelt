@@ -301,3 +301,15 @@ Types: [`smelt.transcript.View`](types.md#smelttranscriptview), [`smelt.Reg`](ty
 
 Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
 
+## `smelt.transcript.win`
+
+```lua
+smelt.win.Win
+```
+
+Types: [`smelt.win.Win`](types.md#smeltwinwin)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+The transcript window, for key bindings, events and anchoring overlays over the transcript.
+

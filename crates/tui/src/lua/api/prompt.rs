@@ -1,7 +1,7 @@
 //! `smelt.prompt` bindings - the main editable input surface.
 //!
-//! `win()` returns a `Win` userdata for the prompt input so plugins can
-//! bind keys / events via the chainable handle API. `text()` snapshots
+//! `win` is the `Win` userdata for the prompt input so plugins can bind
+//! keys / events via the chainable handle API. `text()` snapshots
 //! the current buffer; `set_text(s)` replaces it.
 
 use mlua::prelude::*;
@@ -16,11 +16,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "The main editable input surface: win handle, text get/set, and cursor control. UiHost-only.",
         Tier::UiHost,
     )?;
-    m.fn_(
+    m.value(
         "win",
-        "Return a `Win` handle for the prompt input. Use `win:key(...)` and `win:on(...)` to attach plugin behaviour.",
-        &[],
-        |_, ()| Ok(super::win::LuaWin { id: crate::app::PROMPT_WIN }),
+        "The prompt input window. Attach behaviour with `win:key(...)` and `win:on(...)`, and restyle it with `win:configure(...)`.",
+        "smelt.win.Win",
+        super::win::LuaWin {
+            id: crate::app::PROMPT_WIN,
+        },
     )?;
     m.fn_(
         "text",

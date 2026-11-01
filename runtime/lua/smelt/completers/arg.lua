@@ -7,7 +7,7 @@ if not smelt.prompt then return end
 local ns = smelt.ns("cmd_arg_placeholder")
 
 local function prompt_buf()
-  local win = smelt.prompt.win()
+  local win = smelt.prompt.win
   return win and win:buf()
 end
 
@@ -67,7 +67,7 @@ local function update()
   local args = command_args(cmd)
   if not args or #args == 0 then return end
 
-  local win = smelt.prompt.win()
+  local win = smelt.prompt.win
   local content_width = win and win:content_width()
   if not content_width then return end
 
@@ -82,7 +82,7 @@ local function update()
   })
 end
 
-local win = smelt.prompt.win()
+local win = smelt.prompt.win
 win:on("text_changed", update)
 win:on("resized", update)
 smelt.signal.subscribe("model", update)

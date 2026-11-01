@@ -127,7 +127,7 @@ function __smelt_internal.picker.open_prompt(opts)
   end
   local persistent = type(on_enter) == "function"
 
-  local prompt = smelt.prompt.win()
+  local prompt = smelt.prompt.win
   local query = smelt.prompt.text() or ""
   local limit = opts.limit or 200
   local provider_state = nil

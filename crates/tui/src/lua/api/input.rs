@@ -174,7 +174,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let shared = shared.clone();
     m.fn_(
         "new",
-        "Create a single-line input and return an `Input` handle. Options: `text?`, `placeholder?`, plus window opts accepted by `smelt.win.new` (`region`, `name`, `pad_left`, `pad_right`, `wrap`, `scrollbar`, etc.).",
+        "Create a single-line input and return an `Input` handle. Options: `text?`, `placeholder?`, plus window opts accepted by `smelt.win.new` (`name`, `pad_left`, `pad_right`, `wrap`, `scrollbar`, etc.).",
         &["opts"],
         move |lua, opts: Option<mlua::Table>| -> LuaResult<Option<LuaInput>> {
             let opts = input_opts(lua, opts)?;

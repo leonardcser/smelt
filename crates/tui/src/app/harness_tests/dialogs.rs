@@ -661,7 +661,7 @@ fn usage_dialog_opened_during_active_turn_stays_dismissible() {
             smelt.spawn(function()
               smelt.sleep(10)
               _G.__usage_focus_callback_ran = true
-              smelt.win.TRANSCRIPT:focus()
+              smelt.transcript.win:focus()
             end)
             "#,
         ));
@@ -707,7 +707,7 @@ fn deferred_lua_focus_commits_app_pane_only_after_layout_accepts_it() {
     assert!(app.run_lua(
         r#"
         smelt.ui.layout.set(function()
-          return smelt.ui.layout.leaf(smelt.win.PROMPT)
+          return smelt.ui.layout.leaf(smelt.prompt.win)
         end)
         "#,
     ));
@@ -722,9 +722,9 @@ fn deferred_lua_focus_commits_app_pane_only_after_layout_accepts_it() {
         .exec_lua_entry(
             r#"
             smelt.ui.layout.set(function()
-              return smelt.ui.layout.leaf(smelt.win.TRANSCRIPT)
+              return smelt.ui.layout.leaf(smelt.transcript.win)
             end)
-            smelt.win.TRANSCRIPT:focus()
+            smelt.transcript.win:focus()
             "#,
         )
         .is_ok());
@@ -793,7 +793,7 @@ fn root_dialog_uses_safe_fallback_when_custom_composer_omits_it() {
     assert!(app.run_lua(
         r#"
         smelt.ui.layout.set(function()
-          return smelt.ui.layout.leaf(smelt.win.PROMPT)
+          return smelt.ui.layout.leaf(smelt.prompt.win)
         end)
         "#
     ));
@@ -824,7 +824,7 @@ fn root_dialog_uses_safe_fallback_when_custom_composer_duplicates_it() {
         r#"
         smelt.ui.layout.set(function(state)
           if not state.dialog then
-            return smelt.ui.layout.leaf(smelt.win.PROMPT)
+            return smelt.ui.layout.leaf(smelt.prompt.win)
           end
           return smelt.ui.layout.vbox({
             { state.dialog, height = "fill" },
@@ -848,7 +848,7 @@ fn root_dialog_rejects_retained_stage_from_nested_dialog() {
         local retained
         smelt.ui.layout.set(function(state)
           if not state.dialog then
-            return smelt.ui.layout.leaf(smelt.win.PROMPT)
+            return smelt.ui.layout.leaf(smelt.prompt.win)
           end
           if not retained then
             retained = state.dialog
@@ -3066,7 +3066,7 @@ fn custom_composer_dialog_chrome_resizes_and_reflows_with_terminal() {
         r#"
         smelt.ui.layout.set(function(state)
           if not state.dialog then
-            return smelt.ui.layout.leaf(smelt.win.PROMPT)
+            return smelt.ui.layout.leaf(smelt.prompt.win)
           end
           return smelt.ui.layout.vbox({
             { state.dialog, height = "fill" },

@@ -7,7 +7,7 @@
 --   * Closing the dialog unsubscribes from further updates.
 
 local cache = require("smelt.commands.usage.cache")
-local bar = require("smelt.bar")
+local progress = require("smelt.progress")
 local modal = require("smelt.modal")
 
 local DIM = { fg = "Comment" }
@@ -112,7 +112,7 @@ local function usage_row(label, ratio, percent_text, reset_hint, label_width, pe
   label_width = label_width or #tostring(label or "")
   percent_width = percent_width or #tostring(percent_text or "")
   local out = row(span(string.format("  %-" .. tostring(label_width) .. "s  ", label), DIM))
-  for _, part in ipairs(bar.progress(ratio, { width = 18 })) do out[#out + 1] = part end
+  for _, part in ipairs(progress.bar(ratio, { width = 18 })) do out[#out + 1] = part end
   out[#out + 1] = span("  " .. string.format("%-" .. tostring(percent_width) .. "s", percent_text), VALUE)
   if reset_hint and reset_hint ~= "" then out[#out + 1] = span("  " .. reset_hint, DIM) end
   return out

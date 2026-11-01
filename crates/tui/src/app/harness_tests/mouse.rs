@@ -5,7 +5,7 @@ fn generic_win_cursor_setter_cannot_repark_prompt_cursor() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(r#"smelt.prompt.set_text("hel\nlo")"#));
     app.render();
-    assert!(app.run_lua("smelt.prompt.win():cursor(0)"));
+    assert!(app.run_lua("smelt.prompt.win:cursor(0)"));
     app.type_text("!");
     assert_eq!(app.state().prompt_text, "hel\nlo!");
 }
@@ -16,7 +16,7 @@ fn generic_win_reveal_cannot_repark_prompt_cursor() {
     assert!(app.run_lua(r#"smelt.prompt.set_text("hel\nlo")"#));
     let before = app.prompt_cpos();
 
-    assert!(app.run_lua("smelt.prompt.win():reveal(0)"));
+    assert!(app.run_lua("smelt.prompt.win:reveal(0)"));
 
     assert_eq!(app.prompt_cpos(), before);
 }
@@ -45,7 +45,7 @@ fn prompt_bottom_chrome_click_focuses_prompt() {
 
     let bottom_win = app
         .ui_probe()
-        .named_win("smelt.prompt_bar.bottom")
+        .named_win("smelt.prompt.bottom")
         .expect("default prompt bottom bar window");
     let bottom_rect = app
         .ui_probe()

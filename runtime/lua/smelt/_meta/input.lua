@@ -8,7 +8,7 @@
 ---@class smelt.input
 local input = {}
 
---- Create a single-line input and return an `Input` handle. Options: `text?`, `placeholder?`, plus window opts accepted by `smelt.win.new` (`region`, `name`, `pad_left`, `pad_right`, `wrap`, `scrollbar`, etc.).
+--- Create a single-line input and return an `Input` handle. Options: `text?`, `placeholder?`, plus window opts accepted by `smelt.win.new` (`name`, `pad_left`, `pad_right`, `wrap`, `scrollbar`, etc.).
 ---@see smelt.win.new
 ---@type fun(opts: table?): smelt.input.Input?
 input.new = nil

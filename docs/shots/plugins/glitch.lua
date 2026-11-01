@@ -1,5 +1,5 @@
 -- ~/.config/smelt/plugins/glitch.lua
-local fallback = smelt.prompt_bar.top.builtin("indicator")
+local fallback = smelt.prompt.top:builtin("indicator")
 
 -- A glitching status word: each word decodes in from noise, holds with the odd
 -- flicker, then corrupts away into the next one. It stays white, with a pink and
@@ -95,14 +95,14 @@ smelt.signal.subscribe("work_state", function(state)
 end)
 
 -- Each frame asks for the next one, until "done" has decoded.
-smelt.prompt_bar.top.add("indicator", function()
+smelt.prompt.top:add("indicator", function()
   if smelt.signal.get("work_state") == "done" and not smelt.signal.get("auto_continue_status") then
     local phase = done_at and smelt.time.now_ms() - done_at or DECODE_MS
-    if phase < DECODE_MS then smelt.prompt_bar.top.invalidate_after(FRAME_MS) end
+    if phase < DECODE_MS then smelt.prompt.top:invalidate_after(FRAME_MS) end
     return render(palette(), DONE, #DONE, phase, 0, false)
   end
   if not working() then return fallback() end
-  smelt.prompt_bar.top.invalidate_after(FRAME_MS)
+  smelt.prompt.top:invalidate_after(FRAME_MS)
   local now = smelt.time.now_ms()
   local round = math.floor(now / CYCLE_MS)
   return render(palette(), WORDS[round % #WORDS + 1], WIDTH, now % CYCLE_MS, round, true)

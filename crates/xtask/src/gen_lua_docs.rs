@@ -828,7 +828,6 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "smelt.clipboard",
             "smelt.confirm",
             "smelt.dialog",
-            "smelt.headerline",
             "smelt.input",
             "smelt.layout",
             "smelt.notify",
@@ -836,9 +835,6 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "smelt.paint",
             "smelt.picker",
             "smelt.prompt",
-            "smelt.prompt_bar.bottom",
-            "smelt.prompt_bar.top",
-            "smelt.statusline",
             "smelt.terminal",
             "smelt.theme",
             "smelt.ui",
@@ -1408,8 +1404,21 @@ fn parse_lua_fn_decl(line: &str) -> Option<(String, String, bool)> {
     Some((name, after_fn[1..close].trim().to_string(), internal))
 }
 
+/// `smelt.X.Y = <expr>`: a documented value, such as a handle or an object,
+/// when a `---@type` directive precedes it.
+fn parse_lua_value_decl(line: &str) -> Option<String> {
+    let (name, rhs) = line.trim_start().split_once('=')?;
+    let name = name.trim();
+    if !name.starts_with("smelt.") || rhs.starts_with('=') {
+        return None;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        .then(|| name.to_string())
+}
+
 /// Walk a bundled Lua file once and emit every doc-bearing surface in
-/// it. Recognises three styles of annotation:
+/// it. Recognises four styles of annotation:
 ///
 ///   * `function smelt.X.Y(args)` / `smelt.X.Y = function(args)` →
 ///     [`LuaFnMeta`]. Doc lines are the contiguous `--` or `---` block
@@ -1422,6 +1431,8 @@ fn parse_lua_fn_decl(line: &str) -> Option<(String, String, bool)> {
 ///   * `---@alias smelt.X.Y T|"a"|"b"` → [`LuaAliasDecl`]. Bare
 ///     `string` as the first member marks an open alias; the remaining
 ///     `"literal"` members become the well-known names.
+///   * `smelt.X.Y = <expr>` after a `---@type T` directive → a documented
+///     value of type `T`, such as a window handle or a bar.
 ///
 /// Names starting with `_` default to Internal and are excluded from user docs;
 /// `---@advanced` explicitly preserves low-level public composition helpers.
@@ -1561,6 +1572,24 @@ fn parse_bundled_lua(content: &str, tier: Tier) -> BundledItems {
             });
             doc_buf.clear();
             sig_override = None;
+            continue;
+        }
+        if let Some(full_name) = parse_lua_value_decl(raw).filter(|_| sig_override.is_some()) {
+            let sig = sig_override.take().unwrap_or_default();
+            if let Some((module, name)) = split_module_and_name(&full_name) {
+                let item_classification = classification
+                    .take()
+                    .unwrap_or_else(|| classification_for_type(&full_name));
+                out.fns.push(LuaFnMeta {
+                    module: leak(module),
+                    name: leak(name),
+                    doc: leak(flush_doc(&doc_buf)),
+                    sig,
+                    tier: tier_override.take().unwrap_or(tier),
+                    classification: item_classification,
+                });
+            }
+            doc_buf.clear();
             continue;
         }
         if !trimmed.is_empty() {
@@ -1824,6 +1853,28 @@ mod tests {
         assert_eq!(items.fns.len(), 2);
         assert_eq!(items.fns[0].tier, Tier::UiHost);
         assert_eq!(items.fns[1].tier, Tier::Host);
+    }
+
+    #[test]
+    fn typed_assignments_document_values() {
+        let items = parse_bundled_lua(
+            r#"
+            --- The bar at the bottom.
+            ---@advanced
+            ---@type smelt.bar.Bar
+            smelt.statusline = bar.new({ name = "smelt.statusline" })
+
+            smelt.untyped = {}
+            "#,
+            Tier::UiHost,
+        );
+
+        assert!(items.warnings.is_empty(), "{:?}", items.warnings);
+        assert_eq!(items.fns.len(), 1);
+        assert_eq!(items.fns[0].module, "smelt");
+        assert_eq!(items.fns[0].name, "statusline");
+        assert_eq!(items.fns[0].sig, "smelt.bar.Bar");
+        assert_eq!(items.fns[0].doc, "The bar at the bottom.");
     }
 
     #[test]

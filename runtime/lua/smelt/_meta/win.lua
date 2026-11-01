@@ -8,12 +8,8 @@
 ---@class smelt.win
 local win = {}
 
---- Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = "editable_text"|"readonly_text"|"selectable_text"|"inert"|"list"|"list_inert"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = "input"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = "list"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `true`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.
+--- Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = "editable_text"|"readonly_text"|"selectable_text"|"inert"|"list"|"list_inert"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = "input"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = "list"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `true`); pass `false` on 1-row pills / dialog chrome to reclaim that cell. `opts.pad_left` / `opts.pad_right` inset the content. `opts.style` names a theme group layered over `Normal` as the window's base style. `opts.prefix` paints text into the left padding (see `Win:configure`). `Win:configure(opts)` changes these later.
 ---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win?
 win.new = nil
-
---- Return a `Win` handle for the built-in transcript window. Useful as an `anchor = "win"` / `"win_center"` target so plugins can float overlays over the transcript without hard-coding its id.
----@type fun(): smelt.win.Win
-win.transcript = nil
 
 return win

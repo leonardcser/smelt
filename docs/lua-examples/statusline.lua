@@ -2,15 +2,13 @@
 -- a clock. Each source returns a list of items appended to the
 -- statusline's left strip (or right strip when `align_right = true`).
 --
--- Items use the same shape as `core_compose` in `smelt/statusline.lua`:
+-- Items are `smelt.bar.Item`s, the same shape the built-in sources return:
 --   text        (required) - the rendered string
 --   style       (optional) - { fg, bg, hl_group, bold, italic, dim, ... }
 --   priority    (optional) - higher = more droppable when line is tight
 --   truncatable (optional) - if true, the item shrinks before being dropped
 --   separated   (optional) - prefix " · " when not first in its strip
 --   align_right (optional) - push to the right strip
-
-local statusline = require("smelt.statusline")
 
 local branch_cache = { at = 0, value = nil }
 
@@ -29,7 +27,7 @@ local function git_branch()
   return branch
 end
 
-statusline.add("cwd", function()
+smelt.statusline:add("cwd", function()
   local cwd = os.getenv("PWD") or ""
   local home = os.getenv("HOME") or ""
   if home ~= "" and cwd:sub(1, #home) == home then
@@ -43,7 +41,7 @@ statusline.add("cwd", function()
   } }
 end)
 
-statusline.add("git_branch", function()
+smelt.statusline:add("git_branch", function()
   local branch = git_branch()
   if not branch then return {} end
   return { {
@@ -54,7 +52,7 @@ statusline.add("git_branch", function()
   } }
 end)
 
-statusline.add("clock", function()
+smelt.statusline:add("clock", function()
   return { {
     text = os.date("%H:%M"),
     style = { fg = 245 },

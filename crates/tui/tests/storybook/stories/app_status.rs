@@ -32,9 +32,8 @@ app_story!(statusline_width_ladder, |ctx| {
     // optional middle indicators, a required mode, and a right-aligned cursor.
     ctx.run_lua(
         r#"
-        local statusline = require("smelt.statusline")
-        statusline.remove("core")
-        statusline.add("width_story", function()
+        smelt.statusline:clear()
+        smelt.statusline:add("width_story", function()
           return {
             {
               text = " project-alpha-long-name ",

@@ -21,7 +21,6 @@ if type(state.next_id) ~= "number" then state.next_id = 0 end
 
 local observed_context_sessions = {}
 local auto_continue = require("smelt.auto_continue")
-local headerline = nil
 local setup_done = false
 local subscriptions = {}
 
@@ -127,11 +126,17 @@ local function session_goal()
   return goal
 end
 
+-- The `goal` signal carries the current session's goal (or nil), so anything
+-- that shows it, the header included, repaints when it changes.
+local function publish_goal()
+  if setup_done then smelt.signal.set("goal", session_goal()) end
+end
+
 local function store_goal(goal)
   sessions()[session_id()] = normalize_goal(goal)
   state.save()
   auto_continue.refresh()
-  if headerline then headerline.invalidate() end
+  publish_goal()
 end
 
 local function is_active(goal)
@@ -343,10 +348,13 @@ local function banner_items(goal)
 end
 
 local function register_headerline()
-  headerline = require("smelt.headerline")
-  headerline.add("goal", function()
+  local headerline = require("smelt.headerline")
+  headerline:add("goal", function()
     local goal = session_goal()
     if is_visible(goal) then return banner_items(goal) end
+  end, { builtin = true })
+  subscriptions[#subscriptions + 1] = smelt.signal.subscribe("goal", function()
+    headerline:invalidate()
   end)
 end
 
@@ -632,12 +640,15 @@ end
 function M.setup()
   if setup_done then return end
   setup_done = true
+  smelt.signal.new("goal", session_goal())
   register_tools()
   register_headerline()
   sync_context_note()
 
-  subscriptions[#subscriptions + 1] = smelt.signal.subscribe(
-    "session_epoch", sync_context_note)
+  subscriptions[#subscriptions + 1] = smelt.signal.subscribe("session_epoch", function()
+    sync_context_note()
+    publish_goal()
+  end)
   auto_continue.set_provider(function()
     return M.auto_continue_request()
   end)

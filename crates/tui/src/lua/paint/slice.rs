@@ -565,7 +565,7 @@ pub fn register_paint_slice_docs() {
         classification: classification("smelt.paint.Scroll"),
         doc: "How one window's text moved since the previous frame: the screen area of the text and the rows it moved. Screen row `y` inside the area shows what `ctx.prev` had at row `y + dy`, unless a window above covers it.",
         fields: vec![
-            field("win", "smelt.win.Win", false, "The window that scrolled. Compare it with `==`, for example to `smelt.win.transcript()`."),
+            field("win", "smelt.win.Win", false, "The window that scrolled. Compare it with `==`, for example to `smelt.transcript.win`."),
             field("x", "integer", false, "Left column of the area."),
             field("y", "integer", false, "Top row of the area."),
             field("width", "integer", false, "Width of the area."),

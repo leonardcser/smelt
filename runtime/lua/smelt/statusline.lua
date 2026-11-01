@@ -1,95 +1,15 @@
--- Statusline window - Lua-allocated, Lua-rendered.
+-- The statusline: a strip bar at the bottom of the screen.
 --
--- This module owns:
---   * the statusline window (`M.win`)
---   * a bar (`smelt._bar`, strip layout) holding the named source callbacks
---     registered with `smelt.statusline.add` / `remove`
---   * a retained renderer that lays the bar's rows out after semantic
---     invalidation and writes them to the window's buffer.
---
--- The built-in `core` source reads engine state from signals plus
--- `smelt.session.status()` for values that carry pending/stale markers
--- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
--- `permission_pending`, `keymap_pending`, `vim_pending_input`, `cursor_pos`, `viewport_pos`). Plugins extend the line by
--- registering additional sources via `smelt.statusline.add(name, fn)`.
+-- The built-in sources (`slug`, `vim_mode`, `agent_mode`, `tps`,
+-- `permission`, `keymap`, `procs`, `worktree`, `vim_pending`, `cursor`) read
+-- engine state from signals plus `smelt.session.status()` for values that
+-- carry pending/stale markers. Plugins add sources with
+-- `smelt.statusline:add(name, fn)`, and replace or remove a built-in one by
+-- its name.
 
 local bar = require("smelt._bar")
 
-local NS = smelt.ns("smelt.statusline")
-local renderer_subscriptions = {}
-
-local line = bar.new({
-  name = "smelt.statusline",
-  layout = "strip",
-  bg_group = "SmeltStatusBg",
-  sep_group = "SmeltSeparator",
-})
-
-local M = {}
-smelt.statusline = M
-
---- Repaint after plugin-owned state changes that are not represented by a
---- built-in signal. Adding, replacing, and removing sources invalidates
---- automatically.
----@tier ui_host
----@type fun()
-function smelt.statusline.invalidate()
-  bar.invalidate(line)
-end
-
---- Repaint after `ms` milliseconds. An animated source calls it on every paint
---- to ask for its next frame; the earliest pending request wins.
----@tier ui_host
----@type fun(ms: integer)
-function smelt.statusline.invalidate_after(ms)
-  bar.invalidate_after(line, ms)
-end
-
---- Add a named source of statusline items. `handler(ctx)` runs on every
---- repaint, with `ctx.width` the statusline's width in cells, and returns a
---- list of items (see `smelt.bar.Item`); an error skips the source and shows a
---- notification. Items with `row = 2` or more make the
---- statusline taller. Adding a name that already exists replaces that
---- source in place, keeping its position. Returns a `Reg` that removes this
---- source, unless a later `add` with the same name has replaced it.
----@tier ui_host
----@type fun(name: string, handler: fun(ctx: { width: integer }): smelt.bar.Item[]?): smelt.Reg
-function smelt.statusline.add(name, handler)
-  return bar.add(line, name, handler)
-end
-
---- Remove every source named `name`.
----@tier ui_host
----@type fun(name: string)
-function smelt.statusline.remove(name)
-  bar.remove(line, name)
-end
-
---- Rows the statusline takes: its lowest item row, at least 1, or the rows
---- passed to `set_view`.
----@tier ui_host
----@type fun(): integer
-function smelt.statusline.rows()
-  return bar.rows(line)
-end
-
---- Replace the statusline with any layout node, such as a paint leaf from
---- `smelt.ui.layout.leaf(smelt.paint.register(fn))`, taking `rows` rows
---- (default 1). Pass `nil` to restore the built-in statusline.
----@tier ui_host
----@type fun(node: smelt.ui.layout?, rows: integer?)
-function smelt.statusline.set_view(node, rows)
-  bar.set_view(line, node, rows)
-end
-
---- The statusline's layout node and row count, for layout composers.
----@tier ui_host
----@type fun(): smelt.ui.layout, integer
-function smelt.statusline.node()
-  return bar.node(line)
-end
-
--- ── default `core` source ───────────────────────────────────────────
+-- ── built-in sources ────────────────────────────────────────────────
 
 local function vim_group(label)
   if label == "INSERT" then return "SmeltVimInsert"
@@ -100,190 +20,173 @@ end
 
 local function signal(name) return smelt.signal.get(name) end
 
-local function core_compose()
-  local items = {}
-  local status = smelt.session.status and smelt.session.status() or {}
+local sources = {}
 
-  -- Slug pill. SmeltSlug carries fg only; fall back to SmeltAccent's
-  -- fg as the pill bg when no explicit bg has been set (default), so
-  -- `/color` (which writes SmeltSlug.bg) and theme swaps both
-  -- propagate naturally.
+local function define(name, handler)
+  sources[#sources + 1] = { name, handler }
+end
+
+-- Slug pill. SmeltSlug carries fg only; fall back to SmeltAccent's fg as the
+-- pill bg when no explicit bg has been set (default), so `/color` (which
+-- writes SmeltSlug.bg) and theme swaps both propagate naturally.
+define("slug", function()
   local task_label = signal("task_label")
-  if smelt.settings.show_slug and task_label and task_label ~= "" then
-    local slug = smelt.theme.get("SmeltSlug") or {}
-    local style = { hl_group = "SmeltSlug" }
-    if not slug.bg then
-      local accent = smelt.theme.get("SmeltAccent")
-      if accent and accent.fg then
-        style.bg = accent.fg
-      end
+  if not smelt.settings.show_slug or not task_label or task_label == "" then return nil end
+  local slug = smelt.theme.get("SmeltSlug") or {}
+  local style = { hl_group = "SmeltSlug" }
+  if not slug.bg then
+    local accent = smelt.theme.get("SmeltAccent")
+    if accent and accent.fg then
+      style.bg = accent.fg
     end
-    items[#items + 1] = {
-      text = " " .. task_label .. " ",
-      style = style,
-      priority = 5,
-      truncatable = true,
-    }
   end
+  return {
+    text = " " .. task_label .. " ",
+    style = style,
+    priority = 5,
+    truncatable = true,
+  }
+end)
 
-  -- Vim mode pill.
+define("vim_mode", function()
   local vim_label = signal("vim_mode")
-  if vim_label and vim_label ~= "" then
-    items[#items + 1] = {
-      text = " " .. vim_label .. " ",
-      style = { hl_group = vim_group(vim_label) },
-      priority = 3,
-    }
-  end
+  if not vim_label or vim_label == "" then return nil end
+  return {
+    text = " " .. vim_label .. " ",
+    style = { hl_group = vim_group(vim_label) },
+    priority = 3,
+  }
+end)
 
-  -- Agent mode pill.
+define("agent_mode", function()
+  local status = smelt.session.status and smelt.session.status() or {}
   local mode = status.mode or {}
   local mode_name = mode.name or signal("agent_mode")
-  if mode_name and mode_name ~= "" then
-    local spec = smelt.mode.get(mode_name) or {}
-    items[#items + 1] = {
-      text = " " .. (spec.icon or "") .. mode_name .. (mode.marker or "") .. " ",
-      style = { hl_group = spec.hl_group or "SmeltModeDefault" },
-      priority = 1,
-    }
-  end
+  if not mode_name or mode_name == "" then return nil end
+  local spec = smelt.mode.get(mode_name) or {}
+  return {
+    text = " " .. (spec.icon or "") .. mode_name .. (mode.marker or "") .. " ",
+    style = { hl_group = spec.hl_group or "SmeltModeDefault" },
+    priority = 1,
+  }
+end)
 
-  -- tok/s.
+define("tps", function()
   local tps = signal("tps") or 0
-  if smelt.settings.show_tps and tps > 0 then
-    items[#items + 1] = {
-      text = string.format("%.1f tok/s", tps),
-      style = { fg = "Comment" },
-      priority = 4,
-      separated = true,
-    }
-  end
+  if not smelt.settings.show_tps or tps <= 0 then return nil end
+  return {
+    text = string.format("%.1f tok/s", tps),
+    style = { fg = "Comment" },
+    priority = 4,
+    separated = true,
+  }
+end)
 
-  -- Right-strip indicators.
-  if signal("permission_pending") then
-    items[#items + 1] = {
-      text = "permission pending",
-      style = { fg = "SmeltAccent", bold = true },
-      priority = 2,
-      separated = true,
-    }
-  end
+define("permission", function()
+  if not signal("permission_pending") then return nil end
+  return {
+    text = "permission pending",
+    style = { fg = "SmeltAccent", bold = true },
+    priority = 2,
+    separated = true,
+  }
+end)
 
+define("keymap", function()
   local keymap_pending = signal("keymap_pending")
-  if keymap_pending and keymap_pending ~= "" then
-    items[#items + 1] = {
-      text = "key " .. keymap_pending,
-      style = { fg = "SmeltAccent", bold = true },
-      priority = 2,
-      separated = true,
-    }
-  end
+  if not keymap_pending or keymap_pending == "" then return nil end
+  return {
+    text = "key " .. keymap_pending,
+    style = { fg = "SmeltAccent", bold = true },
+    priority = 2,
+    separated = true,
+  }
+end)
 
+define("procs", function()
   local procs = signal("running_procs") or 0
-  if procs > 0 then
-    items[#items + 1] = {
-      text = procs == 1 and "1 proc" or (procs .. " procs"),
-      style = { fg = "SmeltProcess", italic = false },
-      priority = 2,
-      separated = true,
-    }
-  end
+  if procs <= 0 then return nil end
+  return {
+    text = procs == 1 and "1 proc" or (procs .. " procs"),
+    style = { fg = "SmeltProcess", italic = false },
+    priority = 2,
+    separated = true,
+  }
+end)
 
+define("worktree", function()
   local cwd_worktree_path = signal("cwd_worktree_path")
-  if signal("cwd_managed_worktree") and cwd_worktree_path and cwd_worktree_path ~= "" then
-    items[#items + 1] = {
-      text = cwd_worktree_path,
-      style = { fg = "Comment" },
-      priority = 7,
-      separated = true,
-      truncatable = true,
-      truncate = "middle",
-    }
+  if not signal("cwd_managed_worktree") or not cwd_worktree_path or cwd_worktree_path == "" then
+    return nil
   end
+  return {
+    text = cwd_worktree_path,
+    style = { fg = "Comment" },
+    priority = 7,
+    separated = true,
+    truncatable = true,
+    truncate = "middle",
+  }
+end)
 
+define("vim_pending", function()
   local vim_pending = signal("vim_pending_input")
-  if vim_pending and vim_pending ~= "" then
-    items[#items + 1] = {
-      text = vim_pending,
-      priority = 2,
-      align_right = true,
-    }
-  end
+  if not vim_pending or vim_pending == "" then return nil end
+  return {
+    text = vim_pending,
+    priority = 2,
+    align_right = true,
+  }
+end)
 
+define("cursor", function()
   local pos = signal("cursor_pos")
+  if not pos or not pos.line or pos.line <= 0 then return nil end
   local viewport = signal("viewport_pos")
-  if pos and pos.line and pos.line > 0 then
-    local scroll_pct = pos.scroll_pct or 0
-    if smelt.focus() == "transcript" and viewport and viewport.scroll_pct then
-      scroll_pct = viewport.scroll_pct
-    end
-    items[#items + 1] = {
-      text = string.format(
-        "%d:%d %d%%",
-        pos.line,
-        pos.col or 1,
-        scroll_pct
-      ),
-      style = { fg = "Comment" },
-      priority = 3,
-      align_right = true,
-    }
+  local scroll_pct = pos.scroll_pct or 0
+  if smelt.focus() == "transcript" and viewport and viewport.scroll_pct then
+    scroll_pct = viewport.scroll_pct
   end
+  return {
+    text = string.format("%d:%d %d%%", pos.line, pos.col or 1, scroll_pct),
+    style = { fg = "Comment" },
+    priority = 3,
+    align_right = true,
+  }
+end)
 
-  return items
-end
-
---- The built-in `core` source, so a replacement can wrap it instead of
---- dropping it.
+--- The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
+--- sources: `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`,
+--- `procs`, `worktree`, `vim_pending` and `cursor`. Items with `row = 2` or
+--- more make it taller.
 ---@tier ui_host
----@type fun(name: string): (fun(ctx: { width: integer }): smelt.bar.Item[]?)?
-function smelt.statusline.builtin(name)
-  if name == "core" then return core_compose end
-  return nil
-end
-
-smelt.statusline.add("core", core_compose)
-
--- ── renderer ────────────────────────────────────────────────────────
-
-local function render(win)
-  local buf = win:buf()
-  if not buf then return end
-  bar.write_rows(buf, bar.rows_for(line, win:content_width() or 80), NS)
-end
-
--- ── window allocation ───────────────────────────────────────────────
-
-M.win = smelt.win.new(smelt.buf.new({ name = "smelt.statusline" }), {
+---@type smelt.bar.Bar
+smelt.statusline = bar.new({
   name = "smelt.statusline",
-  scrollbar = false,
-  surface = "selectable_text",
-  region = "status",
+  layout = "strip",
+  bg = "SmeltStatusBg",
+  separator_style = { fg = "SmeltSeparator", dim = true },
+  sources = sources,
 })
 
-line.win = M.win
-if M.win then
-  M.win:set_renderer(render)
-  if type(smelt.signal.subscribe) == "function" then
-    for _, name in ipairs({
-      "agent_mode",
-      "cursor_pos",
-      "cwd_managed_worktree",
-      "cwd_worktree_path",
-      "input_epoch",
-      "keymap_pending",
-      "permission_pending",
-      "running_procs",
-      "session_epoch",
-      "task_label",
-      "tps",
-      "viewport_pos",
-      "vim_mode",
-      "vim_pending_input",
-    }) do
-      renderer_subscriptions[#renderer_subscriptions + 1] = smelt.signal.subscribe(name, M.invalidate)
-    end
-  end
+local function invalidate() smelt.statusline:invalidate() end
+for _, name in ipairs({
+  "agent_mode",
+  "cursor_pos",
+  "cwd_managed_worktree",
+  "cwd_worktree_path",
+  "input_epoch",
+  "keymap_pending",
+  "permission_pending",
+  "running_procs",
+  "session_epoch",
+  "task_label",
+  "tps",
+  "viewport_pos",
+  "vim_mode",
+  "vim_pending_input",
+}) do
+  smelt.signal.subscribe(name, invalidate)
 end
 
-return M
+return smelt.statusline

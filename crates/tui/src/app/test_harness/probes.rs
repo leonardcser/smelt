@@ -44,17 +44,17 @@ impl TestApp {
     pub fn install_prompt_cursor_trap(&mut self, variant: u8) {
         const SNIPPETS: &[&str] = &[
             r#"
-            smelt.prompt.win():on("text_changed", function()
+            smelt.prompt.win:on("text_changed", function()
                 smelt.prompt.cursor(0)
             end)
             "#,
             r#"
-            smelt.prompt.win():on("text_changed", function()
-                smelt.prompt.win():cursor(0)
+            smelt.prompt.win:on("text_changed", function()
+                smelt.prompt.win:cursor(0)
             end)
             "#,
             r#"
-            smelt.prompt.win():on("text_changed", function()
+            smelt.prompt.win:on("text_changed", function()
                 smelt.prompt.cursor(999999)
             end)
             "#,

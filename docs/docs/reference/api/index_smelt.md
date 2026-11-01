@@ -21,6 +21,19 @@ fun(): string
 
 Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 
+## `smelt.headerline`
+
+```lua
+smelt.bar.Bar
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+The strip above the transcript, a `smelt.bar.Bar`. It takes rows only
+while some source shows an item.
+
 ## `smelt.ns`
 
 ```lua
@@ -97,4 +110,19 @@ Types: [`smelt.Reg`](types.md#smeltreg)
 **Availability:** Everywhere, including headless mode.
 
 Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task. Any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds. Spawns inherit the current task lifecycle; top-level spawns are app-scoped and survive agent-turn interrupts.
+
+## `smelt.statusline`
+
+```lua
+smelt.bar.Bar
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+The strip at the bottom of the screen, a `smelt.bar.Bar`. Built-in
+sources: `slug`, `vim_mode`, `agent_mode`, `tps`, `permission`, `keymap`,
+`procs`, `worktree`, `vim_pending` and `cursor`. Items with `row = 2` or
+more make it taller.
 

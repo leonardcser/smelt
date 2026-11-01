@@ -131,28 +131,8 @@ impl LuaRuntime {
             ApiClassification::Supported,
         );
         record_module_doc(
-            "smelt.statusline",
-            "The statusline at the bottom of the screen. Register named sources with `smelt.statusline.add(name, handler)`; each repaint calls every handler and lays out the returned items by priority, one row per item `row`. `set_view` swaps the whole statusline for any layout node, such as a paint. `add` returns a `Reg` that removes the source. UiHost-only.",
-            ApiClassification::Supported,
-        );
-        record_module_doc(
             "smelt.bar",
-            "The item shape shared by smelt's bars: the statusline and the rules above and below the prompt. A bar is a set of named sources; each repaint calls every source and lays the returned items out by priority. The fields are documented under `smelt.bar.Item` in Types.",
-            ApiClassification::Supported,
-        );
-        record_module_doc(
-            "smelt.prompt_bar.top",
-            "The rule above the prompt, which holds the working indicator, model, tokens and cost. Register named sources with `smelt.prompt_bar.top.add(name, handler)`, or replace a built-in one by reusing its name. `add` returns a `Reg` that removes the source. UiHost-only.",
-            ApiClassification::Supported,
-        );
-        record_module_doc(
-            "smelt.prompt_bar.bottom",
-            "The rule below the prompt, empty by default. Register named sources with `smelt.prompt_bar.bottom.add(name, handler)`. `add` returns a `Reg` that removes the source. UiHost-only.",
-            ApiClassification::Supported,
-        );
-        record_module_doc(
-            "smelt.headerline",
-            "Optional rows above the transcript, built like the statusline. Register named sources with `smelt.headerline.add(name, handler)`; each returns `smelt.bar.Item`s, and the header takes rows only while some source shows an item. `add` returns a `Reg` that removes the source. UiHost-only.",
+            "Bars: rows of items from named sources, laid out as a filled strip or a rule. `smelt.bar.new(opts)` returns a `smelt.bar.Bar` that owns its window; place it in a layout with `bar:node()`. `smelt.statusline`, `smelt.headerline`, `smelt.prompt.aux`, `smelt.prompt.top` and `smelt.prompt.bottom` are bars. Items are `smelt.bar.Item`, a bar's look is `smelt.bar.Config`, and the bar itself is `smelt.bar.Bar`; all are documented in Types. UiHost-only.",
             ApiClassification::Supported,
         );
         record_module_doc(

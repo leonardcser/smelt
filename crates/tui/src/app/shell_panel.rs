@@ -38,7 +38,6 @@ impl TuiApp {
         let Some(win) = self.ui.win_open_split(
             buf,
             crate::smelt_edit::SplitConfig {
-                region: "shell_output".into(),
                 gutters: crate::smelt_edit::Gutters {
                     pad_left: 1,
                     pad_right: 1,

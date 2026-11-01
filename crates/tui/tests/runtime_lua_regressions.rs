@@ -1,7 +1,7 @@
 const DIALOG_LUA: &str = include_str!("../../../runtime/lua/smelt/dialog.lua");
 const PS_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/ps.lua");
 const BAR_LUA: &str = include_str!("../../../runtime/lua/smelt/_bar.lua");
-const PROMPT_BAR_LUA: &str = include_str!("../../../runtime/lua/smelt/prompt_bar.lua");
+const PROMPT_CHROME_LUA: &str = include_str!("../../../runtime/lua/smelt/prompt_chrome.lua");
 const COPY_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/copy.lua");
 const LABEL_VALUE_LUA: &str = include_str!("../../../runtime/lua/smelt/label_value.lua");
 const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua");
@@ -145,8 +145,8 @@ fn render_usage(provider: &str, stubs: &str) -> (mlua::Lua, String) {
         package.preload["smelt.commands.usage.cache"] = function()
           return assert(load(__USAGE_CACHE_LUA, "smelt/commands/usage/cache.lua"))()
         end
-        package.loaded["smelt.bar"] = {{
-          progress = function()
+        package.loaded["smelt.progress"] = {{
+          bar = function()
             return {{ {{ text = "[bar]" }} }}
           end,
         }}
@@ -942,15 +942,13 @@ fn ps_details_dialog_uses_list_dialog_height() {
     assert!(!PS_LUA.contains("max_height = \"70%\""));
 }
 
-fn prompt_bar_lua_fixture() -> mlua::Lua {
+fn prompt_chrome_lua_fixture() -> mlua::Lua {
     let lua = mlua::Lua::new();
     install_explicit_api_fixtures(&lua);
     lua.load(
         r#"
         local next_buf_id = 0
         smelt = {
-          __resize = false,
-          __resize_chrome = "",
           __wins = {},
           ns = function(name) return name end,
           settings = { show_tokens = true, show_cost = true },
@@ -968,8 +966,6 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           reasoning = { current = function() return "off" end },
           signal = {
             get = function(name)
-                if name == "prompt_resize_active" then return smelt.__resize end
-                if name == "prompt_resize_chrome" then return smelt.__resize_chrome end
                 if name == "work_state" then return "working" end
                 if name == "work_label" then return "run" end
                 if name == "work_elapsed_ms" then return 0 end
@@ -978,8 +974,11 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
                 if name == "notification_visible" then return false end
                 return nil
             end,
-            subscribe = function() end,
+            subscribe = function(name, fn)
+              smelt.__subscribers[name] = fn
+            end,
           },
+          __subscribers = {},
           text = {
             width = function(text)
               local n = 0
@@ -995,9 +994,12 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
               local suffix = (opts and opts.suffix) or "…"
               if width <= 0 then return "" end
               local out = {}
-              for i = 1, math.max(width - 1, 0) do out[#out + 1] = chars[i] end
+              for i = 1, math.max(width - utf8.len(suffix), 0) do out[#out + 1] = chars[i] end
               out[#out + 1] = suffix
               return table.concat(out)
+            end,
+            fit = function(text, width, opts)
+              return smelt.text.truncate_cells(text, width, opts)
             end,
             format_tokens = function(value) return tostring(value) end,
             format_cost = function(value) return string.format("$%.2f", value) end,
@@ -1006,7 +1008,16 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           notify = { error = function(msg) table.insert(_G.__notified_errors, msg) end },
           reg = { new = function(fn) return { remove = fn } end },
           events = { on = function() end },
+          terminal = { size = function() return { width = 60, height = 24 } end },
+          ui = {
+            layout = {
+              invalidate = function() end,
+              leaf = function(win) return { leaf = win } end,
+              vbox = function(children) return { vbox = children } end,
+            },
+          },
           prompt = {
+            win = { on = function() end },
             queued_rows = function() return {} end,
             queued = function() return {} end,
             has_stash = function() return false end,
@@ -1070,17 +1081,19 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
         .set("smelt._bar", bar_loader)
         .expect("install bar preload");
 
-    lua.load(PROMPT_BAR_LUA).exec().expect("load prompt bar");
+    lua.load(PROMPT_CHROME_LUA)
+        .exec()
+        .expect("load prompt chrome");
     lua
 }
 
 #[test]
-fn prompt_bar_queued_previews_are_single_line_before_truncation() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_queue_previews_are_single_line_before_truncation() {
+    let lua = prompt_chrome_lua_fixture();
     lua.load(
         r#"
-        local top = assert(smelt.__wins["smelt.prompt_bar.top"])
-        top.rect = function() return { height = 2 } end
+        local queue = assert(smelt.__wins["smelt.prompt.queue"])
+        queue.rect = function() return { height = 1 } end
         for _, case in ipairs({
           { "first\nsecond\nthird", "first second third" },
           { "first\r\n\tsecond\n\n  third", "first second third" },
@@ -1091,17 +1104,21 @@ fn prompt_bar_queued_previews_are_single_line_before_truncation() {
           for _, kind in ipairs({ "turn", "request" }) do
             local row = { text = case[1], kind = kind }
             smelt.prompt.queued_rows = function() return { row } end
+            smelt.prompt.queue:invalidate()
             for width = 1, 60 do
-              top.content_width = function() return width end
-              top:renderer()
-              local lines = top:buf()._lines
-              assert(#lines == 2)
-              local prefix = kind == "request" and "  » " or "  › "
-              local expected = require("smelt._bar").truncate_right_padded(prefix .. case[2], width)
-              assert(lines[1] == expected, lines[1])
+              queue.content_width = function() return width end
+              queue:renderer()
+              local lines = queue:buf()._lines
+              assert(#lines == 1)
+              local full = (kind == "request" and "» " or "› ") .. case[2]
+              local expected = full
+              if smelt.text.width(full) > width then
+                expected = smelt.text.truncate_cells(full, width, { suffix = "…" })
+              end
+              expected = expected .. string.rep(" ", width - smelt.text.width(expected))
+              assert(lines[1] == expected, lines[1] .. " vs " .. expected)
               assert(not lines[1]:find("[\r\n\t]"))
-              assert(smelt.text.width(lines[1]) <= width)
-              for _, mark in ipairs(top:buf()._marks) do
+              for _, mark in ipairs(queue:buf()._marks) do
                 assert(mark.start_col >= 0 and mark.end_col <= #lines[mark.row])
               end
               assert(row.text == case[1])
@@ -1115,21 +1132,26 @@ fn prompt_bar_queued_previews_are_single_line_before_truncation() {
 }
 
 #[test]
-fn prompt_bar_keeps_indicator_in_single_row_with_stash() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_queue_keeps_the_stash_marker_when_rows_run_short() {
+    let lua = prompt_chrome_lua_fixture();
     lua.load(
         r#"
         smelt.prompt.has_stash = function() return true end
-        smelt.prompt.queued_rows = function() return {{ text = "queued" }} end
-        local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+        smelt.prompt.queued_rows = function() return {{ text = "first" }, { text = "second" }} end
+        smelt.prompt.queue:invalidate()
+        local queue = assert(smelt.__wins["smelt.prompt.queue"])
+        local expected = {
+          { "Stashed" },
+          { "+2 more", "Stashed" },
+          { "first", "second", "Stashed" },
+        }
         for height = 1, 3 do
-          top.rect = function() return { height = height } end
-          top:renderer()
-          local lines = top:buf()._lines
-          assert(#lines == height)
-          assert(lines[height]:find("model", 1, true), lines[height])
-          if height > 1 then
-            assert(lines[height - 1]:find("Stashed", 1, true))
+          queue.rect = function() return { height = height } end
+          queue:renderer()
+          local lines = queue:buf()._lines
+          assert(#lines == height, #lines)
+          for i, want in ipairs(expected[height]) do
+            assert(lines[i]:find(want, 1, true), height .. ": " .. table.concat(lines, "|"))
           end
         end
         "#,
@@ -1139,8 +1161,41 @@ fn prompt_bar_keeps_indicator_in_single_row_with_stash() {
 }
 
 #[test]
-fn prompt_bar_renders_fast_mode_marker_before_model() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_tip_hides_while_stashed_even_when_the_queue_drops_the_marker() {
+    let lua = prompt_chrome_lua_fixture();
+    lua.load(
+        r#"
+        local tips = package.loaded["smelt.tips"]
+        tips.enabled = function() return true end
+        tips.prompt_tip = function() return { key = "ctrl+s", text = "stash the prompt" } end
+        local get = smelt.signal.get
+        smelt.signal.get = function(name)
+          if name == "work_state" then return "idle" end
+          return get(name)
+        end
+        smelt.prompt.queue:remove("stash")
+        local aux = assert(smelt.__wins["smelt.prompt.aux"])
+        aux.rect = function() return { height = 1 } end
+        aux.content_width = function() return 60 end
+
+        local function shown()
+          smelt.prompt.queue:invalidate()
+          smelt.prompt.aux:invalidate()
+          aux:renderer()
+          return aux:buf()._lines[1]
+        end
+        assert(shown():find("stash the prompt", 1, true), shown())
+        smelt.prompt.has_stash = function() return true end
+        assert(not shown():find("tip", 1, true), shown())
+        "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
+fn prompt_top_renders_fast_mode_marker_before_model() {
+    let lua = prompt_chrome_lua_fixture();
 
     let (text, color, bold, line): (String, Option<String>, Option<bool>, String) = lua
         .load(
@@ -1148,7 +1203,7 @@ fn prompt_bar_renders_fast_mode_marker_before_model() {
             smelt.session.status = function()
               return { model = "model", fast = { supported = true, active = true } }
             end
-            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            local top = assert(smelt.__wins["smelt.prompt.top"])
             top:renderer()
             local buf = top:buf()
             local line = buf._lines[1] or ""
@@ -1170,16 +1225,16 @@ fn prompt_bar_renders_fast_mode_marker_before_model() {
 }
 
 #[test]
-fn prompt_bar_top_source_replaces_a_builtin_in_place() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_top_source_replaces_a_builtin_in_place() {
+    let lua = prompt_chrome_lua_fixture();
     let (before, after): (String, String) = lua
         .load(
             r#"
-            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            local top = assert(smelt.__wins["smelt.prompt.top"])
             top:renderer()
             local before = top:buf()._lines[1]
 
-            smelt.prompt_bar.top.add("model", function()
+            smelt.prompt.top:add("model", function()
               return { text = "custom", align_right = true, separated = true, priority = 3 }
             end)
             top:renderer()
@@ -1196,14 +1251,14 @@ fn prompt_bar_top_source_replaces_a_builtin_in_place() {
 }
 
 #[test]
-fn prompt_bar_top_source_removal_drops_only_that_source() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_top_source_removal_drops_only_that_source() {
+    let lua = prompt_chrome_lua_fixture();
     let line: String = lua
         .load(
             r#"
-            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
-            smelt.prompt_bar.top.remove("cost")
-            smelt.prompt_bar.top.remove("indicator")
+            local top = assert(smelt.__wins["smelt.prompt.top"])
+            smelt.prompt.top:remove("cost")
+            smelt.prompt.top:remove("indicator")
             top:renderer()
             return top:buf()._lines[1]
             "#,
@@ -1217,16 +1272,16 @@ fn prompt_bar_top_source_removal_drops_only_that_source() {
 }
 
 #[test]
-fn prompt_bar_bottom_renders_plugin_sources_into_the_rule() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_bottom_renders_plugin_sources_into_the_rule() {
+    let lua = prompt_chrome_lua_fixture();
     let (plain, line): (String, String) = lua
         .load(
             r#"
-            local bottom = assert(smelt.__wins["smelt.prompt_bar.bottom"])
+            local bottom = assert(smelt.__wins["smelt.prompt.bottom"])
             bottom:renderer()
             local plain = bottom:buf()._lines[1]
 
-            local reg = smelt.prompt_bar.bottom.add("hint", function()
+            local reg = smelt.prompt.bottom:add("hint", function()
               return {
                 { text = "left note", priority = 1 },
                 { text = "right note", align_right = true, priority = 2 },
@@ -1249,21 +1304,21 @@ fn prompt_bar_bottom_renders_plugin_sources_into_the_rule() {
 }
 
 #[test]
-fn prompt_bar_builtin_sources_are_reachable_by_name() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_top_builtin_sources_are_reachable_by_name() {
+    let lua = prompt_chrome_lua_fixture();
     let (indicator, missing, wrapped): (bool, bool, String) = lua
         .load(
             r#"
-            local indicator = smelt.prompt_bar.top.builtin("indicator")
-            smelt.prompt_bar.top.add("indicator", function()
+            local indicator = smelt.prompt.top:builtin("indicator")
+            smelt.prompt.top:add("indicator", function()
               local items = indicator()
               table.insert(items, { text = "wrapped", priority = 1 })
               return items
             end)
-            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            local top = assert(smelt.__wins["smelt.prompt.top"])
             top:renderer()
             return type(indicator) == "function",
-              smelt.prompt_bar.top.builtin("nope") == nil,
+              smelt.prompt.top:builtin("nope") == nil,
               top:buf()._lines[1]
             "#,
         )
@@ -1276,19 +1331,19 @@ fn prompt_bar_builtin_sources_are_reachable_by_name() {
 }
 
 #[test]
-fn prompt_bar_skips_failing_sources_and_accepts_a_single_item() {
-    let lua = prompt_bar_lua_fixture();
+fn prompt_top_skips_failing_sources_and_accepts_a_single_item() {
+    let lua = prompt_chrome_lua_fixture();
     let line: String = lua
         .load(
             r#"
-            smelt.prompt_bar.top.add("broken", function() error("boom") end)
-            smelt.prompt_bar.top.add("single", function()
+            smelt.prompt.top:add("broken", function() error("boom") end)
+            smelt.prompt.top:add("single", function()
               return { text = "solo", align_right = true, priority = 3 }
             end)
-            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            local top = assert(smelt.__wins["smelt.prompt.top"])
             _G.__notified_errors = {}
             top:renderer()
-            smelt.prompt_bar.top.invalidate()
+            smelt.prompt.top:invalidate()
             top:renderer()
             assert(#_G.__notified_errors == 2, "the source is notified on each failing repaint")
             assert(_G.__notified_errors[1]:find("source `broken`: .*boom"), _G.__notified_errors[1])
@@ -1304,7 +1359,7 @@ fn prompt_bar_skips_failing_sources_and_accepts_a_single_item() {
 
 #[test]
 fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
-    let lua = prompt_bar_lua_fixture();
+    let lua = prompt_chrome_lua_fixture();
 
     let (inactive_dots, inactive_bar_dots, active_dots, active_resize_dots, active_dashes, bottom_resize_dashes, bottom_bar_dashes): (
         i64,
@@ -1317,8 +1372,8 @@ fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
     ) = lua
         .load(
             r#"
-            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
-            local bottom = assert(smelt.__wins["smelt.prompt_bar.bottom"])
+            local top = assert(smelt.__wins["smelt.prompt.top"])
+            local bottom = assert(smelt.__wins["smelt.prompt.bottom"])
 
             local function marked_text(buf, mark)
               return string.sub(buf._lines[mark.row] or "", mark.start_col + 1, mark.end_col)
@@ -1337,8 +1392,7 @@ fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
               return text == " · " and mark.fg == "SmeltSeparator" and mark.hl_group == nil
             end)
 
-            smelt.__resize = true
-            smelt.__resize_chrome = "top"
+            smelt.__subscribers.prompt_resize_active(true)
             top:renderer()
             bottom:renderer()
             local active_dots = count_marks(top:buf(), function(_, text) return text == " · " end)
@@ -1367,55 +1421,6 @@ fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
     assert!(active_dashes >= 2);
     assert_eq!(bottom_resize_dashes, 0);
     assert_eq!(bottom_bar_dashes, 1);
-}
-
-#[test]
-fn prompt_resize_highlight_supports_bottom_and_both_chrome() {
-    let lua = prompt_bar_lua_fixture();
-
-    let (bottom_only_top, bottom_only_bottom, both_top, both_bottom): (i64, i64, i64, i64) = lua
-        .load(
-            r#"
-            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
-            local bottom = assert(smelt.__wins["smelt.prompt_bar.bottom"])
-
-            local function marked_text(buf, mark)
-              return string.sub(buf._lines[mark.row] or "", mark.start_col + 1, mark.end_col)
-            end
-            local function count_resize_dashes(buf)
-              local n = 0
-              for _, mark in ipairs(buf._marks) do
-                local text = marked_text(buf, mark)
-                if text:find("─", 1, true) ~= nil and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil then
-                  n = n + 1
-                end
-              end
-              return n
-            end
-
-            smelt.__resize = true
-            smelt.__resize_chrome = "bottom"
-            top:renderer()
-            bottom:renderer()
-            local bottom_only_top = count_resize_dashes(top:buf())
-            local bottom_only_bottom = count_resize_dashes(bottom:buf())
-
-            smelt.__resize_chrome = "both"
-            top:renderer()
-            bottom:renderer()
-            local both_top = count_resize_dashes(top:buf())
-            local both_bottom = count_resize_dashes(bottom:buf())
-
-            return bottom_only_top, bottom_only_bottom, both_top, both_bottom
-            "#,
-        )
-        .eval()
-        .expect("render prompt resize variants");
-
-    assert_eq!(bottom_only_top, 0);
-    assert_eq!(bottom_only_bottom, 1);
-    assert!(both_top >= 2);
-    assert_eq!(both_bottom, 1);
 }
 
 #[test]
@@ -1474,17 +1479,17 @@ fn load_banner_plugin(lua: &mlua::Lua, ready_ctx: &str) {
           },
           win = {
             new = function() return {} end,
-            transcript = function()
-              return {
-                rect = function() return { height = 100 } end,
-                on = function() end,
-                decorate = function() return { close = function() end } end,
-              }
-            end,
           },
           overlay = { new = function() return { close = function() end } end },
           ns = function(name) return name end,
-          transcript = { is_empty = function() return true end },
+          transcript = {
+            is_empty = function() return true end,
+            win = {
+              rect = function() return { height = 100 } end,
+              on = function() end,
+              decorate = function() return { close = function() end } end,
+            },
+          },
           events = { on = function() end },
           signal = __smelt_signal_stub({}, {}),
           lifecycle = {

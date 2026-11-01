@@ -85,9 +85,9 @@ pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, BlockMotion, CursorScreenRowSelection,
     CursorShape, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
     DocumentViewExecutor, DocumentViewScreenRowRestore, DocumentViewState, DrawContext, EventCtx,
-    Gutters, MouseCtx, RowHighlight, RowHighlightMode, RowHighlightRows, RowHighlightWidth,
-    RowYankFlash, ScrollTo, ScrollbarState, SplitConfig, VerticalScroll, ViewportMetrics, Window,
-    WindowSurface, WindowViewport,
+    Gutters, MouseCtx, PadPrefix, RowHighlight, RowHighlightMode, RowHighlightRows,
+    RowHighlightWidth, RowYankFlash, ScrollTo, ScrollbarState, SplitConfig, VerticalScroll,
+    ViewportMetrics, Window, WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -4386,7 +4386,6 @@ mod tests {
             win_id,
             buf,
             SplitConfig {
-                region: format!("test:{}", win_id.0),
                 gutters: crate::Gutters::default(),
             },
         ));
@@ -4406,7 +4405,6 @@ mod tests {
             win_id,
             buf,
             SplitConfig {
-                region: format!("test:{}", win_id.0),
                 gutters: crate::Gutters::default(),
             },
         ));
@@ -4416,7 +4414,6 @@ mod tests {
         ui.win_open_split(
             buf,
             SplitConfig {
-                region: "test".into(),
                 gutters: crate::Gutters::default(),
             },
         )
@@ -4590,7 +4587,6 @@ mod tests {
             second,
             buffer,
             SplitConfig {
-                region: "test:43".into(),
                 gutters: crate::Gutters::default(),
             },
         ));
@@ -4906,7 +4902,6 @@ mod tests {
             win,
             buf,
             SplitConfig {
-                region: "fit-list".into(),
                 gutters: crate::Gutters::default(),
             },
         ));
@@ -5017,7 +5012,6 @@ mod tests {
             target,
             buf,
             SplitConfig {
-                region: "anchor".into(),
                 gutters: crate::Gutters::default(),
             },
         ));
@@ -5052,7 +5046,6 @@ mod tests {
             target,
             buf,
             SplitConfig {
-                region: "anchor".into(),
                 gutters: crate::Gutters::default(),
             },
         ));
@@ -5770,7 +5763,6 @@ mod tests {
             leaf,
             buf,
             SplitConfig {
-                region: "test".into(),
                 gutters: Default::default(),
             }
         ));
@@ -5827,7 +5819,6 @@ mod tests {
             leaf,
             buf,
             SplitConfig {
-                region: "test".into(),
                 gutters: Default::default(),
             }
         ));
@@ -6098,7 +6089,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "t".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6116,7 +6106,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "t".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6135,7 +6124,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6156,7 +6144,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6178,7 +6165,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6218,7 +6204,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6241,7 +6226,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6296,7 +6280,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "t".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6338,7 +6321,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "list".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6655,7 +6637,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "a".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6664,7 +6645,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "b".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6702,7 +6682,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "r".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6754,7 +6733,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6794,7 +6772,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -6984,7 +6961,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7033,7 +7009,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7071,7 +7046,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7107,7 +7081,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7142,7 +7115,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7179,7 +7151,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "test".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7230,7 +7201,6 @@ mod tests {
                 .win_open_split(
                     buf,
                     SplitConfig {
-                        region: "uihost-test".into(),
                         gutters: Gutters::default(),
                     },
                 )
@@ -7315,7 +7285,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "per-pane-default".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7389,7 +7358,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7729,7 +7697,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7794,7 +7761,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7859,7 +7825,6 @@ mod tests {
             .win_open_split(
                 transcript_buf,
                 SplitConfig {
-                    region: "transcript".into(),
                     gutters: Gutters {
                         scrollbar: false,
                         ..Default::default()
@@ -7871,7 +7836,6 @@ mod tests {
             .win_open_split(
                 prompt_buf,
                 SplitConfig {
-                    region: "prompt".into(),
                     gutters: Gutters {
                         scrollbar: false,
                         ..Default::default()
@@ -7917,7 +7881,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -7978,7 +7941,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -8009,7 +7971,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters::default(),
                 },
             )
@@ -8087,7 +8048,6 @@ mod tests {
             .win_open_split(
                 buf,
                 SplitConfig {
-                    region: "p".into(),
                     gutters: Gutters {
                         scrollbar: false,
                         ..Default::default()

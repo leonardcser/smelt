@@ -46,8 +46,6 @@ local M = {}
 
 smelt.dialog = smelt.dialog or {}
 
-local REGION = "dialog"
-
 local function report_callback_error(event, err)
   local msg = tostring(err)
   smelt.log.error("dialog.callback_failed", { event = event, error = msg })
@@ -167,7 +165,6 @@ local GUTTER = 1
 function smelt.dialog.input(placeholder, opts)
   opts = opts or {}
   local input = smelt.input.new({
-    region = REGION,
     placeholder = placeholder or "",
     pad_left = opts.pad_left or GUTTER,
     pad_right = opts.pad_right or GUTTER,
@@ -398,7 +395,6 @@ function smelt.dialog.menu(items, opts)
   render_current(initial_wrap_width)
 
   local leaf = smelt.win.new(buf, {
-    region         = REGION,
     surface       = "list",
     pad_left       = GUTTER,
     pad_right      = GUTTER,
@@ -593,7 +589,7 @@ function smelt.dialog.list(buf, opts)
   opts = opts or {}
   local surface = opts.surface or "list"
   local leaf = smelt.win.new(buf, {
-    region = REGION, surface = surface,
+    surface = surface,
     pad_left = GUTTER, pad_right = GUTTER, scrollbar = false,
     kind = "list", wrap = false,
     initial_cursor = opts.selected or 0,
@@ -620,7 +616,7 @@ function smelt.dialog.markdown(text)
   local buf = smelt.buf.new({ mode = "markdown" })
   buf:source(text or "")
   local leaf = smelt.win.new(buf, {
-    region = REGION, surface = "selectable_text",
+    surface = "selectable_text",
     pad_left = GUTTER, pad_right = GUTTER,
   })
   return leaf, buf
@@ -651,7 +647,6 @@ function smelt.dialog.content(opts)
   -- show pre-styled content (e.g. via `buf:styled(...)`) at its
   -- intrinsic width without soft-wrapping the row.
   local leaf = smelt.win.new(buf, {
-    region      = REGION,
     surface     = surface,
     vim_enabled = (opts.interactive and smelt.settings.vim) and true or false,
     pad_left    = opts.pad_left or GUTTER,

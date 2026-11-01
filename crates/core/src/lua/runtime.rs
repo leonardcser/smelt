@@ -133,8 +133,9 @@ pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
     BootstrapChunk::ui("dialogs/confirm.lua"),
     BootstrapChunk::ui("_bar.lua"),
     BootstrapChunk::ui("tips.lua"),
-    BootstrapChunk::ui("prompt_bar.lua"),
+    BootstrapChunk::ui("prompt_chrome.lua"),
     BootstrapChunk::ui("statusline.lua"),
+    BootstrapChunk::ui("headerline.lua"),
     BootstrapChunk::ui("layout.lua"),
     BootstrapChunk::host("modes.lua"),
 ];
@@ -4239,13 +4240,20 @@ fn load_bootstrap_group_with_roots(
                 .unwrap_or_else(|error| error.into_inner())
                 .push(path);
         }
-        lua.load(&*source.chunk)
+        let module: mlua::Value = lua
+            .load(&*source.chunk)
             .set_name(source.name)
             .set_environment(crate::lua::module::bootstrap_chunk_environment(
                 lua,
                 source.trusted,
             )?)
-            .exec()?;
+            .eval()?;
+        // A chunk that returns its module is what `require` yields later, so
+        // the module body runs once.
+        if !module.is_nil() {
+            let loaded: mlua::Table = lua.globals().get::<mlua::Table>("package")?.get("loaded")?;
+            loaded.set(path_to_module(rel), module)?;
+        }
     }
     Ok(())
 }

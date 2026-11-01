@@ -3036,7 +3036,7 @@ fn lua_buf_win_overlay_contracts_are_available() {
             assert(type(win:scroll()) == "table")
             assert(win:scroll(0) == win)
             assert(win:scroll("tail") == win)
-            local key_win = smelt.prompt.win()
+            local key_win = smelt.prompt.win
             local win_reg = key_win:key("x", function() error("removed keymap fired") end)
             assert(win_reg:remove() == true)
             _G.coverage_replacement_hits = 0
@@ -3096,7 +3096,7 @@ fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
             assert(smelt.prompt.cursor(999) == #"aéz", "prompt cursor clamps")
             assert(smelt.prompt.replace_range(1, 3, "X") == 2, "prompt replace cursor")
             assert(smelt.prompt.text() == "aXz", "prompt replace snaps utf8 range")
-            assert(type(smelt.prompt.win()) == "userdata", "prompt win")
+            assert(type(smelt.prompt.win) == "userdata", "prompt win")
             assert(type(smelt.prompt.queued()) == "table", "prompt queued")
             assert(smelt.prompt.has_stash() == false, "prompt stash")
 
@@ -3158,9 +3158,9 @@ fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
         r#"
             local size = smelt.ui.size()
             assert(type(size.width) == "number" and type(size.height) == "number", "ui size")
-            assert(type(smelt.win.transcript()) == "userdata", "transcript win")
-            assert(type(smelt.win.TRANSCRIPT) == "userdata", "transcript constant")
-            assert(type(smelt.win.PROMPT) == "userdata", "prompt constant")
+            assert(type(smelt.transcript.win) == "userdata", "transcript win")
+            assert(type(smelt.transcript.win) == "userdata", "transcript constant")
+            assert(type(smelt.prompt.win) == "userdata", "prompt constant")
 
             local picker = smelt.picker.new({
                 title = "Coverage Picker",
@@ -3219,8 +3219,8 @@ fn lua_layout_is_applied_before_first_render() {
 
     app.run_lua_result(
         r#"
-            local top = require("smelt.prompt_bar").top_win:rect()
-            local transcript = smelt.win.transcript():rect()
+            local top = smelt.prompt.top.win:rect()
+            local transcript = smelt.transcript.win:rect()
             assert(top ~= nil, "prompt top bar has layout rect before first render")
             assert(transcript ~= nil, "transcript has layout rect before first render")
             assert(top.y > transcript.y, "top bar is below transcript")
@@ -3324,7 +3324,7 @@ fn win_rect_prefers_current_layout_after_resize_before_paint() {
 
     let lua = format!(
         r#"
-            local r = smelt.win.transcript():rect()
+            local r = smelt.transcript.win:rect()
             assert(r ~= nil, "transcript rect")
             assert(r.x == {x}, "x " .. tostring(r.x))
             assert(r.y == {y}, "y " .. tostring(r.y))
@@ -3344,7 +3344,7 @@ fn reload_clears_surviving_prompt_keymaps() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(
         r#"
-            smelt.prompt.win():key("left", function() end)
+            smelt.prompt.win:key("left", function() end)
             "#,
     ));
 

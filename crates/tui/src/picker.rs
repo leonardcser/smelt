@@ -114,7 +114,6 @@ pub(crate) fn open(
     let leaf = app.ui.win_open_split(
         buf,
         SplitConfig {
-            region: "picker_overlay".into(),
             gutters: Gutters {
                 scrollbar: false,
                 ..Gutters::default()
@@ -446,7 +445,7 @@ fn anchor_for(ui: &crate::smelt_edit::Ui, placement: PickerPlacement, height: u1
         // Anchor at the very bottom of the screen. The host has no
         // opinion about the Lua-allocated statusline; callers that want
         // the picker to clear it pass an explicit `Anchor::Win` against
-        // `require("smelt.statusline").win` from the Lua side instead
+        // `smelt.statusline.win` from the Lua side instead
         // of relying on a Rust-side reservation.
         PickerPlacement::ScreenBottom => Anchor::ScreenBottom { above_rows: 0 },
         PickerPlacement::CmdlineDocked { .. } => Anchor::ScreenBottom { above_rows: 1 },
@@ -602,7 +601,6 @@ mod tests {
             crate::app::TRANSCRIPT_WIN,
             tbuf,
             crate::smelt_edit::SplitConfig {
-                region: "transcript".into(),
                 gutters: crate::smelt_edit::Gutters::default(),
             },
         ));
@@ -611,7 +609,6 @@ mod tests {
             crate::app::PROMPT_WIN,
             pbuf,
             crate::smelt_edit::SplitConfig {
-                region: "prompt".into(),
                 gutters: crate::smelt_edit::Gutters {
                     pad_left: 1,
                     pad_right: 1,
@@ -753,7 +750,7 @@ mod tests {
 
     #[test]
     fn anchor_for_prompt_docked_falls_back_to_prompt_win_when_top_bar_missing() {
-        // Without the Lua-allocated top bar (no `smelt.prompt_bar.top`
+        // Without the Lua-allocated prompt chrome (no `smelt.prompt.top`
         // named window), the anchor falls back to anchoring against the
         // prompt input itself with `-height` offset. That matches the
         // cold-start case where the Lua composer hasn't run yet.

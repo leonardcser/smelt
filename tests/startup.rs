@@ -1499,7 +1499,7 @@ smelt.settings.show_prediction = false
 smelt.settings.vim = {vim}
 local submitted, cleared = false, false
 smelt.events.on("input_submit", function() submitted = true end)
-smelt.prompt.win():on("text_changed", function()
+smelt.prompt.win:on("text_changed", function()
   if submitted and smelt.prompt.text() == "" then cleared = true end
   if cleared and not smelt.engine.is_running() and smelt.prompt.text() == "first request" then
     local file = assert(io.open("prompt-restored", "w"))

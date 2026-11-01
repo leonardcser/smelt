@@ -26,7 +26,7 @@ move("]", true, "next block", "<A-Down>")
 move("u", false, "previous user message", "<A-S-Up>")
 move("u", true, "next user message", "<A-S-Down>")
 
-local transcript = smelt.win.TRANSCRIPT
+local transcript = smelt.transcript.win
 
 local function walk(chord, opts, desc)
   smelt.keymap.set("", chord, function()

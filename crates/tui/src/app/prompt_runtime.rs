@@ -408,10 +408,6 @@ impl PromptRuntime {
         self.height.resolve_rows(wrapped_rows, terminal_height)
     }
 
-    pub(crate) fn active_resize_chrome(&self) -> &'static str {
-        self.height.active_chrome()
-    }
-
     pub(crate) fn resize_drag(&self) -> Option<PromptResizeDrag> {
         self.height.drag()
     }
@@ -433,13 +429,8 @@ impl PromptRuntime {
         self.height.register_click(x, y, now)
     }
 
-    pub(crate) fn start_resize_drag(&mut self, chrome: &'static str, row: u16, visible_rows: u16) {
-        self.height.start_drag(chrome, row, visible_rows);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_resize_drag_for_harness(&mut self, drag: Option<PromptResizeDrag>) {
-        self.height.set_drag(drag);
+    pub(crate) fn start_resize_drag(&mut self, row: u16, visible_rows: u16) {
+        self.height.start_drag(row, visible_rows);
     }
 
     #[cfg(test)]

@@ -1195,7 +1195,7 @@ fn stale_prompt_prediction_response_after_submit_is_ignored() {
 }
 
 #[test]
-fn prompt_bar_names_the_model_the_provider_runs() {
+fn prompt_top_names_the_model_the_provider_runs() {
     let mut app = TestApp::builder().build();
     let current = app.core_probe().config.available_models[0].clone();
     let claude_code = |name: &str, resolved: &str| {
@@ -1520,7 +1520,7 @@ fn queued_messages_collapse_to_keep_transcript_visible() {
 
     let top_win = app
         .ui_probe()
-        .named_win("smelt.prompt_bar.top")
+        .named_win("smelt.prompt.top")
         .expect("top bar exists");
     let top_rect = app
         .ui_probe()
@@ -1752,7 +1752,7 @@ fn prompt_docked_picker_does_not_get_tail_clobbered_on_first_render() {
 #[test]
 fn generic_prompt_buf_source_setter_uses_prompt_install_path() {
     let mut app = TestApp::builder().with_vim(false).build();
-    assert!(app.run_lua(r#"smelt.prompt.win():buf():source("hel")"#));
+    assert!(app.run_lua(r#"smelt.prompt.win:buf():source("hel")"#));
     app.type_text("lo");
     assert_eq!(app.state().prompt_text, "hello");
 }
@@ -1760,7 +1760,7 @@ fn generic_prompt_buf_source_setter_uses_prompt_install_path() {
 #[test]
 fn generic_prompt_buf_lines_setter_uses_prompt_install_path() {
     let mut app = TestApp::builder().with_vim(false).build();
-    assert!(app.run_lua(r#"smelt.prompt.win():buf():lines({ "hel" })"#));
+    assert!(app.run_lua(r#"smelt.prompt.win:buf():lines({ "hel" })"#));
     app.type_text("lo");
     assert_eq!(app.state().prompt_text, "hello");
 }
@@ -1788,7 +1788,7 @@ fn idle_submit_restores_stash_without_a_blank_row() {
 
         assert_eq!(app.state().prompt_text, draft);
         let frame = app.render_to_frame().text();
-        let top = app.ui_probe().named_win("smelt.prompt_bar.top").unwrap();
+        let top = app.ui_probe().named_win("smelt.prompt.top").unwrap();
         assert_eq!(app.ui_probe().split_rect(top).unwrap().height, 1, "{frame}");
         let bar_row = frame
             .lines()
@@ -1848,7 +1848,7 @@ fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
 
     let top_bar = app
         .ui_probe()
-        .named_win("smelt.prompt_bar.top")
+        .named_win("smelt.prompt.top")
         .expect("prompt top bar window");
     let vp = app
         .ui_probe()
@@ -1953,7 +1953,7 @@ fn text_changed_callbacks_do_not_repark_prompt_cursor() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(
         r#"
-            smelt.prompt.win():on("text_changed", function()
+            smelt.prompt.win:on("text_changed", function()
                 smelt.prompt.cursor(0)
             end)
             "#,
@@ -2215,4 +2215,152 @@ fn pasted_http_image_url_stays_text() {
 fn prompt_cursor_probe_catches_stuck_insert_after_turn() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.probe_prompt_cursor_after_turn(1);
+}
+
+#[test]
+fn prompt_block_takes_a_background_and_drops_its_rules() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 12);
+    assert!(app.run_lua(
+        r#"
+        for _, win in ipairs({ smelt.prompt.top.win, smelt.prompt.win, smelt.prompt.bottom.win }) do
+          win:configure({ style = "SmeltUserBg" })
+        end
+        smelt.prompt.top:configure({ layout = "strip" })
+        smelt.prompt.bottom:configure({ layout = "strip" })
+        "#,
+    ));
+    app.type_text("hello");
+    let frame = app.render_to_frame();
+    let text = frame.text();
+    assert!(!text.contains('─'), "strip bars draw no rule\n{text}");
+    let status = frame.rows.len() - 1;
+    let (top, prompt, bottom, aux) = (status - 3, status - 2, status - 1, status - 4);
+    assert!(frame.rows[prompt].contains("hello"), "{text}");
+    assert!(frame.rows[top].contains("test/test-model"), "{text}");
+    let bg = frame.styles[prompt][30].bg;
+    assert!(bg.is_some(), "the prompt row takes SmeltUserBg");
+    assert_eq!(
+        frame.styles[prompt][2].bg, bg,
+        "typed text sits on the block\n{text}"
+    );
+    for row in [top, prompt, bottom] {
+        for col in [0, 59] {
+            assert_eq!(frame.styles[row][col].bg, bg, "row {row} col {col}\n{text}");
+        }
+    }
+    assert_ne!(
+        frame.styles[aux][30].bg, bg,
+        "the aux row stays outside the block"
+    );
+
+    assert!(app.run_lua(
+        r#"
+        smelt.prompt.top:configure({ layout = false })
+        smelt.prompt.bottom:configure({ layout = false })
+        "#,
+    ));
+    let text = app.render_to_frame().text();
+    assert!(
+        text.contains('─'),
+        "`false` restores the default rule\n{text}"
+    );
+}
+
+#[test]
+fn hidden_prompt_bars_leave_a_one_row_prompt() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 12);
+    let before = app.render_to_frame();
+    assert!(app.run_lua(
+        r#"
+        smelt.prompt.top:configure({ visible = false })
+        smelt.prompt.bottom:configure({ visible = false })
+        "#,
+    ));
+    app.type_text("hello");
+    let frame = app.render_to_frame();
+    let text = frame.text();
+    let status = frame.rows.len() - 1;
+    assert!(frame.rows[status - 1].contains("hello"), "{text}");
+    assert!(!text.contains('─'), "{text}");
+    assert!(!text.contains("test/test-model"), "{text}");
+    assert!(before.text().contains("test/test-model"));
+    assert!(!app
+        .eval_lua::<bool>("return smelt.prompt.top:config().visible")
+        .unwrap());
+
+    assert!(app.run_lua(r#"smelt.prompt.top:configure({ visible = true })"#));
+    let frame = app.render_to_frame();
+    let status = frame.rows.len() - 1;
+    assert!(frame.rows[status - 1].contains("hello"), "{}", frame.text());
+    assert!(
+        frame.rows[status - 2].contains("test/test-model"),
+        "{}",
+        frame.text()
+    );
+}
+
+#[test]
+fn bar_configure_rejects_unknown_keys_and_layouts() {
+    let mut app = TestApp::builder().build();
+    let err = |app: &mut TestApp, call: &str| {
+        app.eval_lua::<String>(&format!(
+            "local ok, err = pcall({call}); assert(not ok); return tostring(err)"
+        ))
+        .unwrap()
+    };
+    let unknown = err(
+        &mut app,
+        "smelt.statusline.configure, smelt.statusline, { nope = 1 }",
+    );
+    assert!(
+        unknown.contains("smelt.statusline:configure: unknown key `nope`"),
+        "{unknown}"
+    );
+    let layout = err(
+        &mut app,
+        r#"smelt.headerline.configure, smelt.headerline, { layout = "grid" }"#,
+    );
+    assert!(
+        layout.contains(r#"layout must be "strip" or "rule""#),
+        "{layout}"
+    );
+}
+
+#[test]
+fn statusline_built_ins_are_separate_sources() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 12);
+    let names = app
+        .eval_lua::<String>(
+            r#"
+            local names = {}
+            for _, name in ipairs({ "slug", "vim_mode", "agent_mode", "tps", "permission",
+                "keymap", "procs", "worktree", "vim_pending", "cursor" }) do
+              if smelt.statusline:builtin(name) then names[#names + 1] = name end
+            end
+            return table.concat(names, ",")
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        names,
+        "slug,vim_mode,agent_mode,tps,permission,keymap,procs,worktree,vim_pending,cursor"
+    );
+    let status = |app: &mut TestApp| {
+        let frame = app.render_to_frame();
+        frame.rows[frame.rows.len() - 1].clone()
+    };
+    assert!(status(&mut app).contains("normal"));
+    assert!(app.run_lua(r#"smelt.statusline:remove("agent_mode")"#));
+    assert!(!status(&mut app).contains("normal"));
+    assert!(app.run_lua(
+        r#"
+        smelt.statusline:clear()
+        smelt.statusline:add("only", function() return { text = "only-item" } end)
+        "#,
+    ));
+    let row = status(&mut app);
+    assert_eq!(row.trim(), "only-item", "{row}");
 }

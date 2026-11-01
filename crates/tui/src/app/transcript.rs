@@ -9522,7 +9522,6 @@ mod document_tests {
             crate::smelt_edit::WinId(1),
             crate::smelt_edit::BufId(1),
             crate::smelt_edit::SplitConfig {
-                region: "transcript".into(),
                 gutters: crate::smelt_edit::Gutters::default(),
             },
         )

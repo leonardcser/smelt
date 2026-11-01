@@ -151,7 +151,6 @@ impl TuiApp {
         let Some(win) = self.win_open_split(
             buf,
             SplitConfig {
-                region: "cmdline_overlay".into(),
                 gutters: Default::default(),
             },
         ) else {

@@ -506,9 +506,19 @@ pub struct MouseCtx<'a> {
     pub click_count: u8,
 }
 
+/// Text painted into a window's left padding, ahead of the content: `first` on
+/// the first visual row, `rest` on every later row that holds content.
+/// It only uses the `pad_left` cells, so it never changes wrapping or cursor
+/// columns; a prefix wider than the padding is clipped.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PadPrefix {
+    pub first: String,
+    pub rest: String,
+    pub style: Option<HlGroup>,
+}
+
 #[derive(Clone, Debug)]
 pub struct SplitConfig {
-    pub region: String,
     pub gutters: Gutters,
 }
 
@@ -755,10 +765,20 @@ pub struct Window {
     /// content: cursor rows, list selections, and widget-selected row ranges
     /// all use this path so the renderer owns the final background paint.
     row_highlights: Vec<RowHighlight>,
+    /// Highlight group layered over `Normal` as this window's base style. Its
+    /// background fills every row, gutter and padding included, and row
+    /// highlights layer on top of it.
+    style: Option<HlGroup>,
+    prefix: Option<PadPrefix>,
     /// Suppress the block caret even when this focusable leaf owns keyboard
     /// focus. Live dashboard panes use this so periodic text refreshes don't
     /// make a stale byte-position cursor appear to jitter across changing rows.
     pub hide_cursor: bool,
+    /// A click on this window focuses `click_focus` instead, so chrome around
+    /// an input (the bars above and below the prompt) hands focus to it.
+    pub click_focus: Option<WinId>,
+    /// Dragging this window resizes the prompt, and a double click resets it.
+    pub prompt_resize_handle: bool,
     /// Exactly one backing: an editable buffer, a host document, or a native
     /// document with window-owned projection storage and a viewport subscription.
     document: DocumentBinding,
@@ -821,7 +841,11 @@ impl Window {
             layout_key: None,
             surface: WindowSurface::default(),
             row_highlights: Vec::new(),
+            style: None,
+            prefix: None,
             hide_cursor: false,
+            click_focus: None,
+            prompt_resize_handle: false,
             document: DocumentBinding::Buffer,
             search_ranges: Vec::new(),
             viewport: None,
@@ -1056,6 +1080,29 @@ impl Window {
 
     pub fn set_row_highlights(&mut self, highlights: Vec<RowHighlight>) {
         self.row_highlights = highlights;
+    }
+
+    pub fn set_style(&mut self, style: Option<HlGroup>) {
+        self.style = style;
+    }
+
+    pub fn style(&self) -> Option<HlGroup> {
+        self.style
+    }
+
+    pub fn set_prefix(&mut self, prefix: Option<PadPrefix>) {
+        self.prefix = prefix;
+    }
+
+    pub fn prefix(&self) -> Option<&PadPrefix> {
+        self.prefix.as_ref()
+    }
+
+    /// This window's own style, without `Normal` underneath.
+    fn window_style(&self, ctx: &DrawContext) -> Style {
+        self.style
+            .map(|hl| ctx.theme.resolve(hl))
+            .unwrap_or_default()
     }
 
     pub fn set_cursor_line_highlight(&mut self, enabled: bool) {
@@ -2259,7 +2306,10 @@ impl Window {
                 && highlight.mode.active(ctx.focused)
                 && highlight.contains_row(visual_row, cursor_row)
             {
-                style = Some(ctx.theme.resolve(highlight.hl_group));
+                style = Some(merge_styles(
+                    self.window_style(ctx),
+                    ctx.theme.resolve(highlight.hl_group),
+                ));
             }
         }
         style
@@ -3561,7 +3611,7 @@ impl Window {
         };
         let cursor_screen_row =
             Self::screen_row_at(cursor_abs_row, self.scroll_top, viewport_height);
-        let normal_style = ctx.theme.get("Normal");
+        let normal_style = merge_styles(ctx.theme.get("Normal"), self.window_style(ctx));
         let range_layers = crate::RangeLayer::paint_order()
             .map(|layer| (layer, self.painted_ranges(buf, layer, ctx, viewport_height)));
         // Reused per-row scratch - avoids `height` allocations of each Vec.
@@ -3647,6 +3697,26 @@ impl Window {
                 let end = content_offset.saturating_add(content_width).min(width);
                 for col in content_offset..end {
                     slice.set(col, row, ' ', row_style);
+                }
+            }
+            if let (Some(prefix), Some((_, chunk))) = (self.prefix.as_ref(), logical) {
+                let text = if absolute_visual_row == 0 && chunk == 0 {
+                    &prefix.first
+                } else {
+                    &prefix.rest
+                };
+                let style = match prefix.style {
+                    Some(hl) => merge_styles(base_row_style, ctx.theme.resolve(hl)),
+                    None => base_row_style,
+                };
+                let mut col = gutter_width;
+                for grapheme in graphemes(text) {
+                    let grapheme_width = text_width_u16(grapheme);
+                    if col + grapheme_width > content_offset {
+                        break;
+                    }
+                    slice.set_symbol(col, row, grapheme, style);
+                    col += grapheme_width;
                 }
             }
             if let Some(provider) = self.gutter.as_ref() {
@@ -4186,7 +4256,6 @@ mod tests {
             WinId(1),
             BufId(1),
             SplitConfig {
-                region: "test".into(),
                 // Default reserves a scrollbar column; tests below assert on
                 // bare-width content layout, so opt out.
                 gutters: Gutters {
@@ -6864,6 +6933,106 @@ mod tests {
     }
 
     #[test]
+    fn render_fills_every_row_with_the_window_style_under_row_highlights() {
+        // The window style is the base of every row, padding and rows past the
+        // buffer included; a row highlight layers on top of it.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
+        let mut w = make_win();
+        w.config.gutters.pad_left = 2;
+        w.set_cursor_line_highlight(true);
+        w.text_state_mut().cursor_row = 1;
+        w.set_style(Some(intern("WindowStyleTest")));
+        let mut theme = Theme::default();
+        let base = crate::grid::Style::new()
+            .bg(crate::grid::Color::AnsiValue(236))
+            .fg(crate::grid::Color::AnsiValue(250));
+        let cursor = crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238));
+        theme.set("WindowStyleTest", base);
+        theme.set("CursorLine", cursor);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: true,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
+        };
+        let mut grid = Grid::new(10, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
+        w.render(&buf, &mut slice, &ctx);
+
+        assert_eq!(grid.cell(2, 0).symbol, 'a');
+        for (col, row) in [(0, 0), (2, 0), (9, 0), (0, 2), (9, 2)] {
+            assert_eq!(grid.cell(col, row).style.bg, base.bg, "cell ({col}, {row})");
+        }
+        assert_eq!(grid.cell(2, 0).style.fg, base.fg);
+        assert_eq!(grid.cell(2, 1).style.bg, cursor.bg);
+        assert_eq!(
+            grid.cell(2, 1).style.fg,
+            base.fg,
+            "row highlight keeps the window fg"
+        );
+
+        w.set_style(None);
+        let mut grid = Grid::new(10, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
+        w.render(&buf, &mut slice, &ctx);
+        assert_ne!(grid.cell(0, 0).style.bg, base.bg);
+    }
+
+    #[test]
+    fn render_paints_prefix_into_left_padding_without_moving_text() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
+        let mut w = make_win();
+        w.config.gutters.pad_left = 2;
+        w.set_prefix(Some(PadPrefix {
+            first: "> ".into(),
+            rest: "··".into(),
+            style: Some(intern("PrefixTest")),
+        }));
+        let mut theme = Theme::default();
+        let accent = crate::grid::Style::new().fg(crate::grid::Color::AnsiValue(208));
+        theme.set("PrefixTest", accent);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme: std::sync::Arc::new(theme),
+            vim_mode: VimMode::default(),
+            now: std::time::Instant::now(),
+        };
+        let mut grid = Grid::new(10, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
+        w.render(&buf, &mut slice, &ctx);
+
+        assert_eq!(grid.cell(0, 0).symbol, '>');
+        assert_eq!(grid.cell(0, 0).style.fg, accent.fg);
+        assert_eq!(grid.cell(2, 0).symbol, 'a', "text keeps its column");
+        assert_eq!(grid.cell(0, 1).symbol, '·');
+        assert_eq!(grid.cell(2, 1).symbol, 'b');
+        assert_eq!(
+            grid.cell(0, 2).symbol,
+            ' ',
+            "rows past the content stay blank"
+        );
+
+        w.config.gutters.pad_left = 1;
+        let mut grid = Grid::new(10, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
+        w.render(&buf, &mut slice, &ctx);
+        assert_eq!(grid.cell(0, 0).symbol, '>');
+        assert_eq!(
+            grid.cell(1, 0).symbol,
+            'a',
+            "a prefix wider than the padding is clipped"
+        );
+    }
+
+    #[test]
     fn render_skips_cursor_highlight_without_opt_in() {
         // Row highlights default to empty, so focused content viewers
         // (transcript, /help, /btw) stay clean.
@@ -7445,7 +7614,6 @@ mod tests {
             WinId(1),
             BufId(1),
             SplitConfig {
-                region: "test".into(),
                 gutters: Gutters::default(),
             },
         );

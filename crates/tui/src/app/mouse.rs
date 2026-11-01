@@ -2,8 +2,6 @@
 
 use crate::app::transcript::TranscriptProjectionRestore;
 use crate::app::transcript_scroll_trace::TranscriptScrollIntent;
-#[cfg(test)]
-use crate::app::PromptResizeDrag;
 use crate::app::{AppFocus, EventOutcome, TuiApp};
 use crate::content::layout::HitRegion;
 use crate::smelt_edit::{ChromeOwner, HitTarget, RowIndex, WinId};
@@ -53,12 +51,8 @@ pub(crate) fn focus_for_region_click(
     }
 }
 
-fn is_prompt_chrome_window(win: &crate::smelt_edit::Window) -> bool {
-    matches!(win.config.region.as_str(), "prompt_above" | "prompt_below")
-}
-
 fn is_prompt_resize_handle(win: &crate::smelt_edit::Window) -> bool {
-    win.config.region == "prompt_above"
+    win.prompt_resize_handle
 }
 
 fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usize>) {
@@ -97,6 +91,11 @@ struct TranscriptScrollInputCandidate {
 }
 
 impl TuiApp {
+    /// The window a click on `win` focuses instead of `win` itself.
+    fn click_focus_of(&self, win: crate::smelt_edit::WinId) -> Option<crate::smelt_edit::WinId> {
+        self.ui.win(win).and_then(|w| w.click_focus)
+    }
+
     pub(crate) fn scroll_at_with_transcript_intent(
         &mut self,
         x: u16,
@@ -457,16 +456,13 @@ impl TuiApp {
                 let has_content = self.has_transcript_content();
                 if let Some(focus) = focus_for_region_click(region, has_content) {
                     self.app_focus = focus;
-                    if matches!(focus, AppFocus::Prompt)
-                        && hit_target.is_some_and(|ht| match ht {
-                            HitTarget::Window(w) => {
-                                self.ui.win(w).is_some_and(is_prompt_chrome_window)
-                            }
-                            _ => false,
-                        })
-                    {
-                        self.ui.set_focus(crate::app::PROMPT_WIN);
-                    }
+                }
+                let click_focus = hit_target.and_then(|ht| match ht {
+                    HitTarget::Window(w) => self.click_focus_of(w),
+                    _ => None,
+                });
+                if let Some(target) = click_focus {
+                    self.focus_window(target);
                 }
             }
         }
@@ -537,12 +533,10 @@ impl TuiApp {
                 .win(win)
                 .is_some_and(|w| w.supports_text_selection())
             {
-                if is_down
-                    && self.ui.active_modal().is_none()
-                    && self.ui.win(win).is_some_and(is_prompt_chrome_window)
-                {
-                    self.app_focus = AppFocus::Prompt;
-                    self.ui.set_focus(crate::app::PROMPT_WIN);
+                if is_down && self.ui.active_modal().is_none() {
+                    if let Some(target) = self.click_focus_of(win) {
+                        self.focus_window(target);
+                    }
                 }
                 // Generic selectable leaf: notifications, dialog bodies, future popups.
                 // On Down, promote keyboard focus to this leaf if it's focusable -
@@ -566,7 +560,7 @@ impl TuiApp {
                     if is_down {
                         self.ui.cancel_pointer_interaction();
                     }
-                    return if self.ui.win(win).is_some_and(is_prompt_chrome_window) {
+                    return if self.click_focus_of(win).is_some() {
                         EventOutcome::Redraw
                     } else {
                         EventOutcome::Noop
@@ -576,7 +570,7 @@ impl TuiApp {
                     && self
                         .ui
                         .win(win)
-                        .is_some_and(|w| w.accepts_focus() && !is_prompt_chrome_window(w))
+                        .is_some_and(|w| w.accepts_focus() && w.click_focus.is_none())
                 {
                     self.ui.set_focus(win);
                 }
@@ -586,11 +580,11 @@ impl TuiApp {
                     }
                 }
             } else if is_down {
-                if self.ui.win(win).is_some_and(is_prompt_chrome_window)
-                    && self.ui.active_modal().is_none()
+                if let Some(target) = self
+                    .click_focus_of(win)
+                    .filter(|_| self.ui.active_modal().is_none())
                 {
-                    self.app_focus = AppFocus::Prompt;
-                    self.ui.set_focus(crate::app::PROMPT_WIN);
+                    self.focus_window(target);
                     self.ui.cancel_pointer_interaction();
                     return EventOutcome::Redraw;
                 }
@@ -634,7 +628,7 @@ impl TuiApp {
 
     fn start_prompt_resize_drag(&mut self, me: MouseEvent) {
         self.prompt
-            .start_resize_drag("top", me.row, self.layout.prompt.height);
+            .start_resize_drag(me.row, self.layout.prompt.height);
         self.publish_prompt_resize_state();
         self.app_focus = AppFocus::Prompt;
         self.ui.set_focus(crate::app::PROMPT_WIN);
@@ -1101,9 +1095,9 @@ mod tests {
 
         let top = app
             .ui
-            .named_win("smelt.prompt_bar.top")
+            .named_win("smelt.prompt.top")
             .expect("prompt top bar window");
-        app.ui.set_terminal_size(20, 2);
+        app.ui.set_terminal_size(20, 3);
         app.ui.set_layout(crate::smelt_edit::LayoutTree::vbox(vec![
             (
                 crate::smelt_edit::Constraint::Length(1),
@@ -1112,6 +1106,10 @@ mod tests {
             (
                 crate::smelt_edit::Constraint::Fill,
                 crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
+            ),
+            (
+                crate::smelt_edit::Constraint::Length(1),
+                crate::smelt_edit::LayoutTree::leaf(crate::app::PROMPT_WIN),
             ),
         ]));
         let vp = crate::smelt_edit::WindowViewport::new(
@@ -1202,7 +1200,7 @@ mod tests {
         app.handle_mouse(down);
 
         assert_eq!(app.app_focus, AppFocus::Prompt);
-        assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
+        assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
         assert_eq!(app.ui.capture(), None);
         assert!(app.core.clipboard.kill_ring.current().is_empty());
     }
@@ -1213,7 +1211,7 @@ mod tests {
 
         let top = app
             .ui
-            .named_win("smelt.prompt_bar.top")
+            .named_win("smelt.prompt.top")
             .expect("prompt top bar window");
         let viewport =
             crate::smelt_edit::UiHost::viewport_for(&app, top).expect("prompt top bar viewport");
@@ -1234,7 +1232,7 @@ mod tests {
         app.handle_mouse(left_up(3, 0));
 
         assert_eq!(app.app_focus, AppFocus::Prompt);
-        assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
+        assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
         assert_eq!(app.prompt.manual_prompt_rows_for_harness(), None);
         assert_eq!(app.core.clipboard.kill_ring.current(), "abc");
     }
@@ -1243,7 +1241,7 @@ mod tests {
         app.render_normal_to(&mut std::io::sink());
         let top = app
             .ui
-            .named_win("smelt.prompt_bar.top")
+            .named_win("smelt.prompt.top")
             .expect("prompt top bar window");
         let vp = app
             .ui
@@ -1267,39 +1265,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_resize_state_publishes_target_chrome() {
-        let mut app = crate::app::test_harness::TestApp::builder().build().app;
-
-        app.set_prompt_resize_drag(Some(PromptResizeDrag {
-            chrome: "bottom",
-            start_row: 0,
-            start_input_rows: 1,
-            dragged: false,
-        }));
-        assert_eq!(
-            app.core.signals.get::<String>("prompt_resize_chrome"),
-            Some("bottom".to_string())
-        );
-
-        app.set_prompt_resize_drag(Some(PromptResizeDrag {
-            chrome: "both",
-            start_row: 0,
-            start_input_rows: 1,
-            dragged: false,
-        }));
-        assert_eq!(
-            app.core.signals.get::<String>("prompt_resize_chrome"),
-            Some("both".to_string())
-        );
-
-        app.set_prompt_resize_drag(None);
-        assert_eq!(
-            app.core.signals.get::<String>("prompt_resize_chrome"),
-            Some(String::new())
-        );
-    }
-
-    #[test]
     fn prompt_top_chrome_drag_grows_manual_prompt_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         let (row, col) = prompt_resize_handle_cell(&mut app);
@@ -1310,19 +1275,11 @@ mod tests {
             app.core.signals.get::<bool>("prompt_resize_active"),
             Some(true)
         );
-        assert_eq!(
-            app.core.signals.get::<String>("prompt_resize_chrome"),
-            Some("top".to_string())
-        );
         app.handle_mouse(left_drag(col, row.saturating_sub(2)));
         app.handle_mouse(left_up(col, row.saturating_sub(2)));
         assert_eq!(
             app.core.signals.get::<bool>("prompt_resize_active"),
             Some(false)
-        );
-        assert_eq!(
-            app.core.signals.get::<String>("prompt_resize_chrome"),
-            Some(String::new())
         );
         app.render_normal_to(&mut std::io::sink());
 
@@ -1480,7 +1437,7 @@ mod tests {
 
         let bottom = app
             .ui
-            .named_win("smelt.prompt_bar.bottom")
+            .named_win("smelt.prompt.bottom")
             .expect("prompt bottom bar window");
         let vp = app
             .ui

@@ -78,7 +78,6 @@ mod tests {
             crate::app::PROMPT_WIN,
             crate::app::PROMPT_EDIT_BUF,
             crate::smelt_edit::SplitConfig {
-                region: "prompt".into(),
                 gutters: crate::smelt_edit::Gutters::default(),
             },
         );
@@ -117,7 +116,6 @@ mod tests {
             PROMPT_WIN,
             buf.id(),
             SplitConfig {
-                region: "prompt".into(),
                 gutters: Gutters {
                     pad_left: 1,
                     pad_right: 1,

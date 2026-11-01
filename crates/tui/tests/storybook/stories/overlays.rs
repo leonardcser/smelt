@@ -4,9 +4,8 @@ use tui::smelt_edit::layout::{Border, Constraint};
 use tui::smelt_edit::{Align, Anchor, Corner, Gutters};
 use tui::smelt_edit::{LayoutTree, Overlay, SplitConfig};
 
-fn pane(region: &str) -> SplitConfig {
+fn pane() -> SplitConfig {
     SplitConfig {
-        region: region.to_string(),
         gutters: Gutters::default(),
     }
 }
@@ -27,7 +26,7 @@ fn backdrop(ctx: &mut crate::storybook::StoryCtx, w: u16, h: u16) {
         })
         .collect();
     let buf = ctx.buf_with_lines(lines);
-    let win = ctx.open_split(buf, pane("backdrop"));
+    let win = ctx.open_split(buf, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(win),
@@ -42,7 +41,7 @@ fn open_box_overlay(
     anchor: Anchor,
 ) {
     let dlg = ctx.buf_with_lines([title, "+++++"]);
-    let dw = ctx.ui.win_open_split(dlg, pane("box")).expect("buf exists");
+    let dw = ctx.ui.win_open_split(dlg, pane()).expect("buf exists");
     let layout = LayoutTree::vbox(vec![(
         Constraint::Length(height),
         LayoutTree::hbox(vec![(Constraint::Length(width), LayoutTree::leaf(dw))]),
@@ -61,17 +60,14 @@ story!(overlay_centered_modal_over_splits, |ctx| {
             .map(|i| format!("backdrop row {i:02}"))
             .collect::<Vec<_>>(),
     );
-    let bw = ctx.open_split(backdrop, pane("backdrop"));
+    let bw = ctx.open_split(backdrop, pane());
     ctx.set_layout(LayoutTree::vbox(vec![(
         Constraint::Fill,
         LayoutTree::leaf(bw),
     )]));
 
     let dlg = ctx.buf_with_lines(["pick one:", "  • alpha", "  • beta"]);
-    let dw = ctx
-        .ui
-        .win_open_split(dlg, pane("dialog"))
-        .expect("buf exists");
+    let dw = ctx.ui.win_open_split(dlg, pane()).expect("buf exists");
     let layout = LayoutTree::vbox(vec![(
         Constraint::Length(3),
         LayoutTree::hbox(vec![(Constraint::Length(14), LayoutTree::leaf(dw))]),
@@ -154,10 +150,7 @@ story!(anchor_clamped_when_offscreen, |ctx| {
 story!(anchor_screen_bottom_docked, |ctx| {
     backdrop(ctx, 30, 8);
     let dlg = ctx.buf_with_lines(["docked"]);
-    let dw = ctx
-        .ui
-        .win_open_split(dlg, pane("dock"))
-        .expect("buf exists");
+    let dw = ctx.ui.win_open_split(dlg, pane()).expect("buf exists");
     let layout = LayoutTree::vbox(vec![(
         Constraint::Length(1),
         LayoutTree::hbox(vec![(Constraint::Percentage(100), LayoutTree::leaf(dw))]),
@@ -172,7 +165,7 @@ story!(anchor_screen_bottom_docked, |ctx| {
 story!(two_overlays_stack_by_z, |ctx| {
     backdrop(ctx, 30, 8);
     let lo = ctx.buf_with_lines(["LO"]);
-    let lw = ctx.ui.win_open_split(lo, pane("lo")).expect("buf exists");
+    let lw = ctx.ui.win_open_split(lo, pane()).expect("buf exists");
     let lo_layout = LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(lw))])
         .with_border(Border::SINGLE)
         .with_title("lo");
@@ -188,7 +181,7 @@ story!(two_overlays_stack_by_z, |ctx| {
         .with_z(10),
     );
     let hi = ctx.buf_with_lines(["HI"]);
-    let hw = ctx.ui.win_open_split(hi, pane("hi")).expect("buf exists");
+    let hw = ctx.ui.win_open_split(hi, pane()).expect("buf exists");
     let hi_layout = LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(hw))])
         .with_border(Border::ROUNDED)
         .with_title("hi");
@@ -210,18 +203,15 @@ story!(anchor_win_attaches_above_target, |ctx| {
     ctx.set_viewport(30, 8);
     let top = ctx.buf_with_lines((1..=4).map(|i| format!("top row {i}")).collect::<Vec<_>>());
     let bot = ctx.buf_with_lines(["bot row"]);
-    let wt = ctx.open_split(top, pane("top"));
-    let wb = ctx.open_split(bot, pane("bot"));
+    let wt = ctx.open_split(top, pane());
+    let wb = ctx.open_split(bot, pane());
     ctx.set_layout(LayoutTree::vbox(vec![
         (Constraint::Fill, LayoutTree::leaf(wt)),
         (Constraint::Length(2), LayoutTree::leaf(wb)),
     ]));
 
     let toast = ctx.buf_with_lines(["toast!"]);
-    let tw = ctx
-        .ui
-        .win_open_split(toast, pane("toast"))
-        .expect("buf exists");
+    let tw = ctx.ui.win_open_split(toast, pane()).expect("buf exists");
     let layout = LayoutTree::vbox(vec![(
         Constraint::Length(1),
         LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(tw))]),

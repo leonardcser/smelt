@@ -374,7 +374,6 @@ pub struct TuiApp {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PromptResizeDrag {
-    pub(crate) chrome: &'static str,
     pub(crate) start_row: u16,
     pub(crate) start_input_rows: u16,
     pub(crate) dragged: bool,
@@ -444,18 +443,8 @@ impl PromptHeightState {
         self.drag
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_drag(&mut self, drag: Option<PromptResizeDrag>) {
-        self.drag = drag;
-    }
-
-    pub(crate) fn active_chrome(&self) -> &'static str {
-        self.drag.map(|drag| drag.chrome).unwrap_or_default()
-    }
-
-    pub(crate) fn start_drag(&mut self, chrome: &'static str, row: u16, visible_rows: u16) {
+    pub(crate) fn start_drag(&mut self, row: u16, visible_rows: u16) {
         self.drag = Some(PromptResizeDrag {
-            chrome,
             start_row: row,
             start_input_rows: visible_rows.max(1),
             dragged: false,
@@ -929,8 +918,8 @@ fn release_busy_entry(state: &mut BusyStackState, id: u64) -> bool {
 }
 
 /// Well-known stable `WinId`s for the always-present split-tree windows.
-/// Prompt input and the transcript stay engine-owned; the prompt bars and
-/// statusline are Lua-allocated by `runtime/lua/smelt/prompt_bar.lua` and
+/// Prompt input and the transcript stay engine-owned; the prompt chrome and
+/// statusline are Lua-allocated by `runtime/lua/smelt/prompt_chrome.lua` and
 /// `runtime/lua/smelt/statusline.lua`.
 pub(crate) struct WellKnown {
     pub(crate) prompt: crate::smelt_edit::WinId,
@@ -2001,7 +1990,6 @@ impl TuiApp {
                 crate::app::TRANSCRIPT_WIN,
                 transcript_display_buf,
                 crate::smelt_edit::SplitConfig {
-                    region: "transcript".into(),
                     gutters: crate::smelt_edit::Gutters {
                         pad_left: 0,
                         pad_right: 0,
@@ -2030,7 +2018,6 @@ impl TuiApp {
                 crate::app::PROMPT_WIN,
                 input_display_buf,
                 crate::smelt_edit::SplitConfig {
-                    region: "prompt".into(),
                     gutters: crate::smelt_edit::Gutters {
                         // The reserved scrollbar column doubles as the right gutter
                         // when content fits, so `pad_right` stays 0 to avoid a
@@ -2058,7 +2045,7 @@ impl TuiApp {
             // anchors resolve before the first render frame. The Lua
             // composer (registered by `runtime/lua/smelt/layout.lua`)
             // replaces this on the next render once `bring_up_lua` runs
-            // and `prompt_bar.lua` / `statusline.lua` have allocated
+            // and `prompt_chrome.lua` / `statusline.lua` have allocated
             // their windows.
             ui.set_layout(crate::content::layout::seed_layout_tree(
                 /* prompt_input_rows */ 1,
@@ -2395,20 +2382,11 @@ impl TuiApp {
             .publish_if_changed("viewport_pos", viewport);
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_prompt_resize_drag(&mut self, drag: Option<PromptResizeDrag>) {
-        self.prompt.set_resize_drag_for_harness(drag);
-        self.publish_prompt_resize_state();
-    }
-
     pub(crate) fn publish_prompt_resize_state(&mut self) {
-        let active_chrome = self.prompt.active_resize_chrome();
+        let active = self.prompt.resize_drag().is_some();
         self.core
             .signals
-            .publish_if_changed("prompt_resize_active", !active_chrome.is_empty());
-        self.core
-            .signals
-            .publish_if_changed("prompt_resize_chrome", active_chrome.to_string());
+            .publish_if_changed("prompt_resize_active", active);
     }
 
     /// User-facing vim mode label for the focused surface - or empty
@@ -3296,7 +3274,6 @@ impl TuiApp {
         let Some(win) = self.ui.win_open_split(
             buf,
             crate::smelt_edit::SplitConfig {
-                region: "notification".into(),
                 gutters: Default::default(),
             },
         ) else {
@@ -3313,12 +3290,12 @@ impl TuiApp {
                 crate::smelt_edit::LayoutTree::leaf(win),
             )]),
         )]);
-        // Float `1` row above the prompt's Lua-allocated top bar (or the
-        // prompt input on cold start, before Lua has registered the bar),
-        // as wide as it. Anchoring against the named window keeps the toast
-        // correctly placed even when queued/stash rows grow the top bar, and
-        // inside the prompt's column when a layout puts a sidebar beside it.
-        let anchor = crate::content::layout::anchor_above_prompt_chrome(&self.ui, 1);
+        // Float over the prompt's auxiliary row (or above the prompt input
+        // on cold start, before Lua has allocated it), as wide as it.
+        // Anchoring against the window keeps the toast in place when queued
+        // or stash rows grow the prompt block, and inside the prompt's column
+        // when a layout puts a sidebar beside it.
+        let anchor = crate::content::layout::anchor_for_prompt_toast(&self.ui);
         let _overlay_id = self.ui.overlay_open(
             crate::smelt_edit::Overlay::new(layout, anchor)
                 .with_width(crate::smelt_edit::Constraint::Percentage(100))
