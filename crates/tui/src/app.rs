@@ -3939,7 +3939,13 @@ impl TuiApp {
             tokio::select! {
                 biased;
 
-                Some(ev) = term_events.recv() => {
+                ev = term_events.recv() => {
+                    // Input ends when the terminal is gone. A hangup may never
+                    // signal us (SIGHUP ignored, as under nohup), so quit here.
+                    let Some(ev) = ev else {
+                        self.pending_quit = true;
+                        continue 'main;
+                    };
                     // Coalesce scroll: batch rapid wheel ticks into a single motion + one render.
                     // Disabled when an overlay is focused so wheel events route into it.
                     let coalesce_scroll = self.ui.focused_overlay().is_none();
