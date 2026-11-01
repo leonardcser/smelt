@@ -8808,3 +8808,42 @@ fn statusline_cursor_position_follows_each_keystroke() {
         );
     }
 }
+
+#[test]
+fn lua_examples_load_as_init_lua_and_render_without_errors() {
+    for (name, source) in [
+        (
+            "statusline",
+            include_str!("../../../../../docs/lua-examples/statusline.lua"),
+        ),
+        (
+            "override",
+            include_str!("../../../../../docs/lua-examples/override.lua"),
+        ),
+        (
+            "mode_keybinds",
+            include_str!("../../../../../docs/lua-examples/mode_keybinds.lua"),
+        ),
+        (
+            "plugin",
+            include_str!("../../../../../docs/lua-examples/plugin.lua"),
+        ),
+        (
+            "per_project",
+            include_str!("../../../../../docs/lua-examples/per_project.lua"),
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, source).unwrap();
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        app.set_terminal_size(100, 20);
+        app.drain_launch_ready_hooks();
+        let frame = app.render_to_frame();
+        let notification = app
+            .overlays_probe()
+            .notification()
+            .map(|n| n.summary.clone());
+        assert_eq!(notification, None, "{name}.lua\n{}", frame.text());
+    }
+}

@@ -37,7 +37,7 @@ statusline.add("cwd", function()
   end
   return { {
     text = " " .. cwd .. " ",
-    style = { fg = { ansi = 75 }, bold = true },
+    style = { fg = 75, bold = true },
     priority = 0,
     truncatable = true,
   } }
@@ -48,7 +48,7 @@ statusline.add("git_branch", function()
   if not branch then return {} end
   return { {
     text = " " .. branch .. " ",
-    style = { fg = { ansi = 114 } },
+    style = { fg = 114 },
     priority = 1,
     separated = true,
   } }
@@ -57,7 +57,7 @@ end)
 statusline.add("clock", function()
   return { {
     text = os.date("%H:%M"),
-    style = { fg = { ansi = 245 } },
+    style = { fg = 245 },
     priority = 2,
     align_right = true,
   } }
