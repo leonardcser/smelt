@@ -15,7 +15,7 @@
 --     stays on the same row. Returns nil when the user dismisses.
 --
 -- opts.items     = { entry, ... } | function() -> { entry, ... }
---   entry = { label, description?, ansi_color?, search_terms? }
+--   entry = { label, description?, prefix_color?, search_terms? }
 -- opts.on_select = function(item)   -- fires on navigation
 -- opts.on_enter  = function(item, idx)  -- persistent mode; see above
 -- opts.rank      = function(items, query, original) -> { idx, ... }
@@ -51,7 +51,7 @@ local function to_picker_items(list)
     out[i] = {
       label       = it.label,
       description = it.description,
-      ansi_color  = it.ansi_color,
+      prefix_color = it.prefix_color,
       label_color = it.label_color,
       prefix      = it.prefix,
     }
@@ -66,7 +66,7 @@ local function stamp(original)
     all[i] = {
       label        = it.label,
       description  = it.description,
-      ansi_color   = it.ansi_color,
+      prefix_color = it.prefix_color,
       label_color  = it.label_color,
       prefix       = it.prefix,
       search_terms = it.search_terms,

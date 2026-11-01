@@ -50,7 +50,7 @@ local function build_lines()
     mark(marks, NS_DIM, line, #name + 2, #title, { dim = true })
     if status == "error" then
       local start_col = #name + 2
-      mark(marks, NS_ERROR, line, start_col, start_col + #"[error]", { fg = "red", bold = true })
+      mark(marks, NS_ERROR, line, start_col, start_col + #"[error]", { fg = "ErrorMsg", bold = true })
     end
 
     local desc = server.description or ""

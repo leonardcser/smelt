@@ -1740,8 +1740,8 @@ fn diff_source_rows_have_syntax_foregrounds_over_diff_backgrounds() {
     app.run_lua_result(
         r#"
         local groups = smelt.theme.snapshot()
-        groups.SmeltDiffAddBg = { bg = { rgb = { 10, 60, 30 } } }
-        groups.SmeltDiffDeleteBg = { bg = { rgb = { 70, 30, 20 } } }
+        groups.SmeltDiffAddBg = { bg = { 10, 60, 30 } }
+        groups.SmeltDiffDeleteBg = { bg = { 70, 30, 20 } }
         smelt.theme.apply({ syntax = 'Catppuccin Mocha', groups = groups })
     "#,
     )
@@ -1852,10 +1852,10 @@ fn diff_full_width_backgrounds_markers_and_inline_changes_survive_pan_and_theme(
             app.run_lua_result(
                 r#"
                 local groups = smelt.theme.snapshot()
-                groups.SmeltDiffAddBg = {bg = {rgb = {10, 60, 30}}}
-                groups.SmeltDiffDeleteBg = {bg = {rgb = {70, 30, 20}}}
-                groups.SmeltDiffAddInlineBg = {bg = {rgb = {30, 110, 50}}}
-                groups.SmeltDiffDeleteInlineBg = {bg = {rgb = {120, 50, 40}}}
+                groups.SmeltDiffAddBg = {bg = {10, 60, 30}}
+                groups.SmeltDiffDeleteBg = {bg = {70, 30, 20}}
+                groups.SmeltDiffAddInlineBg = {bg = {30, 110, 50}}
+                groups.SmeltDiffDeleteInlineBg = {bg = {120, 50, 40}}
                 smelt.theme.apply({syntax = 'Catppuccin Mocha', groups = groups})
             "#,
             )
@@ -2522,10 +2522,8 @@ fn native_documents_do_not_overwrite_a_shared_backing_buffer() {
         app.app.ui.win_open_split(scratch[0], config).is_none(),
         "shared native projection storage"
     );
-    app.run_lua_result(
-        "assert(tostring(left:buf()) == tostring(shared)); left:document(nil); right:document(nil)",
-    )
-    .unwrap();
+    app.run_lua_result("assert(left:buf() == shared); left:document(nil); right:document(nil)")
+        .unwrap();
     let frame = app.render_to_frame().text();
     assert_eq!(
         frame.matches("original buffer").count(),

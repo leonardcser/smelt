@@ -3,7 +3,7 @@
 -- One singleton orchestrator owns the prompt's `text_changed` subscription.
 -- Each registered completer declares:
 --   detect(text, cpos)             -> anchor_byte | nil
---   items(anchor, text, cpos)?      -> { { label, description?, ansi_color?, prefix?, search_terms? }, ... }
+--   items(anchor, text, cpos)?      -> { { label, description?, prefix_color?, prefix?, search_terms? }, ... }
 --   matches(anchor, text, cpos, limit)? -> already-filtered/ranked rows or `{ items, status?, message?, searching?, scanning? }`
 --   query(text, anchor, cpos)?     -> string (required with items; optional with matches)
 --   accept(item, anchor, action)   -- action ∈ "enter" | "tab"
@@ -12,8 +12,8 @@
 --   auto?                          -- false: do not auto-open on text_changed
 --   accept_single?                 -- false: keep picker open even when manual Tab has one match
 --   prefix?                        -- picker row prefix glyph
---   prefix_color?                  -- ansi for the prefix glyph
---   label_color?                   -- ansi for the label cell
+--   prefix_color?                  -- color of the prefix glyph
+--   label_color?                   -- color of the label
 --
 -- Modality lock (`smelt.prompt.acquire`) blocks the orchestrator from
 -- auto-opening while another widget owns the prompt. The lock is released
@@ -83,7 +83,7 @@ end
 
 local function prepare_picker_items(list, spec)
   for _, it in ipairs(list) do
-    if it.ansi_color == nil then it.ansi_color = spec.prefix_color end
+    if it.prefix_color == nil then it.prefix_color = spec.prefix_color end
     if it.label_color == nil then it.label_color = spec.label_color end
     if it.prefix == nil then it.prefix = spec.prefix end
   end

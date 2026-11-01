@@ -52,7 +52,7 @@ fn open(app: &mut TestApp, placement: &str) {
             layout.vsplit(layout.leaf(b), layout.leaf(c), { size = '50%', min_first = 4, min_second = 5 }),
             { size = 40, min_first = 15, min_second = 18 })
         local windows = layout.windows(split_layout)
-        assert(#windows == 3 and tostring(windows[1]) == tostring(a) and tostring(windows[3]) == tostring(c))
+        assert(#windows == 3 and windows[1] == a and windows[3] == c and windows[1] ~= c)
     "#).unwrap();
     match placement {
         "root" => app.run_lua_result("smelt.ui.layout.set(function() return split_layout end)").unwrap(),

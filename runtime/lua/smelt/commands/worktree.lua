@@ -17,11 +17,6 @@ local function usage()
   return "usage: /worktree <name> [--base <ref>]"
 end
 
-local function accent_ansi()
-  local accent = smelt.theme.get("SmeltAccent")
-  return accent and accent.fg and accent.fg.ansi
-end
-
 local function parse_args(arg)
   local tokens, err = argv.split(arg or "")
   if not tokens then return nil, err end
@@ -140,7 +135,7 @@ local function picker_items()
     info = info,
     worktrees = worktrees,
     list_error = list_error,
-    accent = accent_ansi(),
+    accent = "SmeltAccent",
   })
 end
 

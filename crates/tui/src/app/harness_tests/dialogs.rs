@@ -516,7 +516,7 @@ fn splash_paint_stays_below_global_overlays() {
 fn splash_shows_the_theme_background_around_the_logo() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
-    assert!(app.run_lua(r#"smelt.theme.set("Normal", { bg = { rgb = { 22, 10, 30 } } })"#));
+    assert!(app.run_lua(r#"smelt.theme.set("Normal", { bg = { 22, 10, 30 } })"#));
     app.drain_launch_ready_hooks();
 
     let frame = app.render_to_frame();

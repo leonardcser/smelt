@@ -73,7 +73,7 @@ Types: [`smelt.theme.Layer`](types.md#smeltthemelayer)
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Resolve any color (`{ ansi = n }`, `{ rgb = { r, g, b } }`, a name such as `"red"`, or `"#rrggbb"`) to `{ rgb = { r, g, b } }` as the terminal shows it. The 16 ANSI colors and `nil` / `"reset"` use the terminal's own palette when it reports one at startup, and the xterm palette otherwise; `nil` and `"reset"` resolve to the default for `layer` (`"fg"` when omitted). Use it to blend colors, for example in a paint.
+Resolve any color, or a theme group name such as `"Comment"`, to `{ r, g, b }` as the terminal shows it on `layer` (`"fg"` when omitted). The 16 ANSI colors and the terminal default (`nil` or `false`) use the terminal's own palette when it reports one at startup, and the xterm palette otherwise. Use it to blend colors, for example in a paint.
 
 ## `smelt.theme.set`
 
@@ -85,7 +85,7 @@ Types: [`smelt.theme.StyleDecl`](types.md#smeltthemestyledecl)
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Override a single highlight group's style. `style` is a `StyleDecl` table (`{ fg = { ansi = 244 }, bold = true }`). The override sticks until the next `apply()` or `use()` call.
+Override a single highlight group's style. `style` is a `StyleDecl` table (`{ fg = 244, bold = true }`). The override sticks until the next `apply()` or `use()` call.
 
 ## `smelt.theme.snapshot`
 

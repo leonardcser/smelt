@@ -532,7 +532,7 @@ end
 -- source asks for its next frame here on every paint; the earliest pending
 -- request wins, so sources animating at different rates share one timer.
 function M.invalidate_after(bar, ms)
-  local now = smelt.time.now_ms()
+  local now = smelt.time.monotonic_ms()
   if bar.repaint and now <= bar.repaint_at and bar.repaint_at <= now + ms then return end
   if bar.repaint then bar.repaint:remove() end
   bar.repaint_at = now + ms

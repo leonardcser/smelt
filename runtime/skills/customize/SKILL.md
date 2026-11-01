@@ -30,7 +30,7 @@ Your default workflow is:
 
 1. **Read** the user's `~/.config/smelt/init.lua` (create it if missing).
 2. **Edit** in the specific Lua call that effects the change (e.g.
-   `smelt.theme.set("SmeltAccent", { fg = { ansi = 208 } })`). Preserve every
+   `smelt.theme.set("SmeltAccent", { fg = 208 })`). Preserve every
    existing line.
 3. **Call `smelt_reload`** so the edit takes effect now without waiting for the
    user to restart smelt.
@@ -212,7 +212,7 @@ the relevant highlight group:
 
 ```lua
 -- In ~/.config/smelt/init.lua
-smelt.theme.set("SmeltAccent", { fg = { ansi = 208 }, bold = true })
+smelt.theme.set("SmeltAccent", { fg = 208, bold = true })
 ```
 
 `smelt.theme.set(group, style)` overrides one highlight group; the override
@@ -228,7 +228,7 @@ If the user names a session-color preset (`"ember"`, `"coral"`, `"rose"`,
 `smelt.theme.set(...)` so the preference survives a restart:
 
 ```lua
-smelt.theme.set("SmeltAccent", { fg = { ansi = 208 } })
+smelt.theme.set("SmeltAccent", { fg = 208 })
 ```
 
 The runtime command `/color <preset>` is session-only and exists to distinguish
@@ -243,9 +243,9 @@ returns a `ThemeSpec` table:
 ```lua
 return {
   groups = {
-    SmeltAccent      = { fg = { ansi = 208 }, bold = true },
-    Comment          = { fg = { ansi = 244 } },
-    SmeltDiffAddBg   = { bg = { ansi = 22 } },
+    SmeltAccent      = { fg = 208, bold = true },
+    Comment          = { fg = 244 },
+    SmeltDiffAddBg   = { bg = 22 },
     -- string-valued entries reference another group in this spec:
     SmeltProcess     = "SmeltAccent",
   },

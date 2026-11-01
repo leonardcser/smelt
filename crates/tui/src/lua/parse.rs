@@ -1,4 +1,5 @@
-//! Lua-value → typed-Rust converters (pure, no `TuiApp` dependencies).
+//! Lua-value → typed-Rust converters (pure, no `TuiApp` dependencies; theme
+//! groups come in through a [`Groups`] lookup).
 //! Errors are returned as `String`; call sites wrap them in `LuaError::RuntimeError`.
 
 use crate::smelt_edit::layout::{Border, BorderStyle, Constraint, EdgeStyle};
@@ -9,41 +10,126 @@ use smelt_core::style::Color;
 
 // ── color ──────────────────────────────────────────────────────────────
 
-/// Accepts:
+/// The side of a cell a color paints. A theme group name resolves to that
+/// group's color on the same side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layer {
+    Fg,
+    Bg,
+}
+
+impl Layer {
+    fn of(self, style: Style) -> Option<Color> {
+        match self {
+            Layer::Fg => style.fg,
+            Layer::Bg => style.bg,
+        }
+    }
+}
+
+/// Theme group lookup: a group's style, or `None` for a name the theme does
+/// not have. `crate::lua::theme_group` reads the active theme.
+pub(crate) type Groups<'a> = &'a dyn Fn(&str) -> Option<Style>;
+
+/// The Lua type of a color in the shared grammar, for generated stubs.
+pub(crate) const COLOR_TYPE: &str = "integer | string | false | number[]";
+
+/// A color as Lua gives it: a color, or the name of a theme group whose color
+/// it stands for. Every Lua API that takes a color reads it this way.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ColorRef {
+    Color(Color),
+    Group(String),
+}
+
+impl ColorRef {
+    /// Parse the shared color grammar: any [`color_literal`], or a theme group
+    /// name. Groups start with an uppercase letter (`Comment`, `SmeltAccent`);
+    /// ANSI names and `reset` are lowercase.
+    pub(crate) fn parse(v: &mlua::Value) -> Result<Option<Self>, String> {
+        if let mlua::Value::String(s) = v {
+            let name = s.to_str().map_err(|e| e.to_string())?;
+            if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return Ok(Some(ColorRef::Group(name.to_string())));
+            }
+        }
+        Ok(color_literal(v)?.map(ColorRef::Color))
+    }
+
+    /// The color on `layer`, looking a group up in `groups`. An unknown group
+    /// is an error, so a typo does not silently drop the color.
+    pub(crate) fn resolve(&self, layer: Layer, groups: Groups) -> Result<Option<Color>, String> {
+        match self {
+            ColorRef::Color(c) => Ok(Some(*c)),
+            ColorRef::Group(name) => groups(name)
+                .map(|style| layer.of(style))
+                .ok_or_else(|| format!("color: unknown theme group '{name}'")),
+        }
+    }
+}
+
+impl smelt_core::lua::lua_type::LuaType for ColorRef {
+    fn lua_type() -> String {
+        COLOR_TYPE.into()
+    }
+}
+
+impl mlua::FromLua for ColorRef {
+    fn from_lua(value: mlua::Value, _: &Lua) -> LuaResult<Self> {
+        ColorRef::parse(&value)
+            .and_then(|c| c.ok_or_else(|| "color: expected a color, got nil".to_string()))
+            .map_err(LuaError::RuntimeError)
+    }
+}
+
+/// Parse and resolve a color in one step: [`ColorRef::parse`] then
+/// [`ColorRef::resolve`].
+pub(crate) fn color(
+    v: &mlua::Value,
+    layer: Layer,
+    groups: Groups,
+) -> Result<Option<Color>, String> {
+    ColorRef::parse(v)?
+        .map(|c| c.resolve(layer, groups))
+        .transpose()
+        .map(Option::flatten)
+}
+
+/// Parse a color literal: the shared grammar without theme group names, for
+/// places that cannot refer to groups, such as a colorscheme's own colors.
 ///
 /// - `nil` → `None`
-/// - integer `0..=255` → `AnsiValue`
-/// - string `"reset"`, named ANSI (`"red"`, `"darkred"`, …, `"grey"`)
-/// - string `"#RRGGBB"` (case-insensitive)
-/// - table `{ r=, g=, b= }`
-pub(crate) fn color_opt(v: Option<mlua::Value>) -> Result<Option<Color>, String> {
+/// - `false` or `"reset"` → the terminal default
+/// - integer `0..=255` → an ANSI 256-color slot
+/// - string `"#rrggbb"` (case-insensitive) or an ANSI name (`"red"`, `"darkred"`, …)
+/// - `{ r, g, b }` → RGB; channels are rounded and clamped to `0..=255`
+pub(crate) fn color_literal(v: &mlua::Value) -> Result<Option<Color>, String> {
     match v {
-        None | Some(mlua::Value::Nil) => Ok(None),
-        Some(mlua::Value::Integer(n)) if (0..=255).contains(&n) => {
-            Ok(Some(Color::AnsiValue(n as u8)))
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::Boolean(false) => Ok(Some(Color::Reset)),
+        mlua::Value::Integer(n) if (0..=255).contains(n) => Ok(Some(Color::AnsiValue(*n as u8))),
+        mlua::Value::String(s) => color_str(&s.to_str().map_err(|e| e.to_string())?).map(Some),
+        mlua::Value::Table(t) => {
+            let channel = |i: usize| -> Result<u8, String> {
+                match t.raw_get::<mlua::Value>(i).map_err(|e| e.to_string())? {
+                    mlua::Value::Integer(n) => Ok(n.clamp(0, 255) as u8),
+                    mlua::Value::Number(n) if n.is_finite() => {
+                        Ok(n.round().clamp(0.0, 255.0) as u8)
+                    }
+                    other => Err(format!(
+                        "color[{i}]: expected a number, got {}",
+                        other.type_name()
+                    )),
+                }
+            };
+            Ok(Some(Color::Rgb {
+                r: channel(1)?,
+                g: channel(2)?,
+                b: channel(3)?,
+            }))
         }
-        Some(mlua::Value::String(s)) => {
-            let raw = s.to_str().map_err(|e| e.to_string())?.to_string();
-            color_str(&raw).map(Some)
-        }
-        Some(mlua::Value::Table(t)) => {
-            if let Ok(Some(ansi)) = t.get::<Option<u8>>("ansi") {
-                return Ok(Some(Color::AnsiValue(ansi)));
-            }
-            if let Ok(Some(rgb)) = t.get::<Option<[u8; 3]>>("rgb") {
-                return Ok(Some(Color::Rgb {
-                    r: rgb[0],
-                    g: rgb[1],
-                    b: rgb[2],
-                }));
-            }
-            let r: u8 = t.get("r").map_err(|e| format!("color.r: {e}"))?;
-            let g: u8 = t.get("g").map_err(|e| format!("color.g: {e}"))?;
-            let b: u8 = t.get("b").map_err(|e| format!("color.b: {e}"))?;
-            Ok(Some(Color::Rgb { r, g, b }))
-        }
-        Some(other) => Err(format!(
-            "color: expected string | integer | table, got {}",
+        other => Err(format!(
+            "color: expected false, an integer, a string or {{ r, g, b }}, got {}",
             other.type_name()
         )),
     }
@@ -85,18 +171,19 @@ fn color_str(s: &str) -> Result<Color, String> {
 // ── style + span + title ───────────────────────────────────────────────
 
 /// Read style fields (`fg`, `bg`, `bold`, `dim`, `italic`, `underline`, `crossedout`, `reverse`)
-/// off a table. Unrecognised keys are ignored. `fg = false` / `bg = false`
-/// ask for the terminal default, as `"reset"` does.
-pub(crate) fn style(t: &mlua::Table) -> Result<Style, String> {
-    let color = |key: &str| match t.get::<mlua::Value>(key).ok() {
-        Some(mlua::Value::Boolean(false)) => Ok(Some(Color::Reset)),
-        value => color_opt(value),
+/// off a table. Unrecognised keys are ignored. Colors take any form [`color`]
+/// accepts, with theme groups looked up in `groups`; `fg = false` /
+/// `bg = false` ask for the terminal default.
+pub(crate) fn style(t: &mlua::Table, groups: Groups) -> Result<Style, String> {
+    let read = |key: &str, layer| {
+        let value = t.get::<mlua::Value>(key).map_err(|e| e.to_string())?;
+        color(&value, layer, groups).map_err(|e| format!("{key}: {e}"))
     };
     let mut style = Style::new();
-    if let Some(c) = color("fg")? {
+    if let Some(c) = read("fg", Layer::Fg)? {
         style = style.fg(c);
     }
-    if let Some(c) = color("bg")? {
+    if let Some(c) = read("bg", Layer::Bg)? {
         style = style.bg(c);
     }
     if t.get::<bool>("bold").unwrap_or(false) {
@@ -150,13 +237,16 @@ impl StylePatch {
 
 /// Parse a partial style table: only keys present in `t` change.
 /// `fg = false` / `bg = false` clear a color.
-pub(crate) fn style_patch(t: &mlua::Table) -> Result<StylePatch, String> {
+pub(crate) fn style_patch(t: &mlua::Table, groups: Groups) -> Result<StylePatch, String> {
     let mut patch = StylePatch::default();
-    for (key, slot) in [("fg", &mut patch.fg), ("bg", &mut patch.bg)] {
+    for (key, layer, slot) in [
+        ("fg", Layer::Fg, &mut patch.fg),
+        ("bg", Layer::Bg, &mut patch.bg),
+    ] {
         match t.get::<mlua::Value>(key).map_err(|e| e.to_string())? {
             mlua::Value::Nil => {}
             mlua::Value::Boolean(false) => *slot = Some(None),
-            value => *slot = Some(color_opt(Some(value))?),
+            value => *slot = Some(color(&value, layer, groups).map_err(|e| format!("{key}: {e}"))?),
         }
     }
     for (key, slot) in [
@@ -214,26 +304,25 @@ pub(crate) fn style_to_lua(lua: &Lua, style: Style) -> LuaResult<mlua::Table> {
     Ok(t)
 }
 
-fn color_to_lua(lua: &Lua, color: Color) -> LuaResult<mlua::Table> {
-    let t = lua.create_table_with_capacity(0, 1)?;
-    match color {
-        Color::AnsiValue(v) => t.set("ansi", v)?,
-        Color::Rgb { r, g, b } => t.set("rgb", lua.create_sequence_from([r, g, b])?)?,
-        other => {
-            // Project the named colors back to their canonical ANSI slot.
-            if let Some(idx) = crate::lua::api::color_to_ansi(other) {
-                t.set("ansi", idx)?;
-            }
-        }
-    }
-    Ok(t)
+/// Project a color to the shared grammar [`color_literal`] reads: `{ r, g, b }`
+/// for RGB, an integer for an ANSI slot, and `false` for the terminal default.
+pub(crate) fn color_to_lua(lua: &Lua, color: Color) -> LuaResult<mlua::Value> {
+    Ok(match color {
+        Color::Rgb { r, g, b } => mlua::Value::Table(lua.create_sequence_from([r, g, b])?),
+        Color::AnsiValue(v) => mlua::Value::Integer(v.into()),
+        Color::Reset => mlua::Value::Boolean(false),
+        named => match crate::lua::api::color_to_ansi(named) {
+            Some(idx) => mlua::Value::Integer(idx.into()),
+            None => mlua::Value::Boolean(false),
+        },
+    })
 }
 
-fn span(t: &mlua::Table) -> Result<Span<'static>, String> {
+fn span(t: &mlua::Table, groups: Groups) -> Result<Span<'static>, String> {
     let text: String = t
         .get::<String>("text")
         .map_err(|e| format!("span.text: {e}"))?;
-    Ok(Span::styled(text, style(t)?))
+    Ok(Span::styled(text, style(t, groups)?))
 }
 
 /// Parse a Lua-side title spec into a styled [`Line`]. Surface:
@@ -245,14 +334,17 @@ fn span(t: &mlua::Table) -> Result<Span<'static>, String> {
 /// - sequence of span tables `{ {text=..,fg=..}, " ", {text=..} }` →
 ///   multi-span Line. List items can be plain strings (default style)
 ///   or span tables.
-pub(crate) fn title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, String> {
+pub(crate) fn title(
+    v: Option<mlua::Value>,
+    groups: Groups,
+) -> Result<Option<Line<'static>>, String> {
     match v {
         None | Some(mlua::Value::Nil) => Ok(None),
         Some(mlua::Value::String(s)) => Ok(Some(Line::raw(s.to_string_lossy().to_string()))),
         Some(mlua::Value::Table(t)) => {
             // Table with `text` key → single-span Line.
             if t.contains_key("text").unwrap_or(false) {
-                return Ok(Some(Line::from_spans([span(&t)?])));
+                return Ok(Some(Line::from_spans([span(&t, groups)?])));
             }
             let mut spans: Vec<Span<'static>> = Vec::new();
             for v in t.sequence_values::<mlua::Value>() {
@@ -261,7 +353,7 @@ pub(crate) fn title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, Str
                     mlua::Value::String(s) => {
                         spans.push(Span::raw(s.to_string_lossy().to_string()));
                     }
-                    mlua::Value::Table(st) => spans.push(span(&st)?),
+                    mlua::Value::Table(st) => spans.push(span(&st, groups)?),
                     other => {
                         return Err(format!(
                             "title span: expected string or table, got {}",
@@ -559,39 +651,28 @@ mod tests {
 
     // ── color ──────────────────────────────────────────────────────────
 
-    #[test]
-    fn color_opt_nil_returns_none() {
-        assert_eq!(color_opt(None).unwrap(), None);
-        assert_eq!(color_opt(Some(mlua::Value::Nil)).unwrap(), None);
+    fn literal(src: &str) -> Result<Option<Color>, String> {
+        let lua = lua();
+        color_literal(&eval_value(&lua, src))
     }
 
     #[test]
-    fn color_opt_named_ansi() {
-        let lua = lua();
-        let v = eval_value(&lua, r#"return "red""#);
-        assert_eq!(color_opt(Some(v)).unwrap(), Some(Color::Red));
-    }
-
-    #[test]
-    fn color_opt_hex_rgb() {
-        let lua = lua();
-        let v = eval_value(&lua, r##"return "#FF8000""##);
+    fn color_literal_reads_every_form() {
+        assert_eq!(literal("return nil").unwrap(), None);
+        assert_eq!(literal("return false").unwrap(), Some(Color::Reset));
+        assert_eq!(literal(r#"return "reset""#).unwrap(), Some(Color::Reset));
+        assert_eq!(literal("return 42").unwrap(), Some(Color::AnsiValue(42)));
+        assert_eq!(literal(r#"return "red""#).unwrap(), Some(Color::Red));
         assert_eq!(
-            color_opt(Some(v)).unwrap(),
+            literal(r##"return "#FF8000""##).unwrap(),
             Some(Color::Rgb {
                 r: 0xFF,
                 g: 0x80,
                 b: 0x00
             })
         );
-    }
-
-    #[test]
-    fn color_opt_rgb_table() {
-        let lua = lua();
-        let v = eval_value(&lua, "return { r = 18, g = 22, b = 30 }");
         assert_eq!(
-            color_opt(Some(v)).unwrap(),
+            literal("return { 18, 22, 30 }").unwrap(),
             Some(Color::Rgb {
                 r: 18,
                 g: 22,
@@ -601,26 +682,65 @@ mod tests {
     }
 
     #[test]
-    fn color_opt_ansi_integer() {
-        let lua = lua();
-        let v = eval_value(&lua, "return 42");
-        assert_eq!(color_opt(Some(v)).unwrap(), Some(Color::AnsiValue(42)));
+    fn color_literal_rounds_and_clamps_channels() {
+        assert_eq!(
+            literal("return { 12.6, -40, 300.2 }").unwrap(),
+            Some(Color::Rgb {
+                r: 13,
+                g: 0,
+                b: 255
+            })
+        );
     }
 
     #[test]
-    fn color_opt_unknown_name_errors() {
+    fn color_round_trips_through_lua() {
         let lua = lua();
-        let v = eval_value(&lua, r#"return "fuchsia""#);
-        assert!(color_opt(Some(v)).unwrap_err().contains("unknown name"));
+        for color in [
+            Color::Rgb { r: 1, g: 2, b: 3 },
+            Color::AnsiValue(208),
+            Color::Reset,
+        ] {
+            let value = color_to_lua(&lua, color).unwrap();
+            assert_eq!(color_literal(&value).unwrap(), Some(color));
+        }
     }
 
     #[test]
-    fn color_opt_short_hex_errors() {
-        let lua = lua();
-        let v = eval_value(&lua, r##"return "#abc""##);
-        assert!(color_opt(Some(v))
+    fn color_literal_rejects_bad_input() {
+        assert!(literal(r#"return "fuchsia""#)
+            .unwrap_err()
+            .contains("unknown name"));
+        assert!(literal(r##"return "#abc""##)
             .unwrap_err()
             .contains("must be 6 hex digits"));
+        assert!(literal("return { 1, 2 }").unwrap_err().contains("color[3]"));
+        assert!(literal("return 300").is_err());
+    }
+
+    fn groups(name: &str) -> Option<Style> {
+        (name == "Comment").then(|| Style::new().fg(Color::AnsiValue(8)).bg(Color::AnsiValue(0)))
+    }
+
+    #[test]
+    fn group_names_resolve_per_layer() {
+        let lua = lua();
+        let read = |src: &str, layer| color(&eval_value(&lua, src), layer, &groups);
+        assert_eq!(
+            read(r#"return "Comment""#, Layer::Fg).unwrap(),
+            Some(Color::AnsiValue(8))
+        );
+        assert_eq!(
+            read(r#"return "Comment""#, Layer::Bg).unwrap(),
+            Some(Color::AnsiValue(0))
+        );
+        assert_eq!(
+            read(r#"return "red""#, Layer::Fg).unwrap(),
+            Some(Color::Red)
+        );
+        assert!(read(r#"return "Coment""#, Layer::Fg)
+            .unwrap_err()
+            .contains("unknown theme group 'Coment'"));
     }
 
     // ── style ──────────────────────────────────────────────────────────
@@ -632,7 +752,7 @@ mod tests {
             &lua,
             r#"return { fg = "green", bg = "black", bold = true, italic = true }"#,
         );
-        let s = style(&t).unwrap();
+        let s = style(&t, &groups).unwrap();
         assert_eq!(s.fg, Some(Color::Green));
         assert_eq!(s.bg, Some(Color::Black));
         assert!(s.bold);
@@ -644,7 +764,7 @@ mod tests {
     fn style_unrecognised_keys_are_ignored() {
         let lua = lua();
         let t = eval_table(&lua, r#"return { fg = "red", text = "hi", kind = "min" }"#);
-        let s = style(&t).unwrap();
+        let s = style(&t, &groups).unwrap();
         assert_eq!(s.fg, Some(Color::Red));
     }
 
@@ -654,7 +774,7 @@ mod tests {
     fn title_string_becomes_single_span_line() {
         let lua = lua();
         let v = eval_value(&lua, r#"return "hello""#);
-        let line = title(Some(v)).unwrap().expect("some line");
+        let line = title(Some(v), &groups).unwrap().expect("some line");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].text, "hello");
     }
@@ -666,7 +786,7 @@ mod tests {
             &lua,
             r#"return { text = "warn", fg = "yellow", bold = true }"#,
         );
-        let line = title(Some(v)).unwrap().expect("some line");
+        let line = title(Some(v), &groups).unwrap().expect("some line");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].text, "warn");
         assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
@@ -680,7 +800,7 @@ mod tests {
             &lua,
             r#"return { { text = "[", fg = "grey" }, "info", { text = "]", fg = "grey" } }"#,
         );
-        let line = title(Some(v)).unwrap().expect("some line");
+        let line = title(Some(v), &groups).unwrap().expect("some line");
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[1].text, "info");
         assert_eq!(line.spans[1].style.fg, None);
@@ -690,7 +810,7 @@ mod tests {
     fn title_empty_sequence_returns_none() {
         let lua = lua();
         let v = eval_value(&lua, "return {}");
-        assert!(title(Some(v)).unwrap().is_none());
+        assert!(title(Some(v), &groups).unwrap().is_none());
     }
 
     // ── constraint ────────────────────────────────────────────────────

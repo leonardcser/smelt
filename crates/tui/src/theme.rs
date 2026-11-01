@@ -124,91 +124,65 @@ impl StyleDecl {
     }
 }
 
-/// Color value. A direct color (`{ ansi = N }` / `{ rgb = { R, G, B } }`)
-/// or a `{ dark, light }` branch resolved at compile time against the
-/// terminal background. The branch entries are themselves `ColorDecl`s,
-/// so a light/dark side can carry any other shape; nested branches are
-/// allowed but pointless (the resolver re-reads `is_light` at each
-/// level, so an inner branch resolves the same way as an outer one).
-/// If both a direct color and a matching-side branch are set, the
-/// branch wins.
-#[derive(Debug, Default, Clone)]
-pub struct ColorDecl {
-    /// ANSI 256-color palette index for the default (non-branched) case.
-    pub ansi: Option<u8>,
-    /// `[r, g, b]` sRGB triple for the default (non-branched) case.
-    pub rgb: Option<[u8; 3]>,
-    /// Color this branch resolves to when `is_light == true`.
-    pub light: Option<Box<ColorDecl>>,
-    /// Color this branch resolves to when `is_light == false`.
-    pub dark: Option<Box<ColorDecl>>,
+/// Color value: a direct color in the shared color grammar (an ANSI index,
+/// `"#rrggbb"`, an ANSI name, `{ r, g, b }`, or `false` for the terminal
+/// default), or a `{ dark, light }` branch resolved at compile time against
+/// the terminal background. Branch sides are themselves `ColorDecl`s.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColorDecl {
+    Color(Color),
+    Branch {
+        /// Color this branch resolves to when `is_light == true`.
+        light: Option<Box<ColorDecl>>,
+        /// Color this branch resolves to when `is_light == false`.
+        dark: Option<Box<ColorDecl>>,
+    },
 }
 
 impl ColorDecl {
-    const DOC: &'static str = "Color value. Set `ansi` (256-color palette \
-index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` \
-(themselves `ColorDecl`s) for a branch that resolves against the terminal \
-background. A matching-side branch wins over the direct fields.";
+    const DOC: &'static str = "Color value: an ANSI index, `\"#rrggbb\"`, an ANSI \
+name, `{ r, g, b }`, or `false` for the terminal default. A `{ dark, light }` \
+table instead picks a side by the terminal background.";
 
     pub fn to_color(&self, is_light: bool) -> Option<Color> {
-        if is_light {
-            if let Some(c) = self.light.as_ref().and_then(|c| c.to_color(is_light)) {
-                return Some(c);
+        match self {
+            ColorDecl::Color(c) => Some(*c),
+            ColorDecl::Branch { light, dark } => {
+                let side = if is_light { light } else { dark };
+                side.as_ref().and_then(|c| c.to_color(is_light))
             }
-        } else if let Some(c) = self.dark.as_ref().and_then(|c| c.to_color(is_light)) {
-            return Some(c);
         }
-        if let Some(v) = self.ansi {
-            return Some(Color::AnsiValue(v));
-        }
-        if let Some([r, g, b]) = self.rgb {
-            return Some(Color::Rgb { r, g, b });
-        }
-        None
     }
 }
 
 // Hand-written LuaOpts/FromLua impls because `Box<ColorDecl>` doesn't
-// satisfy the `LuaType` / `FromLua` trait bounds the derive emits.
-// (mlua's `FromLua` isn't implemented for `Box<T>`, and adding a
-// blanket impl would touch the shared `lua_type` module just for this
-// recursive case.) Behavior matches what `#[derive(LuaOpts)]` would
-// produce for the equivalent non-recursive struct.
+// satisfy the `LuaType` / `FromLua` trait bounds the derive emits, and a
+// color is a union of a literal and a branch table.
 
 impl LuaType for ColorDecl {
     fn lua_type() -> String {
+        let ty = format!(
+            "{} | smelt.theme.ColorBranch",
+            crate::lua::parse::COLOR_TYPE
+        );
+        let side = |name, doc| LuaClassField {
+            name,
+            ty: ty.clone(),
+            optional: true,
+            doc,
+        };
         record_class(LuaClassDecl {
-            name: "smelt.theme.ColorDecl",
-            classification: smelt_core::lua::doc::classification_for_type("smelt.theme.ColorDecl"),
-            doc: Self::DOC,
+            name: "smelt.theme.ColorBranch",
+            classification: smelt_core::lua::doc::classification_for_type(
+                "smelt.theme.ColorBranch",
+            ),
+            doc: "Color that depends on the terminal background.",
             fields: vec![
-                LuaClassField {
-                    name: "ansi",
-                    ty: "integer".into(),
-                    optional: true,
-                    doc: "ANSI 256-color palette index for the default (non-branched) case.",
-                },
-                LuaClassField {
-                    name: "rgb",
-                    ty: "integer[]".into(),
-                    optional: true,
-                    doc: "`[r, g, b]` sRGB triple for the default (non-branched) case.",
-                },
-                LuaClassField {
-                    name: "light",
-                    ty: "smelt.theme.ColorDecl".into(),
-                    optional: true,
-                    doc: "Color this branch resolves to when `is_light == true`.",
-                },
-                LuaClassField {
-                    name: "dark",
-                    ty: "smelt.theme.ColorDecl".into(),
-                    optional: true,
-                    doc: "Color this branch resolves to when `is_light == false`.",
-                },
+                side("light", "Color on a light background."),
+                side("dark", "Color on a dark background."),
             ],
         });
-        "smelt.theme.ColorDecl".to_string()
+        ty
     }
 }
 
@@ -222,9 +196,6 @@ impl LuaTypeTuple for ColorDecl {
 
 impl LuaOpts for ColorDecl {
     fn lua_class_decl() -> LuaClassDecl {
-        // Returned for the `LuaOpts` trait contract; the field list is
-        // emitted by the `LuaType` impl above when the registry first
-        // sees the class.
         LuaClassDecl {
             name: "smelt.theme.ColorDecl",
             classification: smelt_core::lua::doc::classification_for_type("smelt.theme.ColorDecl"),
@@ -239,34 +210,33 @@ impl FromLua for ColorDecl {
     // clippy can't see past the recursion to know it's actually used.
     #[allow(clippy::only_used_in_recursion)]
     fn from_lua(value: LuaValue, lua: &Lua) -> LuaResult<Self> {
-        let t = match value {
-            LuaValue::Table(t) => t,
-            other => {
-                return Err(LuaError::FromLuaConversionError {
-                    from: other.type_name(),
-                    to: "smelt.theme.ColorDecl".into(),
-                    message: Some("expected a table".into()),
+        if let LuaValue::Table(t) = &value {
+            let light = t.get::<Option<LuaValue>>("light")?;
+            let dark = t.get::<Option<LuaValue>>("dark")?;
+            if light.is_some() || dark.is_some() {
+                let side = |v: Option<LuaValue>| -> LuaResult<Option<Box<ColorDecl>>> {
+                    v.map(|v| ColorDecl::from_lua(v, lua).map(Box::new))
+                        .transpose()
+                };
+                return Ok(ColorDecl::Branch {
+                    light: side(light)?,
+                    dark: side(dark)?,
                 });
             }
-        };
-        let ansi = t.get::<Option<u8>>("ansi")?;
-        let rgb = t.get::<Option<[u8; 3]>>("rgb")?;
-        // Recurse via `LuaValue` round-trip so `Box<ColorDecl>` doesn't
-        // need a `FromLua` impl of its own.
-        let light = match t.get::<Option<LuaValue>>("light")? {
-            Some(v) => Some(Box::new(ColorDecl::from_lua(v, lua)?)),
-            None => None,
-        };
-        let dark = match t.get::<Option<LuaValue>>("dark")? {
-            Some(v) => Some(Box::new(ColorDecl::from_lua(v, lua)?)),
-            None => None,
-        };
-        Ok(Self {
-            ansi,
-            rgb,
-            light,
-            dark,
-        })
+        }
+        match crate::lua::parse::color_literal(&value) {
+            Ok(Some(c)) => Ok(ColorDecl::Color(c)),
+            Ok(None) => Err(LuaError::FromLuaConversionError {
+                from: "nil",
+                to: "smelt.theme.ColorDecl".into(),
+                message: Some("expected a color".into()),
+            }),
+            Err(e) => Err(LuaError::FromLuaConversionError {
+                from: value.type_name(),
+                to: "smelt.theme.ColorDecl".into(),
+                message: Some(e),
+            }),
+        }
     }
 }
 
@@ -954,7 +924,7 @@ mod tests {
                     syntax = "Catppuccin Mocha",
                     light = true,
                     groups = {
-                        Normal = { fg = { ansi = 15 } },
+                        Normal = { fg = 15 },
                     },
                 }"#,
             )
@@ -1029,10 +999,7 @@ mod tests {
         groups.insert(
             "Base".into(),
             GroupDecl::Style(StyleDecl {
-                fg: Some(ColorDecl {
-                    ansi: Some(42),
-                    ..Default::default()
-                }),
+                fg: Some(ColorDecl::Color(Color::AnsiValue(42))),
                 ..Default::default()
             }),
         );

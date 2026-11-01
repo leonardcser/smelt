@@ -204,6 +204,12 @@ impl Theme {
         self.resolve(intern(name))
     }
 
+    /// The Style set for `name`, or `None` when this Theme has no such group.
+    pub fn lookup(&self, name: &str) -> Option<Style> {
+        let id = registry().read().unwrap().name_to_id.get(name).copied()?;
+        self.styles.get(&id).copied()
+    }
+
     /// Resolve a [`HlGroup`] to its current Style. Anonymous style ids fall
     /// through to the global anon registry; everything else returns
     /// `Style::default()`.

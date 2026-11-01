@@ -16,9 +16,10 @@ mod tasks;
 pub(crate) mod ui_ops;
 
 pub(crate) use app_ref::{
-    scope_app, try_with_agent_host, try_with_conversation_host, try_with_platform_host,
-    try_with_runtime_host, try_with_session_host, try_with_ui_host, with_agent_host,
-    with_conversation_host, with_platform_host, with_runtime_host, with_session_host, with_ui_host,
+    scope_app, theme_group, try_with_agent_host, try_with_conversation_host,
+    try_with_platform_host, try_with_runtime_host, try_with_session_host, try_with_ui_host,
+    with_agent_host, with_conversation_host, with_platform_host, with_runtime_host,
+    with_session_host, with_ui_host,
 };
 
 pub(crate) use smelt_core::lua::{

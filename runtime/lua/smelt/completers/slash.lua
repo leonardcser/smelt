@@ -5,11 +5,6 @@
 
 if not (smelt.prompt and smelt.prompt.register_completer) then return end
 
-local function accent_ansi()
-  local accent = smelt.theme.get("SmeltAccent")
-  return accent and accent.fg and accent.fg.ansi
-end
-
 smelt.prompt.register_completer({
   prefix = "/",
   detect = function(text, cpos)
@@ -21,15 +16,14 @@ smelt.prompt.register_completer({
     return 0
   end,
   items = function()
-    local ansi = accent_ansi()
     local out = {}
     for _, c in ipairs(smelt.cmd.list()) do
       if not c.hidden then
         out[#out + 1] = {
           label        = c.name,
           description  = c.desc,
-          ansi_color   = ansi,
-          label_color  = ansi,
+          prefix_color = "SmeltAccent",
+          label_color  = "SmeltAccent",
         }
       end
     end

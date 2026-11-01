@@ -40,8 +40,6 @@ impl LuaType for LuaPaintSlice {
 pub struct LuaPaintOpts {
     /// Keep the paint id across `/reload` and swap in the new callback.
     pub name: Option<String>,
-    /// Repaint at this rate while the paint is on screen.
-    pub fps: Option<u16>,
     /// Repaint when the mouse moves and expose `ctx.pointer`.
     pub pointer: Option<bool>,
 }
@@ -55,15 +53,14 @@ pub type LuaPointerMap = LuaCallback<(u16, u16, u16, u16), (Option<i64>, Option<
 pub struct LuaFrameOpts {
     /// Keep the paint id across `/reload` and swap in the new callback.
     pub name: Option<String>,
-    /// Repaint at this rate while the paint is registered.
-    pub fps: Option<u16>,
     /// Repaint when the mouse moves and expose `ctx.pointer`.
     pub pointer: Option<bool>,
     /// Frame paints run from the lowest `order` up, so a higher order draws
     /// over the effects below it. Ties run in registration order. Default 0.
     pub order: Option<i32>,
     /// Expose `ctx.prev`, the screen as smelt drew it on the previous frame
-    /// before any frame paint, and `ctx.damage`, the cells that changed since.
+    /// before any frame paint, `ctx.damage`, the cells that changed since,
+    /// and `ctx.scrolls`, the windows whose text scrolled.
     pub history: Option<bool>,
     /// For an effect that moves cells, `map_pointer(x, y, width, height)`
     /// returns the cell smelt laid out at screen cell `(x, y)` of a
@@ -144,14 +141,16 @@ impl mlua::UserData for LuaPaintReg {
             }
         });
 
-        methods.add_method("set_fps", |_, this, fps: Option<u16>| -> LuaResult<bool> {
+        methods.add_method("invalidate", |_, this, ()| -> LuaResult<bool> {
             Ok(crate::lua::with_ui_host(|host| {
-                host.set_paint_fps(this.id, fps)
+                host.invalidate_paint(this.id, None)
             }))
         });
 
-        methods.add_method("redraw", |_, this, ()| -> LuaResult<bool> {
-            Ok(crate::lua::with_ui_host(|host| host.redraw_paint(this.id)))
+        methods.add_method("invalidate_after", |_, this, ms: u64| -> LuaResult<bool> {
+            Ok(crate::lua::with_ui_host(|host| {
+                host.invalidate_paint(this.id, Some(std::time::Duration::from_millis(ms)))
+            }))
         });
 
         methods.add_function(
@@ -208,8 +207,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         fields: smelt_core::class_methods! {
             "remove" => fn() -> bool, "Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.",
             "rect" => fn() -> mlua::Value, "Return the paint leaf's current screen rect as `{ x, y, width, height }`, or `nil` until the first render lays it out.",
-            "set_fps" => fn(fps: Option<u16>) -> bool, "Repaint at `fps` frames per second while the paint is on screen, or only on change with `nil`. Returns `false` once the paint is removed.",
-            "redraw" => fn() -> bool, "Repaint once on the next frame, for example after a timer changes what the callback draws. Returns `false` once the paint is removed.",
+            "invalidate" => fn() -> bool, "Repaint on the next frame, for example after a timer or command changes what the callback draws. Returns `false` once the paint is removed.",
+            "invalidate_after" => fn(ms: u64) -> bool, "Repaint `ms` milliseconds after the current frame. Nothing repaints on its own, so an animated paint asks for its next frame here on every paint, and goes idle when it stops asking. The earliest pending request wins. Returns `false` once the paint is removed.",
             "on" => fn(event: LuaPaintEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription.",
         },
     });
@@ -217,13 +216,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let s = shared.clone();
     m.fn_(
         "register",
-        "Register `func(slice, ctx)` as a paint leaf and return its `Paint` handle. Use the handle anywhere a window id is accepted in the layout / overlay APIs; the callback runs each frame the leaf is visible, in its layer order, so the slice already holds what was painted below it. `ctx` has `focused`, `terminal_width`, `terminal_height`, `x`, `y` (the slice origin on screen), `now_ms`, `frame`, and `pointer` (`{ x, y }` relative to the slice) when `opts.pointer` is set.",
+        "Register `func(slice, ctx)` as a paint leaf and return its `Paint` handle. Use the handle anywhere a window id is accepted in the layout / overlay APIs; the callback runs each frame the leaf is visible, in its layer order, so the slice already holds what was painted below it. See `smelt.paint.Ctx` for what `ctx` holds.",
         &["func", "opts"],
-        move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, mlua::Table), ()>, Option<LuaPaintOpts>)| -> LuaResult<LuaPaintReg> {
+        move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, crate::lua::paint::PaintCtx), ()>, Option<LuaPaintOpts>)| -> LuaResult<LuaPaintReg> {
             let opts = opts.unwrap_or_default();
             let options = crate::lua::paint::PaintOptions {
                 stage: crate::lua::paint::PaintStage::Leaf,
-                fps: opts.fps,
                 pointer: opts.pointer.unwrap_or(false),
             };
             register_paint(lua, &s, func, opts.name, options)
@@ -232,9 +230,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let s = shared.clone();
     m.fn_(
         "frame",
-        "Register `func(slice, ctx)` over the whole screen and return its `Paint` handle. It runs after everything else has painted and before the frame is sent, so it can read, recolor, move, or replace any cell: screen-wide effects such as fades, color filters, or melting text. `ctx` matches `smelt.paint.register`, plus `cursor` (`{ x, y }` of the visible cursor, absent while it is hidden) for effects that follow it, and with `opts.history` also `prev` (a `Snapshot` of the previous frame before frame paints, absent on the first) and `damage` (a list of `{ x, y, width, height }` rects that changed since then; the whole screen on the first frame and after a resize). Damage is visual: scrolling changes every scrolled row. Remove the handle to stop the effect.",
+        "Register `func(slice, ctx)` over the whole screen and return its `Paint` handle. It runs after everything else has painted and before the frame is sent, so it can read, recolor, move, or replace any cell: screen-wide effects such as fades, color filters, or melting text. `ctx` is a `smelt.paint.Ctx`, with `cursor` for effects that follow it and, with `opts.history`, `prev`, `damage` and `scroll` for effects that react to change. Remove the handle to stop the effect.",
         &["func", "opts"],
-        move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, mlua::Table), ()>, Option<LuaFrameOpts>)| -> LuaResult<LuaPaintReg> {
+        move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, crate::lua::paint::PaintCtx), ()>, Option<LuaFrameOpts>)| -> LuaResult<LuaPaintReg> {
             let opts = opts.unwrap_or_default();
             let map_pointer = opts
                 .map_pointer
@@ -246,7 +244,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     history: opts.history.unwrap_or(false),
                     map_pointer,
                 },
-                fps: opts.fps,
                 pointer: opts.pointer.unwrap_or(false),
             };
             register_paint(lua, &s, func, opts.name, options)
@@ -259,7 +256,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 fn register_paint(
     lua: &Lua,
     shared: &Arc<LuaShared>,
-    func: LuaCallback<(LuaPaintSlice, mlua::Table), ()>,
+    func: LuaCallback<(LuaPaintSlice, crate::lua::paint::PaintCtx), ()>,
     name: Option<String>,
     options: crate::lua::paint::PaintOptions,
 ) -> LuaResult<LuaPaintReg> {

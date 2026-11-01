@@ -638,7 +638,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "visible_blocks",
-        "Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line, streaming, rect? }` entries. `rect` is `{ x, y, width, height }`: the screen cells of the block's rows that are on screen, inside the transcript's gutter and padding; it is absent while the block is scrolled out of view. Called from a paint, it matches the frame being painted. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.",
+        "Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line, streaming, rect?, top? }` entries. `rect` is `{ x, y, width, height }`: the screen cells of the block's rows that are on screen, inside the transcript's gutter and padding. `top` is the block row shown at `rect.y`, nonzero when the view cuts off the start of the block, so screen row `y` shows block row `top + y - rect.y`. Both are absent while the block is scrolled out of view. Called from a paint, it matches the frame being painted. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let blocks = crate::lua::try_with_conversation_host(|host| host.visible_transcript_blocks())
@@ -646,8 +646,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let out = lua.create_table_with_capacity(blocks.len(), 0)?;
             for (i, visible) in blocks.into_iter().enumerate() {
                 let t = block_snapshot_table(lua, visible.block)?;
-                if let Some(rect) = visible.screen {
-                    t.set("rect", crate::lua::parse::rect_to_lua(lua, rect)?)?;
+                if let Some(on_screen) = visible.screen {
+                    t.set("rect", crate::lua::parse::rect_to_lua(lua, on_screen.rect)?)?;
+                    t.set("top", on_screen.top)?;
                 }
                 out.set(i + 1, t)?;
             }

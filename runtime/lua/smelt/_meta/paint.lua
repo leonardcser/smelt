@@ -8,13 +8,14 @@
 ---@class smelt.paint
 local paint = {}
 
---- Register `func(slice, ctx)` over the whole screen and return its `Paint` handle. It runs after everything else has painted and before the frame is sent, so it can read, recolor, move, or replace any cell: screen-wide effects such as fades, color filters, or melting text. `ctx` matches `smelt.paint.register`, plus `cursor` (`{ x, y }` of the visible cursor, absent while it is hidden) for effects that follow it, and with `opts.history` also `prev` (a `Snapshot` of the previous frame before frame paints, absent on the first) and `damage` (a list of `{ x, y, width, height }` rects that changed since then; the whole screen on the first frame and after a resize). Damage is visual: scrolling changes every scrolled row. Remove the handle to stop the effect.
----@see smelt.paint.register
----@type fun(func: fun(arg1: smelt.paint.Slice, arg2: table), opts: smelt.paint.FrameOpts?): smelt.paint.Paint
+--- Register `func(slice, ctx)` over the whole screen and return its `Paint` handle. It runs after everything else has painted and before the frame is sent, so it can read, recolor, move, or replace any cell: screen-wide effects such as fades, color filters, or melting text. `ctx` is a `smelt.paint.Ctx`, with `cursor` for effects that follow it and, with `opts.history`, `prev`, `damage` and `scroll` for effects that react to change. Remove the handle to stop the effect.
+---@see smelt.paint.Ctx
+---@type fun(func: fun(arg1: smelt.paint.Slice, arg2: smelt.paint.Ctx), opts: smelt.paint.FrameOpts?): smelt.paint.Paint
 paint.frame = nil
 
---- Register `func(slice, ctx)` as a paint leaf and return its `Paint` handle. Use the handle anywhere a window id is accepted in the layout / overlay APIs; the callback runs each frame the leaf is visible, in its layer order, so the slice already holds what was painted below it. `ctx` has `focused`, `terminal_width`, `terminal_height`, `x`, `y` (the slice origin on screen), `now_ms`, `frame`, and `pointer` (`{ x, y }` relative to the slice) when `opts.pointer` is set.
----@type fun(func: fun(arg1: smelt.paint.Slice, arg2: table), opts: smelt.paint.Opts?): smelt.paint.Paint
+--- Register `func(slice, ctx)` as a paint leaf and return its `Paint` handle. Use the handle anywhere a window id is accepted in the layout / overlay APIs; the callback runs each frame the leaf is visible, in its layer order, so the slice already holds what was painted below it. See `smelt.paint.Ctx` for what `ctx` holds.
+---@see smelt.paint.Ctx
+---@type fun(func: fun(arg1: smelt.paint.Slice, arg2: smelt.paint.Ctx), opts: smelt.paint.Opts?): smelt.paint.Paint
 paint.register = nil
 
 return paint

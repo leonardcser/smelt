@@ -1207,14 +1207,15 @@ impl TuiApp {
         // borrow. The frame owns its grid and borrows the UI only while painting
         // built-in commands, so each Lua leaf paints directly into the frame in
         // its layer order. Frame-stage paints then see the finished screen.
-        let clock = self.paint_timeline.advance(self.core.monotonic_ms());
-        let mut animation: Option<std::time::Duration> = None;
+        let clock = self.paint_timeline.advance(
+            self.core.monotonic_ms(),
+            self.platform.terminal_is_focused(),
+        );
         let mut frame = self.ui.begin_frame(prepared_frame);
         while let Some(leaf) = frame.paint_to_next_leaf(&self.ui) {
             let Some(slot) = self.paint_registry.leaf(leaf.id) else {
                 continue;
             };
-            animation = animation.into_iter().chain(slot.options.interval()).min();
             self.run_paint(
                 slot,
                 &mut frame.grid_mut().slice_mut(leaf.rect),
@@ -1223,32 +1224,57 @@ impl TuiApp {
                 None,
             );
         }
+        let windows = frame.windows().to_vec();
         let mut frame = frame.into_grid();
         let frame_paints = self.paint_registry.frame_paints();
         let changes = frame_paints
             .iter()
             .any(|slot| slot.options.history())
-            .then(|| self.paint_timeline.begin_history(&frame));
+            .then(|| {
+                let areas = self.scroll_areas(&windows);
+                self.paint_timeline.begin_history(&frame, areas)
+            });
         if changes.is_none() {
             self.paint_timeline.drop_history();
         }
-        self.run_frame_paints(
-            &frame_paints,
-            &mut frame,
-            &clock,
-            changes.as_ref(),
-            &mut animation,
-        );
+        self.run_frame_paints(&frame_paints, &mut frame, &clock, changes.as_ref());
         if let Some(changes) = changes {
             self.paint_timeline.end_history(changes);
-        }
-        if let Some(interval) = animation {
-            self.request_animation_render(interval);
         }
         let _ = self.ui.flush_frame(out, frame);
         if let Some(trace) = frame_trace {
             FrameScheduler::record_flushed(trace);
         }
+    }
+
+    /// Where each painted window's content sat, so frame paints can tell
+    /// scrolling from change.
+    fn scroll_areas(
+        &self,
+        windows: &[crate::smelt_edit::PaintedWindow],
+    ) -> Vec<crate::lua::paint::ScrollArea> {
+        windows
+            .iter()
+            .map(|painted| {
+                let origin = |row: crate::smelt_edit::RowIndex| {
+                    i64::from(painted.text.y) + row as i64 - painted.scroll_top as i64
+                };
+                let anchors = if painted.win == crate::app::well_known::TRANSCRIPT_WIN {
+                    self.conversation
+                        .transcript()
+                        .visible_block_layout()
+                        .map(|(block, first_row, _)| (block.get(), origin(first_row)))
+                        .collect()
+                } else {
+                    vec![(0, origin(0))]
+                };
+                crate::lua::paint::ScrollArea {
+                    win: painted.win,
+                    area: painted.text,
+                    anchors,
+                }
+            })
+            .collect()
     }
 
     /// Run frame-stage paints over the finished screen, in order.
@@ -1258,7 +1284,6 @@ impl TuiApp {
         frame: &mut crate::smelt_edit::Grid,
         clock: &crate::lua::paint::PaintClock,
         changes: Option<&crate::lua::paint::FrameChanges>,
-        animation: &mut Option<std::time::Duration>,
     ) {
         if paints.is_empty() {
             return;
@@ -1275,10 +1300,6 @@ impl TuiApp {
             ..Default::default()
         };
         for slot in paints {
-            *animation = (*animation)
-                .into_iter()
-                .chain(slot.options.interval())
-                .min();
             self.run_paint(*slot, &mut frame.slice_mut(area), &context, &clock, changes);
         }
     }

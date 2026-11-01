@@ -7,7 +7,7 @@
 
 local W, H = 32, 32
 local TICK_MS = 100
-local FOOD = { rgb = { 240, 80, 60 } }
+local FOOD = { 240, 80, 60 }
 local STEP = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
 local OPPOSITE = { up = "down", down = "up", left = "right", right = "left" }
 
@@ -63,7 +63,7 @@ end
 -- The head is bright and the body fades toward the tail.
 local function shade(i)
   local f = 1 - (i - 1) / math.max(#game.snake, 8) * 0.7
-  return { rgb = { math.floor(120 * f), math.floor(220 * f), math.floor(90 * f) } }
+  return { math.floor(120 * f), math.floor(220 * f), math.floor(90 * f) }
 end
 
 local function paint(slice)

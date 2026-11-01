@@ -182,6 +182,16 @@ pub struct PreparedPaintLeaf {
     pub context: DrawContext,
 }
 
+/// A window as one frame painted it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaintedWindow {
+    pub win: WinId,
+    /// Where its buffer text sits on screen: row `r` shows buffer row
+    /// `scroll_top + r`.
+    pub text: Rect,
+    pub scroll_top: RowIndex,
+}
+
 /// Resolved frame geometry and painter-order operations. Paint it with
 /// [`Ui::begin_frame`] or [`Ui::paint_frame`] without resolving layout again.
 pub struct PreparedFrame {
@@ -196,6 +206,7 @@ pub struct Frame {
     grid: Grid,
     commands: std::vec::IntoIter<PreparedFrameCommand>,
     theme: std::sync::Arc<Theme>,
+    windows: Vec<PaintedWindow>,
 }
 
 impl Frame {
@@ -231,6 +242,13 @@ impl Frame {
                         continue;
                     };
                     window.render(buffer, &mut grid.slice_mut(rect), &context);
+                    if let Some(text) = window.text_rect() {
+                        self.windows.push(PaintedWindow {
+                            win,
+                            text,
+                            scroll_top: window.scroll_top(),
+                        });
+                    }
                 }
                 PreparedFrameCommand::Paint(leaf) => return Some(leaf),
             }
@@ -240,6 +258,11 @@ impl Frame {
 
     pub fn grid_mut(&mut self) -> &mut Grid {
         &mut self.grid
+    }
+
+    /// The windows painted so far, in painter order.
+    pub fn windows(&self) -> &[PaintedWindow] {
+        &self.windows
     }
 
     /// Finish the frame. Remaining commands are dropped; call
@@ -2770,6 +2793,7 @@ impl Ui {
             grid: self.surface.compositor_mut().begin_frame(),
             commands: prepared.commands.into_iter(),
             theme: prepared.theme,
+            windows: Vec::new(),
         }
     }
 

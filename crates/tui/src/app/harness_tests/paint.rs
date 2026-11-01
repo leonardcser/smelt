@@ -44,7 +44,7 @@ fn frame_paint_recolors_real_transcript_text() {
         _G.__fx = smelt.paint.frame(function(slice)
             slice:map(function(cell)
                 if cell.ch == "m" then
-                    return { ch = "M", style = { fg = { rgb = { 1, 2, 3 } } } }
+                    return { ch = "M", style = { fg = { 1, 2, 3 } } }
                 end
             end)
         end, { name = "test.fx" })
@@ -109,14 +109,19 @@ fn theme_rgb_resolves_every_color_through_the_palette() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(
         r##"
-        local function rgb(c) local t = smelt.theme.rgb(c).rgb; return t[1] .. "," .. t[2] .. "," .. t[3] end
-        assert(rgb({ ansi = 196 }) == "255,0,0", rgb({ ansi = 196 }))
-        assert(rgb({ ansi = 244 }) == "128,128,128", rgb({ ansi = 244 }))
+        local function rgb(c) local t = smelt.theme.rgb(c); return t[1] .. "," .. t[2] .. "," .. t[3] end
+        assert(rgb(196) == "255,0,0", rgb(196))
+        assert(rgb(244) == "128,128,128", rgb(244))
         assert(rgb("#102030") == "16,32,48")
         assert(rgb("red") == "255,0,0")
         assert(rgb(nil) == "229,229,229", rgb(nil))
         assert(rgb("reset") == rgb(nil))
-        assert(table.concat(smelt.theme.rgb(nil, "bg").rgb, ",") == "0,0,0")
+        assert(table.concat(smelt.theme.rgb(nil, "bg"), ",") == "0,0,0")
+        assert(rgb(false) == rgb(nil))
+        assert(rgb({ 10.4, -3, 300 }) == "10,0,255")
+        smelt.theme.set("TestTint", { fg = { 1, 2, 3 }, bg = 196 })
+        assert(rgb("TestTint") == "1,2,3")
+        assert(table.concat(smelt.theme.rgb("TestTint", "bg"), ",") == "255,0,0")
         "##
     ));
 }
@@ -149,7 +154,7 @@ fn leaf_paint_reads_and_restyles_what_is_under_it() {
     assert!(app.run_lua(
         r#"
         _G.__under = smelt.paint.register(function(slice)
-            slice:put_str(0, 0, "abc", { bg = { rgb = { 9, 9, 9 } } })
+            slice:put_str(0, 0, "abc", { bg = { 9, 9, 9 } })
         end)
         _G.__over = smelt.paint.register(function(slice)
             _G.__seen = slice:get(1, 0).ch
@@ -182,32 +187,38 @@ fn leaf_paint_reads_and_restyles_what_is_under_it() {
 }
 
 #[test]
-fn fps_paint_schedules_frames_until_removed() {
+fn invalidate_after_animates_while_the_paint_asks() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 12);
     app.render_silent();
     assert!(app.app.scheduled_frame_delay().is_none());
 
     assert!(app.run_lua(
-        r#"_G.__anim = smelt.paint.frame(function() end, { name = "test.anim", fps = 50 })"#
+        r#"_G.__on = true
+        _G.__anim = smelt.paint.frame(function()
+          if _G.__on then _G.__anim:invalidate_after(20) end
+        end, { name = "test.anim" })"#
     ));
     app.render_silent();
     let delay = app
         .app
         .scheduled_frame_delay()
-        .expect("an fps paint keeps frames coming");
+        .expect("a paint that asks keeps frames coming");
     assert!(delay <= Duration::from_millis(20), "{delay:?}");
-
-    assert!(app.run_lua("_G.__anim:set_fps(nil)"));
     app.render_silent();
-    assert!(app.app.scheduled_frame_delay().is_none());
+    assert!(app.app.scheduled_frame_delay().is_some());
 
-    assert!(app.run_lua("_G.__anim:set_fps(10); _G.__anim:remove()"));
+    assert!(app.run_lua("_G.__on = false"));
     app.render_silent();
     assert!(
         app.app.scheduled_frame_delay().is_none(),
-        "a removed paint stops animating"
+        "a paint that stops asking goes idle"
     );
+
+    assert!(app.run_lua("_G.__anim:remove()"));
+    assert!(!app
+        .eval_lua::<bool>("return _G.__anim:invalidate_after(20)")
+        .unwrap());
 }
 
 #[test]
@@ -284,26 +295,26 @@ fn pointer_paint_sees_leaf_relative_pointer() {
 }
 
 #[test]
-fn redraw_requests_one_frame() {
+fn invalidate_requests_one_frame() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(r#"_G.__fx = smelt.paint.frame(function() end)"#));
     app.render_silent();
     assert!(app.app.scheduled_frame_delay().is_none());
 
-    assert!(app.eval_lua::<bool>("return _G.__fx:redraw()").unwrap());
+    assert!(app.eval_lua::<bool>("return _G.__fx:invalidate()").unwrap());
     assert!(
         app.app.scheduled_frame_delay().is_some(),
-        "redraw asks for a frame"
+        "invalidate asks for a frame"
     );
     app.render_silent();
     assert!(
         app.app.scheduled_frame_delay().is_none(),
-        "redraw is one frame, not an animation"
+        "invalidate is one frame, not an animation"
     );
 
     assert!(app.run_lua("_G.__fx:remove()"));
-    assert!(!app.eval_lua::<bool>("return _G.__fx:redraw()").unwrap());
+    assert!(!app.eval_lua::<bool>("return _G.__fx:invalidate()").unwrap());
 }
 
 #[test]
@@ -374,6 +385,204 @@ fn history_shows_the_previous_frame_before_effects_and_what_changed() {
         "typing damages a few rows: {typed}"
     );
     assert!(app.eval_lua::<bool>("return _G.__plain").unwrap());
+}
+
+#[test]
+fn cells_read_and_written_back_keep_the_default_background() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(40, 12);
+    app.type_text("abc");
+    assert!(app.run_lua(
+        r#"
+        smelt.paint.frame(function(slice, ctx)
+          local y = ctx.cursor.y
+          slice:fill(0, y + 1, 3, 1, " ", { bg = 196 })
+          -- Move the typed text one row down, onto the red band.
+          for x = 0, 2 do
+            local cell = slice:get(ctx.cursor.x - 3 + x, y)
+            _G.__bg = cell.style.bg
+            slice:set(x, y + 1, cell.ch, cell.style)
+          end
+        end)
+        "#
+    ));
+    let frame = app.render_to_frame();
+    assert_eq!(
+        app.eval_lua::<mlua::Value>("return _G.__bg").unwrap(),
+        mlua::Value::Boolean(false),
+        "the terminal background reads as false"
+    );
+    let (y, _) = frame
+        .rows
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.starts_with("abc"))
+        .unwrap_or_else(|| panic!("the copied text shows:\n{}", frame.text()));
+    for x in 0..3 {
+        assert_eq!(
+            frame.styles[y][x].bg, None,
+            "a copied cell keeps its own background, not the band under it"
+        );
+    }
+}
+
+#[test]
+fn frame_paints_see_terminal_focus_and_repaint_when_it_changes() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 12);
+    assert!(app.run_lua(r#"smelt.paint.frame(function(_, ctx) _G.__focused = ctx.focused end)"#));
+    app.render_silent();
+    assert!(app.eval_lua::<bool>("return _G.__focused").unwrap());
+
+    app.feed_one(SourceEvent::Term(Event::FocusLost));
+    assert!(
+        app.app.scheduled_frame_delay().is_some(),
+        "losing focus asks for a frame"
+    );
+    app.render_silent();
+    assert!(!app.eval_lua::<bool>("return _G.__focused").unwrap());
+
+    app.feed_one(SourceEvent::Term(Event::FocusGained));
+    app.render_silent();
+    assert!(app.eval_lua::<bool>("return _G.__focused").unwrap());
+}
+
+#[test]
+fn any_window_that_scrolls_is_reported_and_taken_out_of_damage() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 24);
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new()
+        local lines = {}
+        for i = 1, 60 do lines[i] = "line " .. i end
+        buf:lines(lines)
+        float = smelt.win.new(buf, { surface = 'readonly_text', wrap = false })
+        smelt.overlay.new({ layout = smelt.ui.layout.leaf(float), anchor = 'center',
+          width = 30, height = 10, border = 'none' })
+        smelt.paint.frame(function(_, ctx)
+          local inside = 0
+          local s = ctx.scrolls[1]
+          for _, d in ipairs(ctx.damage) do
+            if s and d.y >= s.y and d.y < s.y + s.height and d.x >= s.x and d.x < s.x + s.width then
+              inside = inside + 1
+            end
+          end
+          _G.__last = { count = #ctx.scrolls, dy = s and s.dy, height = s and s.height, inside = inside,
+            is_float = s and s.win == float and s.win ~= smelt.win.transcript() }
+        end, { history = true })
+        "#
+    ));
+    app.render_silent();
+    app.render_silent();
+    assert!(app.run_lua("float:scroll(3)"));
+    app.render_silent();
+
+    let last = app.eval_lua::<mlua::Table>("return _G.__last").unwrap();
+    assert_eq!(
+        last.get::<i32>("count").unwrap(),
+        1,
+        "only the float scrolled"
+    );
+    assert!(
+        last.get::<bool>("is_float").unwrap(),
+        "the scroll names the float"
+    );
+    assert_eq!(last.get::<i32>("dy").unwrap(), 3);
+    assert!(last.get::<i32>("height").unwrap() > 3);
+    assert_eq!(
+        last.get::<i32>("inside").unwrap(),
+        3,
+        "only the three rows that scrolled in are damage"
+    );
+}
+
+#[test]
+fn scrolling_reports_the_move_and_leaves_only_new_rows_as_damage() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 16);
+    for i in 0..40 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("reply number {i}").into(),
+        });
+    }
+    assert!(app.run_lua(
+        r#"
+        smelt.paint.frame(function(slice, ctx)
+          local s = ctx.scrolls[1]
+          assert(not s or s.win == smelt.win.transcript())
+          local damaged = {}
+          for _, d in ipairs(ctx.damage) do
+            if s and d.y >= s.y and d.y < s.y + s.height then
+              local text = {}
+              for x = d.x, d.x + d.width - 1 do text[#text + 1] = slice:get(x, d.y).ch end
+              damaged[#damaged + 1] = { y = d.y - s.y, text = table.concat(text) }
+            end
+          end
+          -- Every block on screen must agree on which display row is at the top.
+          local origins, agree = {}, 0
+          for _, b in ipairs(smelt.transcript.visible_blocks()) do
+            local origin = b.rect and b.rect.y - b.top - b.first_row
+            if origin and not origins[origin] then origins[origin], agree = true, agree + 1 end
+          end
+          _G.__last = { dy = s and s.dy, damaged = damaged, agree = agree }
+        end, { history = true })
+        "#
+    ));
+    app.render_silent();
+    app.render_silent();
+
+    let view = app
+        .eval_lua::<mlua::Table>("return smelt.win.transcript():rect()")
+        .unwrap();
+    let (x, y): (u16, u16) = (view.get("x").unwrap(), view.get("y").unwrap());
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: x + 2,
+        row: y + 2,
+        modifiers: KeyModifiers::NONE,
+    })));
+    app.render_silent();
+
+    let last = app.eval_lua::<mlua::Table>("return _G.__last").unwrap();
+    let dy = last
+        .get::<Option<i32>>("dy")
+        .unwrap()
+        .expect("a wheel scroll reports ctx.scrolls");
+    assert!(dy < 0, "scrolling up moves the text down: {dy}");
+    let damaged: Vec<(i32, String)> = last
+        .get::<mlua::Table>("damaged")
+        .unwrap()
+        .sequence_values::<mlua::Table>()
+        .map(|d| {
+            let d = d.unwrap();
+            (d.get("y").unwrap(), d.get("text").unwrap())
+        })
+        .collect();
+    assert!(
+        damaged
+            .iter()
+            .any(|(_, text)| text.contains("reply number")),
+        "the reply that scrolled in is damage: {damaged:?}"
+    );
+    for (row, text) in &damaged {
+        assert!(
+            *row < -dy || text.contains("jump to bottom"),
+            "only rows that scrolled in at the top, and the jump pill that appeared, are damage: {damaged:?}"
+        );
+    }
+    assert_eq!(
+        last.get::<i32>("agree").unwrap(),
+        1,
+        "top is exact for every block"
+    );
+
+    app.render_silent();
+    let last = app.eval_lua::<mlua::Table>("return _G.__last").unwrap();
+    assert!(
+        last.get::<Option<i32>>("dy").unwrap().is_none(),
+        "a still frame has no scroll"
+    );
 }
 
 #[test]
@@ -479,6 +688,86 @@ fn dissolve_example_fades_deleted_text_then_goes_idle() {
 }
 
 #[test]
+fn freshink_example_inks_only_new_text_while_the_view_follows_it() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(40, 14);
+    for i in 0..30 {
+        app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+            content: format!("reply number {i}").into(),
+        });
+    }
+    app.start_submitted_turn("question");
+    let guide = include_str!("../../../../../docs/docs/extend/ui.md");
+    let start = guide.find("-- Fresh ink:").expect("fresh ink example");
+    let example = &guide[start..start + guide[start..].find("```").unwrap()];
+    assert!(app.run_lua(example), "{example}");
+    assert!(app.run_lua(
+        r#"_G.__dys = {}
+        smelt.paint.frame(function(_, ctx)
+          for _, s in ipairs(ctx.scrolls) do table.insert(_G.__dys, s.dy) end
+        end, { history = true })"#
+    ));
+    for _ in 0..3 {
+        app.render_silent();
+    }
+
+    let ink = Some(crate::smelt_edit::Color::Rgb {
+        r: 255,
+        g: 236,
+        b: 170,
+    });
+    let words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+    let mut inked_new = false;
+    for (i, word) in words.iter().enumerate() {
+        app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
+            // One paragraph that wraps over many rows, so the streaming block
+            // itself scrolls.
+            delta: format!("{word} words keep the one paragraph going on "),
+        });
+        for _ in 0..12 {
+            let frame = app.render_to_frame();
+            for (y, row) in frame.rows.iter().enumerate() {
+                let inked: String = row
+                    .chars()
+                    .zip(&frame.styles[y])
+                    .map(|(ch, style)| if style.fg == ink { ch } else { ' ' })
+                    .collect();
+                assert!(
+                    !words[..i].iter().any(|old| inked.contains(old))
+                        && !inked.contains("reply number"),
+                    "text that only scrolled is not new: {inked:?}\n{}",
+                    frame.text()
+                );
+                inked_new |= inked.contains(word);
+            }
+            app.clock.advance(Duration::from_millis(40));
+        }
+    }
+    let scrolls = app
+        .eval_lua::<String>("return table.concat(_G.__dys, ',')")
+        .unwrap();
+    assert!(
+        !scrolls.is_empty(),
+        "the view follows the stream and scrolls"
+    );
+    let frame = app.render_to_frame();
+    let dbg = app
+        .eval_lua::<String>(
+            r#"local t = {}
+            for _, b in ipairs(smelt.transcript.visible_blocks()) do
+              t[#t + 1] = b.role .. ":" .. tostring(b.streaming) .. ":" .. (b.rect and (b.rect.y .. "+" .. b.rect.height .. " top " .. b.top) or "off")
+            end
+            return table.concat(t, " | ")"#,
+        )
+        .unwrap();
+    assert!(
+        inked_new,
+        "the streamed words get the ink:\n{}\n{dbg}",
+        frame.text()
+    );
+}
+
+#[test]
 fn paint_time_is_the_monotonic_clock() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 12);
@@ -564,4 +853,32 @@ fn flip_example_turns_the_screen_upside_down() {
     let mut flipped = before.rows.clone();
     flipped.reverse();
     assert_eq!(after.rows, flipped, "\n{}", after.text());
+}
+
+#[test]
+fn every_color_argument_rejects_unknown_theme_groups() {
+    let mut app = TestApp::builder().build();
+    let errors = app
+        .eval_lua::<String>(
+            r#"
+            local buf = smelt.buf.new()
+            buf:lines({ "hello" })
+            local calls = {
+              rgb = function() return smelt.theme.rgb("Coment") end,
+              mark = function() return buf:mark(1, 1, 0, { end_col = 2, fg = "Coment" }) end,
+            }
+            local out = {}
+            for _, name in ipairs({ "rgb", "mark" }) do
+              local ok, err = pcall(calls[name])
+              out[#out + 1] = name .. "=" .. (ok and "ok" or tostring(err):match("unknown theme group '%w+'") or tostring(err))
+            end
+            assert(#smelt.theme.rgb("Comment") == 3)
+            return table.concat(out, ";")
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        errors,
+        "rgb=unknown theme group 'Coment';mark=unknown theme group 'Coment'"
+    );
 }

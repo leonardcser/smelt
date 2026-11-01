@@ -30,12 +30,12 @@ To change the accent color, add this to `init.lua`:
 
 ```lua
 smelt.lifecycle.on_ready(function()
-  smelt.theme.set("SmeltAccent", { fg = { ansi = 208 } })
+  smelt.theme.set("SmeltAccent", { fg = 208 })
 end)
 ```
 
 Any other highlight group works the same way, for example `Comment`. Colors are
-`{ ansi = N }` or `{ rgb = { R, G, B } }`.
+`N` or `{ R, G, B }`.
 
 Or write a full colorscheme at
 `~/.config/smelt/lua/smelt/colorschemes/mytheme.lua`:
@@ -44,10 +44,10 @@ Or write a full colorscheme at
 return {
   name = "mytheme",
   groups = {
-    SmeltAccent  = { fg = { ansi = 208 } },
-    SmeltProcess = { fg = { ansi = 117 } },
-    SmeltUserBg  = { bg = { dark = { ansi = 236 }, light = { ansi = 254 } } },
-    Comment      = { fg = { ansi = 244 } },
+    SmeltAccent  = { fg = 208 },
+    SmeltProcess = { fg = 117 },
+    SmeltUserBg  = { bg = { dark = 236, light = 254 } },
+    Comment      = { fg = 244 },
   },
 }
 ```
@@ -63,7 +63,7 @@ end)
 A colorscheme is a table with a required `groups` map and optional `name`,
 `syntax` and `light` fields. Each group is either a style table
 (`{ fg = ..., bg = ..., bold = true }`) or the name of another group. Colors are
-`{ ansi = N }`, `{ rgb = { R, G, B } }`, or a `{ dark = ..., light = ... }` pair.
+`N`, `{ R, G, B }`, or a `{ dark = ..., light = ... }` pair.
 
 The bundled `runtime/lua/smelt/colorschemes/default.lua` is a worked example, and
 `runtime/lua/smelt/colorschemes/_groups.lua` lists every group with its role and

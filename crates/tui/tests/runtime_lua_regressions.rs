@@ -956,6 +956,7 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           settings = { show_tokens = true, show_cost = true },
           time = {
             now_ms = function() return 0 end,
+            monotonic_ms = function() return 0 end,
             format = function(stamp, fmt) return os.date(fmt, stamp) end,
           },
           theme = { is_light = function() return false end },

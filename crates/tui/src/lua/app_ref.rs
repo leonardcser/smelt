@@ -287,8 +287,8 @@ impl RuntimeLuaHost<'_> {
         self.app.ui.theme().is_light()
     }
 
-    pub(crate) fn theme_group(&self, group: &str) -> smelt_core::style::Style {
-        self.app.ui.theme().get(group)
+    pub(crate) fn theme_group(&self, group: &str) -> Option<smelt_core::style::Style> {
+        self.app.ui.theme().lookup(group)
     }
 
     pub(crate) fn theme_snapshot(&self) -> Vec<(String, smelt_core::style::Style)> {
@@ -1240,26 +1240,18 @@ impl UiLuaHost<'_> {
         removed
     }
 
-    pub(crate) fn set_paint_fps(
+    /// Repaint after `after`, or on the next frame. `false` for a removed paint.
+    pub(crate) fn invalidate_paint(
         &mut self,
         paint: crate::smelt_edit::layout::PaintId,
-        fps: Option<u16>,
+        after: Option<std::time::Duration>,
     ) -> bool {
-        let mut changed = false;
-        let known = self.app.paint_registry.update(paint, |options| {
-            changed = options.fps != fps;
-            options.fps = fps;
-        });
-        if changed {
-            self.app.request_urgent_render();
-        }
-        known
-    }
-
-    pub(crate) fn redraw_paint(&mut self, paint: crate::smelt_edit::layout::PaintId) -> bool {
         let known = self.app.paint_registry.contains(paint);
         if known {
-            self.app.request_urgent_render();
+            match after {
+                Some(after) => self.app.request_animation_render(after),
+                None => self.app.request_urgent_render(),
+            }
         }
         known
     }
@@ -1880,6 +1872,12 @@ pub(crate) fn with_conversation_host<R>(
     callback: impl FnOnce(&mut ConversationLuaHost<'_>) -> R,
 ) -> R {
     with_scoped_app(|app| callback(&mut ConversationLuaHost { app }))
+}
+
+/// The active theme's style for `group`, or `None` when the theme has no such
+/// group. The [`crate::lua::parse::Groups`] lookup Lua color arguments use.
+pub(crate) fn theme_group(group: &str) -> Option<smelt_core::style::Style> {
+    try_with_runtime_host(|host| host.theme_group(group)).flatten()
 }
 
 pub(crate) fn try_with_conversation_host<R>(

@@ -468,26 +468,57 @@ impl Grid {
         })
     }
 
+    /// Every row of the grid as a one-row rect, top to bottom: the damage
+    /// of a frame with nothing to compare against.
+    pub fn rows(&self) -> Vec<Rect> {
+        if self.width == 0 {
+            return Vec::new();
+        }
+        (0..self.height)
+            .map(|y| Rect::new(0, y, self.width, 1))
+            .collect()
+    }
+
     /// Cells that differ from `prev`, as one-row rects of adjacent changed
-    /// cells in reading order. A size change damages the whole grid.
+    /// cells in reading order. A size change damages every row.
     pub fn damage(&self, prev: &Grid) -> Vec<Rect> {
+        self.damage_scrolled(prev, &[])
+    }
+
+    /// Cells that differ from `prev` once each scroll area's content moved up
+    /// by its `dy` rows (down when negative). Areas are in painter order, so
+    /// where they overlap the last one decides. A cell inside an area is
+    /// compared with the cell `dy` rows below it on `prev`, and counts as
+    /// changed when that row is outside the area. Same shape as
+    /// [`Self::damage`].
+    pub fn damage_scrolled(&self, prev: &Grid, scrolls: &[(Rect, i32)]) -> Vec<Rect> {
         if self.width != prev.width || self.height != prev.height {
-            return (self.width > 0 && self.height > 0)
-                .then(|| Rect::new(0, 0, self.width, self.height))
-                .into_iter()
-                .collect();
+            return self.rows();
         }
         let width = self.width as usize;
         let mut runs = Vec::new();
-        for (y, (row, prev_row)) in self
-            .cells
-            .chunks(width.max(1))
-            .zip(prev.cells.chunks(width.max(1)))
-            .enumerate()
-        {
+        for (y, row) in self.cells.chunks(width.max(1)).enumerate() {
+            let at = |src: usize| &prev.cells[src * width..(src + 1) * width];
+            let y16 = y as u16;
+            let crossing: Vec<_> = scrolls
+                .iter()
+                .filter(|(area, _)| (area.y..area.bottom()).contains(&y16))
+                .map(|&(area, dy)| {
+                    let src = i32::from(y16) + dy;
+                    let inside = (i32::from(area.y)..i32::from(area.bottom())).contains(&src);
+                    (area.x..area.right(), inside.then(|| at(src as usize)))
+                })
+                .collect();
             let mut start = None;
             for x in 0..=row.len() {
-                let changed = x < row.len() && row[x] != prev_row[x];
+                let changed = x < row.len() && {
+                    let source = crossing
+                        .iter()
+                        .rev()
+                        .find(|(cols, _)| cols.contains(&(x as u16)))
+                        .map_or(Some(at(y)), |(_, source)| *source);
+                    source.is_none_or(|prev_row| row[x] != prev_row[x])
+                };
                 match (changed, start) {
                     (true, None) => start = Some(x),
                     (false, Some(from)) => {
@@ -1657,10 +1688,62 @@ mod tests {
     }
 
     #[test]
-    fn damage_covers_everything_after_a_resize() {
+    fn damage_scrolled_reports_only_what_the_scroll_does_not_explain() {
+        // Rows 1..4 of a 4x5 grid scroll: "a b c" on rows 1-3 move up one row
+        // and "d" arrives at the bottom. Rows 0 and 4 stay put.
+        let mut prev = Grid::new(4, 5);
+        let mut curr = Grid::new(4, 5);
+        for (y, text) in [(0, "top"), (1, "a"), (2, "b"), (3, "c"), (4, "foot")] {
+            prev.as_mut_slice().put_str(0, y, text, Style::default());
+        }
+        for (y, text) in [(0, "top"), (1, "b"), (2, "c"), (3, "d"), (4, "foot")] {
+            curr.as_mut_slice().put_str(0, y, text, Style::default());
+        }
+        let area = Rect::new(0, 1, 4, 3);
+
+        assert_eq!(
+            curr.damage_scrolled(&prev, &[(area, 1)]),
+            [Rect::new(0, 3, 4, 1)]
+        );
+        assert_eq!(
+            curr.damage(&prev).len(),
+            3,
+            "without the scroll, every moved row changed"
+        );
+        assert_eq!(
+            prev.damage_scrolled(&curr, &[(area, -1)]),
+            [Rect::new(0, 1, 4, 1)],
+            "scrolling back down brings a row in at the top"
+        );
+    }
+
+    #[test]
+    fn damage_scrolled_lets_the_topmost_area_decide() {
+        // The whole grid scrolls up one row, but a still window covers the
+        // right half of rows 1-2: its cells compare in place.
+        let mut prev = Grid::new(4, 3);
+        let mut curr = Grid::new(4, 3);
+        for (y, text) in [(0, "aaxx"), (1, "bbxx"), (2, "ccxx")] {
+            prev.as_mut_slice().put_str(0, y, text, Style::default());
+        }
+        for (y, text) in [(0, "bbbb"), (1, "ccxx"), (2, "ddxx")] {
+            curr.as_mut_slice().put_str(0, y, text, Style::default());
+        }
+        let scrolls = [(Rect::new(0, 0, 4, 3), 1), (Rect::new(2, 1, 2, 2), 0)];
+
+        assert_eq!(
+            curr.damage_scrolled(&prev, &scrolls),
+            [Rect::new(2, 0, 2, 1), Rect::new(0, 2, 2, 1)],
+            "row 0 right half shows what moved out from under the window; \
+             row 2 left half is new text"
+        );
+    }
+
+    #[test]
+    fn damage_covers_every_row_after_a_resize() {
         assert_eq!(
             Grid::new(3, 2).damage(&Grid::new(4, 2)),
-            [Rect::new(0, 0, 3, 2)]
+            [Rect::new(0, 0, 3, 1), Rect::new(0, 1, 3, 1)]
         );
         assert!(Grid::new(0, 0).damage(&Grid::new(4, 2)).is_empty());
     }

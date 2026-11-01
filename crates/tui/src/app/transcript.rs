@@ -10659,13 +10659,23 @@ pub(crate) struct TranscriptBlockSnapshot {
     pub(crate) streaming: bool,
 }
 
-/// A block of the visible projection and the screen rect its rows occupy.
+/// A block of the visible projection and where its rows show on screen.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VisibleTranscriptBlock {
     pub(crate) block: TranscriptBlockSnapshot,
     /// The block's rows inside the transcript text area, or `None` while
     /// they are scrolled out of view.
-    pub(crate) screen: Option<crate::smelt_edit::Rect>,
+    pub(crate) screen: Option<BlockOnScreen>,
+}
+
+/// The rows of a block that show on screen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BlockOnScreen {
+    /// The screen cells of the rows that show.
+    pub(crate) rect: crate::smelt_edit::Rect,
+    /// The block row at the top of `rect`: nonzero when the view cuts off
+    /// the start of the block.
+    pub(crate) top: crate::smelt_edit::RowIndex,
 }
 
 /// The part of rows `[first_row, first_row + rows)` that `text` shows when
@@ -10675,17 +10685,18 @@ fn rows_on_screen(
     scroll_top: crate::smelt_edit::RowIndex,
     first_row: crate::smelt_edit::RowIndex,
     rows: crate::smelt_edit::RowIndex,
-) -> Option<crate::smelt_edit::Rect> {
+) -> Option<BlockOnScreen> {
     let bottom = scroll_top.saturating_add(crate::smelt_edit::RowIndex::from(text.height));
     let start = first_row.max(scroll_top);
     let end = first_row.saturating_add(rows).min(bottom);
-    (start < end && text.width > 0).then(|| {
-        crate::smelt_edit::Rect::new(
+    (start < end && text.width > 0).then(|| BlockOnScreen {
+        rect: crate::smelt_edit::Rect::new(
             text.x,
             text.y + (start - scroll_top) as u16,
             text.width,
             (end - start) as u16,
-        )
+        ),
+        top: start - first_row,
     })
 }
 

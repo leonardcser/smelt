@@ -152,7 +152,7 @@ plugin shows the full pattern with a file tree, folding and refresh.
 ## Pickers
 
 `smelt.picker.open(opts)` asks the user to choose one item. Items are strings or
-`{ label, description, ansi_color, search_terms }` records. With `placement =
+`{ label, description, prefix_color, search_terms }` records. With `placement =
 "prompt_docked"` the prompt filters them using `smelt.fuzzy.rank`. It returns
 `{ index, item, action }`, or `nil` when dismissed.
 
@@ -203,7 +203,9 @@ They may be negative or past the edge: writes outside the slice are dropped and
 reads return `nil`, so a moving effect never clamps by hand. The slice already
 holds what was painted below it, so a paint can read cells and draw over them.
 A write whose style leaves `bg` unset keeps the background underneath; pass
-`bg = false` for the terminal's default background instead.
+`bg = false` for the terminal's default background instead. Reads give
+`bg = false` for that default, so a cell read with `get` and written elsewhere
+with `set` looks the same there.
 
 | Method | Does |
 | ------ | ---- |
@@ -221,10 +223,27 @@ A write whose style leaves `bg` unset keeps the background underneath; pass
 `ctx` holds `x`, `y` (the slice's screen position), `now_ms` and `frame` for
 animation, `focused`, and the terminal size. `ctx.now_ms` is the same monotonic
 clock as `smelt.time.monotonic_ms()`, so a timer and a paint agree on time;
-`smelt.time.now_ms()` is wall time, for timestamps only. A frame paint also gets
-`ctx.cursor = { x, y }` while a cursor is visible, so an effect can follow it.
+`smelt.time.now_ms()` is wall time, for timestamps only. `ctx.focused` tells
+whether keystrokes reach the paint: for a frame paint, whether the terminal has
+focus, so an effect can dim the screen while you are away. A frame paint also
+gets `ctx.cursor = { x, y }` while a cursor is visible, so an effect can follow
+it. `smelt.paint.Ctx` in your editor lists every field.
 
 ### Colors
+
+Every style in smelt takes the same colors:
+
+| Form | Color |
+| ---- | ----- |
+| `{ r, g, b }` | RGB. Channels may be fractions; they are rounded and kept in 0-255 |
+| `"#rrggbb"` | RGB |
+| `0` to `255` | An ANSI 256-color slot |
+| `"red"`, `"darkblue"`, ... | One of the 16 ANSI colors |
+| `"Comment"`, `"SmeltAccent"`, ... | The color of a theme group; names start with a capital |
+| `false` | The terminal's default |
+
+Colors read back from smelt, from `slice:get` or `smelt.theme.get`, use the
+same forms, so you can pass them straight back in.
 
 `recolor` hands `fn` each color as the terminal shows it, `r, g, b` from 0 to
 255, with `layer` set to `"fg"` or `"bg"`. Return new channels, or `nil` to
@@ -246,17 +265,36 @@ makes the background opaque on a translucent terminal.
 
 At startup smelt asks the terminal for its default colors and its 16 ANSI
 colors. `smelt.theme.rgb(color, layer)` uses them to turn any color, including
-`nil` (the default for `layer`), into `{ rgb = { r, g, b } }`. Terminals that
-do not answer get the xterm palette.
+a theme group or `nil` (the default for `layer`), into `{ r, g, b }`. Terminals
+that do not answer get the xterm palette. That is all blending needs:
+
+```lua
+local function mix(a, b, k)
+  return { a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k, a[3] + (b[3] - a[3]) * k }
+end
+-- Fade a cell's text halfway into its background.
+local cell = slice:get(x, y)
+local fg = smelt.theme.rgb(cell.style.fg, "fg")
+local bg = smelt.theme.rgb(cell.style.bg, "bg")
+slice:set_style(x, y, 1, 1, { fg = mix(fg, bg, 0.5) })
+```
 
 ### Repainting
 
-A paint repaints only when something under it changes. For animation, pass
-`fps`: smelt repaints at that rate while the paint is on screen and goes idle
-again once you remove it or call `handle:set_fps(nil)`. A paint may change its
-own rate while it runs. When a timer or event
-changes what a paint draws, call `handle:redraw()` for one repaint. The
-built-in `/donut` is a full example.
+A paint repaints only when something under it changes. When a timer, command or
+event changes what a paint draws, call `handle:invalidate()`. To animate, call
+`handle:invalidate_after(ms)` from the paint itself to ask for the next frame.
+An effect that stops asking goes idle on its own, and a leaf that is not on
+screen does not paint, so it stops asking too. This is the same model the bars
+use. The built-in `/donut` is a full example.
+
+```lua
+local fx
+fx = smelt.paint.frame(function(slice, ctx)
+  -- ... draw ...
+  if still_moving then fx:invalidate_after(16) end -- about 60 frames a second
+end)
+```
 
 Frame paints run from the lowest `order` up (default 0), and in registration
 order for equal orders. Give a filter that must see everything, such as a
@@ -269,13 +307,39 @@ changed:
 
 - `ctx.prev` is a `Snapshot` of the screen as smelt drew it on the previous
   frame, before any frame paint. It is absent on the first frame.
-- `ctx.damage` lists the `{ x, y, width, height }` rects that changed since
-  then. The first frame and a resize damage the whole screen.
+- `ctx.scrolls` lists every window whose text scrolled since then, such as the
+  conversation or a long dialog: `{ win, x, y, width, height, dy }`, the window,
+  the screen area of its text and the rows it moved up (negative for down).
+  Compare `win` with `==`, for example to `smelt.win.transcript()`. Inside that area,
+  row `y` shows what `ctx.prev` had at row `y + dy`, unless a window above
+  covers it.
+- `ctx.damage` lists the cells that changed, as one-row
+  `{ x, y, width, height }` runs in reading order. The first frame and a resize
+  damage every row. Scrolls are taken out: a cell that only moved with its text
+  is not damage, so new text the model writes shows as damage even while the
+  view follows it.
 
-Damage is visual: when the transcript scrolls, every scrolled row changes. To
-follow content instead, read `smelt.transcript.visible_blocks()`. Each block
-has a screen `rect` while it is on screen and `streaming` while the model is
-still writing it, and both match the frame being painted.
+To follow content, read `smelt.transcript.visible_blocks()`. Each block has a
+screen `rect` and `top`, the block row at `rect.y`, while it is on screen, and
+`streaming` while the model is still writing it. All of them match the frame
+being painted. So the text the model just wrote is the damage inside a
+streaming block:
+
+```lua
+-- Fresh ink: what the model writes flashes bright, then settles.
+local fx
+fx = smelt.paint.frame(function(slice, ctx)
+  for _, b in ipairs(smelt.transcript.visible_blocks()) do
+    if b.streaming and b.rect then
+      for _, d in ipairs(ctx.damage) do
+        if d.y >= b.rect.y and d.y < b.rect.y + b.rect.height then
+          slice:set_style(d.x, d.y, d.width, 1, { fg = { 255, 236, 170 }, bold = true })
+        end
+      end
+    end
+  end
+end, { name = "myplugin.freshink", history = true })
+```
 
 ```lua
 -- Dissolve: what disappeared fades out over a few frames.
@@ -294,7 +358,7 @@ fx = smelt.paint.frame(function(slice, ctx)
     if f.t > 0 then kept[#kept + 1] = f end
   end
   fading = kept
-  fx:set_fps(#fading > 0 and 30 or nil) -- animate only while something fades
+  if #fading > 0 then fx:invalidate_after(33) end -- animate only while something fades
 end, { name = "myplugin.dissolve", history = true })
 ```
 
@@ -420,18 +484,22 @@ To draw the statusline or headerline yourself, swap it for any layout node with
 anything, including animation:
 
 ```lua
-local paint = smelt.paint.register(function(slice, ctx)
+local paint
+paint = smelt.paint.register(function(slice, ctx)
   for x = 0, slice:width() - 1 do
     local hue = (x * 4 + ctx.now_ms // 20) % 256
-    slice:set(x, 0, " ", { bg = { rgb = { hue, 80, 255 - hue } } })
+    slice:set(x, 0, " ", { bg = { hue, 80, 255 - hue } })
   end
-end, { fps = 30 })
+  paint:invalidate_after(33)
+end)
 smelt.statusline.set_view(smelt.ui.layout.leaf(paint), 1)
 ```
 
 A bar repaints only when something it shows changes. A source that animates
-draws from `smelt.time.now_ms()` and asks for its next frame on every paint
-with `invalidate_after(ms)`, the way the built-in `indicator` breathes while the agent
-works and cools its dot after. A source that depends on state of its own calls
+draws from `smelt.time.monotonic_ms()` and asks for its next frame on every
+paint with `invalidate_after(ms)`, the way the built-in `indicator` breathes while the agent
+works and cools its dot after. The `indicator` uses wall time,
+`smelt.time.now_ms()`, on purpose: it keeps the animation in step across
+several smelt windows. A source that depends on state of its own calls
 `invalidate()` on its bar when that state changes. A failing source is reported
 on stderr and skipped.

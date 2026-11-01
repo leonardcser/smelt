@@ -43,10 +43,11 @@ impl TuiApp {
                 // tmux drops graphics passthrough from hidden panes, so images uploaded
                 // while unfocused may never have reached the terminal. Repaint and resend.
                 self.ui.force_redraw();
-                self.request_urgent_render();
             } else {
                 self.ui.cancel_pointer_interaction();
             }
+            // Paints read focus from `ctx.focused`.
+            self.request_urgent_render();
             return false;
         }
 

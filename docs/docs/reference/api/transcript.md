@@ -287,7 +287,7 @@ fun(): table
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line, streaming, rect? }` entries. `rect` is `{ x, y, width, height }`: the screen cells of the block's rows that are on screen, inside the transcript's gutter and padding; it is absent while the block is scrolled out of view. Called from a paint, it matches the frame being painted. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
+Return transcript blocks materialized in the current visible projection as `{ record_index, block_id, role, first_row, rows, first_line, streaming, rect?, top? }` entries. `rect` is `{ x, y, width, height }`: the screen cells of the block's rows that are on screen, inside the transcript's gutter and padding. `top` is the block row shown at `rect.y`, nonzero when the view cuts off the start of the block, so screen row `y` shows block row `top + y - rect.y`. Both are absent while the block is scrolled out of view. Called from a paint, it matches the frame being painted. Unlike `loaded_blocks_expensive()`, this does not force loaded-window block layout beyond the visible projection.
 
 ## `smelt.transcript.watch_view`
 

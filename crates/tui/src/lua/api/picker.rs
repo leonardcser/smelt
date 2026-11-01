@@ -21,8 +21,8 @@ impl LuaType for LuaPickerNewOpts {
                 LuaClassField { name: "label", ty: "string".into(), optional: false, doc: "Primary text shown for this row." },
                 LuaClassField { name: "description", ty: "string".into(), optional: true, doc: "Secondary text shown next to the label." },
                 LuaClassField { name: "prefix", ty: "string".into(), optional: true, doc: "Small prefix rendered before the label." },
-                LuaClassField { name: "ansi_color", ty: "integer".into(), optional: true, doc: "ANSI color slot for the prefix." },
-                LuaClassField { name: "label_color", ty: "integer".into(), optional: true, doc: "ANSI color slot for the label." },
+                LuaClassField { name: "prefix_color", ty: crate::lua::parse::COLOR_TYPE.into(), optional: true, doc: "Color of the prefix: any color, or a theme group name such as `\"SmeltAccent\"`." },
+                LuaClassField { name: "label_color", ty: crate::lua::parse::COLOR_TYPE.into(), optional: true, doc: "Color of the label: any color, or a theme group name." },
                 LuaClassField { name: "search_terms", ty: "string".into(), optional: true, doc: "Extra text considered by fuzzy pickers." },
             ],
         });
@@ -153,7 +153,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         fields: smelt_core::class_methods! {
             "win" => fn() -> super::win::LuaWin, "Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).",
             "close" => fn() -> (), "Close the picker overlay. No-op if already closed.",
-            "items" => fn(items: mlua::Table, selected: Option<i64>) -> LuaPicker, "Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, label_color?, prefix?, icon?, ... }`. `icon = { kind = \"file\"|\"dir\", path = string }` renders file-list icons unless `prefix` is set. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining.",
+            "items" => fn(items: mlua::Table, selected: Option<i64>) -> LuaPicker, "Replace the picker's items. Each entry is a string or `{ label, description?, prefix_color?, label_color?, prefix?, icon?, ... }`. `icon = { kind = \"file\"|\"dir\", path = string }` renders file-list icons unless `prefix` is set. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining.",
             "selected" => fn(idx: Option<i64>) -> mlua::Value, "Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining.",
             "move" => fn(delta: i64) -> LuaPicker, "Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.",
         },

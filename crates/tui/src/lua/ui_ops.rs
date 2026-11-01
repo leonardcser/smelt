@@ -140,8 +140,11 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     // overlay tree hot-reload in place. `size_override` on the existing
     // overlay is left intact so user-resized panels stay resized.
     let name: Option<String> = opts.get::<Option<String>>("name").ok().flatten();
-    let title = crate::lua::parse::title(opts.get::<mlua::Value>("title").ok())
-        .map_err(|e| format!("overlay title: {e}"))?;
+    let title = crate::lua::parse::title(
+        opts.get::<mlua::Value>("title").ok(),
+        &crate::lua::theme_group,
+    )
+    .map_err(|e| format!("overlay title: {e}"))?;
     let layout_ud: mlua::AnyUserData = opts
         .get("layout")
         .map_err(|_| "overlay.open: missing `layout = <smelt.ui.layout.* userdata>`".to_string())?;
@@ -957,17 +960,20 @@ pub(crate) fn parse_picker_item(
             } else {
                 item = apply_picker_icon(app, item, t);
             }
-            if let Ok(Some(ansi)) = t.get::<Option<u64>>("ansi_color") {
-                item = item.with_prefix_style(
-                    smelt_core::style::Style::new()
-                        .fg(smelt_core::style::Color::AnsiValue(ansi as u8)),
-                );
+            let groups = |name: &str| app.ui.theme().lookup(name);
+            let fg = |key: &str| -> Result<Option<smelt_core::style::Style>, String> {
+                let value = t
+                    .get::<mlua::Value>(key)
+                    .map_err(|e| format!("picker item.{key}: {e}"))?;
+                let color = crate::lua::parse::color(&value, crate::lua::parse::Layer::Fg, &groups)
+                    .map_err(|e| format!("picker item.{key}: {e}"))?;
+                Ok(color.map(|c| smelt_core::style::Style::new().fg(c)))
+            };
+            if let Some(style) = fg("prefix_color")? {
+                item = item.with_prefix_style(style);
             }
-            if let Ok(Some(ansi)) = t.get::<Option<u64>>("label_color") {
-                item = item.with_label_style(
-                    smelt_core::style::Style::new()
-                        .fg(smelt_core::style::Color::AnsiValue(ansi as u8)),
-                );
+            if let Some(style) = fg("label_color")? {
+                item = item.with_label_style(style);
             }
             Ok(item)
         }

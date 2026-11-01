@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub(crate) use slice::register_paint_slice_docs;
+pub(crate) use slice::{register_paint_slice_docs, PaintCtx};
 
 /// Paint ids start above this base to partition the shared `u64` space:
 /// - `id <  PAINT_ID_BASE` → WinId (owned by `Ui`)
@@ -52,21 +52,11 @@ pub(crate) enum PaintStage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PaintOptions {
     pub stage: PaintStage,
-    /// Repaint at this rate while the paint is on screen. `None` repaints
-    /// only when something else changes.
-    pub fps: Option<u16>,
     /// Repaint when the pointer moves, and expose `ctx.pointer`.
     pub pointer: bool,
 }
 
 impl PaintOptions {
-    /// Frame interval this paint asks for while it is on screen.
-    pub(crate) fn interval(&self) -> Option<std::time::Duration> {
-        self.fps
-            .filter(|fps| *fps > 0)
-            .map(|fps| std::time::Duration::from_secs(1) / u32::from(fps))
-    }
-
     pub(crate) fn history(&self) -> bool {
         matches!(self.stage, PaintStage::Frame { history: true, .. })
     }
@@ -187,14 +177,6 @@ impl PaintRegistry {
             .filter(|slot| slot.options.stage == PaintStage::Leaf)
     }
 
-    /// Change a paint's options. Returns `false` for an unknown id.
-    pub(crate) fn update(&mut self, id: PaintId, f: impl FnOnce(&mut PaintOptions)) -> bool {
-        self.handles
-            .get_mut(&id)
-            .map(|slot| f(&mut slot.options))
-            .is_some()
-    }
-
     /// Frame-stage paints in run order: by `order`, then registration.
     /// Re-registering a named slot keeps its id, so it keeps its place.
     pub(crate) fn frame_paints(&self) -> Vec<PaintSlot> {
@@ -282,20 +264,22 @@ pub(crate) struct PaintTimeline {
 impl PaintTimeline {
     /// Start a new frame at `now_ms` on the runtime's monotonic clock and
     /// return the values its paint callbacks see.
-    pub(crate) fn advance(&mut self, now_ms: u64) -> PaintClock {
+    pub(crate) fn advance(&mut self, now_ms: u64, terminal_focused: bool) -> PaintClock {
         self.frame = self.frame.wrapping_add(1);
         PaintClock {
             now_ms,
             frame: self.frame,
+            terminal_focused,
             pointer: self.pointer,
             cursor: None,
         }
     }
 
-    /// Compare the finished screen `base` to the last one recorded, before
-    /// frame paints change it. Pass the result to [`Self::end_history`].
-    pub(crate) fn begin_history(&mut self, base: &Grid) -> FrameChanges {
-        self.history.begin(base)
+    /// Compare the finished screen `base`, with its windows' content at
+    /// `areas`, to the last one recorded, before frame paints change it.
+    /// Pass the result to [`Self::end_history`].
+    pub(crate) fn begin_history(&mut self, base: &Grid, areas: Vec<ScrollArea>) -> FrameChanges {
+        self.history.begin(base, areas)
     }
 
     pub(crate) fn end_history(&mut self, changes: FrameChanges) {
@@ -308,22 +292,70 @@ impl PaintTimeline {
     }
 }
 
+/// Where one window's content sat on a frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScrollArea {
+    pub win: crate::smelt_edit::WinId,
+    /// The window's text area.
+    pub area: Rect,
+    /// `(anchor id, screen row of the anchor's row 0)`, which is above the
+    /// area for an anchor whose start is scrolled off. A window's buffer is
+    /// one anchor; the transcript has one per visible block, so a block
+    /// growing above the view does not read as a scroll.
+    pub anchors: Vec<(u64, i64)>,
+}
+
+impl ScrollArea {
+    /// Rows the content moved up since `prev` (down when negative), told by
+    /// an anchor on screen in both frames. Zero when nothing moved, or when
+    /// the area changed and rows no longer line up.
+    fn scrolled_since(&self, prev: &ScrollArea) -> i32 {
+        if self.area != prev.area {
+            return 0;
+        }
+        self.anchors
+            .iter()
+            .find_map(|(id, origin)| {
+                let (_, was) = prev.anchors.iter().find(|(prev_id, _)| prev_id == id)?;
+                i32::try_from(was - origin).ok()
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// The screen as smelt drew it on the previous frame, before frame paints.
 #[derive(Default)]
 struct FrameHistory {
-    prev: Option<Arc<Grid>>,
+    prev: Option<(Arc<Grid>, Vec<ScrollArea>)>,
 }
 
 impl FrameHistory {
-    fn begin(&mut self, base: &Grid) -> FrameChanges {
-        let damage = match &self.prev {
-            Some(prev) => base.damage(prev),
-            None => vec![Rect::new(0, 0, base.width(), base.height())],
+    fn begin(&mut self, base: &Grid, areas: Vec<ScrollArea>) -> FrameChanges {
+        let prev = self.prev.take();
+        let moves: Vec<(Rect, i32)> = areas
+            .iter()
+            .map(|now| {
+                let was = prev
+                    .as_ref()
+                    .and_then(|(_, was)| was.iter().find(|was| was.win == now.win));
+                (now.area, was.map_or(0, |was| now.scrolled_since(was)))
+            })
+            .collect();
+        let damage = match &prev {
+            Some((grid, _)) => base.damage_scrolled(grid, &moves),
+            None => base.rows(),
         };
+        let scrolls = areas
+            .iter()
+            .zip(&moves)
+            .filter(|(_, (_, dy))| *dy != 0)
+            .map(|(area, &(rect, dy))| (area.win, rect, dy))
+            .collect();
         FrameChanges {
-            prev: self.prev.take(),
+            prev: prev.map(|(grid, _)| grid),
             damage,
-            base: Arc::new(base.clone()),
+            scrolls,
+            base: (Arc::new(base.clone()), areas),
         }
     }
 
@@ -332,11 +364,14 @@ impl FrameHistory {
     }
 }
 
-/// What a frame paint with `history` sees as `ctx.prev` and `ctx.damage`.
+/// What a frame paint with `history` sees as `ctx.prev`, `ctx.damage` and
+/// `ctx.scrolls`.
 pub(crate) struct FrameChanges {
     prev: Option<Arc<Grid>>,
     damage: Vec<Rect>,
-    base: Arc<Grid>,
+    /// Each window whose text moved, its text area, and by how many rows up.
+    scrolls: Vec<(crate::smelt_edit::WinId, Rect, i32)>,
+    base: (Arc<Grid>, Vec<ScrollArea>),
 }
 
 /// Frame-wide values every paint callback sees in `ctx`.
@@ -346,6 +381,8 @@ pub(crate) struct PaintClock {
     pub now_ms: u64,
     /// Count of frames painted since startup.
     pub frame: u64,
+    /// Whether the terminal window has OS focus.
+    pub terminal_focused: bool,
     /// Last pointer position in screen cells.
     pub pointer: Option<(u16, u16)>,
     /// Where the visible cursor is painted, in screen cells. Known only once
@@ -363,7 +400,10 @@ fn build_ctx_table(
     changes: Option<&FrameChanges>,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
-    t.set("focused", ctx.focused)?;
+    // Whether keystrokes reach this paint: a leaf needs its window focused, and
+    // the whole screen only needs the terminal.
+    let area_focused = matches!(options.stage, PaintStage::Frame { .. }) || ctx.focused;
+    t.set("focused", clock.terminal_focused && area_focused)?;
     t.set("terminal_width", ctx.terminal_width)?;
     t.set("terminal_height", ctx.terminal_height)?;
     t.set("x", area.x)?;
@@ -391,6 +431,14 @@ fn build_ctx_table(
             damage.set(i + 1, crate::lua::parse::rect_to_lua(lua, *rect)?)?;
         }
         t.set("damage", damage)?;
+        let scrolls = lua.create_table_with_capacity(changes.scrolls.len(), 0)?;
+        for (i, &(id, rect, dy)) in changes.scrolls.iter().enumerate() {
+            let scroll = crate::lua::parse::rect_to_lua(lua, rect)?;
+            scroll.set("win", crate::lua::api::win::LuaWin { id })?;
+            scroll.set("dy", dy)?;
+            scrolls.set(i + 1, scroll)?;
+        }
+        t.set("scrolls", scrolls)?;
     }
     Ok(t)
 }
@@ -554,36 +602,56 @@ mod tests {
         let mut history = FrameHistory::default();
         let mut base = Grid::new(4, 1);
 
-        let first = history.begin(&base);
+        let first = history.begin(&base, Vec::new());
         assert!(first.prev.is_none());
         assert_eq!(first.damage, [Rect::new(0, 0, 4, 1)]);
         history.end(first);
 
         base.as_mut_slice()
             .put_str(1, 0, "x", crate::smelt_edit::Style::default());
-        let second = history.begin(&base);
+        let second = history.begin(&base, Vec::new());
         let prev = second.prev.as_ref().expect("previous frame");
         assert_eq!(prev.cell(1, 0).symbol, ' ');
         assert_eq!(second.damage, [Rect::new(1, 0, 1, 1)]);
         history.end(second);
 
-        let third = history.begin(&base);
+        let third = history.begin(&base, Vec::new());
         assert!(third.damage.is_empty());
         assert_eq!(third.prev.as_ref().unwrap().cell(1, 0).symbol, 'x');
     }
 
     #[test]
-    fn fps_sets_the_animation_interval() {
-        let options = |fps| PaintOptions {
-            fps,
-            ..PaintOptions::default()
+    fn history_takes_the_scroll_out_of_damage() {
+        let content = |origin| {
+            vec![ScrollArea {
+                win: crate::smelt_edit::WinId(1),
+                area: Rect::new(0, 0, 3, 3),
+                anchors: vec![(7, origin)],
+            }]
         };
-        assert_eq!(options(None).interval(), None);
-        assert_eq!(options(Some(0)).interval(), None);
+        let rows = |lines: [&str; 3]| {
+            let mut grid = Grid::new(3, 3);
+            for (y, line) in lines.iter().enumerate() {
+                grid.as_mut_slice()
+                    .put_str(0, y as u16, line, crate::smelt_edit::Style::default());
+            }
+            grid
+        };
+        let mut history = FrameHistory::default();
+        let first = history.begin(&rows(["a", "b", "c"]), content(0));
+        history.end(first);
+
+        let scrolled = history.begin(&rows(["b", "c", "d"]), content(-1));
         assert_eq!(
-            options(Some(20)).interval(),
-            Some(std::time::Duration::from_millis(50))
+            scrolled.scrolls,
+            [(crate::smelt_edit::WinId(1), Rect::new(0, 0, 3, 3), 1)]
         );
+        assert_eq!(scrolled.damage, [Rect::new(0, 2, 3, 1)], "only the new row");
+        history.end(scrolled);
+
+        let still = history.begin(&rows(["b", "c", "e"]), content(-1));
+        assert!(still.scrolls.is_empty());
+        assert_eq!(still.damage, [Rect::new(0, 2, 1, 1)]);
     }
 
     #[test]

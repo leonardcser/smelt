@@ -42,7 +42,7 @@
 ---@field style? smelt.buf.MarkOpts Highlight applied to the text.
 ---@field selectable? boolean Include the text in drag-copy. Defaults to the item's setting.
 
---- Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.
+--- Buffer handle returned by `smelt.buf.new(opts?)`. Handles to the same buffer compare equal with `==`. Setter methods return the same handle for chaining.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.buf.Buf
 ---@field source fun(s: string?): any Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. A plain buffer shows the new text right away; a buffer with a mode such as `markdown` renders it on its next layout. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.
@@ -63,8 +63,8 @@
 ---@field right_gravity? boolean If true, the mark sticks with text inserted to its right.
 ---@field end_right_gravity? boolean Right-gravity flag for the end-of-range cursor.
 ---@field hl_group? string Theme group whose style is applied as the highlight base.
----@field fg? string | integer[] | { ansi: integer } | { rgb: integer[] } Foreground override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
----@field bg? string | integer[] | { ansi: integer } | { rgb: integer[] } Background override. Either a theme group name (string) or a direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
+---@field fg? integer | string | false | number[] Foreground override: any color, or a theme group name. Takes precedence over `hl_group`.
+---@field bg? integer | string | false | number[] Background override: any color, or a theme group name. Takes precedence over `hl_group`.
 ---@field bold? boolean Force-bold the highlight.
 ---@field dim? boolean Force-dim the highlight.
 ---@field italic? boolean Force-italic the highlight.
@@ -518,21 +518,43 @@
 ---@field left? boolean Enable left-edge resize.
 ---@field corners? boolean Upgrade cells where two enabled edges meet into diagonal resize handles.
 
+--- One screen cell, as `Slice:get` and `Snapshot:get` read it.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.paint.Cell
+---@field ch string The grapheme cluster. The right half of a wide glyph reads as `""`.
+---@field width integer Cells the glyph covers: 1, 2 for a wide glyph, 0 for its right half.
+---@field style smelt.paint.Style The cell's style.
+---@field image? boolean Set when the cell shows part of an image.
+
+--- Per-frame values a paint callback receives.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.paint.Ctx
+---@field x integer Screen column of the slice's left edge.
+---@field y integer Screen row of the slice's top edge.
+---@field terminal_width integer Terminal width in cells.
+---@field terminal_height integer Terminal height in cells.
+---@field now_ms integer Milliseconds on the clock of `smelt.time.monotonic_ms()`, for animation.
+---@field frame integer Count of frames painted since startup.
+---@field focused boolean Whether keystrokes reach this paint: the terminal has focus, and for a leaf, its window does too.
+---@field pointer? { x: integer, y: integer } The pointer, relative to the slice. Only with `opts.pointer`.
+---@field cursor? { x: integer, y: integer } The visible cursor. Only in frame paints, and absent while the cursor is hidden.
+---@field prev? smelt.paint.Snapshot The screen as smelt drew it on the previous frame, before frame paints. Only with `opts.history`, and absent on the first frame.
+---@field damage? { x: integer, y: integer, width: integer, height: integer }[] One-row runs of cells that changed since `prev`, in reading order. Every row on the first frame and after a resize. Scrolls that `scrolls` reports are taken out: a moved cell counts only if it differs from the cell it moved from. Only with `opts.history`.
+---@field scrolls? smelt.paint.Scroll[] Every window whose text scrolled since `prev`, in painter order. Empty when nothing scrolled. Only with `opts.history`.
+
 --- Options for `smelt.paint.frame`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.FrameOpts
 ---@field name? string Keep the paint id across `/reload` and swap in the new callback.
----@field fps? integer Repaint at this rate while the paint is registered.
 ---@field pointer? boolean Repaint when the mouse moves and expose `ctx.pointer`.
 ---@field order? integer Frame paints run from the lowest `order` up, so a higher order draws over the effects below it. Ties run in registration order. Default 0.
----@field history? boolean Expose `ctx.prev`, the screen as smelt drew it on the previous frame before any frame paint, and `ctx.damage`, the cells that changed since.
+---@field history? boolean Expose `ctx.prev`, the screen as smelt drew it on the previous frame before any frame paint, `ctx.damage`, the cells that changed since, and `ctx.scrolls`, the windows whose text scrolled.
 ---@field map_pointer? fun(arg1: integer, arg2: integer, arg3: integer, arg4: integer): integer?, integer? For an effect that moves cells, `map_pointer(x, y, width, height)` returns the cell smelt laid out at screen cell `(x, y)` of a `width` x `height` screen, so clicks, drags, and wheel scrolls land where the user sees them. Return `nil` to keep the position. The top effect maps first. `ctx.pointer` stays in screen cells.
 
 --- Options for `smelt.paint.register`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Opts
 ---@field name? string Keep the paint id across `/reload` and swap in the new callback.
----@field fps? integer Repaint at this rate while the paint is on screen.
 ---@field pointer? boolean Repaint when the mouse moves and expose `ctx.pointer`.
 
 --- Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
@@ -540,8 +562,8 @@
 ---@class smelt.paint.Paint
 ---@field remove fun(): boolean Drop the paint callback. Returns `true` if it was still registered. Subsequent paints of this id no-op.
 ---@field rect fun(): any Return the paint leaf's current screen rect as `{ x, y, width, height }`, or `nil` until the first render lays it out.
----@field set_fps fun(fps: integer?): boolean Repaint at `fps` frames per second while the paint is on screen, or only on change with `nil`. Returns `false` once the paint is removed.
----@field redraw fun(): boolean Repaint once on the next frame, for example after a timer changes what the callback draws. Returns `false` once the paint is removed.
+---@field invalidate fun(): boolean Repaint on the next frame, for example after a timer or command changes what the callback draws. Returns `false` once the paint is removed.
+---@field invalidate_after fun(ms: integer): boolean Repaint `ms` milliseconds after the current frame. Nothing repaints on its own, so an animated paint asks for its next frame here on every paint, and goes idle when it stops asking. The earliest pending request wins. Returns `false` once the paint is removed.
 ---@field on fun(event: smelt.paint.Event, func: fun(value: table)): smelt.Reg Subscribe `func` to `event` on this paint leaf. Returns a Reg handle whose `:remove()` undoes the subscription.
 
 --- Options for `slice:recolor`.
@@ -549,17 +571,27 @@
 ---@class smelt.paint.RecolorOpts
 ---@field defaults? boolean Also recolor cells that use the terminal's default foreground or background, writing an explicit color in their place. Off by default, because an explicit background is opaque on a translucent terminal.
 
+--- How one window's text moved since the previous frame: the screen area of the text and the rows it moved. Screen row `y` inside the area shows what `ctx.prev` had at row `y + dy`, unless a window above covers it.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.paint.Scroll
+---@field win smelt.win.Win The window that scrolled. Compare it with `==`, for example to `smelt.win.transcript()`.
+---@field x integer Left column of the area.
+---@field y integer Top row of the area.
+---@field width integer Width of the area.
+---@field height integer Height of the area.
+---@field dy integer Rows the text moved up; negative when it moved down.
+
 --- The area a paint callback draws into: its layout leaf, or the whole screen for `smelt.paint.frame`. Coordinates are `(x, y)` from the top-left, in cells, and may be negative or past the edge: writes outside the slice are dropped and reads outside it return `nil`. The slice already holds what was painted below it, so a callback can read cells and draw over them. Writes whose style leaves `bg` unset keep the background underneath; `bg = false` writes the terminal default instead.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.paint.Slice
 ---@field width fun(): integer Return the slice width in cells.
 ---@field height fun(): integer Return the slice height in cells.
----@field get fun(x: integer, y: integer): table? Return the cell at `(x, y)` as `{ ch, width, style, image? }`, or `nil` outside the slice. The right half of a wide glyph has `ch = ""` and `width = 0`.
----@field set fun(x: integer, y: integer, ch: string?, style: table?): nil Write one grapheme cluster (default a space) at `(x, y)`.
----@field put_str fun(x: integer, y: integer, text: string, style: table?): integer Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.
----@field fill fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).
----@field set_style fun(x: integer, y: integer, w: integer, h: integer, patch: table): nil Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.
----@field map fun(f: function): nil Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style.
+---@field get fun(x: integer, y: integer): smelt.paint.Cell? Return the cell at `(x, y)`, or `nil` outside the slice.
+---@field set fun(x: integer, y: integer, ch: string?, style: smelt.paint.Style?): nil Write one grapheme cluster (default a space) at `(x, y)`.
+---@field put_str fun(x: integer, y: integer, text: string, style: smelt.paint.Style?): integer Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.
+---@field fill fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: smelt.paint.Style?): nil Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).
+---@field set_style fun(x: integer, y: integer, w: integer, h: integer, patch: smelt.paint.Style): nil Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.
+---@field map fun(f: fun(arg1: smelt.paint.Cell, arg2: integer, arg3: integer): table?): nil Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style.
 ---@field recolor fun(f: function, opts: smelt.paint.RecolorOpts?): nil Pass every color on the slice through `f(r, g, b, layer)`, where `layer` is `"fg"` or `"bg"` and the channels are 0-255 as the terminal shows them. Return new `r, g, b` (rounded and clamped), or `nil` to keep the color. `f` runs once per distinct color, not per cell, so screen-wide filters such as night shift or color-blind simulation stay cheap. Image cells keep their colors.
 ---@field snapshot fun(): smelt.paint.Snapshot Copy the slice into a `Snapshot` that stays valid after the callback, for example to keep the screen as it was before a change.
 ---@field blit fun(snapshot: smelt.paint.Snapshot, x: integer?, y: integer?): nil Draw `snapshot` with its top-left cell at `(x, y)` (default `0, 0`). Cells outside the slice are dropped.
@@ -570,7 +602,19 @@
 ---@class smelt.paint.Snapshot
 ---@field width fun(): integer Return the snapshot width in cells.
 ---@field height fun(): integer Return the snapshot height in cells.
----@field get fun(x: integer, y: integer): table? Return the cell at `(x, y)` in the same shape as `Slice:get`, or `nil` outside the snapshot.
+---@field get fun(x: integer, y: integer): smelt.paint.Cell? Return the cell at `(x, y)`, or `nil` outside the snapshot.
+
+--- The style of a cell. Colors take any color form: an ANSI index, `"#rrggbb"`, an ANSI name, a theme group name such as `"Comment"`, `{ r, g, b }`, or `false` for the terminal default.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.paint.Style
+---@field fg? integer | string | false | number[] Glyph color. Unset keeps the terminal default.
+---@field bg? integer | string | false | number[] Background color. When writing, unset keeps the background underneath. Reads give `false` for the terminal default, so a cell read and written back stays the same.
+---@field bold? boolean Bold text.
+---@field dim? boolean Dim text.
+---@field italic? boolean Italic text.
+---@field underline? boolean Underlined text.
+---@field crossedout? boolean Struck-through text.
+---@field reverse? boolean Swap the glyph and background colors.
 
 --- Effect-level decisions that apply to tools without a more specific rule.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -667,8 +711,8 @@
 ---@field label string Primary text shown for this row.
 ---@field description? string Secondary text shown next to the label.
 ---@field prefix? string Small prefix rendered before the label.
----@field ansi_color? integer ANSI color slot for the prefix.
----@field label_color? integer ANSI color slot for the label.
+---@field prefix_color? integer | string | false | number[] Color of the prefix: any color, or a theme group name such as `"SmeltAccent"`.
+---@field label_color? integer | string | false | number[] Color of the label: any color, or a theme group name.
 ---@field search_terms? string Extra text considered by fuzzy pickers.
 
 --- Options for the low-level non-blocking picker handle constructor.
@@ -707,7 +751,7 @@
 ---@class smelt.picker.Picker
 ---@field win fun(): smelt.win.Win Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).
 ---@field close fun(): nil Close the picker overlay. No-op if already closed.
----@field items fun(items: table, selected: integer?): smelt.picker.Picker Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, label_color?, prefix?, icon?, ... }`. `icon = { kind = "file"|"dir", path = string }` renders file-list icons unless `prefix` is set. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining.
+---@field items fun(items: table, selected: integer?): smelt.picker.Picker Replace the picker's items. Each entry is a string or `{ label, description?, prefix_color?, label_color?, prefix?, icon?, ... }`. `icon = { kind = "file"|"dir", path = string }` renders file-list icons unless `prefix` is set. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining.
 ---@field selected fun(idx: integer?): any Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining.
 ---@field move fun(delta: integer): smelt.picker.Picker Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.
 
@@ -809,19 +853,17 @@
 ---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
 ---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
 
---- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
+--- Color that depends on the terminal background.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.theme.ColorDecl
----@field ansi? integer ANSI 256-color palette index for the default (non-branched) case.
----@field rgb? integer[] `[r, g, b]` sRGB triple for the default (non-branched) case.
----@field light? smelt.theme.ColorDecl Color this branch resolves to when `is_light == true`.
----@field dark? smelt.theme.ColorDecl Color this branch resolves to when `is_light == false`.
+---@class smelt.theme.ColorBranch
+---@field light? integer | string | false | number[] | smelt.theme.ColorBranch Color on a light background.
+---@field dark? integer | string | false | number[] | smelt.theme.ColorBranch Color on a dark background.
 
 --- Style table for a single highlight group. Every field is optional - unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.theme.StyleDecl
----@field fg? smelt.theme.ColorDecl Foreground color.
----@field bg? smelt.theme.ColorDecl Background color.
+---@field fg? integer | string | false | number[] | smelt.theme.ColorBranch Foreground color.
+---@field bg? integer | string | false | number[] | smelt.theme.ColorBranch Background color.
 ---@field bold? boolean Bold text.
 ---@field italic? boolean Italic text.
 ---@field dim? boolean Dim / faint text.
@@ -1217,7 +1259,7 @@
 ---@field mode? "always"|"focused" Paint always or only while the window is focused. Default `always`.
 ---@field width? "full"|"content" Paint the full window row, including gutter and padding, or only the content region. Default `full`.
 
---- Window handle returned by `smelt.win.new(buf, opts?)`. Most setters return the same handle for chaining; resize operations report whether a resizable owner exists.
+--- Window handle returned by `smelt.win.new(buf, opts?)`. Handles to the same window compare equal with `==`. Most setters return the same handle for chaining; resize operations report whether a resizable owner exists.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.win.Win
 ---@field close fun(): nil Close the overlay leaf. No-op if the window is already closed.

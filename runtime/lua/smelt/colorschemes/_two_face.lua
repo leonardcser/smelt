@@ -4,7 +4,7 @@
 
 local M = {}
 
-local function rgb(r, g, b) return { rgb = { r, g, b } } end
+local function rgb(r, g, b) return { r, g, b } end
 local function fg(color, extra)
   local s = { fg = color }
   if extra then for k, v in pairs(extra) do s[k] = v end end
@@ -80,7 +80,7 @@ local function build(p)
     Comment             = fg(color(p.muted), { italic = true }),
     Visual              = bg(select),
     Search              = { fg = color(bg0), bg = color(accent), bold = true },
-    YankFlash           = bg(mix(select.rgb, p.light and { 0, 0, 0 } or { 255, 255, 255 }, 0.12)),
+    YankFlash           = bg(mix(select, p.light and { 0, 0, 0 } or { 255, 255, 255 }, 0.12)),
     CursorLine          = bg(surface),
     ErrorMsg            = fg(color(p.error), { bold = true }),
     WarningMsg          = fg(color(p.warn), { bold = true }),
@@ -100,7 +100,7 @@ local function build(p)
 
     SmeltStatusBg       = bg(surface),
     SmeltUserBg         = bg(surface2),
-    SmeltUserTimestamp  = fg(mix(surface2.rgb, fg0, p.light and 0.65 or 0.45)),
+    SmeltUserTimestamp  = fg(mix(surface2, fg0, p.light and 0.65 or 0.45)),
     SmeltScrollPillBg   = bg(surface),
     SmeltCodeBlockBg    = bg(surface),
     SmeltSeparator      = fg(mix(accent, bg0, 0.55)),

@@ -5,6 +5,7 @@
 //! a repeat call with the same name returns the existing buf with
 //! its mutable opts re-applied.
 
+use crate::lua::parse::{ColorRef, Layer};
 use crate::lua::LuaShared;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
@@ -39,72 +40,16 @@ impl From<LuaVirtTextPos> for smelt_core::buffer::VirtTextPos {
     }
 }
 
-/// Color value for the `fg`/`bg` highlight fields. Accepts:
-/// - `string` - theme-group name resolved through the active theme.
-/// - `{ r, g, b }` - direct RGB triple (integer array).
-/// - `{ rgb = { r, g, b } }` - same RGB triple in the `StyleDecl` shape
-///   that `smelt.theme.get(group)` returns, so a caller can pipe a
-///   theme-derived color straight back into another highlight.
-/// - `{ ansi = N }` - direct 256-color slot in the same shape.
-#[derive(Debug, Clone)]
-pub enum LuaColor {
-    Group(String),
-    Direct(smelt_core::style::Color),
-}
-
-impl LuaType for LuaColor {
-    fn lua_type() -> String {
-        "string | integer[] | { ansi: integer } | { rgb: integer[] }".into()
-    }
-}
-
-impl FromLua for LuaColor {
-    fn from_lua(value: mlua::Value, _: &Lua) -> LuaResult<Self> {
-        match value {
-            mlua::Value::String(s) => Ok(LuaColor::Group(s.to_str()?.to_string())),
-            mlua::Value::Table(t) => {
-                if let Ok(n) = t.get::<u8>("ansi") {
-                    return Ok(LuaColor::Direct(smelt_core::style::Color::AnsiValue(n)));
-                }
-                if let Ok(rgb) = t.get::<[u8; 3]>("rgb") {
-                    return Ok(LuaColor::Direct(smelt_core::style::Color::Rgb {
-                        r: rgb[0],
-                        g: rgb[1],
-                        b: rgb[2],
-                    }));
-                }
-                let r: u8 = t.get(1)?;
-                let g: u8 = t.get(2)?;
-                let b: u8 = t.get(3)?;
-                Ok(LuaColor::Direct(smelt_core::style::Color::Rgb { r, g, b }))
-            }
-            other => Err(mlua::Error::FromLuaConversionError {
-                from: other.type_name(),
-                to: "smelt color (theme group name, {r,g,b}, {ansi=N}, or {rgb={...}})".into(),
-                message: None,
-            }),
-        }
-    }
-}
-
-impl LuaColor {
-    fn resolve_fg(&self) -> Option<smelt_core::style::Color> {
-        match self {
-            LuaColor::Group(name) => {
-                crate::lua::with_runtime_host(|host| host.theme_group(name).fg)
-            }
-            LuaColor::Direct(c) => Some(*c),
-        }
-    }
-
-    fn resolve_bg(&self) -> Option<smelt_core::style::Color> {
-        match self {
-            LuaColor::Group(name) => {
-                crate::lua::with_runtime_host(|host| host.theme_group(name).bg)
-            }
-            LuaColor::Direct(c) => Some(*c),
-        }
-    }
+/// Resolve an optional `fg`/`bg` color argument against the active theme.
+fn resolve_color(
+    color: &Option<ColorRef>,
+    layer: Layer,
+) -> LuaResult<Option<Option<smelt_core::style::Color>>> {
+    color
+        .as_ref()
+        .map(|c| c.resolve(layer, &crate::lua::theme_group))
+        .transpose()
+        .map_err(LuaError::RuntimeError)
 }
 
 /// Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful
@@ -130,12 +75,12 @@ pub struct LuaMarkOpts {
 
     /// Theme group whose style is applied as the highlight base.
     pub hl_group: Option<String>,
-    /// Foreground override. Either a theme group name (string) or a
-    /// direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
-    pub fg: Option<LuaColor>,
-    /// Background override. Either a theme group name (string) or a
-    /// direct RGB triple `{ r, g, b }`. Takes precedence over `hl_group`.
-    pub bg: Option<LuaColor>,
+    /// Foreground override: any color, or a theme group name. Takes
+    /// precedence over `hl_group`.
+    pub fg: Option<ColorRef>,
+    /// Background override: any color, or a theme group name. Takes
+    /// precedence over `hl_group`.
+    pub bg: Option<ColorRef>,
     /// Force-bold the highlight.
     pub bold: Option<bool>,
     /// Force-dim the highlight.
@@ -259,6 +204,11 @@ impl mlua::UserData for LuaBuf {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Buf#{}", this.id.0))
+        });
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: mlua::AnyUserData| {
+            Ok(other
+                .borrow::<LuaBuf>()
+                .is_ok_and(|other| other.id == this.id))
         });
 
         // ── source (full text): get / set ──────────────────────────
@@ -406,7 +356,7 @@ impl mlua::UserData for LuaBuf {
             |_,
              this,
              (ns, row, col, opts): (u32, u64, u64, Option<LuaMarkOpts>)|
-             -> LuaResult<u64> { Ok(set_extmark(this.id, ns, row, col, opts)) },
+             -> LuaResult<u64> { set_extmark(this.id, ns, row, col, opts) },
         );
 
         // ── clear_ns(ns, start?, end?) - chainable ─────────────────
@@ -453,7 +403,7 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
     record_class(LuaClassDecl {
         name: "smelt.buf.Buf",
         classification: smelt_core::lua::doc::classification_for_type("smelt.buf.Buf"),
-        doc: "Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same handle for chaining.",
+        doc: "Buffer handle returned by `smelt.buf.new(opts?)`. Handles to the same buffer compare equal with `==`. Setter methods return the same handle for chaining.",
         fields: smelt_core::class_methods! {
             "source" => fn(s: Option<String>) -> mlua::Value, "Read or write the buffer's full source. Without arg returns the source string (or `nil` if the buffer is gone). With arg replaces the source and returns the handle for chaining. A plain buffer shows the new text right away; a buffer with a mode such as `markdown` renders it on its next layout. On the built-in prompt buffer, this routes through `smelt.prompt.set_text` semantics so cursor, undo, attachments, and completer state stay coherent.",
             "lines" => fn(arr: Option<Vec<String>>) -> mlua::Value, "Read or write the buffer as a string array. Without arg returns the lines; with arg replaces all lines and returns the handle for chaining. On the built-in prompt buffer, writes are joined with `\\n` and installed through `smelt.prompt.set_text` semantics.",
@@ -605,8 +555,8 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
         bold: bool,
         italic: bool,
         reverse: bool,
-        fg: Option<LuaColor>,
-        bg: Option<LuaColor>,
+        fg: Option<Option<smelt_core::style::Color>>,
+        bg: Option<Option<smelt_core::style::Color>>,
     }
 
     struct Span {
@@ -633,8 +583,8 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
             bold: tbl.get::<Option<bool>>("bold")?.unwrap_or(false),
             italic: tbl.get::<Option<bool>>("italic")?.unwrap_or(false),
             reverse: tbl.get::<Option<bool>>("reverse")?.unwrap_or(false),
-            fg: tbl.get::<Option<LuaColor>>("fg")?,
-            bg: tbl.get::<Option<LuaColor>>("bg")?,
+            fg: resolve_color(&tbl.get("fg")?, Layer::Fg)?,
+            bg: resolve_color(&tbl.get("bg")?, Layer::Bg)?,
         })
     }
 
@@ -683,17 +633,11 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
                     style.bold = span.style.bold;
                     style.italic = span.style.italic;
                     style.reverse = span.style.reverse;
-                    if let Some(c) = &span.style.fg {
-                        style.fg = match c {
-                            LuaColor::Group(name) => sink.theme().get(name).fg,
-                            LuaColor::Direct(color) => Some(*color),
-                        };
+                    if let Some(fg) = span.style.fg {
+                        style.fg = fg;
                     }
-                    if let Some(c) = &span.style.bg {
-                        style.bg = match c {
-                            LuaColor::Group(name) => sink.theme().get(name).bg,
-                            LuaColor::Direct(color) => Some(*color),
-                        };
+                    if let Some(bg) = span.style.bg {
+                        style.bg = bg;
                     }
                     sink.push(group, style);
                     if let Some(lang) = &span.syntax {
@@ -719,11 +663,11 @@ fn set_extmark(
     row: u64,
     col: u64,
     opts: Option<LuaMarkOpts>,
-) -> u64 {
+) -> LuaResult<u64> {
     use smelt_core::buffer::{ExtmarkId, ExtmarkOpts, NsId};
 
     let Some(row0) = row.checked_sub(1) else {
-        return 0;
+        return Ok(0);
     };
     let row0 = row0 as usize;
     let byte_col = col as usize;
@@ -752,13 +696,13 @@ fn set_extmark(
     });
 
     let mut payload_opts = if let Some(text) = opts.virt_text.clone() {
-        let mut o = ExtmarkOpts::virt_text(text, build_virt_text_hl(&opts));
+        let mut o = ExtmarkOpts::virt_text(text, build_virt_text_hl(&opts)?);
         if let Some(pos) = opts.virt_text_pos {
             o = o.with_virt_pos(pos.into());
         }
         o
     } else {
-        let style = build_highlight_style(&opts);
+        let style = build_highlight_style(&opts)?;
         let meta = smelt_core::buffer::SpanMeta {
             selectable: opts.selectable.unwrap_or(true),
             copy_as: opts.yank_as.clone(),
@@ -792,11 +736,10 @@ fn set_extmark(
                 .map(|buf| buf.set_extmark(NsId(ns), row0, col0, payload_opts))
         })
     })
-    .map(|eid: ExtmarkId| eid.0 as u64)
-    .unwrap_or(0)
+    .map_or(Ok(0), |eid: ExtmarkId| Ok(eid.0 as u64))
 }
 
-fn build_virt_text_hl(opts: &LuaMarkOpts) -> Option<String> {
+fn build_virt_text_hl(opts: &LuaMarkOpts) -> LuaResult<Option<String>> {
     if opts.fg.is_none()
         && opts.bg.is_none()
         && opts.bold.is_none()
@@ -804,18 +747,18 @@ fn build_virt_text_hl(opts: &LuaMarkOpts) -> Option<String> {
         && opts.italic.is_none()
         && opts.reverse.is_none()
     {
-        return opts.virt_text_hl.clone();
+        return Ok(opts.virt_text_hl.clone());
     }
 
     let mut style = match opts.virt_text_hl.as_deref() {
-        Some(name) => crate::lua::with_runtime_host(|host| host.theme_group(name)),
+        Some(name) => crate::lua::theme_group(name).unwrap_or_default(),
         None => smelt_core::style::Style::default(),
     };
-    if let Some(c) = &opts.fg {
-        style.fg = c.resolve_fg();
+    if let Some(fg) = resolve_color(&opts.fg, Layer::Fg)? {
+        style.fg = fg;
     }
-    if let Some(c) = &opts.bg {
-        style.bg = c.resolve_bg();
+    if let Some(bg) = resolve_color(&opts.bg, Layer::Bg)? {
+        style.bg = bg;
     }
     if let Some(b) = opts.bold {
         style.bold = b;
@@ -831,21 +774,21 @@ fn build_virt_text_hl(opts: &LuaMarkOpts) -> Option<String> {
     }
 
     let group = smelt_core::theme::intern_anonymous_style(style);
-    smelt_core::theme::name_of(group)
+    Ok(smelt_core::theme::name_of(group))
 }
 
-fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_edit::SpanStyle {
+fn build_highlight_style(opts: &LuaMarkOpts) -> LuaResult<crate::smelt_edit::SpanStyle> {
     use smelt_core::style::Style;
 
     let mut style = match opts.hl_group.as_deref() {
-        Some(name) => crate::lua::with_runtime_host(|host| host.theme_group(name)),
+        Some(name) => crate::lua::theme_group(name).unwrap_or_default(),
         None => Style::default(),
     };
-    if let Some(c) = &opts.fg {
-        style.fg = c.resolve_fg();
+    if let Some(fg) = resolve_color(&opts.fg, Layer::Fg)? {
+        style.fg = fg;
     }
-    if let Some(c) = &opts.bg {
-        style.bg = c.resolve_bg();
+    if let Some(bg) = resolve_color(&opts.bg, Layer::Bg)? {
+        style.bg = bg;
     }
     if let Some(b) = opts.bold {
         style.bold = b;
@@ -859,5 +802,5 @@ fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_edit::SpanStyle {
     if let Some(b) = opts.reverse {
         style.reverse = b;
     }
-    style
+    Ok(style)
 }

@@ -10,7 +10,7 @@ use mlua::prelude::*;
 use scoped_tls_hkt::scoped_thread_local;
 use smelt_buffer::cell_width;
 use smelt_core::lua::doc::record_class;
-use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
+use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::palette::{self, Layer};
 use smelt_core::style::Color;
 use std::collections::HashMap;
@@ -265,7 +265,9 @@ fn one_grapheme_or_space(text: Option<&str>) -> LuaResult<&str> {
 
 fn style_arg(style: Option<mlua::Table>) -> LuaResult<Style> {
     match style {
-        Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError),
+        Some(t) => {
+            crate::lua::parse::style(&t, &crate::lua::theme_group).map_err(LuaError::RuntimeError)
+        }
         None => Ok(Style::new()),
     }
 }
@@ -279,7 +281,13 @@ fn cell_to_lua(lua: &Lua, cell: &Cell) -> LuaResult<mlua::Table> {
         t.set("ch", cell.symbol.as_str())?;
         t.set("width", cell.symbol.width())?;
     }
-    t.set("style", crate::lua::parse::style_to_lua(lua, cell.style)?)?;
+    let style = crate::lua::parse::style_to_lua(lua, cell.style)?;
+    // The terminal background reads as `bg = false`, so a cell written back
+    // with `set` keeps it instead of taking the background underneath.
+    if cell.style.bg.is_none() {
+        style.set("bg", false)?;
+    }
+    t.set("style", style)?;
     if cell.image.is_some() {
         t.set("image", true)?;
     }
@@ -381,8 +389,8 @@ impl mlua::UserData for PaintSliceUd {
         methods.add_method(
             "set_style",
             |_, _, (x, y, w, h, patch): (i32, i32, i32, i32, mlua::Table)| {
-                let patch =
-                    crate::lua::parse::style_patch(&patch).map_err(LuaError::RuntimeError)?;
+                let patch = crate::lua::parse::style_patch(&patch, &crate::lua::theme_group)
+                    .map_err(LuaError::RuntimeError)?;
                 with_canvas(|c| {
                     let rect = clip(c, x, y, w, h);
                     for y in rect.y..rect.bottom() {
@@ -414,9 +422,8 @@ impl mlua::UserData for PaintSliceUd {
                         let out: Option<mlua::Table> = f.call((cell_to_lua(lua, &cell)?, x, y))?;
                         if let Some(out) = out {
                             let style = match out.get::<Option<mlua::Table>>("style")? {
-                                Some(t) => {
-                                    crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?
-                                }
+                                Some(t) => crate::lua::parse::style(&t, &crate::lua::theme_group)
+                                    .map_err(LuaError::RuntimeError)?,
                                 None => cell.style,
                             };
                             match out.get::<Option<String>>("ch")? {
@@ -463,9 +470,109 @@ impl mlua::UserData for PaintSliceUd {
     }
 }
 
+/// Doc-only stand-ins naming the paint tables in generated stubs. They are
+/// never marshalled; the tables are built by hand.
+macro_rules! doc_type {
+    ($name:ident, $lua:literal) => {
+        pub(crate) struct $name;
+        impl LuaType for $name {
+            fn lua_type() -> String {
+                $lua.into()
+            }
+        }
+    };
+}
+doc_type!(PaintCell, "smelt.paint.Cell");
+doc_type!(PaintStyle, "smelt.paint.Style");
+doc_type!(PaintCtx, "smelt.paint.Ctx");
+
+fn field(name: &'static str, ty: &str, optional: bool, doc: &'static str) -> LuaClassField {
+    LuaClassField {
+        name,
+        ty: ty.into(),
+        optional,
+        doc,
+    }
+}
+
 /// Register the `smelt.paint.Slice` and `smelt.paint.Snapshot` class docs.
 /// Keep in sync with the `UserData` impls above.
 pub fn register_paint_slice_docs() {
+    let color = crate::lua::parse::COLOR_TYPE;
+    let classification = smelt_core::lua::doc::classification_for_type;
+    record_class(LuaClassDecl {
+        name: "smelt.paint.Style",
+        classification: classification("smelt.paint.Style"),
+        doc: "The style of a cell. Colors take any color form: an ANSI index, `\"#rrggbb\"`, an ANSI name, a theme group name such as `\"Comment\"`, `{ r, g, b }`, or `false` for the terminal default.",
+        fields: vec![
+            field("fg", color, true, "Glyph color. Unset keeps the terminal default."),
+            field("bg", color, true, "Background color. When writing, unset keeps the background underneath. Reads give `false` for the terminal default, so a cell read and written back stays the same."),
+            field("bold", "boolean", true, "Bold text."),
+            field("dim", "boolean", true, "Dim text."),
+            field("italic", "boolean", true, "Italic text."),
+            field("underline", "boolean", true, "Underlined text."),
+            field("crossedout", "boolean", true, "Struck-through text."),
+            field("reverse", "boolean", true, "Swap the glyph and background colors."),
+        ],
+    });
+    record_class(LuaClassDecl {
+        name: "smelt.paint.Cell",
+        classification: classification("smelt.paint.Cell"),
+        doc: "One screen cell, as `Slice:get` and `Snapshot:get` read it.",
+        fields: vec![
+            field(
+                "ch",
+                "string",
+                false,
+                "The grapheme cluster. The right half of a wide glyph reads as `\"\"`.",
+            ),
+            field(
+                "width",
+                "integer",
+                false,
+                "Cells the glyph covers: 1, 2 for a wide glyph, 0 for its right half.",
+            ),
+            field("style", "smelt.paint.Style", false, "The cell's style."),
+            field(
+                "image",
+                "boolean",
+                true,
+                "Set when the cell shows part of an image.",
+            ),
+        ],
+    });
+    record_class(LuaClassDecl {
+        name: "smelt.paint.Ctx",
+        classification: classification("smelt.paint.Ctx"),
+        doc: "Per-frame values a paint callback receives.",
+        fields: vec![
+            field("x", "integer", false, "Screen column of the slice's left edge."),
+            field("y", "integer", false, "Screen row of the slice's top edge."),
+            field("terminal_width", "integer", false, "Terminal width in cells."),
+            field("terminal_height", "integer", false, "Terminal height in cells."),
+            field("now_ms", "integer", false, "Milliseconds on the clock of `smelt.time.monotonic_ms()`, for animation."),
+            field("frame", "integer", false, "Count of frames painted since startup."),
+            field("focused", "boolean", false, "Whether keystrokes reach this paint: the terminal has focus, and for a leaf, its window does too."),
+            field("pointer", "{ x: integer, y: integer }", true, "The pointer, relative to the slice. Only with `opts.pointer`."),
+            field("cursor", "{ x: integer, y: integer }", true, "The visible cursor. Only in frame paints, and absent while the cursor is hidden."),
+            field("prev", "smelt.paint.Snapshot", true, "The screen as smelt drew it on the previous frame, before frame paints. Only with `opts.history`, and absent on the first frame."),
+            field("damage", "{ x: integer, y: integer, width: integer, height: integer }[]", true, "One-row runs of cells that changed since `prev`, in reading order. Every row on the first frame and after a resize. Scrolls that `scrolls` reports are taken out: a moved cell counts only if it differs from the cell it moved from. Only with `opts.history`."),
+            field("scrolls", "smelt.paint.Scroll[]", true, "Every window whose text scrolled since `prev`, in painter order. Empty when nothing scrolled. Only with `opts.history`."),
+        ],
+    });
+    record_class(LuaClassDecl {
+        name: "smelt.paint.Scroll",
+        classification: classification("smelt.paint.Scroll"),
+        doc: "How one window's text moved since the previous frame: the screen area of the text and the rows it moved. Screen row `y` inside the area shows what `ctx.prev` had at row `y + dy`, unless a window above covers it.",
+        fields: vec![
+            field("win", "smelt.win.Win", false, "The window that scrolled. Compare it with `==`, for example to `smelt.win.transcript()`."),
+            field("x", "integer", false, "Left column of the area."),
+            field("y", "integer", false, "Top row of the area."),
+            field("width", "integer", false, "Width of the area."),
+            field("height", "integer", false, "Height of the area."),
+            field("dy", "integer", false, "Rows the text moved up; negative when it moved down."),
+        ],
+    });
     record_class(LuaClassDecl {
         name: "smelt.paint.Slice",
         classification: smelt_core::lua::doc::classification_for_type("smelt.paint.Slice"),
@@ -473,12 +580,12 @@ pub fn register_paint_slice_docs() {
         fields: smelt_core::class_methods! {
             "width" => fn() -> u16, "Return the slice width in cells.",
             "height" => fn() -> u16, "Return the slice height in cells.",
-            "get" => fn(x: i32, y: i32) -> Option<mlua::Table>, "Return the cell at `(x, y)` as `{ ch, width, style, image? }`, or `nil` outside the slice. The right half of a wide glyph has `ch = \"\"` and `width = 0`.",
-            "set" => fn(x: i32, y: i32, ch: Option<String>, style: Option<mlua::Table>) -> (), "Write one grapheme cluster (default a space) at `(x, y)`.",
-            "put_str" => fn(x: i32, y: i32, text: String, style: Option<mlua::Table>) -> i32, "Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.",
-            "fill" => fn(x: i32, y: i32, w: i32, h: i32, ch: Option<String>, style: Option<mlua::Table>) -> (), "Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).",
-            "set_style" => fn(x: i32, y: i32, w: i32, h: i32, patch: mlua::Table) -> (), "Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.",
-            "map" => fn(f: mlua::Function) -> (), "Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style.",
+            "get" => fn(x: i32, y: i32) -> Option<PaintCell>, "Return the cell at `(x, y)`, or `nil` outside the slice.",
+            "set" => fn(x: i32, y: i32, ch: Option<String>, style: Option<PaintStyle>) -> (), "Write one grapheme cluster (default a space) at `(x, y)`.",
+            "put_str" => fn(x: i32, y: i32, text: String, style: Option<PaintStyle>) -> i32, "Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.",
+            "fill" => fn(x: i32, y: i32, w: i32, h: i32, ch: Option<String>, style: Option<PaintStyle>) -> (), "Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).",
+            "set_style" => fn(x: i32, y: i32, w: i32, h: i32, patch: PaintStyle) -> (), "Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.",
+            "map" => fn(f: LuaCallback<(PaintCell, i32, i32), Option<mlua::Table>>) -> (), "Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style.",
             "recolor" => fn(f: mlua::Function, opts: Option<LuaRecolorOpts>) -> (), "Pass every color on the slice through `f(r, g, b, layer)`, where `layer` is `\"fg\"` or `\"bg\"` and the channels are 0-255 as the terminal shows them. Return new `r, g, b` (rounded and clamped), or `nil` to keep the color. `f` runs once per distinct color, not per cell, so screen-wide filters such as night shift or color-blind simulation stay cheap. Image cells keep their colors.",
             "snapshot" => fn() -> PaintSnapshot, "Copy the slice into a `Snapshot` that stays valid after the callback, for example to keep the screen as it was before a change.",
             "blit" => fn(snapshot: PaintSnapshot, x: Option<i32>, y: Option<i32>) -> (), "Draw `snapshot` with its top-left cell at `(x, y)` (default `0, 0`). Cells outside the slice are dropped.",
@@ -492,7 +599,7 @@ pub fn register_paint_slice_docs() {
         fields: smelt_core::class_methods! {
             "width" => fn() -> u16, "Return the snapshot width in cells.",
             "height" => fn() -> u16, "Return the snapshot height in cells.",
-            "get" => fn(x: i32, y: i32) -> Option<mlua::Table>, "Return the cell at `(x, y)` in the same shape as `Slice:get`, or `nil` outside the snapshot.",
+            "get" => fn(x: i32, y: i32) -> Option<PaintCell>, "Return the cell at `(x, y)`, or `nil` outside the snapshot.",
         },
     });
 }
@@ -647,7 +754,7 @@ mod tests {
             &mut grid,
             r#"
             local a, wide, half = slice:get(0, 0), slice:get(1, 0), slice:get(2, 0)
-            assert(a.ch == "a" and a.width == 1 and a.style.fg.ansi == 9)
+            assert(a.ch == "a" and a.width == 1 and a.style.fg == 9 and a.style.bg == false)
             assert(wide.ch == "語" and wide.width == 2)
             assert(half.ch == "" and half.width == 0)
             assert(slice:get(4, 0) == nil)

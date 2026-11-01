@@ -24,6 +24,15 @@ pub enum LuaColorLayer {
     Bg,
 }
 
+impl From<LuaColorLayer> for crate::lua::parse::Layer {
+    fn from(layer: LuaColorLayer) -> Self {
+        match layer {
+            LuaColorLayer::Fg => Self::Fg,
+            LuaColorLayer::Bg => Self::Bg,
+        }
+    }
+}
+
 impl From<LuaColorLayer> for smelt_core::palette::Layer {
     fn from(layer: LuaColorLayer) -> Self {
         match layer {
@@ -82,7 +91,7 @@ at compile time; cycles and dangling references raise a runtime error.",
     m.fn_(
         "set",
         "Override a single highlight group's style. `style` is a \
-`StyleDecl` table (`{ fg = { ansi = 244 }, bold = true }`). The override \
+`StyleDecl` table (`{ fg = 244, bold = true }`). The override \
 sticks until the next `apply()` or `use()` call.",
         &["group", "style"],
         |lua, (group, style): (String, StyleDecl)| -> LuaResult<()> {
@@ -100,28 +109,25 @@ sticks until the next `apply()` or `use()` call.",
 resolve to an empty table.",
         &["group"],
         |lua, group: String| -> LuaResult<mlua::Table> {
-            let style = crate::lua::with_runtime_host(|host| host.theme_group(&group));
+            let style = crate::lua::theme_group(&group).unwrap_or_default();
             crate::lua::parse::style_to_lua(lua, style)
         },
     )?;
 
     m.fn_(
         "rgb",
-        "Resolve any color (`{ ansi = n }`, `{ rgb = { r, g, b } }`, a name such \
-as `\"red\"`, or `\"#rrggbb\"`) to `{ rgb = { r, g, b } }` as the terminal shows \
-it. The 16 ANSI colors and `nil` / `\"reset\"` use the terminal's own palette \
-when it reports one at startup, and the xterm palette otherwise; `nil` and \
-`\"reset\"` resolve to the default for `layer` (`\"fg\"` when omitted). Use it \
-to blend colors, for example in a paint.",
+        "Resolve any color, or a theme group name such as `\"Comment\"`, to \
+`{ r, g, b }` as the terminal shows it on `layer` (`\"fg\"` when omitted). The \
+16 ANSI colors and the terminal default (`nil` or `false`) use the terminal's \
+own palette when it reports one at startup, and the xterm palette otherwise. \
+Use it to blend colors, for example in a paint.",
         &["color", "layer"],
         |lua, (color, layer): (mlua::Value, Option<LuaColorLayer>)| -> LuaResult<mlua::Table> {
-            let color =
-                crate::lua::parse::color_opt(Some(color)).map_err(LuaError::RuntimeError)?;
-            let layer = layer.map_or(smelt_core::palette::Layer::Fg, Into::into);
-            let (r, g, b) = smelt_core::palette::terminal().rgb(color, layer);
-            let t = lua.create_table()?;
-            t.set("rgb", [r, g, b])?;
-            Ok(t)
+            let layer = layer.unwrap_or(LuaColorLayer::Fg);
+            let color = crate::lua::parse::color(&color, layer.into(), &crate::lua::theme_group)
+                .map_err(LuaError::RuntimeError)?;
+            let (r, g, b) = smelt_core::palette::terminal().rgb(color, layer.into());
+            lua.create_sequence_from([r, g, b])
         },
     )?;
 

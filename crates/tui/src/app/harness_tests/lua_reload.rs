@@ -3110,9 +3110,9 @@ fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
             assert(smelt.text.format_tokens(1200) == "1.2k", "tokens")
             assert(smelt.text.format_cost(1.25) == "$1.25", "cost")
 
-            smelt.theme.set("CoverageContract", { fg = { ansi = 42 }, bold = true })
+            smelt.theme.set("CoverageContract", { fg = 42, bold = true })
             local style = smelt.theme.get("CoverageContract")
-            assert(style.fg.ansi == 42, "theme fg")
+            assert(style.fg == 42, "theme fg")
             assert(style.bold == true, "theme bold")
             assert(type(smelt.theme.snapshot().CoverageContract) == "table", "theme snapshot")
             assert(type(smelt.theme.is_light()) == "boolean", "theme light")

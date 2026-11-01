@@ -10,61 +10,17 @@ local function span(text, style) return { text = text, style = style } end
 local function row(...) return { ... } end
 local function append(dst, src) for _, line in ipairs(src) do dst[#dst + 1] = line end end
 
-local function clamp(n)
-  n = tonumber(n) or 0
-  if n < 0 then return 0 end
-  if n > 255 then return 255 end
-  return math.floor(n + 0.5)
-end
-
-local function ansi_to_rgb(n)
-  n = tonumber(n)
-  if not n then return nil end
-  local basic = {
-    [0] = { 0, 0, 0 },       { 128, 0, 0 },     { 0, 128, 0 },     { 128, 128, 0 },
-    { 0, 0, 128 },           { 128, 0, 128 },   { 0, 128, 128 },   { 192, 192, 192 },
-    { 128, 128, 128 },       { 255, 0, 0 },     { 0, 255, 0 },     { 255, 255, 0 },
-    { 0, 0, 255 },           { 255, 0, 255 },   { 0, 255, 255 },   { 255, 255, 255 },
-  }
-  if n >= 0 and n <= 15 then return basic[n] end
-  if n >= 16 and n <= 231 then
-    local v = n - 16
-    local levels = { 0, 95, 135, 175, 215, 255 }
-    local r = math.floor(v / 36) % 6
-    local g = math.floor(v / 6) % 6
-    local b = v % 6
-    return { levels[r + 1], levels[g + 1], levels[b + 1] }
-  end
-  if n >= 232 and n <= 255 then
-    local grey = 8 + (n - 232) * 10
-    return { grey, grey, grey }
-  end
-  return nil
-end
-
-local function color_rgb(color)
-  if type(color) ~= "table" then return nil end
-  if type(color.rgb) == "table" then return { color.rgb[1], color.rgb[2], color.rgb[3] } end
-  if color.ansi then return ansi_to_rgb(color.ansi) end
-  if color[1] and color[2] and color[3] then return { color[1], color[2], color[3] } end
-  return nil
-end
-
 local function mix(a, b, t)
-  return {
-    clamp(a[1] + (b[1] - a[1]) * t),
-    clamp(a[2] + (b[2] - a[2]) * t),
-    clamp(a[3] + (b[3] - a[3]) * t),
-  }
+  return { a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t }
 end
 
 local function heat_styles()
-  local accent = color_rgb((smelt.theme.get("SmeltAccent") or {}).fg) or { 120, 160, 255 }
+  local accent = smelt.theme.rgb("SmeltAccent")
   local white = { 255, 255, 255 }
   return {
-    { fg = { rgb = mix(accent, white, 0.55) } },
-    { fg = { rgb = mix(accent, white, 0.25) } },
-    { fg = { rgb = accent } },
+    { fg = mix(accent, white, 0.55) },
+    { fg = mix(accent, white, 0.25) },
+    { fg = accent },
   }
 end
 

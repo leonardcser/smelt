@@ -166,6 +166,11 @@ impl mlua::UserData for LuaWin {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Win#{}", this.id.0))
         });
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: mlua::AnyUserData| {
+            Ok(other
+                .borrow::<LuaWin>()
+                .is_ok_and(|other| other.id == this.id))
+        });
 
         // ── close / focus ──────────────────────────────────────────
         methods.add_method("close", |_, this, ()| -> LuaResult<()> {
@@ -854,7 +859,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     record_class(LuaClassDecl {
         name: "smelt.win.Win",
         classification: smelt_core::lua::doc::classification_for_type("smelt.win.Win"),
-        doc: "Window handle returned by `smelt.win.new(buf, opts?)`. Most setters return the same handle for chaining; resize operations report whether a resizable owner exists.",
+        doc: "Window handle returned by `smelt.win.new(buf, opts?)`. Handles to the same window compare equal with `==`. Most setters return the same handle for chaining; resize operations report whether a resizable owner exists.",
         fields: smelt_core::class_methods! {
             "close" => fn() -> (), "Close the overlay leaf. No-op if the window is already closed.",
             "focus" => fn() -> (), "Move keyboard focus to this window. No-op if the window is not focusable.",

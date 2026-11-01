@@ -352,11 +352,17 @@ fn create_split(axis: Axis, opts: Option<&mlua::Table>) -> LuaResult<LuaSplit> {
         .transpose()?
         .flatten()
         .map(|styles| -> LuaResult<_> {
-            let normal = crate::lua::parse::style(&styles.get::<mlua::Table>("normal")?)
-                .map_err(LuaError::external)?;
+            let normal = crate::lua::parse::style(
+                &styles.get::<mlua::Table>("normal")?,
+                &crate::lua::theme_group,
+            )
+            .map_err(LuaError::external)?;
             let active = styles
                 .get::<Option<mlua::Table>>("active")?
-                .map(|style| crate::lua::parse::style(&style).map_err(LuaError::external))
+                .map(|style| {
+                    crate::lua::parse::style(&style, &crate::lua::theme_group)
+                        .map_err(LuaError::external)
+                })
                 .transpose()?
                 .unwrap_or(normal);
             Ok(DividerStyles { normal, active })
@@ -481,8 +487,9 @@ fn parse_node_chrome(opts: Option<&mlua::Table>, ctx: &str) -> Result<NodeChrome
         None | Some(mlua::Value::Nil) => None,
         _ => crate::lua::parse::border(t).map_err(|e| format!("{ctx}.border: {e}"))?,
     };
-    let title = crate::lua::parse::title(t.get::<mlua::Value>("title").ok())
-        .map_err(|e| format!("{ctx}.title: {e}"))?;
+    let title =
+        crate::lua::parse::title(t.get::<mlua::Value>("title").ok(), &crate::lua::theme_group)
+            .map_err(|e| format!("{ctx}.title: {e}"))?;
     let padding = t.get::<u16>("padding").unwrap_or(0);
     let justify = match t.get::<Option<String>>("justify").ok().flatten().as_deref() {
         None | Some("start") => Justify::Start,

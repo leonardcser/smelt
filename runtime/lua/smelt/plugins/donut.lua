@@ -17,7 +17,7 @@ local RAMP = {
   { 226, 98, 26 }, { 244, 122, 40 }, { 252, 150, 66 }, { 255, 180, 104 }, { 255, 208, 150 }, { 255, 232, 200 },
 }
 local STEPS = {}
-for i, rgb in ipairs(RAMP) do STEPS[i] = { glyph = GLYPHS:sub(i, i), style = { fg = { rgb = rgb } } } end
+for i, rgb in ipairs(RAMP) do STEPS[i] = { glyph = GLYPHS:sub(i, i), style = { fg = rgb } } end
 
 local floor, sin, cos = math.floor, math.sin, math.cos
 
@@ -134,6 +134,7 @@ local function paint(slice, ctx)
     local s = STEPS[step[o]]
     slice:set(o % cols, o // cols, s.glyph, s.style)
   end
+  handle:invalidate_after(1000 // FPS)
 end
 
 smelt.cmd.register("donut", function()
@@ -141,6 +142,6 @@ smelt.cmd.register("donut", function()
     handle:remove()
     handle, start = nil, nil
   else
-    handle = smelt.paint.frame(paint, { name = "smelt.donut", fps = FPS })
+    handle = smelt.paint.frame(paint, { name = "smelt.donut" })
   end
 end, { desc = "spin a donut over everything" })
