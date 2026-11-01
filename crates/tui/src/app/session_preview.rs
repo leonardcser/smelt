@@ -240,6 +240,17 @@ impl SessionPreviewRuntime {
         }
     }
 
+    fn bound_window(&self) -> Option<crate::smelt_edit::WinId> {
+        self.binding.as_ref()?.render.window
+    }
+
+    fn cache_key_for_window(&self, window: crate::smelt_edit::WinId) -> Option<&str> {
+        self.binding
+            .as_ref()
+            .filter(|binding| binding.render.window == Some(window))
+            .map(|binding| binding.render.cache_key.as_str())
+    }
+
     fn render_for_window(&self, window: crate::smelt_edit::WinId) -> Option<SessionPreviewRender> {
         self.binding
             .as_ref()
@@ -657,6 +668,18 @@ impl super::TuiApp {
         self.conversation
             .store_resume_preview(render.cache_key, view);
         Some(result)
+    }
+
+    pub(crate) fn session_preview_window(&self) -> Option<crate::smelt_edit::WinId> {
+        self.session_preview.bound_window()
+    }
+
+    pub(crate) fn session_preview_document(
+        &self,
+        window: crate::smelt_edit::WinId,
+    ) -> Option<&super::transcript::TranscriptDocument> {
+        let cache_key = self.session_preview.cache_key_for_window(window)?;
+        self.conversation.resume_preview(cache_key)
     }
 
     pub(crate) fn navigate_session_preview(

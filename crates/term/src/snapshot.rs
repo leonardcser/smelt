@@ -57,6 +57,14 @@ impl SnapshotFrame {
         }
     }
 
+    /// Style of the cell at `x`, `y`, if it lies inside the frame.
+    pub fn style_at(&self, x: u16, y: u16) -> Option<Style> {
+        self.styles
+            .get(usize::from(y))?
+            .get(usize::from(x))
+            .copied()
+    }
+
     /// Rows joined by `\n` with trailing blank cells stripped per row.
     pub fn text(&self) -> String {
         let mut out = String::with_capacity(self.rows.iter().map(|r| r.len() + 1).sum());

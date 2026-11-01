@@ -226,6 +226,25 @@ impl TestApp {
         })
     }
 
+    /// Top row of the scrollbar thumb painted in the last flushed frame,
+    /// relative to `track.start`. Thumb cells carry the theme's
+    /// `SmeltScrollbarThumb` background.
+    pub fn painted_scrollbar_thumb_top(
+        &self,
+        col: u16,
+        track: std::ops::Range<u16>,
+    ) -> Option<u16> {
+        let thumb = self.app.ui.theme().get("SmeltScrollbarThumb");
+        let thumb_bg = thumb.bg.or(thumb.fg)?;
+        let frame = self.app.ui.flushed_snapshot();
+        track.clone().find_map(|row| {
+            frame
+                .style_at(col, row)
+                .is_some_and(|style| style.bg == Some(thumb_bg))
+                .then(|| row - track.start)
+        })
+    }
+
     fn settle_transcript_hydration(&mut self, out: &mut impl std::io::Write) {
         const HYDRATION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
         const HYDRATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);

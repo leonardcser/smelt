@@ -420,6 +420,7 @@ struct ScrollbarDrag {
     rect_top: u16,
     bar: window::ScrollbarState,
     thumb_grab_row: u16,
+    pointer_row: u16,
 }
 
 impl Ui {
@@ -2548,6 +2549,10 @@ impl Ui {
             (Some(buf), Some(win)) => win.scroll_row_total(buf),
             _ => 0,
         };
+        let drag_fraction = self
+            .scrollbar_drag
+            .filter(|drag| drag.owner == win_id)
+            .and_then(|drag| self.scrollbar_pointer_fraction(win_id, drag.pointer_row));
         if let Some(win) = self.wins.get_mut(&win_id) {
             let viewport_height = win
                 .prepared_viewport_height()
@@ -2565,7 +2570,10 @@ impl Ui {
             }
             let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
                 let bar_col = rect.x + rect.width.saturating_sub(1);
-                window::ScrollbarState::new(bar_col, total_rows, viewport_height)
+                window::ScrollbarState::new(bar_col, total_rows, viewport_height).map(|mut bar| {
+                    bar.set_drag_fraction(drag_fraction);
+                    bar
+                })
             } else {
                 None
             };
@@ -2851,9 +2859,11 @@ impl Ui {
                 self.start_scrollbar_drag(owner, event.row);
                 Status::Consumed
             }
-            MouseEventKind::Drag(MouseButton::Left)
-                if matches!(self.capture, Some(HitTarget::Scrollbar { .. })) =>
-            {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(HitTarget::Scrollbar { owner }) = self.capture else {
+                    return Status::Ignored;
+                };
+                self.move_scrollbar_drag_pointer(owner, event.row);
                 Status::Consumed
             }
             MouseEventKind::Up(MouseButton::Left)
@@ -3180,7 +3190,18 @@ impl Ui {
             rect_top: vp.rect.y,
             bar,
             thumb_grab_row,
+            pointer_row: row,
         });
+    }
+
+    fn move_scrollbar_drag_pointer(&mut self, owner: WinId, row: u16) {
+        if let Some(drag) = self
+            .scrollbar_drag
+            .as_mut()
+            .filter(|drag| drag.owner == owner)
+        {
+            drag.pointer_row = row;
+        }
     }
 
     /// Resolve a pointer row to a thumb position fraction `(numerator, denominator)`
@@ -3215,6 +3236,7 @@ impl Ui {
     }
 
     fn apply_scrollbar_drag(&mut self, owner: WinId, row: u16) {
+        self.move_scrollbar_drag_pointer(owner, row);
         let drag = self.scrollbar_drag.filter(|drag| drag.owner == owner);
         let from_top = if let Some(drag) = drag {
             let rel_row = row.saturating_sub(drag.rect_top);
@@ -6783,6 +6805,67 @@ mod tests {
             Status::Consumed
         );
         assert!(ui.capture().is_none());
+    }
+
+    #[test]
+    fn virtual_scrollbar_drag_paints_thumb_under_pointer() {
+        let mut ui = make_ui();
+        let thumb_bg = crate::grid::Color::AnsiValue(220);
+        ui.theme_mut().set(
+            "SmeltScrollbarThumb",
+            crate::grid::Style::new().bg(thumb_bg),
+        );
+        ui.theme_mut().set(
+            "SmeltScrollbarTrack",
+            crate::grid::Style::new().bg(crate::grid::Color::AnsiValue(238)),
+        );
+        let win = WinId(42);
+        register_window(&mut ui, win);
+        let buf = ui.win(win).unwrap().buf;
+        ui.buf_mut(buf)
+            .unwrap()
+            .set_all_lines((0..1_000).map(|row| format!("row {row}")).collect());
+        ui.set_layout(LayoutTree::leaf(win));
+        ui.render(&mut Vec::new()).unwrap();
+        ui.win_mut(win).unwrap().set_resolved_scroll(200);
+        let viewport = ui.win(win).unwrap().viewport.expect("window viewport");
+        let bar = viewport.scrollbar.expect("overflowing scrollbar");
+        let committed_thumb = bar.metrics(200).thumb_top;
+        let painted_thumb_top = |ui: &mut Ui| {
+            ui.render(&mut Vec::new()).unwrap();
+            let frame = ui.flushed_snapshot();
+            (0..bar.viewport_rows)
+                .find(|row| {
+                    frame
+                        .style_at(bar.col, viewport.rect.y + row)
+                        .is_some_and(|style| style.bg == Some(thumb_bg))
+                })
+                .expect("painted thumb")
+        };
+        assert_eq!(painted_thumb_top(&mut ui), committed_thumb);
+
+        let event = |kind, row| crossterm::event::MouseEvent {
+            kind,
+            row,
+            column: bar.col,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        ui.dispatch_virtual_scrollbar_event(event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            viewport.rect.y + committed_thumb,
+        ));
+        ui.dispatch_virtual_scrollbar_event(event(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            viewport.rect.y + 15,
+        ));
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 200);
+        assert_eq!(painted_thumb_top(&mut ui), 15);
+
+        ui.dispatch_virtual_scrollbar_event(event(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            viewport.rect.y + 15,
+        ));
+        assert_eq!(painted_thumb_top(&mut ui), committed_thumb);
     }
 
     #[test]

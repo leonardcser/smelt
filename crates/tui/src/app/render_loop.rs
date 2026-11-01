@@ -178,6 +178,9 @@ fn record_transcript_projection_hydration_deferred(
                 TranscriptProjectionHydrationPending::TailRecordWindow => {
                     "transcript:projection_hydration_pending:tail_record_window"
                 }
+                TranscriptProjectionHydrationPending::FarSeek => {
+                    "transcript:projection_hydration_pending:far_seek"
+                }
             };
             smelt_perf::perf::record_value(metric, 1);
         }
@@ -601,21 +604,7 @@ impl TuiApp {
                 );
             }
         }
-        let pending_scrollbar_top = self
-            .ui
-            .win(crate::app::TRANSCRIPT_WIN)
-            .and_then(|window| window.viewport)
-            .and_then(|viewport| viewport.scrollbar)
-            .and_then(|bar| {
-                self.conversation
-                    .pending_transcript_scrollbar_display_scroll_top(
-                        bar.total_rows,
-                        bar.viewport_rows,
-                    )
-            });
-        if let Some(window) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            window.set_scrollbar_display_scroll_top(pending_scrollbar_top);
-        }
+        self.sync_transcript_scrollbar_displays();
         let transcript_visible = prepared_transcript.is_some();
         if let Some(matched) = transcript_search_match_after_projection {
             self.overlays
@@ -636,6 +625,40 @@ impl TuiApp {
         }
         self.dispatch_pending_transcript_hydration();
         prepared_transcript
+    }
+
+    /// Paint each transcript-backed thumb where a pending scrollbar seek is
+    /// headed while its records hydrate.
+    fn sync_transcript_scrollbar_displays(&mut self) {
+        let windows = [
+            Some(crate::app::TRANSCRIPT_WIN),
+            self.session_preview_window(),
+        ];
+        for window in windows.into_iter().flatten() {
+            let pending = self
+                .ui
+                .win(window)
+                .and_then(|window| window.viewport)
+                .and_then(|viewport| viewport.scrollbar)
+                .and_then(|bar| {
+                    self.transcript_document_for_window(window)?
+                        .pending_scrollbar_display_scroll_top(bar.total_rows, bar.viewport_rows)
+                });
+            if let Some(window) = self.ui.win_mut(window) {
+                window.set_scrollbar_display_scroll_top(pending);
+            }
+        }
+    }
+
+    fn transcript_document_for_window(
+        &self,
+        window: crate::smelt_edit::WinId,
+    ) -> Option<&crate::app::transcript::TranscriptDocument> {
+        if window == crate::app::TRANSCRIPT_WIN {
+            Some(self.conversation.transcript())
+        } else {
+            self.session_preview_document(window)
+        }
     }
 
     fn dispatch_pending_transcript_hydration(&mut self) {

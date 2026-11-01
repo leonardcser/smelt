@@ -84,6 +84,10 @@ impl ResumePreviewCache {
         self.views.remove(key)
     }
 
+    pub(crate) fn get(&self, key: &str) -> Option<&TranscriptDocument> {
+        self.views.get(key)
+    }
+
     pub(crate) fn store(&mut self, key: String, view: TranscriptDocument) {
         self.order.retain(|existing| existing != &key);
         self.order.push_back(key.clone());

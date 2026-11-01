@@ -603,16 +603,6 @@ impl ConversationRuntime {
         self.document.transcript.hydration_is_pending()
     }
 
-    pub(super) fn pending_transcript_scrollbar_display_scroll_top(
-        &self,
-        total_rows: crate::smelt_edit::RowIndex,
-        viewport_rows: u16,
-    ) -> Option<crate::smelt_edit::RowIndex> {
-        self.document
-            .transcript
-            .pending_scrollbar_display_scroll_top(total_rows, viewport_rows)
-    }
-
     pub(super) fn take_pending_transcript_hydration_request(
         &mut self,
     ) -> Option<super::transcript_hydration::TranscriptHydrationRequest> {
@@ -2488,6 +2478,13 @@ impl ConversationRuntime {
         key: &str,
     ) -> Option<super::transcript::TranscriptDocument> {
         self.resume_preview_cache.take(key)
+    }
+
+    pub(crate) fn resume_preview(
+        &self,
+        key: &str,
+    ) -> Option<&super::transcript::TranscriptDocument> {
+        self.resume_preview_cache.get(key)
     }
 
     pub(crate) fn store_resume_preview(

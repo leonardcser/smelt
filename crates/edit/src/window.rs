@@ -314,6 +314,13 @@ impl ViewportMetrics {
             .min(100) as u8
     }
 
+    /// Thumb top for a thumb position fraction, rounded to the nearest row.
+    pub fn thumb_top_for_fraction(&self, numerator: u64, denominator: u64) -> u16 {
+        let denominator = u128::from(denominator.max(1));
+        let numerator = u128::from(numerator).min(denominator);
+        ((numerator * u128::from(self.max_thumb_top) + denominator / 2) / denominator) as u16
+    }
+
     pub fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
         let half = self.thumb_size / 2;
         rel_row.saturating_sub(half).min(self.max_thumb_top)
@@ -342,6 +349,7 @@ pub struct ScrollbarState {
     pub total_rows: RowIndex,
     pub viewport_rows: u16,
     display_scroll_top: Option<RowIndex>,
+    drag_fraction: Option<(u64, u64)>,
 }
 
 impl ScrollbarState {
@@ -351,6 +359,7 @@ impl ScrollbarState {
             total_rows,
             viewport_rows,
             display_scroll_top: None,
+            drag_fraction: None,
         })
     }
 
@@ -358,8 +367,19 @@ impl ScrollbarState {
         ViewportMetrics::new(scroll_top, self.total_rows, self.viewport_rows)
     }
 
+    /// Metrics of the thumb as painted. A drag pointer owns the thumb, so row
+    /// estimate refinements of virtual documents cannot move it mid-drag. A
+    /// pending seek comes next, then the committed scroll.
     pub fn display_metrics(&self, committed_scroll_top: RowIndex) -> ViewportMetrics {
-        self.metrics(self.display_scroll_top.unwrap_or(committed_scroll_top))
+        let mut metrics = self.metrics(self.display_scroll_top.unwrap_or(committed_scroll_top));
+        if let Some((numerator, denominator)) = self.drag_fraction {
+            metrics.thumb_top = metrics.thumb_top_for_fraction(numerator, denominator);
+        }
+        metrics
+    }
+
+    pub(crate) fn set_drag_fraction(&mut self, fraction: Option<(u64, u64)>) {
+        self.drag_fraction = fraction;
     }
 
     pub fn set_display_scroll_top(&mut self, scroll_top: Option<RowIndex>) {

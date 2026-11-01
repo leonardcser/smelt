@@ -1830,11 +1830,9 @@ fn assert_resume_preview_is_visible(
     );
 }
 
-#[test]
-fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
-    let guard = test_home_guard();
+fn open_sparse_resume_preview(guard: &TestEnvironmentGuard) -> TestApp {
     {
-        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        let mut app = TestApp::builder().build_with_test_home_guard(guard);
         app.push_transcript_block(smelt_core::transcript_model::Block::User {
             text: "resume preview regression".into(),
             image_labels: Vec::new(),
@@ -1864,7 +1862,7 @@ fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
         app.save_session_and_flush();
     }
 
-    let mut app = TestApp::builder().build_without_test_home_reset(&guard);
+    let mut app = TestApp::builder().build_without_test_home_reset(guard);
     app.set_terminal_size(120, 32);
     app.reconcile_session_catalog()
         .expect("reconcile resume preview fixture");
@@ -1876,8 +1874,14 @@ fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
     app.app.tick_timers();
     app.settle_lua();
     app.render_silent();
-
     assert!(app.state().active_modal.is_some());
+    app
+}
+
+#[test]
+fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
+    let guard = test_home_guard();
+    let mut app = open_sparse_resume_preview(&guard);
     let preview = app
         .materialized_window_containing("tool-79")
         .expect("resume preview should materialize the saved tail");
@@ -1992,6 +1996,21 @@ fn resume_overlay_scrolls_virtualized_preview_across_sparse_session() {
         sought_to_top.scroll_top,
     );
     assert_resume_preview_is_visible(&sought_to_top, "scrollbar seek");
+}
+
+#[test]
+fn resume_preview_scrollbar_drag_moves_thumb_with_pointer() {
+    let guard = test_home_guard();
+    let mut app = open_sparse_resume_preview(&guard);
+    let preview = app
+        .materialized_window_containing("tool-79")
+        .expect("resume preview should materialize the saved tail");
+    let rect = preview.viewport.rect;
+    let bar = preview
+        .viewport
+        .scrollbar
+        .expect("resume preview scrollbar");
+    assert_painted_scrollbar_drag_follows_pointer(&mut app, rect, bar, preview.scroll_top);
 }
 
 #[test]
@@ -6989,6 +7008,81 @@ fn transcript_scrollbar_click_preserves_fraction_intent() {
         ),
         "scrollbar clicks must preserve a fraction intent instead of collapsing to {:?}",
         frame.scroll_intent
+    );
+}
+
+#[test]
+fn resumed_transcript_scrollbar_drag_moves_thumb_with_pointer() {
+    let (mut app, _dir) = resumed_heterogeneous_transcript_app(400, 120, 32);
+    let window = app.transcript_window();
+    let viewport = window.viewport.expect("transcript viewport");
+    let bar = viewport.scrollbar.expect("transcript scrollbar");
+    assert_painted_scrollbar_drag_follows_pointer(&mut app, viewport.rect, bar, window.scroll_top);
+}
+
+/// Drag a tail-pinned scrollbar thumb to the top one row at a time and assert
+/// the painted thumb stays under the pointer on every frame, including frames
+/// where background hydration refines the row estimates.
+fn assert_painted_scrollbar_drag_follows_pointer(
+    app: &mut TestApp,
+    rect: crate::smelt_edit::Rect,
+    bar: crate::smelt_edit::ScrollbarState,
+    scroll_top: RowIndex,
+) {
+    let start = bar.display_metrics(scroll_top);
+    assert_eq!(start.thumb_top, start.max_thumb_top, "drag starts at tail");
+    assert!(
+        start.max_thumb_top >= 8,
+        "fixture needs room to drag: {start:?}"
+    );
+    let track = rect.y..rect.y + bar.viewport_rows;
+    let mouse = |kind, row| {
+        SourceEvent::Term(Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            row,
+            column: bar.col,
+            modifiers: KeyModifiers::empty(),
+        }))
+    };
+    let painted = |app: &mut TestApp| {
+        app.settle_lua();
+        app.render_silent();
+        app.painted_scrollbar_thumb_top(bar.col, track.clone())
+            .expect("painted thumb")
+    };
+
+    let grab_row = rect.y + start.thumb_top;
+    app.feed_one(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        grab_row,
+    ));
+    let mut observed = vec![painted(app)];
+    for step in 1..=start.max_thumb_top {
+        app.feed_one(mouse(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            grab_row - step,
+        ));
+        observed.push(painted(app));
+        app.feed_one(SourceEvent::Tick(16));
+        app.app.tick_timers();
+        observed.push(painted(app));
+    }
+    app.feed_one(mouse(
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        rect.y,
+    ));
+    observed.push(painted(app));
+
+    let expected: Vec<u16> = std::iter::once(start.thumb_top)
+        .chain((1..=start.max_thumb_top).flat_map(|step| {
+            let top = start.thumb_top - step;
+            [top, top]
+        }))
+        .chain(std::iter::once(0))
+        .collect();
+    assert_eq!(
+        observed, expected,
+        "painted thumb must follow the pointer one row per drag step"
     );
 }
 

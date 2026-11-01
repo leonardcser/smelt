@@ -354,21 +354,17 @@ impl TuiApp {
             return EventOutcome::Redraw;
         }
         let virtual_transcript_scrollbar = scroll_input.as_ref().is_some_and(|input| {
-            matches!(input.target, TranscriptScrollTarget::Main)
-                && matches!(
-                    &input.intent,
-                    TranscriptScrollIntent::ScrollbarFraction { .. }
-                        | TranscriptScrollIntent::ApproximateRowSeek(_)
-                )
-        }) || matches!(
-            (me.kind, cap_before),
-            (
-                MouseEventKind::Up(MouseButton::Left),
-                Some(HitTarget::Scrollbar {
-                    owner: crate::app::TRANSCRIPT_WIN
-                })
+            matches!(
+                &input.intent,
+                TranscriptScrollIntent::ScrollbarFraction { .. }
+                    | TranscriptScrollIntent::ApproximateRowSeek(_)
             )
-        );
+        }) || match (me.kind, cap_before) {
+            (MouseEventKind::Up(MouseButton::Left), Some(HitTarget::Scrollbar { owner })) => {
+                self.transcript_scroll_target(owner).is_some()
+            }
+            _ => false,
+        };
         if virtual_transcript_scrollbar
             && matches!(
                 self.ui.dispatch_virtual_scrollbar_event(me),

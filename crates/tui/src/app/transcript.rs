@@ -814,6 +814,7 @@ pub(crate) enum TranscriptProjectionHydrationPending {
     LocalDelta,
     PreserveViewport,
     TailRecordWindow,
+    FarSeek,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -827,6 +828,14 @@ enum TranscriptTailRecordWindowState {
 struct TranscriptSemanticFarSeek {
     scroll_top: RowIndex,
     row_anchor: TranscriptRowAnchor,
+}
+
+enum TranscriptFarSeekResolution {
+    Resolved(TranscriptSemanticFarSeek),
+    /// The target record window is still hydrating; committing now would
+    /// project the previously loaded window instead of the requested row.
+    Hydrating,
+    Unresolved,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1034,8 +1043,10 @@ impl TranscriptDocument {
             previous_record_index = Some(*record_index);
         }
         smelt_perf::perf::record_value("transcript:hydration:ensure_ids:ranges", range_count);
-        self.pending_hydration
-            .request_blocks(requested.into_iter().map(|(_, id, stored)| (id, stored)));
+        if self.records.store_address.is_some() {
+            self.pending_hydration
+                .request_blocks(requested.into_iter().map(|(_, id, stored)| (id, stored)));
+        }
         self.touch_hydrated(ids);
         self.enforce_hydrated_budget();
         ids.iter()
@@ -2958,8 +2969,9 @@ impl TranscriptDocument {
     }
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
-        self.content.projection.set_inline_options(options);
-        self.extent.forget_layout();
+        if self.content.projection.set_inline_options(options) {
+            self.extent.forget_layout();
+        }
     }
 
     pub(crate) fn invalidate_theme(&mut self) {
@@ -4046,22 +4058,35 @@ impl TranscriptDocument {
         width: u16,
         viewport_rows: u16,
         scroll_top: RowIndex,
-    ) -> Option<TranscriptSemanticFarSeek> {
-        let (record_index, in_record_row) = self.record_at_row(width, scroll_top)?;
+    ) -> TranscriptFarSeekResolution {
+        let Some((record_index, in_record_row)) = self.record_at_row(width, scroll_top) else {
+            return TranscriptFarSeekResolution::Unresolved;
+        };
         let _ = self.activate_semantic_far_seek_record_window(width, record_index, viewport_rows);
-        let record = self
+        let target_is_active = self.records.active_range().is_some_and(|range| {
+            range.start.get() <= record_index && record_index < range.end.get()
+        });
+        if !target_is_active && self.pending_hydration.record_is_pending() {
+            return TranscriptFarSeekResolution::Hydrating;
+        }
+        let Some(record) = self
             .records
             .sparse
-            .record(smelt_store::TranscriptRecordOffset::new(record_index))?;
+            .record(smelt_store::TranscriptRecordOffset::new(record_index))
+        else {
+            return TranscriptFarSeekResolution::Unresolved;
+        };
         let block_id = record.block_id;
-        let row_anchor = self.content.projection.row_anchor_for_block(
+        let Some(row_anchor) = self.content.projection.row_anchor_for_block(
             lua,
             &mut self.content.transcript.history,
             width,
             block_id,
             in_record_row,
-        )?;
-        Some(TranscriptSemanticFarSeek {
+        ) else {
+            return TranscriptFarSeekResolution::Unresolved;
+        };
+        TranscriptFarSeekResolution::Resolved(TranscriptSemanticFarSeek {
             scroll_top,
             row_anchor,
         })
@@ -4143,7 +4168,8 @@ impl TranscriptDocument {
         }
         let missing_ranges = self.records.sparse.missing_ranges(&cache_range);
         let requested = !missing_ranges.is_empty();
-        if requested && !self.hydration.record_failed {
+        // Without a store nothing can serve the request, so it is never queued.
+        if requested && !self.hydration.record_failed && self.records.store_address.is_some() {
             if let Some(materialize_block_id) = materialize_block_id {
                 self.pending_hydration.request_semantic_record_ranges(
                     projection_range.clone(),
@@ -4545,7 +4571,7 @@ impl TranscriptDocument {
         width: u16,
         viewport_rows: u16,
         intent: &TranscriptScrollIntent,
-    ) -> Option<TranscriptSemanticFarSeek> {
+    ) -> TranscriptFarSeekResolution {
         let scroll_top = match intent {
             TranscriptScrollIntent::ScrollbarFraction {
                 numerator,
@@ -4553,7 +4579,7 @@ impl TranscriptDocument {
             } => {
                 let denominator = (*denominator).max(1);
                 if *numerator >= denominator {
-                    return None;
+                    return TranscriptFarSeekResolution::Unresolved;
                 }
                 let total_rows = self.total_rows(lua, width);
                 Self::scrollbar_fraction_scroll_top(
@@ -4567,7 +4593,7 @@ impl TranscriptDocument {
                 let total_rows = self.total_rows(lua, width);
                 (*row).min(Self::max_scroll_for_total(total_rows, viewport_rows))
             }
-            _ => return None,
+            _ => return TranscriptFarSeekResolution::Unresolved,
         };
         self.resolve_semantic_far_seek(lua, width, viewport_rows, scroll_top)
     }
@@ -5615,8 +5641,18 @@ impl TranscriptDocument {
         let behavior = Self::intent_behavior(&intent);
         let semantic_far_seek =
             self.semantic_far_seek_for_intent(lua, width, viewport_rows, &intent);
-        let (scroll_target, cursor_target) = semantic_far_seek.map_or_else(
-            || {
+        let unresolved_far_seek_hydration =
+            matches!(semantic_far_seek, TranscriptFarSeekResolution::Hydrating);
+        let (scroll_target, cursor_target) = match semantic_far_seek {
+            TranscriptFarSeekResolution::Resolved(far_seek) => (
+                crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
+                    far_seek.scroll_top,
+                    Some(far_seek.row_anchor),
+                    0,
+                ),
+                None,
+            ),
+            TranscriptFarSeekResolution::Hydrating | TranscriptFarSeekResolution::Unresolved => {
                 self.scroll_target_for_intent(
                     lua,
                     width,
@@ -5625,18 +5661,8 @@ impl TranscriptDocument {
                     &intent,
                     pending_intent.hint,
                 )
-            },
-            |far_seek| {
-                (
-                    crate::content::transcript_buf::ScrollTarget::visible_stable_row_delta(
-                        far_seek.scroll_top,
-                        Some(far_seek.row_anchor),
-                        0,
-                    ),
-                    None,
-                )
-            },
-        );
+            }
+        };
         let unresolved_command_hydration = matches!(
             intent,
             TranscriptScrollIntent::ExactContentAnchor(_)
@@ -5657,6 +5683,7 @@ impl TranscriptDocument {
         let unresolved_preserve_hydration = preserve_anchor_intent && self.hydration_is_pending();
         if unresolved_command_hydration
             || unresolved_local_delta_hydration
+            || unresolved_far_seek_hydration
             || unresolved_preserve_hydration
         {
             if self.viewport.state.pending_projection.is_none() {
@@ -5674,6 +5701,8 @@ impl TranscriptDocument {
                 TranscriptProjectionHydrationPending::CommandTarget
             } else if unresolved_local_delta_hydration {
                 TranscriptProjectionHydrationPending::LocalDelta
+            } else if unresolved_far_seek_hydration {
+                TranscriptProjectionHydrationPending::FarSeek
             } else {
                 TranscriptProjectionHydrationPending::PreserveViewport
             };
@@ -9085,6 +9114,16 @@ mod document_tests {
 
         document.observe_record_rows(width, 0, 19);
         document.set_inline_options(InlineOptions::default());
+        assert_eq!(
+            document.rows_before_record(width, 1),
+            19,
+            "unchanged inline options should keep observed record rows"
+        );
+
+        document.set_inline_options(InlineOptions {
+            math_graphics: true,
+            ..InlineOptions::default()
+        });
         assert_eq!(document.rows_before_record(width, 1), 2);
     }
 

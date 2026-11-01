@@ -1623,9 +1623,10 @@ impl TranscriptProjection {
         }
     }
 
-    pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
+    /// Returns whether the options changed and the layout was reset.
+    pub(crate) fn set_inline_options(&mut self, options: InlineOptions) -> bool {
         if self.inline_options == options {
-            return;
+            return false;
         }
         self.inline_options = options;
         self.reset_layout_cache();
@@ -1633,6 +1634,7 @@ impl TranscriptProjection {
         self.clear_visible_state();
         self.visible.full_rows = None;
         self.projection_generation = self.projection_generation.wrapping_add(1);
+        true
     }
 
     pub(crate) fn projection_generation(&self) -> u64 {
