@@ -2380,15 +2380,19 @@ impl TuiApp {
             self.overlays.notification_is_visible(),
         );
         self.publish_prompt_resize_state();
+        self.publish_work_signals();
+    }
 
+    /// Publish where the focused window's cursor and viewport are. Their rows
+    /// and columns follow edits only once the window is laid out for the
+    /// frame, so the render loop calls this after syncing the views.
+    pub(crate) fn publish_view_signals(&mut self) {
         let cursor = self.focused_cursor_pos();
         let viewport = self.focused_viewport_pos();
         self.core.signals.publish_if_changed("cursor_pos", cursor);
         self.core
             .signals
             .publish_if_changed("viewport_pos", viewport);
-
-        self.publish_work_signals();
     }
 
     #[cfg(test)]

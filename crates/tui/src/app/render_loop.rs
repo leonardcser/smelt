@@ -1084,6 +1084,13 @@ impl TuiApp {
             (prompt_rect, _) = self.ensure_main_layout();
         }
 
+        // Lay out the prompt for this frame's text before Lua observers run,
+        // so the cursor position they read follows the latest edit.
+        {
+            let _p = smelt_perf::perf::begin("compositor:input");
+            self.sync_input_layer(prompt_rect, has_prompt_cursor);
+        }
+
         // Commit the retained transcript view before Lua observers run. Stale
         // content or viewport inputs project here; unchanged frames reuse the
         // existing bounded row tape. Plugins receive one coherent snapshot and
@@ -1092,8 +1099,10 @@ impl TuiApp {
             let _perf = smelt_perf::perf::begin("compositor:prepare_committed_transcript_view");
             self.prepare_committed_transcript_view(has_transcript_cursor)
         };
-        // Frame preparation can publish animation and committed-view signals.
-        // Apply their retained renderer invalidations before repainting windows.
+        self.publish_view_signals();
+        // Frame preparation can publish animation, committed-view, and cursor
+        // signals. Apply their retained renderer invalidations before
+        // repainting windows.
         self.drain_signals_pending();
 
         {
@@ -1102,12 +1111,6 @@ impl TuiApp {
         }
         // Suppress unused-variable warning when queued is only forwarded into Lua state.
         let _ = queued;
-        // Row-backed drag state uses absolute document rows, so the committed
-        // backing slice can follow edge autoscroll without moving its anchor.
-        {
-            let _p = smelt_perf::perf::begin("compositor:input");
-            self.sync_input_layer(prompt_rect, has_prompt_cursor);
-        }
 
         if has_transcript_cursor {
             self.ui

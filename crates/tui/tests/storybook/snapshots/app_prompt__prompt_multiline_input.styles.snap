@@ -7,5 +7,5 @@ dim: 50 10
   7  11   1 fg=Black bg=White
   8   0  50 fg=AnsiValue(237)
   9   0  10 fg=AnsiValue(244) bg=AnsiValue(234)
-  9  10  32 bg=AnsiValue(233)
-  9  42   8 fg=AnsiValue(244) bg=AnsiValue(233)
+  9  10  31 bg=AnsiValue(233)
+  9  41   9 fg=AnsiValue(244) bg=AnsiValue(233)

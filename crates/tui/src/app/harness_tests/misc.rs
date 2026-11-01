@@ -8697,3 +8697,20 @@ fn resume_preview_mouse_drag_paints_selection_and_copies() {
         "selectable line 17\n\nresume selectable"
     );
 }
+
+#[test]
+fn statusline_cursor_position_follows_each_keystroke() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(40, 12);
+    app.render_silent();
+    for (typed, col) in [("a", 2), ("b", 3), ("c", 4)] {
+        app.type_text(typed);
+        let frame = app.render_to_frame();
+        let position = format!("1:{col} ");
+        assert!(
+            frame.rows.iter().any(|row| row.contains(&position)),
+            "after typing {typed:?} the statusline shows {position:?}: {:#?}",
+            frame.rows
+        );
+    }
+}
