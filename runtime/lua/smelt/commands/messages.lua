@@ -7,7 +7,8 @@ local function format_lines(entries)
   local lines = {}
   for i, e in ipairs(entries) do
     if i > 1 then table.insert(lines, "") end
-    table.insert(lines, string.format("[%s] %s", e.kind, e.source))
+    local repeats = e.count > 1 and string.format(" ×%d", e.count) or ""
+    table.insert(lines, string.format("[%s] %s%s", e.kind, e.source, repeats))
     for body_line in (e.full or e.summary):gmatch("([^\n]*)\n?") do
       table.insert(lines, "  " .. body_line)
     end

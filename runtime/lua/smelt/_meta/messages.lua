@@ -20,7 +20,7 @@ messages.clear = nil
 ---@type fun(): integer
 messages.count = nil
 
---- Return every persisted message as rows of `{ kind, source, summary, full, ts_ms }`, ordered oldest-first.
+--- Return every persisted message as rows of `{ kind, source, summary, full, ts_ms, count }`, ordered oldest-first. `count` is how many times the message arrived in a row; repeats of the newest message fold into it and `ts_ms` is the last arrival.
 ---@type fun(): table
 messages.list = nil
 

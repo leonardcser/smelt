@@ -19,7 +19,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let s = shared.clone();
     m.fn_(
         "list",
-        "Return every persisted message as rows of `{ kind, source, summary, full, ts_ms }`, ordered oldest-first.",
+        "Return every persisted message as rows of `{ kind, source, summary, full, ts_ms, count }`, ordered oldest-first. `count` is how many times the message arrived in a row; repeats of the newest message fold into it and `ts_ms` is the last arrival.",
         &[],
         move |lua, ()| -> LuaResult<mlua::Table> {
             let messages = s
@@ -34,6 +34,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 row.set("summary", entry.summary.clone())?;
                 row.set("full", entry.full.clone())?;
                 row.set("ts_ms", system_time_to_ms(entry.ts))?;
+                row.set("count", entry.count)?;
                 out.set(i + 1, row)?;
             }
             Ok(out)

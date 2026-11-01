@@ -32,7 +32,12 @@ pub struct MessageEntry {
     pub summary: String,
     /// Full body (multi-line for tracebacks; same as `summary` for short messages).
     pub full: String,
+    /// When the message last arrived.
     pub ts: SystemTime,
+    /// Times the message arrived in a row. A message that repeats the newest
+    /// entry folds into it, so a callback failing on every repaint keeps one
+    /// entry.
+    pub count: u32,
 }
 
 /// Append-only message ring. Drives the statusline unread-error indicator;
@@ -40,6 +45,8 @@ pub struct MessageEntry {
 pub struct Messages {
     entries: Vec<MessageEntry>,
     unread_errors: usize,
+    /// Whether the newest entry is an error counted in `unread_errors`.
+    newest_unread: bool,
 }
 
 impl Default for Messages {
@@ -53,10 +60,25 @@ impl Messages {
         Self {
             entries: Vec::new(),
             unread_errors: 0,
+            newest_unread: false,
         }
     }
 
     pub fn append(&mut self, kind: MessageKind, source: String, full: String) {
+        let is_error = matches!(kind, MessageKind::Error);
+        if let Some(newest) = self
+            .entries
+            .last_mut()
+            .filter(|e| e.kind == kind && e.source == source && e.full == full)
+        {
+            newest.count = newest.count.saturating_add(1);
+            newest.ts = SystemTime::now();
+            if is_error && !self.newest_unread {
+                self.unread_errors = self.unread_errors.saturating_add(1);
+                self.newest_unread = true;
+            }
+            return;
+        }
         let summary = full.lines().next().unwrap_or("").to_string();
         self.entries.push(MessageEntry {
             kind,
@@ -64,10 +86,12 @@ impl Messages {
             summary,
             full,
             ts: SystemTime::now(),
+            count: 1,
         });
-        if matches!(kind, MessageKind::Error) {
+        if is_error {
             self.unread_errors = self.unread_errors.saturating_add(1);
         }
+        self.newest_unread = is_error;
         if self.entries.len() > MAX_ENTRIES {
             let drop = self.entries.len() - MAX_ENTRIES;
             self.entries.drain(0..drop);
@@ -88,11 +112,13 @@ impl Messages {
 
     pub fn mark_read(&mut self) {
         self.unread_errors = 0;
+        self.newest_unread = false;
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
         self.unread_errors = 0;
+        self.newest_unread = false;
     }
 }
 
@@ -121,6 +147,31 @@ mod tests {
         assert_eq!(m.unread_errors(), 1);
         m.mark_read();
         assert_eq!(m.unread_errors(), 0);
+    }
+
+    #[test]
+    fn a_repeat_of_the_newest_entry_folds_into_it() {
+        let mut m = Messages::new();
+        for _ in 0..3 {
+            m.append(MessageKind::Error, "lua".into(), "boom".into());
+        }
+        assert_eq!(m.count(), 1);
+        assert_eq!(m.entries()[0].count, 3);
+        assert_eq!(m.unread_errors(), 1, "one unread error, not three");
+
+        m.mark_read();
+        m.append(MessageKind::Error, "lua".into(), "boom".into());
+        assert_eq!(m.entries()[0].count, 4);
+        assert_eq!(
+            m.unread_errors(),
+            1,
+            "a repeat after reading is unread again"
+        );
+
+        m.append(MessageKind::Error, "other".into(), "boom".into());
+        m.append(MessageKind::Error, "lua".into(), "boom".into());
+        assert_eq!(m.count(), 3, "only consecutive repeats fold");
+        assert_eq!(m.unread_errors(), 3);
     }
 
     #[test]

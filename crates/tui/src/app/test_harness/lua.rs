@@ -251,6 +251,7 @@ impl TestApp {
     }
 
     #[cfg(test)]
+    /// Times a message with `body` arrived, counting repeats folded into one entry.
     pub(crate) fn lua_message_count(&self, body: &str) -> usize {
         self.app
             .lua
@@ -261,7 +262,8 @@ impl TestApp {
             .entries()
             .iter()
             .filter(|entry| entry.full == body)
-            .count()
+            .map(|entry| entry.count as usize)
+            .sum()
     }
 
     #[cfg(test)]
