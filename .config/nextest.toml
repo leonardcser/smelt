@@ -13,9 +13,14 @@ filter = 'test(/^app::harness_tests::(persistence::current_compacted_read_only_s
 threads-required = "num-test-threads"
 
 # Tests and the smelt processes they spawn log and persist under the state dir;
-# keep them out of the developer's real one.
+# keep them out of the developer's real one. Nextest has no teardown scripts, so
+# each run first removes the state dirs that runs left over a day ago.
 [scripts.setup.isolate-state]
-command = ["sh", "-c", 'echo "XDG_STATE_HOME=$(mktemp -d "${TMPDIR:-/tmp}/smelt-nextest-state.XXXXXX")" >> "$NEXTEST_ENV"']
+command = ["sh", "-c", '''
+tmp="${TMPDIR:-/tmp}"
+find "$tmp" -maxdepth 1 -name 'smelt-nextest-state.*' -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null
+echo "XDG_STATE_HOME=$(mktemp -d "$tmp/smelt-nextest-state.XXXXXX")" >> "$NEXTEST_ENV"
+''']
 
 [[profile.default.scripts]]
 filter = "all()"
