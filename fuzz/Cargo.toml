@@ -28,7 +28,7 @@ smelt-style = { path = "../crates/style" }
 smelt-ansi = { path = "../crates/ansi" }
 smelt-term = { path = "../crates/term" }
 smelt-protocol = { path = "../crates/protocol" }
-smelt-engine = { path = "../crates/engine", features = ["fuzz"] }
+smelt-engine = { path = "../crates/engine", default-features = false, features = ["fuzz"] }
 smelt-provider = { path = "../crates/provider", features = ["fuzz"] }
 crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
 serde = { version = "1", features = ["derive"] }

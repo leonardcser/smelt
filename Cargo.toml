@@ -12,7 +12,7 @@ independent-crates = ["smelt-perf", "smelt-style", "smelt-ansi", "smelt-term"]
 # Internal crates
 smelt-protocol = { path = "crates/protocol" }
 smelt-provider = { path = "crates/provider" }
-smelt-engine = { path = "crates/engine" }
+smelt-engine = { path = "crates/engine", default-features = false }
 smelt-style = { path = "crates/style", version = "0.5.1" }
 smelt-ansi = { path = "crates/ansi", version = "0.4.0" }
 smelt-perf = { path = "crates/perf", version = "0.2.0" }
@@ -83,7 +83,7 @@ path = "src/main.rs"
 [dependencies]
 smelt-protocol = { workspace = true }
 smelt-provider = { workspace = true }
-smelt-engine = { workspace = true }
+smelt-engine = { workspace = true, features = ["secret-service"] }
 smelt-core = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-tui = { workspace = true }

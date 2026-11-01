@@ -31,6 +31,9 @@ atomic-write-file = "0.3.1"
 uuid = { version = "1.29.0", features = ["v4"] }
 
 [features]
+# Linux credential storage over the D-Bus secret service. Fuzz builds leave it
+# out: they never reach a keyring and the dependency tree is large.
+secret-service = ["dep:zbus-secret-service-keyring-store"]
 # Exposes `fuzz_build_anthropic_body` / `fuzz_build_openai_body` for the
 # `cache_invariance` fuzz target. Not for production use - these bypass
 # the network layer and let fuzzers byte-compare cached prefixes.
@@ -50,4 +53,4 @@ apple-native-keyring-store = { version = "1.0.1", features = ["keychain"] }
 windows-native-keyring-store = { version = "1.1.0", default-features = false }
 
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
-zbus-secret-service-keyring-store = { version = "1.0.0", default-features = false, features = ["crypto-rust"] }
+zbus-secret-service-keyring-store = { version = "1.0.0", default-features = false, features = ["crypto-rust"], optional = true }

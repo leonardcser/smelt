@@ -69,6 +69,7 @@ fn initialize_native_credential_store() -> Result<Arc<keyring_core::CredentialSt
         Ok(store)
     }
     #[cfg(all(
+        feature = "secret-service",
         unix,
         not(any(target_os = "macos", target_os = "ios", target_os = "android"))
     ))]
@@ -81,6 +82,7 @@ fn initialize_native_credential_store() -> Result<Arc<keyring_core::CredentialSt
         target_os = "macos",
         target_os = "windows",
         all(
+            feature = "secret-service",
             unix,
             not(any(target_os = "macos", target_os = "ios", target_os = "android"))
         )
