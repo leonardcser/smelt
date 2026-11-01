@@ -100,10 +100,10 @@ impl Chunk {
             return;
         };
         let bg = theme.resolve(intern(group)).bg.or(row.decoration.window_bg);
+        // Unhighlighted text: overlays clamp to each inline range anyway.
         let fallback = smelt_buffer::buffer::Span {
             col_start: 2,
-            col_end: smelt_buffer::text::byte_to_cell(&row.text, row.text.len())
-                .min(u16::MAX as usize) as u16,
+            col_end: u16::MAX,
             hl: intern("Normal"),
             meta: Default::default(),
             hl_eol: false,
@@ -116,11 +116,13 @@ impl Chunk {
         };
         let mut token = 0;
         let mut overlays = Vec::new();
+        let mut cells = smelt_buffer::text::CellCursor::new(&row.text);
         for range in &self.inline[index].ranges {
-            let start = smelt_buffer::text::byte_to_cell(&row.text, 2 + range.start)
-                .min(u16::MAX as usize) as u16;
-            let end = smelt_buffer::text::byte_to_cell(&row.text, 2 + range.end)
-                .min(u16::MAX as usize) as u16;
+            let start = cells.cell(2 + range.start).min(u16::MAX as usize) as u16;
+            if start == u16::MAX {
+                break;
+            }
+            let end = cells.cell(2 + range.end).min(u16::MAX as usize) as u16;
             while token < tokens.len() && tokens[token].col_end <= start {
                 token += 1;
             }

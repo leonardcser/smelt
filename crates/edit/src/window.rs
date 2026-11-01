@@ -2450,22 +2450,27 @@ impl Window {
     /// belong in `PromptState::install_source`; this is for surgical edits where
     /// keeping the cursor's neighborhood is the point.
     pub fn clamp_anchors_to_source(&mut self, source: &str) {
-        let len = source.len();
+        self.clamp_anchors(source.len(), |pos| text::snap_grapheme(source, pos));
+    }
+
+    /// [`Self::clamp_anchors_to_source`] for text of length `len` whose
+    /// grapheme boundaries `snap` finds, so callers need not build the text.
+    pub fn clamp_anchors(&mut self, len: usize, snap: impl Fn(usize) -> usize) {
         let text = self.text_state_mut();
-        text.cpos = text::snap_grapheme(source, text.cpos.min(len));
+        text.cpos = snap(text.cpos.min(len));
         if let Some(a) = text.selection_anchor {
-            let snapped = text::snap_grapheme(source, a.min(len));
+            let snapped = snap(a.min(len));
             text.selection_anchor = if snapped == text.cpos {
                 None
             } else {
                 Some(snapped)
             };
         }
-        text.vim_state.clamp_visual_anchor(source);
-        debug_assert_eq!(text::snap_grapheme(source, text.cpos), text.cpos);
+        text.vim_state.clamp_visual_anchor_with(len, &snap);
+        debug_assert_eq!(snap(text.cpos), text.cpos);
         debug_assert!(text
             .selection_anchor
-            .is_none_or(|a| { a <= len && text::snap_grapheme(source, a) == a }));
+            .is_none_or(|a| a <= len && snap(a) == a));
     }
 
     /// Resolve the shift-selection range against `src`. Both endpoints are clamped to
@@ -3799,19 +3804,29 @@ impl Window {
                 src_col = src_col.saturating_add(width);
             }
             let content_end_col = dst_col;
+            // Source cells shown in this viewport row.
+            let first_col = chunk_cell_offset.saturating_add(scroll_left);
             spans_buf.clear();
             if logical.is_some() {
-                buf.highlights_at_into(logical_row, &mut spans_buf);
+                buf.visible_highlights_into(
+                    logical_row,
+                    first_col..first_col.saturating_add(content_width),
+                    &mut spans_buf,
+                );
             }
             let is_cursor_row = cursor_screen_row == Some(row);
             for span in &spans_buf {
                 if span.on_cursor_row && !is_cursor_row {
                     continue;
                 }
-                let span_style = ctx.theme.resolve(span.hl);
-                let style = merge_span_style(row_style, &span_style);
                 let start = to_viewport_col(span.col_start);
                 let end = to_viewport_col(span.col_end);
+                // Rows can carry spans far outside a panned viewport.
+                if end <= start && !span.hl_eol {
+                    continue;
+                }
+                let span_style = ctx.theme.resolve(span.hl);
+                let style = merge_span_style(row_style, &span_style);
                 if end > start {
                     paint_span_cells(
                         slice,
@@ -3838,18 +3853,20 @@ impl Window {
             // Selection painting: after highlights (wins over base) but before virt-text.
             // Mask out cells under `selectable = false` spans so chrome (e.g. inline
             // gutter, line-number column) doesn't receive the Visual bg. Skip the mask
-            // when the row has only chrome and no selectable cells - the fallback
+            // when the painted cells are all chrome - the fallback
             // selection span placed after the chrome by `byte_range_to_row_ranges` will
             // paint there, keeping multi-line selections visually continuous without
             // highlighting the chrome itself.
             let line_has_highlight = range_layers
                 .iter()
                 .any(|(_, ranges)| ranges.iter().any(|r| r.line == logical_row));
-            let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
-            let any_selectable =
-                cell_range_contains_selectable(&spans_buf, 0, text::byte_to_cell(line, line.len()));
-            let mask_slice: Option<&[bool]> = if line_has_highlight && any_chrome && any_selectable
-            {
+            let mask_slice: Option<&[bool]> = if line_has_highlight
+                && spans_buf.iter().any(|s| !s.meta.selectable)
+                && cell_range_contains_selectable(
+                    &spans_buf,
+                    usize::from(first_col),
+                    usize::from(first_col) + usize::from(content_end_col),
+                ) {
                 mask_buf.clear();
                 mask_buf.resize(content_width as usize, true);
                 for span in spans_buf.iter().filter(|s| !s.meta.selectable) {
@@ -4028,70 +4045,75 @@ fn cursor_cell_selectable(buf: &Buffer, cpos: usize) -> bool {
     cell_range_contains_selectable(&spans, col, col.saturating_add(1))
 }
 
-/// Advance `col` past any leading non-selectable (chrome) spans on `logical_row`.
-/// Used by cursor positioning so the caret never lands inside an inline gutter
-/// or other chrome - caller-supplied col is clamped forward to the first
-/// selectable cell, repeated until no chrome span covers it. If advancing
-/// would carry the cursor past every selectable cell on the row (e.g. click in
-/// a trailing bg pad, or an all-chrome user-block padding row), clamp back to
-/// the last selectable col_end so the cursor never escapes the row's content
-/// edge and triggers horizontal pan.
+/// Whether any cell in `start..end` lies outside every chrome
+/// (`selectable = false`) span.
 fn cell_range_contains_selectable(
     spans: &[smelt_buffer::buffer::Span],
     start: usize,
     end: usize,
 ) -> bool {
-    if start >= end {
-        return false;
-    }
-    (start..end).any(|col| {
-        !spans.iter().any(|span| {
-            !span.meta.selectable && col >= span.col_start as usize && col < span.col_end as usize
-        })
-    })
+    skip_chrome(spans, start) < end
 }
 
+/// First cell at or after `col` that no chrome span covers.
+fn skip_chrome(spans: &[smelt_buffer::buffer::Span], mut col: usize) -> usize {
+    while let Some(end) = spans
+        .iter()
+        .filter(|s| {
+            !s.meta.selectable && usize::from(s.col_start) <= col && col < usize::from(s.col_end)
+        })
+        .map(|s| usize::from(s.col_end))
+        .max()
+    {
+        col = end;
+    }
+    col
+}
+
+/// One past the last cell before `end` that no chrome span covers.
+fn last_selectable_edge(spans: &[smelt_buffer::buffer::Span], mut end: usize) -> Option<usize> {
+    while end > 0 {
+        match spans
+            .iter()
+            .filter(|s| {
+                !s.meta.selectable
+                    && usize::from(s.col_start) < end
+                    && end <= usize::from(s.col_end)
+            })
+            .map(|s| usize::from(s.col_start))
+            .min()
+        {
+            Some(start) => end = start,
+            None => return Some(end),
+        }
+    }
+    None
+}
+
+/// Advance `col` past any non-selectable (chrome) spans on `logical_row`.
+/// Used by cursor positioning so the caret never lands inside an inline gutter
+/// or other chrome. If advancing would carry the cursor past every selectable
+/// cell on the row (e.g. click in a trailing bg pad), clamp back to the last
+/// selectable edge so the cursor never escapes the row's content edge and
+/// triggers horizontal pan. An all-chrome row parks the cursor at its right
+/// edge, one cell past the row; `Window::render` keeps the caret visible when
+/// that edge is the viewport's edge.
 fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: usize) -> usize {
     if buf.decoration_at(logical_row).cursor_policy == LineCursorPolicy::PreserveRequested {
         return col;
     }
-    let mut spans = Vec::new();
-    buf.highlights_at_into(logical_row, &mut spans);
+    let spans = buf.highlights_at(logical_row);
     if spans.iter().all(|s| s.meta.selectable) {
         return col;
     }
-    let mut col = col;
-    loop {
-        let mut advanced = false;
-        for s in &spans {
-            if !s.meta.selectable && s.col_start as usize <= col && col < s.col_end as usize {
-                col = s.col_end as usize;
-                advanced = true;
-            }
-        }
-        if !advanced {
-            break;
-        }
-    }
-    let Some(line) = buf.get_line(logical_row) else {
-        return col;
-    };
-    let line_width = text::byte_to_cell(line, line.len());
-    if col < line_width && cell_range_contains_selectable(&spans, col, col + 1) {
+    let col = skip_chrome(&spans, col);
+    let line_width = buf
+        .get_line(logical_row)
+        .map_or(usize::MAX, |line| text::byte_to_cell(line, line.len()));
+    if col < line_width {
         return col;
     }
-    let last_selectable_edge = (0..line_width)
-        .filter(|c| cell_range_contains_selectable(&spans, *c, *c + 1))
-        .map(|c| c.saturating_add(1))
-        .next_back();
-    // An all-chrome row parks the cursor at its right edge, which is one cell
-    // past the row. `Window::render` keeps the caret visible when that edge is
-    // the viewport's edge.
-    match last_selectable_edge {
-        Some(edge) if col > edge => edge,
-        None => line_width,
-        _ => col.min(line_width),
-    }
+    last_selectable_edge(&spans, line_width).unwrap_or(line_width)
 }
 
 /// Skips wide-grapheme continuation cells: their `col_to_grapheme` index repeats the

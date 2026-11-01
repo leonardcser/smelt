@@ -968,15 +968,20 @@ impl DiffView {
             };
             let first = syntax.spans.partition_point(|span| span.end <= line.start);
             let (mut byte, mut source_byte) = (usize::from(prefix), line.start);
+            let mut cells = smelt_buffer::text::CellCursor::new(&row.text);
             for span in &syntax.spans[first..] {
                 let end = span.end.min(line.end);
-                let start_col = smelt_buffer::text::byte_to_cell(&row.text, byte);
+                let start_col = cells.cell(byte);
+                // Span columns saturate at `u16::MAX`; nothing past it can show.
+                if start_col >= usize::from(u16::MAX) {
+                    break;
+                }
                 byte += display_text(smelt_buffer::text::slice(
                     &self.diff.patch,
                     source_byte..end,
                 ))
                 .len();
-                let end_col = smelt_buffer::text::byte_to_cell(&row.text, byte);
+                let end_col = cells.cell(byte);
                 row.spans.push(Span {
                     col_start: start_col.min(u16::MAX as usize) as u16,
                     col_end: end_col.min(u16::MAX as usize) as u16,
@@ -1217,6 +1222,13 @@ mod tests {
     static THEME: std::sync::LazyLock<Theme> = std::sync::LazyLock::new(Theme::default);
 
     fn highlighted(view: &DiffView, range: Range<u64>) -> Vec<DocumentRow> {
+        let _subscription = subscribe(view, range.clone());
+        view.rows(range, &THEME)
+    }
+
+    /// Show `range` in a viewport and wait until its syntax is cached. The
+    /// cache keeps oversized chunks only while the viewport stays subscribed.
+    fn subscribe(view: &DiffView, range: Range<u64>) -> smelt_buffer::document::RowView {
         let subscription = smelt_buffer::document::RowView::new(Arc::new(view.fork()));
         subscription.prepare(&DocumentViewport {
             rows: range.clone(),
@@ -1231,7 +1243,7 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        view.rows(range, &THEME)
+        subscription
     }
 
     #[test]
@@ -1476,6 +1488,31 @@ mod tests {
     }
 
     #[test]
+    fn huge_single_line_rows_render_in_one_pass() {
+        let line = |ms: u32| {
+            let frames = format!("{{\"ms\":{ms},\"l\":[\"\\u001b[1m日本 frame\"]}},").repeat(8_000);
+            format!("{{\"frames\":[{frames}]}}")
+        };
+        let patch = format!(
+            "diff --git a/replay.json b/replay.json\n@@ -1 +1 @@\n-{}\n+{}\n",
+            line(56),
+            line(104)
+        );
+        let view = DiffView::new(Arc::new(Diff::parse(patch)), 3);
+        let _subscription = subscribe(&view, 0..4);
+        let started = std::time::Instant::now();
+        let rows = view.rows(0..4, &THEME);
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_secs() < 2, "rendering took {elapsed:?}");
+        let added = &rows[3];
+        assert!(added.spans.len() > 1_000, "{} spans", added.spans.len());
+        let cells = smelt_buffer::text::byte_to_cell(&added.text, added.text.len());
+        assert!(cells > usize::from(u16::MAX), "{cells} cells");
+        let last = added.spans.iter().map(|span| span.col_start).max().unwrap();
+        assert!(last < u16::MAX, "spans start past the span column range");
+    }
+
+    #[test]
     fn distant_seeks_parse_a_bounded_window() {
         let patch = "diff --git a/large.rs b/large.rs\n@@ -0,0 +1,100000 @@\n".to_string()
             + &"+fn value() -> u32 {\n+    compute(42, \"hello\")\n+}\n".repeat(33333);
@@ -1498,7 +1535,7 @@ mod tests {
             )),
             3,
         );
-        highlighted(&view, 0..4);
+        let _subscription = subscribe(&view, 0..4);
         let sibling = view.fork();
         let snapshot = view.snapshot();
         let mut dark = Theme::default();

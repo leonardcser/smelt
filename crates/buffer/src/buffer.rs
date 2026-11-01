@@ -317,19 +317,17 @@ pub struct Span {
     pub on_cursor_row: bool,
 }
 
-#[derive(Clone, Debug)]
-struct RenderedHighlight {
-    row: usize,
-    span: Span,
-}
-
 /// Contiguous renderer-owned metadata for a batch of display rows.
 ///
-/// Unlike generic extmarks, this representation retains two flat vectors and
-/// can be cleared and refilled without allocating one tree node per span or row.
+/// Unlike generic extmarks, this representation retains flat vectors and can
+/// be cleared and refilled without allocating one tree node per span or row.
+/// Rows are pushed in order, so each row's highlights are one slice.
 #[derive(Clone, Debug, Default)]
 pub struct RenderedRowMetadata {
-    highlights: Vec<RenderedHighlight>,
+    highlights: Vec<Span>,
+    /// Index into `highlights` of each row's first span, up to the last row
+    /// that has any.
+    row_starts: Vec<usize>,
     decorations: Vec<LineDecoration>,
     pub(crate) source_line_bounds: Option<SourceLine>,
 }
@@ -343,9 +341,9 @@ impl RenderedRowMetadata {
         hl: HlGroup,
         meta: SpanMeta,
     ) {
-        self.highlights.push(RenderedHighlight {
+        self.push_span(
             row,
-            span: Span {
+            Span {
                 col_start,
                 col_end,
                 hl,
@@ -353,11 +351,50 @@ impl RenderedRowMetadata {
                 hl_eol: false,
                 on_cursor_row: false,
             },
-        });
+        );
     }
 
     pub(crate) fn push_span(&mut self, row: usize, span: Span) {
-        self.highlights.push(RenderedHighlight { row, span });
+        debug_assert!(
+            row + 1 >= self.row_starts.len(),
+            "rendered highlights must be pushed in row order"
+        );
+        while self.row_starts.len() <= row {
+            self.row_starts.push(self.highlights.len());
+        }
+        self.highlights.push(span);
+    }
+
+    /// Range of `row`'s spans in `highlights`.
+    fn row_range(&self, row: usize) -> std::ops::Range<usize> {
+        let Some(&start) = self.row_starts.get(row) else {
+            return 0..0;
+        };
+        start
+            ..self
+                .row_starts
+                .get(row + 1)
+                .copied()
+                .unwrap_or(self.highlights.len())
+    }
+
+    /// Highlights of `row` in insertion order.
+    fn row_highlights(&self, row: usize) -> &[Span] {
+        &self.highlights[self.row_range(row)]
+    }
+
+    /// Drop the highlights of `rows`, keeping every other row's.
+    fn clear_highlight_rows(&mut self, rows: std::ops::Range<usize>) {
+        let end_row = rows.end.min(self.row_starts.len());
+        if rows.start >= end_row {
+            return;
+        }
+        let start = self.row_starts[rows.start];
+        let end = self.row_range(end_row - 1).end;
+        self.highlights.drain(start..end);
+        for row_start in &mut self.row_starts[rows.start + 1..] {
+            *row_start = (*row_start).max(end) - (end - start);
+        }
     }
 
     pub fn push_decoration(&mut self, row: usize, decoration: LineDecoration) {
@@ -374,11 +411,7 @@ impl RenderedRowMetadata {
     }
 
     pub fn highlights_at(&self, row: usize) -> Vec<Span> {
-        self.highlights
-            .iter()
-            .filter(|highlight| highlight.row == row)
-            .map(|highlight| highlight.span.clone())
-            .collect()
+        self.row_highlights(row).to_vec()
     }
 
     pub fn decoration_at(&self, row: usize) -> Option<&LineDecoration> {
@@ -391,6 +424,7 @@ impl RenderedRowMetadata {
 
     fn clear(&mut self) {
         self.highlights.clear();
+        self.row_starts.clear();
         self.decorations.clear();
         self.source_line_bounds = None;
     }
@@ -1135,6 +1169,11 @@ impl Buffer {
         self.lines.join("\n")
     }
 
+    /// Byte length of [`Self::text`], without joining the lines.
+    pub fn text_len(&self) -> usize {
+        (self.lines.iter().map(String::len).sum::<usize>() + self.lines.len()).saturating_sub(1)
+    }
+
     /// Extract text in byte range `[start, end)`, applying `SpanMeta` filters:
     /// cells covered by `selectable: false` spans are dropped; `copy_as` spans
     /// emit their substitution string once per span. Rows are joined with `\n`.
@@ -1441,9 +1480,7 @@ impl Buffer {
     }
 
     pub fn clear_highlights(&mut self, start_line: usize, end_line: usize) {
-        Arc::make_mut(&mut self.rendered_rows)
-            .highlights
-            .retain(|highlight| highlight.row < start_line || highlight.row >= end_line);
+        Arc::make_mut(&mut self.rendered_rows).clear_highlight_rows(start_line..end_line);
         let ns = self.ns_highlights;
         self.clear_namespace(ns, start_line, end_line);
     }
@@ -1462,17 +1499,9 @@ impl Buffer {
         target: &mut RenderedRowMetadata,
     ) {
         if self.rendered_rows.decorations.get(source_row).is_some() {
-            target.highlights.extend(
-                self.rendered_rows
-                    .highlights
-                    .iter()
-                    .filter(|highlight| highlight.row == source_row)
-                    .cloned()
-                    .map(|mut highlight| {
-                        highlight.row = target_row;
-                        highlight
-                    }),
-            );
+            for span in self.rendered_rows.row_highlights(source_row) {
+                target.push_span(target_row, span.clone());
+            }
         } else {
             for span in self.highlights_at(source_row) {
                 target.push_span(target_row, span);
@@ -1497,6 +1526,27 @@ impl Buffer {
     /// (priority, ns-id, insertion order). Reuses the caller's buffer to
     /// avoid one allocation per call in tight render loops.
     pub fn highlights_at_into(&self, line: usize, out: &mut Vec<Span>) {
+        self.collect_highlights(line, |_| true, out);
+    }
+
+    /// [`Self::highlights_at_into`] restricted to spans that paint inside the
+    /// cell range `cols`: those overlapping it, plus `hl_eol` fills. A panned
+    /// viewport over a very long row only pays for what it shows.
+    pub fn visible_highlights_into(
+        &self,
+        line: usize,
+        cols: std::ops::Range<u16>,
+        out: &mut Vec<Span>,
+    ) {
+        self.collect_highlights(
+            line,
+            |span| span.hl_eol || (span.col_start < cols.end && span.col_end > cols.start),
+            out,
+        );
+    }
+
+    /// Highlights of `line` that pass `keep`.
+    fn collect_highlights(&self, line: usize, keep: impl Fn(&Span) -> bool, out: &mut Vec<Span>) {
         // We need to sort by (priority, ns, id) before producing `Span`s, but
         // `Span` doesn't carry those keys. Thread-local scratch keeps the
         // tuple buffer reused across calls without re-allocating per row.
@@ -1508,18 +1558,15 @@ impl Buffer {
         }
         SCRATCH.with_borrow_mut(|buf| {
             buf.clear();
-            for (index, highlight) in self
-                .rendered_rows
-                .highlights
-                .iter()
-                .filter(|highlight| highlight.row == line)
-                .enumerate()
-            {
+            for (index, span) in self.rendered_rows.row_highlights(line).iter().enumerate() {
+                if !keep(span) {
+                    continue;
+                }
                 buf.push((
                     0,
                     self.ns_highlights.0,
                     index.min(u32::MAX as usize) as u32,
-                    highlight.span.clone(),
+                    span.clone(),
                 ));
             }
             // namespaces iterates in NsId order (BTreeMap); marks_at filters by
@@ -1534,19 +1581,17 @@ impl Buffer {
                         ..
                     } = &mark.payload
                     {
-                        buf.push((
-                            mark.priority,
-                            ns.0,
-                            id.0,
-                            Span {
-                                col_start: mark.start_col as u16,
-                                col_end: mark.end_col as u16,
-                                hl: *hl,
-                                meta: meta.clone(),
-                                hl_eol: *hl_eol,
-                                on_cursor_row: *on_cursor_row,
-                            },
-                        ));
+                        let span = Span {
+                            col_start: mark.start_col as u16,
+                            col_end: mark.end_col as u16,
+                            hl: *hl,
+                            meta: meta.clone(),
+                            hl_eol: *hl_eol,
+                            on_cursor_row: *on_cursor_row,
+                        };
+                        if keep(&span) {
+                            buf.push((mark.priority, ns.0, id.0, span));
+                        }
                     }
                 }
             }
@@ -1711,6 +1756,32 @@ mod tests {
 
     fn make_buf() -> Buffer {
         Buffer::new(BufId(1), BufCreateOpts::default())
+    }
+
+    #[test]
+    fn rendered_highlights_index_rows_and_clear_ranges() {
+        let mut metadata = RenderedRowMetadata::default();
+        for (row, col) in [(0, 0), (0, 1), (2, 2), (3, 3), (5, 5)] {
+            metadata.push_highlight(row, col, col + 1, HlGroup::default(), SpanMeta::default());
+        }
+        let cols = |metadata: &RenderedRowMetadata, row| {
+            metadata
+                .highlights_at(row)
+                .iter()
+                .map(|span| span.col_start)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cols(&metadata, 0), [0, 1]);
+        assert_eq!(cols(&metadata, 1), [] as [u16; 0]);
+        assert_eq!(cols(&metadata, 6), [] as [u16; 0]);
+        metadata.clear_highlight_rows(1..4);
+        assert_eq!(cols(&metadata, 0), [0, 1]);
+        assert_eq!(cols(&metadata, 2), [] as [u16; 0]);
+        assert_eq!(cols(&metadata, 3), [] as [u16; 0]);
+        assert_eq!(cols(&metadata, 5), [5]);
+        metadata.clear_highlight_rows(4..99);
+        assert_eq!(cols(&metadata, 5), [] as [u16; 0]);
+        assert_eq!(cols(&metadata, 0), [0, 1]);
     }
 
     #[test]

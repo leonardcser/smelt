@@ -24,7 +24,7 @@ pub fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = &str> {
 }
 
 /// Byte offsets and extended grapheme clusters in `text`.
-pub fn grapheme_indices(text: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> {
+pub fn grapheme_indices(text: &str) -> GraphemeIndices<'_> {
     use unicode_segmentation::UnicodeSegmentation;
     if text.is_ascii() {
         GraphemeIndices::Ascii {
@@ -37,9 +37,10 @@ pub fn grapheme_indices(text: &str) -> impl DoubleEndedIterator<Item = (usize, &
     }
 }
 
-/// In ASCII every byte is its own cluster except `\r\n`, so ASCII text skips
-/// the general segmentation state machine.
-enum GraphemeIndices<'a> {
+/// Iterator returned by [`grapheme_indices`]. In ASCII every byte is its own
+/// cluster except `\r\n`, so ASCII text skips the general segmentation state
+/// machine.
+pub enum GraphemeIndices<'a> {
     Ascii {
         text: &'a str,
         front: usize,

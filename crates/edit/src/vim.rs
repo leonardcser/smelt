@@ -617,10 +617,15 @@ impl VimWindowState {
     /// boundary. Call after any in-place source shrink so the anchor
     /// preserved for `gv` can never outlive its terminal glyph.
     pub fn clamp_visual_anchor(&mut self, source: &str) {
-        if self.visual_anchor > source.len() {
-            self.visual_anchor = source.len();
-        }
-        self.visual_anchor = smelt_buffer::text::snap_grapheme(source, self.visual_anchor);
+        self.clamp_visual_anchor_with(source.len(), |pos| {
+            smelt_buffer::text::snap_grapheme(source, pos)
+        });
+    }
+
+    /// [`Self::clamp_visual_anchor`] for text of length `len` whose grapheme
+    /// boundaries `snap` finds.
+    pub fn clamp_visual_anchor_with(&mut self, len: usize, snap: impl Fn(usize) -> usize) {
+        self.visual_anchor = snap(self.visual_anchor.min(len));
     }
 
     fn record_change(&mut self, command: RepeatCommand) {

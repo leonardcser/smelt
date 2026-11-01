@@ -3,7 +3,8 @@
 pub use smelt_buffer::text::{
     byte_of_char, byte_to_cell, ceil_grapheme, cell_to_byte, char_pos, contained_grapheme_range,
     covering_grapheme_range, next_char_boundary, next_grapheme_boundary, prev_char_boundary,
-    prev_grapheme_boundary, slice_snapped_graphemes, snap, snap_grapheme, snapped_grapheme_range,
+    prev_grapheme_boundary, slice_snapped_graphemes, snap, snap_grapheme, snap_grapheme_in_lines,
+    snapped_grapheme_range,
 };
 pub use smelt_buffer::wrap::wrap_line;
 

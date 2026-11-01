@@ -331,7 +331,9 @@ impl Window {
         let before = *self.document_view_state_ref();
         self.refresh_row_cursor_columns(buf);
         let projected = self.resync_row_display_coords(buf);
-        self.clamp_anchors_to_source(&buf.text());
+        self.clamp_anchors(buf.text_len(), |pos| {
+            crate::text::snap_grapheme_in_lines(buf.lines(), pos)
+        });
         projected || before != *self.document_view_state_ref()
     }
 

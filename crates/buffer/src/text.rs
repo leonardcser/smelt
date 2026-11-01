@@ -8,6 +8,46 @@ pub fn byte_to_cell(line: &str, byte: usize) -> usize {
     crate::cell_width::text_width(&line[..byte])
 }
 
+/// [`byte_to_cell`] for many offsets into one line. Each lookup resumes where
+/// the previous one stopped, so mapping ascending offsets (every span of a row)
+/// costs one pass over the line instead of one pass per offset. A lookup before
+/// the previous one restarts from the beginning of the line.
+pub struct CellCursor<'a> {
+    line: &'a str,
+    graphemes: std::iter::Peekable<crate::cell_width::GraphemeIndices<'a>>,
+    byte: usize,
+    cell: usize,
+}
+
+impl<'a> CellCursor<'a> {
+    pub fn new(line: &'a str) -> Self {
+        Self {
+            line,
+            graphemes: crate::cell_width::grapheme_indices(line).peekable(),
+            byte: 0,
+            cell: 0,
+        }
+    }
+
+    /// Terminal column of `byte`, snapped to the start of its grapheme.
+    pub fn cell(&mut self, byte: usize) -> usize {
+        let byte = snap(self.line, byte);
+        if byte < self.byte {
+            *self = Self::new(self.line);
+        }
+        while let Some(&(start, grapheme)) = self.graphemes.peek() {
+            let end = start + grapheme.len();
+            if end > byte {
+                break;
+            }
+            self.cell += crate::cell_width::text_width(grapheme);
+            self.byte = end;
+            self.graphemes.next();
+        }
+        self.cell
+    }
+}
+
 /// Terminal column → byte offset at which the preceding text occupies `cell` columns.
 ///
 /// Exact cell boundaries map after the preceding grapheme. A cell inside a wide
@@ -93,11 +133,30 @@ pub fn snap_grapheme(s: &str, pos: usize) -> usize {
     if pos == s.len() {
         return pos;
     }
-    crate::cell_width::grapheme_indices(s)
-        .take_while(|(start, _)| *start <= pos)
-        .map(|(start, _)| start)
-        .last()
-        .unwrap_or(0)
+    // Segment only around `pos`, so snapping deep into a long line stays cheap.
+    let mut cursor = GraphemeCursor::new(pos, s.len(), true);
+    match cursor.is_boundary(s, 0) {
+        Ok(true) => pos,
+        _ => cursor.prev_boundary(s, 0).ok().flatten().unwrap_or(0),
+    }
+}
+
+/// [`snap_grapheme`] over the `\n`-joined text of `lines`, without joining.
+/// Graphemes never span a line feed except `\r\n`.
+pub fn snap_grapheme_in_lines(lines: &[String], pos: usize) -> usize {
+    let mut start = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let end = start + line.len();
+        if pos <= end {
+            let col = pos - start;
+            if col == line.len() && line.ends_with('\r') && index + 1 < lines.len() {
+                return end - 1;
+            }
+            return start + snap_grapheme(line, col);
+        }
+        start = end + 1;
+    }
+    start.saturating_sub(1)
 }
 
 /// Snap a byte offset to the nearest following grapheme boundary. Exact
@@ -673,6 +732,53 @@ mod tests {
         ] {
             let cell = byte_to_cell(s, pos);
             assert_eq!(cell_to_byte(s, cell), pos, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn snap_grapheme_matches_forward_segmentation_at_every_offset() {
+        let s = "a\r\nb🇨🇦🇺🇸🇫e\u{301}\u{302}👩\u{200d}💻9\u{fe0f}\r\r\n日x";
+        for pos in 0..=s.len() + 1 {
+            let expected = crate::cell_width::grapheme_indices(s)
+                .map(|(start, _)| start)
+                .chain([s.len()])
+                .take_while(|start| *start <= pos)
+                .last()
+                .unwrap();
+            assert_eq!(snap_grapheme(s, pos), expected, "pos {pos}");
+        }
+    }
+
+    #[test]
+    fn snap_grapheme_in_lines_matches_the_joined_text() {
+        for lines in [
+            vec![],
+            vec![String::new()],
+            vec![
+                "a\r".into(),
+                "e\u{301}".into(),
+                String::new(),
+                "🇨🇦\r".into(),
+            ],
+            vec!["\r".into(), "\r".into(), "日x".into()],
+        ] {
+            let joined = lines.join("\n");
+            for pos in 0..=joined.len() + 2 {
+                assert_eq!(
+                    snap_grapheme_in_lines(&lines, pos),
+                    snap_grapheme(&joined, pos),
+                    "{lines:?} pos {pos}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cell_cursor_matches_byte_to_cell_in_any_order() {
+        let s = "a日e\u{301}\t9\u{fe0f}👩\u{200d}💻🇨🇦x\r\nz";
+        let mut cells = CellCursor::new(s);
+        for byte in (0..=s.len() + 2).chain([5, 0, 9]).chain(8..=s.len()) {
+            assert_eq!(cells.cell(byte), byte_to_cell(s, byte), "byte {byte}");
         }
     }
 
