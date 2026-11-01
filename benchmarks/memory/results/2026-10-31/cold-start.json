@@ -1,0 +1,162 @@
+{
+ "mode": "cold-start",
+ "date": "2026-10-31",
+ "machine": {
+  "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
+  "kernel": "7.0.0-34-generic",
+  "podman": "podman version 5.7.0"
+ },
+ "smelt": "local build",
+ "agents": {
+  "smelt": [
+   {
+    "pss": 52891648,
+    "requests": 1
+   },
+   {
+    "pss": 55781376,
+    "requests": 1
+   },
+   {
+    "pss": 52448256,
+    "requests": 1
+   },
+   {
+    "pss": 58737664,
+    "requests": 1
+   },
+   {
+    "pss": 51688448,
+    "requests": 1
+   },
+   {
+    "pss": 51419136,
+    "requests": 1
+   },
+   {
+    "pss": 54980608,
+    "requests": 1
+   }
+  ],
+  "pi": [
+   {
+    "pss": 113699840,
+    "requests": 1
+   },
+   {
+    "pss": 110407680,
+    "requests": 1
+   },
+   {
+    "pss": 112220160,
+    "requests": 1
+   },
+   {
+    "pss": 113385472,
+    "requests": 1
+   },
+   {
+    "pss": 112514048,
+    "requests": 1
+   },
+   {
+    "pss": 114079744,
+    "requests": 1
+   },
+   {
+    "pss": 111644672,
+    "requests": 1
+   }
+  ],
+  "codex": [
+   {
+    "pss": 145029120,
+    "requests": 1
+   },
+   {
+    "pss": 146744320,
+    "requests": 1
+   },
+   {
+    "pss": 145353728,
+    "requests": 1
+   },
+   {
+    "pss": 146001920,
+    "requests": 1
+   },
+   {
+    "pss": 146199552,
+    "requests": 1
+   },
+   {
+    "pss": 146942976,
+    "requests": 1
+   },
+   {
+    "pss": 145213440,
+    "requests": 1
+   }
+  ],
+  "claude-code": [
+   {
+    "pss": 197649408,
+    "requests": 1
+   },
+   {
+    "pss": 198447104,
+    "requests": 1
+   },
+   {
+    "pss": 198480896,
+    "requests": 1
+   },
+   {
+    "pss": 197697536,
+    "requests": 1
+   },
+   {
+    "pss": 197945344,
+    "requests": 1
+   },
+   {
+    "pss": 198964224,
+    "requests": 1
+   },
+   {
+    "pss": 197829632,
+    "requests": 1
+   }
+  ],
+  "opencode": [
+   {
+    "pss": 349797376,
+    "requests": 2
+   },
+   {
+    "pss": 347353088,
+    "requests": 2
+   },
+   {
+    "pss": 349155328,
+    "requests": 2
+   },
+   {
+    "pss": 348682240,
+    "requests": 2
+   },
+   {
+    "pss": 344346624,
+    "requests": 2
+   },
+   {
+    "pss": 345904128,
+    "requests": 2
+   },
+   {
+    "pss": 355549184,
+    "requests": 2
+   }
+  ]
+ }
+}

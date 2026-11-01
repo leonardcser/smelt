@@ -62,7 +62,7 @@
   .home .hero-subtitle,
   .home .cell h2,
   .home .cell .feature h3,
-  .home .cell p:not(.legend) {
+  .home .cell p {
     font-family: var(--md-text-font-family), sans-serif;
   }
   .home .cell h3 {
@@ -453,7 +453,7 @@
   }
   .home .charts {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 1.5rem 2.5rem;
   }
   .home .chart figcaption {
@@ -482,7 +482,7 @@
     background: linear-gradient(to right, var(--bar) 0 var(--v), transparent 0);
     --bar: var(--home-line);
   }
-  .home .chart li i::after {
+  .home .chart li i[style*="--lo"]::after {
     content: "";
     position: absolute;
     top: 50%;
@@ -509,32 +509,12 @@
   .home .chart li.me b {
     font-weight: 700;
   }
-  .home .cell p.legend {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    margin: 1rem 0 0;
-    font-size: 0.64rem;
-  }
-  .home .legend i {
-    width: 1.2rem;
-    height: 0.6rem;
-    background: var(--home-line);
-  }
-  .home .legend i.range {
-    margin-left: 0.8rem;
-    height: 0.45rem;
-    box-sizing: border-box;
-    border-left: 1px solid var(--home-muted);
-    border-right: 1px solid var(--home-muted);
-    background: linear-gradient(var(--home-muted), var(--home-muted)) center / 100% 1px no-repeat;
-  }
   @media (max-width: 52rem) {
     .home .charts {
       grid-template-columns: minmax(0, 1fr);
     }
     .home .chart li {
-      grid-template-columns: 7rem minmax(0, 1fr) 4.5rem;
+      grid-template-columns: 5.5rem minmax(0, 1fr) 4rem;
     }
   }
 
@@ -674,43 +654,33 @@
     </div>
     <div class="cell">
       <h2>Light on your machine</h2>
-      <p>smelt used 0.20 GiB of memory in the median run, against 0.71 to 2.80 GiB for the other five agents. Terminal-Bench 2.1, Qwen3.8 27B, 360 runs. Lower is better.</p>
+      <p>smelt installs as one 45 MiB binary and uses 50 MiB at start. The other four agents write 313 to 1683 MiB and use 107 to 333 MiB. Latest releases on 2026-10-31, measured while waiting for the model. Lower is better.</p>
       <div class="charts">
         <figure class="chart">
-          <figcaption>memory</figcaption>
+          <figcaption>install size</figcaption>
           <ol>
-            <li class="me" title="smelt: median 0.20 GiB, middle half 0.16 to 0.32 GiB"><span>smelt</span><i style="--v:6.9%;--lo:5.5%;--hi:11.1%"></i><b>0.20 GiB</b></li>
-            <li title="pi: median 0.71 GiB, middle half 0.67 to 0.78 GiB"><span>pi</span><i style="--v:24.6%;--lo:23.2%;--hi:27.0%"></i><b>0.71 GiB</b></li>
-            <li title="claude code: median 1.42 GiB, middle half 1.23 to 1.53 GiB"><span>claude code</span><i style="--v:49.1%;--lo:42.6%;--hi:52.9%"></i><b>1.42 GiB</b></li>
-            <li title="mini-swe-agent: median 1.49 GiB, middle half 1.34 to 1.55 GiB"><span>mini-swe-agent</span><i style="--v:51.6%;--lo:46.4%;--hi:53.6%"></i><b>1.49 GiB</b></li>
-            <li title="codex: median 2.09 GiB, middle half 2.02 to 2.19 GiB"><span>codex</span><i style="--v:72.3%;--lo:69.9%;--hi:75.8%"></i><b>2.09 GiB</b></li>
-            <li title="opencode: median 2.80 GiB, middle half 2.57 to 2.89 GiB"><span>opencode</span><i style="--v:96.9%;--lo:88.9%;--hi:100.0%"></i><b>2.80 GiB</b></li>
+<!-- bench:install -->
+          <li class="me" title="smelt: 45 MiB, 1 run"><span>smelt</span><i style="--v:2.7%"></i><b>45 MiB</b></li>
+          <li title="claude code: 313 MiB, 1 run"><span>claude code</span><i style="--v:18.6%"></i><b>313 MiB</b></li>
+          <li title="pi: 480 MiB, 1 run"><span>pi</span><i style="--v:28.5%"></i><b>480 MiB</b></li>
+          <li title="codex: 853 MiB, 1 run"><span>codex</span><i style="--v:50.7%"></i><b>853 MiB</b></li>
+          <li title="opencode: 1683 MiB, 1 run"><span>opencode</span><i style="--v:100.0%"></i><b>1683 MiB</b></li>
+<!-- /bench -->
           </ol>
         </figure>
         <figure class="chart">
-          <figcaption>CPU time</figcaption>
+          <figcaption>memory at start</figcaption>
           <ol>
-            <li class="me" title="smelt: median 6.1 s, middle half 3.5 to 17.1 s"><span>smelt</span><i style="--v:2.3%;--lo:1.3%;--hi:6.4%"></i><b>6.1 s</b></li>
-            <li title="pi: median 9.7 s, middle half 5.6 to 16 s"><span>pi</span><i style="--v:3.6%;--lo:2.1%;--hi:6.0%"></i><b>9.7 s</b></li>
-            <li title="codex: median 9.8 s, middle half 6.9 to 33.9 s"><span>codex</span><i style="--v:3.7%;--lo:2.6%;--hi:12.7%"></i><b>9.8 s</b></li>
-            <li title="mini-swe-agent: median 13.1 s, middle half 9.3 to 49.7 s"><span>mini-swe-agent</span><i style="--v:4.9%;--lo:3.5%;--hi:18.6%"></i><b>13.1 s</b></li>
-            <li title="claude code: median 17.5 s, middle half 8.6 to 33.8 s"><span>claude code</span><i style="--v:6.5%;--lo:3.2%;--hi:12.6%"></i><b>17.5 s</b></li>
-            <li title="opencode: median 116 s, middle half 44.1 to 267.5 s"><span>opencode</span><i style="--v:43.4%;--lo:16.5%;--hi:100.0%"></i><b>116 s</b></li>
-          </ol>
-        </figure>
-        <figure class="chart">
-          <figcaption>wall time</figcaption>
-          <ol>
-            <li class="me" title="smelt: median 352 s, middle half 126 to 915 s"><span>smelt</span><i style="--v:36.1%;--lo:12.9%;--hi:93.8%"></i><b>352 s</b></li>
-            <li title="codex: median 372 s, middle half 205 to 760 s"><span>codex</span><i style="--v:38.2%;--lo:21.0%;--hi:77.9%"></i><b>372 s</b></li>
-            <li title="pi: median 399 s, middle half 148 to 803 s"><span>pi</span><i style="--v:40.9%;--lo:15.2%;--hi:82.4%"></i><b>399 s</b></li>
-            <li title="opencode: median 421 s, middle half 185 to 857 s"><span>opencode</span><i style="--v:43.2%;--lo:19.0%;--hi:87.9%"></i><b>421 s</b></li>
-            <li title="mini-swe-agent: median 570 s, middle half 237 to 916 s"><span>mini-swe-agent</span><i style="--v:58.5%;--lo:24.3%;--hi:93.9%"></i><b>570 s</b></li>
-            <li title="claude code: median 783 s, middle half 264 to 975 s"><span>claude code</span><i style="--v:80.3%;--lo:27.1%;--hi:100.0%"></i><b>783 s</b></li>
+<!-- bench:cold-start -->
+          <li class="me" title="smelt: median 50 MiB, middle half 50 to 53 MiB, 7 runs"><span>smelt</span><i style="--v:15.1%;--lo:14.9%;--hi:15.8%"></i><b>50 MiB</b></li>
+          <li title="pi: median 107 MiB, middle half 107 to 108 MiB, 7 runs"><span>pi</span><i style="--v:32.2%;--lo:32.0%;--hi:32.5%"></i><b>107 MiB</b></li>
+          <li title="codex: median 139 MiB, middle half 139 to 140 MiB, 7 runs"><span>codex</span><i style="--v:41.8%;--lo:41.6%;--hi:41.9%"></i><b>139 MiB</b></li>
+          <li title="claude code: median 189 MiB, middle half 189 to 189 MiB, 7 runs"><span>claude code</span><i style="--v:56.6%;--lo:56.6%;--hi:56.8%"></i><b>189 MiB</b></li>
+          <li title="opencode: median 333 MiB, middle half 331 to 333 MiB, 7 runs"><span>opencode</span><i style="--v:99.8%;--lo:99.2%;--hi:100.0%"></i><b>333 MiB</b></li>
+<!-- /bench -->
           </ol>
         </figure>
       </div>
-      <p class="legend"><i></i> median <i class="range"></i> middle half of runs</p>
       <a class="more" href="guide/benchmarks/">Benchmarks →</a>
     </div>
     <div class="cell">

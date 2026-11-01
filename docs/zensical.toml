@@ -6,7 +6,7 @@ site_url = "https://smeltagent.dev/"
 repo_url = "https://github.com/leonardcser/smelt"
 edit_uri = "edit/main/docs/docs/"
 extra_css = ["stylesheets/extra.css"]
-extra_javascript = ["javascripts/copy-page.js", "javascripts/profile.js", "javascripts/replay.js"]
+extra_javascript = ["javascripts/copy-page.js", "javascripts/replay.js"]
 
 nav = [
   { "Home" = "index.md" },

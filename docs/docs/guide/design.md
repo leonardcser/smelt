@@ -6,9 +6,8 @@ description: "Why smelt stays fast in long sessions, uses Lua for plugins, store
 # Design decisions
 
 Four choices set smelt apart from other coding agents. For each one: what we
-chose, why, and what it costs. Numbers come from the
-[Terminal-Bench results](benchmarks.md) and from performance tests in the smelt
-repository.
+chose, why, and what it costs. Numbers come from the [benchmarks](benchmarks.md)
+and from performance tests in the smelt repository.
 
 | Choice                            | What you get                                       | What it costs                         |
 | --------------------------------- | -------------------------------------------------- | ------------------------------------- |
@@ -98,6 +97,6 @@ quirks, such as wide characters and resize signals, are ours to fix.
 
 ## Related
 
-- [Benchmarks](benchmarks.md): memory, CPU and wall time against five other
-  agents.
+- [Benchmarks](benchmarks.md): memory, install size and CPU time against
+  four other agents.
 - [Lua API](../extend/index.md): what plugins can change.

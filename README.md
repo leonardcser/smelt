@@ -22,8 +22,9 @@
 
 ## Why
 
-Most coding agents are heavy and hard to change. smelt uses a fraction of their
-memory and CPU, and you reshape it with plain Lua files that reload live.
+Most coding agents are heavy and hard to change. smelt installs as one small
+binary, uses less memory and CPU, and you reshape it with plain Lua files that
+reload live.
 
 <p align="center">
   <img src="assets/demo.gif" alt="smelt running a coding task in the terminal" width="800">
@@ -46,20 +47,21 @@ Why we made these choices, and what they cost:
 
 ## Benchmarks
 
-Same model, same tasks: Terminal-Bench 2.1 with Qwen3.8 27B, 360 runs. Medians,
-lower is better.
+Lower is better.
 
-|                | Memory       | CPU time  | Wall time |
-| -------------- | ------------ | --------- | --------- |
-| **smelt**      | **0.20 GiB** | **6.1 s** | **352 s** |
-| pi             | 0.71 GiB     | 9.7 s     | 399 s     |
-| codex          | 2.09 GiB     | 9.8 s     | 372 s     |
-| claude code    | 1.42 GiB     | 17.5 s    | 783 s     |
-| opencode       | 2.80 GiB     | 116 s     | 421 s     |
-| mini-swe-agent | 1.49 GiB     | 13.1 s    | 570 s     |
+|             | Memory at start | Install size | Peak memory on tasks | CPU time on tasks |
+| ----------- | --------------- | ------------ | -------------------- | ----------------- |
+| **smelt**   | **50 MiB**      | **45 MiB**   | **0.10 GiB**         | **6.1 s**         |
+| pi          | 107 MiB         | 480 MiB      | 0.14 GiB             | 9.7 s             |
+| codex       | 139 MiB         | 853 MiB      | 0.22 GiB             | 9.8 s             |
+| claude code | 189 MiB         | 313 MiB      | 0.24 GiB             | 17.5 s            |
+| opencode    | 333 MiB         | 1683 MiB     | 0.71 GiB             | 116 s             |
 
-Measured per container (agent, tools and task): 20 tasks, 3 attempts each,
-2 CPUs and 4 GiB.
+Memory at start and install size are from the latest releases on 2026-10-31, and
+you can
+[rerun them](https://github.com/leonardcser/smelt/tree/main/benchmarks/memory).
+The task columns are medians from a Terminal-Bench 2.1 study with Qwen3.8 27B in
+October 2026, on older versions (smelt v0.6.0).
 [Full results](https://smeltagent.dev/guide/benchmarks/)
 
 ## Install
@@ -69,9 +71,9 @@ curl -fsSL https://smeltagent.dev/install.sh | sh
 ```
 
 Or grab a prebuilt binary (Linux and macOS on x86_64 and aarch64, Windows on
-x86_64) from the [Releases](https://github.com/leonardcser/smelt/releases) page. Extract
-the archive and put `smelt` (`smelt.exe` on Windows) on your `PATH`, or install
-from source:
+x86_64) from the [Releases](https://github.com/leonardcser/smelt/releases) page.
+Extract the archive and put `smelt` (`smelt.exe` on Windows) on your `PATH`, or
+install from source:
 
 ```bash
 cargo install --locked --git https://github.com/leonardcser/smelt.git smelt-agent
@@ -96,7 +98,8 @@ smelt                               # claude-code models appear in the picker
 Claude Code owns authentication, the agent loop, native tools, and context
 management. smelt provides the terminal UI, permissions, and additional tools
 through MCP. It does not copy subscription credentials or impersonate Claude
-Code's API requests. See [the Claude Code provider docs](https://smeltagent.dev/latest/customize/providers/#claude-code)
+Code's API requests. See
+[the Claude Code provider docs](https://smeltagent.dev/latest/customize/providers/#claude-code)
 for configuration and limitations. smelt is not affiliated with Anthropic.
 
 **API-key providers** (any OpenAI-compatible endpoint):

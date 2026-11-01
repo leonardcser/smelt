@@ -1,39 +1,102 @@
 ---
 title: "Benchmarks vs Claude Code, Codex and opencode"
-description: "Terminal-Bench 2.1 results for smelt, pi, codex, claude code, opencode and mini-swe-agent on the same model: memory, CPU time and wall time over 360 runs."
+description:
+  "Memory and install size of smelt, pi, codex, claude code and opencode, and
+  their memory and CPU on Terminal-Bench 2.1 tasks."
 ---
 
 # Benchmarks
 
-Six coding agents on the same model and the same tasks: 20
+smelt against four other coding agents. Lower is better.
+
+- **At start:** smelt uses 50 MiB, the others 107 to 333 MiB.
+- **Install:** smelt writes 45 MiB, the others 313 to 1683 MiB.
+- **On real tasks:** smelt peaks at 0.10 GiB, the others 0.14 to 0.71 GiB.
+
+The first two you can
+[rerun yourself](https://github.com/leonardcser/smelt/tree/main/benchmarks/memory)
+on Linux with podman. They were measured on 2026-10-31 with smelt from `main`
+(`v0.6.5-19-gae02ec9d5`), pi 1.4.0, codex 0.166.0, claude code 2.1.316 and
+opencode 2.2.5, each in its own container.
+
+## Memory at start
+
+Total memory of the agent's processes once it has started and sent its first
+request. Median of 7 runs.
+
+<div class="bench" markdown="0">
+<!-- chart:cold-start -->
+  <figure class="chart">
+    <ol>
+      <li class="me" title="smelt: median 50 MiB, middle half 50 to 53 MiB, 7 runs"><span>smelt</span><i style="--v:15.1%;--lo:14.9%;--hi:15.8%"></i><b>50 MiB</b></li>
+      <li title="pi: median 107 MiB, middle half 107 to 108 MiB, 7 runs"><span>pi</span><i style="--v:32.2%;--lo:32.0%;--hi:32.5%"></i><b>107 MiB</b></li>
+      <li title="codex: median 139 MiB, middle half 139 to 140 MiB, 7 runs"><span>codex</span><i style="--v:41.8%;--lo:41.6%;--hi:41.9%"></i><b>139 MiB</b></li>
+      <li title="claude code: median 189 MiB, middle half 189 to 189 MiB, 7 runs"><span>claude code</span><i style="--v:56.6%;--lo:56.6%;--hi:56.8%"></i><b>189 MiB</b></li>
+      <li title="opencode: median 333 MiB, middle half 331 to 333 MiB, 7 runs"><span>opencode</span><i style="--v:99.8%;--lo:99.2%;--hi:100.0%"></i><b>333 MiB</b></li>
+    </ol>
+  </figure>
+<!-- /chart -->
+<p class="legend"><i></i> median <i class="range"></i> middle half of runs</p>
+</div>
+
+This is an agent waiting for the model, not working on a task.
+
+## Install size
+
+Bytes each install writes to disk. smelt is one binary; the others install a
+runtime and packages.
+
+<div class="bench" markdown="0">
+<!-- chart:install -->
+  <figure class="chart">
+    <ol>
+      <li class="me" title="smelt: 45 MiB, 1 run"><span>smelt</span><i style="--v:2.7%"></i><b>45 MiB</b></li>
+      <li title="claude code: 313 MiB, 1 run"><span>claude code</span><i style="--v:18.6%"></i><b>313 MiB</b></li>
+      <li title="pi: 480 MiB, 1 run"><span>pi</span><i style="--v:28.5%"></i><b>480 MiB</b></li>
+      <li title="codex: 853 MiB, 1 run"><span>codex</span><i style="--v:50.7%"></i><b>853 MiB</b></li>
+      <li title="opencode: 1683 MiB, 1 run"><span>opencode</span><i style="--v:100.0%"></i><b>1683 MiB</b></li>
+    </ol>
+  </figure>
+<!-- /chart -->
+</div>
+
+## Terminal-Bench study
+
+Peak memory and CPU time on 20
 [Terminal-Bench 2.1](https://github.com/harbor-framework/terminal-bench-2-1)
-tasks, 3 attempts each, 360 runs in total. Every run had a fresh container
-limited to 2 CPUs and 4 GiB. The model was Qwen3.8 27B (FP8) on vLLM. The study
-finished on 2026-10-17 with a smelt build just after `v0.6.0`.
+tasks, 3 attempts each, with Qwen3.8 27B. The study ran in October 2026 on a
+private model server, so you cannot rerun it, and its versions are older: smelt
+v0.6.0, pi 1.3.0, codex 0.162.1, claude code 2.1.301 and opencode 1.19.1. CPU
+time includes the task's own commands. Median per run.
 
-## Resources
+<div class="bench" markdown="0">
+<div class="charts">
+  <figure class="chart">
+    <figcaption>memory</figcaption>
+    <ol>
+      <li class="me" title="smelt: median 0.10 GiB, middle half 0.08 to 0.14 GiB"><span>smelt</span><i style="--v:13.2%;--lo:10.8%;--hi:19.2%"></i><b>0.10 GiB</b></li>
+      <li title="pi: median 0.14 GiB, middle half 0.13 to 0.16 GiB"><span>pi</span><i style="--v:18.5%;--lo:17.4%;--hi:21.7%"></i><b>0.14 GiB</b></li>
+      <li title="codex: median 0.22 GiB, middle half 0.21 to 0.26 GiB"><span>codex</span><i style="--v:29.7%;--lo:28.2%;--hi:34.7%"></i><b>0.22 GiB</b></li>
+      <li title="claude code: median 0.24 GiB, middle half 0.23 to 0.28 GiB"><span>claude code</span><i style="--v:32.6%;--lo:31.6%;--hi:37.8%"></i><b>0.24 GiB</b></li>
+      <li title="opencode: median 0.71 GiB, middle half 0.68 to 0.74 GiB"><span>opencode</span><i style="--v:95.4%;--lo:91.9%;--hi:100.0%"></i><b>0.71 GiB</b></li>
+    </ol>
+  </figure>
+  <figure class="chart">
+    <figcaption>CPU time</figcaption>
+    <ol>
+      <li class="me" title="smelt: median 6.1 s, middle half 3.5 to 17.1 s"><span>smelt</span><i style="--v:2.3%;--lo:1.3%;--hi:6.4%"></i><b>6.1 s</b></li>
+      <li title="pi: median 9.7 s, middle half 5.6 to 16 s"><span>pi</span><i style="--v:3.6%;--lo:2.1%;--hi:6.0%"></i><b>9.7 s</b></li>
+      <li title="codex: median 9.8 s, middle half 6.9 to 33.9 s"><span>codex</span><i style="--v:3.7%;--lo:2.6%;--hi:12.7%"></i><b>9.8 s</b></li>
+      <li title="claude code: median 17.5 s, middle half 8.6 to 33.8 s"><span>claude code</span><i style="--v:6.5%;--lo:3.2%;--hi:12.6%"></i><b>17.5 s</b></li>
+      <li title="opencode: median 116 s, middle half 44.1 to 267.5 s"><span>opencode</span><i style="--v:43.4%;--lo:16.5%;--hi:100.0%"></i><b>116 s</b></li>
+    </ol>
+  </figure>
+</div>
+<p class="legend"><i></i> median <i class="range"></i> middle half of runs</p>
+</div>
 
-Medians per run, with the interquartile range in parentheses.
+## Limits
 
-| Agent          | Version           | Memory (GiB)         | CPU time (s)       | Wall time (s)     |
-| -------------- | ----------------- | -------------------- | ------------------ | ----------------- |
-| **smelt**      | v0.6.0-1-246e0f13 | **0.20** (0.16–0.32) | **6.1** (3.5–17.1) | **352** (126–915) |
-| pi             | 1.3.0             | 0.71 (0.67–0.78)     | 9.7 (5.6–16.0)     | 399 (148–803)     |
-| codex          | 0.162.1           | 2.09 (2.02–2.19)     | 9.8 (6.9–33.9)     | 372 (205–760)     |
-| claude code    | 2.1.301           | 1.42 (1.23–1.53)     | 17.5 (8.6–33.8)    | 783 (264–975)     |
-| opencode       | 1.19.1            | 2.80 (2.57–2.89)     | 116.0 (44.1–267.5) | 421 (185–857)     |
-| mini-swe-agent | 2.4.6             | 1.49 (1.34–1.55)     | 13.1 (9.3–49.7)    | 570 (237–916)     |
-
-Memory is the peak of the container's memory, page cache included. CPU time
-covers everything in the container: the agent, its tools and the task itself.
-
-## Over time
-
-Memory and CPU in use at each moment on `regex-log`, a task every agent solved
-in all three runs. Each row is one real run, the agent's median-length one,
-sampled every second. The area is memory in use, on a scale shared by every
-row, with the run's peak on the right. The strip below it is CPU in use: the
-darker, the busier, up to the container's 2 cores. Hover for the values at any
-moment.
-
-<div class="profiles" data-profile="../../assets/bench/regex-log.json" role="img" aria-label="Memory and CPU in use over time on the regex-log task, a row per agent; smelt peaks at 0.17 GiB while the others reach 0.85 to 2.89 GiB" markdown="0"></div>
+- Every agent ran headless, so the cost of drawing a terminal interface is not
+  included.
+- One machine and one container image, with Node 22 for the Node agents.

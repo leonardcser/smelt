@@ -140,81 +140,6 @@ body:has(.home) .md-header__source .md-source__repository {
   }
 }
 
-/* Benchmark profiles over time (javascripts/profile.js): smelt in the
-   primary color, the other agents as recessive context. */
-.md-typeset .profiles {
-  position: relative;
-}
-.profiles svg {
-  display: block;
-  overflow: visible;
-}
-.profiles .grid {
-  stroke: var(--md-default-fg-color--lightest);
-}
-.profiles .tick {
-  fill: var(--md-default-fg-color--light);
-  font: 9px var(--md-code-font-family), monospace;
-}
-.profiles .label {
-  fill: var(--md-default-fg-color--light);
-  font: 10px var(--md-code-font-family), monospace;
-}
-.profiles .label.me {
-  fill: var(--md-default-fg-color);
-  font-weight: 700;
-}
-.profiles .line {
-  fill: none;
-  stroke: var(--md-default-fg-color--light);
-  stroke-width: 1.5;
-  stroke-linejoin: round;
-}
-.profiles .line.me {
-  stroke: var(--md-primary-fg-color);
-  stroke-width: 2;
-}
-.profiles .area {
-  fill: var(--md-default-fg-color--lightest);
-}
-.profiles .area.me {
-  fill: color-mix(in srgb, var(--md-primary-fg-color) 22%, transparent);
-}
-.profiles .track {
-  fill: var(--md-default-fg-color--lightest);
-}
-.profiles .heat {
-  fill: var(--md-default-fg-color);
-}
-.profiles .heat.me {
-  fill: var(--md-primary-fg-color);
-}
-.profiles .cross {
-  stroke: var(--md-default-fg-color--light);
-  pointer-events: none;
-}
-.profiles .hit {
-  fill: transparent;
-  cursor: crosshair;
-}
-.profile__tip {
-  position: absolute;
-  top: 0;
-  z-index: 1;
-  display: none;
-  padding: 0.25rem 0.45rem;
-  border: 1px solid var(--md-default-fg-color--lightest);
-  background: var(--md-default-bg-color);
-  font: 0.58rem/1.5 var(--md-code-font-family), monospace;
-  white-space: pre;
-  color: var(--md-default-fg-color--light);
-  pointer-events: none;
-}
-.profile__tip div:first-child,
-.profile__tip .me {
-  color: var(--md-default-fg-color);
-  font-weight: 700;
-}
 /* A recorded smelt session, replayed as text by javascripts/replay.js. */
 :root {
   --term-bg: #000;
@@ -345,4 +270,101 @@ body:has(.home) .md-header__source .md-source__repository {
 /* Plugin code can carry Nerd Font icons. */
 .md-typeset pre > code {
   font-family: var(--md-code-font-family), "Symbols Nerd Font Mono", monospace;
+}
+
+/* Benchmark bar charts (guide/benchmarks.md): the bar is the median, the capped
+   line spans the middle half of runs. smelt in the primary color. */
+.md-typeset .bench {
+  --muted: var(--md-default-fg-color--light);
+  --bar: var(--md-default-fg-color--lightest);
+}
+.md-typeset .bench .charts {
+  display: grid;
+  gap: 1.5rem;
+}
+.md-typeset .bench figure {
+  display: block;
+  width: 100%;
+  margin: 0;
+}
+.md-typeset .bench figcaption {
+  margin: 0 0 0.5rem;
+  text-align: left;
+  font-size: 0.68rem;
+  color: var(--md-default-fg-color);
+}
+.md-typeset .bench ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.md-typeset .bench li {
+  display: grid;
+  grid-template-columns: 4.8rem minmax(0, 1fr) 3.6rem;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 2px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.md-typeset .bench li span {
+  text-align: left;
+}
+.md-typeset .bench li i {
+  position: relative;
+  height: 0.75rem;
+  background: linear-gradient(to right, var(--bar) 0 var(--v), transparent 0);
+}
+.md-typeset .bench li i[style*="--lo"]::after,
+.md-typeset .bench .legend i.range {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: var(--lo);
+  width: calc(var(--hi) - var(--lo));
+  height: 0.45rem;
+  box-sizing: border-box;
+  transform: translateY(-50%);
+  border-left: 1px solid var(--muted);
+  border-right: 1px solid var(--muted);
+  background: linear-gradient(var(--muted), var(--muted)) center / 100% 1px no-repeat;
+}
+.md-typeset .bench li b {
+  font-weight: 400;
+  text-align: right;
+}
+.md-typeset .bench li.me {
+  color: var(--md-default-fg-color);
+  font-weight: 700;
+}
+.md-typeset .bench li.me i {
+  --bar: var(--md-primary-fg-color);
+}
+.md-typeset .bench li.me b {
+  font-weight: 700;
+}
+.md-typeset .bench .legend {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 1rem 0 0;
+  font-size: 0.64rem;
+  color: var(--muted);
+}
+.md-typeset .bench .legend i {
+  position: static;
+  display: inline-block;
+  width: 1.2rem;
+  height: 0.6rem;
+  background: var(--bar);
+}
+.md-typeset .bench .legend i.range {
+  position: relative;
+  top: 0;
+  left: 0;
+  width: 1.2rem;
+  height: 0.45rem;
+  margin-left: 0.8rem;
+  transform: none;
+  background: linear-gradient(var(--muted), var(--muted)) center / 100% 1px no-repeat;
 }
