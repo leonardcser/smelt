@@ -917,6 +917,27 @@ fn expanding_root_dialog_preserves_focused_panel() {
 }
 
 #[test]
+fn replaced_and_dismissed_notifications_free_their_buffers() {
+    let mut app = TestApp::builder().build();
+    let shown_buf = |app: &TestApp| {
+        let win = app.notification_win().expect("notification shown");
+        app.ui_probe().win(win).expect("notification window").buf
+    };
+
+    app.notify_error("first".into());
+    let first = shown_buf(&app);
+    app.notify_error("second".into());
+    let second = shown_buf(&app);
+    assert!(app.ui_probe().buf(first).is_none());
+
+    app.clock.advance(std::time::Duration::from_millis(
+        crate::app::NOTIFICATION_TTL_MS * 2,
+    ));
+    assert!(app.dismiss_expired_notification());
+    assert!(app.ui_probe().buf(second).is_none());
+}
+
+#[test]
 fn root_dialog_pauses_notification_visibility_and_ttl() {
     let mut app = TestApp::builder().build();
     app.notify_error("deferred notification".into());

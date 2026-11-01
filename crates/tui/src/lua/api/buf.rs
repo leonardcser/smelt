@@ -395,7 +395,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "buf",
         "Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata. \
 `opts.name` opts the buffer into hot-reload survival - repeat calls with the same name \
-return the same handle with mutable opts re-applied. Anonymous buffers are reaped on `/reload`. \
+return the same handle with mutable opts re-applied. Anonymous buffers are freed when the last window showing them closes, \
+and on `/reload`. \
 UiHost-only - buffers are terminal-screen backing stores that windows render into.",
         Tier::UiHost,
     )?;

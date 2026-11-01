@@ -943,9 +943,21 @@ impl Ui {
     fn remove_window(&mut self, id: WinId) {
         self.named_wins.unbind_by_id(id);
         if let Some(win) = self.wins.remove(&id) {
-            if let Some(scratch) = win.native_scratch() {
-                self.buf_destroy(scratch);
+            for buf in win.retained_buffers() {
+                self.release_buf(buf);
             }
+        }
+    }
+
+    /// Drop an anonymous buffer once no window retains it. Named buffers
+    /// outlive their windows so plugins can reopen them by name.
+    fn release_buf(&mut self, id: BufId) {
+        let retained = self
+            .wins
+            .values()
+            .any(|win| win.retained_buffers().any(|buf| buf == id));
+        if !retained && !self.named_bufs.contains_id(id) {
+            self.bufs.remove(&id);
         }
     }
 
@@ -1107,21 +1119,14 @@ impl Ui {
         for decoration in doomed_decorations {
             ids.extend(self.decoration_close_tree(decoration));
         }
-        let referenced: std::collections::HashSet<BufId> = self
-            .wins
-            .values()
-            .flat_map(Window::retained_buffers)
-            .collect();
-        let named_bufs = self.named_bufs.ids_set();
-        let drop_bufs: Vec<BufId> = self
+        let lua_bufs: Vec<BufId> = self
             .bufs
             .keys()
             .copied()
             .filter(|id| id.0 >= lua_buf_threshold)
-            .filter(|id| !referenced.contains(id) && !named_bufs.contains(id))
             .collect();
-        for id in drop_bufs {
-            self.bufs.remove(&id);
+        for id in lua_bufs {
+            self.release_buf(id);
         }
         ids
     }
@@ -4407,6 +4412,78 @@ mod tests {
         ));
     }
 
+    fn open_split(ui: &mut Ui, buf: BufId) -> WinId {
+        ui.win_open_split(
+            buf,
+            SplitConfig {
+                region: "test".into(),
+                gutters: crate::Gutters::default(),
+            },
+        )
+        .expect("window opens")
+    }
+
+    #[test]
+    fn closing_a_window_frees_its_anonymous_buffer() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        let win = open_split(&mut ui, buf);
+
+        let _ = ui.win_close(win);
+
+        assert!(ui.buf(buf).is_none());
+    }
+
+    #[test]
+    fn closing_a_window_keeps_its_named_buffer() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        ui.name_buf("test.kept", buf);
+        let win = open_split(&mut ui, buf);
+
+        let _ = ui.win_close(win);
+
+        assert!(ui.buf(buf).is_some());
+        open_split(&mut ui, buf);
+    }
+
+    #[test]
+    fn shared_anonymous_buffer_lives_until_its_last_window_closes() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        let first = open_split(&mut ui, buf);
+        let second = open_split(&mut ui, buf);
+
+        let _ = ui.win_close(first);
+        assert!(ui.buf(buf).is_some());
+
+        let _ = ui.win_close(second);
+        assert!(ui.buf(buf).is_none());
+    }
+
+    #[test]
+    fn closing_an_overlay_frees_the_buffers_of_its_leaves() {
+        let mut ui = make_ui();
+        let bufs = [
+            ui.buf_create(BufCreateOpts::default()),
+            ui.buf_create(BufCreateOpts::default()),
+        ];
+        let leaves = bufs.map(|buf| open_split(&mut ui, buf));
+        let overlay = ui.overlay_open(Overlay::new(
+            LayoutTree::vbox(
+                leaves
+                    .iter()
+                    .map(|win| (Constraint::Length(1), LayoutTree::leaf(*win)))
+                    .collect(),
+            ),
+            Anchor::ScreenCenter,
+        ));
+
+        let _ = ui.overlay_close_tree(overlay);
+
+        assert!(bufs.iter().all(|buf| ui.buf(*buf).is_none()));
+    }
+
     #[test]
     fn host_display_document_surfaces_buffer_actions() {
         let mut ui = make_ui();
@@ -7208,7 +7285,7 @@ mod tests {
         assert!(removed.is_some());
         let cb_ids = UiHost::win_close(&mut ui, win);
         assert!(cb_ids.is_empty());
-        assert!(ui.buf(buf).is_some());
+        assert!(ui.buf(buf).is_none());
     }
 
     // ── UiHost per-pane data accessors ───────────────────────────────
