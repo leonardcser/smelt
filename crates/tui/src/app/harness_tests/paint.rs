@@ -882,3 +882,61 @@ fn every_color_argument_rejects_unknown_theme_groups() {
         "rgb=unknown theme group 'Coment';mark=unknown theme group 'Coment'"
     );
 }
+
+fn error_count(app: &TestApp) -> usize {
+    let messages = app.app.lua.core_shared().messages.lock().unwrap();
+    messages
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind == smelt_core::messages::MessageKind::Error)
+        .count()
+}
+
+#[test]
+fn failing_paint_is_reported_once_and_removed() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        _G.__calls = 0
+        _G.__fx = smelt.paint.frame(function()
+          _G.__calls = _G.__calls + 1
+          error("boom")
+        end, { name = "test.failing" })
+        "#
+    ));
+    let errors = error_count(&app);
+
+    for _ in 0..5 {
+        app.render_silent();
+    }
+
+    assert_eq!(app.eval_lua::<u32>("return _G.__calls").unwrap(), 1);
+    assert_eq!(error_count(&app), errors + 1);
+    assert!(!app.eval_lua::<bool>("return _G.__fx:invalidate()").unwrap());
+}
+
+#[test]
+fn failing_pointer_map_is_reported_once_and_removed() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        _G.__maps = 0
+        _G.__fx = smelt.paint.frame(function() end, {
+          map_pointer = function()
+            _G.__maps = _G.__maps + 1
+            error("boom")
+          end,
+        })
+        "#
+    ));
+    app.render_silent();
+    let errors = error_count(&app);
+
+    let left = crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left);
+    app.mouse(left, (2, 2));
+    app.mouse(left, (3, 3));
+
+    assert_eq!(app.eval_lua::<u32>("return _G.__maps").unwrap(), 1);
+    assert_eq!(error_count(&app), errors + 1);
+    assert!(!app.eval_lua::<bool>("return _G.__fx:invalidate()").unwrap());
+}

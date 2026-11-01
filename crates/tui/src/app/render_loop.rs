@@ -1313,9 +1313,42 @@ impl TuiApp {
         changes: Option<&crate::lua::paint::FrameChanges>,
     ) {
         let lua = self.lua.execution();
-        crate::lua::scope_app(self, || {
-            crate::lua::paint::paint(&lua, slot, slice, context, clock, changes);
+        let result = crate::lua::scope_app(self, || {
+            crate::lua::paint::paint(&lua, slot, slice, context, clock, changes)
         });
+        if let Err(error) = result {
+            self.fail_paint(slot.id, &error);
+        }
+    }
+
+    /// Remove a paint whose callback raised `error`. It would raise it again
+    /// on every frame, so it is reported once; `/reload` restores it.
+    pub(crate) fn fail_paint(
+        &mut self,
+        paint: crate::smelt_edit::layout::PaintId,
+        error: &mlua::Error,
+    ) {
+        if self.remove_paint(paint) {
+            self.record_notice(
+                smelt_core::messages::MessageKind::Error,
+                "lua".into(),
+                format!("smelt.paint removed after error: {error}"),
+            );
+        }
+    }
+
+    pub(crate) fn remove_paint(&mut self, paint: crate::smelt_edit::layout::PaintId) -> bool {
+        self.request_urgent_render();
+        for callback_id in self.ui.leaf_clear_callbacks(paint) {
+            self.lua.remove_callback(callback_id);
+        }
+        let Some(slot) = self.paint_registry.unregister(paint) else {
+            return false;
+        };
+        for callback_id in slot.callbacks() {
+            self.lua.remove_callback(callback_id);
+        }
+        true
     }
 
     /// Compute which pane owns the cursor this frame.

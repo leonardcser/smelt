@@ -65,13 +65,14 @@ impl PaintOptions {
 /// A registered paint callback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PaintSlot {
+    pub id: PaintId,
     /// Callback handle id (a `u64` into `LuaShared::callbacks`).
     pub handle: u64,
     pub options: PaintOptions,
 }
 
 impl PaintSlot {
-    fn map_pointer(&self) -> Option<u64> {
+    pub(crate) fn map_pointer(&self) -> Option<u64> {
         match self.options.stage {
             PaintStage::Frame { map_pointer, .. } => map_pointer,
             PaintStage::Leaf => None,
@@ -141,13 +142,14 @@ impl PaintRegistry {
         name: Option<String>,
         options: PaintOptions,
     ) -> (PaintId, Option<PaintSlot>) {
-        let slot = PaintSlot {
+        let slot = |id| PaintSlot {
+            id,
             handle: handle_id,
             options,
         };
         if let Some(ref n) = name {
             if let Some(existing) = self.names.lookup(n) {
-                return (existing, self.handles.insert(existing, slot));
+                return (existing, self.handles.insert(existing, slot(existing)));
             }
         }
         let id = PaintId(self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -155,7 +157,7 @@ impl PaintRegistry {
             id.0 >= PAINT_ID_BASE,
             "PaintRegistry exhausted paint half of u64 namespace"
         );
-        self.handles.insert(id, slot);
+        self.handles.insert(id, slot(id));
         if let Some(n) = name {
             self.names.bind(n, id);
         }
@@ -192,13 +194,13 @@ impl PaintRegistry {
         paints.into_iter().map(|(_, slot)| slot).collect()
     }
 
-    /// Pointer-map callbacks of frame paints, top effect first: the order a
+    /// Frame paints with a pointer map, top effect first: the order a
     /// screen position unwinds through them.
-    pub(crate) fn pointer_maps(&self) -> Vec<u64> {
+    pub(crate) fn pointer_maps(&self) -> Vec<PaintSlot> {
         let mut maps: Vec<_> = self
             .frame_paints()
-            .iter()
-            .filter_map(PaintSlot::map_pointer)
+            .into_iter()
+            .filter(|slot| slot.map_pointer().is_some())
             .collect();
         maps.reverse();
         maps
@@ -443,8 +445,14 @@ fn build_ctx_table(
     Ok(t)
 }
 
-/// Run one Lua paint callback on `slice`. Errors are recorded rather than
-/// propagated; cells the callback wrote before failing stay painted.
+/// The Lua function behind callback `handle`, if it is still registered.
+fn callback(runtime: &super::LuaExecution, handle: u64) -> Option<mlua::Function> {
+    let cbs = runtime.shared().callbacks.lock().ok()?;
+    runtime.lua.registry_value(&cbs.get(&handle)?.key).ok()
+}
+
+/// Run one Lua paint callback on `slice`. Cells the callback wrote before
+/// failing stay painted.
 pub(crate) fn paint(
     runtime: &super::LuaExecution,
     slot: PaintSlot,
@@ -452,76 +460,43 @@ pub(crate) fn paint(
     ctx: &DrawContext,
     clock: &PaintClock,
     changes: Option<&FrameChanges>,
-) {
-    let lua = &runtime.lua;
-    let func: mlua::Function = {
-        let Ok(cbs) = runtime.shared().callbacks.lock() else {
-            return;
-        };
-        let Some(handle) = cbs.get(&slot.handle) else {
-            return;
-        };
-        match lua.registry_value(&handle.key) {
-            Ok(f) => f,
-            Err(_) => return,
-        }
+) -> LuaResult<()> {
+    let Some(func) = callback(runtime, slot.handle) else {
+        return Ok(());
     };
-    let ud = match lua.create_userdata(slice::PaintSliceUd) {
-        Ok(u) => u,
-        Err(e) => {
-            runtime.record_error(format!("smelt.paint: userdata: {e}"));
-            return;
-        }
-    };
-    let ctx_tbl = match build_ctx_table(lua, slice.grid_rect(), ctx, clock, slot.options, changes) {
-        Ok(t) => t,
-        Err(e) => {
-            runtime.record_error(format!("smelt.paint: ctx: {e}"));
-            return;
-        }
-    };
+    let ud = runtime.lua.create_userdata(slice::PaintSliceUd)?;
+    let ctx_tbl = build_ctx_table(
+        &runtime.lua,
+        slice.grid_rect(),
+        ctx,
+        clock,
+        slot.options,
+        changes,
+    )?;
     let _perf = smelt_perf::perf::begin("lua:paint");
-    slice::scope_slice(slice, || {
-        if let Err(e) = func.call::<()>((ud, ctx_tbl)) {
-            runtime.record_error(format!("smelt.paint: {e}"));
-        }
-    });
+    slice::scope_slice(slice, || func.call::<()>((ud, ctx_tbl)))
 }
 
 /// Map screen cell `at` through the pointer-map callback `handle`, on a
-/// `size` screen. A `nil` return or an error keeps the position, and the
-/// result is clamped to the screen.
+/// `size` screen. A `nil` return keeps the position, and the result is
+/// clamped to the screen.
 pub(crate) fn map_pointer(
     runtime: &super::LuaExecution,
     handle: u64,
     at: (u16, u16),
     size: (u16, u16),
-) -> (u16, u16) {
-    let lua = &runtime.lua;
-    let func: mlua::Function = {
-        let Ok(cbs) = runtime.shared().callbacks.lock() else {
-            return at;
-        };
-        let Some(handle) = cbs.get(&handle) else {
-            return at;
-        };
-        match lua.registry_value(&handle.key) {
-            Ok(f) => f,
-            Err(_) => return at,
-        }
+) -> LuaResult<(u16, u16)> {
+    let Some(func) = callback(runtime, handle) else {
+        return Ok(at);
     };
     let _perf = smelt_perf::perf::begin("lua:paint:map_pointer");
-    match func.call::<(Option<i64>, Option<i64>)>((at.0, at.1, size.0, size.1)) {
-        Ok((Some(x), Some(y))) => {
-            let clamp = |v: i64, len: u16| v.clamp(0, i64::from(len.saturating_sub(1))) as u16;
-            (clamp(x, size.0), clamp(y, size.1))
-        }
-        Ok(_) => at,
-        Err(e) => {
-            runtime.record_error(format!("smelt.paint: map_pointer: {e}"));
-            at
-        }
-    }
+    let clamp = |v: i64, len: u16| v.clamp(0, i64::from(len.saturating_sub(1))) as u16;
+    Ok(
+        match func.call::<(Option<i64>, Option<i64>)>((at.0, at.1, size.0, size.1))? {
+            (Some(x), Some(y)) => (clamp(x, size.0), clamp(y, size.1)),
+            _ => at,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -687,11 +662,17 @@ mod tests {
         reg.register(1, None, mapped(0, 10));
         let top = reg.register(2, None, mapped(5, 20)).0;
         reg.register(3, None, frame(9));
+        let maps = |reg: &PaintRegistry| -> Vec<_> {
+            reg.pointer_maps()
+                .iter()
+                .filter_map(PaintSlot::map_pointer)
+                .collect()
+        };
 
-        assert_eq!(reg.pointer_maps(), [20, 10]);
+        assert_eq!(maps(&reg), [20, 10]);
         let released: Vec<_> = reg.unregister(top).unwrap().callbacks().collect();
         assert_eq!(released, [2, 20]);
-        assert_eq!(reg.pointer_maps(), [10]);
+        assert_eq!(maps(&reg), [10]);
     }
 
     #[test]

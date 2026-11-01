@@ -314,11 +314,21 @@ impl TuiApp {
         let size = self.ui.terminal_size();
         let lua = self.lua.execution();
         let mut at = (me.column, me.row);
+        let mut failed = Vec::new();
         crate::lua::scope_app(self, || {
-            for map in maps {
-                at = crate::lua::paint::map_pointer(&lua, map, at, size);
+            for slot in &maps {
+                let Some(map) = slot.map_pointer() else {
+                    continue;
+                };
+                match crate::lua::paint::map_pointer(&lua, map, at, size) {
+                    Ok(mapped) => at = mapped,
+                    Err(error) => failed.push((slot.id, error)),
+                }
             }
         });
+        for (paint, error) in failed {
+            self.fail_paint(paint, &error);
+        }
         (me.column, me.row) = at;
         me
     }

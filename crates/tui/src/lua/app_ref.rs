@@ -1257,17 +1257,7 @@ impl UiLuaHost<'_> {
     }
 
     pub(crate) fn remove_paint(&mut self, paint: crate::smelt_edit::layout::PaintId) -> bool {
-        self.app.request_urgent_render();
-        for callback_id in self.app.ui.leaf_clear_callbacks(paint) {
-            self.app.lua.remove_callback(callback_id);
-        }
-        let Some(slot) = self.app.paint_registry.unregister(paint) else {
-            return false;
-        };
-        for callback_id in slot.callbacks() {
-            self.app.lua.remove_callback(callback_id);
-        }
-        true
+        self.app.remove_paint(paint)
     }
 
     pub(crate) fn register_paint(
