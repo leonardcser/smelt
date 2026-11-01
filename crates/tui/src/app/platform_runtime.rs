@@ -206,11 +206,11 @@ impl PlatformRuntime {
         Ok(true)
     }
 
-    pub(super) fn terminal_size(&self) -> std::io::Result<(u16, u16)> {
+    /// The attached terminal's size, or `None` without one.
+    pub(super) fn terminal_size(&self) -> Option<std::io::Result<(u16, u16)>> {
         self.terminal
             .as_ref()
             .map(crate::term_setup::TuiTerminal::size)
-            .unwrap_or_else(crossterm::terminal::size)
     }
 
     pub(super) fn suspend_terminal<F, R>(&mut self, operation: F) -> Option<R>
@@ -447,7 +447,9 @@ impl crate::app::TuiApp {
     }
 
     pub(crate) fn platform_terminal_size(&self) -> std::io::Result<(u16, u16)> {
-        self.platform.terminal_size()
+        self.platform
+            .terminal_size()
+            .unwrap_or(Ok((self.last_width, self.last_height)))
     }
 
     pub(crate) fn terminal_is_focused(&self) -> bool {
