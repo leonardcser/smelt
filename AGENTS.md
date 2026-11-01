@@ -4,8 +4,8 @@ Pipe through `tail -120` and keep `set -o pipefail` so output stays bounded and 
 
 ```bash
 # build
-cargo build
-cargo build --profile release-fast --bin smelt   # fast optimized local build
+cargo build --bin smelt                          # default local build (incremental)
+cargo build --profile release-fast --bin smelt   # performance checks only; every edit rebuilds whole crates
 cargo build --profile dist --bin smelt           # distribution build
 
 # test (needs cargo-nextest; the harness feature enables storybook/test helpers)

@@ -104,8 +104,9 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
-# Faster optimized local builds for smoke-testing performance without paying
-# release LTO cost. Not used for published artifacts.
+# Optimized local builds for performance checks and benchmarks without paying
+# release LTO cost. Not incremental, so use the default dev build for the edit
+# loop. Not used for published artifacts.
 [profile.release-fast]
 inherits = "release"
 lto = false
