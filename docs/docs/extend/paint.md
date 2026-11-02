@@ -106,6 +106,7 @@ new model text from other changes. Each visible block has a screen `rect`, its
 first visible block row in `top`, and a `streaming` flag:
 
 ```lua
+-- Fresh ink: highlight newly streamed text.
 smelt.paint.frame(function(slice, ctx)
   for _, block in ipairs(smelt.transcript.visible_blocks()) do
     if block.streaming and block.rect then

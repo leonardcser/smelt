@@ -646,12 +646,33 @@ fn visible_blocks_report_screen_rects_and_streaming() {
 }
 
 #[test]
-fn dissolve_example_fades_deleted_text_then_goes_idle() {
+fn dissolve_fades_deleted_text_then_goes_idle() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.set_terminal_size(40, 12);
-    let guide = include_str!("../../../../../docs/docs/extend/ui.md");
-    let start = guide.find("-- Dissolve:").expect("dissolve example");
-    let example = &guide[start..start + guide[start..].find("```").unwrap()];
+    let example = r#"
+        local fading, fx = {}, nil
+        fx = smelt.paint.frame(function(slice, ctx)
+          for _, r in ipairs(ctx.damage) do
+            for x = r.x, r.x + r.width - 1 do
+              local old = ctx.prev and ctx.prev:get(x, r.y)
+              if old and old.ch ~= " " then
+                fading[#fading + 1] = { x = x, y = r.y, ch = old.ch, t = 4 }
+              end
+            end
+          end
+          local kept = {}
+          for _, f in ipairs(fading) do
+            local cell = slice:get(f.x, f.y)
+            if cell and cell.ch == " " then
+              slice:set(f.x, f.y, f.ch, { dim = true })
+            end
+            f.t = f.t - 1
+            if f.t > 0 then kept[#kept + 1] = f end
+          end
+          fading = kept
+          if #fading > 0 then fx:invalidate_after(33) end
+        end, { name = "test.dissolve", history = true })
+    "#;
     assert!(app.run_lua(example), "{example}");
     app.type_text("zq");
     for _ in 0..8 {
@@ -695,7 +716,7 @@ fn freshink_example_inks_only_new_text_while_the_view_follows_it() {
         });
     }
     app.start_submitted_turn("question");
-    let guide = include_str!("../../../../../docs/docs/extend/ui.md");
+    let guide = include_str!("../../../../../docs/docs/extend/paint.md");
     let start = guide.find("-- Fresh ink:").expect("fresh ink example");
     let example = &guide[start..start + guide[start..].find("```").unwrap()];
     assert!(app.run_lua(example), "{example}");
@@ -835,16 +856,29 @@ fn map_pointer_sends_clicks_to_the_cell_the_user_sees() {
 }
 
 #[test]
-fn flip_example_turns_the_screen_upside_down() {
+fn flip_turns_the_screen_upside_down() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.set_terminal_size(40, 12);
     app.type_text("flipme");
     app.render_silent();
     let before = app.render_to_frame();
 
-    let guide = include_str!("../../../../../docs/docs/extend/ui.md");
-    let start = guide.find("-- Upside down.").expect("flip example");
-    let example = &guide[start..start + guide[start..].find("```").unwrap()];
+    let example = r#"
+        smelt.paint.frame(function(slice, ctx)
+          local snap, w, h = slice:snapshot(), slice:width(), slice:height()
+          for y = 0, h - 1 do
+            for x = 0, w - 1 do
+              local cell = snap:get(x, h - 1 - y)
+              if cell.width > 0 then slice:set(x, y, cell.ch, cell.style) end
+            end
+          end
+          if ctx.cursor then slice:set_cursor(ctx.cursor.x, h - 1 - ctx.cursor.y) end
+        end, {
+          name = "test.flip",
+          order = 100,
+          map_pointer = function(x, y, _, height) return x, height - 1 - y end,
+        })
+    "#;
     assert!(app.run_lua(example), "{example}");
     let after = app.render_to_frame();
 
