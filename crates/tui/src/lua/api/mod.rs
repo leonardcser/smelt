@@ -95,6 +95,11 @@ pub(super) fn register_host_extensions(
     keymap: &mlua::Table,
     shared: &Arc<smelt_core::lua::LuaShared>,
 ) -> LuaResult<()> {
+    record_module_doc(
+        "smelt",
+        "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.",
+        ApiClassification::Supported,
+    );
     register_build_metadata(lua, smelt)?;
     engine::register(lua, smelt, shared)?;
     keymap::register(lua, keymap, shared)?;
