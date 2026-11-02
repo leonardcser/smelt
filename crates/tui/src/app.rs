@@ -2458,13 +2458,23 @@ impl TuiApp {
         }
     }
 
-    /// Resolve the public `WorkState` and label from `WorkingState` +
-    /// the per-app busy stack. Engine-side `Working`/`Retrying`/`Paused`
-    /// win over busy tokens; an empty engine state with a live busy
-    /// token reads as `Busy`; otherwise `Done`/`Interrupted` if a turn
-    /// just archived, else `Idle`. The label is the top busy entry's
-    /// when set, otherwise `"working"` for live engine phases, otherwise
-    /// empty.
+    fn continuation_is_scheduled(&self) -> bool {
+        self.conversation.continuation_token().is_some_and(|token| {
+            self.lua
+                .shared()
+                .scheduled_continuation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(session_id, scheduled_token)| {
+                    session_id == &self.conversation.session().id && *scheduled_token == token
+                })
+        })
+    }
+
+    /// Logical activity for the UI, plugins, and public status. Scheduled
+    /// continuations keep working between engine turns without owning a busy
+    /// token, which would prevent the scheduler from dispatching them.
     pub(crate) fn resolve_work_state(&self) -> (smelt_core::working::WorkState, String) {
         use smelt_core::working::{TurnOutcome, WorkState};
         let engine = self.working.engine_state();
@@ -2477,6 +2487,7 @@ impl TuiApp {
             WorkState::Busy
         } else {
             match outcome {
+                Some(TurnOutcome::Done) if self.continuation_is_scheduled() => WorkState::Working,
                 Some(TurnOutcome::Done) => WorkState::Done,
                 Some(TurnOutcome::Cancelled | TurnOutcome::Errored) => WorkState::Interrupted,
                 None => WorkState::Idle,
@@ -2486,8 +2497,8 @@ impl TuiApp {
         let label = if let Some(l) = busy_label {
             l
         } else if matches!(
-            engine,
-            Some(WorkState::Working) | Some(WorkState::Retrying) | Some(WorkState::Paused)
+            state,
+            WorkState::Working | WorkState::Retrying | WorkState::Paused
         ) {
             self.working.phase_label().unwrap_or("working").to_string()
         } else {
@@ -2500,17 +2511,13 @@ impl TuiApp {
     /// Derive and publish the `work_*` signals from `WorkingState` and the
     /// per-app busy stack.
     fn publish_work_signals(&mut self) {
-        use smelt_core::working::TurnOutcome;
+        use smelt_core::working::{TurnOutcome, WorkState};
 
         let (state, label) = self.resolve_work_state();
-        let engine = self.working.engine_state();
-        let outcome = self.working.last_outcome();
-
-        let outcome_str = match outcome {
-            Some(TurnOutcome::Done) if engine.is_none() => "done",
-            Some(TurnOutcome::Cancelled | TurnOutcome::Errored) if engine.is_none() => {
-                "interrupted"
-            }
+        let outcome_str = match (state, self.working.last_outcome()) {
+            (WorkState::Working, _) => "",
+            (_, Some(TurnOutcome::Done)) => "done",
+            (_, Some(TurnOutcome::Cancelled | TurnOutcome::Errored)) => "interrupted",
             _ => "",
         };
 
@@ -3626,6 +3633,23 @@ impl TuiApp {
         }
     }
 
+    fn tick_runtime(&mut self) {
+        self.tick_timers();
+        self.drain_persist_reports();
+        self.publish_diff_signals();
+        self.publish_public_status();
+        self.drain_signals_pending();
+        self.drive_lua_tasks();
+        for _id in self.drain_finished_blocks() {
+            self.core.signals.emit_dyn(
+                "block_done",
+                std::rc::Rc::new(smelt_core::signals::EventStub),
+            );
+        }
+        self.pump_lua();
+        self.dispatch_ui_window_events(true);
+    }
+
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
         crate::content::display_layout::set_kitty_probe_result(false);
         let platform_startup = smelt_perf::perf::begin("startup:platform");
@@ -3776,20 +3800,7 @@ impl TuiApp {
                 self.discard_turn(TurnEnd::Cancelled);
                 break 'main;
             }
-            self.tick_timers();
-            self.drain_persist_reports();
-            self.publish_diff_signals();
-            self.publish_public_status();
-            self.drain_signals_pending();
-            self.drive_lua_tasks();
-            for _id in self.drain_finished_blocks() {
-                self.core.signals.emit_dyn(
-                    "block_done",
-                    std::rc::Rc::new(smelt_core::signals::EventStub),
-                );
-            }
-            self.pump_lua();
-            self.dispatch_ui_window_events(true);
+            self.tick_runtime();
 
             for update in self.platform.drain_context_window_updates() {
                 self.apply_context_window_update(update);

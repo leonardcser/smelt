@@ -127,6 +127,10 @@ JSON records contain:
 | `boot_id`, `process_start_time_ticks` | Optional process-identity guards, available on Linux |
 | `updated_at_ms`, `expires_at_ms` | Unix timestamps for the latest heartbeat and expiry |
 
+A scheduled automatic continuation keeps the session `busy` between turns.
+Permission requests, questions, and turn errors still report `needs_attention`.
+Detached background commands alone do not keep a completed session `busy`.
+
 Status is refreshed on every state change and at least every 5 seconds; stale or
 dead-process records are ignored. Files live under `$XDG_RUNTIME_DIR/smelt/status`
 (the temporary directory if unset), readable only by you on Unix.

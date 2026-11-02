@@ -18,10 +18,9 @@ pub enum TurnPhase {
     Retrying { delay: Duration, attempt: u32 },
 }
 
-/// Public, plugin-facing snapshot of the overall work state. Resolved by
-/// the tui layer from the engine-side `WorkingState` and the per-app
-/// busy-token stack: `Idle` / `Busy` / `Done` / `Interrupted` are layered
-/// on top of `engine_state` in the cell publisher.
+/// Overall activity for plugins, UI, and public status. The tui combines
+/// live engine state, busy tokens, and scheduled continuations, so activity
+/// can remain `Working` between engine turns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkState {
     Idle,

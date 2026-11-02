@@ -241,6 +241,9 @@ pub struct LuaShared {
     /// the two maps allocate ids from the same `next_id` counter but each
     /// call_id only ever lands in one of them.
     pub ask_callbacks: Mutex<HashMap<u64, AskCallbacks>>,
+    /// Generation-local normal follow-up, scoped by session and continuation token.
+    /// Separate from busy work so the scheduler can still observe idle time.
+    pub scheduled_continuation: Mutex<Option<(String, u64)>>,
     pub next_id: Arc<AtomicU64>,
     lua_handle_ledger: Arc<LuaHandleLedger>,
     pub next_registry_token: AtomicU64,
@@ -437,6 +440,7 @@ impl Default for LuaShared {
             transcript_groups_cache_key: AtomicU64::new(0),
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
+            scheduled_continuation: Mutex::new(None),
             next_id: Arc::new(AtomicU64::new(1)),
             lua_handle_ledger: Arc::new(LuaHandleLedger::default()),
             next_registry_token: AtomicU64::new(1),

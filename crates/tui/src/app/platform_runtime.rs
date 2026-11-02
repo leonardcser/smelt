@@ -69,6 +69,8 @@ pub(super) struct PlatformRuntime {
     app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     public_status: Option<smelt_core::public_status::StatusPublisher>,
+    #[cfg(test)]
+    pub(super) status_updates: Option<Vec<smelt_core::public_status::StatusUpdate>>,
     public_status_heartbeat: Option<tokio::time::Interval>,
     http_client: Option<engine::HttpClient>,
     context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<ContextWindowUpdate>>,
@@ -117,6 +119,8 @@ impl PlatformRuntime {
             app_event_tx,
             app_event_rx,
             public_status,
+            #[cfg(test)]
+            status_updates: None,
             public_status_heartbeat: None,
             http_client: None,
             context_window_tx: None,
@@ -352,6 +356,10 @@ impl PlatformRuntime {
     }
 
     pub(super) fn publish_status(&mut self, update: smelt_core::public_status::StatusUpdate) {
+        #[cfg(test)]
+        if let Some(updates) = self.status_updates.as_mut() {
+            updates.push(update.clone());
+        }
         let Some(publisher) = self.public_status.as_mut() else {
             return;
         };

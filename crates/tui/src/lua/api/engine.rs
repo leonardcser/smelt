@@ -366,6 +366,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             )
         },
     )?;
+    {
+        let shared = Arc::clone(shared);
+        m.private_fn(
+            "__set_scheduled_continuation",
+            &["session_id", "token"],
+            move |_, (session_id, token): (String, Option<u64>)| -> LuaResult<()> {
+                *shared.scheduled_continuation.lock().unwrap() =
+                    token.map(|token| (session_id, token));
+                Ok(())
+            },
+        )?;
+    }
     m.fn_(
         "continuation_state",
         "Return the current session's continuation token and pause state. A new turn, cancellation, or session change invalidates scheduled continuations.",

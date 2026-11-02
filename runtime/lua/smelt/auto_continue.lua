@@ -118,6 +118,11 @@ end
 
 local function publish_status()
   local state = smelt.engine.continuation_state()
+  local scheduled_token
+  if not state.paused and current(pending, state) and can_continue(state) then
+    scheduled_token = pending.token
+  end
+  __smelt_internal.engine.__set_scheduled_continuation(smelt.session.id(), scheduled_token)
   local status
   if state.paused and state.error_kind ~= "cancelled" then
     status = { kind = state.error_kind or "other", phase = "paused" }

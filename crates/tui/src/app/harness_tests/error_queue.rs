@@ -437,20 +437,140 @@ fn auto_continue_off_disables_quota_retry() {
 }
 
 #[test]
-fn auto_continue_always_continues_without_goal() {
-    let mut app = isolated_app();
-    assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
-    clear_goal(&mut app);
-    let turn_id = start_canonical_turn(&mut app);
+fn auto_continuation_keeps_work_signals_and_status_busy() {
+    use smelt_core::public_status::PublicState;
 
-    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
-        turn_id,
-        history: None,
-        meta: None,
-    }));
-    app.wait_for_turn_persistence();
+    for goal in [false, true] {
+        let mut app = isolated_app();
+        clear_goal(&mut app);
+        if goal {
+            create_auto_goal(&mut app, "finish status continuity test");
+        } else {
+            assert!(app.run_lua(r#"smelt.settings.auto_continue = "always""#));
+        }
+        let turn_id = start_canonical_turn(&mut app);
+        app.set_terminal_focus_for_harness(false);
+        app.app.platform.status_updates = Some(Vec::new());
+        assert!(app.run_lua(
+            r#"
+            _G.work_states = {}
+            smelt.signal.subscribe("work_state", function(value)
+                table.insert(_G.work_states, value)
+            end)
+        "#
+        ));
+        let release = app.app.conversation.pause_persistence();
+        app.app.dispatch_engine_event(EngineEvent::TurnComplete {
+            turn_id,
+            history: None,
+            meta: None,
+        });
+        app.app.tick_runtime();
+        app.clock.advance(std::time::Duration::from_millis(1199));
+        app.app.tick_runtime();
+        assert!(!app.app.turn_submission_is_pending());
+        assert!(app.run_lua(
+            r#"
+            assert(smelt.signal.get("work_state") == "working")
+            assert(smelt.signal.get("work_label") == "working")
+            assert(smelt.signal.get("work_outcome") == "")
+        "#
+        ));
+        app.clock.advance(std::time::Duration::from_millis(1));
+        app.app.tick_runtime();
+        assert!(app.app.turn_submission_is_pending());
+        release.send(()).unwrap();
+        app.wait_for_turn_persistence();
+        app.app.tick_runtime();
+        assert!(has_started_turn(&app.drain_engine_sends()));
+        let updates = app.app.platform.status_updates.as_ref().unwrap();
+        assert!(!updates.is_empty());
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.state == PublicState::Busy && update.reason.is_none()),
+            "{updates:?}"
+        );
+        assert!(app.run_lua(
+            r#"
+            for _, state in ipairs(_G.work_states) do assert(state == "working", state) end
+        "#
+        ));
+    }
+}
 
-    assert!(has_started_turn(&run_due_timers(&mut app, 1300)));
+#[test]
+fn stopped_continuation_reports_completion() {
+    use smelt_core::public_status::{PublicReason, PublicState};
+
+    for (stop, state, reason) in [
+        (
+            r#"smelt.settings.auto_continue = "off""#,
+            PublicState::NeedsAttention,
+            PublicReason::TurnComplete,
+        ),
+        (
+            r#"require("smelt.goal").clear()"#,
+            PublicState::NeedsAttention,
+            PublicReason::TurnComplete,
+        ),
+        (
+            "smelt.engine.cancel()",
+            PublicState::Idle,
+            PublicReason::Interrupted,
+        ),
+    ] {
+        let mut app = isolated_app();
+        create_auto_goal(&mut app, "stop scheduled work");
+        let turn_id = start_canonical_turn(&mut app);
+        app.set_terminal_focus_for_harness(false);
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id,
+            history: None,
+            meta: None,
+        }));
+        app.wait_for_turn_persistence();
+        assert!(app.run_lua(stop));
+        app.pump_lua();
+        assert_eq!(app.public_status_state_reason(), (state, Some(reason)));
+        assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
+    }
+}
+
+#[test]
+fn scheduled_continuation_follows_session_lifecycle() {
+    use smelt_core::public_status::PublicState;
+
+    for reset in [false, true] {
+        let mut app = isolated_app();
+        create_auto_goal(&mut app, "follow session lifecycle");
+        let turn_id = start_canonical_turn(&mut app);
+        app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+            turn_id,
+            history: None,
+            meta: None,
+        }));
+        app.wait_for_turn_persistence();
+        if reset {
+            app.reset_session();
+            app.wait_for_session_lifecycle();
+        } else {
+            app.reload_lua();
+        }
+        let mut app = with_advancing_clock(app);
+        assert_eq!(
+            app.public_status_state_reason(),
+            (
+                if reset {
+                    PublicState::Idle
+                } else {
+                    PublicState::Busy
+                },
+                None
+            )
+        );
+        assert_eq!(has_started_turn(&run_due_timers(&mut app, 1300)), !reset);
+    }
 }
 
 #[test]
