@@ -174,9 +174,6 @@ layout.set(function(state)
 end)
 ```
 
-The [changes sidebar](gallery.md#changes-sidebar) in the gallery is a complete
-example.
-
 ## Large read-only views
 
 For big read-only content, give a window a document instead of filling a buffer

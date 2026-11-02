@@ -47,6 +47,12 @@ export type Scene = {
   from?: RegExp;
   /** Extra files for the config dir, keyed by path under `~/.config/smelt/`. */
   files?: Record<string, string>;
+  /** Run in a throwaway `$HOME`, so the config is at `~/.config/smelt/`, where the agent can write a plugin. */
+  home?: boolean;
+  /** Command-line arguments for smelt, for a scripted scene: `--mode yolo` lets its tools run unasked. */
+  args?: string[];
+  /** Extra `init.lua`, given the scripted provider's port. */
+  init?: (port: number | null) => string;
   steps: Step[];
 };
 
@@ -95,6 +101,33 @@ const themes = (scheme: "dark" | "light", list: string[]): Scene => ({
     { pause: 1800 * list.length + 1500 },
   ],
 });
+
+/** The lamp fix as the home page asks it. */
+const LAMP_FIX = "a 10% discount makes the lamp free. fix it";
+
+/** The local model, and both subscriptions as `/model` lists them, all served by the scripted
+ * provider so every answer is scripted whichever model asks. */
+const subscriptions = (port: number | null) => `smelt.provider.register("ollama", {
+  type = "openai-compatible",
+  api_base = "http://127.0.0.1:${port}/v1",
+  models = { { name = "qwen3.8:27b", context_window = 262144 } },
+})
+smelt.defaults.set({ model = "ollama/qwen3.8:27b" })
+smelt.settings.show_cost = false
+smelt.provider.register("codex", {
+  type = "openai-compatible",
+  api_base = "http://127.0.0.1:${port}/v1",
+  models = { { name = "gpt-6.1-sol", context_window = 400000 } },
+})
+smelt.provider.register("claude-code", {
+  type = "openai-compatible",
+  api_base = "http://127.0.0.1:${port}/v1",
+  models = {
+    { name = "opus", context_window = 1000000 }, { name = "sonnet", context_window = 1000000 },
+    { name = "fable", context_window = 1000000 }, { name = "haiku", context_window = 200000 },
+  },
+})
+`;
 
 /** The plugins shown on the homepage and in the plugin gallery, from `plugins/`. */
 const plugin = (name: string) => readFileSync(new URL(`../plugins/${name}.lua`, import.meta.url), "utf8");
@@ -174,44 +207,6 @@ export const scenes: Record<string, Scene> = {
     cols: 64,
     rows: 14,
     files: { "plugins/lualine.lua": plugin("lualine") },
-    steps: [
-      { pause: 1200 },
-      { type: "run the tests and fix whatever fails" },
-      { pause: 400 },
-      { key: "Enter" },
-      // Skip ahead through the model's first think, then play the turn in real time.
-      { speed: 8 },
-      { until: /^\* \w/m },
-      { speed: 1 },
-      { until: /─ ● done/ },
-      { pause: 2500 },
-    ],
-  },
-
-  /** A glitching status word that decodes in, flickers and corrupts into the next while the agent works. */
-  glitch: {
-    fromSubmit: true,
-    realtime: true,
-    cols: 64,
-    rows: 14,
-    files: { "plugins/glitch.lua": plugin("glitch") },
-    steps: [
-      { pause: 1200 },
-      { type: "run the tests and fix whatever fails" },
-      { pause: 400 },
-      { key: "Enter" },
-      { until: /─ done/ },
-      { pause: 2500 },
-    ],
-  },
-
-  /** A changed-files sidebar beside the default layout, updating as the agent edits. */
-  changes: {
-    fromSubmit: true,
-    realtime: true,
-    cols: 110,
-    rows: 24,
-    files: { "plugins/changes.lua": plugin("changes") },
     steps: [
       { pause: 1200 },
       { type: "run the tests and fix whatever fails" },
@@ -402,6 +397,84 @@ export const scenes: Record<string, Scene> = {
       { type: "?" },
       { press: ["Escape"], gap: 700 },
       { pause: 1500 },
+    ],
+  },
+
+  /** The cursor leaves the prompt and goes anywhere in the conversation: between messages, to a search match, over a code block, which is yanked into the prompt. */
+  cursor: {
+    vim: true,
+    mock: true,
+    home: true,
+    args: ["--mode", "yolo"],
+    cols: 100,
+    rows: 30,
+    from: /cargo test to confirm/,
+    steps: [
+      { pause: 800 },
+      { type: "give me a quick tour of this project" },
+      { key: "Enter" },
+      { until: /─ ● done/ },
+      { pause: 500 },
+      { type: LAMP_FIX },
+      { key: "Enter" },
+      { until: /─ ● done/ },
+      { pause: 500 },
+      { type: "where does the rounding happen?" },
+      { key: "Enter" },
+      { until: /─ ● done/ },
+      { pause: 1500 },
+      // Up out of the prompt, back through the messages you wrote and forward again.
+      { press: ["Escape"], gap: 400 },
+      { press: ["C-w", "k"], gap: 300 },
+      { pause: 600 },
+      ...["[u", "[u", "[u", "]u", "]u"].flatMap((motion): Step[] => [{ press: [...motion], gap: 120 }, { pause: 650 }]),
+      // Search for a line of the code, select the whole block and yank it.
+      { press: ["/"], gap: 300 },
+      { type: "price_cents -" },
+      { pause: 300 },
+      { key: "Enter" },
+      { pause: 800 },
+      { press: ["v", "i", "c"], gap: 250 },
+      { pause: 900 },
+      { press: ["y"], gap: 300 },
+      { pause: 600 },
+      // Back in the prompt, the block goes in under a question.
+      { press: ["C-c"], gap: 500 },
+      { press: ["A"], gap: 300 },
+      { type: "does this round down?" },
+      { press: ["C-j", "Escape", "p"], gap: 400 },
+      { pause: 2500 },
+    ],
+  },
+
+  /** `/model` lists the local model and both subscriptions, and moves from one to another mid-session. */
+  models: {
+    mock: true,
+    home: true,
+    args: ["--mode", "yolo"],
+    init: subscriptions,
+    cols: 100,
+    rows: 22,
+    from: /─ ● done/,
+    steps: [
+      { pause: 800 },
+      { type: "what does apply_discount do?" },
+      { key: "Enter" },
+      { until: /─ ● done/ },
+      { pause: 1500 },
+      { type: "/model" },
+      { pause: 300 },
+      { key: "Enter" },
+      { pause: 1800 },
+      { press: ["Up"], gap: 500 },
+      { pause: 900 },
+      { key: "Enter" },
+      { pause: 900 },
+      { type: "where is the total?" },
+      { pause: 400 },
+      { key: "Enter" },
+      { until: /Cart::total/ },
+      { pause: 2500 },
     ],
   },
 

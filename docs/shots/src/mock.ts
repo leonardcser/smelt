@@ -1,4 +1,6 @@
 // Scripted OpenAI-compatible chat server so the static screenshots never depend on a real provider.
+import { PROJECT } from "./paths";
+
 export const MODEL = "gpt-6-luna";
 
 type Chunk = Record<string, unknown>;
@@ -27,13 +29,16 @@ const text = (t: string): Chunk[] => {
   ];
 };
 
+/** Tool calls answered so far, so every call gets its own id across a multi-step turn. */
+let callIds = 0;
+
 const calls = (content: string, list: { name: string; args: Record<string, unknown> }[]): Chunk[] => [
   chunk({
     role: "assistant",
     content,
     tool_calls: list.map((c, index) => ({
       index,
-      id: `call_shots_${index}`,
+      id: `call_shots_${callIds++}`,
       type: "function",
       function: { name: c.name, arguments: JSON.stringify(c.args) },
     })),
@@ -70,6 +75,55 @@ impl Rule {
 }
 `;
 
+/** The gallery's exchanges, a step for each tool result since the user's message: the lamp fix reads
+ * the pricing, fixes the divisor, runs the tests and reports; the crate question looks up two crates;
+ * a thanks gets a word back. */
+function gallery(user: string, step: number): Chunk[] | null {
+  if (/^\W*thanks!\W*$/i.test(user)) return text("Anytime.");
+  if (/how does the discount math work\?/i.test(user))
+    return text(
+      "`apply_discount` takes a price in cents and a percent off. It works out the cut as `price * percent / 100`, " +
+        "then takes that from the price, so 10% off a $50 lamp leaves $45.\n\n" +
+        "Everything stays in whole cents, so no float rounding creeps in, and a percent over 100 is held at 100 " +
+        "so a price never goes below zero. A fixed amount off goes through `Rule::Fixed`, which saturates the same way.",
+    );
+  if (/what does apply_discount do\?/i.test(user)) return text("Takes a price in cents and a percent, and returns the price after the discount.");
+  if (/money math/i.test(user)) {
+    if (step === 0) return calls("", [{ name: "crate_info", args: { name: "rust_decimal" } }, { name: "crate_info", args: { name: "bigdecimal" } }]);
+    return text("Use `rust_decimal`: fixed precision, fast, and made for money. `bigdecimal` is for arbitrary precision.");
+  }
+  if (/plan a test for 0% off/i.test(user)) {
+    const plan = (...status: string[]) => ({
+      items: ["Read how apply_discount rounds", "Write a test for 0% off", "Run the tests"].map((text, i) => ({ text, status: status[i] })),
+    });
+    if (step === 0) return calls("", [{ name: "todo", args: plan("active", "todo", "todo") }]);
+    if (step === 1) return calls("", [{ name: "todo", args: plan("done", "active", "todo") }]);
+    if (step === 2) return calls("", [{ name: "todo", args: plan("done", "done", "active") }]);
+    return text("All three done: 0% off leaves the price as it was.");
+  }
+  if (/how big is each file\?/i.test(user)) {
+    if (step === 0) {
+      return calls("", [
+        { name: "chart", args: { title: "lines per file", bars: [["src/cart.rs", 64], ["src/pricing.rs", 12], ["src/lib.rs", 2], ["tests/cart.rs", 41]].map(([label, value]) => ({ label, value })) } },
+      ]);
+    }
+    return text("`cart.rs` is the biggest; `lib.rs` only declares the modules.");
+  }
+  if (/run the checkout tests/i.test(user)) {
+    if (step === 0) return bash("", "cargo test -q --test checkout", "Run the checkout tests");
+    return text("There is no `checkout` test target. The cart tests live in `tests/cart.rs`.");
+  }
+  if (!/lamp free/i.test(user)) return null;
+  if (step === 0) return calls("", [{ name: "read_file", args: { file_path: `${PROJECT}/src/pricing.rs` } }]);
+  if (step === 1) {
+    return calls("It divides by `10`, not `100`.", [
+      { name: "edit_file", args: { file_path: `${PROJECT}/src/pricing.rs`, old_string: "price_cents * percent / 10\n", new_string: "price_cents * percent / 100\n" } },
+    ]);
+  }
+  if (step === 2) return bash("", "cargo test -q --test cart", "Run the tests");
+  return text("Fixed: 10% off a $50 lamp is now $45. All 4 tests pass.");
+}
+
 type Message = { role: string; content?: unknown };
 
 const asText = (content: unknown) => (typeof content === "string" ? content : JSON.stringify(content ?? ""));
@@ -81,9 +135,11 @@ function reply(messages: Message[]): Chunk[] {
   const system = asText(messages.find((m) => m.role === "system")?.content);
 
   if (/title/i.test(system) && messages.length <= 3) return text("Fix failing cart tests");
+  const scripted = gallery(user, messages.slice(lastUser + 1).filter((m) => m.role === "tool").length);
+  if (scripted) return scripted;
   if (/discount\.rs/i.test(user)) {
     return calls("I'll move the discount rules into their own file.", [
-      { name: "write_file", args: { file_path: "/tmp/acme-app/src/discount.rs", content: discountModule } },
+      { name: "write_file", args: { file_path: `${PROJECT}/src/discount.rs`, content: discountModule } },
     ]);
   }
   if (/run the tests/i.test(user)) return bash("I'll run the test suite first.", "cargo test", "Run the test suite");

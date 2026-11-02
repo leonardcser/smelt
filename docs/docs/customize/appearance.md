@@ -22,7 +22,8 @@ smelt.lifecycle.on_ready(function()
 end)
 ```
 
-`/theme` lists every bundled name, marked ☾ for dark and ☀ for light.
+`/theme` lists every bundled name, marked ☾ for dark and ☀ for light. For
+themes that restyle more than colors, see the [plugin gallery](../gallery/index.md).
 
 ### Your own colors
 

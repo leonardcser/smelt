@@ -1,0 +1,604 @@
+{
+ "featured": [
+  "lualine",
+  "bubbles",
+  "win95",
+  "chart",
+  "weather",
+  "xray",
+  "decode",
+  "snake"
+ ],
+ "sections": [
+  {
+   "name": "Themes",
+   "blurb": "Restyle the whole interface: colors, mood, era."
+  },
+  {
+   "name": "Transcripts",
+   "blurb": "The conversation drawn as something else: a messenger, a timeline, panels."
+  },
+  {
+   "name": "Bars",
+   "blurb": "Statuslines, header lines, the prompt and its indicators, and notifications."
+  },
+  {
+   "name": "Layouts",
+   "blurb": "Rearrange the screen: sidebars, panes and whole desktops."
+  },
+  {
+   "name": "Workflow",
+   "blurb": "Keys and indicators that make smelt quicker to drive."
+  },
+  {
+   "name": "Tools",
+   "blurb": "New tools the agent can call, each drawn its own way in the transcript."
+  },
+  {
+   "name": "Hooks",
+   "blurb": "Code that runs when smelt acts: before a command runs, after a file changes."
+  },
+  {
+   "name": "Commands",
+   "blurb": "Effects you call up with a slash command, and that go away on their own or with a key."
+  },
+  {
+   "name": "Events",
+   "blurb": "Effects smelt sets off itself: a failed tool, a long turn finished, a cleared screen, you stepping away."
+  },
+  {
+   "name": "While it works",
+   "blurb": "Effects that come alive while the model streams and settle when the turn is done."
+  },
+  {
+   "name": "Mouse and keys",
+   "blurb": "Effects that follow the mouse and the keyboard."
+  },
+  {
+   "name": "Games",
+   "blurb": "Open one with its command and play while the agent works."
+  }
+ ],
+ "items": [
+  {
+   "slug": "light",
+   "title": "Light",
+   "category": "Themes",
+   "summary": "Light, and bright.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/light.lua",
+   "bundled": false
+  },
+  {
+   "slug": "mono",
+   "title": "Mono",
+   "category": "Themes",
+   "summary": "/mono <green|amber>: a monochrome screen.",
+   "detail": "Every color in the theme becomes a shade of phosphor, by how bright it is; green to start with.",
+   "command": "/mono",
+   "source": "docs/shots/gallery/mono.lua",
+   "bundled": false
+  },
+  {
+   "slug": "vaporwave",
+   "title": "Vaporwave",
+   "category": "Themes",
+   "summary": "Dark to purple, mid to pink, bright to cyan.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/vaporwave.lua",
+   "bundled": false
+  },
+  {
+   "slug": "huedrift",
+   "title": "Hue drift",
+   "category": "Themes",
+   "summary": "The theme's colors drift slowly round the color wheel, and jump ahead on every turn.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/huedrift.lua",
+   "bundled": false
+  },
+  {
+   "slug": "nightshift",
+   "title": "Night shift",
+   "category": "Themes",
+   "summary": "The screen warms after dark, the way a night light does, and cools back by morning.",
+   "detail": "`/nightshift` steps between following the clock, always on, and off.",
+   "command": "/nightshift",
+   "source": "docs/shots/gallery/nightshift.lua",
+   "bundled": false
+  },
+  {
+   "slug": "colorblind",
+   "title": "Colorblind",
+   "category": "Themes",
+   "summary": "`/colorblind <protan|deutan|tritan|mono>` shows smelt as someone with that color vision sees it, to check a theme; `/colorblind fix <protan|deutan|tritan>` shifts the colors they can't tell apart into ones they can; `/colorblind off` turns it off.",
+   "detail": "",
+   "command": "/colorblind",
+   "source": "docs/shots/gallery/colorblind.lua",
+   "bundled": false
+  },
+  {
+   "slug": "bloom",
+   "title": "Bloom",
+   "category": "Themes",
+   "summary": "Vivid colored text glows, its light spilling softly onto the background around it.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/bloom.lua",
+   "bundled": false
+  },
+  {
+   "slug": "panels",
+   "title": "Panels",
+   "category": "Transcripts",
+   "summary": "Your messages and every tool call on a panel: a band of background with a row of padding above and below, each kind of tool in a color of its own.",
+   "detail": "Answers stay plain text between them.",
+   "command": null,
+   "source": "docs/shots/gallery/panels.lua",
+   "bundled": false
+  },
+  {
+   "slug": "timeline",
+   "title": "Timeline",
+   "category": "Transcripts",
+   "summary": "The transcript as a timeline: a rail down the left, a node on it for each message and tool.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/timeline.lua",
+   "bundled": false
+  },
+  {
+   "slug": "bubbles",
+   "title": "Bubbles",
+   "category": "Transcripts",
+   "summary": "The transcript as a messenger: your messages in blue bubbles on the right, smelt's answers in gray ones on the left, each as wide as its text.",
+   "detail": "Everything else, tool calls included, shows as it always does.",
+   "command": null,
+   "source": "docs/shots/gallery/bubbles.lua",
+   "bundled": false
+  },
+  {
+   "slug": "lualine",
+   "title": "Lualine",
+   "category": "Bars",
+   "summary": "A lualine-style statusline with the mode, working directory, branch and changed-file counts.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/plugins/lualine.lua",
+   "bundled": false
+  },
+  {
+   "slug": "glitch-spinner",
+   "title": "Glitch spinner",
+   "category": "Bars",
+   "summary": "A working indicator whose status words decode in from noise, flicker, then corrupt into the next.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/plugins/glitch.lua",
+   "bundled": false
+  },
+  {
+   "slug": "pills",
+   "title": "Pills",
+   "category": "Bars",
+   "summary": "A statusline of rounded pills: the mode, the project, the model and the time.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/pills.lua",
+   "bundled": false
+  },
+  {
+   "slug": "airline",
+   "title": "Airline",
+   "category": "Bars",
+   "summary": "A vim-airline statusline: powerline segments whose mode block changes color with what smelt is doing (blue at rest, orange at work, green when done), the project and branch beside it, and the model, context and time on the right.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/airline.lua",
+   "bundled": false
+  },
+  {
+   "slug": "marquee",
+   "title": "Marquee",
+   "category": "Bars",
+   "summary": "The headerline as a marquee: the project, the time and a word from smelt scrolling past.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/marquee.lua",
+   "bundled": false
+  },
+  {
+   "slug": "filled-prompt",
+   "title": "Filled prompt",
+   "category": "Bars",
+   "summary": "The prompt's three rows on one band of background, in the color of your sent messages, instead of two rules around it.",
+   "detail": "No spinner: just the model and tokens on the right.",
+   "command": null,
+   "source": "docs/shots/gallery/filled-prompt.lua",
+   "bundled": false
+  },
+  {
+   "slug": "shell-prompt",
+   "title": "Shell prompt",
+   "category": "Bars",
+   "summary": "A shell's prompt: one row with a `❯` that turns yellow while smelt works and green when it is done, no rules around it.",
+   "detail": "What the rules showed moves into the statusline.",
+   "command": null,
+   "source": "docs/shots/gallery/shell-prompt.lua",
+   "bundled": false
+  },
+  {
+   "slug": "toasts",
+   "title": "Toasts",
+   "category": "Bars",
+   "summary": "Notifications of its own: one quiet line at the top right for every tool smelt runs and when a turn ends.",
+   "detail": "It slides in, gets a tick when the tool is done, and slides away a few seconds later.",
+   "command": null,
+   "source": "docs/shots/gallery/toasts.lua",
+   "bundled": false
+  },
+  {
+   "slug": "c64",
+   "title": "Commodore 64",
+   "category": "Layouts",
+   "summary": "A Commodore 64: light blue on blue inside a light blue border, BASIC up top, READY.",
+   "detail": "below.",
+   "command": null,
+   "source": "docs/shots/gallery/c64.lua",
+   "bundled": false
+  },
+  {
+   "slug": "win95",
+   "title": "Windows 95",
+   "category": "Layouts",
+   "summary": "Windows 95: grey everywhere, a blue title bar with its buttons, and a taskbar with Start.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/win95.lua",
+   "bundled": false
+  },
+  {
+   "slug": "weather",
+   "title": "Weather",
+   "category": "Commands",
+   "summary": "/weather <rain|snow|autumn|spring|off>: weather over the conversation that knows where the text is.",
+   "detail": "Rain splashes on words, snow piles up on them, leaves and petals land on them for a while. It eases in, and when you turn it off it eases out and what lies on the text melts away.",
+   "command": "/weather",
+   "source": "docs/shots/gallery/weather.lua",
+   "bundled": false
+  },
+  {
+   "slug": "matrix",
+   "title": "Matrix",
+   "category": "Commands",
+   "summary": "The matrix rains down the screen for a few seconds, then the last columns drain away.",
+   "detail": "",
+   "command": "/matrix",
+   "source": "docs/shots/gallery/matrix.lua",
+   "bundled": false
+  },
+  {
+   "slug": "bounce",
+   "title": "DVD",
+   "category": "Commands",
+   "summary": "A small DVD logo bounces over the conversation like an idle player, changing color at every wall, until you run it again.",
+   "detail": "",
+   "command": "/dvd",
+   "source": "docs/shots/gallery/bounce.lua",
+   "bundled": false
+  },
+  {
+   "slug": "rainbow",
+   "title": "Rainbow",
+   "category": "Commands",
+   "summary": "A rainbow drifts across all the text on screen until you run it again.",
+   "detail": "",
+   "command": "/rainbow",
+   "source": "docs/shots/gallery/rainbow.lua",
+   "bundled": false
+  },
+  {
+   "slug": "flashlight",
+   "title": "Flashlight",
+   "category": "Commands",
+   "summary": "Lights out.",
+   "detail": "The whole screen goes dark but for a flickering beam that follows the mouse, until you run it again.",
+   "command": "/flashlight",
+   "source": "docs/shots/gallery/flashlight.lua",
+   "bundled": false
+  },
+  {
+   "slug": "donut",
+   "title": "Donut",
+   "category": "Commands",
+   "summary": "Andy Sloane's donut.c, spinning over everything on screen.",
+   "detail": "The session keeps working under it; /donut again stops it.  A straight port: a circle of radius 1 swept at radius 2 around the y axis, 5 units from the eye, turned by A about the x axis and B about the z axis, lit from behind the viewer and above. Only the scale follows the screen, and the turn follows the clock, so a late frame still lands where it should.",
+   "command": "/donut",
+   "source": "runtime/lua/smelt/plugins/donut.lua",
+   "bundled": true
+  },
+  {
+   "slug": "barrelroll",
+   "title": "Barrel roll",
+   "category": "Commands",
+   "summary": "`/barrelroll` spins the whole screen one full turn, pulling back as it goes so it spins clear of the edges.",
+   "detail": "Letters stay upright; lines, corners and half blocks turn with it.",
+   "command": "/barrelroll",
+   "source": "docs/shots/gallery/barrelroll.lua",
+   "bundled": false
+  },
+  {
+   "slug": "flip",
+   "title": "Flip",
+   "category": "Commands",
+   "summary": "`/flip` turns the whole screen over like a card, around its middle row, and smelt keeps working upside down until the next `/flip`: typing, clicks and scrolling land where they show.",
+   "detail": "On April 1 it turns over by itself at startup.",
+   "command": "/flip",
+   "source": "docs/shots/gallery/flip.lua",
+   "bundled": false
+  },
+  {
+   "slug": "bigclock",
+   "title": "Big clock",
+   "category": "Commands",
+   "summary": "A big clock in the middle of the screen.",
+   "detail": "q or Esc puts it away.",
+   "command": "/bigclock",
+   "source": "docs/shots/gallery/bigclock.lua",
+   "bundled": false
+  },
+  {
+   "slug": "screensaver",
+   "title": "Screensaver",
+   "category": "Events",
+   "summary": "A harmonograph screensaver: two damped pendulums draw a curve in fine braille lines, its color drifting through the spectrum as it goes, then a new figure starts.",
+   "detail": "It comes on after two minutes without input, or with /screensaver, and any key puts it away. One quiet line says what the agent is doing, and how long the turn took once it is done.",
+   "command": "/screensaver",
+   "source": "docs/shots/gallery/screensaver.lua",
+   "bundled": false
+  },
+  {
+   "slug": "confetti",
+   "title": "Confetti",
+   "category": "Events",
+   "summary": "A confetti popper: two blasts from the bottom corners shoot up, slow in the air, then flutter down.",
+   "detail": "`/confetti` pops one, and so does a turn that kept you waiting more than 20 seconds.",
+   "command": "/confetti",
+   "source": "docs/shots/gallery/confetti.lua",
+   "bundled": false
+  },
+  {
+   "slug": "lightning",
+   "title": "Lightning",
+   "category": "Events",
+   "summary": "Lightning when something breaks: a tool that fails or a turn that errors sends a bolt forking down the screen.",
+   "detail": "It glows white-hot, cools to violet and is gone, so you notice from across the room.",
+   "command": "/lightning",
+   "source": "docs/shots/gallery/lightning.lua",
+   "bundled": false
+  },
+  {
+   "slug": "gravity",
+   "title": "Gravity",
+   "category": "Events",
+   "summary": "`/clear` and `/new` let go of the conversation, and its letters fall off the screen.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/gravity.lua",
+   "bundled": false
+  },
+  {
+   "slug": "dissolve",
+   "title": "Dissolve",
+   "category": "Events",
+   "summary": "When most of the screen changes at once (a theme, `/clear`, a resumed session), the old screen breaks up into the new one grain by grain instead of cutting.",
+   "detail": "Scrolling doesn't count.",
+   "command": null,
+   "source": "docs/shots/gallery/dissolve.lua",
+   "bundled": false
+  },
+  {
+   "slug": "away",
+   "title": "Away",
+   "category": "Events",
+   "summary": "When the terminal loses focus, smelt fades to a dim gray, the way a dimmed window shows it is in the background, and its colors come back as soon as you return.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/away.lua",
+   "bundled": false
+  },
+  {
+   "slug": "decode",
+   "title": "Decode",
+   "category": "While it works",
+   "summary": "The text the model writes arrives scrambled and green, and resolves glyph by glyph.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/decode.lua",
+   "bundled": false
+  },
+  {
+   "slug": "freshink",
+   "title": "Fresh ink",
+   "category": "While it works",
+   "summary": "The text the model writes lands bright and dries into its own color.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/freshink.lua",
+   "bundled": false
+  },
+  {
+   "slug": "sparkler",
+   "title": "Sparkler",
+   "category": "While it works",
+   "summary": "Sparks fly from wherever the model is writing, arcing down and cooling as they fall.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/sparkler.lua",
+   "bundled": false
+  },
+  {
+   "slug": "cat",
+   "title": "Cat",
+   "category": "While it works",
+   "summary": "A cat in the corner that keeps an eye on the agent: it dozes while nothing happens, watches the work with its eyes going back and forth, and is pleased for a moment when the turn is done.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/cat.lua",
+   "bundled": false
+  },
+  {
+   "slug": "trail",
+   "title": "Trail",
+   "category": "Mouse and keys",
+   "summary": "Embers trail the mouse, falling and cooling from yellow through orange to red as they go.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/trail.lua",
+   "bundled": false
+  },
+  {
+   "slug": "xray",
+   "title": "X-ray",
+   "category": "Mouse and keys",
+   "summary": "Point at a word and every other place it shows on screen lights up with it, fading out for a moment after the mouse moves on.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/xray.lua",
+   "bundled": false
+  },
+  {
+   "slug": "focus",
+   "title": "Focus",
+   "category": "Mouse and keys",
+   "summary": "The message or tool under the mouse stays sharp and the rest of the conversation fades back.",
+   "detail": "`/focus` turns it off and on.",
+   "command": "/focus",
+   "source": "docs/shots/gallery/focus.lua",
+   "bundled": false
+  },
+  {
+   "slug": "sparks",
+   "title": "Sparks",
+   "category": "Mouse and keys",
+   "summary": "Sparks fly from the prompt as you type.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/sparks.lua",
+   "bundled": false
+  },
+  {
+   "slug": "snake",
+   "title": "Snake",
+   "category": "Games",
+   "summary": "Snake in a floating window while the agent works. Steer with hjkl or the arrows.",
+   "detail": "hjkl or the arrows steer, space starts over, q, Esc or Ctrl-C closes. The title shows the score and the best one this session.  Two board rows share one terminal row: `▀` paints the top half in its foreground and the bottom half in its background.",
+   "command": "/snake",
+   "source": "runtime/lua/smelt/plugins/snake.lua",
+   "bundled": true
+  },
+  {
+   "slug": "invaders",
+   "title": "Invaders",
+   "category": "Games",
+   "summary": "The aliens march and the ship fights back.",
+   "detail": "smelt flies it until you press a key; then it is yours: h or ← left, l or → right, space fires. q or Esc closes.",
+   "command": "/invaders",
+   "source": "docs/shots/gallery/invaders.lua",
+   "bundled": false
+  },
+  {
+   "slug": "pong",
+   "title": "Pong",
+   "category": "Games",
+   "summary": "You against smelt.",
+   "detail": "smelt plays both paddles until you press a key; then the left one is yours: k or ↑ up, j or ↓ down. q or Esc closes.",
+   "command": "/pong",
+   "source": "docs/shots/gallery/pong.lua",
+   "bundled": false
+  },
+  {
+   "slug": "breakout",
+   "title": "Breakout",
+   "category": "Games",
+   "summary": "Bricks, a ball and a paddle.",
+   "detail": "smelt plays until you press a key; then the paddle is yours: h or ← left, l or → right. Three balls a game. q or Esc closes.",
+   "command": "/breakout",
+   "source": "docs/shots/gallery/breakout.lua",
+   "bundled": false
+  },
+  {
+   "slug": "flappy",
+   "title": "Flappy",
+   "category": "Games",
+   "summary": "A bird through the pipes.",
+   "detail": "smelt flaps until you press a key; then it is yours: space, k or ↑ flaps. A pipe or the ground starts it over. q or Esc closes.",
+   "command": "/flappy",
+   "source": "docs/shots/gallery/flappy.lua",
+   "bundled": false
+  },
+  {
+   "slug": "crates",
+   "title": "Crate lookup",
+   "category": "Tools",
+   "summary": "A new tool for the agent: the latest version, downloads and description of a crate, from crates.io.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/plugins/crates.lua",
+   "bundled": false
+  },
+  {
+   "slug": "todo",
+   "title": "Plan",
+   "category": "Tools",
+   "summary": "A plan the agent keeps: a `todo` tool it calls with its steps, drawn in the transcript as a checklist that ticks off as it works, with the step in progress lit up.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/todo.lua",
+   "bundled": false
+  },
+  {
+   "slug": "chart",
+   "title": "Chart",
+   "category": "Tools",
+   "summary": "A `chart` tool: the agent passes labeled numbers and the transcript draws them as a bar chart, each bar in its own color, measured to an eighth of a cell.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/chart.lua",
+   "bundled": false
+  },
+  {
+   "slug": "autoformat",
+   "title": "Auto-format",
+   "category": "Hooks",
+   "summary": "Formats every file the agent edits, the moment the edit lands: a hook on finished tool calls runs the project's formatter on the file and says so.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/autoformat.lua",
+   "bundled": false
+  },
+  {
+   "slug": "whichkey",
+   "title": "Which-key",
+   "category": "Workflow",
+   "summary": "Ctrl+space in the prompt opens a popup of what the next key does; press one to run it, or Esc to close.",
+   "detail": "The keys are a table you can fill with your own.",
+   "command": null,
+   "source": "docs/shots/gallery/whichkey.lua",
+   "bundled": false
+  },
+  {
+   "slug": "queue-chips",
+   "title": "Queue chips",
+   "category": "Workflow",
+   "summary": "Messages you send while smelt is working wait above the prompt as numbered chips, in the order they will go, instead of rows of gray text.",
+   "detail": "",
+   "command": null,
+   "source": "docs/shots/gallery/queue-chips.lua",
+   "bundled": false
+  }
+ ]
+}

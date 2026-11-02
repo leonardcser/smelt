@@ -4,21 +4,30 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { MODEL, startMock } from "./mock";
+import { CACHE, PROJECT, TMUX } from "./paths";
 import { pickMove, readBoard } from "./steer";
+import { hoverAt } from "./hover";
 
 export type Scheme = "dark" | "light";
 
 export type Step =
-  | { type: string }
+  /** Type text key by key, or all at once when `instant`. */
+  | { type: string; instant?: boolean }
   | { key: string }
   | { press: string[]; gap?: number }
   | { resize: { cols: number; rows: number }; over?: number }
   /** Paste text through the terminal's bracketed paste, as Cmd+V would. */
   | { paste: string }
+  /** Tell smelt the terminal window gained (`true`) or lost (`false`) focus, as a terminal reports it. */
+  | { focus: boolean }
   /** Hold the left button on the last screen line matching `grab` (at `col`) and drag it `dy` rows (negative is up). */
   | { drag: { grab: RegExp; dy: number; col?: number; over?: number } }
   /** Turn the mouse wheel `lines` notches (negative is up) over the last screen line matching `at`. */
   | { wheel: { at: RegExp; lines: number; gap?: number } }
+  /** Move the mouse with no button held for `hover` ms, along `hoverAt`'s path. */
+  | { hover: number }
+  /** Glide the mouse over `over` ms onto the first text matching `to`, then hold it there `hold` ms. */
+  | { glide: { to: RegExp; over?: number; hold?: number } }
   | { pause: number }
   /** From here on, play the recording this many times faster (1 is real time). */
   | { speed: number }
@@ -29,6 +38,9 @@ export type Step =
   | { shot: string; rows: number };
 
 export type Frame = { at: number; ansi: string; cols: number; rows: number };
+
+/** Where the mouse pointer moved to, in 0-based cells. */
+export type PointerEvent = { at: number; x: number; y: number };
 
 /** A change of playback speed, set by a `speed` step. */
 export type SpeedMark = { at: number; speed: number };
@@ -61,12 +73,23 @@ export type RunOptions = {
   recordEvery: number;
   /** Attach a terminal that speaks the Kitty graphics protocol, so math renders as images. */
   kitty?: boolean;
+  /** The screen smelt is ready on; the statusline's mode by default. */
+  ready?: RegExp;
+  /** Extra command-line arguments for smelt. */
+  args?: string[];
+  /** Extra `init.lua`, given the scripted provider's port (null on a live run). */
+  init?: (port: number | null) => string;
+  /** Run smelt with the throwaway home as `$HOME` and its config in `~/.config`, so paths under it
+   * read as they would on a real machine. */
+  home?: boolean;
+  /** The project repo's branch, instead of git's default. */
+  branch?: string;
 };
 
 const root = path.resolve(import.meta.dir, "..");
-const cache = path.join(root, ".cache");
-const project = "/tmp/acme-app";
-const tmuxName = "smelt-shots";
+const cache = CACHE;
+const project = PROJECT;
+const tmuxName = TMUX;
 
 function smeltBinary() {
   const candidates = [
@@ -89,6 +112,9 @@ const fixture: Record<string, string> = {
   "tests/cart.rs": `use acme_app::cart::{Cart, Item};\n\nfn cart_with(price_cents: u32, discount_percent: u32) -> Cart {\n    Cart {\n        items: vec![Item { name: "lamp".into(), price_cents, discount_percent }],\n    }\n}\n\n#[test]\nfn empty_cart_is_free() {\n    assert_eq!(Cart::default().total(), 0);\n}\n\n#[test]\nfn no_discount_keeps_price() {\n    assert_eq!(cart_with(5000, 0).total(), 5000);\n}\n\n#[test]\nfn discount_applies_to_total() {\n    assert_eq!(cart_with(5000, 10).total(), 4500);\n}\n\n#[test]\nfn full_discount_is_free() {\n    assert_eq!(cart_with(5000, 100).total(), 0);\n}\n`,
 };
 
+/** The config dir under the throwaway home. */
+const configDir = (opts: RunOptions) => (opts.home ? ".config" : "config");
+
 async function prepare(port: number | null, opts: RunOptions) {
   await rm(project, { recursive: true, force: true });
   for (const [file, body] of Object.entries(fixture)) {
@@ -98,13 +124,14 @@ async function prepare(port: number | null, opts: RunOptions) {
 
   // A committed repo, so `git status` in the demo is clean instead of an error.
   const git = ["-C", project, "-c", "user.name=smelt", "-c", "user.email=docs@smelt.invalid"];
-  await $`git ${git} init -q`.quiet();
+  await $`git ${git} init -q ${opts.branch ? ["-b", opts.branch] : []}`.quiet();
   await $`git ${git} add -A`.quiet();
   await $`git ${git} commit -q -m ${"initial commit"}`.quiet();
 
   const home = path.join(cache, "home");
+  const config = configDir(opts);
   await rm(home, { recursive: true, force: true });
-  for (const d of ["config/smelt", "state", "data", "cache"]) await mkdir(path.join(home, d), { recursive: true });
+  for (const d of [`${config}/smelt`, "state", "data", "cache"]) await mkdir(path.join(home, d), { recursive: true });
   const provider =
     port === null
       ? ""
@@ -115,19 +142,31 @@ async function prepare(port: number | null, opts: RunOptions) {
 })
 `;
   await writeFile(
-    path.join(home, "config/smelt/init.lua"),
+    path.join(home, config, "smelt/init.lua"),
     `${provider}smelt.defaults.set({ model = "codex/${MODEL}" })
 smelt.settings.autoupgrade = "off"
+-- No build identity under the splash, so nothing drawn over it can leave part of it in a capture.
+smelt.build.display = ""
 smelt.settings.show_tips = false
 smelt.settings.show_slug = false
 smelt.settings.file_icons = true
 smelt.settings.show_tps = ${opts.tps}
 smelt.settings.vim = ${opts.vim}
 smelt.settings.auto_continue = "off"
-`,
+-- Message and tool times count from a fixed moment, so every recording shows the same clock.
+do
+  local transcript = require("smelt.transcript.defaults")
+  local timestamp, start = transcript.timestamp, smelt.time.now_ms()
+  local base = os.time({ year = 2026, month = 3, day = 21, hour = 14, min = 37, sec = 3 }) * 1000
+  transcript.timestamp = function(at_ms, now_ms)
+    local shift = function(ms) return tonumber(ms) and base + tonumber(ms) - start end
+    return timestamp(shift(at_ms), shift(now_ms))
+  end
+end
+${opts.init?.(port) ?? ""}`,
   );
   for (const [file, body] of Object.entries(opts.files ?? {})) {
-    const target = path.join(home, "config/smelt", file);
+    const target = path.join(home, config, "smelt", file);
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, body);
   }
@@ -168,11 +207,46 @@ const tmux = (...args: (string | number)[]) => $`tmux ${args.map(String)}`.quiet
 /** An SGR mouse report for the 0-based cell, which smelt reads as it would from the terminal. */
 const mouse = (code: number, col: number, row: number, release = false) => `\x1b[<${code};${col + 1};${row + 1}${release ? "m" : "M"}`;
 
-// Strip the volatile bits (clock, build identity) so captures are reproducible.
-const clean = (s: string) =>
-  s.replace(/\d{2}:\d{2}:\d{2}/g, "        ").replace(/v\d+\.\d+\.\d+[-\w.+]*/g, (v) => " ".repeat(v.length));
+// Strip the build identity so captures are reproducible.
+const clean = (s: string) => s.replace(/v\d+\.\d+\.\d+[-\w.+]*/g, (v) => " ".repeat(v.length));
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;:]*m/g, "");
+
+/** Applies one SGR sequence to `pen`, which maps each attribute slot to the parameters that set it. */
+function sgr(pen: Map<string, string>, params: string) {
+  const p = params === "" ? ["0"] : params.split(";");
+  for (let i = 0; i < p.length; i++) {
+    const [head] = p[i].split(":");
+    const c = +head;
+    if (c === 0) pen.clear();
+    else if (c === 38 || c === 48 || c === 58) {
+      // Extended colors take their arguments as parameters of their own, unless written with colons.
+      const n = p[i].includes(":") ? 1 : p[i + 1] === "5" ? 3 : 5;
+      pen.set(head, p.slice(i, i + n).join(";"));
+      i += n - 1;
+    } else if (c === 39 || c === 49 || c === 59) pen.delete(String(c - 1));
+    else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) pen.set("38", head);
+    else if ((c >= 40 && c <= 47) || (c >= 100 && c <= 107)) pen.set("48", head);
+    else if (c === 22) pen.delete("1"), pen.delete("2");
+    else if (c >= 23 && c <= 29) pen.delete(String(c - 20));
+    else pen.set(head, p[i]);
+  }
+}
+
+/** tmux writes a capture as one stream, so a line starts with the pen the line before ended with.
+ * Each line here restates that pen first, so a player can draw any line on its own. A blank line
+ * stays blank: tmux writes every colored cell out as a space, so nothing on it is colored. */
+function selfContained(ansi: string) {
+  const pen = new Map<string, string>();
+  return ansi
+    .split("\n")
+    .map((line) => {
+      const start = pen.size && plain(line) ? `\x1b[${[...pen.values()].join(";")}m` : "";
+      for (const m of line.matchAll(/\x1b\[([0-9;:]*)m/g)) sgr(pen, m[1]);
+      return start + line;
+    })
+    .join("\n");
+}
 
 /**
  * The screen and the window size it was drawn at, read in one tmux call so they always agree.
@@ -185,7 +259,7 @@ async function snapshot(full = false): Promise<{ ansi: string; cols: number; row
     .text();
   const end = out.trimEnd().lastIndexOf("\n");
   const [cols, rows] = out.slice(end + 1).trim().split(" ").map(Number);
-  return { ansi: clean(out.slice(0, end + 1)), cols, rows };
+  return { ansi: selfContained(clean(out.slice(0, end + 1))), cols, rows };
 }
 
 const screen = async () => (await snapshot()).ansi;
@@ -233,7 +307,7 @@ function attachKitty(images: Record<number, KittyImage>) {
 export async function run(
   steps: Step[],
   opts: RunOptions,
-): Promise<{ captures: Capture[]; frames: Frame[]; keylog: KeyEvent[]; marks: SpeedMark[]; images: Record<number, KittyImage> }> {
+): Promise<{ captures: Capture[]; frames: Frame[]; keylog: KeyEvent[]; marks: SpeedMark[]; pointer: PointerEvent[]; images: Record<number, KittyImage> }> {
   const mock = opts.live ? null : startMock(opts.wordDelay);
   const home = await prepare(mock?.port ?? null, opts);
   // Live runs get a throwaway state dir holding a copy of the real codex login, so sessions and
@@ -247,7 +321,13 @@ export async function run(
   }
   const fg = opts.scheme === "light" ? "0;15" : "15;0";
   const env = [
-    `XDG_CONFIG_HOME=${home}/config`,
+    `XDG_CONFIG_HOME=${home}/${configDir(opts)}`,
+    // Cargo and rustup find their toolchains through $HOME unless told where they are.
+    ...(opts.home
+      ? [`HOME=${home}`, `CARGO_HOME=${process.env.CARGO_HOME ?? `${process.env.HOME}/.cargo`}`, `RUSTUP_HOME=${process.env.RUSTUP_HOME ?? `${process.env.HOME}/.rustup`}`]
+      : []),
+    // A scripted run never finds the host's Claude Code, so its models never join the list.
+    ...(opts.live ? [] : ["SMELT_CLAUDE_CODE_EXECUTABLE=/nonexistent/claude"]),
     `XDG_STATE_HOME=${state}`,
     `XDG_DATA_HOME=${home}/data`,
     `XDG_CACHE_HOME=${home}/cache`,
@@ -258,7 +338,7 @@ export async function run(
   await tmux("kill-session", "-t", tmuxName).nothrow();
   await tmux(
     "new-session", "-d", "-s", tmuxName, "-x", opts.cols, "-y", opts.rows,
-    `${opts.kitty ? "tmux wait-for smelt-kitty; " : ""}cd ${project} && env -u LLM_API_BASE_URL -u LLM_API_KEY ${env} ${smeltBinary()}${opts.live ? ` --model codex/${MODEL} --mode yolo --reasoning-effort medium` : ""}; sleep 3`,
+    `${opts.kitty ? "tmux wait-for smelt-kitty; " : ""}cd ${project} && env -u LLM_API_BASE_URL -u LLM_API_KEY ${env} ${smeltBinary()}${opts.live ? ` --model codex/${MODEL} --mode yolo --reasoning-effort medium` : ""}${(opts.args ?? []).map((a) => ` ${a}`).join("")}; sleep 3`,
   );
 
   // Keep the window at the size we ask for, whatever else attaches to tmux.
@@ -276,6 +356,8 @@ export async function run(
   const frames: Frame[] = [];
   const keylog: KeyEvent[] = [];
   const marks: SpeedMark[] = [];
+  const pointer: PointerEvent[] = [];
+  const point = (x: number, y: number) => pointer.push({ at: Date.now() - t0, x, y });
   const t0 = Date.now();
   const log = (label: string, typed = false) => keylog.push({ at: Date.now() - t0, label, ...(typed ? { typed } : {}) });
   let recording = opts.recordEvery > 0;
@@ -295,10 +377,10 @@ export async function run(
   };
 
   try {
-    await waitFor(/normal|yolo/);
+    await waitFor(opts.ready ?? /normal|yolo/);
     for (const step of steps) {
       if ("type" in step) {
-        if (opts.typeDelay) {
+        if (opts.typeDelay && !step.instant) {
           for (const [i, ch] of [...step.type].entries()) {
             await tmux("send-keys", "-t", tmuxName, "-l", ch);
             log(ch === " " ? "␣" : ch, true);
@@ -317,6 +399,8 @@ export async function run(
           log(keyLabel(k));
           await Bun.sleep((step.gap ?? 420) * (0.8 + rand() * 0.5));
         }
+      } else if ("focus" in step) {
+        await tmux("send-keys", "-t", tmuxName, "-l", step.focus ? "\x1b[I" : "\x1b[O");
       } else if ("paste" in step) {
         await tmux("set-buffer", "-b", "shots-paste", "--", step.paste);
         await tmux("paste-buffer", "-p", "-d", "-b", "shots-paste", "-t", tmuxName);
@@ -325,7 +409,10 @@ export async function run(
         const row = (await screen()).split("\n").findLastIndex((l) => step.drag.grab.test(plain(l)));
         if (row < 0) throw new Error(`nothing to grab for ${step.drag.grab}\n${await screen()}`);
         const col = step.drag.col ?? 4;
-        const send = (code: number, y: number, release = false) => tmux("send-keys", "-t", tmuxName, "-l", mouse(code, col, y, release));
+        const send = (code: number, y: number, release = false) => {
+          point(col, y);
+          return tmux("send-keys", "-t", tmuxName, "-l", mouse(code, col, y, release));
+        };
         log("drag");
         await send(0, row);
         const n = Math.max(1, Math.abs(step.drag.dy));
@@ -338,10 +425,38 @@ export async function run(
         const row = (await screen()).split("\n").findLastIndex((l) => step.wheel.at.test(plain(l)));
         if (row < 0) throw new Error(`nothing to scroll for ${step.wheel.at}\n${await screen()}`);
         log("scroll");
+        point(8, row);
         for (let i = 0; i < Math.abs(step.wheel.lines); i++) {
           await tmux("send-keys", "-t", tmuxName, "-l", mouse(step.wheel.lines < 0 ? 64 : 65, 8, row));
           await Bun.sleep(step.wheel.gap ?? 120);
         }
+      } else if ("hover" in step) {
+        log(`hover ${step.hover}`);
+        const start = Date.now();
+        for (let t = 0; t < step.hover; t = Date.now() - start) {
+          const [x, y] = hoverAt(t, opts.cols, opts.rows);
+          point(x, y);
+          await tmux("send-keys", "-t", tmuxName, "-l", mouse(35, x, y));
+          await Bun.sleep(33);
+        }
+      } else if ("glide" in step) {
+        const lines = plain(await screen()).split("\n");
+        const row = lines.findIndex((l) => step.glide.to.test(l));
+        if (row < 0) throw new Error(`nothing to glide to for ${step.glide.to}\n${lines.join("\n")}`);
+        const col = lines[row].search(step.glide.to) + 1;
+        const from = pointer.at(-1) ?? { x: col, y: row };
+        log("glide");
+        const over = step.glide.over ?? 700;
+        for (let t = 0; t <= over; t += 33) {
+          const k = 1 - (1 - t / over) ** 3;
+          const x = Math.round(from.x + (col - from.x) * k), y = Math.round(from.y + (row - from.y) * k);
+          point(x, y);
+          await tmux("send-keys", "-t", tmuxName, "-l", mouse(35, x, y));
+          await Bun.sleep(33);
+        }
+        point(col, row);
+        await tmux("send-keys", "-t", tmuxName, "-l", mouse(35, col, row));
+        await Bun.sleep(step.glide.hold ?? 2500);
       } else if ("resize" in step) {
         // Drag the window edge: step the size so the UI reflows frame by frame.
         const [w0, h0] = (await $`tmux display-message -p -t ${tmuxName} ${"#{window_width} #{window_height}"}`.quiet().text())
@@ -410,5 +525,5 @@ export async function run(
       if (after && !before.equals(after)) await copyFile(tempAuth, realAuth);
     }
   }
-  return { captures, frames, keylog, marks, images };
+  return { captures, frames, keylog, marks, pointer, images };
 }

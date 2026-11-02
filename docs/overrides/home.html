@@ -369,7 +369,7 @@
     font-size: 0.7rem;
   }
   /* Smaller features side by side; a wide one takes a row of its own. Each
-     terminal sits at the bottom of its card so neighbours line up. */
+     terminal follows its text, so neighbours with equal text line up. */
   .home .features {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -378,9 +378,6 @@
   .home .feature {
     display: flex;
     flex-direction: column;
-  }
-  .home .feature .term {
-    margin-top: auto;
   }
   .home .feature--wide {
     grid-column: 1 / -1;
@@ -585,46 +582,39 @@
     <div class="ascii gutter gutter--left" aria-hidden="true"></div>
     <div class="ascii gutter gutter--right" aria-hidden="true"></div>
     <div class="cell">
-      <h2>Plugins in a few lines of Lua</h2>
-      <p>Drop a file in <code>~/.config/smelt/plugins/</code> and it loads, no restart.</p>
+      <h2>Move around the conversation</h2>
+      <p>
+        Leave the prompt and move through the conversation with vim keys: jump between messages, search,
+        select a code block and yank it into the prompt. Turn it on with <code>smelt.settings.vim = true</code>.
+      </p>
+      <figure class="term" data-keys="corner" data-replay="assets/replays/cursor.json" aria-label="The cursor leaving the prompt, jumping between messages, searching, selecting a code block and yanking it into the prompt">
+            <pre class="term__screen" aria-hidden="true"></pre>
+          </figure>
+    </div>
+    <div class="cell">
       <div class="features">
         <div class="feature">
-          <h3>Changes sidebar</h3>
-          <p>Every file the agent changed, with line counts, beside the conversation.</p>
-          <figure class="term" data-replay="assets/replays/changes.json" aria-label="A sidebar listing the files the agent changed, beside the conversation">
+      <h2>Plugins</h2>
+      <p>A plugin is one Lua file. Put it in <code>~/.config/smelt/plugins/</code> and it loads at once. It can draw on any cell of the screen. You can also ask smelt to write one.</p>
+      <figure class="term" data-replay="assets/replays/gallery/barrelroll-wide.json" aria-label="The whole screen doing a barrel roll">
             <pre class="term__screen" aria-hidden="true"></pre>
           </figure>
+      <div><a class="more" href="gallery/">Plugin gallery →</a><a class="more" href="extend/">Write a plugin →</a></div>
         </div>
         <div class="feature">
-          <h3>Snake</h3>
-          <p>Built in, in plain Lua like yours. Type <code>/snake</code> while the agent works.</p>
-          <figure class="term" data-replay="assets/replays/snake.json" aria-label="Playing snake in a floating window while the agent works">
+      <h2>Use any model</h2>
+      <p>Sign in with ChatGPT, GitHub Copilot, Kimi Code or Claude Code, or use any OpenAI-compatible server. Switch with <code>/model</code> at any time.</p>
+      <figure class="term" data-replay="assets/replays/models.json" aria-label="The model list, and switching from a local model to codex in the middle of a session">
             <pre class="term__screen" aria-hidden="true"></pre>
           </figure>
-        </div>
-        <div class="feature">
-          <h3>Statusline</h3>
-          <p>Mode, directory, branch and changed files, in the style of lualine.</p>
-          <figure class="term" data-replay="assets/replays/lualine.json" aria-label="A lualine-style statusline with the mode, working directory, branch and changed-file counts">
-            <pre class="term__screen" aria-hidden="true"></pre>
-          </figure>
-        </div>
-        <div class="feature">
-          <h3>Spinner</h3>
-          <p>Replace the working indicator with anything, like words that glitch in and out.</p>
-          <figure class="term" data-replay="assets/replays/glitch.json" aria-label="A status word that glitches: it decodes in from noise, flickers, then corrupts into the next word">
-            <pre class="term__screen" aria-hidden="true"></pre>
-          </figure>
-        </div>
+            </div>
       </div>
-      <a class="more" href="extend/">Write a plugin →</a>
-      <a class="more" href="extend/gallery/">More plugins →</a>
     </div>
     <div class="cell">
       <div class="features">
         <div class="feature">
           <h2>Themes</h2>
-          <p>Over thirty bundled themes, or build your own and change any color you like.</p>
+          <p>More than thirty themes are included. Write your own in a few lines of Lua.</p>
           <figure class="term" data-scheme="dark" data-replay="assets/replays/themes-dark.json" aria-label="An answer recolored by one bundled dark theme after another">
             <pre class="term__screen" aria-hidden="true"></pre>
           </figure>
@@ -633,27 +623,16 @@
           </figure>
         </div>
         <div class="feature">
-          <h2>LaTeX in the terminal</h2>
-          <p>Equations render as typeset images, with a Unicode fallback in any terminal.</p>
+          <h2>Math</h2>
+          <p>Equations show as images. Terminals without image support get plain Unicode.</p>
           <figure class="term" data-replay="assets/replays/math.json" aria-label="An answer with the gradient descent and Adam update equations rendered as images">
-            <pre class="term__screen" aria-hidden="true"></pre>
-          </figure>
-        </div>
-        <div class="feature feature--wide">
-          <h2>Vim mode</h2>
-          <p>
-            Insert, normal and visual modes in the prompt and the transcript, with
-            motions, text objects, yank and undo. One line turns it on:
-            <code>smelt.settings.vim = true</code>
-          </p>
-          <figure class="term" data-keys="corner" data-replay="assets/replays/vim.json" aria-label="Yanking a word from the transcript with vim motions and pasting it into the prompt">
             <pre class="term__screen" aria-hidden="true"></pre>
           </figure>
         </div>
       </div>
     </div>
     <div class="cell">
-      <h2>Light on your machine</h2>
+      <h2>Small and fast</h2>
       <p>smelt installs as one 46 MiB binary and uses 34 MiB at start. The other four agents write 313 to 1684 MiB and use 110 to 328 MiB. Measured on 2026-11-02 with a smelt main dist build and the latest stable comparison-agent releases, while waiting for the model. Lower is better.</p>
       <div class="charts">
         <figure class="chart">

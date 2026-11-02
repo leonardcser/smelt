@@ -15,6 +15,10 @@ Source: https://github.com/leonardcser/smelt
 - [Design decisions](https://smeltagent.dev/latest/guide/design/): why smelt has its own renderer, Lua plugins and SQLite sessions, and what each costs
 - [Troubleshooting](https://smeltagent.dev/latest/guide/troubleshooting/): common problems and fixes
 
+## Gallery
+
+- [Plugin gallery](https://smeltagent.dev/latest/gallery/): small Lua plugins, each recorded running: themes, bars, layouts, effects and games
+
 ## Customize
 
 - [Configure smelt with Lua](https://smeltagent.dev/latest/customize/): init.lua, project config, reloading, load order
@@ -35,7 +39,6 @@ Source: https://github.com/leonardcser/smelt
 - [Tools and provider hooks](https://smeltagent.dev/latest/extend/tools-and-agent/)
 - [Async tasks and I/O](https://smeltagent.dev/latest/extend/async/)
 - [Bundled plugins](https://smeltagent.dev/latest/extend/bundled-plugins/)
-- [Plugin gallery](https://smeltagent.dev/latest/extend/gallery/)
 
 ## Reference
 

@@ -182,6 +182,18 @@ body:has(.home) .md-header__source .md-source__repository {
   background: var(--term-bg);
   color: var(--term-fg);
 }
+/* The mouse pointer in a replay that moves it, its tip on the cell it points at. */
+.term__pointer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: auto;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+.term__pointer[hidden] {
+  display: none;
+}
 /* Keys pressed in a replay, as keycaps centered in the wallpaper below the window. The home
    page has no wallpaper, so only a figure that asks for it (data-keys="corner") shows them,
    in the top-right corner of the window. */
@@ -367,4 +379,198 @@ body:has(.home) .md-header__source .md-source__repository {
   margin-left: 0.8rem;
   transform: none;
   background: linear-gradient(var(--muted), var(--muted)) center / 100% 1px no-repeat;
+}
+
+/* The plugin gallery (gallery/index.md): a grid of cards that open a dialog. */
+.gallery__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  align-items: center;
+  margin: 1.25rem 0;
+}
+.gallery__search {
+  flex: 0 1 16rem;
+  min-width: 10rem;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  color: inherit;
+  background: var(--md-default-bg-color);
+  border: 1px solid var(--md-default-fg-color--lighter);
+}
+.gallery__search:focus-visible {
+  outline: 2px solid var(--md-accent-fg-color);
+  outline-offset: 1px;
+}
+.gallery__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.gallery__chip {
+  padding: 0.2rem 0.6rem;
+  font: inherit;
+  font-size: 0.7rem;
+  color: inherit;
+  cursor: pointer;
+  background: none;
+  border: 1px solid var(--md-default-fg-color--lighter);
+}
+.gallery__chip span {
+  opacity: 0.55;
+}
+.gallery__chip:hover {
+  border-color: var(--md-accent-fg-color);
+}
+.gallery__chip[aria-pressed="true"] {
+  color: #000;
+  background: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+.gallery__section {
+  margin-bottom: 2.5rem;
+}
+.gallery__section[hidden] {
+  display: none;
+}
+.gallery__title {
+  margin-bottom: 0.75rem;
+}
+.md-typeset .gallery__title h2 {
+  margin: 0;
+}
+.gallery__title p {
+  margin: 0.2rem 0 0;
+  color: var(--md-default-fg-color--light);
+}
+.is-searching .gallery__title {
+  display: none;
+}
+.is-searching .gallery__section {
+  margin-bottom: 0;
+}
+/* As many columns of at least 13rem as fit, with a gap so every card stands on its own. */
+.gallery__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
+  gap: 1rem;
+}
+.md-typeset a.gallery__card.gallery__card {
+  display: flex;
+  flex-direction: column;
+  color: inherit;
+  text-decoration: none;
+  background: none;
+  border: 1px solid var(--md-default-fg-color--lighter);
+  overflow: hidden;
+}
+.md-typeset a.gallery__card.gallery__card:hover,
+.md-typeset a.gallery__card.gallery__card:focus-visible {
+  color: inherit;
+  background: none;
+  border-color: var(--md-accent-fg-color);
+  outline: 1px solid var(--md-accent-fg-color);
+}
+.md-typeset a.gallery__card.gallery__card[hidden] {
+  display: none;
+}
+/* Recordings differ in size, so every thumbnail is the frame of a 60x26 terminal (a cell is 2.17
+   times as tall as it is wide), with a smaller recording centered in it on the terminal's
+   background. */
+.gallery__thumb {
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  aspect-ratio: 60 / 56.33;
+  overflow: hidden;
+  background: var(--term-bg);
+  border-bottom: 1px solid var(--md-default-fg-color--lighter);
+}
+.md-typeset .gallery__thumb figure.term.term {
+  width: 100%;
+}
+.md-typeset .gallery__thumb figure.term.term,
+.md-typeset .gallery__dialog > figure.term.term {
+  margin: 0;
+  padding: 0;
+  background: none;
+}
+[data-md-color-scheme="default"] .gallery__thumb {
+  --term-bg: #ffffff;
+}
+/* One line: the name, and the command on the right. */
+.gallery__body {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+.gallery__body strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.md-typeset .gallery__command {
+  padding: 0;
+  font-size: 0.65rem;
+  color: var(--md-default-fg-color--light);
+  background: none;
+}
+.gallery__empty {
+  color: var(--md-default-fg-color--light);
+}
+.gallery__dialog {
+  width: min(32rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  padding: 0;
+  overflow: auto;
+  color: var(--md-default-fg-color);
+  background: var(--md-default-bg-color);
+  border: 1px solid var(--md-default-fg-color--lighter);
+}
+.gallery__dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+.gallery__dialog .term__keys {
+  display: none;
+}
+.gallery__details {
+  padding: 0.25rem 1.25rem 1rem;
+  font-size: 0.8rem;
+}
+.gallery__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.gallery__head h2 {
+  margin: 0.75rem 0 0.25rem;
+}
+.gallery__close {
+  font: inherit;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: inherit;
+  cursor: pointer;
+  background: none;
+  border: 0;
+}
+.gallery__tags {
+  margin: 0 0 0.75rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* On a narrow screen the chips are one row that scrolls sideways. */
+@media (max-width: 36em) {
+  .gallery__chips {
+    flex-wrap: nowrap;
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .gallery__chip {
+    flex: none;
+  }
 }

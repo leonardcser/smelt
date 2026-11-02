@@ -12,6 +12,7 @@ mod composition;
 mod dialogs;
 mod diff;
 mod error_queue;
+mod gallery;
 mod goal;
 mod lua_reload;
 mod misc;

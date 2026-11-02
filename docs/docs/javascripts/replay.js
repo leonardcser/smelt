@@ -58,35 +58,50 @@
   // Applies one SGR sequence to the pen. Recordings use only reset, bold, dim,
   // italic, and default, 256-color or truecolor foreground and background.
   // `flipped` mirrors the lightness of a dark recording shown in the light scheme.
+  // A vivid color (a bubble, a tile, a snake) is an accent, not a surface: flipped, it keeps its
+  // own color, and so does text on a vivid background, so white on blue stays white on blue.
+  // `fill` is the foreground a block element paints with, which follows its own vividness.
   function sgr(pen, params, light, flipped) {
     var base = light ? LIGHT16 : BASE16;
     var p = params === "" ? [0] : params.split(";").map(Number);
     for (var i = 0; i < p.length; i++) {
       var c = p[i];
-      if (c === 0) (pen.fg = pen.bg = null), (pen.bold = pen.dim = pen.italic = false);
+      if (c === 0) (pen.fgs = pen.bgs = null), (pen.bold = pen.dim = pen.italic = false);
       else if (c === 1) pen.bold = true;
       else if (c === 2) pen.dim = true;
       else if (c === 3) pen.italic = true;
       else if (c === 22) pen.bold = pen.dim = false;
       else if (c === 23) pen.italic = false;
-      else if (c === 39) pen.fg = null;
-      else if (c === 49) pen.bg = null;
-      else if (c >= 30 && c <= 37) pen.fg = base[c - 30];
-      else if (c >= 90 && c <= 97) pen.fg = base[c - 82];
-      else if (c >= 40 && c <= 47) pen.bg = base[c - 40];
-      else if (c >= 100 && c <= 107) pen.bg = base[c - 92];
+      else if (c === 39) pen.fgs = null;
+      else if (c === 49) pen.bgs = null;
+      else if (c >= 30 && c <= 37) pen.fgs = [base[c - 30]];
+      else if (c >= 90 && c <= 97) pen.fgs = [base[c - 82]];
+      else if (c >= 40 && c <= 47) pen.bgs = [base[c - 40]];
+      else if (c >= 100 && c <= 107) pen.bgs = [base[c - 92]];
       else if (c === 38 || c === 48) {
-        var color;
-        if (p[i + 1] === 5) (color = xterm256(p[i + 2], light, flipped)), (i += 2);
-        else if (p[i + 1] === 2) {
+        var colors;
+        if (p[i + 1] === 5) {
+          var x = xtermRgb(p[i + 2]);
+          colors = [xterm256(p[i + 2], light, flipped), xterm256(p[i + 2], false, false), vivid(x)];
+          i += 2;
+        } else if (p[i + 1] === 2) {
           var tc = [p[i + 2], p[i + 3], p[i + 4]];
-          color = rgb(flipped ? flip(tc) : tc);
+          colors = [rgb(flipped ? flip(tc) : tc), rgb(tc), vivid(tc)];
           i += 4;
         }
-        if (c === 38) pen.fg = color;
-        else pen.bg = color;
+        if (c === 38) pen.fgs = colors;
+        else pen.bgs = colors;
       }
     }
+    var own = function (c) { return c[flipped && c[2] ? 1 : 0]; };
+    pen.bg = pen.bgs ? own(pen.bgs) : null;
+    pen.fill = pen.fgs ? own(pen.fgs) : null;
+    pen.fg = pen.fgs ? pen.fgs[flipped && pen.bgs && pen.bgs[2] && pen.fgs[1] ? 1 : 0] : null;
+  }
+
+  // Whether a color is saturated and far from gray.
+  function vivid(c) {
+    return Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]) >= 100;
   }
 
   // Characters a terminal gives two cells (East Asian Wide, emoji presentation).
@@ -130,6 +145,9 @@
     return layers.join(",") + "," + (bg || "transparent");
   }
 
+  // Where each of a braille pattern's eight dots sits in its cell, by bit.
+  var BRAILLE = ["0 0", "0 33.33%", "0 66.67%", "100% 0", "100% 33.33%", "100% 66.67%", "0 100%", "100% 100%"];
+
   // Block elements painted as backgrounds, split on whole pixels so stacked
   // half blocks (the logo) tile without seams.
   function blockBackground(cp, fg, bg) {
@@ -138,6 +156,16 @@
     if (cp === 0x2588) return fg;
     if (cp === 0x258c) return "linear-gradient(to right," + fg + " 50%," + bg + " 50%)";
     if (cp === 0x2590) return "linear-gradient(to right," + bg + " 50%," + fg + " 50%)";
+    // Braille patterns as round dots, whether or not the font carries them.
+    if (cp > 0x2800 && cp <= 0x28ff) {
+      var dots = [];
+      for (var b = 0; b < 8; b++) {
+        if ((cp - 0x2800) & (1 << b)) {
+          dots.push("radial-gradient(circle closest-side," + fg + " 50%,transparent 75%) " + BRAILLE[b] + " / 50% 25% no-repeat");
+        }
+      }
+      return dots.join(",") + "," + bg;
+    }
     // Powerline arrows, as two half-cell diagonals meeting at the tip.
     if (cp === 0xe0b0 || cp === 0xe0b2) {
       var side = cp === 0xe0b0 ? "right" : "left";
@@ -145,6 +173,11 @@
         "linear-gradient(to top " + side + "," + fg + " 50%," + bg + " 50%) 0 0 / 100% var(--half) no-repeat," +
         "linear-gradient(to bottom " + side + "," + fg + " 50%," + bg + " 50%) 0 100% / 100% calc(100% - var(--half)) no-repeat"
       );
+    }
+    // Powerline round caps, as a half ellipse against the flat side.
+    if (cp === 0xe0b4 || cp === 0xe0b6) {
+      var flat = cp === 0xe0b4 ? "0" : "100%";
+      return "radial-gradient(ellipse 100% 50% at " + flat + " 50%," + fg + " 97%," + bg + " 100%)";
     }
     return null;
   }
@@ -175,7 +208,7 @@
 
   function renderLine(line, light, flipped, images) {
     var row = document.createElement("div");
-    var pen = { fg: null, bg: null, bold: false, dim: false, italic: false };
+    var pen = { fg: null, bg: null, fill: null, fgs: null, bgs: null, bold: false, dim: false, italic: false };
     var run = "";
     var runStyle = "";
     // Every span is sized in whole cells, so columns line up across rows
@@ -263,7 +296,8 @@
         // a different advance cannot shift the columns after it.
         flush();
         var fg = pen.dim ? "color-mix(in srgb," + (pen.fg || FG) + " 50%," + (pen.bg || BG) + ")" : pen.fg || FG;
-        var block = blockBackground(cp, fg, pen.bg || BG);
+        var fill = pen.dim ? "color-mix(in srgb," + (pen.fill || FG) + " 50%," + (pen.bg || BG) + ")" : pen.fill || FG;
+        var block = blockBackground(cp, fill, pen.bg || BG);
         if (block) span(ch, 1, css + "background:" + block + ";", "c x");
         else if (BOX[cp]) span(ch, 1, css + "background:" + boxBackground(BOX[cp], fg, pen.bg) + ";", "c x");
         else span(ch, cellWidth(cp), css, isIcon(cp) ? "c n" : "c");
@@ -296,6 +330,16 @@
     this.keys.className = "term__keys";
     this.keys.setAttribute("aria-hidden", "true");
     this.el.appendChild(this.keys);
+    // The mouse pointer, for a recording that moves it.
+    this.pointer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    this.pointer.setAttribute("class", "term__pointer");
+    this.pointer.setAttribute("viewBox", "0 0 12 19");
+    this.pointer.setAttribute("aria-hidden", "true");
+    this.pointer.innerHTML =
+      '<path d="M1 1v15l3.6-3.4 2.6 5.9 2.4-1-2.6-5.8H12z" fill="#111" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>';
+    this.pointer.setAttribute("hidden", "");
+    this.window.appendChild(this.pointer);
+    this.at = null;
     this.frames = null;
     this.index = 0;
     this.timer = null;
@@ -307,10 +351,13 @@
   Replay.prototype.load = function (low) {
     if (this.loading) return this.loading;
     var self = this;
-    this.loading = fetch(this.el.dataset.replay, low ? { priority: "low" } : undefined)
-      .then(function (r) {
-        return r.json();
-      })
+    // A page that already holds the recording passes it as `el.__data`.
+    var source = this.el.__data
+      ? Promise.resolve(this.el.__data)
+      : fetch(this.el.dataset.replay, low ? { priority: "low" } : undefined).then(function (r) {
+          return r.json();
+        });
+    this.loading = source
       .then(function (data) {
         self.cols = data.cols;
         self.rows = data.rows;
@@ -330,6 +377,15 @@
         self.show(self.index, true);
       });
     return this.loading;
+  };
+
+  // Drops the drawn screen of a figure far off screen, which the page can draw again when it nears.
+  Replay.prototype.unload = function () {
+    this.pause();
+    this.screen.replaceChildren();
+    this.frames = null;
+    this.loading = null;
+    this.shownKeys = null;
   };
 
   // Natural width of the recording's columns in this font at `size`.
@@ -367,6 +423,8 @@
     this.cell = cell;
     this.row = row;
     this.el.style.height = row * this.rows + "px";
+    this.pointer.style.height = Math.round(row * 1.15) + "px";
+    this.place();
     this.size = null;
     if (this.frames) this.resize(this.index);
   };
@@ -379,6 +437,17 @@
     this.size = size;
     this.window.style.width = this.cell * (f.cols || this.cols) + "px";
     this.screen.style.height = this.row * (f.rows || this.rows) + "px";
+  };
+
+  // Puts the pointer's tip in the middle of the cell it points at, or hides it.
+  Replay.prototype.place = function () {
+    if (!this.at || !this.cell) {
+      this.pointer.setAttribute("hidden", "");
+      return;
+    }
+    this.pointer.removeAttribute("hidden");
+    this.pointer.style.transform =
+      "translate(" + (this.at[0] + 0.4) * this.cell + "px," + (this.at[1] + 0.35) * this.row + "px)";
   };
 
   // Draws frame `n`. Lines are stored as diffs, so a jump redraws from the start.
@@ -410,6 +479,17 @@
       }
     }
     this.resize(n);
+    var at = this.at;
+    if (jump) {
+      at = null;
+      for (var q = 0; q <= n; q++) if (this.frames[q].p) at = this.frames[q].p;
+    } else if (this.frames[n].p) {
+      at = this.frames[n].p;
+    }
+    if (at !== this.at) {
+      this.at = at;
+      this.place();
+    }
     var keys = this.frames[n].k || [];
     if (keys.join("\n") !== this.shownKeys) {
       this.shownKeys = keys.join("\n");
@@ -438,7 +518,9 @@
   Replay.prototype.play = function () {
     var self = this;
     this.load().then(function () {
+      // A figure marked data-hover plays only while its page says it is hovered.
       if (self.playing || reducedMotion || !self.visible || document.hidden) return;
+      if (self.el.hasAttribute("data-hover") && !self.hovered) return;
       self.playing = true;
       if (self.index === self.frames.length - 1) self.show(0, true);
       self.tick();
@@ -488,17 +570,19 @@
     var near = new IntersectionObserver(
       function (entries) {
         entries.forEach(function (e) {
-          if (e.isIntersecting) e.target.__replay.load();
+          var r = e.target.__replay;
+          if (e.isIntersecting) r.load();
+          else if (e.target.hasAttribute("data-lazy") && !r.hovered) r.unload();
         });
       },
-      { rootMargin: "400px" },
+      { rootMargin: "800px" },
     );
     var resized = new ResizeObserver(function (entries) {
       entries.forEach(function (e) {
         e.target.__replay.fit();
       });
     });
-    document.querySelectorAll("[data-replay]").forEach(function (el) {
+    function mount(el) {
       var r = (el.__replay = new Replay(el));
       replays.push(r);
       seen.observe(el);
@@ -508,7 +592,20 @@
       // into view and `near` never loads it. Fetch it when the browser is idle,
       // so switching schemes shows it at once.
       if (el.dataset.scheme) whenIdle(function () { r.load(true); });
-    });
+    }
+    function unmount(el) {
+      var r = el.__replay;
+      if (!r) return;
+      r.pause();
+      seen.unobserve(el);
+      near.unobserve(el);
+      resized.unobserve(el);
+      replays.splice(replays.indexOf(r), 1);
+      el.__replay = null;
+    }
+    // Lets a page mount recordings it builds after load, such as the plugin gallery's.
+    window.smeltReplay = { mount: mount, unmount: unmount };
+    document.querySelectorAll("[data-replay]").forEach(mount);
   }
 
   if (window.document$) window.document$.subscribe(initReplays);

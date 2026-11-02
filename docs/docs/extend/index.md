@@ -36,7 +36,7 @@ no manifest, no build step.
 
 Use the [API reference](../reference/api/index.md) for signatures and types,
 [bundled plugins](bundled-plugins.md) for working implementations, and the
-[plugin gallery](gallery.md) for small examples recorded in action.
+[plugin gallery](../gallery/index.md) for small examples recorded in action.
 
 ## Anatomy of a plugin
 

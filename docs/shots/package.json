@@ -5,7 +5,8 @@
   "scripts": {
     "stills": "bun src/main.ts stills",
     "record": "bun src/main.ts record",
-    "all": "bun src/main.ts all"
+    "all": "bun src/main.ts all",
+    "gallery": "bun src/gallery.ts"
   },
   "dependencies": {
     "jetbrains-mono": "^1.0.6",
