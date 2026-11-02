@@ -64,6 +64,10 @@ impl AppStoryCtx {
         self.app.feed_one(SourceEvent::Tick(ms));
     }
 
+    pub fn advance_animation(&mut self, ms: u64) {
+        self.app.advance_animation(ms);
+    }
+
     /// Advance until every received stream chunk is fully revealed.
     pub fn finish_stream_reveal(&mut self) {
         self.advance_time(tui::app::test_harness::STREAM_REVEAL_LIMIT.as_millis() as u64);

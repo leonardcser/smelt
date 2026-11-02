@@ -578,6 +578,38 @@ app_story!(ask_user_question_custom_input_wraps, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(file_finder_dialog, |ctx| {
+    ctx.set_viewport(120, 30);
+    ctx.run_lua(
+        r#"
+        smelt.settings.file_icons = true
+        smelt.settings.file_icon_colors = true
+        smelt.files.search = function(query)
+            local all = {
+                { label = "src/main.rs", path = "/workspace/src/main.rs" },
+                { label = "src/config.rs", path = "/workspace/src/config.rs" },
+                { label = "README.md", path = "/workspace/README.md" },
+            }
+            local items = {}
+            for _, i in ipairs(smelt.fuzzy.rank(all, query)) do items[#items + 1] = all[i] end
+            return { items = items, total_matched = #items, total_files = #all }
+        end
+        smelt.fs.is_file = function() return true end
+        smelt.fs.read_limited = function(path)
+            return { content = path:find('config', 1, true)
+                and 'pub struct Config {\n    pub editor: String,\n}\n'
+                or 'fn main() {\n    println!("hello, smelt");\n}\n', truncated = false }
+        end
+        "#,
+    );
+    ctx.run_command("files");
+    ctx.advance_animation(100);
+    ctx.assert_snapshot();
+    ctx.type_prompt("config");
+    ctx.advance_animation(100);
+    ctx.assert_snapshot();
+});
+
 app_story!(resume_dialog, |ctx| {
     ctx.set_viewport(72, 18);
     // /resume drives `smelt.session.list()`. Seed real `SessionMeta`

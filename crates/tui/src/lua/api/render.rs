@@ -46,6 +46,9 @@ pub struct LuaRenderSyntaxOpts {
     pub lang: Option<String>,
     /// Path whose extension is used when `lang` is omitted.
     pub path: Option<String>,
+    /// Stamp source line numbers for windows configured with `gutter = "line_numbers"`. Defaults to false.
+    #[lua(default)]
+    pub line_numbers: bool,
 }
 
 /// Options for `smelt.render.diff_split`.
@@ -154,7 +157,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let theme_snap = ui.theme().clone();
                 let width = crate::content::term_width() as u16;
                 if let Some(buf) = ui.buf_mut(buf.id) {
-                    render_into_buffer(buf, width, &theme_snap, |sink| {
+                    let rendered = render_into_buffer(buf, width, &theme_snap, |sink| {
                         let lang_token = lang.as_deref().unwrap_or_else(|| {
                             path.as_deref()
                                 .and_then(|p| std::path::Path::new(p).extension())
@@ -163,6 +166,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         });
                         print_code_lines(sink, &content, lang_token);
                     });
+                    if opts.line_numbers {
+                        let first_row = buf.line_count().saturating_sub(rendered.line_count);
+                        for row in first_row..buf.line_count() {
+                            let mut decoration = buf.decoration_at(row).clone();
+                            decoration.source_line = Some(smelt_buffer::buffer::SourceLine::Linear {
+                                lineno: (row - first_row + 1) as u32,
+                            });
+                            buf.set_decoration(row, decoration);
+                        }
+                    }
                 }
             }));
             Ok(())

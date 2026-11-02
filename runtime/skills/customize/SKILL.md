@@ -498,6 +498,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.diff` | /diff: snapshot-based, virtualized Git diff viewer. |
 | `smelt.plugins.donut` | /donut - Andy Sloane's donut.c, spinning over everything on screen. |
 | `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
+| `smelt.plugins.file_finder` | /files (all or git): fuzzy workspace or Git-tracked file search with source preview. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan artifacts and approval UI. |
 | `smelt.plugins.predict` | Input prediction plugin. |

@@ -1385,6 +1385,7 @@ Options for `smelt.render.syntax`.
 | `content` | `string` |  | Source code to render. |
 | `lang` | `string` |  | Syntax language token such as `"rust"`, `"lua"`, or `"py"`. |
 | `path` | `string` |  | Path whose extension is used when `lang` is omitted. |
+| `line_numbers` | `boolean` |  | Stamp source line numbers for windows configured with `gutter = "line_numbers"`. Defaults to false. |
 
 ### `smelt.render.TextOpts`
 

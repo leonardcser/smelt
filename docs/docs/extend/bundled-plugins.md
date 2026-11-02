@@ -32,6 +32,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.diff` | /diff: snapshot-based, virtualized Git diff viewer. |
 | `smelt.plugins.donut` | /donut - Andy Sloane's donut.c, spinning over everything on screen. |
 | `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
+| `smelt.plugins.file_finder` | /files (all or git): fuzzy workspace or Git-tracked file search with source preview. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan artifacts and approval UI. |
 | `smelt.plugins.predict` | Input prediction plugin. |
@@ -57,3 +58,20 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- BUNDLED_PLUGINS_END -->
+
+## File finder
+
+[Find a file and open it in your editor](../guide/workflows.md#find-a-file-and-open-it-in-your-editor)
+with `/files` or `/files git`.
+
+No global keybindings are installed. To add your own:
+
+```lua
+smelt.keymap.set("n", "<leader>ff", function()
+  smelt.cmd.run("files all")
+end, { desc = "find workspace file" })
+
+smelt.keymap.set("n", "<leader>fg", function()
+  smelt.cmd.run("files git")
+end, { desc = "find Git-tracked file" })
+```

@@ -928,6 +928,7 @@
 ---@field content? string Source code to render.
 ---@field lang? string Syntax language token such as `"rust"`, `"lua"`, or `"py"`.
 ---@field path? string Path whose extension is used when `lang` is omitted.
+---@field line_numbers? boolean Stamp source line numbers for windows configured with `gutter = "line_numbers"`. Defaults to false.
 
 --- Options for `smelt.render.text`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
