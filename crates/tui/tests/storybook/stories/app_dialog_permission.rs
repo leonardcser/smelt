@@ -481,6 +481,7 @@ app_story!(edit_file_permission_dialog_multiline_diff, |ctx| {
 
 app_story!(notebook_edit_permission_dialog_with_diff, |ctx| {
     ctx.set_viewport(80, 28);
+    ctx.run_lua("require('smelt.plugins.notebook')");
     // Prepare a read snapshot of a two-cell notebook for the cell-level diff.
     let nb_json = r##"{
       "nbformat": 4,
@@ -514,6 +515,7 @@ app_story!(notebook_edit_permission_dialog_with_diff, |ctx| {
 
 app_story!(notebook_edit_permission_dialog_insert_cell, |ctx| {
     ctx.set_viewport(80, 22);
+    ctx.run_lua("require('smelt.plugins.notebook')");
     let nb_json = r##"{
       "nbformat": 4,
       "nbformat_minor": 5,

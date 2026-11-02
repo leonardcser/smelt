@@ -2,6 +2,7 @@ use crate::app_story;
 
 app_story!(goal_banner_states, |ctx| {
     ctx.set_viewport(64, 16);
+    ctx.run_lua("require('smelt.plugins.goal')");
     ctx.push_user_turn("Please keep working toward the parser migration.");
     ctx.push_assistant_text("I will keep the migration goal visible while working.");
 

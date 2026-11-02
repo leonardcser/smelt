@@ -69,6 +69,8 @@ For shell commands and options, see [CLI upgrades](cli.md#upgrades).
 
 ### Goals
 
+Enable `/goal` with `require("smelt.plugins.goal")` in `init.lua`.
+
 `/goal <objective>` starts a persistent goal that smelt keeps pursuing across
 turns. The sub-commands and the auto-continue setting are described under
 [Goals and Auto-Continue](../guide/workflows.md#goals-and-auto-continue).

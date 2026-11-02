@@ -104,6 +104,16 @@ conversation.
 
 ### Goals and auto-continue
 
+Goals are opt-in. Enable the bundled plugin in `~/.config/smelt/init.lua`:
+
+```lua
+require("smelt.plugins.goal")
+```
+
+This adds `/goal`, goal tools, the goal bar, and goal-aware continuation in the
+interactive frontend. Quota recovery and `auto_continue = "always"` do not
+require the goal plugin.
+
 A goal is a persistent objective that smelt keeps working on across turns, with a
 progress label in the goal bar. Create one only when you want smelt to keep going
 on a defined task:

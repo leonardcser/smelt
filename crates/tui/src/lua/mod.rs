@@ -1761,6 +1761,14 @@ mod tests {
             runtime.load_error
         );
         assert!(
+            !runtime.tool_available_for("edit_notebook", smelt_core::lua::ToolVisibility::Headless)
+        );
+        runtime
+            .lua
+            .load("require('smelt.plugins.notebook')")
+            .exec()
+            .unwrap();
+        assert!(
             runtime.tool_available_for("edit_notebook", smelt_core::lua::ToolVisibility::Headless)
         );
 
@@ -3334,9 +3342,13 @@ mod tests {
     }
 
     #[test]
-    fn autoload_registers_conflicting_file_tools_as_sequential() {
+    fn file_edit_tools_register_as_sequential() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
+        rt.lua
+            .load("require('smelt.plugins.notebook')")
+            .exec()
+            .unwrap();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let defs = rt.tool_defs(
             protocol::AgentMode::normal(),

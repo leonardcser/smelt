@@ -729,6 +729,9 @@ mod tests {
             ),
         ] {
             let mut app = TestApp::builder().build();
+            if name == "edit_notebook" {
+                assert!(app.run_lua("require('smelt.plugins.notebook')"));
+            }
             let dir = tempfile::tempdir().expect("create draft fixture directory");
             let file = dir.path().join(if name == "edit_file" {
                 "example.rs"

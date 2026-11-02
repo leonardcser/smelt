@@ -536,7 +536,9 @@ fn compact_command_preserves_kept_tool_presentations() {
     ];
     for (name, args, result, expected) in cases {
         let mut app = TestApp::builder().build();
-        assert!(app.run_lua(r#"require('smelt.plugins.lsp').setup({})"#));
+        assert!(app.run_lua(
+            r#"require('smelt.plugins.lsp').setup({}); require('smelt.plugins.notebook')"#
+        ));
         app.set_terminal_size(100, 40);
         let mut history = protocol::history_from_messages(vec![
             user_message("old user"),

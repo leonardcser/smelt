@@ -2262,6 +2262,38 @@ fn shared_session_state_uses_resume_hint_message_state() {
 }
 
 #[test]
+fn optional_goal_and_notebook_plugins_follow_config_reload() {
+    let config = tempfile::tempdir().unwrap();
+    let init = config.path().join("init.lua");
+    std::fs::write(&init, "").unwrap();
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    let assert_tools = |app: &mut TestApp, enabled: bool| {
+        assert!(app.run_lua(&format!(r#"
+            local tools = {{}}
+            for _, name in ipairs(smelt.tools.list()) do tools[name] = true end
+            for _, name in ipairs({{ 'create_goal', 'get_goal', 'update_goal', 'clear_goal', 'edit_notebook' }}) do
+                assert((tools[name] == true) == {enabled}, name)
+            end
+            assert((package.loaded['smelt.goal.command'] ~= nil) == {enabled})
+        "#)));
+    };
+    assert_tools(&mut app, false);
+    assert!(app.run_lua("assert(package.loaded['smelt.goal'] == nil)"));
+    std::fs::write(
+        &init,
+        "require('smelt.plugins.goal')\nrequire('smelt.plugins.notebook')\n",
+    )
+    .unwrap();
+    app.reload_lua();
+    assert_tools(&mut app, true);
+    app.reload_lua();
+    assert_tools(&mut app, true);
+    std::fs::write(&init, "").unwrap();
+    app.reload_lua();
+    assert_tools(&mut app, false);
+}
+
+#[test]
 fn assembled_system_prompt_uses_engine_template() {
     let app = TestApp::builder().build();
 
@@ -2671,6 +2703,7 @@ fn unread_edit_notebook_draft_shows_the_error_instead_of_the_source() {
     .to_string();
 
     let mut app = TestApp::builder().build();
+    assert!(app.run_lua("require('smelt.plugins.notebook')"));
     app.set_terminal_size(100, 24);
     app.start_turn(7);
     app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
@@ -2702,6 +2735,7 @@ fn stale_edit_notebook_is_rejected_in_preflight() {
     std::fs::write(&file, content).expect("write notebook fixture");
 
     let mut app = TestApp::builder().build();
+    assert!(app.run_lua("require('smelt.plugins.notebook')"));
     app.start_turn(7);
     assert!(app.run_lua(&format!(
         "smelt.fs.file_state.record_read_with_mtime({}, {}, 0, {}, 0)",

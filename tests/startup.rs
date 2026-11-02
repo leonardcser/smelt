@@ -1044,7 +1044,7 @@ async fn interactive_tool_keeps_typing_responsive(probe: ToolProbe) {
         })
         .mount(&provider).await;
     let notebook_setup = if notebook {
-        format!("smelt.permissions.extend({{ apply = {{ tools = {{ ask = {{ 'edit_notebook' }} }} }} }})\nsmelt.fs.file_state.record_read({}, {}, 0, 10000)\n",
+        format!("require('smelt.plugins.notebook')\nsmelt.permissions.extend({{ apply = {{ tools = {{ ask = {{ 'edit_notebook' }} }} }} }})\nsmelt.fs.file_state.record_read({}, {}, 0, 10000)\n",
             serde_json::to_string(&target.to_string_lossy()).unwrap(),
             serde_json::to_string(&notebook_content).unwrap())
     } else {

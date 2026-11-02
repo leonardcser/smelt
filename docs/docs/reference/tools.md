@@ -58,6 +58,10 @@ file unless `replace_all` is true. Refuses Jupyter notebooks (use
 
 ### `edit_notebook`
 
+Opt-in: add `require("smelt.plugins.notebook")` to `~/.config/smelt/init.lua`.
+This registers the editing tool and its previews. Reading notebooks through
+`read_file` remains available by default.
+
 Edits a Jupyter notebook (`.ipynb`) cell. Supports replacing, inserting, and
 deleting cells. Identify cells by `cell_id` or `cell_number` (0-indexed).
 Inserts show the new cell content in the confirm dialog; replace and delete show
@@ -296,7 +300,8 @@ for how to create and organize skills.
 
 ## Goal coordination
 
-The autoloaded goal plugin adds tools for persistent, user-requested objectives.
+The opt-in goal plugin adds tools for persistent, user-requested objectives.
+Enable it with `require("smelt.plugins.goal")` in `~/.config/smelt/init.lua`.
 Goals survive across turns in the current session and can drive idle
 auto-continue. The agent must not create one merely because a task is long.
 

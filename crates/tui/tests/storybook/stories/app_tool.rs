@@ -299,6 +299,7 @@ app_story!(edit_file_success_uses_retained_content_diff, |ctx| {
 
 app_story!(edit_notebook_tool_states, |ctx| {
     ctx.set_viewport(84, 22);
+    ctx.run_lua("require('smelt.plugins.notebook')");
     let notebook = r#"{"cells":[]}"#;
     let path = ctx.write_fixture("analysis.ipynb", notebook);
     ctx.cache_file_read(&path, notebook);

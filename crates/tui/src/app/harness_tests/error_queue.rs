@@ -316,7 +316,7 @@ fn start_canonical_turn(app: &mut TestApp) -> u64 {
 }
 
 fn clear_goal(app: &mut TestApp) {
-    assert!(app.run_lua(r#"require("smelt.goal").clear()"#));
+    assert!(app.run_lua(r#"require("smelt.plugins.goal"); require("smelt.goal").clear()"#));
 }
 
 fn create_auto_goal(app: &mut TestApp, objective: &str) {
@@ -541,8 +541,11 @@ fn stopped_continuation_reports_completion() {
 fn scheduled_continuation_follows_session_lifecycle() {
     use smelt_core::public_status::PublicState;
 
+    let config = tempfile::tempdir().unwrap();
+    let init = config.path().join("init.lua");
+    std::fs::write(&init, "require('smelt.plugins.goal')").unwrap();
     for reset in [false, true] {
-        let mut app = isolated_app();
+        let mut app = with_advancing_clock(TestApp::builder().with_init_lua(&init).build());
         create_auto_goal(&mut app, "follow session lifecycle");
         let turn_id = start_canonical_turn(&mut app);
         app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
@@ -1483,6 +1486,7 @@ fn withdrawing_queued_goal_creation_does_not_activate_or_replace_a_goal() {
     for existing_goal in [false, true] {
         for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
             let mut app = isolated_app();
+            assert!(app.run_lua("require('smelt.plugins.goal')"));
             if existing_goal {
                 assert!(app.run_lua(
                     r#"
@@ -1538,6 +1542,7 @@ fn goal_stop_controls_while_running_prevent_auto_continuation_after_turn_end() {
     ] {
         for quota in [false, true] {
             let mut app = isolated_app();
+            assert!(app.run_lua("require('smelt.plugins.goal')"));
             app.type_text("/goal finish the current work");
             app.press(KeyCode::Enter);
             app.wait_for_turn_persistence();
@@ -1572,6 +1577,7 @@ fn goal_stop_controls_while_running_prevent_auto_continuation_after_turn_end() {
 fn goal_resume_controls_while_running_continue_only_after_turn_end() {
     for command in ["resume", "auto on"] {
         let mut app = isolated_app();
+        assert!(app.run_lua("require('smelt.plugins.goal')"));
         app.type_text("/goal finish the current work");
         app.press(KeyCode::Enter);
         app.wait_for_turn_persistence();

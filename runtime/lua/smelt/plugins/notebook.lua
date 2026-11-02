@@ -1,5 +1,5 @@
--- Built-in edit_notebook tool. Replace/insert/delete a Jupyter cell with
--- staleness preflight and per-path flock.
+-- Optional notebook editing: edit_notebook with cell previews,
+-- staleness preflight, and per-path locking.
 
 local transcript_defaults = require("smelt.transcript.defaults")
 

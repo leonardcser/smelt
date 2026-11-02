@@ -1055,7 +1055,7 @@ mod tests {
         let lua = app.lua.as_ref().unwrap();
         lua.lua
             .load(include_str!(
-                "../../../runtime/lua/smelt/tools/notebook_edit.lua"
+                "../../../runtime/lua/smelt/plugins/notebook.lua"
             ))
             .set_environment(crate::lua::module::bundled_chunk_environment(&lua.lua).unwrap())
             .exec()

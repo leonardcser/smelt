@@ -1830,6 +1830,7 @@ fn lua_goal_module_persists_and_updates_session_goal() {
 
     assert!(app.run_lua(
         r#"
+            require("smelt.plugins.goal")
             local goal = require("smelt.goal")
             local created = assert(goal.create("finish named context notes", { auto_continue = false }))
             assert(created.id ~= nil and created.id ~= "")
@@ -1924,6 +1925,7 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
 
     assert!(app.run_lua(
         r#"
+            require("smelt.plugins.goal")
             local goal = require("smelt.goal")
             smelt.engine.has_active_turn = function() return _G.__goal_running == true end
             smelt.engine.continuation_state = function() return { token = 42, paused = false } end

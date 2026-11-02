@@ -1,5 +1,12 @@
 use super::*;
 
+fn goal_builder() -> TestAppBuilder {
+    TestApp::builder().with_init_lua(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/lua/smelt/plugins/goal.lua"
+    ))
+}
+
 fn assert_only_history_updates(app: &TestApp) {
     for action in app.actions() {
         if let Action::EngineSend(cmd) = action {
@@ -13,7 +20,7 @@ fn assert_only_history_updates(app: &TestApp) {
 
 #[test]
 fn goal_auto_off_applies_while_agent_is_running() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.type_text("/goal finish the current work");
     app.press(KeyCode::Enter);
     app.wait_for_turn_persistence();
@@ -65,7 +72,7 @@ fn goal_controls_apply_while_agent_is_running_without_changing_queued_messages()
     ];
     for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
         for (arg, check, notice) in cases {
-            let mut app = TestApp::builder().build();
+            let mut app = goal_builder().build();
             app.type_text("/goal finish the current work");
             app.press(KeyCode::Enter);
             app.wait_for_turn_persistence();
@@ -106,7 +113,7 @@ fn goal_controls_apply_while_agent_is_running_without_changing_queued_messages()
 #[test]
 fn clear_goal_tool_removes_goal_and_context_without_interrupting_turn() {
     for state in ["active", "paused", "blocked", "done", "absent"] {
-        let mut app = TestApp::builder().build();
+        let mut app = goal_builder().build();
         app.type_text("/goal finish the current work");
         app.press(KeyCode::Enter);
         app.wait_for_turn_persistence();
@@ -194,7 +201,7 @@ fn call_update_goal(app: &mut TestApp, args: serde_json::Value) -> (String, bool
 
 #[test]
 fn update_goal_tool_records_progress_and_state() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     assert!(app.run_lua(
         r#"assert(require("smelt.goal").create("finish the work", { auto_continue = false }))"#,
     ));
@@ -240,7 +247,7 @@ fn update_goal_tool_records_progress_and_state() {
 
 #[test]
 fn clear_goal_prevents_pending_auto_continuation() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.type_text("/goal finish the current work");
     app.press(KeyCode::Enter);
     app.wait_for_turn_persistence();
@@ -271,7 +278,7 @@ fn clear_goal_prevents_pending_auto_continuation() {
 fn goal_creation_while_running_waits_until_its_queued_request_is_consumed() {
     for prefix in ["/goal", "/goal set"] {
         for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
-            let mut app = TestApp::builder().build();
+            let mut app = goal_builder().build();
             app.type_text("initial request");
             app.press(KeyCode::Enter);
             app.wait_for_turn_persistence();
@@ -340,7 +347,7 @@ fn goal_creation_while_running_waits_until_its_queued_request_is_consumed() {
 
 #[test]
 fn lua_goal_renders_top_banner_not_statusline() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(60, 16);
 
     assert!(app.run_lua(
@@ -374,7 +381,7 @@ fn lua_goal_renders_top_banner_not_statusline() {
 
 #[test]
 fn lua_goal_banner_is_fully_selectable() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(48, 16);
 
     assert!(app.run_lua(
@@ -402,7 +409,7 @@ fn lua_goal_banner_is_fully_selectable() {
 
 #[test]
 fn lua_goal_state_writes_nested_session_updates_immediately() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     let session_id = app.session_snapshot().id.clone();
 
     assert!(app.run_lua(
@@ -432,7 +439,7 @@ fn lua_goal_state_writes_nested_session_updates_immediately() {
 fn lua_goal_state_restores_for_same_resumed_session_id() {
     let runtime = tempfile::TempDir::new().expect("create shared runtime root");
     let session_id = {
-        let mut app = TestApp::builder().with_runtime_home(runtime.path()).build();
+        let mut app = goal_builder().with_runtime_home(runtime.path()).build();
         let session_id = app.session_snapshot().id.clone();
         assert!(app.run_lua(
             r#"
@@ -444,7 +451,7 @@ fn lua_goal_state_restores_for_same_resumed_session_id() {
         session_id
     };
 
-    let mut resumed = TestApp::builder().with_runtime_home(runtime.path()).build();
+    let mut resumed = goal_builder().with_runtime_home(runtime.path()).build();
     resumed.set_session_id_for_harness(session_id);
 
     assert!(resumed.run_lua(
@@ -460,7 +467,7 @@ fn lua_goal_state_restores_for_same_resumed_session_id() {
 
 #[test]
 fn lua_goal_banner_prefers_live_progress() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(72, 16);
 
     assert!(app.run_lua(
@@ -491,7 +498,7 @@ fn lua_goal_banner_prefers_live_progress() {
 
 #[test]
 fn lua_goal_banner_keeps_progress_visible_with_long_objective() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(48, 16);
 
     assert!(app.run_lua(
@@ -518,7 +525,7 @@ fn lua_goal_banner_keeps_progress_visible_with_long_objective() {
 
 #[test]
 fn lua_goal_banner_truncates_long_progress_and_preserves_mode() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(32, 16);
 
     assert!(app.run_lua(
@@ -546,7 +553,7 @@ fn lua_goal_banner_truncates_long_progress_and_preserves_mode() {
 
 #[test]
 fn lua_goal_banner_preserves_mode_when_fixed_chrome_overflows() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(10, 16);
 
     assert!(app.run_lua(
@@ -572,7 +579,7 @@ fn lua_goal_banner_preserves_mode_when_fixed_chrome_overflows() {
 
 #[test]
 fn lua_goal_banner_stays_above_transcript_scroll_pill() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(60, 16);
 
     assert!(app.run_lua(
@@ -610,7 +617,7 @@ fn lua_goal_banner_stays_above_transcript_scroll_pill() {
 
 #[test]
 fn lua_goal_banner_uses_status_labels_and_unicode_ellipsis() {
-    let mut app = TestApp::builder().build();
+    let mut app = goal_builder().build();
     app.set_terminal_size(36, 16);
 
     assert!(app.run_lua(

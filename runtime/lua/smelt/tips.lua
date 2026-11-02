@@ -374,11 +374,6 @@ local command_tips = {
     text = "show available skills and where they were loaded from",
   },
   {
-    id = "commands.goal",
-    key = "/goal",
-    text = "keep a persistent objective visible across turns",
-  },
-  {
     id = "commands.mcp",
     key = "/mcp",
     text = "show MCP servers, lifecycle state, and available tool names",

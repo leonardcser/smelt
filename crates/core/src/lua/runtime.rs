@@ -171,6 +171,8 @@ pub const OPTIONAL_PLUGINS: &[&str] = &[
     "smelt.plugins.which_key",
     "smelt.plugins.inspect",
     "smelt.plugins.lsp",
+    "smelt.plugins.goal",
+    "smelt.plugins.notebook",
 ];
 
 /// Command metadata used by command-line completion UIs.
