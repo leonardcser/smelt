@@ -127,6 +127,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
 
     m.live_only_fn(
+        "open_editor",
+        "Open an existing file in $VISUAL, then $EDITOR, falling back to vi. Relative paths resolve against the session cwd. Suspends the terminal until the editor exits, then repaints smelt. Returns `(true, nil)` or `(false, err)`.",
+        &["path"],
+        |_, path: String| -> LuaResult<(bool, Option<String>)> {
+            match crate::lua::with_platform_host(|host| host.open_editor(&path)) {
+                Ok(()) => Ok((true, None)),
+                Err(error) => Ok((false, Some(error))),
+            }
+        },
+    )?;
+
+    m.live_only_fn(
         "bell",
         "Ring the terminal bell (BEL). Returns false when no interactive terminal is attached.",
         &[],

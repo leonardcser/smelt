@@ -61,7 +61,7 @@ impl TuiTerminal {
     /// into our alt buffer, which the caller rebuilds with `force_redraw`.
     ///
     /// This deliberately does **not** touch any active terminal input reader.
-    /// Callers must stop or recreate their reader around suspension so it does
+    /// Callers must pause or stop their reader around suspension so it does
     /// not race the child process for stdin bytes.
     pub fn suspended<F, R>(&mut self, f: F) -> R
     where

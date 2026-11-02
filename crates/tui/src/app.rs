@@ -3732,6 +3732,7 @@ impl TuiApp {
                 return;
             }
         };
+        self.platform.set_input_pause(term_events.pause_handle());
         // The kitty graphics answer arrives through `term_replies` while the
         // loop runs, so the first frame never waits for it. Inside tmux an
         // unsupported terminal never answers at all.

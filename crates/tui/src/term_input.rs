@@ -34,6 +34,66 @@ pub(crate) struct TerminalInput {
     shutdown: Option<platform::Shutdown>,
 }
 
+#[derive(Clone)]
+pub(crate) struct TerminalInputPause {
+    control: platform::Control,
+}
+
+pub(crate) struct PausedTerminalInput {
+    control: platform::Control,
+}
+
+impl TerminalInputPause {
+    pub(crate) fn pause(&self) -> io::Result<PausedTerminalInput> {
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        self.control.send(ReaderCommand::Pause(ack_tx))?;
+        ack_rx.recv().map_err(|_| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "terminal input reader stopped")
+        })?;
+        Ok(PausedTerminalInput {
+            control: self.control.clone(),
+        })
+    }
+}
+
+impl Drop for PausedTerminalInput {
+    fn drop(&mut self) {
+        let _ = self.control.send(ReaderCommand::Resume);
+    }
+}
+
+enum ReaderCommand {
+    Pause(std::sync::mpsc::Sender<()>),
+    Resume,
+    Shutdown,
+}
+
+// Acknowledging a pause must happen on the reader thread, between reads.
+fn handle_reader_command(
+    mut command: ReaderCommand,
+    commands: &std::sync::mpsc::Receiver<ReaderCommand>,
+) -> bool {
+    let mut pauses = 0usize;
+    loop {
+        match command {
+            ReaderCommand::Pause(ack) => {
+                if ack.send(()).is_ok() {
+                    pauses += 1;
+                }
+            }
+            ReaderCommand::Resume => pauses = pauses.saturating_sub(1),
+            ReaderCommand::Shutdown => return false,
+        }
+        if pauses == 0 {
+            return true;
+        }
+        command = match commands.recv() {
+            Ok(command) => command,
+            Err(_) => return false,
+        };
+    }
+}
+
 /// Answers to smelt's own terminal queries, kept apart from [`TerminalInput`]
 /// so the event loop can wait on input and replies at the same time.
 pub(crate) struct TerminalReplies {
@@ -93,6 +153,17 @@ impl TerminalInput {
                 geometry_rx,
             },
         ))
+    }
+
+    pub(crate) fn pause_handle(&self) -> TerminalInputPause {
+        TerminalInputPause {
+            control: self
+                .shutdown
+                .as_ref()
+                .expect("active terminal input")
+                .control
+                .clone(),
+        }
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Event> {
@@ -155,11 +226,39 @@ pub(crate) fn cell_pixel_query() -> Vec<u8> {
 #[cfg(unix)]
 mod platform {
     use super::*;
-    use std::os::fd::RawFd;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::sync::Arc;
     use std::thread::JoinHandle;
 
+    #[derive(Clone)]
+    pub(super) struct Control(Arc<ControlInner>);
+
+    struct ControlInner {
+        commands: std::sync::mpsc::Sender<ReaderCommand>,
+        write_fd: OwnedFd,
+    }
+
+    impl Control {
+        pub(super) fn send(&self, command: ReaderCommand) -> io::Result<()> {
+            self.0.commands.send(command).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "terminal input reader stopped")
+            })?;
+            loop {
+                let result =
+                    unsafe { libc::write(self.0.write_fd.as_raw_fd(), [0u8].as_ptr().cast(), 1) };
+                if result == 1 {
+                    return Ok(());
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
     pub(super) struct Shutdown {
-        write_fd: RawFd,
+        pub(super) control: Control,
         #[cfg(test)]
         read_fd: RawFd,
         thread: Option<JoinHandle<()>>,
@@ -168,17 +267,13 @@ mod platform {
     #[cfg(test)]
     impl Shutdown {
         pub(super) fn pipe_fds(&self) -> (RawFd, RawFd) {
-            (self.read_fd, self.write_fd)
+            (self.read_fd, self.control.0.write_fd.as_raw_fd())
         }
     }
 
     impl Drop for Shutdown {
         fn drop(&mut self) {
-            let byte = [0u8; 1];
-            unsafe {
-                let _ = libc::write(self.write_fd, byte.as_ptr().cast(), byte.len());
-                libc::close(self.write_fd);
-            }
+            let _ = self.control.send(ReaderCommand::Shutdown);
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
@@ -206,22 +301,26 @@ mod platform {
                 return Err(e);
             }
         };
+        let (commands, command_rx) = std::sync::mpsc::channel();
+        let control = Control(Arc::new(ControlInner {
+            commands,
+            write_fd: unsafe { OwnedFd::from_raw_fd(shutdown_write_fd) },
+        }));
         let thread = match std::thread::Builder::new()
             .name("smelt-terminal-input".into())
-            .spawn(move || reader_loop(fd, shutdown_read_fd, tx, probe_tx, geometry_tx))
+            .spawn(move || reader_loop(fd, shutdown_read_fd, command_rx, tx, probe_tx, geometry_tx))
         {
             Ok(thread) => thread,
             Err(e) => {
                 unsafe {
                     libc::close(fd);
                     libc::close(shutdown_read_fd);
-                    libc::close(shutdown_write_fd);
                 }
                 return Err(io::Error::other(e));
             }
         };
         Ok(Shutdown {
-            write_fd: shutdown_write_fd,
+            control,
             #[cfg(test)]
             read_fd: shutdown_read_fd,
             thread: Some(thread),
@@ -231,7 +330,7 @@ mod platform {
     fn open_input_fd() -> io::Result<RawFd> {
         unsafe {
             if libc::isatty(libc::STDIN_FILENO) == 1 {
-                let fd = libc::dup(libc::STDIN_FILENO);
+                let fd = libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 0);
                 if fd < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -282,6 +381,7 @@ mod platform {
     fn reader_loop(
         fd: RawFd,
         shutdown_fd: RawFd,
+        commands: std::sync::mpsc::Receiver<ReaderCommand>,
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
         probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
         geometry_tx: tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
@@ -324,9 +424,31 @@ mod platform {
                 }
                 continue;
             }
-            if pfds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)
-                != 0
-            {
+            if pfds[1].revents & libc::POLLIN != 0 {
+                let mut wake = 0u8;
+                let read = loop {
+                    let read = unsafe { libc::read(shutdown_fd, (&mut wake as *mut u8).cast(), 1) };
+                    if read < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break read;
+                };
+                if read != 1 {
+                    break;
+                }
+                match commands.try_recv() {
+                    Ok(command) => {
+                        parser = Parser::new();
+                        if !handle_reader_command(command, &commands) {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+                continue;
+            }
+            if pfds[1].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
                 break;
             }
             let input_events = pfds[0].revents;
@@ -377,39 +499,65 @@ mod platform {
 #[cfg(not(unix))]
 mod platform {
     use super::*;
-    use futures_core::Stream;
-    use std::pin::Pin;
+    #[derive(Clone)]
+    pub(super) struct Control(std::sync::mpsc::Sender<ReaderCommand>);
 
-    pub(super) struct Shutdown;
+    impl Control {
+        pub(super) fn send(&self, command: ReaderCommand) -> io::Result<()> {
+            self.0.send(command).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "terminal input reader stopped")
+            })
+        }
+    }
+
+    pub(super) struct Shutdown {
+        pub(super) control: Control,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for Shutdown {
+        fn drop(&mut self) {
+            let _ = self.control.send(ReaderCommand::Shutdown);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
 
     pub(super) fn spawn_reader(
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
     ) -> io::Result<Shutdown> {
-        std::thread::Builder::new()
+        let (commands, command_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::Builder::new()
             .name("smelt-terminal-input".into())
-            .spawn(move || {
-                let mut stream = crossterm::event::EventStream::new();
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .expect("terminal input runtime");
-                rt.block_on(async move {
-                    while let Some(Ok(ev)) = stream_next(&mut stream).await {
-                        if tx.send(ev).is_err() {
+            .spawn(move || loop {
+                match command_rx.try_recv() {
+                    Ok(command) => {
+                        if !handle_reader_command(command, &command_rx) {
                             break;
                         }
                     }
-                });
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+                match crossterm::event::poll(std::time::Duration::from_millis(10)) {
+                    Ok(true) => match crossterm::event::read() {
+                        Ok(event) => {
+                            if tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    },
+                    Ok(false) => {}
+                    Err(_) => break,
+                }
             })
             .map_err(io::Error::other)?;
-        Ok(Shutdown)
-    }
-
-    async fn stream_next<S>(stream: &mut S) -> Option<S::Item>
-    where
-        S: Stream + Unpin,
-    {
-        std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
+        Ok(Shutdown {
+            control: Control(commands),
+            thread: Some(thread),
+        })
     }
 }
 
@@ -1199,6 +1347,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pipe_backed_cell_query_preserves_user_input() {
+        let _lock = terminal_reader_test_lock();
         let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
         writer.write_all(b"z\x1b[6;24;12t").unwrap();
         assert_eq!(
@@ -1212,6 +1361,7 @@ mod tests {
     #[test]
     fn pipe_backed_kitty_probe_preserves_user_input() {
         assert!(kitty_probe_query().starts_with(&smelt_term::kitty::control_sequence(KITTY_PROBE)));
+        let _lock = terminal_reader_test_lock();
         let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
         writer.write_all(b"z\x1b_Gi=16777214;OK\x1b\\").unwrap();
         assert_eq!(
@@ -1225,6 +1375,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pipe_backed_kitty_probe_fence_reports_unsupported() {
+        let _lock = terminal_reader_test_lock();
         let (_input, mut replies, mut writer, _) = pipe_terminal_input();
         writer.write_all(b"\x1b[?62;4c").unwrap();
         assert_eq!(
@@ -1236,6 +1387,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pipe_backed_kitty_probe_fence_after_reply_keeps_support() {
+        let _lock = terminal_reader_test_lock();
         let (_input, mut replies, mut writer, _) = pipe_terminal_input();
         writer
             .write_all(b"\x1b_Gi=16777214;OK\x1b\\\x1b[?62;4c")
@@ -1249,6 +1401,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pipe_backed_unanswered_kitty_probe_leaves_input_flowing() {
+        let _lock = terminal_reader_test_lock();
         let (mut input, mut replies, mut writer, _) = pipe_terminal_input();
         writer.write_all(b"z").unwrap();
         assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
@@ -1261,6 +1414,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pipe_backed_settled_kitty_probe_ignores_later_answers() {
+        let _lock = terminal_reader_test_lock();
         let (_input, mut replies, mut writer, _) = pipe_terminal_input();
         writer.write_all(b"\x1b_Gi=16777214;OK\x1b\\").unwrap();
         assert_eq!(
@@ -1504,6 +1658,70 @@ mod tests {
 
         assert_eq!(recv_with_timeout(&mut input), None);
         drop(input);
+        for fd in fds {
+            assert_fd_closed(fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paused_reader_leaves_all_editor_bytes_on_the_input_fd() {
+        let _lock = terminal_reader_test_lock();
+        let (mut input, _replies, mut writer, fds) = pipe_terminal_input();
+        let flags = unsafe { libc::fcntl(fds[0], libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        let control = input.pause_handle();
+        for _ in 0..8 {
+            let paused = control.pause().unwrap();
+            writer.write_all(b"editor input").unwrap();
+            let mut bytes = [0u8; 12];
+            assert_eq!(
+                unsafe { libc::read(fds[0], bytes.as_mut_ptr().cast(), bytes.len()) },
+                12
+            );
+            assert_eq!(&bytes, b"editor input");
+            assert!(input.try_recv().is_err());
+            drop(paused);
+            writer.write_all(b"z").unwrap();
+            assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
+        }
+        drop(control);
+        drop(input);
+        for fd in fds {
+            assert_fd_closed(fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paused_reader_resumes_during_unwind() {
+        let _lock = terminal_reader_test_lock();
+        let (mut input, _replies, mut writer, _) = pipe_terminal_input();
+        let control = input.pause_handle();
+        let panic = std::panic::catch_unwind(|| {
+            let _paused = control.pause().unwrap();
+            panic!("editor panic");
+        });
+        assert!(panic.is_err());
+        writer.write_all(b"z").unwrap();
+        assert_eq!(keys_text(&[recv_with_timeout(&mut input).unwrap()]), "z");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_interrupts_a_paused_reader() {
+        let _lock = terminal_reader_test_lock();
+        let (input, _replies, _writer, fds) = pipe_terminal_input();
+        let control = input.pause_handle();
+        let paused = control.pause().unwrap();
+        drop(input);
+        assert!(control.pause().is_err());
+        drop(paused);
+        drop(control);
         for fd in fds {
             assert_fd_closed(fd);
         }

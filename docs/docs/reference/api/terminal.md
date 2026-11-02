@@ -43,6 +43,14 @@ fun(): boolean
 
 Return true when the smelt terminal window currently has OS focus.
 
+## `smelt.terminal.open_editor`
+
+```lua
+fun(path: string): boolean, string?
+```
+
+Open an existing file in $VISUAL, then $EDITOR, falling back to vi. Relative paths resolve against the session cwd. Suspends the terminal until the editor exits, then repaints smelt. Returns `(true, nil)` or `(false, err)`.
+
 ## `smelt.terminal.osc9_notify`
 
 ```lua

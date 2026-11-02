@@ -93,6 +93,140 @@ fn spawn_in_pty(mut command: Command) -> (File, ChildProcessGroup) {
     (master, process)
 }
 
+fn check_editor_handoff(prompt: bool, exit_code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("example.txt"), "editor handoff fixture\n").unwrap();
+    let ready = root.path().join("ready");
+    let editor_ready = root.path().join("editor-ready");
+    let received = root.path().join("received");
+    let resumed = root.path().join("resumed");
+    let expected = b"editor-input-0123456789";
+    let editor = root.path().join("test editor.py");
+    std::fs::write(
+        &editor,
+        format!(
+            r#"#!/usr/bin/env python3
+import os, pathlib, sys, termios, tty
+assert sys.argv[1:-1] == ['argument with spaces', '', '$HOME;touch not-a-command'], sys.argv
+old = termios.tcgetattr(0)
+try:
+    tty.setraw(0)
+    pathlib.Path({:?}).write_text('ready')
+    data = b''
+    while len(data) < {}:
+        data += os.read(0, 1)
+        pathlib.Path({:?}).write_bytes(data)
+    if {} == 0:
+        pathlib.Path(sys.argv[-1]).write_text('edited prompt\n')
+finally:
+    termios.tcsetattr(0, termios.TCSANOW, old)
+sys.exit({})
+"#,
+            editor_ready.to_str().unwrap(),
+            expected.len(),
+            received.to_str().unwrap(),
+            exit_code,
+            exit_code
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = root.path().join("init.lua");
+    std::fs::write(&config, format!(r#"
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_continue = "off"
+smelt.settings.show_prediction = false
+smelt.settings.vim = false
+smelt.provider.register("local", {{ type = "openai-compatible", api_base = "http://127.0.0.1:9", api_key_env = "MOCK_KEY", models = {{ "test" }} }})
+smelt.defaults.set({{ model = "local/test" }})
+smelt.lifecycle.on_ready(function() smelt.fs.write({:?}, "ready") end)
+smelt.keymap.set("", "<F6>", function() smelt.cmd.run("files all") end)
+smelt.keymap.set("", "<F7>", function() smelt.fs.write({:?}, smelt.prompt.text()) end)
+"#, ready.to_str().unwrap(), resumed.to_str().unwrap())).unwrap();
+    let mut command = isolated_smelt_command(root.path());
+    command
+        .current_dir(&workspace)
+        .args(["--config", config.to_str().unwrap()])
+        .env("TERM", "xterm-256color")
+        .env("MOCK_KEY", "test")
+        .env(
+            "VISUAL",
+            format!(
+                "\"{}\" 'argument with spaces' '' '$HOME;touch not-a-command'",
+                editor.display()
+            ),
+        );
+    let (mut master, mut process) = spawn_in_pty(command);
+    let mut captured = Vec::new();
+    let mut terminal = pty_terminal();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (mut triggered, mut opened, mut requested_resume) = (false, false, false);
+    let mut sent = 0;
+    loop {
+        let before = captured.len();
+        drain_pty(&mut master, &mut captured);
+        terminal.process(&captured[before..]);
+        let screen = terminal.screen().contents();
+        if ready.exists() && !triggered {
+            master
+                .write_all(if prompt { b"\x18\x05" } else { b"\x1b[17~" })
+                .unwrap();
+            triggered = true;
+        }
+        if !prompt && !opened && screen.contains("editor handoff fixture") {
+            master.write_all(b"\r").unwrap();
+            opened = true;
+        }
+        let bytes = std::fs::read(&received).unwrap_or_default();
+        if editor_ready.exists() && bytes.len() == sent && sent < expected.len() {
+            master.write_all(&expected[sent..sent + 1]).unwrap();
+            sent += 1;
+        }
+        if bytes.len() == expected.len() && !requested_resume {
+            assert_eq!(bytes, expected);
+            master.write_all(b"\x1b[18~").unwrap();
+            requested_resume = true;
+        }
+        if resumed.exists() {
+            if prompt {
+                assert_eq!(
+                    std::fs::read_to_string(&resumed).unwrap(),
+                    "edited prompt\n"
+                );
+            }
+            break;
+        }
+        assert!(
+            process.child.try_wait().unwrap().is_none(),
+            "smelt exited:\n{screen}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "editor lost input or did not return: sent {sent}, received {bytes:?}\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn file_finder_editor_handoff_preserves_keyboard_input() {
+    check_editor_handoff(false, 0);
+}
+
+#[test]
+fn prompt_editor_handoff_preserves_keyboard_input() {
+    check_editor_handoff(true, 0);
+}
+
+#[test]
+fn failed_editor_handoff_restores_keyboard_input() {
+    check_editor_handoff(false, 7);
+}
+
 #[test]
 fn model_switch_loads_catalog_metadata_offline_in_terminal() {
     let root = tempfile::tempdir().unwrap();

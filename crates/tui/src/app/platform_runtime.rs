@@ -62,6 +62,7 @@ impl ContextWindowController {
 pub(super) struct PlatformRuntime {
     terminal_focused: bool,
     terminal: Option<crate::term_setup::TuiTerminal>,
+    input_pause: Option<crate::term_input::TerminalInputPause>,
     sessions: smelt_core::session::SessionStorage,
     inspect_server: std::sync::Arc<std::sync::Mutex<Option<crate::inspect_server::Server>>>,
     sleep_inhibitor: crate::sleep_inhibit::SleepInhibitor,
@@ -112,6 +113,7 @@ impl PlatformRuntime {
         Self {
             terminal_focused: true,
             terminal: None,
+            input_pause: None,
             sessions,
             inspect_server: std::sync::Arc::new(std::sync::Mutex::new(None)),
             sleep_inhibitor: crate::sleep_inhibit::SleepInhibitor::new(env.cwd()),
@@ -167,6 +169,7 @@ impl PlatformRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .take();
         drop(server);
+        self.input_pause = None;
         self.terminal = None;
     }
 
@@ -217,13 +220,25 @@ impl PlatformRuntime {
             .map(crate::term_setup::TuiTerminal::size)
     }
 
-    pub(super) fn suspend_terminal<F, R>(&mut self, operation: F) -> Option<R>
+    pub(super) fn set_input_pause(&mut self, pause: crate::term_input::TerminalInputPause) {
+        self.input_pause = Some(pause);
+    }
+
+    pub(super) fn suspend_terminal<F, R>(&mut self, operation: F) -> Option<std::io::Result<R>>
     where
-        F: FnOnce() -> R,
+        F: FnOnce() -> std::io::Result<R>,
     {
-        self.terminal
-            .as_mut()
-            .map(|terminal| terminal.suspended(operation))
+        let terminal = self.terminal.as_mut()?;
+        let _input_pause = match self
+            .input_pause
+            .as_ref()
+            .map(|input| input.pause())
+            .transpose()
+        {
+            Ok(pause) => pause,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(terminal.suspended(operation))
     }
 
     pub(super) fn install_cwd(&mut self, cwd: std::path::PathBuf) {
@@ -442,6 +457,43 @@ impl Drop for PlatformRuntime {
 }
 
 impl crate::app::TuiApp {
+    pub(crate) fn open_file_in_editor(&mut self, path: &str) -> Result<(), String> {
+        let path = self.core.env.cwd().join(path);
+        if !path.is_file() {
+            return Err(format!("editor: not a file: {}", path.display()));
+        }
+        let (program, mut args) = crate::input::editor::editor_command_from_env()
+            .map_err(|error| format!("editor: {error}"))?;
+        args.push(path.into_os_string());
+        match self.run_editor(&program, &args) {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("editor exited with {status}")),
+            Err(error) => Err(format!("editor: {error}")),
+        }
+    }
+
+    pub(super) fn run_editor(
+        &mut self,
+        program: &std::ffi::OsStr,
+        args: &[std::ffi::OsString],
+    ) -> std::io::Result<std::process::ExitStatus> {
+        let cwd = self.core.env.cwd();
+        let status = self.platform.suspend_terminal(|| {
+            std::process::Command::new(program)
+                .args(args)
+                .current_dir(cwd)
+                .status()
+        });
+        // Editors overwrite the alternate screen; rebuild the render baseline.
+        self.ui.force_redraw();
+        status.unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "unavailable without an attached terminal",
+            ))
+        })
+    }
+
     pub(crate) fn write_terminal_control(&mut self, bytes: &[u8]) -> std::io::Result<bool> {
         self.platform.write_terminal_control(bytes)
     }

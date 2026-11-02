@@ -24,6 +24,10 @@ terminal.info = nil
 ---@type fun(): boolean
 terminal.is_focused = nil
 
+--- Open an existing file in $VISUAL, then $EDITOR, falling back to vi. Relative paths resolve against the session cwd. Suspends the terminal until the editor exits, then repaints smelt. Returns `(true, nil)` or `(false, err)`.
+---@type fun(path: string): boolean, string?
+terminal.open_editor = nil
+
 --- Post an OSC 9 terminal notification with `message`. Pass `{ dcs_passthrough = true }` inside tmux to wrap the notification for tmux passthrough. Control characters are stripped from messages before writing.
 ---@type fun(message: string, opts: table?): boolean
 terminal.osc9_notify = nil

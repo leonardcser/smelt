@@ -1106,21 +1106,7 @@ impl TuiApp {
                 return;
             }
         };
-        let cwd = self.core.env.cwd();
-        let spawn = || {
-            std::process::Command::new(&req.program)
-                .args(&req.args)
-                .current_dir(cwd)
-                .status()
-        };
-        let Some(status) = self.platform.suspend_terminal(spawn) else {
-            self.notify_error("editor: unavailable without an attached terminal".to_string());
-            self.ui.force_redraw();
-            return;
-        };
-        // Vim et al re-show the hardware cursor and scribble over the alt
-        // screen; force a full repaint so the diff baseline is rebuilt.
-        self.ui.force_redraw();
+        let status = self.run_editor(&req.program, &req.args);
         match crate::input::editor::finalize(req, status) {
             Ok(text) => {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);

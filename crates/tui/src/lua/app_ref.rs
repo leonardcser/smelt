@@ -909,6 +909,10 @@ pub(crate) struct PlatformLuaHost<'a> {
 }
 
 impl PlatformLuaHost<'_> {
+    pub(crate) fn open_editor(&mut self, path: &str) -> Result<(), String> {
+        self.app.open_file_in_editor(path)
+    }
+
     pub(crate) fn write_terminal_control(&mut self, bytes: &[u8]) -> std::io::Result<bool> {
         self.app.write_terminal_control(bytes)
     }
