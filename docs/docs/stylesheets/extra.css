@@ -80,9 +80,8 @@
   font-size: 0;
 }
 
-/* The homepage shows the section links in the header row instead of below it
-   (overrides/main.html renders both copies), minus the Home link. The drawer stays the narrow-screen
-   navigation. */
+/* The homepage shows section links in the header row, minus Home.
+   The drawer stays the narrow-screen navigation. */
 .md-header__inner .md-tabs {
   display: none;
 }

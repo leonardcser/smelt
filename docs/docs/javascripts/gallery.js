@@ -24,13 +24,32 @@
 
   function init() {
     var root = document.getElementById("gallery");
-    if (!root || !window.smeltReplay) return;
+    if (!root) return;
     var base = root.dataset.base;
-    // The posters are one file, and a card draws its own only while it is near the screen.
-    var fetched = [fetch(root.dataset.items), hovers ? fetch(base + "stills.json") : Promise.resolve(null)];
-    Promise.all(fetched.map(function (p) { return p.then(function (r) { return r && r.json(); }); })).then(function (loaded) {
-      build(root, base, loaded[0], loaded[1]);
-    });
+    root.replaceChildren(el("p", "gallery__status", "Loading plugins…"));
+    root.setAttribute("aria-busy", "true");
+
+    function json(url) {
+      return fetch(url, { signal: AbortSignal.timeout(15000) }).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+    }
+
+    // Posters are optional: a failed poster request must not hide the plugin list.
+    Promise.all([json(root.dataset.items), hovers ? json(base + "stills.json").catch(function () { return {}; }) : null])
+      .then(function (loaded) { build(root, base, loaded[0], loaded[1]); })
+      .catch(function () {
+        if (window.smeltReplay) root.querySelectorAll("[data-replay]").forEach(function (f) { window.smeltReplay.unmount(f); });
+        var retry = el("button", "gallery__chip", "Retry");
+        retry.type = "button";
+        retry.onclick = init;
+        var message = el("p", "gallery__status", "Could not load plugins. ");
+        message.setAttribute("role", "alert");
+        message.appendChild(retry);
+        root.replaceChildren(message);
+      })
+      .finally(function () { root.removeAttribute("aria-busy"); });
   }
 
   function build(root, base, data, stills) {
@@ -92,12 +111,8 @@
           var r = fig.__replay;
           if (!r || r.hovered) return;
           r.hovered = true;
-          if (!r.full) {
-            r.full = true;
-            fig.__data = null;
-            r.loading = null;
-            r.frames = null;
-          }
+          r.unload();
+          fig.__data = null;
           r.visible = true;
           r.play();
         };
@@ -105,15 +120,9 @@
           var r = fig.__replay;
           if (!r || !r.hovered) return;
           r.hovered = false;
-          r.pause();
-          // Back to the poster, which is the still the card started with.
-          if (r.full) {
-            r.full = false;
-            fig.__data = stills[item.slug];
-            r.loading = null;
-            r.frames = null;
-            r.load();
-          }
+          r.unload();
+          fig.__data = stills[item.slug];
+          r.load();
         };
         a.addEventListener("mouseenter", play);
         a.addEventListener("focus", play);
@@ -179,7 +188,7 @@
     }
     dialog.addEventListener("close", function () {
       var live = dialog.querySelector("figure");
-      if (live && window.smeltReplay) window.smeltReplay.unmount(live);
+      if (live) window.smeltReplay.unmount(live);
       dialog.replaceChildren();
       if (location.hash) history.replaceState(null, "", location.pathname + location.search);
     });
@@ -208,6 +217,8 @@
         link.href = REPO + item.source;
         body.appendChild(el("p", "", "")).appendChild(link);
       }
+      var previous = dialog.querySelector("figure");
+      if (previous) window.smeltReplay.unmount(previous);
       var live = figure(base + item.slug + ".json");
       dialog.replaceChildren(live, body);
       window.smeltReplay.mount(live);
@@ -215,10 +226,14 @@
       history.replaceState(null, "", "#" + item.slug);
     }
 
-    var wanted = items.filter(function (i) { return "#" + i.slug === location.hash; })[0];
-    if (wanted) open(wanted);
+    function fromHash() {
+      var wanted = items.filter(function (i) { return "#" + i.slug === location.hash; })[0];
+      if (wanted) open(wanted);
+      else close();
+    }
+    window.addEventListener("hashchange", fromHash);
+    fromHash();
   }
 
-  if (window.document$) window.document$.subscribe(init);
-  else init();
+  init();
 })();

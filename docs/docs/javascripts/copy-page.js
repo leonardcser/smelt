@@ -1,5 +1,5 @@
 // "Copy page" button: copies the page's Markdown source to the clipboard.
-// Delegated on document so it keeps working across instant navigation.
+
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-copy-page]");
   if (!button) return;

@@ -354,11 +354,16 @@
     // A page that already holds the recording passes it as `el.__data`.
     var source = this.el.__data
       ? Promise.resolve(this.el.__data)
-      : fetch(this.el.dataset.replay, low ? { priority: "low" } : undefined).then(function (r) {
+      : fetch(this.el.dataset.replay, { signal: AbortSignal.timeout(15000), priority: low ? "low" : "auto" }).then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
           return r.json();
         });
-    this.loading = source
+    var loading = source
       .then(function (data) {
+        if (self.loading !== loading) return false;
+        if (!data || !(data.cols > 0) || !(data.rows > 0) || !Array.isArray(data.frames) || !data.frames.length) {
+          throw new Error("Invalid recording");
+        }
         self.cols = data.cols;
         self.rows = data.rows;
         self.frames = data.frames;
@@ -375,8 +380,18 @@
         self.index = self.frames.length - 1;
         self.fit();
         self.show(self.index, true);
+        return true;
+      })
+      .catch(function () {
+        if (self.loading === loading) {
+          self.loading = null;
+          self.frames = null;
+          if (self.el.isConnected) self.screen.textContent = "Recording unavailable.";
+        }
+        return false;
       });
-    return this.loading;
+    this.loading = loading;
+    return loading;
   };
 
   // Drops the drawn screen of a figure far off screen, which the page can draw again when it nears.
@@ -517,7 +532,8 @@
 
   Replay.prototype.play = function () {
     var self = this;
-    this.load().then(function () {
+    this.load().then(function (loaded) {
+      if (!loaded || !self.frames) return;
       // A figure marked data-hover plays only while its page says it is hovered.
       if (self.playing || reducedMotion || !self.visible || document.hidden) return;
       if (self.el.hasAttribute("data-hover") && !self.hovered) return;
@@ -552,14 +568,11 @@
   }
 
   function initReplays() {
-    replays.forEach(function (r) {
-      r.pause();
-    });
-    replays = [];
     var seen = new IntersectionObserver(
       function (entries) {
         entries.forEach(function (e) {
           var r = e.target.__replay;
+          if (!r) return;
           r.visible = e.isIntersecting;
           if (r.visible) r.play();
           else r.pause();
@@ -571,6 +584,7 @@
       function (entries) {
         entries.forEach(function (e) {
           var r = e.target.__replay;
+          if (!r) return;
           if (e.isIntersecting) r.load();
           else if (e.target.hasAttribute("data-lazy") && !r.hovered) r.unload();
         });
@@ -579,7 +593,7 @@
     );
     var resized = new ResizeObserver(function (entries) {
       entries.forEach(function (e) {
-        e.target.__replay.fit();
+        if (e.target.__replay) e.target.__replay.fit();
       });
     });
     function mount(el) {
@@ -596,7 +610,10 @@
     function unmount(el) {
       var r = el.__replay;
       if (!r) return;
-      r.pause();
+      r.visible = false;
+      r.unload();
+      r.window.replaceWith(r.screen);
+      r.keys.remove();
       seen.unobserve(el);
       near.unobserve(el);
       resized.unobserve(el);
@@ -608,6 +625,5 @@
     document.querySelectorAll("[data-replay]").forEach(mount);
   }
 
-  if (window.document$) window.document$.subscribe(initReplays);
-  else initReplays();
+  initReplays();
 })();

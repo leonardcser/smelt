@@ -12,6 +12,9 @@ Run from anywhere: `python3 docs/build_versions.py [OUT]` writes to
 site on port 8000 from a temporary folder. It needs the release tags, so CI
 checks out the full history. For writing docs, `zensical serve` reloads on
 every edit but has no version selector.
+
+GitHub Pages controls cache headers and can serve cached content for 10 minutes.
+Immediate freshness requires host/CDN revalidation for mutable pages and assets.
 """
 
 import argparse
@@ -86,18 +89,20 @@ def normalize_replay_paths(site: Path) -> None:
 def build(source: Path, name: str, strict: bool) -> bool:
     """Build the docs tree at `source` into `site/<name>/`."""
     config = source / "zensical.toml"
-    text = re.sub(r"^site_url = .*$", f'site_url = "{URL}{name}/"', config.read_text(), count=1, flags=re.M)
+    text = re.sub(r"^site_url = .*$", f'site_url = "{URL}{name}/"', config.read_text(), count=1, flags=re.MULTILINE)
+    # Archived releases also use full-page navigation, not their old client-side router.
+    text = re.sub(r'^\s*"navigation\.instant(?:\.[^"]+)?",?\n', "", text, flags=re.MULTILINE)
     # The selector belongs to the versioned site, not to any one version, so
     # every build gets it here and `zensical serve` goes without.
     text += '\n[project.extra.version]\nprovider = "mike"\n'
-    text = re.sub(r"^extra_css = \[", f'extra_css = ["{SELECTOR_CSS}", ', text, count=1, flags=re.M)
+    text = re.sub(r"^extra_css = \[", f'extra_css = ["{SELECTOR_CSS}", ', text, count=1, flags=re.MULTILINE)
     shutil.copy(DOCS / "versions.css", source / "docs" / SELECTOR_CSS)
     for path in home_files():
         (source / path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(DOCS / path, source / path)
     config.write_text(text)
     command = ["zensical", "build", "--strict"] if strict else ["zensical", "build"]
-    if subprocess.run(command, cwd=source).returncode != 0:
+    if subprocess.run(command, cwd=source, check=False).returncode != 0:
         print(f"warning: the docs for {name} did not build, leaving them out", file=sys.stderr)
         return False
     normalize_replay_paths(source / "site")
