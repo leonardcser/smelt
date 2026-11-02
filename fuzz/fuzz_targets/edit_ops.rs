@@ -103,7 +103,6 @@ fn run(input: Input) {
         .win_open_split(
             buf,
             SplitConfig {
-                region: "fuzz".into(),
                 gutters: Gutters::default(),
             },
         )

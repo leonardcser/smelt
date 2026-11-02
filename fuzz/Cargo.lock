@@ -3077,6 +3077,7 @@ dependencies = [
  "smelt-buffer",
  "smelt-perf",
  "smelt-protocol",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

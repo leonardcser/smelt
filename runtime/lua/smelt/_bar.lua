@@ -615,7 +615,7 @@ end
 -- the items for a bar that gets fewer rows than it wants, cached apart so the
 -- full set that `rows()` measures stays valid.
 local function items_of(bar, width, rows)
-  width = width or bar.items_width or smelt.terminal.size().width
+  width = width or bar.items_width or smelt.ui.size().width
   if not bar.items or bar.items_width ~= width then
     bar.items, bar.items_width, bar.folded = collect(bar, width), width, nil
     bar.item_rows = rows_of(bar.items)
@@ -631,7 +631,7 @@ function Bar:rows()
   if not self.visible or (self.hosted and not self.host_opts) then return 0 end
   local view = self.presentation
   if view and view.owner then
-    local size = smelt.terminal.size()
+    local size = smelt.ui.size()
     return select(2, smelt.ui.layout.size(view.node, self.hosted and self.context.width or (self.items_width or size.width), size.height))
   end
   if self.layout == "rule" then return 1 end
@@ -694,7 +694,7 @@ function Bar:set_view(factory)
   if self.hosted and (not self.host_opts or not self.visible) then
     self.view_factory = factory
   else
-    if not self.hosted then self.context.width = self.items_width or smelt.terminal.size().width end
+    if not self.hosted then self.context.width = self.items_width or smelt.ui.size().width end
     local candidate = factory and build_view(self, factory) or self.source_view or self:_default_view()
     local ok, overlay = pcall(function()
       self:_wire_press(candidate)
@@ -1052,7 +1052,7 @@ local function new_bar(opts, hosted)
     name = opts.name,
     hosted = hosted,
     win_opts = opts.win_opts or {},
-    context = { state = {}, width = smelt.terminal.size().width },
+    context = { state = {}, width = smelt.ui.size().width },
     min_rows = opts.min_rows or 1,
     defaults = defaults,
     sources = {}, -- ordered { name, handler } pairs

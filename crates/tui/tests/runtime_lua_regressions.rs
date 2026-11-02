@@ -1395,8 +1395,8 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
           notify = { error = function(msg) table.insert(_G.__notified_errors, msg) end },
           reg = { new = function(fn) return { remove = fn } end },
           events = { on = function() end },
-          terminal = { size = function() return { width = 60, height = 24 } end },
           ui = {
+            size = function() return { width = 60, height = 24 } end,
             layout = {
               invalidate = function() end,
               measure = function() return { set = function() end } end,
@@ -2183,7 +2183,6 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
         smelt = {
           ns = function(name) return name end,
           style = __smelt_style_stub(),
-          terminal = { size = function() return { width = 30, height = 5 } end },
           reg = { new = function(fn) return { remove = fn } end },
           text = {
             width = function(text) return #text end,
@@ -2226,11 +2225,14 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
               }
             end,
           },
-          ui = { layout = {
-            leaf = function() return {} end,
-            invalidate = function() end,
-            measure = function() return { set = function() end } end,
-          } },
+          ui = {
+            size = function() return { width = 30, height = 5 } end,
+            layout = {
+              leaf = function() return {} end,
+              invalidate = function() end,
+              measure = function() return { set = function() end } end,
+            },
+          },
           transcript = {
             top_inset = function(rows) top_inset = rows end,
             watch_view = function(fn)

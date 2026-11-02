@@ -3250,6 +3250,26 @@ mod tests {
     }
 
     #[test]
+    fn bars_initialize_without_terminal_size() {
+        let rt = LuaRuntime::new();
+        smelt_core::lua::doc::with_ui_host_declarations(&rt.lua, || {
+            rt.lua
+                .load(
+                    r#"
+                    smelt.terminal.size = function()
+                        error("no terminal attached")
+                    end
+                    local bar = smelt.bar.new({ name = "terminal_free" })
+                    assert(bar.context.width > 0)
+                    assert(bar:rows() == 1)
+                    "#,
+                )
+                .exec()
+                .unwrap();
+        });
+    }
+
+    #[test]
     fn autoload_registers_builtin_commands() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
