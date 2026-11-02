@@ -222,9 +222,14 @@ impl SpanMeta {
     }
 }
 
-/// Per-row mapping back to a "source line number" - what a gutter provider
-/// (`LineNumberGutter`) renders for that row. `None` on the decoration falls back
-/// to the row index + 1 so a plain text buffer needs no setup.
+/// Digit columns reserved for a source line number, excluding surrounding spacing.
+/// A four-digit minimum keeps ordinary source files aligned across views.
+pub fn line_number_digits(max_line: usize) -> usize {
+    (max_line.checked_ilog10().unwrap_or(0) as usize + 1).max(4)
+}
+
+/// Per-row mapping back to a source line number rendered by a gutter provider.
+/// Rows without a mapping do not display a line number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceLine {
     /// 1-based file line number. Use for plain code buffers and the post-edit side

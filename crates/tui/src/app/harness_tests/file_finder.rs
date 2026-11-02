@@ -31,7 +31,17 @@ fn wait_for_frame(app: &mut TestApp, text: &str) -> String {
 
 #[test]
 fn file_finder_search_preview_accept_and_dismiss() {
-    let (_dir, mut app) = fixture_app();
+    let (dir, mut app) = fixture_app();
+    std::fs::write(dir.path().join("beta.txt"), "beta preview\n".repeat(318)).unwrap();
+    let source_column = |frame: &str, marker: &str| {
+        frame
+            .lines()
+            .find_map(|row| {
+                row.split_once(marker)
+                    .map(|(prefix, _)| prefix.chars().count())
+            })
+            .unwrap()
+    };
     app.run_lua_result(
         r#"
         smelt.terminal.open_editor = function(path) opened_file = path; return true end
@@ -40,6 +50,7 @@ fn file_finder_search_preview_accept_and_dismiss() {
     )
     .unwrap();
     let frame = wait_for_frame(&mut app, "alpha_preview");
+    let alpha_column = source_column(&frame, "fn alpha_preview");
     let alpha_row = frame
         .lines()
         .position(|row| row.contains("alpha.rs"))
@@ -50,7 +61,12 @@ fn file_finder_search_preview_accept_and_dismiss() {
         .unwrap();
     assert!(beta_row < alpha_row, "{frame}");
     app.press(KeyCode::Up);
-    wait_for_frame(&mut app, "beta preview");
+    let frame = wait_for_frame(&mut app, "beta preview");
+    assert_eq!(
+        source_column(&frame, "beta preview"),
+        alpha_column,
+        "{frame}"
+    );
     app.advance_animation(500);
     assert!(app.render_to_frame().text().contains("beta preview"));
     app.press(KeyCode::Down);

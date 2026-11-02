@@ -7,15 +7,15 @@ dim: 84 14
   0   1  10 attrs=dim
   0  73  10 attrs=dim
   1   0   2 bg=Rgb { r: 60, g: 20, b: 20 }
-  1   2   3 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
-  1   5   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
-  1   7   3 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 110, g: 35, b: 35 }
-  1  10  73 bg=Rgb { r: 60, g: 20, b: 20 }
+  1   2   6 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
+  1   8   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
+  1  10   3 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 110, g: 35, b: 35 }
+  1  13  70 bg=Rgb { r: 60, g: 20, b: 20 }
   2   0   2 bg=Rgb { r: 20, g: 50, b: 20 }
-  2   2   3 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
-  2   5   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
-  2   7   3 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 35, g: 95, b: 35 }
-  2  10  73 bg=Rgb { r: 20, g: 50, b: 20 }
+  2   2   6 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
+  2   8   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
+  2  10   3 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 35, g: 95, b: 35 }
+  2  13  70 bg=Rgb { r: 20, g: 50, b: 20 }
  10   0   1 fg=AnsiValue(237)
  10   2   1 fg=Rgb { r: 39, g: 27, b: 27 } attrs=bold
  10   4   1 fg=Rgb { r: 150, g: 150, b: 150 } attrs=bold

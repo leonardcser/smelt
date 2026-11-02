@@ -3,8 +3,8 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * edit_file src/lib.rs                                                     14:37:03
-   1 - old
-   1 + new
+      1 - old
+      1 + new
 
 
 

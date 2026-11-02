@@ -11,11 +11,11 @@ dim: 100 24
   3   3   1 fg=AnsiValue(244)
   3  18   2 fg=Rgb { r: 113, g: 192, b: 117 }
   3  21   2 fg=Rgb { r: 219, g: 104, b: 104 }
-  3  37   7 fg=AnsiValue(244)
-  3  45   1 fg=AnsiValue(11)
-  3  59   8 fg=AnsiValue(244)
-  3  68   2 fg=Rgb { r: 113, g: 192, b: 117 }
-  3  71   2 fg=Rgb { r: 219, g: 104, b: 104 }
+  3  37  13 fg=AnsiValue(244)
+  3  51   1 fg=AnsiValue(11)
+  3  65   8 fg=AnsiValue(244)
+  3  74   2 fg=Rgb { r: 113, g: 192, b: 117 }
+  3  77   2 fg=Rgb { r: 219, g: 104, b: 104 }
   3  96   1 fg=AnsiValue(244)
   4   3   1 fg=AnsiValue(244)
   4   4   1 bg=AnsiValue(237)
@@ -25,36 +25,36 @@ dim: 100 24
   4  19   1 bg=AnsiValue(237)
   4  20   2 fg=Rgb { r: 219, g: 104, b: 104 } bg=AnsiValue(237)
   4  22  15 bg=AnsiValue(237)
-  4  37   7 fg=AnsiValue(244)
-  4  45  49 fg=AnsiValue(244)
+  4  37  13 fg=AnsiValue(244)
+  4  51  43 fg=AnsiValue(244)
   4  96   1 fg=AnsiValue(244)
   5   3   1 fg=AnsiValue(244)
   5  37   1 fg=AnsiValue(244)
-  5  38   6 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
-  5  44   1 bg=Rgb { r: 60, g: 20, b: 20 }
-  5  45   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
-  5  47   3 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 60, g: 20, b: 20 }
-  5  50   8 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
-  5  58   1 fg=Rgb { r: 249, g: 38, b: 114 } bg=Rgb { r: 60, g: 20, b: 20 }
-  5  59   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
-  5  60   4 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 110, g: 35, b: 35 }
-  5  64   1 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 60, g: 20, b: 20 }
+  5  38  12 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
+  5  50   1 bg=Rgb { r: 60, g: 20, b: 20 }
+  5  51   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
+  5  53   3 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 60, g: 20, b: 20 }
+  5  56   8 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
+  5  64   1 fg=Rgb { r: 249, g: 38, b: 114 } bg=Rgb { r: 60, g: 20, b: 20 }
   5  65   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
-  5  66  30 bg=Rgb { r: 60, g: 20, b: 20 }
+  5  66   4 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 110, g: 35, b: 35 }
+  5  70   1 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 60, g: 20, b: 20 }
+  5  71   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 60, g: 20, b: 20 }
+  5  72  24 bg=Rgb { r: 60, g: 20, b: 20 }
   5  96   1 fg=AnsiValue(244)
   6   3   1 fg=AnsiValue(244)
   6  37   1 fg=AnsiValue(244)
-  6  38   6 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
-  6  44   1 bg=Rgb { r: 20, g: 50, b: 20 }
-  6  45   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
-  6  47   3 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 20, g: 50, b: 20 }
-  6  50   8 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
-  6  58   1 fg=Rgb { r: 249, g: 38, b: 114 } bg=Rgb { r: 20, g: 50, b: 20 }
-  6  59   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
-  6  60   3 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 35, g: 95, b: 35 }
-  6  63   1 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 20, g: 50, b: 20 }
-  6  64   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
-  6  65  31 bg=Rgb { r: 20, g: 50, b: 20 }
+  6  38  12 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
+  6  50   1 bg=Rgb { r: 20, g: 50, b: 20 }
+  6  51   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
+  6  53   3 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 20, g: 50, b: 20 }
+  6  56   8 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+  6  64   1 fg=Rgb { r: 249, g: 38, b: 114 } bg=Rgb { r: 20, g: 50, b: 20 }
+  6  65   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+  6  66   3 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 35, g: 95, b: 35 }
+  6  69   1 fg=Rgb { r: 190, g: 132, b: 255 } bg=Rgb { r: 20, g: 50, b: 20 }
+  6  70   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+  6  71  25 bg=Rgb { r: 20, g: 50, b: 20 }
   6  96   1 fg=AnsiValue(244)
   7   3   1 fg=AnsiValue(244)
   7  37   1 fg=AnsiValue(244)

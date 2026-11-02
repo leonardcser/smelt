@@ -35,9 +35,9 @@ pub trait GutterProvider: Send + Sync {
     fn cell(&self, buf: &Buffer, theme: &Theme, row: usize) -> Option<GutterCell>;
 }
 
-/// Line numbers, derived from each row's `SourceLine` metadata. Plain buffers with no
-/// mapping fall back to `row + 1`. Diff buffers automatically render old + new columns
-/// - the same provider works for both.
+/// Line numbers, derived from each row's `SourceLine` metadata, with at least four
+/// digit columns per number. Unstamped buffers reserve no space. Diff buffers render
+/// old + new columns - the same provider works for both.
 ///
 /// Layout:
 /// - plain (all rows linear or unset): `" N "` (one pad each side).
@@ -80,13 +80,7 @@ struct Widths {
 }
 
 fn digits_of(n: u32) -> u16 {
-    let mut d: u16 = 1;
-    let mut n = n.max(1);
-    while n >= 10 {
-        n /= 10;
-        d += 1;
-    }
-    d
+    smelt_buffer::buffer::line_number_digits(n as usize) as u16
 }
 
 impl LineNumberGutter {
@@ -249,16 +243,16 @@ mod tests {
     }
 
     #[test]
-    fn plain_buffer_width_scales_with_stamped_linenos() {
+    fn plain_gutter_stays_aligned_until_five_digits() {
         let g = LineNumberGutter::new();
         let theme = Theme::new();
-        let mut single = buf_with_lines(0, 1);
-        stamp_source_line(&mut single, 0, SourceLine::Linear { lineno: 1 });
-        assert_eq!(g.width(&single), 3); // " 1 "
-        let mut wide = buf_with_lines(1, 1);
-        stamp_source_line(&mut wide, 0, SourceLine::Linear { lineno: 100 });
-        assert_eq!(g.width(&wide), 5); // " 100 "
-        assert_eq!(g.cell(&wide, &theme, 0).unwrap().text, " 100 ");
+        let mut buf = buf_with_lines(0, 1);
+        for lineno in [1, 9, 10, 99, 100, 999, 1000, 9999, 10_000, u32::MAX] {
+            stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno });
+            let expected = format!(" {lineno:>4} ");
+            assert_eq!(g.width(&buf) as usize, expected.len());
+            assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, expected);
+        }
     }
 
     #[test]
@@ -268,8 +262,8 @@ mod tests {
         stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 42 });
         stamp_source_line(&mut buf, 1, SourceLine::Linear { lineno: 43 });
         let theme = Theme::new();
-        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, " 42 ");
-        assert_eq!(g.cell(&buf, &theme, 1).unwrap().text, " 43 ");
+        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, "   42 ");
+        assert_eq!(g.cell(&buf, &theme, 1).unwrap().text, "   43 ");
     }
 
     #[test]
@@ -301,11 +295,10 @@ mod tests {
             },
         );
         let theme = Theme::new();
-        // widths: old_digits = 2 (max 11), new_digits = 2 (max 11).
-        // layout: " OO  NN "
-        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, " 10  10 ");
-        assert_eq!(g.cell(&buf, &theme, 1).unwrap().text, "     11 ");
-        assert_eq!(g.cell(&buf, &theme, 2).unwrap().text, " 11     ");
+        assert_eq!(g.width(&buf), 12);
+        assert_eq!(g.cell(&buf, &theme, 0).unwrap().text, "   10    10 ");
+        assert_eq!(g.cell(&buf, &theme, 1).unwrap().text, "         11 ");
+        assert_eq!(g.cell(&buf, &theme, 2).unwrap().text, "   11       ");
     }
 
     #[test]
@@ -325,9 +318,8 @@ mod tests {
         let g = LineNumberGutter::new();
         let mut buf = buf_with_lines(0, 1);
         stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 1 });
-        assert_eq!(g.width(&buf), 3); // " 1 "
-                                      // Mutate to require more digits - cache must invalidate via changedtick.
-        stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 9999 });
-        assert_eq!(g.width(&buf), 6); // " 9999 "
+        assert_eq!(g.width(&buf), 6);
+        stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 10_000 });
+        assert_eq!(g.width(&buf), 7);
     }
 }

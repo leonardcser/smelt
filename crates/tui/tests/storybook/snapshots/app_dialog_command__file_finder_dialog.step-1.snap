@@ -7,9 +7,9 @@ expression: frame.text()
 
 
          ┌──────────────────────────────────────┐┌ preview ───────────────────────────────────────────────────┐
-         │                                      ││ 1 pub struct Config {                                      │
-         │                                      ││ 2     pub editor: String,                                  │
-         │                                      ││ 3 }                                                        │
+         │                                      ││    1 pub struct Config {                                   │
+         │                                      ││    2     pub editor: String,                               │
+         │                                      ││    3 }                                                     │
          │                                      ││                                                            │
          │                                      ││                                                            │
          │                                      ││                                                            │

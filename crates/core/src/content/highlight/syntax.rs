@@ -159,7 +159,7 @@ fn render_highlighted(
     max_rows: u16,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:highlighted");
-    let lineno_digits = lines.len().max(1).to_string().len();
+    let lineno_digits = smelt_buffer::buffer::line_number_digits(lines.len());
     // `Stamped` reserves gutter cells for the host window's `LineNumberGutter`.
     // `None` reserves nothing. Inline-gutter callers go through
     // `build_file_view_ir` + `print_diff_ir` instead.

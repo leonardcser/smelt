@@ -11,10 +11,9 @@ dim: 60 18
   2   2   1 fg=AnsiValue(244)
   2  17   2 fg=Rgb { r: 113, g: 192, b: 117 }
   2  20   2 fg=Rgb { r: 219, g: 104, b: 104 }
-  2  26   7 fg=AnsiValue(244)
-  2  34   1 fg=Black bg=White
-  2  45   8 fg=AnsiValue(244)
-  2  54   1 fg=Rgb { r: 113, g: 192, b: 117 }
+  2  26  13 fg=AnsiValue(244)
+  2  40   1 fg=Black bg=White
+  2  51   4 fg=AnsiValue(244)
   2  57   1 fg=AnsiValue(244)
   3   2   1 fg=AnsiValue(244)
   3   3   1 bg=AnsiValue(237)
@@ -24,24 +23,24 @@ dim: 60 18
   3  15   1 bg=AnsiValue(237)
   3  16   2 fg=Rgb { r: 219, g: 104, b: 104 } bg=AnsiValue(237)
   3  18   8 bg=AnsiValue(237)
-  3  26   7 fg=AnsiValue(244)
-  3  34  21 fg=AnsiValue(244)
+  3  26  13 fg=AnsiValue(244)
+  3  40  15 fg=AnsiValue(244)
   3  57   1 fg=AnsiValue(244)
   4   2   1 fg=AnsiValue(244)
   4  26   1 fg=AnsiValue(244)
-  4  27   6 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
-  4  33   1 bg=Rgb { r: 60, g: 20, b: 20 }
-  4  34   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
-  4  36   3 fg=Rgb { r: 255, g: 255, b: 255 } bg=Rgb { r: 110, g: 35, b: 35 }
-  4  39  18 bg=Rgb { r: 60, g: 20, b: 20 }
+  4  27  12 fg=AnsiValue(244) bg=Rgb { r: 60, g: 20, b: 20 }
+  4  39   1 bg=Rgb { r: 60, g: 20, b: 20 }
+  4  40   2 fg=Red bg=Rgb { r: 60, g: 20, b: 20 }
+  4  42   3 fg=Rgb { r: 255, g: 255, b: 255 } bg=Rgb { r: 110, g: 35, b: 35 }
+  4  45  12 bg=Rgb { r: 60, g: 20, b: 20 }
   4  57   1 fg=AnsiValue(244)
   5   2   1 fg=AnsiValue(244)
   5  26   1 fg=AnsiValue(244)
-  5  27   6 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
-  5  33   1 bg=Rgb { r: 20, g: 50, b: 20 }
-  5  34   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
-  5  36   3 fg=Rgb { r: 255, g: 255, b: 255 } bg=Rgb { r: 35, g: 95, b: 35 }
-  5  39  18 bg=Rgb { r: 20, g: 50, b: 20 }
+  5  27  12 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
+  5  39   1 bg=Rgb { r: 20, g: 50, b: 20 }
+  5  40   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
+  5  42   3 fg=Rgb { r: 255, g: 255, b: 255 } bg=Rgb { r: 35, g: 95, b: 35 }
+  5  45  12 bg=Rgb { r: 20, g: 50, b: 20 }
   5  57   1 fg=AnsiValue(244)
   6   2   1 fg=AnsiValue(244)
   6  26   1 fg=AnsiValue(244)

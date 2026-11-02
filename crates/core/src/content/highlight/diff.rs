@@ -1268,7 +1268,7 @@ fn retained_file_widths(
     indent_cells: u16,
 ) -> (usize, u16) {
     let line_count = content.read().logical_line_count();
-    let lineno_digits = line_count.max(1).to_string().len();
+    let lineno_digits = smelt_buffer::buffer::line_number_digits(line_count);
     let prefix_cells = match gutter {
         GutterStyle::Stamped => 0,
         GutterStyle::InlineLineNumbers => lineno_digits + 2,
@@ -1350,7 +1350,7 @@ pub fn print_retained_file_view_edge(
     }
 
     let line_count = content.read().logical_line_count();
-    let lineno_digits = line_count.max(1).to_string().len();
+    let lineno_digits = smelt_buffer::buffer::line_number_digits(line_count);
     let prefix_cells = match gutter {
         GutterStyle::Stamped => 0,
         GutterStyle::InlineLineNumbers => lineno_digits + 2,
@@ -1397,7 +1397,7 @@ pub fn print_retained_file_view(
     if line_count == 0 {
         return 0;
     }
-    let lineno_digits = line_count.max(1).to_string().len();
+    let lineno_digits = smelt_buffer::buffer::line_number_digits(line_count);
     let prefix_cells = match gutter {
         GutterStyle::Stamped => 0,
         GutterStyle::InlineLineNumbers => lineno_digits + 2,
@@ -1743,7 +1743,7 @@ pub fn measure_diff_ir(
     gutter: GutterStyle,
     indent_cells: u16,
 ) -> usize {
-    let lineno_digits = format!("{}", cache.max_display_lineno).len();
+    let lineno_digits = smelt_buffer::buffer::line_number_digits(cache.max_display_lineno);
     let prefix_cells = match gutter {
         GutterStyle::Stamped => 0,
         GutterStyle::InlineLineNumbers => lineno_digits + 2,
@@ -1797,7 +1797,7 @@ pub fn print_diff_ir_with_width(
     // written inline regardless of mode. `Stamped` hands off the line number via
     // `SourceLine`; the host window's `LineNumberGutter` paints the column outside
     // the content width - so the in-content prefix is just the sign.
-    let lineno_digits = format!("{}", cache.max_display_lineno).len();
+    let lineno_digits = smelt_buffer::buffer::line_number_digits(cache.max_display_lineno);
     let prefix_cells = match gutter {
         GutterStyle::Stamped => 0,
         GutterStyle::InlineLineNumbers => lineno_digits + 2,
@@ -3008,6 +3008,55 @@ mod tests {
             assert!(runtime.sides.is_none());
         }
         assert_eq!(measure_diff_ir(&decoded, 80, GutterStyle::None, 0), 2);
+    }
+
+    #[test]
+    fn numbered_source_views_share_gutter_width_and_wrapping() {
+        for lineno in [1, 9, 10, 99, 100, 999, 1000, 9999, 10_000] {
+            let cache = diff_ir(
+                lineno,
+                "txt".into(),
+                vec![context_line(lineno, "abcdefghij".into())],
+            );
+            let digits = lineno.to_string().len().max(4);
+            let width = (digits + 4 + 8) as u16;
+            assert_eq!(
+                measure_diff_ir(&cache, width, GutterStyle::InlineLineNumbers, 0),
+                2
+            );
+            let block = render_test(width, |out| {
+                print_diff_ir(out, &cache, GutterStyle::InlineLineNumbers, 0, 0, 0);
+            });
+            assert_eq!(block.lines.len(), 2);
+            assert!(block.lines[0]
+                .text
+                .starts_with(&format!(" {lineno:>digits$}   abcdefgh")));
+            assert!(block.lines[1]
+                .text
+                .starts_with(&format!("{}ij", " ".repeat(digits + 4))));
+        }
+        let content = TranscriptContent::from("abcdefghij");
+        let cache = RetainedFileViewCache::default();
+        assert_eq!(
+            measure_retained_file_view(&content, 16, GutterStyle::InlineLineNumbers, 0),
+            2
+        );
+        let block = render_test(16, |out| {
+            print_retained_file_view(
+                out,
+                &content,
+                &cache,
+                "txt",
+                GutterStyle::InlineLineNumbers,
+                0,
+                16,
+                0,
+                0,
+            );
+        });
+        assert_eq!(block.lines.len(), 2);
+        assert!(block.lines[0].text.starts_with("    1   abcdefgh"));
+        assert!(block.lines[1].text.starts_with("        ij"));
     }
 
     #[test]

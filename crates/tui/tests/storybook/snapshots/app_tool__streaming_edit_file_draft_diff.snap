@@ -3,8 +3,8 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * edit_file src/live.rs
-   1   pub fn live() -> i32 {
-   2       2
+      1   pub fn live() -> i32 {
+      2       2
 
 
 

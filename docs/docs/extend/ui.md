@@ -18,6 +18,9 @@ Pickers add selection and filtering to these building blocks. All UI operations
 here require the terminal interface. Blocking `open` calls must run in a
 [coroutine](async.md#where-you-can-wait).
 
+Line-number gutters use at least four digit columns. Unnumbered content reserves
+no line-number space.
+
 ## Shared styles and spans
 
 Buffer marks, styled text, window backgrounds, titles, bars and paint use the
