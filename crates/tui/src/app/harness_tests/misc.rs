@@ -59,6 +59,42 @@ fn response_draft_rejection_removes_only_attempt_output() {
 }
 
 #[test]
+fn rewritten_response_replaces_visible_draft_with_structured_reasoning() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "discarded provider answer".into(),
+    }));
+    app.render_to_frame();
+    app.feed_one(SourceEvent::Tick(
+        crate::app::test_harness::STREAM_REVEAL_LIMIT.as_millis() as u64,
+    ));
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("discarded provider answer"));
+    for event in [
+        EngineEvent::ResponseDraftRejected,
+        EngineEvent::Reasoning {
+            kind: protocol::ReasoningKind::Summary,
+            title: Some("Safety".into()),
+            content: "Checked before acting.".into(),
+        },
+        EngineEvent::Text {
+            content: "accepted hook answer".into(),
+        },
+        EngineEvent::ResponseDraftAccepted,
+    ] {
+        app.feed_one(SourceEvent::engine(event));
+    }
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("discarded provider answer"));
+    assert!(frame.contains("accepted hook answer"));
+    assert!(frame.contains("Safety"));
+    app.assert_invariants();
+}
+
+#[test]
 fn response_draft_acceptance_separates_attempts() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);

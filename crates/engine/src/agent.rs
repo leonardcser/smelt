@@ -13,8 +13,9 @@ use protocol::{
 use serde_json::Value;
 use smelt_provider::{
     quota_exceeded_message, sort_tools_for_cache_stability, CancellationToken, ChatOptions,
-    ChatRequestOptions, ChatResponse, FunctionSchema, ProviderError, ProviderStreamEvent,
-    ReasoningStreamEvent, RequestAttemptInfo, ResponseFormat, ToolCallStreamEvent, ToolDefinition,
+    ChatRequestOptions, ChatResponse, CompletedReasoningPart, FunctionSchema, ProviderError,
+    ProviderStreamEvent, ReasoningStreamEvent, RequestAttemptInfo, ResponseFormat,
+    ToolCallStreamEvent, ToolDefinition,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1262,6 +1263,39 @@ impl<'a> Turn<'a> {
         }
     }
 
+    /// Emit a complete response for batch delivery or after replacing a draft.
+    fn emit_response(&mut self, message: &Message, reasoning_parts: &[CompletedReasoningPart]) {
+        if reasoning_parts.is_empty() {
+            if let Some(reasoning) = &message.reasoning_content {
+                let trimmed = smelt_buffer::text::trim_whitespace(reasoning);
+                if !trimmed.is_empty() {
+                    self.emit(EngineEvent::Reasoning {
+                        kind: ReasoningKind::Raw,
+                        title: None,
+                        content: trimmed.to_string(),
+                    });
+                }
+            }
+        } else {
+            for part in reasoning_parts {
+                let (title, content) = normalize_reasoning_part(part.kind, &part.content);
+                self.emit(EngineEvent::Reasoning {
+                    kind: part.kind,
+                    title,
+                    content,
+                });
+            }
+        }
+        if let Some(content) = &message.content {
+            let trimmed = smelt_buffer::text::trim_whitespace(content.as_text());
+            if !trimmed.is_empty() {
+                self.emit(EngineEvent::Text {
+                    content: trimmed.to_string(),
+                });
+            }
+        }
+    }
+
     /// Milliseconds since `start` measured against the injected clock.
     fn elapsed_ms_since(&self, start: Instant) -> u64 {
         self.config
@@ -1992,9 +2026,19 @@ impl<'a> Turn<'a> {
             let reasoning_parts = resp.reasoning_parts;
             let reasoning_details = resp.reasoning_details;
 
-            if tool_calls.is_empty()
+            let original = Message::assistant_with_reasoning(
+                content,
+                reasoning,
+                reasoning_details,
+                (!tool_calls.is_empty()).then_some(tool_calls),
+            );
+            let (hooked, deferred) = self.apply_response_hooks(original.clone()).await;
+            provider_turn_cmds.extend(deferred);
+            let terminal_response = hooked.tool_calls.as_ref().is_none_or(Vec::is_empty);
+
+            if terminal_response
                 && !output_limited
-                && content.as_ref().is_none_or(|content| {
+                && hooked.content.as_ref().is_none_or(|content| {
                     smelt_buffer::text::trim_whitespace(content.as_text()).is_empty()
                 })
             {
@@ -2019,7 +2063,7 @@ impl<'a> Turn<'a> {
                 }
                 self.emit(EngineEvent::TurnError {
                     message: format!(
-                        "The model returned no answer or tool calls after {} attempts.",
+                        "The response contained no answer or tool calls after {} attempts.",
                         MAX_UNUSABLE_RETRIES + 1
                     ),
                     kind: Some(EngineAskErrorKind::InvalidResponse),
@@ -2028,51 +2072,22 @@ impl<'a> Turn<'a> {
                 self.emit_turn_complete(false);
                 return;
             }
-            // Streaming already delivered deltas; only emit batch events for non-streaming.
-            if partial_text.is_empty() && partial_reasoning.is_empty() {
-                if reasoning_parts.is_empty() {
-                    if let Some(ref reasoning) = reasoning {
-                        let trimmed = smelt_buffer::text::trim_whitespace(reasoning);
-                        if !trimmed.is_empty() {
-                            self.emit(EngineEvent::Reasoning {
-                                kind: ReasoningKind::Raw,
-                                title: None,
-                                content: trimmed.to_string(),
-                            });
-                        }
-                    }
+            let rewritten = hooked.content != original.content
+                || hooked.reasoning_content != original.reasoning_content
+                || hooked.tool_calls != original.tool_calls;
+            if rewritten {
+                // Tool drafts are speculative too, even when their surrounding text is unchanged.
+                self.emit(EngineEvent::ResponseDraftRejected);
+            }
+            if rewritten || (partial_text.is_empty() && partial_reasoning.is_empty()) {
+                let parts = if hooked.reasoning_content == original.reasoning_content {
+                    reasoning_parts.as_slice()
                 } else {
-                    for part in &reasoning_parts {
-                        let (title, content) = normalize_reasoning_part(part.kind, &part.content);
-                        self.emit(EngineEvent::Reasoning {
-                            kind: part.kind,
-                            title,
-                            content,
-                        });
-                    }
-                }
-
-                if let Some(ref content) = content {
-                    let content_text = content.as_text();
-                    let trimmed = smelt_buffer::text::trim_whitespace(content_text);
-                    if !trimmed.is_empty() {
-                        self.emit(EngineEvent::Text {
-                            content: trimmed.to_string(),
-                        });
-                    }
-                }
+                    &[]
+                };
+                self.emit_response(&hooked, parts);
             }
             self.emit(EngineEvent::ResponseDraftAccepted);
-            let terminal_response = tool_calls.is_empty();
-            let (hooked, deferred) = self
-                .apply_response_hooks(Message::assistant_with_reasoning(
-                    content,
-                    reasoning,
-                    reasoning_details,
-                    (!terminal_response).then_some(tool_calls),
-                ))
-                .await;
-            provider_turn_cmds.extend(deferred);
 
             if terminal_response {
                 let turn = AssistantStep::terminal(
@@ -3015,7 +3030,13 @@ impl<'a> Turn<'a> {
             }
         };
 
-        let (pt, pr) = provider_stream.finish(self.event_tx);
+        let (pt, pr, parts) = provider_stream.finish(self.event_tx);
+        let result = result.map(|mut response| {
+            if response.reasoning_parts.is_empty() {
+                response.reasoning_parts = parts;
+            }
+            response
+        });
 
         self.apply_deferred_turn_cmds(deferred_config_updates);
         for append in deferred_appends {
@@ -3097,7 +3118,7 @@ impl ProviderStreamState {
             ProviderStreamEvent::DraftRejected => {
                 self.text.lock().unwrap().clear();
                 self.reasoning.lock().unwrap().clear();
-                self.reasoning_parts.lock().unwrap().parts.clear();
+                *self.reasoning_parts.lock().unwrap() = ReasoningStreamState::default();
                 let _ = event_tx.send(EngineEvent::ResponseDraftRejected);
             }
             ProviderStreamEvent::TextDelta(text) => {
@@ -3154,14 +3175,19 @@ impl ProviderStreamState {
         }
     }
 
-    fn finish(self, event_tx: &crate::EngineEventSender) -> (String, String) {
-        self.reasoning_parts
+    fn finish(
+        self,
+        event_tx: &crate::EngineEventSender,
+    ) -> (String, String, Vec<CompletedReasoningPart>) {
+        let parts = self
+            .reasoning_parts
             .into_inner()
             .unwrap_or_default()
             .finish_all(event_tx);
         (
             self.text.into_inner().unwrap_or_default(),
             self.reasoning.into_inner().unwrap_or_default(),
+            parts,
         )
     }
 }
@@ -3169,6 +3195,7 @@ impl ProviderStreamState {
 #[derive(Default)]
 struct ReasoningStreamState {
     parts: HashMap<String, ActiveReasoningPart>,
+    completed: Vec<CompletedReasoningPart>,
 }
 
 struct ActiveReasoningPart {
@@ -3245,7 +3272,8 @@ impl ReasoningStreamState {
                     part.source.clear();
                     part.source.push_str(content);
                 }
-                send_reasoning_part_finished(tx, id, part);
+                self.completed
+                    .push(send_reasoning_part_finished(tx, id, part));
             }
             ReasoningStreamEvent::ItemFinished { item_id } => {
                 self.finish_item(item_id, tx);
@@ -3262,17 +3290,20 @@ impl ReasoningStreamState {
         ids.sort();
         for id in ids {
             if let Some(part) = self.parts.remove(&id) {
-                send_reasoning_part_finished(tx, id, part);
+                self.completed
+                    .push(send_reasoning_part_finished(tx, id, part));
             }
         }
     }
 
-    fn finish_all(self, tx: &crate::EngineEventSender) {
+    fn finish_all(mut self, tx: &crate::EngineEventSender) -> Vec<CompletedReasoningPart> {
         let mut parts: Vec<_> = self.parts.into_iter().collect();
         parts.sort_by(|a, b| a.0.cmp(&b.0));
         for (id, part) in parts {
-            send_reasoning_part_finished(tx, id, part);
+            self.completed
+                .push(send_reasoning_part_finished(tx, id, part));
         }
+        self.completed
     }
 }
 
@@ -3368,7 +3399,7 @@ fn send_reasoning_part_finished(
     tx: &crate::EngineEventSender,
     id: String,
     part: ActiveReasoningPart,
-) {
+) -> CompletedReasoningPart {
     let (title, content) = normalize_reasoning_part(part.kind, &part.source);
     let _ = tx.send(EngineEvent::ReasoningPartFinished {
         id,
@@ -3376,6 +3407,10 @@ fn send_reasoning_part_finished(
         title,
         content,
     });
+    CompletedReasoningPart {
+        kind: part.kind,
+        content: part.source,
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -3491,6 +3526,38 @@ mod tests {
             Ok(EngineEvent::ReasoningPartFinished { content, .. }) if content == "complete thought"
         ));
         assert_eq!(partial_reasoning.into_inner().unwrap(), "complete thought");
+    }
+
+    #[test]
+    fn rejected_provider_attempt_discards_completed_reasoning_for_replay() {
+        let (tx, _rx) = test_event_channel();
+        let stream = ProviderStreamState::default();
+        for (item_id, content) in [
+            ("old", "discarded summary"),
+            ("new", "**Safety**\nCheck first."),
+        ] {
+            stream.apply(
+                ProviderStreamEvent::Reasoning(ReasoningStreamEvent::PartFinished {
+                    item_id,
+                    part_index: 0,
+                    kind: ReasoningKind::Summary,
+                    content: Some(content),
+                }),
+                &tx,
+            );
+            if item_id == "old" {
+                stream.apply(ProviderStreamEvent::DraftRejected, &tx);
+            }
+        }
+        let (_, reasoning, parts) = stream.finish(&tx);
+        assert_eq!(reasoning, "**Safety**\nCheck first.");
+        assert_eq!(
+            parts,
+            vec![CompletedReasoningPart {
+                kind: ReasoningKind::Summary,
+                content: "**Safety**\nCheck first.".into(),
+            }]
+        );
     }
 
     #[test]
