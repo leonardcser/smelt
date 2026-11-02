@@ -1189,6 +1189,81 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
 }
 
 #[tokio::test]
+async fn diff_live_refresh_preserves_folder_and_section_stage_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    std::fs::create_dir_all(dir.path().join("b/nested")).unwrap();
+    for path in ["b/one.rs", "b/nested/two.rs", "z.rs"] {
+        std::fs::write(dir.path().join(path), "new\n").unwrap();
+    }
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(120, 35);
+    app.type_text("/diff");
+    app.press(KeyCode::Enter);
+    wait_for_diff_section(&mut app, "unstaged (3)").await;
+    let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
+    app.press(KeyCode::Tab);
+    app.type_text("gjh");
+    paint_diff(&mut app);
+    let selected_label = |app: &TestApp| {
+        let win = app.ui_probe().win(sidebar).unwrap();
+        let row = win.cursor_abs_row();
+        win.row_source()
+            .unwrap()
+            .rows(row..row + 1, app.ui_probe().theme())[0]
+            .text
+            .trim()
+            .to_string()
+    };
+    assert_eq!(selected_label(&app), "▶ b/");
+
+    std::fs::create_dir(dir.path().join("a")).unwrap();
+    std::fs::write(dir.path().join("a/new.rs"), "new\n").unwrap();
+    wait_for_diff_section(&mut app, "unstaged (4)").await;
+    assert_eq!(
+        selected_label(&app),
+        "▶ b/",
+        "live refresh changed the staging target"
+    );
+    app.type_char('-');
+    wait_for_diff_section(&mut app, "staged (2)").await;
+    assert_eq!(git(&["ls-files"]), "b/nested/two.rs\nb/one.rs\n");
+
+    let source = app.ui_probe().win(sidebar).unwrap().row_source().unwrap();
+    let staged_row = source
+        .rows(0..source.snapshot().total_rows, app.ui_probe().theme())
+        .iter()
+        .position(|row| row.text.starts_with("staged ("))
+        .unwrap();
+    click_diff_row(&mut app, sidebar, staged_row as u16);
+    assert!(selected_label(&app).starts_with("staged (2)"));
+    std::fs::write(dir.path().join("a/extra.rs"), "new\n").unwrap();
+    wait_for_diff_section(&mut app, "unstaged (3)").await;
+    assert!(
+        selected_label(&app).starts_with("staged (2)"),
+        "{}",
+        selected_label(&app)
+    );
+    app.type_char('u');
+    wait_for_diff_section(&mut app, "staged (0)").await;
+    assert!(git(&["ls-files"]).is_empty());
+    app.press(KeyCode::Esc);
+}
+
+#[tokio::test]
 async fn diff_tree_groups_toggle_index_entries() {
     let dir = tempfile::tempdir().unwrap();
     let git = |args: &[&str]| {

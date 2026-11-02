@@ -77,7 +77,8 @@ collapsed. `-` stages an unstaged selection or unstages a staged selection.
 
 The view follows the repository while it is open: edits, new files, staging and
 commits made by the agent or outside smelt appear without a refresh, and your
-selection and scroll position are restored when the file still exists.
+file, folder, or section selection is kept when the target still exists.
+Refreshes also preserve collapsed folders and restore your scroll position.
 Untracked ignored files such as build output do not trigger updates; tracked
 files remain watched even under ignored directories. During a Visual selection,
 the update waits until you leave Visual mode. If a refresh fails, the previous

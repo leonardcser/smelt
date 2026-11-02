@@ -74,6 +74,13 @@ impl mlua::UserData for LuaDiffTree {
             Ok(this.0.section_row(section(&name)?))
         });
         methods.add_method("collapsed", |_, this, ()| Ok(this.0.collapsed()));
+        methods.add_method(
+            "restore_group",
+            |_, this, (previous, row): (LuaAnyUserData, u64)| {
+                let previous = previous.borrow::<LuaDiffTree>()?;
+                Ok(this.0.restore_group(&previous.0, row))
+            },
+        );
         methods.add_method("toggle", |_, this, row: u64| Ok(this.0.toggle(row)));
         methods.add_method(
             "file_row",
@@ -333,6 +340,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             LuaClassField { name: "toggle", ty: "fun(self: smelt.diff.Tree, row: integer): integer?".into(), optional: false, doc: "Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil." },
             LuaClassField { name: "collapsed", ty: "fun(self: smelt.diff.Tree): string[]".into(), optional: false, doc: "Opaque collapsed directory keys for restoring a new snapshot." },
             LuaClassField { name: "section_row", ty: "fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'): integer".into(), optional: false, doc: "Visible row of a section header, including an empty section." },
+            LuaClassField { name: "restore_group", ty: "fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer?".into(), optional: false, doc: "Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic." },
         ],
     });
     record_class(LuaClassDecl {

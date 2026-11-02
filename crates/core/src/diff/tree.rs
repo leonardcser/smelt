@@ -117,6 +117,7 @@ pub struct TreeIndex {
     nodes: Vec<Node>,
     files: Vec<usize>,
     groups: [usize; 2],
+    directories: Vec<usize>,
     counts: Vec<Counts>,
     visible: Arc<Vec<usize>>,
 }
@@ -228,13 +229,25 @@ impl TreeIndex {
             nodes[group].end = nodes.len();
             counts.push(Counts::new(added, deleted));
         }
+        let mut directories: Vec<_> = (0..nodes.len())
+            .filter(|index| nodes[*index].is_directory())
+            .collect();
+        directories.sort_unstable_by(|a, b| nodes[*a].path.cmp(&nodes[*b].path));
         Self {
             visible: Arc::new((0..nodes.len()).collect()),
             nodes,
             files,
             groups,
+            directories,
             counts,
         }
+    }
+
+    fn directory(&self, key: &str) -> Option<usize> {
+        self.directories
+            .binary_search_by(|index| self.nodes[*index].path.as_str().cmp(key))
+            .ok()
+            .map(|index| self.directories[index])
     }
 }
 
@@ -264,22 +277,45 @@ impl DiffTree {
     }
 
     pub fn restore_collapsed(&self, paths: &[String]) {
-        let paths: HashSet<_> = paths.iter().collect();
         let mut state = self.state.lock().unwrap();
         if paths.is_empty() && state.collapsed.is_empty() {
             return;
         }
-        let collapsed = self
-            .index
-            .nodes
+        let collapsed = paths
             .iter()
-            .enumerate()
-            .filter(|(_, node)| !node.path.is_empty() && paths.contains(&node.path))
-            .map(|(index, _)| index)
+            .filter_map(|path| self.index.directory(path))
             .collect();
         if state.collapsed != collapsed {
             state.collapsed = collapsed;
             state.reindex(&self.index.nodes);
+        }
+    }
+
+    /// Restore a directory or section by identity, never by its former row.
+    /// File selection is restored separately through the diff's raw file key.
+    pub fn restore_group(&self, previous: &Self, row: u64) -> Option<u64> {
+        let old_index = *previous
+            .state
+            .lock()
+            .unwrap()
+            .visible
+            .get(usize::try_from(row).ok()?)?;
+        let old = &previous.index.nodes[old_index];
+        let mut index = if old.group {
+            self.index.groups[old.section as usize]
+        } else if old.is_directory() {
+            self.index
+                .directory(&old.path)
+                .unwrap_or(self.index.groups[old.section as usize])
+        } else {
+            return None;
+        };
+        let state = self.state.lock().unwrap();
+        loop {
+            if let Some(row) = state.row(index) {
+                return Some(row);
+            }
+            index = self.index.nodes[index].parent?;
         }
     }
 
@@ -584,6 +620,47 @@ mod tests {
         assert!(tree
             .rows(Range { start: 5, end: 2 }, &crate::theme::Theme::default())
             .is_empty());
+    }
+
+    #[test]
+    fn group_selection_restores_identity_instead_of_display_row() {
+        let diff = fixture();
+        let previous = DiffTree::new(&diff);
+        let old_src = 1;
+        let old_nested = 2;
+        let refreshed = DiffTree::new(&Diff::parse(format!(
+            "diff --git a/a/new.rs b/a/new.rs\n@@ -0,0 +1 @@\n+new\n{}",
+            diff.patch
+        )));
+        previous.toggle(old_src);
+        refreshed.restore_collapsed(&previous.collapsed());
+        let new_src = refreshed.restore_group(&previous, old_src).unwrap();
+        assert_eq!(new_src, 3);
+        assert!(!refreshed.node(new_src).unwrap().expanded);
+        assert_eq!(refreshed.restore_group(&refreshed, new_src), Some(new_src));
+        assert!(refreshed
+            .restore_group(&previous, previous.file_row(2, false).unwrap())
+            .is_none());
+        assert!(refreshed.restore_group(&previous, u64::MAX).is_none());
+        let previous_unfolded = DiffTree::new(&diff);
+        assert_eq!(
+            refreshed.restore_group(&previous_unfolded, old_nested),
+            Some(new_src)
+        );
+        let empty = DiffTree::new(&Diff::parse(String::new()));
+        assert_eq!(empty.restore_group(&previous, old_src), Some(0));
+        let staged = previous.section_row(Section::Staged);
+        assert_eq!(
+            empty.restore_group(&previous, staged),
+            Some(empty.section_row(Section::Staged))
+        );
+        assert!(empty.restore_group(&previous, staged - 1).is_none());
+        let mut staged_diff = fixture();
+        for file in &mut staged_diff.files {
+            file.section = Section::Staged;
+        }
+        let staged_tree = DiffTree::new(&staged_diff);
+        assert_eq!(staged_tree.restore_group(&previous, old_src), Some(0));
     }
 
     #[test]

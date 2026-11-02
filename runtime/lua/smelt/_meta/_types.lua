@@ -322,6 +322,7 @@
 ---@field toggle fun(self: smelt.diff.Tree, row: integer): integer? Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil.
 ---@field collapsed fun(self: smelt.diff.Tree): string[] Opaque collapsed directory keys for restoring a new snapshot.
 ---@field section_row fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'): integer Visible row of a section header, including an empty section.
+---@field restore_group fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer? Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic.
 
 --- Metadata for one visible file-tree row. File indices are one-based and tree rows are zero-based.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.

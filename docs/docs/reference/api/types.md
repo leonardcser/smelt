@@ -460,6 +460,7 @@ Independent virtual file sidebar sharing immutable file metadata and ordering. E
 | `toggle` | `fun(self: smelt.diff.Tree, row: integer): integer?` | yes | Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil. |
 | `collapsed` | `fun(self: smelt.diff.Tree): string[]` | yes | Opaque collapsed directory keys for restoring a new snapshot. |
 | `section_row` | `fun(self: smelt.diff.Tree, section: 'unstaged'\|'staged'): integer` | yes | Visible row of a section header, including an empty section. |
+| `restore_group` | `fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer?` | yes | Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic. |
 
 ### `smelt.diff.TreeNode`
 

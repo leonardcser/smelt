@@ -207,6 +207,9 @@ end)
   without touching the worktree, and returns a fresh snapshot.
 - `smelt.git.watch(handler)` calls `handler` when the snapshot may be outdated,
   so a viewer can stay live.
+- `tree:restore_group(previous_tree, row)` restores a folder or section selection
+  by identity after a refresh, without expanding folders. Do not reuse old row
+  offsets: new files can shift a staging target to a different row.
 
 The bundled
 [`smelt.plugins.diff`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/plugins/diff.lua)

@@ -292,6 +292,7 @@ function M.open()
       return
     end
     pending_install = nil
+    local previous_tree = tree
     local sidebar_scroll = tree and sidebar:scroll()
     local sidebar_row = sidebar:cursor() or 0
     local sidebar_offset = sidebar_scroll and (sidebar_row - sidebar_scroll.top)
@@ -303,6 +304,7 @@ function M.open()
     stale = false
     file_count = diff:file_count()
     build_tree()
+    local group_row = restore_position and previous_tree and tree:restore_group(previous_tree, sidebar_row)
     local index = keep and diff:find_file(keep.section, keep.key)
     local same_file = index ~= nil
     if not index and next_file then index = diff:find_file(next_file.section, next_file.key) end
@@ -311,8 +313,7 @@ function M.open()
       if first <= last then index = first elseif not keep and file_count > 0 then index = 1 end
     end
     if index then
-      local hidden = same_file and restore_position and not tree:file_row(index)
-      jump_file(index, hidden and math.min(sidebar_row, tree:document():row_count() - 1))
+      jump_file(index, group_row)
       if same_file and restore_position then
         if cursor then preview:cursor(cursor) end
         if top then preview:scroll(top) end
@@ -325,6 +326,7 @@ function M.open()
       preview_buf:lines({ "", file_count == 0 and "clean" or
         (section == "unstaged" and "all staged" or "nothing staged"), "r refresh" })
     end
+    if group_row then sidebar:cursor(group_row) end
     if sidebar_offset then
       sidebar:scroll(math.max(0, (sidebar:cursor() or 0) - sidebar_offset))
     end
