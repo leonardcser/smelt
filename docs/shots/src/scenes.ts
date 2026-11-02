@@ -160,6 +160,31 @@ test result: FAILED. 2 passed; 2 failed; 0 ignored
 `;
 
 export const scenes: Record<string, Scene> = {
+  /** Find a source file, open it in Neovim, then return without a model call. */
+  files: {
+    mock: true,
+    realtime: true,
+    files: {
+      "plugins/editor.lua": `smelt.os.setenv("VISUAL", "nvim --clean -n -i NONE -c 'set number background=dark'")\n`,
+    },
+    steps: [
+      { type: "/files" },
+      { key: "Enter" },
+      { wait: /find files…\s+6 \/ 6/ },
+      { pause: 1200 },
+      { type: "pricing" },
+      { wait: /pricing\s+1 \/ 6/ },
+      { pause: 1800 },
+      { key: "Enter" },
+      { wait: /src\/pricing\.rs\s+1,1\s+All/ },
+      { pause: 2500 },
+      { type: ":q" },
+      { key: "Enter" },
+      { wait: /○ normal/ },
+      { pause: 1200 },
+    ],
+  },
+
   /** The agent calls a tool a plugin gave it. */
   tool: {
     fromSubmit: true,

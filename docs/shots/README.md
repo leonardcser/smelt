@@ -9,7 +9,7 @@ player, frame by frame, in headless Chromium.
 | Output | Source | Provider |
 | ------ | ------ | -------- |
 | `replays/{prompt,approval,goal}.json` (one frame each) | `stills` in `src/scenes.ts` | Scripted mock (deterministic, offline) |
-| `replays/<scene>.json`, plus `assets/demo.gif` for `demo` | same-named entries in `scenes` | Live `codex/gpt-6-luna` (`paste` and `plugin` send no prompt; `resize`, `vim`, `cursor`, `models` and the theme scenes use the scripted mock) |
+| `replays/<scene>.json`, plus `assets/demo.gif` for `demo` | same-named entries in `scenes` | Live `codex/gpt-6-luna` (`paste` and `plugin` send no prompt; `files`, `resize`, `vim`, `cursor`, `models` and the theme scenes use the scripted mock) |
 
 ## Run
 
@@ -21,6 +21,7 @@ bunx playwright-core install chromium   # once, for the README GIF; or set CHROM
 bun run stills                   # the one-frame replays
 bun run record                   # every scene, real agent and live model
 bun run record queue vim         # only the named scenes
+bun test src/session.test.ts     # offline screen-wait regressions
 bun run record -- --cached       # re-render the last recordings, no model calls
 bun run all
 ```
@@ -56,7 +57,7 @@ bun run gallery -- --index       # only the posters and the cards
 
 `SHOTS_SLOT=<n>` gives a run its own home, project and tmux session, so several record at once.
 
-Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain.
+Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain. The `files` scene also needs `nvim`.
 
 ## Notes
 
@@ -75,6 +76,8 @@ Requirements: `bun`, `tmux`, `ffmpeg`, a Rust toolchain.
 - Recordings are cached in `.cache/frames/`, so `--cached` only re-renders.
 - Unless a scene is `realtime`, stretches with no typing nearby (boot, model thinking, tool runs) are sped up 3x
   and the last screen is held for 2 s; see `IDLE_SPEEDUP` in `src/main.ts`.
+- Use `{ wait: /screen text/ }` to check a screen transition, including an already-visible match.
+  Unlike `until`, it does not approve dialogs. `pause` sets viewing time, not readiness.
 - `vim: true` enables vim mode.
 - Besides keys, a scene can `paste` text (bracketed paste), `drag` a screen line with the left button
   held (the prompt's top bar, a dialog's top bar, or text to select) and turn the mouse `wheel`.

@@ -31,6 +31,8 @@ export type Step =
   | { pause: number }
   /** From here on, play the recording this many times faster (1 is real time). */
   | { speed: number }
+  /** Wait for a screen match, including one already visible, without approving dialogs. */
+  | { wait: RegExp; timeout?: number }
   /** Run the turn until the screen matches, approving any dialog the match is not waiting for. */
   | { until: RegExp }
   /** Play the open snake window for this many ms, steering toward the food. */
@@ -368,11 +370,12 @@ export async function run(
     }
   })();
 
-  const waitFor = async (re: RegExp) => {
-    for (let i = 0; i < 600; i++) {
+  const waitFor = async (re: RegExp, timeout = 60_000) => {
+    const deadline = Date.now() + timeout;
+    do {
       if (re.test(plain(await screen()))) return;
       await Bun.sleep(100);
-    }
+    } while (Date.now() < deadline);
     throw new Error(`timed out waiting for ${re}\n${await screen()}`);
   };
 
@@ -489,6 +492,8 @@ export async function run(
             dir = next;
           }
         }
+      } else if ("wait" in step) {
+        await waitFor(step.wait, step.timeout);
       } else if ("until" in step) {
         // A match already on screen (the last turn's `─ ● done`) only counts once this turn has started.
         let started = !step.until.test(plain(await screen()));
