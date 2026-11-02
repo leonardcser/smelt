@@ -4,7 +4,8 @@ expression: frame.styles_text()
 ---
 dim: 72 18
   0   0   1 fg=AnsiValue(9)
-  0   1  11 attrs=dim
+  0   1   8 attrs=dim
+  0  10   2 attrs=dim
   0  12  10 fg=AnsiValue(9)
   0  61  10 attrs=dim
   3   2  13 fg=AnsiValue(9)

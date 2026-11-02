@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+    ┌ run checks ──────────────────────────────────────────┐
+    │                                                      │
+    │                                                      │
+    │  Use the same chrome around a centered action modal  │
+    │                                                      │
+    │                     run     cancel                   │
+    │                                                      │
+    │                                                      │
+    └──────────────────────────────────────────────────────┘
+
+  tip ctrl+enter / ctrl+q, steer the current response without…
+────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────
+ ○ normal                                               1:1 100%

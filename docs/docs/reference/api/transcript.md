@@ -26,18 +26,17 @@ Bind the block-motion key `key`, a single character, to transcript blocks with a
 ## `smelt.transcript.extend_renderer`
 
 ```lua
-fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg
+fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, opts?: smelt.transcript.RendererOptions): smelt.Reg
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.Reg`](types.md#smeltreg)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode), [`smelt.transcript.RendererOptions`](types.md#smelttranscriptrendereroptions), [`smelt.Reg`](types.md#smeltreg)
 
 **Availability:** Everywhere, including headless mode.
 
-Add or replace named middleware around the root renderer. Later extensions
-run first. The callback receives `(next, block, ctx)` and may return its own
-layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
-this registration instance. Omit `opts.cache_key` to opt out of persisted
-DisplayIR while the middleware is active.
+Add or replace named middleware around a renderer part (default `root`).
+Later extensions run first and delegate with `next(block, ctx)`. Names are
+scoped to the part. The returned `Reg` removes only this registration instance.
+Omit `opts.cache_key` to disable persisted layouts while the middleware is active.
 
 ## `smelt.transcript.fold_all`
 
@@ -92,15 +91,16 @@ Jump the transcript to its semantic tail and enable tail-follow mode.
 ## `smelt.transcript.get_renderer`
 
 ```lua
-fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?
+fun(part?: smelt.transcript.RendererPart): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node)
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.RendererPart`](types.md#smelttranscriptrendererpart), [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 **Availability:** Everywhere, including headless mode.
 
-Return the current composed root transcript renderer, or nil before the
-default renderer has been installed.
+Return a composed renderer. Omit `part` for `root`. Capture the result before
+replacement to delegate to the previous implementation without recursion.
+Unknown part names raise rather than silently disabling customization.
 
 ## `smelt.transcript.get_tool_presentation`
 
@@ -244,19 +244,16 @@ Return rendered transcript display rows in `[start, start + count)`, materializi
 ## `smelt.transcript.set_renderer`
 
 ```lua
-fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil
+fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node, opts?: smelt.transcript.RendererOptions): nil
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode), [`smelt.transcript.RendererOptions`](types.md#smelttranscriptrendereroptions)
 
 **Availability:** Everywhere, including headless mode.
 
-Replace the base transcript renderer used when the host asks Lua for a
-transcript block layout. Existing middleware registered with `extend_renderer`
-remains wrapped around the new base. The renderer must return a `smelt.layout`
-value; return `smelt.layout.empty()` to hide a block. Omit `opts.cache_key`
-to opt out of persisted DisplayIR, or bump it whenever renderer output changes
-across process restarts.
+Replace a part's base renderer, keeping its middleware. The default part is
+`root`, the whole block renderer. Return `smelt.layout.empty()` to hide content.
+Omit `opts.cache_key` to disable persisted layouts while this renderer is active.
 
 ## `smelt.transcript.stream`
 

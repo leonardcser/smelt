@@ -8,6 +8,14 @@
 ---@class smelt.dialog
 local dialog = {}
 
+--- Compose a dialog's body with its chrome. Override this ordinary Lua function
+--- to restyle or recompose dialogs, including built-in dialogs and dialog pickers,
+--- without replacing their focus, keymaps or lifecycle. The returned layout must
+--- retain every body window; additional windows participate in the modal lifecycle.
+--- Overrides affect future opens. Sizes apply to the complete returned view.
+---@type fun(body: smelt.ui.layout, opts?: smelt.dialog.Opts): smelt.ui.layout
+dialog.compose = nil
+
 --- General-purpose body leaf. Pass `opts.buf` to wrap an existing buffer
 --- or `opts.text` to spin up a fresh read-only one. `opts.readonly` can
 --- force the backing buffer's readonly flag when a caller supplies `opts.buf`.

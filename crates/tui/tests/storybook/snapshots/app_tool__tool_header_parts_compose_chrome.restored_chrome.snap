@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash cargo test --workspace --features       14:37:03
+       smelt-tui/harness --all-targets --
+       … 1 line below
+  all checks passed
+
+* explore ×2                                   14:37:03
+  grep "alpha"
+  grep "beta"
+
+* bash cargo clippy --workspace  (timeout:     14:37:03
+       2m 0s)  1.2s
+
+
+
+
+
+─ ● … 1s ───────────────────────────────────────────────
+
+────────────────────────────────────────────────────────
+ ○ normal                                       1:1 100%

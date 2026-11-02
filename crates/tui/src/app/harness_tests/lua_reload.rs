@@ -36,6 +36,42 @@ fn worktree_repo() -> tempfile::TempDir {
 }
 
 #[test]
+fn theme_spec_is_a_copy_a_plugin_can_change() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        local spec = smelt.theme.spec("Catppuccin Mocha")
+        assert(spec.syntax == "Catppuccin Mocha" and spec.groups.Normal)
+        spec.groups.Normal.changed = true
+        assert(smelt.theme.spec("catppuccin-mocha").groups.Normal.changed == nil)
+        assert(require("smelt.colorschemes.catppuccin-mocha").groups.Normal.changed == nil)
+        assert(not pcall(smelt.theme.spec, "no-such-scheme"))
+        for _, name in ipairs({ "", false, 42 }) do
+            assert(not pcall(smelt.theme.spec, name))
+        end
+        package.preload["smelt.colorschemes.broken"] = function()
+            error("fixture load failure")
+        end
+        local ok, err = pcall(smelt.theme.spec, "broken")
+        assert(not ok and tostring(err):find("fixture load failure", 1, true))
+        package.preload["smelt.colorschemes.invalid"] = function() return {} end
+        ok, err = pcall(smelt.theme.spec, "invalid")
+        assert(not ok and tostring(err):find("groups table", 1, true))
+        local load_spec = smelt.theme.spec
+        local loaded
+        smelt.theme.spec = function(name)
+            loaded = name
+            return load_spec(name)
+        end
+        smelt.theme.use("catppuccin-mocha")
+        assert(loaded == "catppuccin-mocha")
+        assert(smelt.theme.syntax_theme() == "Catppuccin Mocha")
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn app_themes_are_isolated_across_interleaved_renders() {
     let guard = test_home_guard();
     let mut dark = TestApp::builder().build_with_test_home_guard(&guard);

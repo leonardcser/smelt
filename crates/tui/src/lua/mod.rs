@@ -2085,18 +2085,33 @@ mod tests {
         assert_text_content_layout(child, expected_id, true);
     }
 
+    fn header_parts(mut layout: &BlockLayout) -> (String, String, &BlockLayout) {
+        let mut first = String::new();
+        let mut rest = String::new();
+        loop {
+            match layout {
+                BlockLayout::RowPrefix { child, spec } => {
+                    for span in &spec.first {
+                        first.push_str(&span.text);
+                    }
+                    for span in &spec.rest {
+                        rest.push_str(&span.text);
+                    }
+                    layout = child;
+                }
+                BlockLayout::Refresh { child, .. } => layout = child,
+                _ => return (first, rest, layout),
+            }
+        }
+    }
+
     fn assert_tool_header_has_lua_duration(layout: &BlockLayout) {
         let BlockLayout::Vbox(items) = layout else {
             panic!("expected tool vbox, got {layout:?}");
         };
-        let BlockLayout::RowPrefix { child, spec } = &items[0] else {
-            panic!("expected prefixed header, got {:?}", items[0]);
-        };
-        assert!(
-            spec.rest.iter().any(|span| !span.text.is_empty()),
-            "expected continued header rows to keep prefix indentation"
-        );
-        let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = child.as_ref() else {
+        let (_, rest, child) = header_parts(&items[0]);
+        assert!(!rest.is_empty(), "expected continued header indentation");
+        let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = child else {
             panic!("expected Lua-owned runs header, got {child:?}");
         };
         let text = spec
@@ -2108,6 +2123,97 @@ mod tests {
             .map(|span| span.text.as_str())
             .collect::<String>();
         assert!(text.ends_with("  1m5s"), "unexpected header text: {text:?}");
+    }
+
+    #[test]
+    fn tool_title_resolves_once_without_changing_body_input() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+            title_calls = 0
+            smelt.transcript.register_tool("title_probe", {
+                title = function()
+                    title_calls = title_calls + 1
+                    return ""
+                end,
+                body = function(tool)
+                    assert(tool.summary[1][1].text == "title_probe")
+                    return smelt.layout.text("body")
+                end,
+            })
+            smelt.transcript.extend_renderer("resolved_title", function(next, tool, ctx)
+                assert(tool.summary == "")
+                return next(tool, ctx)
+            end, { part = "tool_header_content" })
+        "#,
+            )
+            .exec()
+            .unwrap();
+        let (tool, state) = tool_block("title_probe", "ignored");
+        let BlockLayout::Vbox(items) = render_transcript_block(&rt, &tool, Some(&state)) else {
+            panic!("expected tool layout");
+        };
+        assert_eq!(header_parts(&items[0]).0, "* title_probe");
+        let BlockLayout::Gutter { child, .. } = &items[1] else {
+            panic!("expected body gutter");
+        };
+        assert_text_layout(child, "body");
+        assert_eq!(rt.lua.globals().get::<u32>("title_calls").unwrap(), 1);
+    }
+
+    #[test]
+    fn tool_header_chrome_composes_with_default_content() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let (tool, state) = tool_block("bash", "done");
+        let prefix = |rt: &LuaRuntime| {
+            let BlockLayout::Vbox(items) = render_transcript_block(rt, &tool, Some(&state)) else {
+                panic!("expected tool vbox");
+            };
+            let (first, rest, _) = header_parts(&items[0]);
+            (first, rest)
+        };
+
+        assert_eq!(prefix(&rt), ("* bash ".into(), "       ".into()));
+        rt.lua
+            .load(
+                r#"
+                header_reg = smelt.transcript.extend_renderer("test.chrome", function(_, block, ctx)
+                    local content = smelt.transcript.get_renderer("tool_header_content")(block, ctx)
+                    return smelt.layout.row_prefix(content, {
+                        first = { { text = "界 ", hl = "SmeltAccent", selectable = false } },
+                        rest = "   ",
+                    })
+                end, { part = "tool_header" })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(prefix(&rt), ("界 bash ".into(), "        ".into()));
+        rt.lua.load("header_reg:remove()").exec().unwrap();
+        assert_eq!(prefix(&rt), ("* bash ".into(), "       ".into()));
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.set_renderer(
+                    smelt.transcript.get_renderer("tool_header_content"),
+                    { part = "tool_header" }
+                )
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let BlockLayout::Vbox(items) = render_transcript_block(&rt, &tool, Some(&state)) else {
+            panic!("expected tool vbox");
+        };
+        let (first, rest, content) = header_parts(&items[0]);
+        assert_eq!((first.as_str(), rest.as_str()), ("bash ", "     "));
+        let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = content else {
+            panic!("expected semantic header content, got {content:?}");
+        };
+        assert!(spec.lines.0[0].iter().any(|span| span.text == "  1m5s"));
     }
 
     #[test]
@@ -2245,14 +2351,17 @@ mod tests {
         let BlockLayout::Vbox(items) = render_transcript_block(&rt, &block, Some(&state)) else {
             panic!("expected tool vbox");
         };
-        let BlockLayout::RowPrefix { spec, .. } = &items[0] else {
-            panic!("expected prefixed header, got {:?}", items[0]);
+        let BlockLayout::RowPrefix { child, .. } = &items[0] else {
+            panic!("expected header chrome, got {:?}", items[0]);
         };
-        let name: Vec<_> = spec.first[1..3]
+        let BlockLayout::RowPrefix { spec, .. } = child.as_ref() else {
+            panic!("expected semantic tool label, got {child:?}");
+        };
+        let name: Vec<_> = spec.first[..2]
             .iter()
             .map(|span| (span.text.as_str(), span.italic))
             .collect();
-        assert_eq!(name, [(" claude-code/", true), ("ToolSearch", false)]);
+        assert_eq!(name, [("claude-code/", true), ("ToolSearch", false)]);
     }
 
     #[test]
@@ -2268,11 +2377,13 @@ mod tests {
         let BlockLayout::Vbox(items) = active else {
             panic!("expected active tool vbox");
         };
-        let BlockLayout::Refresh { child, spec } = &items[0] else {
-            panic!("active elapsed header must request refresh");
+        let BlockLayout::RowPrefix { child, .. } = &items[0] else {
+            panic!("expected header chrome");
+        };
+        let BlockLayout::Refresh { spec, .. } = child.as_ref() else {
+            panic!("active elapsed content must request refresh");
         };
         assert_eq!(spec.after_ms, 100);
-        assert!(matches!(child.as_ref(), BlockLayout::RowPrefix { .. }));
 
         state.elapsed_active = false;
         let paused = render_transcript_block(&rt, &block, Some(&state));
@@ -2925,6 +3036,71 @@ mod tests {
             panic!("expected tool vbox");
         };
         assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn transcript_renderer_parts_share_composition_and_cache_lifecycle() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let initial_key = rt.transcript_renderer_cache_key();
+        assert!(initial_key.is_some());
+        let generation = rt.transcript_renderer_generation();
+        rt.lua.load(r#"
+            local t, l = smelt.transcript, smelt.layout
+            local function wrap(label)
+                return function(next, block, ctx)
+                    return l.gutter(next(block, ctx), { text = label })
+                end
+            end
+            stale = t.extend_renderer("same", wrap("old"), { part = "user", cache_key = "old" })
+            current = t.extend_renderer("same", wrap("new"), { part = "user", cache_key = "new" })
+            stale:remove()
+            root = t.extend_renderer("same", wrap("root"), { cache_key = "root" })
+            outer = t.extend_renderer("outer", wrap("outer"), { part = "user", cache_key = "outer" })
+            t.set_renderer(function() return l.text("base") end, { part = "user", cache_key = "base" })
+            for _, opts in ipairs({ { part = "typo" }, { part = false }, { part = "user", cache_key = 1 } }) do
+                assert(not pcall(t.set_renderer, function() return l.empty() end, opts))
+                assert(not pcall(t.extend_renderer, "same", wrap("bad"), opts))
+            end
+            assert(not pcall(t.get_renderer, "typo"))
+        "#).exec().unwrap();
+        assert!(rt.transcript_renderer_generation() > generation);
+        let stable_key = rt.transcript_renderer_cache_key();
+        assert!(stable_key.is_some());
+        assert_ne!(stable_key, initial_key);
+        let block = Block::User {
+            text: "hello".into(),
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: None,
+        };
+        let mut layout = render_transcript_block(&rt, &block, None);
+        for label in ["root", "outer", "new"] {
+            let BlockLayout::Gutter { child, spec } = layout else {
+                panic!("expected {label} gutter, got {layout:?}");
+            };
+            assert_eq!(spec.text, label);
+            layout = *child;
+        }
+        assert_text_layout(&layout, "base");
+        rt.lua
+            .load(
+                r#"
+            dynamic = smelt.transcript.extend_renderer("dynamic", function(next, block, ctx)
+                return next(block, ctx)
+            end, { part = "tool_header_content" })
+        "#,
+            )
+            .exec()
+            .unwrap();
+        assert!(rt.transcript_renderer_cache_key().is_none());
+        rt.lua.load("dynamic:remove()").exec().unwrap();
+        assert_eq!(rt.transcript_renderer_cache_key(), stable_key);
+        rt.lua
+            .load("root:remove(); outer:remove(); current:remove()")
+            .exec()
+            .unwrap();
+        assert_text_layout(&render_transcript_block(&rt, &block, None), "base");
     }
 
     #[test]

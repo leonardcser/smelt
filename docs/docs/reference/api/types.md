@@ -344,9 +344,8 @@ Options accepted by `smelt.dialog.menu`.
 
 Options accepted by `smelt.dialog.open` / `smelt.dialog.new`.
 Dialogs fit their content by default while preserving transcript context.
-Integer `height` values are body-relative and gain
-the top chrome row automatically. Pick one of `height` or `max_height`;
-setting both raises.
+Sizes describe the complete composed view, including chrome, just like overlays.
+Pick one of `height` or `max_height`; setting both raises.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -356,7 +355,7 @@ setting both raises.
 | `bottom_panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) |  | Panels pinned to the bottom when the dialog has surplus height; extra height is placed between them and `panels`. |
 | `bottom_gap` | `integer` |  | Minimum blank rows between `panels` and `bottom_panels` (default 0). |
 | `focus` | [smelt.win.Win](types.md#smeltwinwin) |  | Leaf that should receive initial focus. |
-| `height` | `any` |  | Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`. |
+| `height` | `any` |  | Fixed total view size, including chrome: integer cells, `"N%"`, `"fill"`, or `"fit"`. |
 | `max_height` | `any` |  | Maximum root-layout height while fitting content. |
 | `min_height` | `any` |  | Minimum root-layout height while fitting content. |
 | `blocks_agent` | `boolean` |  | Block the agent loop while the dialog is open. Defaults to `false`. |
@@ -1553,8 +1552,8 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `name` | `string` |  | Tool name. |
 | `args` | `table` |  | Bounded tool-argument previews and complete non-string structured values. |
 | `argument_fields` | [smelt.transcript.ArgumentField[]](types.md#smelttranscriptargumentfield) |  | Opaque top-level string arguments. Complete field content is never included in renderer metadata. |
-| `summary` | `any` |  | Tool styled summary lines or compacted summary text. |
-| `summary_text` | `string` |  | Tool summary flattened to plain text. |
+| `summary` | `any` |  | Tool styled summary lines or compacted summary text. Header parts receive the resolved presentation title here; other parts keep the original summary. |
+| `summary_text` | `string` |  | Original tool summary flattened to plain text. |
 | `kept` | [smelt.transcript.Block[]](types.md#smelttranscriptblock) |  | Compacted marker: user, assistant, and tool entries the model still receives verbatim, oldest first. |
 | `status` | `"pending"\|"confirm"\|"ok"\|"err"\|"denied"` |  | Tool status. |
 | `called_at_ms` | `integer` |  | Invocation start as Unix epoch milliseconds. |
@@ -1715,6 +1714,17 @@ Filters accepted by semantic previous/next block navigation.
 | --- | --- | --- | --- |
 | `role` | [smelt.transcript.Role](types.md#smelttranscriptrole) |  | Match only blocks with this semantic role. Defaults to `user`. |
 
+### `smelt.transcript.RendererOptions`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Options shared by renderer replacements and middleware.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `part` | [smelt.transcript.RendererPart](types.md#smelttranscriptrendererpart) |  | Named renderer part; defaults to `root`. |
+| `cache_key` | `string` |  | Stable persisted-layout key. Omit for dynamic state; bump when output changes across restarts. |
+
 ### `smelt.transcript.RevealOpts`
 
 **Classification:** `Supported` - Primary alpha facade for user config and plugins.
@@ -1806,16 +1816,6 @@ Options passed to focused tool body and draft callbacks.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `gutter` | `string` |  | Prefix rendered before each body line. |
-
-### `smelt.transcript.ToolHeaderOptions`
-
-**Classification:** `Supported` - Primary alpha facade for user config and plugins.
-
-Options accepted by the default tool header renderer.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `hl` | `string` |  | Status marker highlight group. |
 
 ### `smelt.transcript.ToolOutput`
 
@@ -2099,6 +2099,14 @@ Variants: `"allow"` \| `"ask"` \| `"deny"`
 Coarse side-effect classification used by permission policy.
 
 Variants: `"read"` \| `"write"` \| `"network"` \| `"user"` \| `"process"` \| `"config"` \| `"other"`
+
+### `smelt.transcript.RendererPart`
+
+**Classification:** `Supported` - Primary alpha facade for user config and plugins.
+
+Semantic stages in the bundled transcript composition pipeline.
+
+Variants: `"root"` \| `"group"` \| `"tool"` \| `"tool_header"` \| `"tool_header_content"` \| `"user"` \| `"user_content"` \| `"assistant"` \| `"thinking"` \| `"exec"` \| `"mode"` \| `"process_status"` \| `"compacted"` \| `"compaction_preview"` \| `"code"` \| `"unknown"`
 
 ### `smelt.transcript.RevealAlign`
 

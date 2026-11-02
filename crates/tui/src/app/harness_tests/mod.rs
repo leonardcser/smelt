@@ -8,6 +8,7 @@ use std::time::Duration;
 mod agents;
 mod cmdline;
 mod compaction;
+mod composition;
 mod dialogs;
 mod diff;
 mod error_queue;

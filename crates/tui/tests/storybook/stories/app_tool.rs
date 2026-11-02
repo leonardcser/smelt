@@ -36,6 +36,55 @@ app_story!(bash_tool_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
+app_story!(tool_header_parts_compose_chrome, |ctx| {
+    ctx.set_viewport(56, 20);
+    ctx.tool_call(
+        "bash",
+        &[
+            ("command", json!("cargo test --workspace --features smelt-tui/harness --all-targets -- --nocapture --test-threads=1")),
+            ("description", json!("Check header wrapping")),
+        ],
+        "all checks passed",
+        Some(1234),
+    );
+    for pattern in ["alpha", "beta"] {
+        ctx.tool_call(
+            "grep",
+            &[("pattern", json!(pattern))],
+            "no matches",
+            Some(12),
+        );
+    }
+    ctx.tool_started("bash", &[("command", json!("cargo clippy --workspace"))]);
+    ctx.advance_time(1250);
+    ctx.run_lua(
+        r#"
+        local t, l = smelt.transcript, smelt.layout
+        smelt.settings.transcript.limits.tool_header_rows = 2
+        header_chrome = t.extend_renderer("storybook.chrome", function(_, block, render_ctx)
+            assert(block.id and block.index ~= nil)
+            if block.kind == "group" then assert(block.child_count == 2) end
+            return l.row_prefix(t.get_renderer("tool_header_content")(block, render_ctx), {
+                first = { { text = "界 ", hl = "SmeltAccent", selectable = false } },
+                rest = { { text = "   ", selectable = false } },
+            })
+        end, { part = "tool_header" })
+    "#,
+    );
+    ctx.assert_snapshot_named("custom_chrome");
+    ctx.run_lua(
+        r#"
+        header_chrome:remove()
+        local t = smelt.transcript
+        default_header = t.get_renderer("tool_header")
+        t.set_renderer(t.get_renderer("tool_header_content"), { part = "tool_header" })
+    "#,
+    );
+    ctx.assert_snapshot_named("content_only");
+    ctx.run_lua("smelt.transcript.set_renderer(default_header, { part = 'tool_header' })");
+    ctx.assert_snapshot_named("restored_chrome");
+});
+
 app_story!(bash_background_hint_appears_after_ten_seconds, |ctx| {
     ctx.set_viewport(72, 10);
     ctx.tool_started("bash", &[("command", json!("cargo build --release"))]);

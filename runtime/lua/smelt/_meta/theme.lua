@@ -43,6 +43,13 @@ theme.set = nil
 ---@type fun(): table
 theme.snapshot = nil
 
+--- Return a fresh copy of colorscheme `name`'s ThemeSpec, by module slug or
+--- syntax theme name, for a plugin to change and pass to `smelt.theme.apply`.
+--- Changing the copy leaves the colorscheme itself as it was.
+---@see smelt.theme.apply
+---@type fun(name: string): smelt.theme.ThemeSpec
+theme.spec = nil
+
 --- Tier: Host - Available in every runtime, including headless mode.
 --- Return the active bundled syntect/two-face syntax theme name, if the colorscheme set one.
 ---@type fun(): string?

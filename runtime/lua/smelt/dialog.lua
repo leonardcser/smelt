@@ -114,9 +114,8 @@ local GUTTER = 1
 
 --- Options accepted by `smelt.dialog.open` / `smelt.dialog.new`.
 --- Dialogs fit their content by default while preserving transcript context.
---- Integer `height` values are body-relative and gain
---- the top chrome row automatically. Pick one of `height` or `max_height`;
---- setting both raises.
+--- Sizes describe the complete composed view, including chrome, just like overlays.
+--- Pick one of `height` or `max_height`; setting both raises.
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels? smelt.dialog.Panel[] Ordered list of body panels. Mutually exclusive with `layout`.
@@ -124,7 +123,7 @@ local GUTTER = 1
 ---@field bottom_panels? smelt.dialog.Panel[] Panels pinned to the bottom when the dialog has surplus height; extra height is placed between them and `panels`.
 ---@field bottom_gap? integer Minimum blank rows between `panels` and `bottom_panels` (default 0).
 ---@field focus? smelt.win.Win Leaf that should receive initial focus.
----@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
+---@field height? any Fixed total view size, including chrome: integer cells, `"N%"`, `"fill"`, or `"fit"`.
 ---@field max_height? any Maximum root-layout height while fitting content.
 ---@field min_height? any Minimum root-layout height while fitting content.
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
@@ -745,6 +744,40 @@ function smelt.dialog.title(title, opts)
   return spans
 end
 
+--- Compose a dialog's body with its chrome. Override this ordinary Lua function
+--- to restyle or recompose dialogs, including built-in dialogs and dialog pickers,
+--- without replacing their focus, keymaps or lifecycle. The returned layout must
+--- retain every body window; additional windows participate in the modal lifecycle.
+--- Overrides affect future opens. Sizes apply to the complete returned view.
+---@type fun(body: smelt.ui.layout, opts?: smelt.dialog.Opts): smelt.ui.layout
+function smelt.dialog.compose(body, opts)
+  opts = opts or {}
+  return smelt.ui.layout.frame(body, {
+    border = opts.border or { top = "SmeltAccent" },
+    title = smelt.dialog.title(opts.title, { pad = true }),
+  })
+end
+
+local function contains_window(windows, win)
+  for _, candidate in ipairs(windows) do
+    if candidate == win then return true end
+  end
+  return false
+end
+
+local function compose_dialog(body, opts)
+  local required = smelt.ui.layout.windows(body)
+  if #required == 0 then error("smelt.dialog: body must contain a window", 3) end
+  local view = smelt.dialog.compose(body, opts)
+  local leaves = smelt.ui.layout.windows(view)
+  for _, win in ipairs(required) do
+    if not contains_window(leaves, win) then
+      error("smelt.dialog.compose: view must retain every body window", 3)
+    end
+  end
+  return leaves, view, opts.height or "fit"
+end
+
 local function build_dialog(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
     error("smelt.dialog: use `height` (fixed) or `max_height` (fit to content), not both", 3)
@@ -754,34 +787,22 @@ local function build_dialog(opts)
 
   local top_panels = opts.panels or {}
   local bottom_panels = opts.bottom_panels or {}
-  local chrome = {
-    border = opts.border or { top = "SmeltAccent" },
-    title = smelt.dialog.title(opts.title, { pad = true }),
-  }
-  -- Numeric heights describe the body, excluding the top chrome row.
-  local height = opts.height or "fit"
-  if type(height) == "number" then height = height + 1 end
   if opts.layout ~= nil then
     if opts.panels ~= nil or opts.bottom_panels ~= nil then
       error("smelt.dialog: use `layout` or `panels`, not both", 3)
     end
-    local leaves = smelt.ui.layout.windows(opts.layout)
-    if #leaves == 0 then error("smelt.dialog: layout must contain a window", 3) end
-    local layout = smelt.ui.layout.frame(opts.layout, chrome)
-    return leaves[1], leaves, layout, height
+    return compose_dialog(opts.layout, opts)
   end
   if #top_panels == 0 and #bottom_panels == 0 then
     error("smelt.dialog: panels or bottom_panels must be non-empty", 3)
   end
 
-  local leaves = {}
   local function build_layout_items(panels, start_index)
     local layout_items = {}
     for i, p in ipairs(panels) do
       if type(p) ~= "table" or p.leaf == nil then
         error("smelt.dialog: panel " .. (start_index + i - 1) .. " requires a `leaf`", 3)
       end
-      leaves[#leaves + 1] = p.leaf
       local leaf_node = smelt.ui.layout.leaf(p.leaf, {
         border              = p.border,
         title               = smelt.dialog.title(p.title),
@@ -797,17 +818,15 @@ local function build_dialog(opts)
 
   local layout
   if #top_items > 0 and #bottom_items > 0 then
-    chrome.gap = opts.bottom_gap or 0
-    chrome.justify = "space-between"
     layout = smelt.ui.layout.vbox({
       { smelt.ui.layout.vbox(top_items),    height = "fit" },
       { smelt.ui.layout.vbox(bottom_items), height = "fit" },
-    }, chrome)
+    }, { gap = opts.bottom_gap or 0, justify = "space-between" })
   else
-    layout = smelt.ui.layout.vbox(#top_items > 0 and top_items or bottom_items, chrome)
+    layout = smelt.ui.layout.vbox(#top_items > 0 and top_items or bottom_items)
   end
 
-  return leaves[1], leaves, layout, height
+  return compose_dialog(layout, opts)
 end
 
 -- Wire dialog-level keymaps, focus, events, and the resolve handle. Shared between
@@ -851,8 +870,8 @@ local function setup_lifecycle(opts, leaves, layout, height, resolve_fn)
 
   -- Reject bad options before the host opens: closing a half-built dialog
   -- would destroy the caller's panels and leave the previous dialog covered.
-  if opts.focus ~= nil and type(opts.focus) ~= "userdata" then
-    error("smelt.dialog: focus must be a window handle", 4)
+  if opts.focus ~= nil and not contains_window(leaves, opts.focus) then
+    error("smelt.dialog: focus must be a window handle in the composed view", 4)
   end
   local keymaps = dialog_keymaps(opts)
   for _, km in ipairs(keymaps) do
@@ -981,7 +1000,7 @@ function smelt.dialog.open(opts)
     error("smelt.dialog.open: expected table of options", 2)
   end
 
-  local _, leaves, layout, height = build_dialog(opts)
+  local leaves, layout, height = build_dialog(opts)
   local task_id = smelt.task.alloc()
   local resolve = setup_lifecycle(opts, leaves, layout, height, function(value)
     smelt.task.resume(task_id, value)
@@ -1154,7 +1173,7 @@ function smelt.dialog.new(opts)
   if type(opts) ~= "table" then
     error("smelt.dialog.new: expected table of options", 2)
   end
-  local _, leaves, layout, height = build_dialog(opts)
+  local leaves, layout, height = build_dialog(opts)
   local resolve, root = setup_lifecycle(opts, leaves, layout, height, function(_) end)
   return {
     win    = root,

@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+
+
+╭ choose a check ──────────────────────────────────────────────╮
+│                                                              │
+│  filter checks                                               │
+│  ◆ tests  workspace                                          │
+│  ◆ lint  warnings denied                                     │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+ ○ normal                                               1:1 100%

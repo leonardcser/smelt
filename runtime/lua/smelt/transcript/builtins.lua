@@ -25,17 +25,17 @@ local function child_status_hl(child)
   return nil
 end
 
-local function aggregate_status_hl(group)
+local function aggregate_status(group)
   local has_pending = false
   local has_confirm = false
   for _, child in ipairs(defaults.group_children(group)) do
-    if defaults.child_failed(child) then return "ErrorMsg" end
+    if defaults.child_failed(child) then return "err" end
     has_pending = has_pending or child.status == "pending" or child.status == "drafting"
     has_confirm = has_confirm or child.status == "confirm"
   end
-  if has_pending then return "SmeltToolPending" end
-  if has_confirm then return "SmeltAccent" end
-  return "SmeltSuccess"
+  if has_pending then return "pending" end
+  if has_confirm then return "confirm" end
+  return "ok"
 end
 
 local function process_summary_line(text, has_failure)
@@ -46,27 +46,6 @@ local function process_summary_line(text, has_failure)
   } } })
 end
 
-local function tool_group_header(name, count, hl, suffix, called_at_ms, ctx)
-  local header = layout.runs({ {
-    { text = "*", hl = hl },
-    { text = " " .. name, dim = true },
-    { text = " ×" .. tostring(count), dim = true, selectable = false },
-    { text = suffix or "", hl = suffix ~= "" and "ErrorMsg" or nil, selectable = false },
-  } })
-  local called_at, refresh_after = defaults.timestamp(called_at_ms, ctx and ctx.now_ms)
-  if called_at then
-    header = layout.hbox({
-      { header, weight = 1, copy_owner = true },
-      {
-        layout.line({ { text = "  " .. called_at, dim = true, selectable = false } }),
-        fit = true,
-      },
-    })
-  end
-  if refresh_after then header = layout.refresh(header, { after_ms = refresh_after }) end
-  return header
-end
-
 local function latest_group_call_time(group)
   local latest
   for _, child in ipairs(defaults.group_children(group)) do
@@ -74,6 +53,22 @@ local function latest_group_call_time(group)
     if called_at_ms and (not latest or called_at_ms > latest) then latest = called_at_ms end
   end
   return latest
+end
+
+local function tool_group_header(group, ctx)
+  local count = group.child_count or #defaults.group_children(group)
+  local errors, denied = defaults.group_failure_counts(group)
+  local suffix = failure_suffix(errors, denied)
+  local header = setmetatable({
+    name = group.group_kind or group.name or "group",
+    status = aggregate_status(group),
+    called_at_ms = latest_group_call_time(group),
+    summary = { {
+      { text = "×" .. tostring(count), dim = true, selectable = false },
+      { text = suffix, hl = suffix ~= "" and "ErrorMsg" or nil, selectable = false },
+    } },
+  }, { __index = group })
+  return smelt.transcript.get_renderer("tool_header")(header, ctx)
 end
 
 local function display_path(path)
@@ -145,23 +140,13 @@ local function render_compact_group_list(group, label)
   return layout.gutter(layout.runs(lines), { text = "  " })
 end
 
-local function render_terminal_tool_group(group, ctx, opts)
-  local count = group.child_count or #defaults.group_children(group)
-  local errors, denied = defaults.group_failure_counts(group)
-  local header = tool_group_header(
-    opts.name,
-    count,
-    aggregate_status_hl(group),
-    failure_suffix(errors, denied),
-    latest_group_call_time(group),
-    ctx
-  )
+local function render_terminal_tool_group(group, ctx)
   if group.view_state == "expanded" then
     return defaults.render_group_children(group, ctx)
   end
   return layout.vbox({
-    header,
-    render_compact_group_list(group, opts.label),
+    tool_group_header(group, ctx),
+    render_compact_group_list(group, tool_group_label),
   })
 end
 
@@ -227,22 +212,12 @@ function M.render(group, ctx)
     return render_background_process_completed_group(group, ctx)
   end
   if kind == "explore" or kind == "lsp" or kind == "web" then
-    return render_terminal_tool_group(group, ctx, {
-      name = kind,
-      label = tool_group_label,
-    })
+    return render_terminal_tool_group(group, ctx)
   end
   if (ctx and ctx.view_state) == "expanded" or group.view_state == "expanded" then
     return defaults.render_group_children(group, ctx)
   end
-  return tool_group_header(
-    kind or "group",
-    group.child_count or #defaults.group_children(group),
-    aggregate_status_hl(group),
-    "",
-    latest_group_call_time(group),
-    ctx
-  )
+  return tool_group_header(group, ctx)
 end
 
 function M.register()

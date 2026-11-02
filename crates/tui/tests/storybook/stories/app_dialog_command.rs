@@ -39,6 +39,41 @@ fn open_ask_user_question_dialog(ctx: &mut AppStoryCtx) {
     });
 }
 
+app_story!(composed_dialog_picker_views, |ctx| {
+    ctx.set_viewport(64, 20);
+    ctx.run_lua(r#"
+        smelt.dialog.compose = function(body, opts)
+            return smelt.ui.layout.frame(body, {
+                border = "rounded", padding = 1, title = opts.title,
+            })
+        end
+        smelt.spawn(function()
+            smelt.dialog.picker({
+                title = " choose a check ", height = 8,
+                items = { { label = "tests", detail = "workspace" }, { label = "lint", detail = "warnings denied" } },
+                render = function(item)
+                    return { spans = {
+                        { text = "◆ " .. item.label, style = "SmeltAccent" },
+                        { text = "  " .. item.detail, style = { dim = true } },
+                    } }
+                end,
+                placeholder = "filter checks",
+            })
+        end)
+    "#);
+    ctx.pump_lua();
+    ctx.run_lua("assert(smelt.dialog.current())");
+    ctx.assert_snapshot_named("picker");
+    ctx.run_lua(r#"
+        smelt.dialog.current().close()
+        require("smelt.modal").open({
+            title = " run checks ", lines = { "Use the same chrome around a centered action modal." },
+            actions = { { label = "run", value = "run" }, { label = "cancel", value = "cancel" } },
+        })
+    "#);
+    ctx.assert_snapshot_named("centered");
+});
+
 app_story!(help_overlay, |ctx| {
     // `/help` opens a centered overlay (not a dialog) built from
     // `smelt.keymap.help()`. The overlay snapshot captures the

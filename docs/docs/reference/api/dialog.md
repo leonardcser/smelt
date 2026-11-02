@@ -11,6 +11,20 @@ description: "Root-docked modal dialog primitives. Lua API reference for smelt.d
 
 Root-docked modal dialog primitives. UiHost-only.
 
+## `smelt.dialog.compose`
+
+```lua
+fun(body: smelt.ui.layout, opts?: smelt.dialog.Opts): smelt.ui.layout
+```
+
+Types: [`smelt.dialog.Opts`](types.md#smeltdialogopts)
+
+Compose a dialog's body with its chrome. Override this ordinary Lua function
+to restyle or recompose dialogs, including built-in dialogs and dialog pickers,
+without replacing their focus, keymaps or lifecycle. The returned layout must
+retain every body window; additional windows participate in the modal lifecycle.
+Overrides affect future opens. Sizes apply to the complete returned view.
+
 ## `smelt.dialog.content`
 
 ```lua

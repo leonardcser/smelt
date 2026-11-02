@@ -39,6 +39,20 @@ Good fits:
 
 Do not add concrete regressions directly to the harness implementation. Put them in topical app test modules and keep the harness focused on reusable driving/probing/invariant helpers.
 
+### Independently maintained gallery consumers
+
+The composition tests include an opt-in check against real plugin sources.
+It reads the supplied directory without changing it. The marker-free view policy
+is supplied through normal configuration before loading timeline/panels, so the
+same source can exercise the new semantic-content boundary before its migration.
+
+```bash
+set -o pipefail; SMELT_GALLERY_DIR=/path/to/gallery cargo test -p smelt-tui --features harness --lib app::harness_tests::composition::gallery_api_consumers -- --ignored 2>&1 | tail -120
+```
+
+The normal suite separately pins marker-free labels, reusable user content,
+dialog composition, picker styling, navigation, selection and modal cleanup.
+
 ## 4. Visual/storybook snapshots
 
 Use storybook snapshots when the important assertion is what appears on screen.

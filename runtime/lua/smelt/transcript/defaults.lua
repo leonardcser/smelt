@@ -98,34 +98,33 @@ function M.render_display_count(block, opts)
   return layout.text(M.display_count_text(block, opts))
 end
 
---- Render any semantic transcript block with the bundled default policy.
+local function render_part(name, block, ctx)
+  return smelt.transcript.get_renderer(name)(block, ctx)
+end
+
+local function render_tool_header(block, ctx, presentation)
+  if presentation.title then
+    local title = require_title_result(block, presentation.title(block, ctx))
+    if title ~= nil then block = setmetatable({ summary = title }, { __index = block }) end
+  end
+  return render_part("tool_header", block, ctx)
+end
+
+local block_parts = {
+  group = true, tool = true, user = true, assistant = true, thinking = true,
+  exec = true, mode = true, process_status = true, compacted = true,
+  compaction_preview = true, code = true,
+}
+
+--- Render a semantic block through its composed renderer part.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render(block, ctx)
   block = block or {}
-  if block.kind == "group" then
-    return require("smelt.transcript.builtins").render(block, ctx)
-  elseif block.kind == "tool" then
-    return M.render_tool(block, ctx)
-  elseif block.kind == "user" then
-    return M.render_user(block, ctx)
-  elseif block.kind == "assistant" then
-    return M.render_assistant(block, ctx)
-  elseif block.kind == "thinking" then
-    return M.render_thinking(block, ctx)
-  elseif block.kind == "exec" then
-    return M.render_exec(block, ctx)
-  elseif block.kind == "mode" then
-    return M.render_mode(block, ctx)
-  elseif block.kind == "process_status" then
-    return M.render_process_status(block, ctx)
-  elseif block.kind == "compacted" then
-    return M.render_compacted(block, ctx)
-  elseif block.kind == "compaction_preview" then
-    return M.render_compaction_preview(block, ctx)
-  elseif block.kind == "code" then
-    return M.render_code(block, ctx)
-  end
-  return M.render_unknown(block, ctx)
+  return render_part(block_parts[block.kind] and block.kind or "unknown", block, ctx)
+end
+
+function M.render_group(block, ctx)
+  return require("smelt.transcript.builtins").render(block, ctx)
 end
 
 --- Render a tool block for the current transcript view state.
@@ -144,7 +143,7 @@ end
 
 local function render_tool_error_summary(block, ctx, presentation)
   return layout.vbox({
-    M.render_tool_header(block, ctx, nil, presentation),
+    render_tool_header(block, ctx, presentation),
     layout.gutter(
       M.render_tool_output_tail(block.output, ctx, {
         rows = (ctx and ctx.limits and ctx.limits.collapsed_error_rows) or 4,
@@ -167,7 +166,7 @@ function M.render_tool_summary(block, ctx, presentation)
     return render_tool_error_summary(block, ctx, presentation)
   end
 
-  local header = M.render_tool_header(block, ctx, nil, presentation)
+  local header = render_tool_header(block, ctx, presentation)
   if no_detail then return header end
   local detail_layout = detail
   if type(detail) == "string" then
@@ -189,7 +188,7 @@ function M.render_tool_full(block, ctx, presentation)
     return M.render_tool_summary(block, ctx, presentation)
   end
   local items = {}
-  items[#items + 1] = M.render_tool_header(block, ctx, nil, presentation)
+  items[#items + 1] = render_tool_header(block, ctx, presentation)
 
   if block.user_message and block.user_message ~= "" then
     items[#items + 1] = layout.gutter(
@@ -264,15 +263,13 @@ local function elapsed_text(elapsed_ms)
   return tostring(math.floor(seconds / 3600)) .. "h" .. tostring(math.floor((seconds % 3600) / 60)) .. "m"
 end
 
---- Render the default one-line tool header.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolHeaderOptions, presentation?: smelt.transcript.ToolPresentation): smelt.layout.Node
-function M.render_tool_header(block, ctx, opts, presentation)
+--- Render tool header content without row chrome. Timestamps, duration, row caps
+--- and refresh metadata stay with the content when a plugin replaces the chrome.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+function M.render_tool_header_content(block, ctx)
   ctx = ctx or {}
-  opts = opts or {}
-  presentation = tool_presentation(block, presentation)
   local status = block.status or "pending"
-  local hl = opts.hl or status_hl[status]
-  local lines, tail, has_summary = tool_header_lines(block, status, ctx, presentation)
+  local lines, tail, has_summary = tool_header_lines(block, status)
   local duration = status ~= "confirm" and elapsed_text(block.elapsed_ms) or nil
   if duration then
     local first = lines[1] or {}
@@ -297,20 +294,25 @@ function M.render_tool_header(block, ctx, opts, presentation)
   if header_rows then
     header = layout.cap(header, { rows = header_rows, keep = "head", marker = "below" })
   end
-  header = layout.row_prefix(
-    header,
-    {
-      first = tool_header_prefix(block, hl, tail, has_summary),
-      rest = tool_header_rest_prefix(block),
-    }
-  )
-
+  header = layout.row_prefix(header, {
+    first = tool_header_prefix(block, tail, has_summary),
+    rest = tool_header_rest_prefix(block),
+  })
   local refresh_after = called_at_refresh
   if block.elapsed_active and status ~= "confirm" then
     refresh_after = refresh_after and math.min(refresh_after, 100) or 100
   end
   if refresh_after then header = layout.refresh(header, { after_ms = refresh_after }) end
   return header
+end
+
+--- Compose status chrome around the semantic tool label, summary and timings.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+function M.render_tool_header(block, ctx)
+  return layout.row_prefix(render_part("tool_header_content", block, ctx), {
+    first = { { text = "*", hl = status_hl[block.status or "pending"] }, { text = " ", dim = true } },
+    rest = { { text = "  ", selectable = false, dim = true } },
+  })
 end
 
 local function copy_table(t)
@@ -379,33 +381,28 @@ local function display_width(s)
   return #s
 end
 
-function tool_header_prefix(block, hl, tail, has_summary)
+function tool_header_prefix(block, tail, has_summary)
   local tool_name = block.name or "tool"
-  local spans = { { text = "*", hl = hl } }
+  local spans = {}
   -- A provider's native tools arrive as `provider/Name`; smelt names never hold `/`.
   local provider, name = tool_name:match("^([^/]+/)(.+)$")
   if provider then
-    spans[#spans + 1] = { text = " " .. provider, dim = true, italic = true }
+    spans[#spans + 1] = { text = provider, dim = true, italic = true }
     spans[#spans + 1] = { text = name, dim = true }
   else
-    spans[#spans + 1] = { text = " " .. tool_name, dim = true }
+    spans[#spans + 1] = { text = tool_name, dim = true }
   end
   if tail then spans[#spans + 1] = { text = " ", selectable = has_summary } end
-  return spans, display_width("* " .. tool_name .. " ")
+  return spans
 end
 
 function tool_header_rest_prefix(block)
-  local _, width = tool_header_prefix(block, nil, true, false)
+  local width = display_width((block.name or "tool") .. " ")
   return { { text = string.rep(" ", width), selectable = false, dim = true } }
 end
 
-function tool_header_lines(block, status, ctx, presentation)
-  local title = block.summary
-  if presentation.title then
-    title = require_title_result(block, presentation.title(block, ctx))
-    if title == nil then title = block.summary end
-  end
-  local lines = summary_lines(title)
+function tool_header_lines(block, status)
+  local lines = summary_lines(block.summary)
   local suffix = {}
 
   if lines[1] then
@@ -429,7 +426,6 @@ function tool_header_lines(block, status, ctx, presentation)
   local first = lines[1]
   local has_summary = has_text(first)
   local tail = has_summary or #suffix > 0
-
   if #suffix > 0 then
     if has_summary then
       first[#first + 1] = { text = "  ", selectable = false, dim = true }
@@ -583,7 +579,7 @@ end
 --- Render a user panel with a timestamp in its top padding row.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render_user(block, ctx)
-  local text = M.render_user_text(block, ctx)
+  local text = render_part("user_content", block, ctx)
   local timestamp, refresh_after = M.timestamp(block.sent_at_ms, ctx and ctx.now_ms)
   if not timestamp then
     return layout.panel(text, { hl = "SmeltUserBg", padding = 1 })
@@ -610,7 +606,7 @@ end
 
 --- Render user text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function M.render_user_text(block, ctx)
+function M.render_user_content(block, ctx)
   local _ = ctx
   return layout.runs(block.user_lines or block.text or "")
 end
@@ -902,7 +898,7 @@ function M.render_group_children(group, ctx)
   return layout.group_children()
 end
 
---- Render any semantic transcript block with the bundled default policy.
+--- Dispatch a semantic block through its composed renderer part, without root middleware.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render(block, ctx)
   return M.render(block, ctx)

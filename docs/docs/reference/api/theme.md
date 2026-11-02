@@ -97,6 +97,20 @@ fun(): table
 
 Snapshot every group currently set on the active theme into a `{ group = StyleDecl }` table.
 
+## `smelt.theme.spec`
+
+```lua
+fun(name: string): smelt.theme.ThemeSpec
+```
+
+Types: [`smelt.theme.ThemeSpec`](types.md#smeltthemethemespec)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Return a fresh copy of colorscheme `name`'s ThemeSpec, by module slug or
+syntax theme name, for a plugin to change and pass to `smelt.theme.apply`.
+Changing the copy leaves the colorscheme itself as it was.
+
 ## `smelt.theme.syntax_theme`
 
 ```lua

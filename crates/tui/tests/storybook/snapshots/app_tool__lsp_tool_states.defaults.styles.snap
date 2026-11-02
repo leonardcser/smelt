@@ -51,7 +51,8 @@ dim: 96 86
  12   2   1 fg=Rgb { r: 248, g: 248, b: 242 } bg=AnsiValue(233)
  12   3  92 bg=AnsiValue(233)
  14   0   1 fg=AnsiValue(77)
- 14   1   7 attrs=dim
+ 14   1   4 attrs=dim
+ 14   6   2 attrs=dim
  14  85  10 attrs=dim
  19   0   1 fg=AnsiValue(77)
  19   1  15 attrs=dim

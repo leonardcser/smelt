@@ -78,13 +78,6 @@ local function render_actions(buf, actions, selected, width)
   end
 end
 
-local function modal_title(title)
-  if title == nil or title == "" then return nil end
-  if smelt.dialog and smelt.dialog.title then return smelt.dialog.title(title, { pad = true }) end
-  if type(title) == "table" then return title end
-  return { { text = " " .. tostring(title) .. " ", style = { dim = true } } }
-end
-
 function M.open(opts)
   opts = opts or {}
   local actions = normalize_actions(opts.actions)
@@ -165,10 +158,12 @@ function M.open(opts)
     { smelt.ui.layout.leaf(action_leaf), height = 1 },
   }, { padding = 1 })
 
-  handle.overlay = smelt.overlay.new({
-    title = modal_title(opts.title),
-    anchor = "center",
+  layout = smelt.dialog.compose(layout, {
+    title = opts.title,
     border = opts.border or { all = "Normal" },
+  })
+  handle.overlay = smelt.overlay.new({
+    anchor = "center",
     modal = true,
     blocks_agent = opts.blocks_agent or false,
     draggable = false,

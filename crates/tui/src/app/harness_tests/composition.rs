@@ -1,0 +1,370 @@
+use super::*;
+
+#[test]
+fn unadorned_tool_headers_keep_semantic_names() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(72, 20);
+    app.run_lua_result(
+        r#"
+        local t = smelt.transcript
+        t.set_renderer(t.get_renderer("tool_header_content"), { part = "tool_header" })
+    "#,
+    )
+    .unwrap();
+    app.start_turn(1);
+    let id = app.tool_started(
+        "shell",
+        "bash",
+        std::collections::HashMap::from([("command".into(), serde_json::json!("cargo test"))]),
+    );
+    app.tool_finished(
+        id,
+        "shell",
+        protocol::ToolOutcome::new("checks passed".into(), false, None),
+        Some(1200),
+    );
+    let text = app.render_to_frame().text();
+    assert!(text.contains("bash cargo test"), "{text}");
+    assert!(!text.contains("* bash"), "{text}");
+    app.assert_invariants();
+}
+
+#[test]
+fn bubble_view_reuses_user_content_without_default_panel() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 18);
+    app.run_lua_result(
+        r#"
+        local t, l = smelt.transcript, smelt.layout
+        t.set_renderer(function(block, ctx)
+            return l.row_prefix(t.get_renderer("user_content")(block, ctx), {
+                first = "you: ", rest = "     ",
+            })
+        end, { part = "user" })
+    "#,
+    )
+    .unwrap();
+    app.push_user_block("hello from the gallery");
+    let text = app.render_to_frame().text();
+    assert!(text.contains("you: hello from the gallery"), "{text}");
+    app.assert_invariants();
+}
+
+#[test]
+fn dialog_composition_changes_chrome_without_replacing_behavior() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(60, 20);
+    app.run_lua_result(r#"
+        local l = smelt.ui.layout
+        local compose = assert(smelt.dialog.compose)
+        smelt.dialog.compose = function(body, opts)
+            return l.frame(body, { border = "rounded", padding = 1, title = "custom " .. (opts.title or "") })
+        end
+        smelt.spawn(function()
+            local win = smelt.dialog.input("reusable body", { pad_left = 0, pad_right = 0 })
+            dialog_result = smelt.dialog.open({
+                title = "dialog", height = 8, panels = { { leaf = win } },
+                on_submit = function(ctx) ctx.resolve("accepted") end,
+            })
+        end)
+    "#).unwrap();
+    drive_lua_tasks(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("custom dialog"), "{frame}");
+    assert!(frame.contains("reusable body"), "{frame}");
+    assert_eq!(
+        app.eval_lua::<u16>("return smelt.dialog.current().win:rect().height")
+            .unwrap(),
+        4
+    );
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+    assert_eq!(
+        app.eval_lua::<String>("return dialog_result").unwrap(),
+        "accepted"
+    );
+    app.assert_invariants();
+}
+
+#[test]
+fn dialog_picker_reuses_composition_and_styled_list_rows() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(64, 20);
+    app.run_lua_result(r#"
+        smelt.dialog.compose = function(body, opts)
+            return smelt.ui.layout.frame(body, { border = "rounded", title = "pick a view", padding = 1 })
+        end
+        smelt.spawn(function()
+            picked = smelt.dialog.picker({
+                height = 8,
+                items = { { id = 7, label = "alpha" }, { id = 9, label = "beta" } },
+                render = function(item)
+                    return { spans = {
+                        { text = "[" .. item.id .. "] ", style = "SmeltAccent" },
+                        { text = item.label, style = { bold = true } },
+                    } }
+                end,
+                on_open = function(ctx)
+                    ctx.input:configure({ pad_left = 2, prefix = "/ " })
+                end,
+            })
+        end)
+    "#).unwrap();
+    drive_lua_tasks(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("pick a view"), "{frame}");
+    assert!(frame.contains("[7] alpha"), "{frame}");
+    assert!(frame.contains("[9] beta"), "{frame}");
+    app.press(KeyCode::Down);
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+    assert_eq!(app.eval_lua::<u32>("return picked.id").unwrap(), 9);
+    app.assert_invariants();
+}
+
+#[test]
+fn picker_constructor_override_keeps_navigation_and_original_items() {
+    for placement in ["center", "prompt_docked"] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.set_terminal_size(60, 20);
+        app.run_lua_result(&format!(r#"
+            local new = smelt.picker.new
+            smelt.theme.set("CustomPicker", {{ bg = {{ 20, 40, 60 }} }})
+            smelt.picker.new = function(opts)
+                local picker = new(opts)
+                styled_win = picker:win()
+                styled_win:configure({{ style = "CustomPicker", pad_left = 2, selection_highlight = false }})
+                return picker
+            end
+            smelt.spawn(function()
+                picked = smelt.picker.open({{
+                    placement = "{placement}",
+                    items = {{ {{ label = "alpha", id = 7 }}, {{ label = "beta", id = 9 }} }},
+                }})
+            end)
+        "#)).unwrap();
+        drive_lua_tasks(&mut app);
+        let frame = app.render_to_frame();
+        let (x, y): (u16, u16) = app
+            .eval_lua("local r = styled_win:rect(); return r.x, r.y")
+            .unwrap();
+        assert_eq!(
+            frame.styles[y as usize][x as usize].bg,
+            Some(smelt_core::style::Color::Rgb {
+                r: 20,
+                g: 40,
+                b: 60
+            })
+        );
+        app.press(KeyCode::Down);
+        app.press(KeyCode::Enter);
+        drive_lua_tasks(&mut app);
+        assert_eq!(app.eval_lua::<u32>("return picked.item.id").unwrap(), 9);
+        assert!(!app.overlays_probe().has_pickers());
+        app.assert_invariants();
+    }
+}
+
+#[test]
+fn invalid_dialog_composition_keeps_existing_modal_and_caller_windows() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.run_lua_result(
+        r#"
+        parent_input = smelt.dialog.input("parent")
+        parent = smelt.dialog.new({ panels = { { leaf = parent_input } } })
+        local compose = smelt.dialog.compose
+        smelt.dialog.compose = function() return smelt.ui.layout.vbox({}) end
+        child_input = smelt.dialog.input("child")
+        local ok, err = pcall(smelt.dialog.new, { panels = { { leaf = child_input } } })
+        assert(not ok and tostring(err):find("retain every body window", 1, true))
+        assert(smelt.dialog.current().win == parent_input)
+        assert(child_input:buf() ~= nil)
+        child_input:close()
+        smelt.dialog.compose = compose
+    "#,
+    )
+    .unwrap();
+    app.press(KeyCode::Esc);
+    assert!(app
+        .eval_lua::<bool>("return smelt.dialog.current() == nil")
+        .unwrap());
+    app.assert_invariants();
+}
+
+#[test]
+fn invalid_dialog_focus_does_not_mount_partial_modal() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.run_lua_result(
+        r#"
+        local parent_input = smelt.dialog.input("parent")
+        local parent = smelt.dialog.new({ panels = { { leaf = parent_input } } })
+        local input = smelt.dialog.input("child")
+        local outside = smelt.dialog.input("outside")
+        local ok, err = pcall(smelt.dialog.new, { panels = { { leaf = input } }, focus = outside })
+        assert(not ok and tostring(err):find("focus", 1, true))
+        assert(smelt.dialog.current().win == parent_input)
+        assert(input:buf() ~= nil and outside:buf() ~= nil)
+        input:close()
+        outside:close()
+        parent:close()
+    "#,
+    )
+    .unwrap();
+    app.assert_invariants();
+}
+
+#[test]
+fn composed_dialog_owns_extra_windows_without_changing_focus_or_submit() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.run_lua_result(
+        r#"
+        smelt.dialog.compose = function(body)
+            extra = smelt.dialog.content({ text = "extra header", surface = "inert" })
+            return smelt.ui.layout.vbox({
+                { smelt.ui.layout.leaf(extra), height = 1 },
+                { body, height = "fill" },
+            })
+        end
+        input = smelt.dialog.input("body")
+        smelt.dialog.new({
+            panels = { { leaf = input } }, focus = input, height = 5,
+            on_submit = function(ctx) ctx.close() end,
+        })
+    "#,
+    )
+    .unwrap();
+    app.render_silent();
+    app.run_lua_result(
+        r#"
+        assert(#smelt.dialog.current().panels == 2)
+        assert(smelt.dialog.current().focused_leaf == input)
+        assert(extra:buf() ~= nil and input:buf() ~= nil)
+    "#,
+    )
+    .unwrap();
+    app.press(KeyCode::Enter);
+    app.run_lua_result(
+        r#"
+        assert(smelt.dialog.current() == nil)
+        assert(extra:buf() == nil and input:buf() == nil)
+    "#,
+    )
+    .unwrap();
+    app.assert_invariants();
+}
+
+#[test]
+fn centered_modal_reuses_dialog_chrome_and_action_behavior() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(64, 20);
+    app.run_lua_result(
+        r#"
+        smelt.dialog.compose = function(body, opts)
+            return smelt.ui.layout.frame(body, { border = "rounded", title = "custom centered" })
+        end
+        require("smelt.modal").open({
+            lines = { "shared modal body" },
+            actions = { { label = "accept", value = "yes" } },
+            on_submit = function(value) modal_result = value end,
+        })
+    "#,
+    )
+    .unwrap();
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("custom centered"), "{frame}");
+    assert!(frame.contains("shared modal body"), "{frame}");
+    app.press(KeyCode::Enter);
+    assert_eq!(
+        app.eval_lua::<String>("return modal_result").unwrap(),
+        "yes"
+    );
+    app.assert_invariants();
+}
+
+#[test]
+#[ignore = "set SMELT_GALLERY_DIR to independently maintained gallery sources"]
+fn gallery_api_consumers() {
+    let dir = std::path::PathBuf::from(
+        std::env::var_os("SMELT_GALLERY_DIR").expect("set SMELT_GALLERY_DIR"),
+    );
+    for name in [
+        "panels",
+        "timeline",
+        "bubbles",
+        "mono",
+        "huedrift",
+        "c64",
+        "vaporwave",
+        "light",
+        "win95",
+    ] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.set_terminal_size(80, 30);
+        app.animate_with_virtual_clock();
+        if matches!(name, "panels" | "timeline") {
+            // Supply the marker-free policy through configuration; the gallery source stays unchanged.
+            app.run_lua_result(
+                r#"
+                local t = smelt.transcript
+                t.set_renderer(t.get_renderer("tool_header_content"), { part = "tool_header" })
+            "#,
+            )
+            .unwrap();
+        }
+        let path = dir.join(format!("{name}.lua"));
+        let source = std::fs::read_to_string(&path).unwrap();
+        app.run_lua_result(&source)
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        app.push_user_block("check gallery composition");
+        app.start_turn(1);
+        let id = app.tool_started(
+            "shell",
+            "bash",
+            std::collections::HashMap::from([("command".into(), serde_json::json!("cargo test"))]),
+        );
+        app.tool_finished(
+            id,
+            "shell",
+            protocol::ToolOutcome::new("checks passed".into(), false, None),
+            Some(1200),
+        );
+        for pattern in ["alpha", "beta"] {
+            let id = app.tool_started(
+                pattern,
+                "grep",
+                std::collections::HashMap::from([("pattern".into(), serde_json::json!(pattern))]),
+            );
+            app.tool_finished(
+                id,
+                pattern,
+                protocol::ToolOutcome::new("no matches".into(), false, None),
+                Some(10),
+            );
+        }
+        app.advance_animation(240);
+        let text = app.render_to_frame().text();
+        assert!(text.contains("bash cargo test"), "{name}: {text}");
+        if matches!(name, "panels" | "timeline") {
+            assert!(!text.contains("* bash"), "{name}: {text}");
+            assert!(text.contains("explore"), "{name}: {text}");
+        }
+        if name == "mono" {
+            app.run_lua_result("smelt.cmd.run('mono amber')").unwrap();
+            app.render_silent();
+        }
+        let errors: Vec<_> = app
+            .app
+            .lua
+            .core_shared()
+            .messages
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == smelt_core::messages::MessageKind::Error)
+            .map(|entry| entry.full.clone())
+            .collect();
+        assert!(errors.is_empty(), "{name}: {errors:?}");
+        app.assert_invariants();
+    }
+}

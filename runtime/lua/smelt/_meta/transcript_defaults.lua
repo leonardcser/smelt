@@ -8,7 +8,7 @@
 ---@class smelt.transcript.defaults
 local transcript_defaults = {}
 
---- Render any semantic transcript block with the bundled default policy.
+--- Dispatch a semantic block through its composed renderer part, without root middleware.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render = nil
 

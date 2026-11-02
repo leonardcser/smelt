@@ -63,13 +63,32 @@ if smelt.theme then
   ---@tier ui_host
   ---@type fun(name: string): nil
   function smelt.theme.use(name)
+    smelt.theme.apply(smelt.theme.spec(name))
+  end
+
+  local function deep_copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for k, v in pairs(value) do out[k] = deep_copy(v) end
+    return out
+  end
+
+  -- Return a fresh copy of colorscheme `name`'s ThemeSpec, by module slug or
+  -- syntax theme name, for a plugin to change and pass to `smelt.theme.apply`.
+  -- Changing the copy leaves the colorscheme itself as it was.
+  ---@tier ui_host
+  ---@type fun(name: string): smelt.theme.ThemeSpec
+  function smelt.theme.spec(name)
+    if type(name) ~= "string" or name == "" then
+      error("smelt.theme.spec: expected a non-empty colorscheme name", 2)
+    end
     local scheme = resolve_scheme(name)
     local module = scheme and scheme.module or name
     local spec = require("smelt.colorschemes." .. module)
-    if type(spec) ~= "table" then
-      error("smelt.theme.use: colorscheme `" .. name .. "` must return a ThemeSpec table", 2)
+    if type(spec) ~= "table" or type(spec.groups) ~= "table" then
+      error("smelt.theme.spec: colorscheme `" .. name .. "` must return a ThemeSpec with a groups table", 2)
     end
-    smelt.theme.apply(spec)
+    return deep_copy(spec)
   end
 
   -- Built-in session-color presets. Used by `/color`; user

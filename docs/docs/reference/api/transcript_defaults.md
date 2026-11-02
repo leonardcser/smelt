@@ -21,7 +21,7 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Render any semantic transcript block with the bundled default policy.
+Dispatch a semantic block through its composed renderer part, without root middleware.
 
 ## `smelt.transcript.defaults.render_tool_output`
 
