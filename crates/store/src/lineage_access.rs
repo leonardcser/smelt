@@ -1340,6 +1340,12 @@ impl LineageSessionReader {
         .0)
     }
 
+    pub fn history_last_user_index_before(&self, end: u64) -> Result<Option<u64>> {
+        Ok(self
+            .history_semantic_query(lineage::HistorySemantic::User, 0..end, true)?
+            .map(|(index, _)| index))
+    }
+
     pub fn history_mode_before(&self, end: u64) -> Result<Option<String>> {
         Ok(self
             .history_semantic_query(lineage::HistorySemantic::Mode, 0..end, true)?
@@ -1888,14 +1894,28 @@ impl LineageSessionReader {
         Ok(output)
     }
 
-    pub fn export_history_jsonl(&self, mut out: impl Write) -> Result<()> {
+    pub fn export_history_jsonl(&self, out: impl Write) -> Result<()> {
+        self.export_history_jsonl_cancellable(out, &|| false)
+    }
+
+    pub fn export_history_jsonl_cancellable(
+        &self,
+        mut out: impl Write,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<()> {
         const CHUNK_ITEMS: u64 = 256;
 
-        let history_len = self.snapshot()?.head.history_len.get();
+        let history_len = self.store_head()?.history_len.get();
         let mut start = 0;
         while start < history_len {
+            if cancelled() {
+                return Err(StoreError::Cancelled);
+            }
             let end = start.saturating_add(CHUNK_ITEMS).min(history_len);
             for item in self.history_range(start, end)? {
+                if cancelled() {
+                    return Err(StoreError::Cancelled);
+                }
                 serde_json::to_writer(&mut out, &item)?;
                 out.write_all(b"\n")?;
             }
@@ -6002,6 +6022,37 @@ mod tests {
         let exported: protocol::HistoryItem =
             serde_json::from_slice(history_export.strip_suffix(b"\n").unwrap()).unwrap();
         assert_eq!(exported, protocol::HistoryItem::system("first"));
+    }
+
+    #[test]
+    fn history_archive_export_cancels_between_items() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('c');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut commit = initial_commit(&id);
+        commit.history.items = (0..300)
+            .map(|i| protocol::HistoryItem::user(protocol::Content::text(format!("request {i}"))))
+            .collect();
+        commit.history.final_len = HistoryLen::new(300);
+        writer.commit_session(&commit).unwrap();
+        writer.release().unwrap();
+        let reader = LineageSessionReader::open_existing(root.path(), &id).unwrap();
+        assert_eq!(reader.history_last_user_index_before(0).unwrap(), None);
+        assert_eq!(reader.history_last_user_index_before(2).unwrap(), Some(1));
+        assert_eq!(
+            reader.history_last_user_index_before(400).unwrap(),
+            Some(299)
+        );
+        let checks = std::cell::Cell::new(0);
+        let mut output = Vec::new();
+        let result = reader.export_history_jsonl_cancellable(&mut output, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 2
+        });
+        assert!(matches!(result, Err(StoreError::Cancelled)));
+        assert_eq!(output.iter().filter(|&&byte| byte == b'\n').count(), 1);
+        let first: protocol::HistoryItem = serde_json::from_slice(&output).unwrap();
+        assert_eq!(first, commit.history.items[0]);
     }
 
     #[test]

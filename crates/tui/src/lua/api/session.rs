@@ -429,6 +429,14 @@ pub(super) fn register(
             Ok(())
         },
     )?;
+    m.private_live_only_fn(
+        "__continue_archived",
+        &["goal"],
+        |_, goal: String| -> LuaResult<()> {
+            crate::lua::with_session_host(|host| host.continue_with_archived_history(goal))
+                .map_err(mlua::Error::external)
+        },
+    )?;
     let worktree_sink = shared.core.resume_sink();
     m.private_live_only_fn(
         "__start_enter_worktree",

@@ -14,6 +14,7 @@ pub(crate) mod events;
 #[cfg(test)]
 mod harness_tests;
 pub(crate) mod history;
+pub(crate) mod history_archive;
 pub(crate) mod host_dispatch;
 mod latest_worker;
 pub(crate) mod lua_bridge;

@@ -702,7 +702,9 @@ impl TestApp {
     }
 
     pub(crate) fn wait_for_session_lifecycle(&mut self) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now()
+            + crate::persist::DEFAULT_PERSISTENCE_DEADLINE
+            + std::time::Duration::from_secs(5);
         while self.app.session_load.is_pending() || self.app.conversation.writer_is_opening() {
             self.app.drain_persist_reports();
             if let Some(event) = self.app.platform.try_recv_app_event() {

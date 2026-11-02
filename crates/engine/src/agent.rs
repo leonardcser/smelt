@@ -1780,6 +1780,7 @@ impl<'a> Turn<'a> {
 
         let mut first = true;
         let mut unusable_retries: u8 = 0;
+        let mut context_recovery_attempted = false;
         let mut tool_replay_guard = ToolReplayGuard::default();
         const MAX_UNUSABLE_RETRIES: u8 = 2;
 
@@ -1913,7 +1914,8 @@ impl<'a> Turn<'a> {
                         },
                         &serde_json::json!({"reason": "llm_error", "error": error_msg.clone()}),
                     );
-                    if is_ctx {
+                    if is_ctx && !context_recovery_attempted {
+                        context_recovery_attempted = true;
                         // Ask the host's recovery hook for a shorter
                         // conversation. On success we swap history
                         // (preserving the system prompt at index 0)
@@ -1992,7 +1994,7 @@ impl<'a> Turn<'a> {
                         }
                     }
                     let message = if is_ctx {
-                        "Context limit reached. Run /compact and retry.".to_string()
+                        "Context limit reached. Run /compact to retry.".to_string()
                     } else {
                         error_msg
                     };
@@ -2006,6 +2008,7 @@ impl<'a> Turn<'a> {
                 }
             };
 
+            context_recovery_attempted = false;
             if let Some(tps) = resp.tokens_per_sec {
                 self.tps_samples.push(tps);
             }

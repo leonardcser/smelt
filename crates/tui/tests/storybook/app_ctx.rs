@@ -629,6 +629,16 @@ impl AppStoryCtx {
         self.app.pending_ask_id()
     }
 
+    pub fn reject_pending_ask(&mut self, error: protocol::EngineAskError) {
+        let id = self.pending_ask_id().expect("pending auxiliary request");
+        self.app.engine_event(EngineEvent::EngineAskResponse {
+            id,
+            message: None,
+            error: Some(error),
+        });
+        self.app.settle_lua();
+    }
+
     /// Show a notification toast via `smelt.notify` and pump the render
     /// so the toast overlay is created before the next snapshot.
     pub fn notify(&mut self, body: &str, source: Option<&str>) {

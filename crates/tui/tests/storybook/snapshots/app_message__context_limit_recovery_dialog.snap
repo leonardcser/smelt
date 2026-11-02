@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+                                                                       14:37:03
+ Refactor the parser while preserving compatibility.
+
+
+                                                                       14:37:03
+ Continue with the smaller model.
+
+
+
+
+
+
+
+
+
+─ context limit ────────────────────────────────────────────────────────────────
+ This model cannot compact the current history.
+
+ Archive and continue saves the full history locally and starts a fresh
+ session on the selected model. The old session stays available.
+  1. Keep session
+  2. Retry compaction
+  3. Archive and continue
+ ○ normal                                                                 1:1 0%

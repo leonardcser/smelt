@@ -64,6 +64,7 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 	-- plugin stops auto-firing for the rest of the session to avoid burning
 	-- tokens in a loop. /compact still works (manual override).
 	local MAX_CONSECUTIVE_FAILURES = 3
+	local CONTEXT_FAILURE = "This model cannot compact the current history. Run /compact to retry."
 	local compact_state = host.state
 	local consecutive_failures = compact_state.consecutive_failures or 0
 
@@ -89,6 +90,14 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 	local function trip_circuit_breaker()
 		compact_state.failures = (compact_state.failures or 0) + 1
 		set_consecutive_failures(MAX_CONSECUTIVE_FAILURES)
+	end
+
+	local function context_failure()
+		trip_circuit_breaker()
+		if host.context_failure then
+			host.context_failure()
+		end
+		return { action = "abort", message = CONTEXT_FAILURE }
 	end
 
 	local function is_terminal_provider_error(err)
@@ -428,11 +437,6 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 	end
 
 	local function summarize_by_group_boundary(history, instructions, done)
-		if not history or #history == 0 then
-			done(nil)
-			return
-		end
-
 		local boundary = compaction_boundary(history)
 		if not boundary then
 			done(nil)
@@ -460,37 +464,16 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 			end
 		end
 
-		local function attempt()
-			local prefix_last_group = suffix_start_group - 1
-			if not prefix_group_is_compactable(history, prefix_last_group) then
-				finish(nil)
-				return
-			end
-
-			local prefix_messages = slice_group_prefix(history, groups, prefix_last_group)
+		local ok, err = pcall(function()
+			local prefix_messages = slice_group_prefix(history, groups, boundary.prefix_last_group)
 			summarize_messages(prefix_messages, summary_instructions, current, function(summary, err)
 				if summary then
 					finish(summary, nil, suffix_first_live_message_index(history, groups, suffix_start_group))
 					return
 				end
-				if host.is_cancelled(err) then
-					finish(nil, err)
-					return
-				end
-				if err and err.kind == "context_window" then
-					if prefix_last_group > 1 then
-						suffix_start_group = suffix_start_group - 1
-						attempt()
-						return
-					end
-					finish(nil, err)
-					return
-				end
 				finish(nil, err)
 			end)
-		end
-
-		local ok, err = pcall(attempt)
+		end)
 		if not ok then
 			handle:remove()
 			error(err)
@@ -526,13 +509,9 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 			host.notify.info("nothing old enough to compact")
 			return
 		end
-		-- Use the provider's actual prompt-token count.  If no turn has
-		-- completed yet (context_tokens is nil) we skip rather than guess.
+		-- A model switch invalidates provider usage, but must not prevent a
+		-- manual retry. Leave usage unknown rather than reuse another model's count.
 		local before_tokens = host.context_tokens()
-		if not before_tokens then
-			host.notify.error("no token usage available yet; try again after the next turn completes")
-			return
-		end
 
 		-- Summarise the original history. `ask_inherited` keeps the request
 		-- prefix byte-identical to the main turn for cache reuse.
@@ -550,7 +529,11 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 					return
 				end
 				if not summary then
-					record_failure()
+					if err and err.kind == "context_window" then
+						host.notify.error(context_failure().message)
+					else
+						record_failure()
+					end
 					return
 				end
 				local installed = host.checkpoint({
@@ -614,7 +597,7 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 			if not summary then
 				if is_terminal_provider_error(err) then
 					trip_circuit_breaker()
-				else
+				elseif not (err and err.kind == "context_window") then
 					record_failure()
 				end
 				done(nil, err)
@@ -676,6 +659,10 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 		})
 		local guard = host.guard()
 		compact_live_session(estimated_tokens, "summarize-pre-request", { guard = guard }, function(replaced, err)
+			if err and err.kind == "context_window" then
+				reply(context_failure())
+				return
+			end
 			if is_terminal_provider_error(err) then
 				reply({ action = "abort", message = err.message })
 				return
@@ -704,7 +691,7 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 		end
 
 		if not has_compactable_group_prefix(messages) then
-			reply(nil)
+			reply(context_failure())
 			return
 		end
 
@@ -724,8 +711,12 @@ Bullet list of file paths that were touched or are about to be touched, with a o
 				return
 			end
 			if not summary then
-				record_failure()
-				reply(nil)
+				if err and err.kind == "context_window" then
+					reply(context_failure())
+				else
+					record_failure()
+					reply(nil)
+				end
 				return
 			end
 			local installed = host.checkpoint({

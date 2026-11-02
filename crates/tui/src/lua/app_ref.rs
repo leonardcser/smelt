@@ -1925,6 +1925,10 @@ impl SessionLuaHost<'_> {
             .map_err(|error| error.to_string())
     }
 
+    pub(crate) fn continue_with_archived_history(&mut self, goal: String) -> Result<(), String> {
+        self.app.continue_with_archived_history(goal)
+    }
+
     pub(crate) fn fork_session(&mut self) {
         self.app.fork_session();
     }

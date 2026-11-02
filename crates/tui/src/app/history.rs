@@ -4267,10 +4267,10 @@ mod checkpoint_tests {
         assert_eq!(snapshot.head.history_len.get(), 0);
         assert_eq!(snapshot.head.transcript_record_count.get(), 0);
 
-        assert!(
-            !app.load_session_by_id(&id),
-            "recordless sessions cannot be resumed"
-        );
+        assert!(app.load_session_by_id(&id));
+        assert_eq!(app.session_message_count(), 0);
+        assert!(app.model_history().is_empty());
+        assert!(app.app.rewind_turns().unwrap().is_empty());
     }
 
     #[test]

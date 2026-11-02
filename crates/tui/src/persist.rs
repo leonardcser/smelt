@@ -3553,7 +3553,7 @@ fn record_save_receipt(receipt: &smelt_store::SaveReceipt) {
     );
 }
 
-#[cfg(any(test, feature = "harness"))]
+#[cfg(test)]
 pub(crate) fn write_transcript_record_suffix(
     store: &smelt_core::session::SessionStoreAddress,
     start_record_idx: usize,
@@ -3570,7 +3570,7 @@ pub(crate) fn write_transcript_record_suffix(
     write_transcript_record_suffix_with_ids(store, start_record_idx, &records)
 }
 
-#[cfg(any(test, feature = "harness"))]
+#[cfg(test)]
 pub(crate) fn write_transcript_record_suffix_with_ids(
     store: &smelt_core::session::SessionStoreAddress,
     start_record_idx: usize,

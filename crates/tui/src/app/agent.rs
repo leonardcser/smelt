@@ -4197,7 +4197,9 @@ mod tests {
         let resume = app.app.conversation.pause_persistence();
         app.app.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now()
+            + crate::persist::DEFAULT_PERSISTENCE_DEADLINE
+            + std::time::Duration::from_secs(5);
         while app.app.session_load.is_pending() {
             let started = std::time::Instant::now();
             app.app.drain_persist_reports();

@@ -3250,7 +3250,7 @@ impl ConversationRuntime {
         Ok(self.persistence.as_ref().map(|actor| {
             actor.begin_close(
                 self.document.generation(),
-                std::time::Instant::now() + crate::persist::INTERACTIVE_PERSISTENCE_DEADLINE,
+                std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
             )
         }))
     }

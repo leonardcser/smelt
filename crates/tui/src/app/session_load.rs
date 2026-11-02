@@ -82,8 +82,8 @@ impl SessionOperationRuntime {
         Ok(generation)
     }
 
-    pub(super) fn cancel(&self) {
-        self.latest.fetch_add(1, Ordering::AcqRel);
+    pub(super) fn cancel(&self) -> u64 {
+        let generation = self.latest.fetch_add(1, Ordering::AcqRel) + 1;
         if let Some(inbox) = &self.inbox {
             inbox
                 .0
@@ -91,6 +91,7 @@ impl SessionOperationRuntime {
                 .unwrap_or_else(|error| error.into_inner())
                 .pending = None;
         }
+        generation
     }
 
     pub(super) fn is_current(&self, generation: u64) -> bool {
@@ -179,13 +180,19 @@ pub(super) struct SessionForkRequest {
     pub(super) preserved_projection: Option<crate::app::session_document::ProjectedSessionSave>,
 }
 
+enum SessionPreparation {
+    Load,
+    Refresh(Box<PreparedSessionLoad>),
+    Fork(SessionForkRequest),
+    Archive(super::history_archive::HistoryArchiveRequest),
+}
+
 struct SessionLoadRequest {
     sessions: smelt_core::session::SessionStorage,
     id: String,
     width: u16,
     target_rows: u16,
-    fork: Option<SessionForkRequest>,
-    prepared: Option<Box<PreparedSessionLoad>>,
+    preparation: SessionPreparation,
 }
 
 pub struct SessionLoadWorkerResult {
@@ -193,6 +200,7 @@ pub struct SessionLoadWorkerResult {
     id: String,
     outcome: Result<PreparedSessionLoad, String>,
     forked_from: Option<String>,
+    continuation: Option<String>,
 }
 
 impl std::fmt::Debug for SessionLoadWorkerResult {
@@ -210,7 +218,8 @@ struct SessionAdoption {
     generation: u64,
     source_generation: super::session_document::PersistenceGeneration,
     busy: super::BusyToken,
-    prepared: Option<Box<PreparedSessionLoad>>,
+    target_id: String,
+    preparation: Option<SessionPreparation>,
     forked_from: Option<String>,
     stage: SessionAdoptionStage,
 }
@@ -230,6 +239,7 @@ pub(super) struct SessionLoadRuntime {
     pending: std::cell::Cell<bool>,
     adoption: Option<SessionAdoption>,
     ready: Option<SessionLoadWorkerResult>,
+    continuation: Option<(u64, String, String)>,
     #[cfg(test)]
     delay: std::time::Duration,
 }
@@ -241,6 +251,7 @@ impl Default for SessionLoadRuntime {
             pending: std::cell::Cell::new(false),
             adoption: None,
             ready: None,
+            continuation: None,
             #[cfg(test)]
             delay: std::time::Duration::ZERO,
         }
@@ -264,27 +275,37 @@ impl SessionLoadRuntime {
                 if cancelled() {
                     return;
                 }
-                let forked_from = request.fork.as_ref().map(|fork| fork.source_id.clone());
-                let outcome = request
-                    .fork
-                    .map_or(Ok(()), |fork| {
-                        create_session_fork(&request.sessions, fork, &cancelled)
-                    })
-                    .and_then(|()| match request.prepared {
-                        Some(prepared) => prepared.refresh(
-                            &request.sessions,
-                            request.width,
-                            request.target_rows,
-                            &cancelled,
-                        ),
-                        None => prepare_session_load(
-                            &request.sessions,
-                            &request.id,
-                            request.width,
-                            request.target_rows,
-                            &cancelled,
-                        ),
-                    });
+                let mut forked_from = None;
+                let mut continuation = None;
+                let preparation = match request.preparation {
+                    SessionPreparation::Load => Ok(None),
+                    SessionPreparation::Refresh(prepared) => Ok(Some(prepared)),
+                    SessionPreparation::Fork(fork) => {
+                        forked_from = Some(fork.source_id.clone());
+                        create_session_fork(&request.sessions, fork, &cancelled).map(|()| None)
+                    }
+                    SessionPreparation::Archive(archive) => {
+                        archive.run(&request.sessions, &cancelled).map(|seed| {
+                            continuation = Some(seed);
+                            None
+                        })
+                    }
+                };
+                let outcome = preparation.and_then(|prepared| match prepared {
+                    Some(prepared) => prepared.refresh(
+                        &request.sessions,
+                        request.width,
+                        request.target_rows,
+                        &cancelled,
+                    ),
+                    None => prepare_session_load(
+                        &request.sessions,
+                        &request.id,
+                        request.width,
+                        request.target_rows,
+                        &cancelled,
+                    ),
+                });
                 if cancelled() {
                     return;
                 }
@@ -294,6 +315,7 @@ impl SessionLoadRuntime {
                         id: request.id,
                         outcome,
                         forked_from,
+                        continuation,
                     },
                 )));
             })
@@ -306,7 +328,10 @@ impl SessionLoadRuntime {
     }
 
     pub(super) fn is_pending(&self) -> bool {
-        self.pending.get() || self.adoption.is_some() || self.ready.is_some()
+        self.pending.get()
+            || self.adoption.is_some()
+            || self.ready.is_some()
+            || self.continuation.is_some()
     }
 
     pub(super) fn has_handoff(&self) -> bool {
@@ -407,11 +432,12 @@ pub(super) fn prepare_session_load(
         store_address.session_id.clone(),
         store_address.lineage_id.clone(),
     );
-    let transcript = crate::app::transcript::LoadedTranscript::from_record_slice(
-        transcript_record_tail,
-        address,
-    )
-    .ok_or_else(|| format!("session {id:?} has no stored transcript records"))?;
+    let transcript = if head.transcript_record_count.get() == 0 && head.history_len.get() == 0 {
+        crate::app::transcript::LoadedTranscript::empty_from_store(address)
+    } else {
+        crate::app::transcript::LoadedTranscript::from_record_slice(transcript_record_tail, address)
+            .ok_or_else(|| format!("session {id:?} has no stored transcript records"))?
+    };
     Ok(PreparedSessionLoad {
         header,
         user_turn_count,
@@ -582,8 +608,7 @@ impl super::TuiApp {
             id: id.to_string(),
             width: self.last_width,
             target_rows,
-            fork: None,
-            prepared: None,
+            preparation: SessionPreparation::Load,
         };
         match self
             .session_load
@@ -602,8 +627,7 @@ impl super::TuiApp {
             id: fork.forked.id.clone(),
             width: self.last_width,
             target_rows: super::transcript::record_tail_target_rows(self.last_height),
-            fork: Some(fork),
-            prepared: None,
+            preparation: SessionPreparation::Fork(fork),
         };
         match self
             .session_load
@@ -612,6 +636,28 @@ impl super::TuiApp {
             Ok(_) => self.notify("forking session...".into()),
             Err(error) => self.notify_session_error_sticky(error),
         }
+    }
+
+    pub(super) fn request_archived_session(
+        &mut self,
+        archive: super::history_archive::HistoryArchiveRequest,
+    ) {
+        self.quiesce_session_bound_work();
+        let generation = self.session_load.operations.cancel();
+        self.session_load.pending.set(true);
+        self.session_load.adoption = Some(SessionAdoption {
+            generation,
+            source_generation: self.conversation.persistence_generation(),
+            busy: self.busy_stack.push_token("archiving history".into()),
+            target_id: archive.session.id.clone(),
+            preparation: Some(SessionPreparation::Archive(archive)),
+            forked_from: None,
+            stage: SessionAdoptionStage::Settling {
+                deadline: std::time::Instant::now()
+                    + crate::persist::INTERACTIVE_PERSISTENCE_DEADLINE,
+            },
+        });
+        self.poll_session_adoption();
     }
 
     pub(super) fn cancel_pending_session_load(&self) {
@@ -665,6 +711,14 @@ impl super::TuiApp {
                     return;
                 }
                 let forked_from = adoption.forked_from;
+                let continuation = result.continuation;
+                if continuation.is_some() {
+                    if let Err(error) = self.check_archive_continuation_idle() {
+                        self.restore_source_writer();
+                        self.notify_session_load_error(error);
+                        return;
+                    }
+                }
                 match result.outcome {
                     Ok(prepared) => {
                         self.cancel_pending_rewind();
@@ -677,6 +731,13 @@ impl super::TuiApp {
                         if let Some(source_id) = forked_from {
                             self.publish_history_delta(super::history::HistoryDeltaKind::Forked);
                             self.notify(format!("forked from {source_id}"));
+                        }
+                        if let Some(seed) = continuation {
+                            self.session_load.continuation = Some((
+                                result.generation,
+                                self.conversation.session().id.clone(),
+                                seed,
+                            ));
                         }
                     }
                     Err(error) => {
@@ -705,7 +766,8 @@ impl super::TuiApp {
             generation: result.generation,
             source_generation: self.conversation.persistence_generation(),
             busy: self.busy_stack.push_token("loading session".into()),
-            prepared: Some(prepared),
+            target_id: result.id,
+            preparation: Some(SessionPreparation::Refresh(prepared)),
             forked_from: result.forked_from,
             stage: SessionAdoptionStage::Settling {
                 deadline: std::time::Instant::now()
@@ -726,6 +788,16 @@ impl super::TuiApp {
     }
 
     pub(super) fn poll_session_adoption(&mut self) {
+        if !self.conversation.writer_is_opening() {
+            if let Some((generation, id, seed)) = self.session_load.continuation.take() {
+                if self.session_load.operations.is_current(generation)
+                    && self.conversation.session().id == id
+                    && self.check_archive_continuation_idle().is_ok()
+                {
+                    self.start_archived_continuation(seed);
+                }
+            }
+        }
         let Some(mut adoption) = self.session_load.adoption.take() else {
             return;
         };
@@ -810,17 +882,15 @@ impl super::TuiApp {
         };
         // The old writer's final save may advance the destination. Revalidate the
         // captured head after physical release before reusing its immutable data.
-        let prepared = adoption
-            .prepared
-            .take()
-            .expect("prepared resume destination");
         let request = SessionLoadRequest {
             sessions: self.core.sessions.clone(),
-            id: prepared.session.id.clone(),
+            id: adoption.target_id.clone(),
             width: self.last_width,
             target_rows: super::transcript::record_tail_target_rows(self.last_height),
-            fork: None,
-            prepared: Some(prepared),
+            preparation: adoption
+                .preparation
+                .take()
+                .expect("prepared session destination"),
         };
         match self
             .session_load

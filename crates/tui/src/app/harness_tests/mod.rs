@@ -663,7 +663,7 @@ async fn compaction_prepare_request_keeps_active_turn_guard_current() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
+async fn compaction_context_limit_stops_without_reducing_history() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);
     let messages = vec![
@@ -702,20 +702,10 @@ async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
         });
     }
 
-    let second = ask_messages(app.drain_engine_sends());
-    assert_eq!(second.len(), 1);
-    let second_messages = &second[0].1;
-    assert_eq!(
-        &second_messages[..3],
-        &messages[..3],
-        "retry should move the boundary one group earlier"
-    );
-
-    respond_pending_ask_with_text(&mut app, "# Goal\nok");
-    let replacement = replacement_from_decision(rx.await.expect("recovery reply"), "recovery");
-    assert_eq!(replacement.len(), 3);
-    assert_eq!(replacement[1], messages[3]);
-    assert_eq!(replacement[2], messages[4]);
+    assert!(ask_messages(app.drain_engine_sends()).is_empty());
+    assert!(matches!(rx.await.expect("recovery reply"),
+        engine::HostRequestDecision::Abort(message) if message.contains("/compact")
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -766,7 +756,7 @@ async fn compaction_context_limit_denies_tool_calls_without_moving_boundary() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compaction_context_limit_returns_none_when_no_earlier_boundary_fits() {
+async fn compaction_context_limit_offers_archive_when_summary_cannot_fit() {
     let mut app = TestApp::builder().build();
     app.start_turn(42);
     let messages = vec![user_message("u1"), user_message("u2")];
@@ -792,6 +782,6 @@ async fn compaction_context_limit_returns_none_when_no_earlier_boundary_fits() {
 
     assert!(matches!(
         rx.await.expect("recovery reply"),
-        engine::HostRequestDecision::Continue
+        engine::HostRequestDecision::Abort(message) if message.contains("/compact")
     ));
 }

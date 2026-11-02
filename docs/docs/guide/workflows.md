@@ -240,7 +240,11 @@ Use `/compact` only for manual control, such as choosing what the summary keeps:
 
 <figure class="term" data-replay="../../assets/replays/compact.json" aria-label="Compacting a conversation with a custom instruction" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
-Press `Esc Esc` to cancel it. Tune the automatic behavior with the `auto_compact`,
+If compaction cannot fit the model's context, smelt offers to keep the session,
+retry, or archive the history and continue in a fresh session. The selected
+model stays active, and the old session remains available.
+
+Press `Esc Esc` to cancel compaction. Tune the automatic behavior with the `auto_compact`,
 `compact_threshold` and `compact_keep_recent_groups`
 [settings](../customize/settings.md).
 

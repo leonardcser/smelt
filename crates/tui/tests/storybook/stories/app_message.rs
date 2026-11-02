@@ -398,6 +398,24 @@ app_story!(compaction_preview_waiting_for_summary, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(context_limit_recovery_dialog, |ctx| {
+    ctx.set_viewport(80, 24);
+    ctx.use_test_model();
+    ctx.push_user_turn("Refactor the parser while preserving compatibility.");
+    ctx.push_assistant_text("I inspected the parser and its tests.");
+    ctx.push_user_turn("Continue with the smaller model.");
+    ctx.run_command("compact");
+    ctx.reject_pending_ask(protocol::EngineAskError {
+        kind: protocol::EngineAskErrorKind::ContextWindow,
+        message: "maximum context length exceeded".into(),
+    });
+    assert!(ctx.frame_text().contains("Archive and continue"));
+    ctx.assert_snapshot();
+    ctx.set_viewport(80, 14);
+    assert!(ctx.frame_text().contains("Archive and continue"));
+    ctx.assert_snapshot();
+});
+
 app_story!(compaction_preview_streaming_summary, |ctx| {
     // Live compaction preview is a transient peeked block. It should show
     // the tail of the summary as deltas arrive, then be replaced by the

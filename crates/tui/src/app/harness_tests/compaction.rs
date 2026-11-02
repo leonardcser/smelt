@@ -1,5 +1,126 @@
 use super::*;
 
+#[test]
+fn smaller_model_compaction_stops_on_context_rejection() {
+    for trigger in ["prepare", "recovery"] {
+        let mut app = TestApp::builder().build();
+        app.set_terminal_size(100, 30);
+        let mut models = app.core_probe().config.available_models.clone();
+        let mut smaller = models[0].clone();
+        smaller.key = "test/smaller".into();
+        smaller.model_name = "smaller".into();
+        smaller.config.context_window = Some(128_000);
+        models.push(smaller);
+        app.set_available_models(models);
+        app.set_context_window(Some(1_000_000));
+        for i in 0..3 {
+            app.session_append_history(protocol::HistoryItem::user(protocol::Content::text(
+                format!("group {i}"),
+            )));
+        }
+        app.set_context_token_baseline_for_harness(Some(400_000));
+        assert!(app.run_lua(r#"smelt.cmd.run('/model test/smaller')"#));
+        assert!(app.run_lua(r#"assert(smelt.model.current() == 'test/smaller')"#));
+        app.set_context_window(Some(128_000));
+        app.start_turn(42);
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let messages = protocol::history_to_messages(&app.model_history());
+        let turn_id = app.current_turn_id().expect("active turn");
+        app.dispatch_host_call(if trigger == "prepare" {
+            engine::HostCall::PrepareRequest {
+                turn_id,
+                messages: engine::PreparedRequestMessages::model_only(messages),
+                estimated_tokens: 400_000,
+                reply: tx,
+            }
+        } else {
+            engine::HostCall::RecoverFromContextLimit {
+                turn_id,
+                messages,
+                reply: tx,
+            }
+        });
+        let sends = app.drain_engine_sends();
+        for send in &sends {
+            if let protocol::UiCommand::EngineAsk { target, .. } = send {
+                assert_eq!(target.model, "smaller");
+            }
+        }
+        assert_eq!(ask_messages(sends).len(), 1);
+        assert!(app.render_to_frame().text().contains("compacting"));
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+            id: app.pending_ask_id().expect("pending summary"),
+            message: None,
+            error: Some(protocol::EngineAskError {
+                kind: protocol::EngineAskErrorKind::ContextWindow,
+                message: "maximum context length exceeded".into(),
+            }),
+        });
+        app.drive_lua_tasks();
+        assert!(ask_messages(app.drain_engine_sends()).is_empty());
+        assert!(matches!(rx.try_recv().expect("compaction finished"),
+            engine::HostRequestDecision::Abort(message) if message.contains("/compact")
+        ));
+        assert_eq!(protocol::history_to_messages(&app.model_history()).len(), 3);
+        assert_ne!(app.working_probe().phase_label(), Some("compacting"));
+        assert!(app.finish_turn());
+        app.drive_lua_tasks();
+        let frame = app.render_to_frame().text();
+        assert!(frame.contains("Archive and continue"), "{frame}");
+        assert!(frame.contains("Retry compaction"), "{frame}");
+        let source = app.session_snapshot().id;
+        app.press(KeyCode::Esc);
+        app.drive_lua_tasks();
+        assert_eq!(app.session_snapshot().id, source);
+        assert!(app.run_lua(r#"assert(smelt.model.current() == 'test/smaller')"#));
+        app.drain_engine_sends();
+        assert!(app.run_lua(r#"smelt.cmd.run('compact')"#));
+        let retry_id = app
+            .drain_engine_sends()
+            .into_iter()
+            .find_map(|command| match command {
+                protocol::UiCommand::EngineAsk { id, messages, .. }
+                    if messages.iter().any(|message| {
+                        message.content.as_ref().is_some_and(|content| {
+                            content.as_text().contains("CONTEXT CHECKPOINT COMPACTION")
+                        })
+                    }) =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            })
+            .expect("manual retry summary request");
+        app.dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+            id: retry_id,
+            message: None,
+            error: Some(protocol::EngineAskError {
+                kind: protocol::EngineAskErrorKind::ContextWindow,
+                message: "maximum context length exceeded".into(),
+            }),
+        });
+        app.drive_lua_tasks();
+        let frame = app.render_to_frame().text();
+        assert!(frame.contains("Archive and continue"), "{trigger}: {frame}");
+        assert_eq!(app.session_snapshot().id, source);
+    }
+}
+
+#[test]
+fn manual_compaction_can_retry_without_provider_usage() {
+    let mut app = TestApp::builder().build();
+    for item in protocol::history_from_messages(vec![
+        user_message("previous request"),
+        assistant_message("previous answer"),
+        user_message("current task"),
+    ]) {
+        app.session_append_history(item);
+    }
+    app.set_context_token_baseline_for_harness(None);
+    assert!(app.run_lua(r#"smelt.cmd.run('compact')"#));
+    assert_eq!(ask_messages(app.drain_engine_sends()).len(), 1);
+}
+
 fn cache_sensitive_history() -> Vec<protocol::HistoryItem> {
     protocol::history_from_messages(vec![
         protocol::Message::user(protocol::Content::with_images(
@@ -1272,6 +1393,132 @@ fn one_shot_response(id: &str, text: &str, input_tokens: u32) -> String {
         .iter()
         .map(|event| format!("data: {event}\n\n"))
         .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_engine_context_failure_can_continue_with_archived_history() {
+    use std::sync::Arc;
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_json_request(&mut stream).await;
+        assert_eq!(request["model"], "smaller");
+        assert!(request
+            .to_string()
+            .contains("CONTEXT CHECKPOINT COMPACTION"));
+        let body = r#"{"error":{"code":"context_length_exceeded","message":"maximum context length exceeded"}}"#;
+        stream.write_all(format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_json_request(&mut stream).await;
+        assert_eq!(request["model"], "smaller");
+        let text = request.to_string();
+        assert!(text.contains("history-archives"), "{text}");
+        assert!(text.contains("CURRENT_TASK"), "{text}");
+        assert!(!text.contains("OLD_HISTORY"), "{text}");
+        assert!(!text.contains("CONTEXT CHECKPOINT COMPACTION"), "{text}");
+        write_response(
+            &mut stream,
+            &one_shot_response("resp_archive", "continued from archive", 100),
+        )
+        .await;
+    });
+    let cwd = tempfile::tempdir().unwrap();
+    let config = cwd.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("early.lua"),
+        r#"smelt.builtins.disable({ plugins = { "title", "predict" } })"#,
+    )
+    .unwrap();
+    let engine = engine::start(
+        engine::EngineConfig::new(cwd.path().to_path_buf(), Arc::new(engine::clock::RealClock)),
+        Box::new(engine::tools::EmptyDispatcher),
+    );
+    let mut app = TestApp::builder()
+        .with_cwd(cwd.path())
+        .with_lua_load_paths(&config, None)
+        .with_engine(engine)
+        .build();
+    app.set_terminal_size(100, 30);
+    let model = smelt_core::config::ResolvedModel {
+        key: "mock/larger".into(),
+        provider_name: "mock".into(),
+        model_name: "larger".into(),
+        display_name: None,
+        api_base: format!("http://{address}"),
+        api_key_env: String::new(),
+        provider_type: "openai".into(),
+        config: protocol::ModelConfig {
+            context_window: Some(1_000_000),
+            ..Default::default()
+        },
+        catalog: protocol::ModelCatalogMetadata::default(),
+    };
+    app.use_model(model.clone());
+    let mut smaller = model.clone();
+    smaller.key = "mock/smaller".into();
+    smaller.model_name = "smaller".into();
+    smaller.config.context_window = Some(128_000);
+    app.set_available_models(vec![model, smaller]);
+    for _ in 0..10 {
+        app.commit_request_history_item(
+            protocol::HistoryItem::user(protocol::Content::text(format!(
+                "OLD_HISTORY {}",
+                "x".repeat(64_000)
+            ))),
+            None,
+        );
+    }
+    assert!(app.run_lua(r#"smelt.cmd.run('/model mock/smaller')"#));
+    app.set_context_window(Some(128_000));
+    let source = app.session_snapshot().id;
+    app.start_submitted_turn("CURRENT_TASK");
+    let mut terminal_output = Vec::new();
+    for stage in 0..2 {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    output = app.app.core.engine.recv_output() => {
+                        let output = output.expect("engine output");
+                        let complete = matches!(&output, engine::EngineOutput::Event(protocol::EngineEvent::TurnComplete { .. }));
+                        app.app.dispatch_selected_engine_output_in_render_loop_to(output, &mut terminal_output);
+                        if complete { break; }
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                        while let Some(event) = app.try_recv_app_event() { app.handle_app_event(event); }
+                        app.app.drain_persist_reports();
+                        app.drain_idle_work();
+                        app.pump_lua();
+                        app.drive_lua_tasks();
+                    }
+                }
+            }
+        }).await.unwrap_or_else(|_| panic!("stage {stage} timed out: {}", app.render_to_frame().text()));
+        if stage == 0 {
+            app.drive_lua_tasks();
+            assert_eq!(app.session_snapshot().id, source);
+            let frame = app.render_to_frame().text();
+            assert!(frame.contains("Archive and continue"), "{frame}");
+            assert!(!app.agent_running());
+            app.press(KeyCode::Down);
+            app.press(KeyCode::Down);
+            app.press(KeyCode::Enter);
+        }
+    }
+    server.await.unwrap();
+    assert_ne!(app.session_snapshot().id, source);
+    assert_eq!(
+        app.core_probe().config.active_model().unwrap().key,
+        "mock/smaller"
+    );
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("continued from archive"));
 }
 
 async fn write_response(stream: &mut tokio::net::TcpStream, body: &str) {

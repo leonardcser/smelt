@@ -1,5 +1,4 @@
-//! A provider response hook that takes every tool call away ends the turn,
-//! and the text it writes replaces the draft that streamed in.
+//! Provider response rewriting and bounded context-limit recovery through host hooks.
 
 use engine::EngineConfig;
 use protocol::{
@@ -31,7 +30,7 @@ fn tool_call_sse() -> String {
     events.iter().map(|ev| format!("data: {ev}\n\n")).collect()
 }
 
-async fn serve_one(sock: &mut tokio::net::TcpStream, body: &str) {
+async fn serve_one(sock: &mut tokio::net::TcpStream, status: u16, body: &str) {
     let mut buf = [0u8; 8192];
     let mut seen = Vec::new();
     let header_end = loop {
@@ -58,7 +57,7 @@ async fn serve_one(sock: &mut tokio::net::TcpStream, body: &str) {
         seen.extend_from_slice(&buf[..n]);
     }
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} Response\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     sock.write_all(header.as_bytes()).await.unwrap();
@@ -71,6 +70,15 @@ async fn run_hook(
     body: String,
     hook: fn(Message) -> Message,
 ) -> (Vec<EngineEvent>, usize) {
+    let (events, requests, _) = run_responses(provider, vec![(200, body)], hook).await;
+    (events, requests)
+}
+
+async fn run_responses(
+    provider: &str,
+    responses: Vec<(u16, String)>,
+    hook: fn(Message) -> Message,
+) -> (Vec<EngineEvent>, usize, usize) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -78,8 +86,9 @@ async fn run_hook(
     let server = tokio::spawn(async move {
         loop {
             let (mut sock, _) = listener.accept().await.unwrap();
-            served.fetch_add(1, Ordering::SeqCst);
-            serve_one(&mut sock, &body).await;
+            let index = served.fetch_add(1, Ordering::SeqCst);
+            let (status, body) = &responses[index.min(responses.len() - 1)];
+            serve_one(&mut sock, *status, body).await;
         }
     });
 
@@ -134,6 +143,7 @@ async fn run_hook(
     // Every event after the response draft streamed, in order.
     let mut after_hook = Vec::new();
     let mut hooked = false;
+    let mut recoveries = 0;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match handle.recv_output().await {
@@ -149,8 +159,24 @@ async fn run_hook(
                     hooked = true;
                     reply.send(Some(hook(message))).unwrap();
                 }
+                Some(engine::EngineOutput::HostCall(
+                    engine::HostCall::RecoverFromContextLimit {
+                        messages, reply, ..
+                    },
+                )) => {
+                    recoveries += 1;
+                    reply
+                        .send(engine::HostRequestDecision::replace_canonical_history(
+                            messages,
+                        ))
+                        .unwrap();
+                }
                 Some(engine::EngineOutput::Event(EngineEvent::TurnComplete { .. })) => break,
-                Some(engine::EngineOutput::Event(event)) if hooked => after_hook.push(event),
+                Some(engine::EngineOutput::Event(event))
+                    if hooked || matches!(event, EngineEvent::TurnError { .. }) =>
+                {
+                    after_hook.push(event)
+                }
                 Some(_) => {}
                 None => panic!("engine closed before the turn completed"),
             }
@@ -159,8 +185,51 @@ async fn run_hook(
     .await
     .expect("the turn did not finish");
     server.abort();
-    assert!(hooked, "response hook did not run");
-    (after_hook, requests.load(Ordering::SeqCst))
+    (after_hook, requests.load(Ordering::SeqCst), recoveries)
+}
+
+fn context_error() -> (u16, String) {
+    (400, r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: context window exceeded"}}"#.into())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn consecutive_context_rejections_allow_only_one_recovery() {
+    let (events, requests, recoveries) =
+        run_responses("anthropic-compatible", vec![context_error()], |message| {
+            message
+        })
+        .await;
+    assert_eq!(requests, 2);
+    assert_eq!(recoveries, 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::TurnError {
+            kind: Some(protocol::EngineAskErrorKind::ContextWindow),
+            ..
+        }
+    )));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_response_resets_context_recovery_allowance() {
+    let (events, requests, recoveries) = run_responses(
+        "anthropic-compatible",
+        vec![context_error(), (200, tool_call_sse()), context_error()],
+        |message| message,
+    )
+    .await;
+    assert_eq!(requests, 4);
+    assert_eq!(recoveries, 2);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::ResponseDraftAccepted)));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::TurnError {
+            kind: Some(protocol::EngineAskErrorKind::ContextWindow),
+            ..
+        }
+    )));
 }
 
 #[tokio::test(flavor = "current_thread")]
