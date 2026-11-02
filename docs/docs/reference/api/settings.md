@@ -9,7 +9,7 @@ description: "Metatable-backed proxy table for preferences. Lua API reference fo
 
 **Availability:** Everywhere, including headless mode.
 
-Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. Available during configuration loading and in headless mode.
+Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. Transcript keys are `show_timestamps`, `view`, and `limits`; unknown keys raise, including on table replacement. Nested `view` and `limits` tables remain extensible. Available during configuration loading and in headless mode.
 
 ## `smelt.settings.schema`
 

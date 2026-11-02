@@ -89,7 +89,9 @@ smelt.settings.notifications = {
 ## Transcript
 
 `smelt.settings.transcript` controls how the conversation is displayed. It is a
-Lua table, not a `--set` key.
+Lua table, not a `--set` key. Only `show_timestamps`, `view` and `limits` are
+accepted at the top level; unknown keys raise, including on table replacement.
+The nested `view` and `limits` tables remain extensible.
 
 ```lua
 smelt.settings.transcript = {

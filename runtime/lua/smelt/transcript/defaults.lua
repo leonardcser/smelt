@@ -98,16 +98,12 @@ function M.render_display_count(block, opts)
   return layout.text(M.display_count_text(block, opts))
 end
 
-local function render_part(name, block, ctx)
-  return smelt.transcript.get_renderer(name)(block, ctx)
-end
-
 local function render_tool_header(block, ctx, presentation)
   if presentation.title then
     local title = require_title_result(block, presentation.title(block, ctx))
     if title ~= nil then block = setmetatable({ summary = title }, { __index = block }) end
   end
-  return render_part("tool_header", block, ctx)
+  return smelt.transcript.render_part("tool_header", block, ctx)
 end
 
 local block_parts = {
@@ -120,7 +116,7 @@ local block_parts = {
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render(block, ctx)
   block = block or {}
-  return render_part(block_parts[block.kind] and block.kind or "unknown", block, ctx)
+  return smelt.transcript.render_part(block_parts[block.kind] and block.kind or "unknown", block, ctx)
 end
 
 function M.render_group(block, ctx)
@@ -309,7 +305,7 @@ end
 --- Compose status chrome around the semantic tool label, summary and timings.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render_tool_header(block, ctx)
-  return layout.row_prefix(render_part("tool_header_content", block, ctx), {
+  return layout.row_prefix(smelt.transcript.render_part("tool_header_content", block, ctx), {
     first = { { text = "*", hl = status_hl[block.status or "pending"] }, { text = " ", dim = true } },
     rest = { { text = "  ", selectable = false, dim = true } },
   })
@@ -579,7 +575,7 @@ end
 --- Render a user panel with a timestamp in its top padding row.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function M.render_user(block, ctx)
-  local text = render_part("user_content", block, ctx)
+  local text = smelt.transcript.render_part("user_content", block, ctx)
   local timestamp, refresh_after = M.timestamp(block.sent_at_ms, ctx and ctx.now_ms)
   if not timestamp then
     return layout.panel(text, { hl = "SmeltUserBg", padding = 1 })

@@ -45,9 +45,9 @@ transcript.fold_node = nil
 ---@type fun(): nil
 transcript.follow_tail = nil
 
---- Return a composed renderer. Omit `part` for `root`. Capture the result before
---- replacement to delegate to the previous implementation without recursion.
---- Unknown part names raise rather than silently disabling customization.
+--- Return a snapshot of a composed renderer. Omit `part` for `root`. Capture it
+--- before replacement to wrap the previous implementation without recursion.
+--- Use `render_part` for live dispatch. Unknown part names raise.
 ---@type fun(part?: smelt.transcript.RendererPart): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node)
 transcript.get_renderer = nil
 
@@ -106,6 +106,12 @@ transcript.pills = nil
 --- cached standalone and grouped nodes invalidate.
 ---@type fun(name: string, presentation: smelt.transcript.ToolPresentation): smelt.Reg
 transcript.register_tool = nil
+
+--- Render a part using its current composition, including later replacements and
+--- middleware. To wrap the same part, delegate with `next` or capture `get_renderer`
+--- before replacement instead of recursively calling this function.
+---@type fun(part: smelt.transcript.RendererPart, block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+transcript.render_part = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to the `top_inset`; `opts.move_cursor` defaults to true and puts the cursor at the start of the target's text.

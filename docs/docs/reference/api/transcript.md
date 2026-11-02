@@ -98,9 +98,9 @@ Types: [`smelt.transcript.RendererPart`](types.md#smelttranscriptrendererpart), 
 
 **Availability:** Everywhere, including headless mode.
 
-Return a composed renderer. Omit `part` for `root`. Capture the result before
-replacement to delegate to the previous implementation without recursion.
-Unknown part names raise rather than silently disabling customization.
+Return a snapshot of a composed renderer. Omit `part` for `root`. Capture it
+before replacement to wrap the previous implementation without recursion.
+Use `render_part` for live dispatch. Unknown part names raise.
 
 ## `smelt.transcript.get_tool_presentation`
 
@@ -218,6 +218,20 @@ copied, so later table mutation has no effect; re-register to change behavior
 or cache keys. The returned registration removes only this exact replacement.
 Registering presentation changes rebuilds the composed root renderer so all
 cached standalone and grouped nodes invalidate.
+
+## `smelt.transcript.render_part`
+
+```lua
+fun(part: smelt.transcript.RendererPart, block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+```
+
+Types: [`smelt.transcript.RendererPart`](types.md#smelttranscriptrendererpart), [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+**Availability:** Everywhere, including headless mode.
+
+Render a part using its current composition, including later replacements and
+middleware. To wrap the same part, delegate with `next` or capture `get_renderer`
+before replacement instead of recursively calling this function.
 
 ## `smelt.transcript.reveal`
 

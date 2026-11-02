@@ -13,6 +13,7 @@ Use the smallest change that fits:
 | Change one tool's title or body | `smelt.transcript.register_tool` |
 | Replace a block or semantic part | `smelt.transcript.set_renderer` |
 | Wrap a renderer | `smelt.transcript.extend_renderer` |
+| Render a part's current composition | `smelt.transcript.render_part` |
 | Group adjacent related blocks | `smelt.transcript.groups.register` |
 
 These renderers return `smelt.layout` nodes, not the `smelt.ui.layout` window
@@ -61,6 +62,9 @@ or `"tool_header"`. Tool header changes also apply to grouped tool headers.
 See [`RendererOptions`](../reference/api/types.md#smelttranscriptrendereroptions)
 for supported part names.
 
+`render_part(name, block, ctx)` uses the current composition, including later
+middleware. `get_renderer(name)` captures the composition at the time of the call.
+
 Semantic content is separate from chrome. `tool_header_content` keeps the tool
 name, provider namespace, summary, duration, timestamps and row limits. Add a
 custom marker without rebuilding that content:
@@ -69,7 +73,7 @@ custom marker without rebuilding that content:
 local transcript, layout = smelt.transcript, smelt.layout
 
 local chrome = transcript.extend_renderer("my.tool-marker", function(_, tool, ctx)
-  local content = transcript.get_renderer("tool_header_content")(tool, ctx)
+  local content = transcript.render_part("tool_header_content", tool, ctx)
   return layout.row_prefix(content, {
     first = { { text = "◆ ", hl = "SmeltAccent", selectable = false } },
     rest = { { text = "  ", selectable = false } },
@@ -83,10 +87,9 @@ To omit the marker, set the header renderer to its content renderer:
 
 ```lua
 local transcript = smelt.transcript
-transcript.set_renderer(transcript.get_renderer("tool_header_content"), {
-  part = "tool_header",
-  cache_key = "my.unprefixed-header:v1",
-})
+transcript.set_renderer(function(block, ctx)
+  return transcript.render_part("tool_header_content", block, ctx)
+end, { part = "tool_header", cache_key = "my.unprefixed-header:v1" })
 ```
 
 Likewise, `user_content` provides styled user text without the default panel or
@@ -95,7 +98,7 @@ timestamp. Reuse it in a bubble view:
 ```lua
 local transcript, layout = smelt.transcript, smelt.layout
 transcript.set_renderer(function(block, ctx)
-  local content = transcript.get_renderer("user_content")(block, ctx)
+  local content = transcript.render_part("user_content", block, ctx)
   return layout.panel(content, { hl = "SmeltUserBg", padding = 1 })
 end, { part = "user", cache_key = "my.bubble:v1" })
 ```

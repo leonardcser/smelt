@@ -284,12 +284,20 @@ function smelt.transcript.set_renderer(renderer, opts)
   rebuild_renderer()
 end
 
---- Return a composed renderer. Omit `part` for `root`. Capture the result before
---- replacement to delegate to the previous implementation without recursion.
---- Unknown part names raise rather than silently disabling customization.
+--- Return a snapshot of a composed renderer. Omit `part` for `root`. Capture it
+--- before replacement to wrap the previous implementation without recursion.
+--- Use `render_part` for live dispatch. Unknown part names raise.
 ---@type fun(part?: smelt.transcript.RendererPart): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node)
 function smelt.transcript.get_renderer(part)
   return renderer_part("get_renderer", part).renderer
+end
+
+--- Render a part using its current composition, including later replacements and
+--- middleware. To wrap the same part, delegate with `next` or capture `get_renderer`
+--- before replacement instead of recursively calling this function.
+---@type fun(part: smelt.transcript.RendererPart, block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+function smelt.transcript.render_part(part, block, ctx)
+  return renderer_part("render_part", part).renderer(block, ctx)
 end
 
 --- Add or replace named middleware around a renderer part (default `root`).

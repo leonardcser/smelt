@@ -68,7 +68,7 @@ local function tool_group_header(group, ctx)
       { text = suffix, hl = suffix ~= "" and "ErrorMsg" or nil, selectable = false },
     } },
   }, { __index = group })
-  return smelt.transcript.get_renderer("tool_header")(header, ctx)
+  return smelt.transcript.render_part("tool_header", header, ctx)
 end
 
 local function display_path(path)

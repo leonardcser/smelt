@@ -1,6 +1,96 @@
 use super::*;
 
 #[test]
+fn render_part_uses_live_composition_while_get_renderer_keeps_a_snapshot() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 20);
+    app.run_lua_result(
+        r#"
+        local t, l = smelt.transcript, smelt.layout
+        captured_user_content = t.get_renderer("user_content")
+        t.set_renderer(function(block, ctx)
+            return l.row_prefix(t.render_part("user_content", block, ctx), { first = "bubble: " })
+        end, { part = "user" })
+        "#,
+    )
+    .unwrap();
+    app.push_user_block("hello");
+    assert!(app.render_to_frame().text().contains("bubble: hello"));
+    app.run_lua_result(
+        r#"
+        live_extension = smelt.transcript.extend_renderer("test.live", function(next, block, ctx)
+            return smelt.layout.row_prefix(next(block, ctx), { first = "late: " })
+        end, { part = "user_content" })
+        "#,
+    )
+    .unwrap();
+    assert!(app.render_to_frame().text().contains("bubble: late: hello"));
+    app.run_lua_result("live_extension:remove()").unwrap();
+    assert!(app.render_to_frame().text().contains("bubble: hello"));
+    app.run_lua_result(
+        r#"
+        local t = smelt.transcript
+        t.set_renderer(function() return smelt.layout.text("replacement") end, { part = "user_content" })
+        "#,
+    ).unwrap();
+    assert!(app.render_to_frame().text().contains("bubble: replacement"));
+    app.run_lua_result("smelt.transcript.set_renderer(captured_user_content, { part = 'user' })")
+        .unwrap();
+    let text = app.render_to_frame().text();
+    assert!(
+        text.contains("hello") && !text.contains("replacement"),
+        "{text}"
+    );
+    app.run_lua_result(
+        r#"
+        local ok, err = pcall(smelt.transcript.render_part, "missing", {}, {})
+        assert(not ok and tostring(err):find("render_part: unknown renderer part", 1, true), tostring(err))
+        "#,
+    ).unwrap();
+    app.assert_invariants();
+}
+
+#[test]
+fn transcript_settings_reject_unknown_keys_after_table_replacement() {
+    let mut app = TestApp::builder().build();
+    app.run_lua_result(
+        r#"
+        local settings = smelt.settings
+        local function rejected(fn, key)
+            local ok, err = pcall(fn)
+            assert(not ok and tostring(err):find("smelt.settings.transcript: unknown key `" .. key .. "`", 1, true), tostring(err))
+        end
+        rejected(function() settings.transcript.tool_marker = "" end, "tool_marker")
+        rejected(function() return settings.transcript.typo end, "typo")
+        local original = settings.transcript
+        rejected(function() settings.transcript = { show_timestamps = false, typo = true } end, "typo")
+        assert(settings.transcript == original and settings.transcript.show_timestamps == true)
+        for _ = 1, 2 do
+            local replacement = { show_timestamps = false, view = {}, limits = {} }
+            settings.transcript = replacement
+            assert(settings.transcript == replacement)
+            settings.transcript.show_timestamps = true
+            assert(settings.transcript.show_timestamps == true)
+            rejected(function() settings.transcript.tool_marker = "" end, "tool_marker")
+            rejected(function() replacement.typo = true end, "typo")
+            settings.transcript.view.custom = "plugin-owned"
+            settings.transcript.limits.custom_rows = 3
+            assert(settings.transcript.view.custom == "plugin-owned")
+            local paired
+            for key, value in pairs(settings) do
+                if key == "transcript" then paired = value end
+            end
+            assert(paired == replacement)
+        end
+        settings.transcript = {}
+        settings.transcript.show_timestamps = false
+        assert(settings.transcript.show_timestamps == false and settings.transcript.view == nil)
+        rejected(function() settings.transcript.typo = true end, "typo")
+        "#,
+    ).unwrap();
+}
+
+#[test]
 fn unadorned_tool_headers_keep_semantic_names() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(72, 20);

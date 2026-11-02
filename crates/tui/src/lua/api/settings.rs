@@ -4,9 +4,8 @@
 //! Unknown keys raise at the access site; type mismatches raise on
 //! assignment.
 //!
-//! The schema lives entirely in `smelt_core::config::SETTINGS` - this
-//! module reads / writes through that table and adds no per-key code
-//! of its own.
+//! The scalar schema lives in `smelt_core::config::SETTINGS`. Lua-owned
+//! table preferences are initialized and guarded separately below.
 
 use mlua::prelude::*;
 use smelt_core::config::{setting_decl, ResolvedSettings, SettingKind, SettingValue, SETTINGS};
@@ -44,6 +43,45 @@ fn init_transcript_settings(lua: &Lua) -> LuaResult<mlua::Table> {
     let table = lua.create_table()?;
     table.set("view", lua.create_table()?)?;
     table.set("limits", lua.create_table()?)?;
+    Ok(table)
+}
+
+fn validate_transcript_key(key: &str) -> LuaResult<()> {
+    const KEYS: &[&str] = &["show_timestamps", "view", "limits"];
+    if KEYS.contains(&key) {
+        Ok(())
+    } else {
+        Err(LuaError::external(format!(
+            "smelt.settings.transcript: unknown key `{key}`; known keys are {KEYS:?}"
+        )))
+    }
+}
+
+fn guard_table_setting(lua: &Lua, key: &str, table: mlua::Table) -> LuaResult<mlua::Table> {
+    if key != "transcript" {
+        return Ok(table);
+    }
+    for pair in table.clone().pairs::<String, mlua::Value>() {
+        validate_transcript_key(&pair?.0)?;
+    }
+    let mt = lua.create_table()?;
+    mt.set(
+        "__index",
+        lua.create_function(|_, (_, key): (mlua::Table, String)| {
+            validate_transcript_key(&key)?;
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
+    mt.set(
+        "__newindex",
+        lua.create_function(
+            |_, (table, key, value): (mlua::Table, String, mlua::Value)| {
+                validate_transcript_key(&key)?;
+                table.raw_set(key, value)
+            },
+        )?,
+    )?;
+    table.set_metatable(Some(mt))?;
     Ok(table)
 }
 
@@ -121,21 +159,30 @@ pub(super) fn register(
         lua,
         smelt,
         "settings",
-        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. Available during configuration loading and in headless mode.",
+        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.notifications` and `settings.transcript` are Lua tables for plugin preferences. Transcript keys are `show_timestamps`, `view`, and `limits`; unknown keys raise, including on table replacement. Nested `view` and `limits` tables remain extensible. Available during configuration loading and in headless mode.",
         Tier::Host,
     )?;
+    // Keep table settings behind the proxy so replacing an existing table is validated too.
+    let table_values = lua.create_table()?;
     for decl in TABLE_SETTINGS {
-        settings_tbl.tbl.raw_set(decl.key, (decl.init)(lua)?)?;
+        table_values.raw_set(
+            decl.key,
+            guard_table_setting(lua, decl.key, (decl.init)(lua)?)?,
+        )?;
     }
     let mt_tbl = lua.create_table()?;
     let mt = LuaMod::extend_supported(lua, mt_tbl.clone(), "smelt.settings", Tier::Host);
 
     {
         let shared = Arc::clone(shared);
+        let table_values = table_values.clone();
         mt.private_metamethod(
             "__index",
             &["_", "key"],
             move |lua, (_, key): (mlua::Value, String)| -> LuaResult<mlua::Value> {
+                if table_setting_decl(&key).is_some() {
+                    return table_values.raw_get(key);
+                }
                 let decl = setting_decl(&key).ok_or_else(|| unknown_key_err(&key))?;
                 let desired = shared
                     .settings_overrides
@@ -156,19 +203,21 @@ pub(super) fn register(
 
     {
         let shared = Arc::clone(shared);
+        let table_values = table_values.clone();
         mt.private_metamethod(
             "__newindex",
             &["_", "key", "value"],
-            move |_, (table, key, value): (mlua::Table, String, mlua::Value)| -> LuaResult<()> {
+            move |lua, (_, key, value): (mlua::Table, String, mlua::Value)| -> LuaResult<()> {
                 if setting_decl(&key).is_none() {
                     if table_setting_decl(&key).is_some() {
-                        let mlua::Value::Table(_) = &value else {
+                        let mlua::Value::Table(table) = value else {
                             return Err(LuaError::external(format!(
                                 "smelt.settings.{key}: expected table, got {}",
                                 value.type_name()
                             )));
                         };
-                        table.raw_set(key, value)?;
+                        let table = guard_table_setting(lua, &key, table)?;
+                        table_values.raw_set(key, table)?;
                         return Ok(());
                     }
                     return Err(unknown_key_err(&key));
@@ -184,10 +233,9 @@ pub(super) fn register(
         mt.private_metamethod(
             "__pairs",
             &["settings"],
-            move |lua,
-                  settings: mlua::Table|
-                  -> LuaResult<(mlua::Function, mlua::Value, mlua::Value)> {
+            move |lua, _: mlua::Table| -> LuaResult<(mlua::Function, mlua::Value, mlua::Value)> {
                 let shared = Arc::clone(&shared);
+                let table_values = table_values.clone();
                 let next =
                     lua.create_function(move |lua, (_, prev): (mlua::Value, mlua::Value)| {
                         let prev_key = match prev {
@@ -238,7 +286,7 @@ pub(super) fn register(
                             let value = setting_to_lua(lua, &value)?;
                             return Ok((mlua::Value::String(lua.create_string(key)?), value));
                         }
-                        let value = settings.raw_get::<mlua::Value>(key.as_str())?;
+                        let value = table_values.raw_get::<mlua::Value>(key.as_str())?;
                         Ok((mlua::Value::String(lua.create_string(key)?), value))
                     })?;
                 Ok((next, mlua::Value::Nil, mlua::Value::Nil))
