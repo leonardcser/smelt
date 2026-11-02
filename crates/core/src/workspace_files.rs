@@ -63,7 +63,7 @@ const NOISY_DIRS: &[&str] = &[
 
 #[derive(Debug)]
 pub struct WorkspaceFiles {
-    projects: HashMap<PathBuf, ProjectSearch>,
+    projects: HashMap<(PathBuf, SearchSource), ProjectSearch>,
     roots: HashMap<PathBuf, PathBuf>,
     git_roots: HashSet<PathBuf>,
     search_worker: Option<SearchWorker>,
@@ -91,7 +91,15 @@ enum WatcherCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectKind {
     Git,
+    GitTracked,
     Filesystem,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SearchSource {
+    #[default]
+    Workspace,
+    Git,
 }
 
 #[derive(Debug)]
@@ -135,6 +143,7 @@ struct SearchKey {
     limit: usize,
     offset: usize,
     include_dirs: bool,
+    source: SearchSource,
     generation: u64,
 }
 
@@ -145,6 +154,7 @@ impl SearchKey {
             && self.limit == other.limit
             && self.offset == other.offset
             && self.include_dirs == other.include_dirs
+            && self.source == other.source
     }
 }
 
@@ -219,6 +229,7 @@ pub struct SearchRequest {
     pub limit: usize,
     pub offset: usize,
     pub include_dirs: bool,
+    pub source: SearchSource,
 }
 
 #[derive(Clone, Debug)]
@@ -383,7 +394,7 @@ impl WorkspaceFiles {
 
     pub fn warmup(&mut self, cwd: &Path) -> Result<(), String> {
         let root = self.workspace_root(cwd);
-        self.ensure_project(&root)
+        self.ensure_project(&root, SearchSource::Workspace)
     }
 
     pub fn search(&mut self, request: SearchRequest) -> Result<SearchResponse, String> {
@@ -402,6 +413,7 @@ impl WorkspaceFiles {
             limit: request.limit,
             offset: request.offset,
             include_dirs: request.include_dirs,
+            source: request.source,
             generation: snapshot.generation,
         };
         Ok(self
@@ -412,10 +424,10 @@ impl WorkspaceFiles {
 
     pub fn accept(&mut self, request: AcceptRequest) -> Result<(), String> {
         let root = self.workspace_root(&request.cwd);
-        self.ensure_project(&root)?;
+        self.ensure_project(&root, SearchSource::Workspace)?;
         let project = self
             .projects
-            .get(&root)
+            .get(&(root.clone(), SearchSource::Workspace))
             .ok_or_else(|| "workspace files project was not initialized".to_string())?;
         let relative = safe_relative_path(&request.path)?;
         let path = slash_path(&relative).ok_or_else(|| "file accept path is empty".to_string())?;
@@ -429,10 +441,10 @@ impl WorkspaceFiles {
 
     pub fn status(&mut self, cwd: &Path) -> Result<WorkspaceFilesStatus, String> {
         let root = self.workspace_root(cwd);
-        self.ensure_project(&root)?;
+        self.ensure_project(&root, SearchSource::Workspace)?;
         let project = self
             .projects
-            .get(&root)
+            .get(&(root.clone(), SearchSource::Workspace))
             .ok_or_else(|| "workspace files project was not initialized".to_string())?;
         let snapshot = project.snapshot()?;
         Ok(WorkspaceFilesStatus {
@@ -448,19 +460,21 @@ impl WorkspaceFiles {
 
     pub fn rescan(&mut self, cwd: &Path) -> Result<(), String> {
         let root = self.workspace_root(cwd);
-        self.ensure_project(&root)?;
-        let project = self
-            .projects
-            .get(&root)
-            .ok_or_else(|| "workspace files project was not initialized".to_string())?;
-        if let Ok(mut state) = project.state.write() {
-            state.scanning = true;
-            state.last_error = None;
+        self.ensure_project(&root, SearchSource::Workspace)?;
+        for ((project_root, _), project) in &self.projects {
+            if project_root != &root {
+                continue;
+            }
+            if let Ok(mut state) = project.state.write() {
+                state.scanning = true;
+                state.last_error = None;
+            }
+            project
+                .worker_tx
+                .send(WorkerMsg::Rescan)
+                .map_err(|e| e.to_string())?;
         }
-        project
-            .worker_tx
-            .send(WorkerMsg::Rescan)
-            .map_err(|e| e.to_string())
+        Ok(())
     }
 
     fn snapshot_for_request(
@@ -471,10 +485,10 @@ impl WorkspaceFiles {
             let _perf = smelt_perf::perf::begin("workspace_files:root");
             self.workspace_root(&request.cwd)
         };
-        self.ensure_project(&root)?;
+        self.ensure_project(&root, request.source)?;
         let project = self
             .projects
-            .get(&root)
+            .get(&(root.clone(), request.source))
             .ok_or_else(|| "workspace files project was not initialized".to_string())?;
         let snapshot = {
             let _perf = smelt_perf::perf::begin("workspace_files:snapshot");
@@ -483,21 +497,22 @@ impl WorkspaceFiles {
         Ok((project.root.clone(), snapshot))
     }
 
-    fn ensure_project(&mut self, root: &Path) -> Result<(), String> {
-        if self.projects.contains_key(root) {
+    fn ensure_project(&mut self, root: &Path, source: SearchSource) -> Result<(), String> {
+        let key = (root.to_path_buf(), source);
+        if self.projects.contains_key(&key) {
             return Ok(());
         }
 
         let state = Arc::new(RwLock::new(ProjectState::new_scanning()));
-        let kind = if self.git_roots.contains(root) {
-            ProjectKind::Git
-        } else {
-            ProjectKind::Filesystem
+        let kind = match source {
+            SearchSource::Git => ProjectKind::GitTracked,
+            SearchSource::Workspace if self.git_roots.contains(root) => ProjectKind::Git,
+            SearchSource::Workspace => ProjectKind::Filesystem,
         };
         let worker_tx = spawn_project_worker(root.to_path_buf(), kind, Arc::clone(&state));
         let watcher = start_watcher(root, kind, worker_tx.clone(), Arc::clone(&state));
         self.projects.insert(
-            root.to_path_buf(),
+            key,
             ProjectSearch {
                 root: root.to_path_buf(),
                 state,
@@ -549,7 +564,14 @@ fn search_snapshot_response(
 ) -> SearchResponse {
     smelt_perf::perf::record_value("workspace_files:entries", snapshot.entries.len() as u64);
     if let Some(item) = exact_path_item(root, &request.query, request.include_dirs) {
-        return exact_path_response(root, snapshot, request, item);
+        if request.source == SearchSource::Workspace
+            || snapshot
+                .entries
+                .binary_search_by(|entry| entry.path.cmp(&item.path))
+                .is_ok()
+        {
+            return exact_path_response(root, snapshot, request, item);
+        }
     }
 
     let ranked = {
@@ -597,7 +619,9 @@ fn search_snapshot_response(
         scanned: snapshot.scanned,
         scanning: snapshot.scanning,
         searching: false,
-        ready: snapshot.warmup_complete && !snapshot.scanning,
+        ready: snapshot.warmup_complete
+            && !snapshot.scanning
+            && (snapshot.last_error.is_none() || !snapshot.entries.is_empty()),
         message,
     }
 }
@@ -685,6 +709,7 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchJob>, mpsc::Receiver<SearchCompl
                 limit: job.key.limit,
                 offset: job.key.offset,
                 include_dirs: job.key.include_dirs,
+                source: job.key.source,
             };
             let response = search_snapshot_response(&job.key.root, &job.snapshot, &request);
             if completion_tx
@@ -726,7 +751,7 @@ fn spawn_project_worker(
 
 fn start_watcher(
     root: &Path,
-    _kind: ProjectKind,
+    kind: ProjectKind,
     tx: mpsc::Sender<WorkerMsg>,
     state: SharedProjectState,
 ) -> Option<WorkspaceWatcher> {
@@ -735,26 +760,47 @@ fn start_watcher(
     let manager_tx = watch_tx.clone();
     std::thread::Builder::new()
         .name("smelt-workspace-watcher".into())
-        .spawn(move || run_watcher(root, tx, state, manager_tx, watch_rx))
+        .spawn(move || run_watcher(root, kind, tx, state, manager_tx, watch_rx))
         .ok()?;
     Some(WorkspaceWatcher { tx: watch_tx })
 }
 
+fn git_index_path(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let contents = std::fs::read_to_string(dot_git).ok()?;
+        root.join(contents.trim().strip_prefix("gitdir: ")?)
+    };
+    Some(std::fs::canonicalize(git_dir).ok()?.join("index"))
+}
+
 fn run_watcher(
     root: PathBuf,
+    kind: ProjectKind,
     worker_tx: mpsc::Sender<WorkerMsg>,
     state: SharedProjectState,
     watch_tx: mpsc::Sender<WatcherCommand>,
     watch_rx: mpsc::Receiver<WatcherCommand>,
 ) {
+    let index = git_index_path(&root);
+    let watch_index = index.clone();
     let watch_root = root.clone();
     let callback_watch_tx = watch_tx.clone();
+    let tracked_only = kind == ProjectKind::GitTracked;
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
-            if relevant_event(&watch_root, &event) {
+            let index_changed = !matches!(event.kind, EventKind::Access(_))
+                && watch_index
+                    .as_ref()
+                    .is_some_and(|index| event.paths.contains(index));
+            if index_changed || (!tracked_only && relevant_event(&watch_root, &event)) {
                 let _ = worker_tx.send(WorkerMsg::Rescan);
-                enqueue_new_directory_watches(&watch_root, &event, &callback_watch_tx);
+                if !tracked_only {
+                    enqueue_new_directory_watches(&watch_root, &event, &callback_watch_tx);
+                }
             }
         },
         NotifyConfig::default(),
@@ -763,12 +809,21 @@ fn run_watcher(
         Err(_) => return,
     };
 
-    if watch_workspace_tree(&mut watcher, &root).is_ok() {
-        if let Ok(mut state) = state.write() {
-            state.watcher_ready = true;
-        }
+    // Watch the directory because Git replaces index through an atomic rename.
+    let index_watched = index
+        .as_ref()
+        .and_then(|path| path.parent())
+        .is_some_and(|dir| watcher.watch(dir, RecursiveMode::NonRecursive).is_ok());
+    let ready = if tracked_only {
+        index_watched
     } else {
+        watch_workspace_tree(&mut watcher, &root).is_ok()
+    };
+    if !ready {
         return;
+    }
+    if let Ok(mut state) = state.write() {
+        state.watcher_ready = true;
     }
 
     while let Ok(command) = watch_rx.recv() {
@@ -850,6 +905,7 @@ fn scan_project(root: &Path, kind: ProjectKind, state: &SharedProjectState) {
 
     let scan = match kind {
         ProjectKind::Git => scan_git_project(root),
+        ProjectKind::GitTracked => scan_tracked_project(root),
         ProjectKind::Filesystem => scan_filesystem_project(root, state),
     };
     publish_scan(
@@ -893,6 +949,20 @@ impl ScanResult {
         });
         self
     }
+}
+
+fn scan_tracked_project(root: &Path) -> ScanResult {
+    let mut scan = ScanResult::new();
+    match git_ls_files(root, &["--cached", "--deduplicate"]) {
+        Ok(paths) => {
+            let mut seen = HashSet::new();
+            for path in paths {
+                add_scan_entry(&mut scan, &mut seen, path, ItemKind::File);
+            }
+        }
+        Err(err) => scan.error = Some(format!("git ls-files failed: {err}")),
+    }
+    scan.finish()
 }
 
 fn scan_git_project(root: &Path) -> ScanResult {
@@ -1540,6 +1610,178 @@ mod tests {
         run_git(dir, &["init", "--quiet"])
     }
 
+    fn tracked_request(root: &Path) -> SearchRequest {
+        SearchRequest {
+            query: String::new(),
+            cwd: root.to_path_buf(),
+            limit: 2,
+            offset: 0,
+            include_dirs: true,
+            source: SearchSource::Git,
+        }
+    }
+
+    fn wait_for_search(
+        files: &mut WorkspaceFiles,
+        request: &SearchRequest,
+        total: usize,
+    ) -> SearchResponse {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let response = files.search_interactive(request.clone()).unwrap();
+            if response.ready && response.total_files == total {
+                return response;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "search did not settle: {response:#?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn tracked_search_is_bounded_separate_and_index_authoritative() {
+        let project = tempfile::tempdir().unwrap();
+        assert!(init_git(project.path()));
+        std::fs::create_dir(project.path().join("target")).unwrap();
+        for path in [
+            "alpha.rs",
+            "deleted.rs",
+            "target/ignored.rs",
+            "untracked.rs",
+        ] {
+            std::fs::write(project.path().join(path), "fn source() {}\n").unwrap();
+        }
+        std::fs::write(project.path().join(".gitignore"), "target/\n").unwrap();
+        assert!(run_git(
+            project.path(),
+            &["add", "-f", "alpha.rs", "deleted.rs", "target/ignored.rs"]
+        ));
+        std::fs::remove_file(project.path().join("deleted.rs")).unwrap();
+        let mut files = WorkspaceFiles::default();
+        files.warmup(project.path()).unwrap();
+        let mut request = tracked_request(project.path());
+        let response = wait_for_search(&mut files, &request, 3);
+        assert_eq!(response.total_matched, 3);
+        assert_eq!(response.items.len(), 2);
+        assert_eq!(response.total_dirs, 0);
+        assert_eq!(files.projects.len(), 2);
+        request.offset = 2;
+        assert_eq!(wait_for_search(&mut files, &request, 3).items.len(), 1);
+        request.offset = 0;
+        for query in ["deleted.rs", "target/ignored.rs"] {
+            request.query = query.to_string();
+            let response = wait_for_search(&mut files, &request, 3);
+            assert_eq!(response.items[0].path, query);
+        }
+        request.query = "untracked.rs".to_string();
+        assert!(wait_for_search(&mut files, &request, 3).items.is_empty());
+        request.source = SearchSource::Workspace;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let response = files.search_interactive(request.clone()).unwrap();
+            if response.ready {
+                assert_eq!(response.items[0].path, "untracked.rs");
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn tracked_search_outside_git_reports_error() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("untracked.rs"), "").unwrap();
+        let mut files = WorkspaceFiles::default();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let response = files
+                .search_interactive(tracked_request(project.path()))
+                .unwrap();
+            if !response.scanning && !response.searching {
+                assert!(!response.ready && response.items.is_empty());
+                assert!(response.message.unwrap().contains("git ls-files failed"));
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn git_index_watcher_refreshes_normal_and_linked_worktrees() {
+        for linked in [false, true] {
+            let project = tempfile::tempdir().unwrap();
+            assert!(init_git(project.path()));
+            assert!(run_git(
+                project.path(),
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "fixture"
+                ]
+            ));
+            let linked_dir = project.path().join("linked");
+            let root = if linked {
+                assert!(run_git(
+                    project.path(),
+                    &["worktree", "add", "--detach", linked_dir.to_str().unwrap()]
+                ));
+                &linked_dir
+            } else {
+                project.path()
+            };
+            std::fs::write(root.join(".gitignore"), "*.rs\n").unwrap();
+            std::fs::write(root.join("added.rs"), "fn added() {}\n").unwrap();
+            let mut files = WorkspaceFiles::default();
+            let request = tracked_request(root);
+            let workspace_request = SearchRequest {
+                source: SearchSource::Workspace,
+                ..request.clone()
+            };
+            wait_for_search(&mut files, &request, 0);
+            wait_for_search(&mut files, &workspace_request, 1);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            for source in [SearchSource::Git, SearchSource::Workspace] {
+                let key = (normalize_cwd(root), source);
+                while !files.projects[&key].snapshot().unwrap().watcher_ready {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            // No source-tree event occurs: both catalogs must observe the index rename.
+            assert!(run_git(root, &["add", "-f", "added.rs"]));
+            assert_eq!(
+                wait_for_search(&mut files, &request, 1).items[0].path,
+                "added.rs"
+            );
+            assert_eq!(
+                wait_for_search(&mut files, &workspace_request, 2).total_matched,
+                2
+            );
+            assert!(run_git(root, &["rm", "--cached", "-f", "added.rs"]));
+            assert!(wait_for_search(&mut files, &request, 0).items.is_empty());
+            assert_eq!(
+                wait_for_search(&mut files, &workspace_request, 1).items[0].path,
+                ".gitignore"
+            );
+            std::fs::write(root.join("rescanned.rs"), "").unwrap();
+            assert!(run_git(root, &["add", "-f", "rescanned.rs"]));
+            files.rescan(root).unwrap();
+            assert_eq!(
+                wait_for_search(&mut files, &request, 1).items[0].path,
+                "rescanned.rs"
+            );
+        }
+    }
+
     #[test]
     fn safe_relative_path_rejects_workspace_escape() {
         assert_eq!(
@@ -1688,6 +1930,7 @@ mod tests {
             limit: 20,
             offset: 0,
             include_dirs: false,
+            source: SearchSource::Workspace,
         };
         files.search(request.clone()).unwrap();
         assert!(files.search_worker.is_none());
@@ -1723,6 +1966,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
 
@@ -1748,6 +1992,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
 
@@ -1789,6 +2034,7 @@ mod tests {
                     limit: 20,
                     offset: 0,
                     include_dirs: false,
+                    source: SearchSource::Workspace,
                 })
                 .unwrap();
 
@@ -1821,6 +2067,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
 
@@ -1854,6 +2101,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
         assert!(noisy.items.is_empty(), "response: {noisy:#?}");
@@ -1865,6 +2113,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
         assert!(tracked.items.is_empty(), "response: {tracked:#?}");
@@ -1890,6 +2139,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
         assert!(fuzzy.items.is_empty(), "response: {fuzzy:#?}");
@@ -1901,6 +2151,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
         assert_eq!(exact.items[0].path, "ignored/secret.txt");
@@ -1927,6 +2178,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
 
@@ -1963,6 +2215,7 @@ mod tests {
                     limit: 20,
                     offset: 0,
                     include_dirs: false,
+                    source: SearchSource::Workspace,
                 })
                 .unwrap();
 
@@ -1994,6 +2247,7 @@ mod tests {
                 limit: 20,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
 
@@ -2021,6 +2275,7 @@ mod tests {
                     limit: 20,
                     offset: 0,
                     include_dirs: true,
+                    source: SearchSource::Workspace,
                 })
                 .unwrap();
             if let Some(item) = response
@@ -2064,6 +2319,7 @@ mod tests {
             limit: 20,
             offset: 0,
             include_dirs: true,
+            source: SearchSource::Workspace,
         };
         let first = files.search_interactive(request.clone()).unwrap();
         assert!(first.searching, "first response: {first:#?}");
@@ -2110,6 +2366,7 @@ mod tests {
                 limit: 10,
                 offset: 0,
                 include_dirs: false,
+                source: SearchSource::Workspace,
             })
             .unwrap();
         assert_eq!(response.items[0].path, "zeta.rs");
@@ -2136,6 +2393,7 @@ mod tests {
                     limit: 10,
                     offset: 0,
                     include_dirs: false,
+                    source: SearchSource::Workspace,
                 })
                 .unwrap();
             if response

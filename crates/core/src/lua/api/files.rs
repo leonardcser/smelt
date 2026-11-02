@@ -4,7 +4,7 @@ use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
 use crate::workspace_files::{
-    AcceptRequest, ItemKind, SearchRequest, SearchResponse, WorkspaceFilesStatus,
+    AcceptRequest, ItemKind, SearchRequest, SearchResponse, SearchSource, WorkspaceFilesStatus,
 };
 use mlua::prelude::*;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let search_context = Arc::clone(shared);
     files.fn_(
         "search",
-        "Search workspace files. Returns `{ items, total_matched, total_files, total_dirs, scanned, scanning, searching, ready, status, message, root }`. Items are `{ label, path, insert_text, kind, score }`. Options: `{ limit?, offset?, include_dirs?, cwd? }`.",
+        "Search workspace files. Returns `{ items, total_matched, total_files, total_dirs, scanned, scanning, searching, ready, status, message, root }`. Items are `{ label, path, insert_text, kind, score }`. Options: `{ limit?, offset?, include_dirs?, cwd?, source? }`. Source is `workspace` (default) or `git` (tracked files only).",
         &["query", "opts"],
         move |lua, (query, opts): (String, Option<mlua::Table>)| -> LuaResult<mlua::Table> {
             let _perf = smelt_perf::perf::begin("files:search");
@@ -44,6 +44,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     limit: opts.limit,
                     offset: opts.offset,
                     include_dirs: opts.include_dirs,
+                    source: opts.source,
                 })
             });
             match response {
@@ -160,12 +161,32 @@ struct SearchOpts {
     limit: usize,
     offset: usize,
     include_dirs: bool,
+    source: SearchSource,
     cwd: Option<PathBuf>,
 }
 
 impl SearchOpts {
     fn from_lua(opts: Option<mlua::Table>) -> LuaResult<Self> {
+        let source = match opts
+            .as_ref()
+            .map(|t| t.get::<LuaValue>("source"))
+            .transpose()?
+        {
+            None | Some(LuaValue::Nil) => SearchSource::Workspace,
+            Some(LuaValue::String(value)) if value.as_bytes().as_ref() == b"workspace" => {
+                SearchSource::Workspace
+            }
+            Some(LuaValue::String(value)) if value.as_bytes().as_ref() == b"git" => {
+                SearchSource::Git
+            }
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "files.search: source must be 'workspace' or 'git'",
+                ))
+            }
+        };
         Ok(Self {
+            source,
             limit: opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<u64>>("limit").ok().flatten())
@@ -218,6 +239,8 @@ fn response_to_lua(lua: &Lua, response: SearchResponse) -> LuaResult<mlua::Table
         "status",
         if response.scanning || response.searching {
             "loading"
+        } else if !response.ready {
+            "error"
         } else if response.items.is_empty() {
             "empty"
         } else {

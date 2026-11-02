@@ -33,7 +33,7 @@ Trigger an asynchronous full rescan for the current workspace or `opts.cwd`. Ret
 fun(query: string, opts: table?): table
 ```
 
-Search workspace files. Returns `{ items, total_matched, total_files, total_dirs, scanned, scanning, searching, ready, status, message, root }`. Items are `{ label, path, insert_text, kind, score }`. Options: `{ limit?, offset?, include_dirs?, cwd? }`.
+Search workspace files. Returns `{ items, total_matched, total_files, total_dirs, scanned, scanning, searching, ready, status, message, root }`. Items are `{ label, path, insert_text, kind, score }`. Options: `{ limit?, offset?, include_dirs?, cwd?, source? }`. Source is `workspace` (default) or `git` (tracked files only).
 
 ## `smelt.files.status`
 
