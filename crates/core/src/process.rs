@@ -1757,17 +1757,9 @@ impl Containment {
                 unit,
                 process_group,
             } => {
-                let mut command = tokio::process::Command::new("systemctl");
-                command.args([
-                    "--user",
-                    "kill",
-                    "--kill-whom=all",
-                    "--signal=SIGKILL",
-                    unit,
-                ]);
-                let _ = run_systemd_status(command).await;
                 kill_optional_process_group(*process_group);
                 let _ = child.start_kill();
+                stop_systemd_scope(unit).await;
             }
             #[cfg(unix)]
             Self::ProcessGroup { process_group } => {
@@ -1795,17 +1787,7 @@ impl Containment {
                 kill_optional_process_group(*process_group);
                 let unit = unit.clone();
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    runtime.spawn(async move {
-                        let mut command = tokio::process::Command::new("systemctl");
-                        command.args([
-                            "--user",
-                            "kill",
-                            "--kill-whom=all",
-                            "--signal=SIGKILL",
-                            &unit,
-                        ]);
-                        let _ = run_systemd_status(command).await;
-                    });
+                    runtime.spawn(async move { stop_systemd_scope(&unit).await });
                 }
             }
             #[cfg(unix)]
@@ -1848,6 +1830,7 @@ impl Containment {
                     }
                 }
                 if *_stopped {
+                    stop_systemd_scope(unit).await;
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 }
@@ -1862,6 +1845,24 @@ impl Containment {
         }
         false
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn stop_systemd_scope(unit: &str) {
+    let mut kill = tokio::process::Command::new("systemctl");
+    kill.args([
+        "--user",
+        "kill",
+        "--kill-whom=all",
+        "--signal=SIGKILL",
+        unit,
+    ]);
+    let _ = run_systemd_status(kill).await;
+    // A scope registration can outlive a wrapper killed during startup.
+    // Killing members alone does not retire that empty scope.
+    let mut stop = tokio::process::Command::new("systemctl");
+    stop.args(["--user", "stop", "--no-block", unit]);
+    let _ = run_systemd_status(stop).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -3028,6 +3029,41 @@ mod tests {
 
         assert_eq!(snapshot.termination, Some(JobTermination::OutOfMemory));
         assert_eq!(snapshot.exit_code, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn systemd_scope_clear_during_startup_finishes_jobs() {
+        if !probe_systemd_scope().await {
+            return;
+        }
+        let supervisor = JobSupervisor::new();
+        for _ in 0..4 {
+            let id = supervisor
+                .spawn_background(
+                    "sleep 30",
+                    &ShellSpec::default(),
+                    &test_cwd(),
+                    Instant::now(),
+                )
+                .await
+                .unwrap();
+            let (mut finished, unit) = {
+                let jobs = supervisor.0.jobs.lock().unwrap();
+                let job = &jobs[&id];
+                let Containment::SystemdScope { unit, .. } = &job.containment else {
+                    panic!("expected systemd containment");
+                };
+                (job.finished_rx.clone(), unit.clone())
+            };
+            supervisor.clear();
+            tokio::time::timeout(Duration::from_secs(5), finished.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!finished.borrow().as_ref().unwrap().running);
+            assert!(!systemd_scope_status(&unit).await.unwrap().active);
+        }
     }
 
     #[cfg(target_os = "linux")]
