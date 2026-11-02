@@ -4,10 +4,10 @@ expression: frame.text()
 ---
 
   ┌ files ────────────────┬─ snapshot - r refresh ───────┐
-  │ unstaged (1) +1 -1    │       M  界 .lua  unstaged +  │
-  │ M 界 .lua +1 -1        │       @@ -1 +1 @@            │
-  │                       │ 1     - old                  │
-  │ staged (0)            │    1  + new                  │
+  │ unstaged (1) +1 -1    │             M  界 .lua  unst  │
+  │ M 界 .lua +1 -1        │             @@ -1 +1 @@      │
+  │                       │    1        - old            │
+  │ staged (0)            │          1  + new            │
   │                       │                              │
   │                       │                              │
   │                       │                              │
