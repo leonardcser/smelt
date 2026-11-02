@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the changelog notes for a release version.
+"""Print text-only GitHub release notes for a release version.
 
 Usage: release_notes.py <version> [pages-dir]
 
@@ -8,6 +8,7 @@ changelog page or the page still has its draft summary, so a tag cannot ship
 without curated notes.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -30,7 +31,13 @@ def main() -> int:
     if front_matter(text).get("summary") in ("", PLACEHOLDER):
         print(f"{page} still has the draft summary", file=sys.stderr)
         return 1
-    print(body)
+    # Keep website-only media and relative links out of GitHub release notes.
+    body = re.sub(r"<(figure|video|picture|audio)\b[^>]*>.*?</\1\s*>", "", body, flags=re.S | re.I)
+    body = re.sub(r"<(?:img|source)\b[^>]*>", "", body, flags=re.I)
+    body = re.sub(r"!\[[^\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)", "", body)
+    body = re.sub(r"\[([^\]\n]+)\]\(\.\.?/[^)]+\)", r"\1", body)
+    body = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", body)
+    print(body.strip())
     return 0
 
 

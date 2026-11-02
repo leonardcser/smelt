@@ -29,9 +29,9 @@ never edits `main`, creates commits, pushes generated changes, or moves tags.
    since the last stable tag and updates the index and sidebar. Curate the
    page for users: merge duplicates, drop internal items, reword, and replace
    the `TODO` summary with one line of highlights. Merge that to `main`. The
-   release workflow publishes the page as the GitHub release notes and fails
-   when it is missing or still has the draft summary. Pre-release tags need no
-   page.
+   release workflow publishes the page as the GitHub release notes, stripping
+   media and relative links, and fails when it is missing or still has the draft
+   summary. Pre-release tags need no page.
 
    In the same change, refresh the models.dev snapshot that the binary uses
    until the live catalog loads:
