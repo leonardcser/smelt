@@ -82,49 +82,25 @@ See the [CLI Reference](../reference/cli.md) for every flag.
 
 ### Subscription providers
 
-These use your existing subscription and require no API key. Run `smelt auth`
-once, pick the provider, then start smelt with no extra flags. Claude Code uses
-its own login instead:
+ChatGPT (Codex), GitHub Copilot, and Kimi Code use your existing subscription
+without an API key. Log in once, select a provider, then start smelt:
 
-=== ":fontawesome-brands-openai: ChatGPT (Codex)"
+```bash
+smelt auth
+smelt
+```
 
-    ```bash
-    smelt auth                # one-time browser or device-code login
-    smelt
-    ```
+Claude Code uses its own login:
 
-=== ":simple-anthropic: Claude Code"
+```bash
+claude auth login
+smelt
+```
 
-    ```bash
-    claude auth login         # one-time login, in Claude Code
-    smelt
-    ```
-
-    When the `claude` executable is installed, `/model` lists every model it
-    offers, such as `claude-code/opus` or `claude-code/claude-opus-4-8`. smelt
-    runs Claude Code itself as the agent, with its own tools and context
-    management, behind smelt's interface and permissions. See the
-    [Claude Code provider](../customize/providers.md#claude-code).
-
-=== ":simple-moonshotai: Kimi Code"
-
-    ```bash
-    smelt auth                # device-code login
-    smelt
-    ```
-
-    After login, smelt registers the `kimi-code` provider automatically. Start
-    smelt with no flags to use it.
-
-=== ":simple-github: GitHub Copilot"
-
-    ```bash
-    smelt auth                # device-code login
-    smelt
-    ```
-
-    Every model your Copilot account exposes (Claude, GPT, Grok, …) is
-    available immediately.
+With `claude` on `PATH`, its models appear in `/model`. Claude Code provides the
+agent, tools, and context management; smelt provides the UI and permissions. See
+[Provider setup](../customize/providers.md) for configuration and
+[Claude Code](../customize/providers.md#claude-code) for its requirements and limitations.
 
 ### API-key providers
 

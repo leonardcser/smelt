@@ -81,17 +81,12 @@ You don't have to wait for a response to finish. Keep typing:
 - `Enter` on an empty prompt after an interrupt continues the turn where it
   stopped. When idle, it continues from the last response.
 
-In vim visual mode, these act on the selection only. Messages queued during
-compaction run after it finishes.
+In vim visual mode, these keys act on the selection; `Enter` sends only that
+selection. Messages queued during compaction run after it finishes.
 
 <figure class="term" data-replay="../../assets/replays/queue.json" aria-label="Queueing two messages while the agent works, then promoting the queue" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
-Interrupt with `Esc Esc` when the agent heads the wrong way, then press `Enter` on
-the empty prompt to let it carry on:
-
 <figure class="term" data-replay="../../assets/replays/continue.json" aria-label="Interrupting a turn, then pressing Enter on an empty prompt to continue it" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
-
-Selecting a line in visual mode and pressing `Enter` sends just that line:
 
 <figure class="term" data-replay="../../assets/replays/select.json" aria-label="Sending a selected line as its own message" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 

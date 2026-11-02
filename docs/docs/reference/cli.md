@@ -18,8 +18,9 @@ smelt session compact <SESSION>
 smelt status (--pid <PID> | --all) [--json]
 smelt status --pid <PID> --file
 smelt status --dir
-smelt upgrade [--channel stable|unstable] [--json]
+smelt upgrade [--background] [--channel stable|unstable] [--json]
 smelt upgrade check [--channel stable|unstable] [--json]
+smelt upgrade status [--json]
 ```
 
 When a message is provided, it auto-submits on startup. Running with no
@@ -57,6 +58,7 @@ use a neutral filename.
 | `smelt status`                   | Read the public status of one or all running smelt processes                                        |
 | `smelt upgrade`                  | Check for and install the newest smelt build                                                        |
 | `smelt upgrade check`            | Check for updates without installing                                                                |
+| `smelt upgrade status`           | Show installation progress or the last result                                                        |
 
 `smelt export history` and `smelt export requests` options:
 
@@ -135,21 +137,26 @@ Status is refreshed on every state change and at least every 5 seconds; stale or
 dead-process records are ignored. Files live under `$XDG_RUNTIME_DIR/smelt/status`
 (the temporary directory if unset), readable only by you on Unix.
 
-`smelt upgrade` options:
+### Upgrades
 
-| Flag                 | Description                                                                               |
-| -------------------- | ----------------------------------------------------------------------------------------- |
-| `--channel stable`   | Use the newest stable GitHub release and its prebuilt archive (default)                   |
-| `--channel unstable` | Use `main` and install with `cargo install --git ... --branch main smelt-agent` |
-| `--json`             | Print one JSON status line on stdout instead of text                                      |
+`smelt upgrade` installs in the foreground; add `--background` to return
+immediately. If an upgrade is already running, the command reports its status
+instead of starting another.
 
-`smelt upgrade check` accepts the same flags and never installs.
+| Flag | Description |
+| ---- | ----------- |
+| `--background` | Run installation in the background |
+| `--channel stable` | Download the latest stable release (default) |
+| `--channel unstable` | Build from `main` |
+| `--json` | Print one JSON result |
 
-A stable install verifies the archive against the release's `SHA256SUMS`, runs
-the new binary once, then atomically replaces the running executable. If any
-step fails, the installed binary stays unchanged. Running sessions keep their
-version until you restart them. The directory that holds `smelt` must be
-writable.
+`smelt upgrade check` accepts `--channel` and `--json` and never installs.
+`smelt upgrade status [--json]` reads shared installation status without
+contacting GitHub.
+
+Installation requires write access to the directory that holds `smelt`.
+Candidates are validated before replacing the installed binary; stable downloads
+also verify the release's `SHA256SUMS`. Restart smelt to use the new version.
 
 ## Connection
 
