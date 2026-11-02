@@ -74,7 +74,14 @@ Click a file to jump to it, or a folder to fold it. Drag the divider to resize t
 panes. `s`, `u` and `-` stage and unstage the selected file, folder, or section
 without touching the working tree. Folders include all descendants, even when
 collapsed. `-` stages an unstaged selection or unstages a staged selection.
-If a refresh fails, the previous view stays with a `stale - r refresh` marker.
+
+The view follows the repository while it is open: edits, new files, staging and
+commits made by the agent or outside smelt appear without a refresh, and your
+selection and scroll position are restored when the file still exists.
+Untracked ignored files such as build output do not trigger updates; tracked
+files remain watched even under ignored directories. During a Visual selection,
+the update waits until you leave Visual mode. If a refresh fails, the previous
+view stays with a `stale - r refresh` marker.
 
 | Key | Action |
 | --- | ------ |
@@ -84,7 +91,7 @@ If a refresh fails, the previous view stays with a `stale - r refresh` marker.
 | `s` / `u`, `-` | Stage/unstage the selected file, folder, or section; `-` toggles by section |
 | `Enter` | Expand/collapse unchanged context, or open a file or folder from the tree |
 | `v` / `V`, `y` | Visual selection and copy |
-| `r` | Refresh |
+| `r` | Refresh now |
 | `q`, `Esc`, `Ctrl-C` | Close |
 
 Vim motions (`j`/`k`, `gg`/`G`, `w`/`b`, counts, `Ctrl-U`/`Ctrl-D`) work in both

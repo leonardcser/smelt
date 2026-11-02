@@ -51,7 +51,7 @@ impl Section {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct File {
     pub path: String,
     pub old_path: String,
@@ -101,6 +101,10 @@ pub struct Diff {
 }
 
 impl Diff {
+    pub(crate) fn same_content(&self, previous: &Self) -> bool {
+        self.patch == previous.patch && self.files == previous.files
+    }
+
     pub fn parse(patch: String) -> Self {
         Self::parse_cancellable(patch, || false).expect("uncancelled diff index")
     }

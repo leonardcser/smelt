@@ -171,8 +171,10 @@ end
 --- Load separate unstaged (index to worktree) and staged (HEAD to index) changes
 --- without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
 --- defaults to the runtime workspace and `context` to 3. The snapshot is stable
---- until explicitly refreshed; a clean repository returns an empty diff.
----@type fun(opts: { cwd: string?, context: integer? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
+--- until explicitly refreshed; a clean repository returns an empty diff. Pass
+--- `previous` to compare contents off-thread: `unchanged` is true when patch,
+--- section metadata and context match, so a viewer can retain its document.
+---@type fun(opts: { cwd: string?, context: integer?, previous: smelt.diff.Diff? }?): { root: string, branch: string, diff: smelt.diff.Diff, unchanged: boolean }?, string?
 function smelt.git.diff(opts)
   require_yieldable("smelt.git.diff")
   local id = smelt.task.alloc()

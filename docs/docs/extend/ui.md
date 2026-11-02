@@ -205,10 +205,12 @@ end)
 - `smelt.git.index(diff, index, action, last?)` stages or unstages one file,
   or an inclusive range within one section (`"stage"`, `"unstage"` or `"toggle"`),
   without touching the worktree, and returns a fresh snapshot.
+- `smelt.git.watch(handler)` calls `handler` when the snapshot may be outdated,
+  so a viewer can stay live.
 
 The bundled
 [`smelt.plugins.diff`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/plugins/diff.lua)
-plugin shows the full pattern with a file tree, folding and refresh.
+plugin shows the full pattern with a file tree, folding and live refresh.
 
 ## Pickers
 

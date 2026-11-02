@@ -17,6 +17,7 @@ pub struct DiffSnapshot {
     pub root: PathBuf,
     pub branch: String,
     pub view: Arc<DiffView>,
+    pub unchanged: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -298,7 +299,7 @@ fn checked(output: std::process::Output) -> Result<Vec<u8>, String> {
     }
 }
 
-fn path_bytes(bytes: Vec<u8>) -> OsString {
+pub(crate) fn path_bytes(bytes: Vec<u8>) -> OsString {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
@@ -379,9 +380,18 @@ pub async fn working_diff(
     context: usize,
     cancel: CancellationToken,
 ) -> Result<DiffSnapshot, String> {
+    working_diff_since(cwd, context, cancel, None).await
+}
+
+pub(crate) async fn working_diff_since(
+    cwd: PathBuf,
+    context: usize,
+    cancel: CancellationToken,
+    previous: Option<Arc<DiffView>>,
+) -> Result<DiffSnapshot, String> {
     tokio::time::timeout(
         Duration::from_secs(120),
-        load_working_diff(cwd, context, cancel),
+        load_working_diff(cwd, context, cancel, previous),
     )
     .await
     .map_err(|_| "git diff timed out after 120 seconds".to_string())?
@@ -391,6 +401,7 @@ async fn load_working_diff(
     cwd: PathBuf,
     context: usize,
     cancel: CancellationToken,
+    previous: Option<Arc<DiffView>>,
 ) -> Result<DiffSnapshot, String> {
     let mut root = checked(git(&cwd, &args(&["rev-parse", "--show-toplevel"]), &cancel).await?)?;
     if root.last() == Some(&b'\n') {
@@ -548,13 +559,21 @@ async fn load_working_diff(
             diff.sort_files(&|| index_cancel.is_cancelled())
                 .ok_or("cancelled")?;
         }
-        Ok::<_, String>(Arc::new(DiffView::new(Arc::new(diff), context)))
+        let unchanged = previous.as_ref().is_some_and(|previous| {
+            previous.context() == context && diff.same_content(&previous.diff)
+        });
+        Ok::<_, String>((Arc::new(DiffView::new(Arc::new(diff), context)), unchanged))
     });
-    let view = tokio::select! {
+    let (view, unchanged) = tokio::select! {
         _ = cancel.cancelled() => return Err("cancelled".into()),
         view = view => view.map_err(|error| format!("diff index: {error}"))??,
     };
-    Ok(DiffSnapshot { root, branch, view })
+    Ok(DiffSnapshot {
+        root,
+        branch,
+        view,
+        unchanged,
+    })
 }
 
 #[cfg(test)]
@@ -586,6 +605,53 @@ mod tests {
             }
         }
         files
+    }
+
+    #[tokio::test]
+    async fn working_snapshot_comparison_includes_sections_and_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run(root, &["init", "-q"]);
+        run(root, &["config", "user.name", "test"]);
+        run(root, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(root.join("tracked"), "base\n").unwrap();
+        run(root, &["add", "."]);
+        run(root, &["commit", "-qm", "base"]);
+        std::fs::write(root.join("tracked"), "edit\n").unwrap();
+        let previous = working_diff(root.to_owned(), 3, CancellationToken::new())
+            .await
+            .unwrap()
+            .view;
+        for (context, unchanged) in [(3, true), (5, false)] {
+            let snapshot = working_diff_since(
+                root.to_owned(),
+                context,
+                CancellationToken::new(),
+                Some(Arc::clone(&previous)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(snapshot.unchanged, unchanged);
+        }
+        run(root, &["add", "tracked"]);
+        let staged = working_diff_since(
+            root.to_owned(),
+            3,
+            CancellationToken::new(),
+            Some(Arc::clone(&previous)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !staged.unchanged,
+            "moving the same patch to staged changes its metadata"
+        );
+        std::fs::write(root.join("tracked"), "another edit\n").unwrap();
+        let edited =
+            working_diff_since(root.to_owned(), 3, CancellationToken::new(), Some(previous))
+                .await
+                .unwrap();
+        assert!(!edited.unchanged);
     }
 
     #[tokio::test]

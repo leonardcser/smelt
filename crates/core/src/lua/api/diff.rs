@@ -5,8 +5,10 @@ use crate::diff::{Diff, DiffView};
 use crate::lua::doc::{record_class, Tier};
 use crate::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use crate::lua::module::LuaMod;
+use crate::lua::watchers::{WatchTarget, WatcherEntry};
 use crate::lua::LuaShared;
 use mlua::prelude::*;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 struct Repository {
@@ -221,6 +223,7 @@ impl mlua::UserData for LuaDiffJob {
                         if let Some(snapshot) = snapshot {
                             result.set("root", snapshot.root.to_string_lossy().as_ref())?;
                             result.set("branch", snapshot.branch)?;
+                            result.set("unchanged", snapshot.unchanged)?;
                             result.set(
                                 "diff",
                                 LuaDiff(
@@ -360,6 +363,37 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(LuaDiff(view, None))
         })?;
     let git = LuaMod::advanced(lua, smelt, "git", "Asynchronous Git snapshots and explicit file or range staging. `git.diff(opts?)` yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.", Tier::Host)?;
+    let watch_shared = Arc::clone(shared);
+    git.private_fn(
+        "__watch_register",
+        &["opts"],
+        move |_, opts: Option<mlua::Table>| -> LuaResult<(Option<u64>, Option<String>)> {
+            let cwd = opts
+                .as_ref()
+                .map(|opts| opts.get::<Option<String>>("cwd"))
+                .transpose()?
+                .flatten()
+                .map(|path| watch_shared.resolve_project_path(path))
+                .unwrap_or_else(|| watch_shared.evaluation_cwd());
+            let repository = match crate::git_watch::Repository::discover(&cwd) {
+                Ok(repository) => repository,
+                Err(error) => return Ok((None, Some(error))),
+            };
+            let entry = match WatcherEntry::new(
+                WatchTarget::Repository(repository),
+                watch_shared.resume_sink(),
+                watch_shared.external_effects_active(),
+            ) {
+                Ok(entry) => entry,
+                Err(error) => return Ok((None, Some(error))),
+            };
+            let id = watch_shared.next_watcher_id.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut watchers) = watch_shared.watchers.lock() {
+                watchers.insert(id, entry);
+            }
+            Ok((Some(id), None))
+        },
+    )?;
     let index_shared = Arc::clone(shared);
     let shared = Arc::clone(shared);
     git.private_live_only_fn(
@@ -379,13 +413,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 .transpose()?
                 .flatten()
                 .unwrap_or(3);
+            let previous = opts
+                .as_ref()
+                .map(|opts| opts.get::<Option<LuaDiff>>("previous"))
+                .transpose()?
+                .flatten()
+                .map(|diff| diff.0);
             let result: DiffResult = Arc::new(Mutex::new(None));
             let output = Arc::clone(&result);
             let cancel = crate::lua::current_task_cancel().unwrap_or_default();
             let sink = shared.resume_sink();
             let wakeup = shared.wakeup_tx.get().cloned();
             tokio::spawn(async move {
-                let value = crate::git::working_diff(cwd, context, cancel).await;
+                let value = crate::git::working_diff_since(cwd, context, cancel, previous).await;
                 if let Ok(snapshot) = &value {
                     snapshot.view.set_wakeup(wakeup);
                 }

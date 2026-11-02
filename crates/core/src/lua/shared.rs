@@ -298,8 +298,8 @@ pub struct LuaShared {
     /// Default shell + argv for `smelt.process.run`/`run_streaming` when no
     /// explicit shell is given. `None` means hardcoded `sh -c`.
     pub default_shell: Mutex<Option<DefaultShell>>,
-    /// Active filesystem watchers registered through `smelt.fs.watch`. The
-    /// notify-backed `WatcherEntry` keeps the OS subscription alive; dropping
+    /// Active filesystem watchers registered through `smelt.fs.watch` and
+    /// `smelt.git.watch`. The `WatcherEntry` keeps the OS subscription alive; dropping
     /// the entry tears it down. `next_watcher_id` mints fresh ids.
     pub watchers: Mutex<HashMap<u64, crate::lua::watchers::WatcherEntry>>,
     pub next_watcher_id: AtomicU64,

@@ -629,6 +629,171 @@ async fn diff_groups_show_distinct_partial_patches_totals_and_file_dividers() {
     }
 }
 
+/// Drive Lua wakeups and timers until the frame satisfies `done`.
+async fn settle_diff(app: &mut TestApp, within: Duration, done: impl Fn(&str) -> bool) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while std::time::Instant::now() < deadline {
+        app.feed_one(SourceEvent::LuaWakeup);
+        app.tick_timers();
+        app.tick_signals();
+        paint_diff(app);
+        if done(&app.render_to_frame().text()) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    false
+}
+
+#[test]
+fn diff_preserves_visual_selection_when_inflight_refresh_completes() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(120, 35);
+    assert!(app.run_lua(
+        r#"
+        local loads = 0
+        smelt.git.watch = function(handler)
+          DIFF_CHANGED = handler
+          return smelt.reg.new(function() DIFF_CHANGED = nil end)
+        end
+        smelt.git.diff = function()
+          loads = loads + 1
+          local text = 'first edit'
+          if loads > 1 then
+            DIFF_WAIT = smelt.task.alloc()
+            smelt.task.wait(DIFF_WAIT)
+            text = 'late edit'
+          end
+          return { root = '.', unchanged = loads > 2, diff = smelt.diff.parse(
+            'diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-base\n+' .. text .. '\n') }
+        end
+        smelt.cmd.run('diff')
+    "#
+    ));
+    drive_lua_tasks(&mut app);
+    paint_diff(&mut app);
+    assert!(app.render_to_frame().text().contains("first edit"));
+    assert!(app.run_lua("DIFF_CHANGED()"));
+    drive_lua_tasks(&mut app);
+    app.type_text("ggv");
+    assert!(app.run_lua("smelt.task.resume(DIFF_WAIT, true)"));
+    drive_lua_tasks(&mut app);
+    paint_diff(&mut app);
+    assert!(!app.render_to_frame().text().contains("late edit"));
+    app.press(KeyCode::Esc);
+    app.tick_signals();
+    drive_lua_tasks(&mut app);
+    paint_diff(&mut app);
+    assert!(app.render_to_frame().text().contains("late edit"));
+    let source = Arc::clone(
+        app.ui_probe()
+            .win(preview(&app))
+            .unwrap()
+            .row_source()
+            .unwrap(),
+    );
+    assert!(app.run_lua("DIFF_CHANGED()"));
+    drive_lua_tasks(&mut app);
+    assert!(app.run_lua("smelt.task.resume(DIFF_WAIT, true)"));
+    drive_lua_tasks(&mut app);
+    paint_diff(&mut app);
+    assert!(Arc::ptr_eq(
+        &source,
+        app.ui_probe()
+            .win(preview(&app))
+            .unwrap()
+            .row_source()
+            .unwrap()
+    ));
+    app.press(KeyCode::Esc);
+    assert!(app.run_lua("assert(DIFF_CHANGED == nil)"));
+}
+
+const SETTLE: Duration = Duration::from_secs(10);
+
+#[tokio::test]
+async fn diff_follows_worktree_changes_while_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "test"],
+        vec!["config", "user.email", "test@example.invalid"],
+    ] {
+        assert!(git(&args).status.success());
+    }
+    std::fs::write(dir.path().join("a.rs"), "base\n").unwrap();
+    assert!(git(&["add", "."]).status.success());
+    assert!(git(&["commit", "-qm", "base"]).status.success());
+    std::fs::write(dir.path().join("a.rs"), "first edit\n").unwrap();
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(120, 35);
+    app.type_text("/diff");
+    app.press(KeyCode::Enter);
+    assert!(settle_diff(&mut app, SETTLE, |frame| frame.contains("first edit")).await);
+
+    std::fs::write(dir.path().join("a.rs"), "second edit\n").unwrap();
+    assert!(
+        settle_diff(&mut app, SETTLE, |frame| frame.contains("second edit")).await,
+        "{}\nwatchers: {}\nmessages: {:?}",
+        app.render_to_frame().text(),
+        app.app.lua.core_shared().watchers.lock().unwrap().len(),
+        app.app.lua.core_shared().messages.lock().unwrap().entries()
+    );
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/new.rs"), "created later\n").unwrap();
+    assert!(
+        settle_diff(&mut app, SETTLE, |frame| frame.contains("new.rs")).await,
+        "{}",
+        app.render_to_frame().text()
+    );
+    let frame = app.render_to_frame().text();
+    assert!(
+        !frame.contains("refreshing") && !frame.contains("stale"),
+        "{frame}"
+    );
+
+    // A reload would drop the Visual selection, so it waits for Normal mode.
+    app.type_text("ggv");
+    std::fs::write(dir.path().join("a.rs"), "third edit\n").unwrap();
+    let quiet = Duration::from_millis(800);
+    assert!(!settle_diff(&mut app, quiet, |frame| frame.contains("third edit")).await);
+    app.press(KeyCode::Esc);
+    assert!(
+        settle_diff(&mut app, SETTLE, |frame| frame.contains("third edit")).await,
+        "{}",
+        app.render_to_frame().text()
+    );
+    assert!(app.ui_probe().named_win("smelt.diff.preview").is_some());
+    assert!(git(&["add", "a.rs"]).status.success());
+    assert!(
+        settle_diff(&mut app, SETTLE, |frame| frame.contains("staged (1)")
+            && !frame.contains("staged (0)"))
+        .await
+    );
+    assert!(git(&["commit", "-qm", "external change"]).status.success());
+    assert!(
+        settle_diff(&mut app, SETTLE, |frame| frame.contains("staged (0)")
+            && !frame.contains("a.rs"))
+        .await
+    );
+    app.press(KeyCode::Esc);
+    assert!(app
+        .app
+        .lua
+        .core_shared()
+        .watchers
+        .lock()
+        .unwrap()
+        .is_empty());
+}
+
 #[tokio::test]
 async fn diff_merge_conflict_remains_visible_with_untracked_files() {
     let dir = tempfile::tempdir().unwrap();

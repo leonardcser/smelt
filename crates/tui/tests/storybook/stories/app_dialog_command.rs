@@ -85,6 +85,12 @@ app_story!(help_overlay, |ctx| {
     ctx.assert_snapshot();
 });
 
+fn open_diff_fixture(ctx: &mut AppStoryCtx) {
+    // Snapshots supply fixed Git contents, independent of the real workspace.
+    ctx.run_lua("smelt.git.watch = function() return smelt.reg.new(function() end) end");
+    ctx.run_command("diff");
+}
+
 app_story!(diff_overlay, |ctx| {
     ctx.set_viewport(110, 28);
     ctx.run_lua(r#"
@@ -94,7 +100,7 @@ app_story!(diff_overlay, |ctx| {
           .. 'diff --git a/tests/parser.rs b/tests/parser.rs\nnew file mode 100644\n@@ -0,0 +1,3 @@\n+#[test]\n+fn rejects_invalid_input() {\n+    assert!(parse_checked("bad").is_err());\n'
         smelt.git.diff = function() return { branch = 'feature/parser', diff = smelt.diff.parse(patch) } end
     "#);
-    ctx.run_command("diff");
+    open_diff_fixture(ctx);
     ctx.wait_for_document("smelt.diff.preview");
     ctx.assert_snapshot();
 });
@@ -128,7 +134,7 @@ app_story!(diff_overlay_grouped, |ctx| {
         "local load = smelt.git.diff; smelt.git.diff = function() return load({{cwd = {}}}) end",
         serde_json::to_string(&dir.path().to_str().unwrap()).unwrap()
     ));
-    ctx.run_command("diff");
+    open_diff_fixture(ctx);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !ctx.frame_text().contains("configured()") {
         assert!(std::time::Instant::now() < deadline, "{}", ctx.frame_text());
@@ -159,7 +165,7 @@ app_story!(diff_overlay_refresh, |ctx| {
             return {diff = smelt.diff.parse(patch)}
         end
     "#);
-    ctx.run_command("diff");
+    open_diff_fixture(ctx);
     ctx.wait_for_document("smelt.diff.preview");
     ctx.press_tab();
     ctx.run_lua("refresh_blocked = true");
@@ -175,7 +181,7 @@ app_story!(diff_overlay_refresh, |ctx| {
 app_story!(diff_overlay_empty, |ctx| {
     ctx.set_viewport(80, 20);
     ctx.run_lua("smelt.git.diff = function() return {diff = smelt.diff.parse('')} end");
-    ctx.run_command("diff");
+    open_diff_fixture(ctx);
     ctx.assert_snapshot();
 });
 
@@ -184,7 +190,7 @@ app_story!(diff_overlay_narrow, |ctx| {
     ctx.run_lua(r#"
         smelt.git.diff = function() return { branch = 'main', diff = smelt.diff.parse('diff --git a/界.lua b/界.lua\n@@ -1 +1 @@\n-old\n+new\n') } end
     "#);
-    ctx.run_command("diff");
+    open_diff_fixture(ctx);
     ctx.wait_for_document("smelt.diff.preview");
     ctx.assert_snapshot();
 });

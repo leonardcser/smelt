@@ -2,7 +2,7 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
-use crate::lua::watchers::WatcherEntry;
+use crate::lua::watchers::{WatchTarget, WatcherEntry};
 use crate::lua::LuaShared;
 use mlua::prelude::*;
 use notify::RecursiveMode;
@@ -644,8 +644,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 };
                 let id = s.next_watcher_id.fetch_add(1, Ordering::Relaxed);
                 let entry = match WatcherEntry::new(
-                    s.resolve_project_path(path),
-                    mode,
+                    WatchTarget::Path {
+                        path: s.resolve_project_path(path),
+                        mode,
+                    },
                     s.resume_sink(),
                     s.external_effects_active(),
                 ) {

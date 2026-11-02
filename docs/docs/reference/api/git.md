@@ -16,7 +16,7 @@ Asynchronous Git snapshots and explicit file or range staging. `git.diff(opts?)`
 ## `smelt.git.diff`
 
 ```lua
-fun(opts: { cwd: string?, context: integer? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
+fun(opts: { cwd: string?, context: integer?, previous: smelt.diff.Diff? }?): { root: string, branch: string, diff: smelt.diff.Diff, unchanged: boolean }?, string?
 ```
 
 Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff)
@@ -24,7 +24,9 @@ Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff)
 Load separate unstaged (index to worktree) and staged (HEAD to index) changes
 without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
 defaults to the runtime workspace and `context` to 3. The snapshot is stable
-until explicitly refreshed; a clean repository returns an empty diff.
+until explicitly refreshed; a clean repository returns an empty diff. Pass
+`previous` to compare contents off-thread: `unchanged` is true when patch,
+section metadata and context match, so a viewer can retain its document.
 
 ## `smelt.git.index`
 
@@ -43,4 +45,20 @@ index operation returns index_updated=true even if refresh fails: diff is then
 nil and refresh_error explains why. Retain the old snapshot as stale and
 refresh before another mutation. nil, error means the mutation did not report
 success; cancellation/timeouts may require refreshing to verify repository state.
+
+## `smelt.git.watch`
+
+```lua
+fun(handler: fun(), opts: { cwd: string? }?): smelt.Reg
+```
+
+Types: [`smelt.Reg`](types.md#smeltreg)
+
+Watch a Git repository for changes that can alter `smelt.git.diff`, including
+tracked files under ignored directories, the index, HEAD and refs. Reads,
+untracked ignored files and lock files are dropped. Change bursts are
+coalesced off-thread over 150 ms; `handler()` is an invalidation notice, not
+a file-event stream. `opts.cwd` defaults to the runtime workspace. Registration
+returns after watches are installed, or raises on setup failure. Returns a
+`Reg` whose `:remove()` stops watching.
 
