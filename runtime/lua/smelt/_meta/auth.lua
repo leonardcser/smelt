@@ -9,11 +9,18 @@
 local auth = {}
 
 --- Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
---- provider-neutral `{ summary, limits }` rows with `{ label, used, limit,
---- resetHint? }`. Supported for `kimi-code` and `claude-code`, which asks the
---- installed Claude Code for its account's plan limits.
----@type fun(provider: string): { summary: table?, limits: table[] }?, string?
+--- provider-neutral rows with `{ label, used, limit, resetAt? }`.
+--- `resetAt` is Unix seconds, formatted by the consumer.
+--- Supported for `codex`, `kimi-code`, and `claude-code` (asks the installed
+--- Claude Code without a model request). Codex also reports plan, credits,
+--- and resetCredits `{ count, inventory? }` with `{ expires_at? }` entries.
+---@type fun(provider: string): { summary: table?, limits: table[], plan: string?, credits: string?, resetCredits: table? }?, string?
 auth.managed_usage = nil
+
+--- Redeem one Codex reset credit using credentials matching `usage_scope("codex")`.
+--- Reuse `request_id` when retrying an uncertain outcome to avoid a second redemption.
+---@type fun(scope: string, request_id: string): string?, string?
+auth.redeem_usage_reset = nil
 
 --- Run an authenticated request against a provider-owned endpoint using
 --- smelt-managed credentials. Credentials stay in Rust; Lua receives only
@@ -21,5 +28,9 @@ auth.managed_usage = nil
 --- URL scheme; `opts.method` defaults to `GET`.
 ---@type fun(provider: string, opts: { path: string, method: string?, body: string? }): { status: integer, body: string }?, string?
 auth.request = nil
+
+--- Return an opaque login scope for account-usage caches, or nil when managed credentials are unavailable (including externally authenticated providers). Never contains credentials.
+---@type fun(provider: string): string?
+auth.usage_scope = nil
 
 return auth

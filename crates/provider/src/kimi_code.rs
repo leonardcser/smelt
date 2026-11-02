@@ -4,7 +4,7 @@
 //! request helpers, and provider response parsing. Credential and model-cache
 //! persistence stay outside this crate.
 
-use crate::usage::{format_duration, format_reset_time, ManagedUsageReport, ManagedUsageRow};
+use crate::usage::{parse_iso_time, ManagedUsageReport, ManagedUsageRow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
@@ -85,6 +85,9 @@ pub fn json_u32(value: &serde_json::Value) -> Option<u32> {
 pub struct KimiCodeTokens {
     pub access_token: String,
     pub refresh_token: String,
+    /// Local login identity, preserved when the provider rotates refresh tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_scope: Option<String>,
     pub expires_at: u64,
     #[serde(default)]
     pub scope: String,
@@ -101,6 +104,7 @@ pub fn parse_managed_usage_payload(payload: &Value, now: u64) -> ManagedUsageRep
         return ManagedUsageReport {
             summary: None,
             limits: Vec::new(),
+            ..Default::default()
         };
     };
 
@@ -127,7 +131,11 @@ pub fn parse_managed_usage_payload(payload: &Value, now: u64) -> ManagedUsageRep
         }
     }
 
-    ManagedUsageReport { summary, limits }
+    ManagedUsageReport {
+        summary,
+        limits,
+        ..Default::default()
+    }
 }
 
 fn to_usage_row(raw: Option<&Value>, default_label: &str, now: u64) -> Option<ManagedUsageRow> {
@@ -136,20 +144,17 @@ fn to_usage_row(raw: Option<&Value>, default_label: &str, now: u64) -> Option<Ma
     let mut used = to_int(raw.get("used"));
     if used.is_none() {
         if let (Some(remaining), Some(limit)) = (to_int(raw.get("remaining")), limit) {
-            used = Some(limit - remaining);
+            used = limit.checked_sub(remaining);
         }
-    }
-    if used.is_none() && limit.is_none() {
-        return None;
     }
     let label = string_field(raw, "name")
         .or_else(|| string_field(raw, "title"))
         .unwrap_or_else(|| default_label.to_string());
     Some(ManagedUsageRow {
         label,
-        used: used.unwrap_or(0),
+        used: used.filter(|value| *value >= 0)?,
         limit: limit.unwrap_or(0),
-        reset_hint: reset_hint_from(raw, now),
+        reset_at: reset_at_from(raw, now),
     })
 }
 
@@ -194,28 +199,30 @@ fn limit_label(
     format!("Limit #{}", idx + 1)
 }
 
-fn reset_hint_from(raw: &serde_json::Map<String, Value>, now: u64) -> Option<String> {
+fn reset_at_from(raw: &serde_json::Map<String, Value>, now: u64) -> Option<i64> {
     for key in ["reset_at", "resetAt", "reset_time", "resetTime"] {
-        if let Some(value) = raw
+        if let Some(stamp) = raw
             .get(key)
             .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
+            .and_then(parse_iso_time)
         {
-            return Some(format_reset_time(value, now));
+            return Some(stamp);
         }
     }
-    for key in ["reset_in", "resetIn", "ttl", "window"] {
-        if let Some(seconds) = to_int(raw.get(key)).filter(|s| *s > 0) {
-            return Some(format!("resets in {}", format_duration(seconds)));
-        }
-    }
-    None
+    ["reset_in", "resetIn", "ttl", "window"]
+        .iter()
+        .find_map(|key| to_int(raw.get(*key)).filter(|seconds| *seconds > 0))
+        .map(|seconds| (now as i64).saturating_add(seconds))
 }
 
 fn to_int(value: Option<&Value>) -> Option<i64> {
     match value? {
         Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|n| n.trunc() as i64)),
-        Value::String(s) => s.parse::<f64>().ok().map(|n| n.trunc() as i64),
+        Value::String(s) => s
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .map(|n| n.trunc() as i64),
         _ => None,
     }
 }
@@ -484,6 +491,7 @@ pub fn token_from_response_at(
     Ok(KimiCodeTokens {
         access_token,
         refresh_token,
+        account_scope: None,
         expires_at: now.saturating_add(expires_in),
         scope: value["scope"].as_str().unwrap_or_default().to_string(),
         token_type: value["token_type"].as_str().unwrap_or("Bearer").to_string(),
@@ -688,7 +696,7 @@ mod tests {
                 label: "Weekly limit".into(),
                 used: 40,
                 limit: 1000,
-                reset_hint: None,
+                reset_at: None,
             })
         );
         assert_eq!(parsed.limits[0].label, "5h limit");
@@ -696,6 +704,43 @@ mod tests {
         assert_eq!(parsed.limits[1].label, "24h limit");
         assert_eq!(parsed.limits[1].used, 40);
         assert_eq!(parsed.limits[2].label, "Daily cap");
+    }
+
+    #[test]
+    fn unknown_usage_is_not_reported_as_zero() {
+        for used in [
+            serde_json::Value::Null,
+            serde_json::json!("unknown"),
+            serde_json::json!("NaN"),
+        ] {
+            let report = parse_managed_usage_payload(
+                &serde_json::json!({"limits": [{"used": used, "limit": 100}]}),
+                0,
+            );
+            assert!(report.limits.is_empty());
+        }
+        let report = parse_managed_usage_payload(
+            &serde_json::json!({"limits": [{"limit": i64::MAX, "remaining": i64::MIN}]}),
+            0,
+        );
+        assert!(report.limits.is_empty());
+    }
+
+    #[test]
+    fn usage_reset_times_remain_absolute_in_cached_reports() {
+        let report = parse_managed_usage_payload(
+            &serde_json::json!({
+                "limits": [
+                    { "used": 1, "limit": 100, "reset_at": "2030-01-01T00:00:00Z" },
+                    { "used": 2, "limit": 100, "reset_in": 300 },
+                    { "used": 3, "limit": 100, "reset_at": "invalid", "ttl": 60 }
+                ]
+            }),
+            1000,
+        );
+        assert_eq!(report.limits[0].reset_at, Some(1893456000));
+        assert_eq!(report.limits[1].reset_at, Some(1300));
+        assert_eq!(report.limits[2].reset_at, Some(1060));
     }
 
     #[test]

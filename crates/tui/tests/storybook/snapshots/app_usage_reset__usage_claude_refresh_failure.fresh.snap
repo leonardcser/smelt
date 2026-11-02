@@ -1,0 +1,32 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+─ usage ────────────────────────────────────────────────────────────────────
+ cost $0.0000
+
+ Claude Code
+   5h limit  |███████▌░░░░░░░░░░|  42% used  resets Jan 01 00:00
+   7d limit  |███▎░░░░░░░░░░░░░░|  18% used
+
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1. Refresh usage
+ ○ normal                                                           1:1 100%

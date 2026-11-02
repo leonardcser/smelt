@@ -54,6 +54,16 @@ fn save_tokens_to(tokens: &KimiCodeTokens, store: &CredStore) -> Result<(), Stri
     store.save(&json)
 }
 
+pub(crate) fn account_scope(tokens: &KimiCodeTokens) -> String {
+    tokens.account_scope.clone().unwrap_or_else(|| {
+        crate::auth::model_cache_fingerprint(
+            crate::auth::AuthProvider::KimiCode,
+            "refresh_token",
+            &tokens.refresh_token,
+        )
+    })
+}
+
 pub(crate) fn load_tokens_passive() -> Option<KimiCodeTokens> {
     let json = cred_store().load_passive()?;
     serde_json::from_str(&json).ok()
@@ -228,9 +238,11 @@ async fn access_token_with_env(
         return Ok(tokens.access_token);
     }
 
-    let fresh = kimi_protocol::refresh_access_token(client, &env.protocol, &tokens.refresh_token)
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut fresh =
+        kimi_protocol::refresh_access_token(client, &env.protocol, &tokens.refresh_token)
+            .await
+            .map_err(|error| error.to_string())?;
+    fresh.account_scope = Some(account_scope(&tokens));
     let token = fresh.access_token.clone();
     save_tokens_to(&fresh, &env.token_store)?;
     Ok(token)
@@ -345,10 +357,11 @@ async fn fetch_models_fresh_with_env(
     let token = if tokens.expires_at > (env.protocol.now)().saturating_add(60) {
         tokens.access_token
     } else {
-        let fresh =
+        let mut fresh =
             kimi_protocol::refresh_access_token(client, &env.protocol, &tokens.refresh_token)
                 .await
                 .map_err(managed_refresh_error)?;
+        fresh.account_scope = Some(account_scope(&tokens));
         let token = fresh.access_token.clone();
         save_tokens_to(&fresh, &env.token_store)
             .map_err(super::ManagedModelRefreshError::terminal)?;
@@ -446,6 +459,7 @@ mod tests {
             expires_at: fixed_now() + 3_600,
             scope: String::new(),
             token_type: kimi_protocol::default_bearer(),
+            account_scope: None,
         };
         save_tokens_to(&tokens, &env.token_store).unwrap();
 
@@ -474,6 +488,7 @@ mod tests {
             expires_at: fixed_now().saturating_sub(1),
             scope: String::new(),
             token_type: kimi_protocol::default_bearer(),
+            account_scope: None,
         };
         save_tokens_to(&tokens, &env.token_store).unwrap();
 
@@ -492,6 +507,13 @@ mod tests {
         let saved = std::fs::read_to_string(&env.token_store.file_path).unwrap();
         assert!(saved.contains("fresh-access"), "{saved}");
         assert!(saved.contains("fresh-refresh"), "{saved}");
+        let fresh: KimiCodeTokens = serde_json::from_str(&saved).unwrap();
+        assert_eq!(account_scope(&fresh), account_scope(&tokens));
+        let mut rotated_again = fresh.clone();
+        rotated_again.refresh_token = "next-refresh".into();
+        assert_eq!(account_scope(&rotated_again), account_scope(&tokens));
+        rotated_again.account_scope = None;
+        assert_ne!(account_scope(&rotated_again), account_scope(&tokens));
     }
 
     #[tokio::test]
@@ -513,6 +535,7 @@ mod tests {
             expires_at: fixed_now().saturating_sub(1),
             scope: String::new(),
             token_type: kimi_protocol::default_bearer(),
+            account_scope: None,
         };
         save_tokens_to(&tokens, &env.token_store).unwrap();
 

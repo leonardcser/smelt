@@ -15,6 +15,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         Tier::Host,
     )?;
 
+    auth.fn_(
+        "usage_scope",
+        "Return an opaque login scope for account-usage caches, or nil when managed credentials are unavailable (including externally authenticated providers). Never contains credentials.",
+        &["provider"],
+        |_, provider: String| {
+            if provider == "claude-code" { return Ok(None); }
+            let provider = parse_provider(&provider)?;
+            Ok(engine::auth::usage_scope(provider))
+        },
+    )?;
+
     {
         let shared = Arc::clone(shared);
         auth.private_live_only_fn(
@@ -35,10 +46,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             &["task_id", "provider"],
             move |_, (task_id, provider): (u64, String)| -> LuaResult<()> {
                 if provider == "claude-code" {
-                    spawn_managed_usage(&shared, task_id, engine::claude_code_usage());
+                    spawn_auth_result(&shared, task_id, engine::claude_code_usage());
                 } else {
                     let provider = parse_provider(&provider)?;
-                    spawn_managed_usage(&shared, task_id, async move {
+                    spawn_auth_result(&shared, task_id, async move {
                         let client = smelt_provider::http_client();
                         engine::auth::managed_usage(provider, &client).await
                     });
@@ -48,6 +59,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
 
+    {
+        let shared = Arc::clone(shared);
+        auth.private_live_only_fn(
+            "__start_redeem_usage_reset",
+            &["task_id", "scope", "request_id"],
+            move |_, (task_id, scope, request_id): (u64, String, String)| -> LuaResult<()> {
+                spawn_auth_result(&shared, task_id, async move {
+                    let message = engine::auth::redeem_usage_reset(
+                        &scope,
+                        &request_id,
+                        &smelt_provider::http_client(),
+                    )
+                    .await?;
+                    Ok(serde_json::json!({ "message": message }))
+                });
+                Ok(())
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -103,12 +133,10 @@ fn spawn_authenticated_request(shared: &Arc<LuaShared>, task_id: u64, req: AuthR
     });
 }
 
-fn spawn_managed_usage(
+fn spawn_auth_result<T: serde::Serialize + Send + 'static>(
     shared: &Arc<LuaShared>,
     task_id: u64,
-    usage: impl std::future::Future<Output = Result<smelt_provider::usage::ManagedUsageReport, String>>
-        + Send
-        + 'static,
+    operation: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
 ) {
     let cancel = crate::lua::current_task_cancel().unwrap_or_default();
     let sink = shared.resume_sink();
@@ -116,8 +144,8 @@ fn spawn_managed_usage(
         let payload = tokio::select! {
             biased;
             _ = cancel.cancelled() => serde_json::json!({ "__cancelled": true }),
-            result = usage => match result {
-                Ok(report) => serde_json::to_value(report).unwrap_or_else(|err| serde_json::json!({ "err": err.to_string() })),
+            result = operation => match result {
+                Ok(value) => serde_json::to_value(value).unwrap_or_else(|err| serde_json::json!({ "err": err.to_string() })),
                 Err(err) => serde_json::json!({ "err": err }),
             },
         };

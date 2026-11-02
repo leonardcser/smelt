@@ -52,38 +52,17 @@ local function active_provider()
   local active = smelt.model.current()
   local capabilities = smelt.model.capabilities and smelt.model.capabilities()
   if capabilities then
-    return capabilities.provider_type or "", active or "", capabilities.api_base or ""
+    return capabilities.provider_type or "", capabilities.api_base or ""
   end
   for _, model in ipairs(smelt.model.list() or {}) do
     if model.key == active or model.name == active then
-      return model.provider or "", model.key or active or "", model.api_base or ""
+      return model.provider or "", model.api_base or ""
     end
   end
-  return "", active or ""
-end
-
-local function is_codex_provider(provider)
-  provider = (provider or ""):lower()
-  return provider:find("codex", 1, true) ~= nil or provider:find("chatgpt", 1, true) ~= nil
-end
-
-local function is_claude_code_provider(provider)
-  return provider == "claude-code"
-end
-
-local function is_kimi_provider(provider, api_base)
-  provider = (provider or ""):lower()
-  api_base = (api_base or ""):lower()
-  return provider == "kimi-code" or api_base:find("api.kimi.com/coding", 1, true) ~= nil
+  return "", ""
 end
 
 -- ── Formatting helpers ─────────────────────────────────────────────────
-
-local function pct(value)
-  local n = tonumber(value)
-  if not n then return "unknown" end
-  return string.format("%.0f%%", n)
-end
 
 local function format_time(stamp, format)
   stamp = tonumber(stamp)
@@ -95,17 +74,6 @@ local function reset_text(value)
   local formatted = format_time(value, "%b %d %H:%M")
   if not formatted then return nil end
   return "resets " .. formatted
-end
-
-local function window_label(seconds, secondary)
-  local minutes = tonumber(seconds or "")
-  if not minutes then return secondary and "secondary" or "primary" end
-  minutes = math.floor(minutes / 60)
-  if minutes == 300 then return "5h limit" end
-  if minutes >= 28 * 24 * 60 and minutes <= 31 * 24 * 60 then return "monthly limit" end
-  if minutes >= 24 * 60 and minutes % (24 * 60) == 0 then return tostring(minutes / (24 * 60)) .. "d limit" end
-  if minutes >= 60 and minutes % 60 == 0 then return tostring(minutes / 60) .. "h limit" end
-  return tostring(minutes) .. "m limit"
 end
 
 local function usage_row(label, ratio, percent_text, reset_hint, label_width, percent_width)
@@ -133,118 +101,13 @@ local function usage_table_lines(rows)
   return lines
 end
 
--- ── Shared fetching / error handling ───────────────────────────────────
-
-local function log_usage_error(provider, message, data)
-  data = data or {}
-  data.provider = provider
-  data.message = message
-  smelt.log.warn("usage_fetch_failed", data)
-end
-
-local function fetch_auth_json(provider, path, opts)
-  opts = opts or {}
-  local res, auth_err = smelt.auth.request(provider, { path = path, method = opts.method, body = opts.body })
-  if not res then
-    local msg = tostring(auth_err or "")
-    if msg:find("not logged in", 1, true) then
-      return nil, "not_logged_in", msg
-    end
-    if msg:find("sign in again", 1, true) or msg:find("refresh token", 1, true) then
-      return nil, "auth_expired", msg
-    end
-    return nil, "auth_error", msg
-  end
-
-  local payload = smelt.parse.json(res.body or "")
-  if res.status ~= 200 then
-    local body = tostring(res.body or "")
-    if tonumber(res.status) == 401 then
-      return nil, "auth_expired", body
-    elseif tonumber(res.status) == 403 then
-      return nil, "forbidden", body
-    end
-    return nil, "http_error", body
-  end
-
-  if type(payload) ~= "table" then
-    return nil, "invalid_json", tostring(res.body or ""):sub(1, 1000)
-  end
-
-  return payload, nil, nil
-end
-
-local ERROR_MESSAGES = {
-  codex = {
-    not_logged_in = "not logged in",
-    auth_expired = "authentication expired - run `smelt auth` to sign in again",
-    forbidden = "usage unavailable for this account",
-    invalid_json = "usage response was invalid - try again later",
-    auth_error = "usage unavailable - try again later",
-    http_error = "usage unavailable right now - try again later",
-    default = "usage unavailable right now - try again later",
-  },
-  kimi = {
-    not_logged_in = "not logged in",
-    auth_expired = "authentication expired - sign in to Kimi Code again",
-    forbidden = "usage unavailable for this account",
-    invalid_json = "usage response was invalid - try again later",
-    auth_error = "usage unavailable - check your connection and try again",
-    http_error = "usage unavailable right now - try again later",
-    default = "usage unavailable right now - try again later",
-  },
-}
-
-local function render_fetch_error(title, kind, detail, messages)
-  if kind == "not_logged_in" then
-    return { text_row(title .. ": " .. messages.not_logged_in, DIM) }
-  end
-  local style = (kind == "auth_expired") and ERR or DIM
-  local friendly = messages[kind] or messages.default
-  log_usage_error(title, friendly, { kind = kind, detail = detail })
-  return { text_row(title .. ": " .. friendly, style) }
-end
-
--- ── Codex usage ────────────────────────────────────────────────────────
-
-local last_codex_reset_credits = nil
-
-local function codex_reset_credit_count(payload)
-  local reset_credits = payload and payload.rate_limit_reset_credits
-  if type(reset_credits) ~= "table" then return nil end
-  return tonumber(reset_credits.available_count)
-end
+-- ── Reset-credit presentation and redemption ───────────────────────────
 
 local function expiry_less(a, b)
   if a.expires_at and b.expires_at then return a.expires_at < b.expires_at end
   if a.expires_at then return true end
   if b.expires_at then return false end
   return false
-end
-
-local function parse_expiry(value)
-  if type(value) == "number" then return value end
-  if type(value) == "string" then return smelt.time.parse_iso8601(value) end
-  return nil
-end
-
-local function codex_reset_credit_inventory(count)
-  if not count or count <= 0 then return nil end
-  local payload = fetch_auth_json("codex", "/wham/rate-limit-reset-credits")
-  if type(payload) ~= "table" or type(payload.credits) ~= "table" then return nil end
-
-  local now = smelt.time.now()
-  local credits = {}
-  for _, credit in ipairs(payload.credits) do
-    if type(credit) == "table" and credit.status == "available" then
-      local expires_at = parse_expiry(credit.expires_at)
-      if not expires_at or expires_at > now then
-        credits[#credits + 1] = { expires_at = expires_at }
-      end
-    end
-  end
-  table.sort(credits, expiry_less)
-  return credits
 end
 
 local function codex_reset_credit_groups(inventory)
@@ -276,14 +139,13 @@ local function expiry_group_text(group)
   return tostring(group.count) .. verb .. (format_time(group.expires_at, "%b %d") or "unknown")
 end
 
-local function add_codex_reset_credit_line(lines, payload)
-  local count = codex_reset_credit_count(payload)
-  last_codex_reset_credits = count
-  if count == nil then return end
+local function add_reset_credit_lines(lines, credits)
+  if not credits then return end
+  local count = credits.count
   local label = count == 1 and "1 available" or tostring(count) .. " available"
   local line = row(span("  usage limit resets ", DIM), span(label, VALUE))
 
-  local inventory = codex_reset_credit_inventory(count)
+  local inventory = credits.inventory
   local inventory_matches = type(inventory) == "table" and #inventory == count
   local groups = inventory_matches and codex_reset_credit_groups(inventory) or nil
   if inventory_matches and #inventory == 1 and inventory[1].expires_at then
@@ -307,104 +169,9 @@ local function add_codex_reset_credit_line(lines, payload)
   end
 end
 
-local function redeem_request_id()
-  local millis = math.floor((os.clock() or 0) * 1000)
-  return string.format("smelt-%d-%d-%d", os.time(), millis, math.random(100000000, 999999999))
-end
+-- ── Shared report rendering ────────────────────────────────────────────
 
-local function redeem_outcome(payload)
-  if type(payload) ~= "table" then return nil end
-  local code = payload.code or payload.outcome or payload.result
-  if type(code) ~= "string" then return nil end
-  return code:gsub("_", ""):lower()
-end
-
-local function consume_codex_reset_credit()
-  local body = smelt.json.encode({ redeem_request_id = redeem_request_id() })
-  local payload, kind, detail = fetch_auth_json("codex", "/wham/rate-limit-reset-credits/consume", {
-    method = "POST",
-    body = body,
-  })
-  if not payload then
-    return false, (ERROR_MESSAGES.codex[kind] or ERROR_MESSAGES.codex.default), detail
-  end
-
-  local outcome = redeem_outcome(payload)
-  if outcome == "reset" then
-    local windows = tonumber(payload.windows_reset)
-    if windows and windows > 0 then
-      return true, string.format("Redeemed reset credit. Reset %d usage window%s.", windows, windows == 1 and "" or "s")
-    end
-    return true, "Redeemed reset credit."
-  elseif outcome == "nothingtoreset" then
-    return true, "No current usage limit window can be reset."
-  elseif outcome == "nocredit" then
-    return false, "No usage limit reset credits are available."
-  elseif outcome == "alreadyredeemed" then
-    return true, "This reset request was already redeemed."
-  end
-  return false, "Unexpected reset response."
-end
-
-local function add_codex_rate_limits(rows, details, prefix)
-  if type(details) ~= "table" then return end
-  for _, spec in ipairs({ { key = "primary_window", secondary = false }, { key = "secondary_window", secondary = true } }) do
-    local window = details[spec.key]
-    if type(window) == "table" then
-      local used = tonumber(window.used_percent) or 0
-      local label = (prefix or "") .. window_label(window.limit_window_seconds, spec.secondary)
-      rows[#rows + 1] = {
-        label = label,
-        ratio = used / 100,
-        percent = pct(used) .. " used",
-        reset = reset_text(window.reset_at),
-      }
-    end
-  end
-end
-
-local function codex_usage_lines()
-  last_codex_reset_credits = nil
-  local payload, kind, detail = fetch_auth_json("codex", "/wham/usage")
-  if not payload then
-    return render_fetch_error("Codex", kind, detail, ERROR_MESSAGES.codex)
-  end
-
-  local lines = { text_row("Codex", HEAD) }
-  if payload.plan_type then lines[#lines + 1] = row(span("  plan ", DIM), span(tostring(payload.plan_type), VALUE)) end
-
-  local rows = {}
-  add_codex_rate_limits(rows, payload.rate_limit)
-
-  local credits = payload.credits
-  if type(credits) == "table" and credits.has_credits then
-    local value = credits.unlimited and "unlimited" or credits.balance
-    if value ~= nil then lines[#lines + 1] = row(span("  credits ", DIM), span(tostring(value), VALUE)) end
-  end
-  add_codex_reset_credit_line(lines, payload)
-
-  for _, extra in ipairs(payload.additional_rate_limits or {}) do
-    if type(extra) == "table" then
-      local name = extra.limit_name or extra.metered_feature or "additional"
-      add_codex_rate_limits(rows, extra.rate_limit, tostring(name) .. " ")
-    end
-  end
-
-  append(lines, usage_table_lines(rows))
-  if #rows == 0 then lines[#lines + 1] = text_row("  no usage windows returned", DIM) end
-  return lines
-end
-
--- ── Kimi usage ─────────────────────────────────────────────────────────
-
--- Providers whose usage smelt reads in Rust report provider-neutral rows.
-local function managed_usage_lines(title, provider, fallback_error)
-  local report, err = smelt.auth.managed_usage(provider)
-  if not report then
-    log_usage_error(title, tostring(err or "usage unavailable"), { kind = "managed_usage" })
-    return { text_row(title .. ": " .. tostring(err or fallback_error), DIM) }
-  end
-
+local function usage_lines(title, report)
   local rows = {}
   if type(report.summary) == "table" then rows[#rows + 1] = report.summary end
   for _, item in ipairs(report.limits or {}) do
@@ -412,17 +179,20 @@ local function managed_usage_lines(title, provider, fallback_error)
   end
 
   local lines = { text_row(title, HEAD) }
-  if #rows == 0 then return { text_row(title, HEAD), text_row("  no usage data available", DIM) } end
+  if report.plan then lines[#lines + 1] = row(span("  plan ", DIM), span(report.plan, VALUE)) end
+  if report.credits then lines[#lines + 1] = row(span("  credits ", DIM), span(report.credits, VALUE)) end
+  add_reset_credit_lines(lines, report.resetCredits)
+  if #rows == 0 then lines[#lines + 1] = text_row("  no usage data available", DIM) end
   local rendered = {}
   for _, usage in ipairs(rows) do
     local used = tonumber(usage.used) or 0
     local limit = tonumber(usage.limit) or 0
-    local ratio = limit > 0 and math.max(0, math.min(used / limit, 1)) or 0
+    local ratio = limit > 0 and used / limit or 0
     rendered[#rendered + 1] = {
       label = usage.label,
-      ratio = ratio,
+      ratio = math.max(0, math.min(ratio, 1)),
       percent = limit > 0 and string.format("%.0f%% used", ratio * 100) or tostring(used) .. " used",
-      reset = usage.resetHint,
+      reset = reset_text(usage.resetAt),
     }
   end
   append(lines, usage_table_lines(rendered))
@@ -431,22 +201,13 @@ end
 
 -- ── Provider dispatch ──────────────────────────────────────────────────
 
-local function provider_title(provider, model, api_base)
-  if is_codex_provider(provider) then return "Codex" end
-  if is_claude_code_provider(provider) then return "Claude Code" end
-  if is_kimi_provider(provider, api_base) then return "Kimi Code" end
-  return provider ~= "" and provider or "Usage"
-end
-
-local function fetch_provider_usage(provider, model, api_base)
-  if is_codex_provider(provider) then
-    return codex_usage_lines()
-  elseif is_claude_code_provider(provider) then
-    return managed_usage_lines("Claude Code", "claude-code", "usage unavailable right now - try again later")
-  elseif is_kimi_provider(provider, api_base) then
-    return managed_usage_lines("Kimi Code", "kimi-code", ERROR_MESSAGES.kimi.default)
-  end
-  return { text_row("No subscription usage for active provider: " .. (provider ~= "" and provider or "unknown"), DIM) }
+local function usage_provider()
+  local provider, api_base = active_provider()
+  local kind = provider:lower()
+  if kind:find("codex", 1, true) or kind:find("chatgpt", 1, true) then return "codex", "Codex", api_base end
+  if kind == "claude-code" then return "claude-code", "Claude Code", api_base end
+  if kind == "kimi-code" or api_base:lower():find("api.kimi.com/coding", 1, true) then return "kimi-code", "Kimi Code", api_base end
+  return nil, provider ~= "" and provider or "unknown", api_base
 end
 
 -- ── Cost/pricing (always local, always bright) ─────────────────────────
@@ -478,16 +239,20 @@ local function loading_provider_lines(title)
   }
 end
 
-local function render_dialog(buf, provider_lines, fresh, error_message, title)
+local function render_dialog(buf, entry, title, supported)
   local lines = {}
   append(lines, cost_and_pricing_lines())
   lines[#lines + 1] = blank()
-  if provider_lines then
-    append(lines, fresh and provider_lines or dim_lines(provider_lines))
-  elseif error_message then
-    lines[#lines + 1] = text_row(title .. ": " .. error_message, ERR)
-  else
+  if not supported then
+    lines[#lines + 1] = text_row("No subscription usage for active provider: " .. title, DIM)
+  elseif entry and entry.report then
+    local provider_lines = usage_lines(title, entry.report)
+    append(lines, entry.fresh and provider_lines or dim_lines(provider_lines))
+  elseif not (entry and entry.error) then
     append(lines, dim_lines(loading_provider_lines(title)))
+  end
+  if entry and entry.error then
+    lines[#lines + 1] = text_row(title .. ": " .. entry.error, ERR)
   end
   lines[#lines + 1] = blank()
   buf:styled(lines)
@@ -495,28 +260,63 @@ end
 
 -- ── Command handler ────────────────────────────────────────────────────
 
+local function usage_key(provider, api_base)
+  return cache.key(provider, (api_base or "") .. "\0" .. (smelt.auth.usage_scope(provider) or ""))
+end
+
+local function fetch_usage(provider, api_base, key)
+  if usage_key(provider, api_base) ~= key then return nil, "sign-in changed - refreshing usage" end
+  local report, err = smelt.auth.managed_usage(provider)
+  if usage_key(provider, api_base) ~= key then return nil, "sign-in changed - refreshing usage" end
+  return report, err
+end
+
 local function open_usage()
-  local provider, model, api_base = active_provider()
-  local key = cache.key(provider, model)
-  local title = provider_title(provider, model, api_base)
-  local is_codex = is_codex_provider(provider)
+  local provider, title, api_base = usage_provider()
+  local key = provider and usage_key(provider, api_base)
+  local is_codex = provider == "codex"
 
   local buf = smelt.buf.new({ readonly = true })
   local content_leaf = smelt.dialog.content({ buf = buf, wrap = false })
 
+  local callback
+  local closed = false
+  local function fetch(fetch_key)
+    return fetch_usage(provider, api_base, fetch_key)
+  end
+
+  local function sync_scope()
+    if not provider or closed then return end
+    local current = usage_key(provider, api_base)
+    if current == key then return end
+    cache.unsubscribe(key, callback)
+    key = current
+    cache.subscribe(key, callback)
+    callback(cache.get(key))
+  end
+
   local function refresh_usage()
-    cache.refresh(key, function()
-      return fetch_provider_usage(provider, model, api_base)
-    end)
+    sync_scope()
+    if key and not closed then cache.refresh(key, fetch) end
+  end
+
+  local function reset_count()
+    local entry = key and cache.get(key)
+    if not entry or not entry.fresh then return 0 end
+    local credits = entry.report and entry.report.resetCredits
+    return credits and credits.count or 0
   end
 
   local function open_reset_confirmation()
-    local count = tonumber(last_codex_reset_credits or 0) or 0
+    sync_scope()
+    local count = reset_count()
     if count <= 0 then
       smelt.notify.info("No usage limit reset credits are available.", "usage")
       return
     end
 
+    local confirmation_key = key
+    local scope = smelt.auth.usage_scope(provider)
     modal.open({
       title = "usage limit reset",
       lines = {
@@ -529,15 +329,18 @@ local function open_usage()
         { label = "Cancel", value = "cancel" },
       },
       on_submit = function(value)
-        if value ~= "redeem" then return end
-        smelt.spawn(function()
-          local ok, message = consume_codex_reset_credit()
-          if ok then
-            smelt.notify.info(message, "usage")
-          else
-            smelt.notify.error(message, "usage")
-          end
-          last_codex_reset_credits = nil
+        if value ~= "redeem" or closed then return end
+        sync_scope()
+        if key ~= confirmation_key or reset_count() <= 0 then
+          smelt.notify.info("Usage changed - refresh usage before redeeming a reset.", "usage")
+          cache.prefetch(key, fetch)
+          return
+        end
+        cache.redeem(key, function(request_id)
+          return smelt.auth.redeem_usage_reset(scope, request_id)
+        end, function(message, err)
+          if message then smelt.notify.info(message, "usage")
+          else smelt.notify.error(err or "Reset unavailable - try again later.", "usage") end
           refresh_usage()
         end)
       end,
@@ -545,13 +348,14 @@ local function open_usage()
   end
 
   local function usage_actions()
-    local actions = { { label = "Refresh usage", action = "refresh" } }
+    local entry = key and cache.get(key)
+    local redeeming = entry and entry.redeeming
+    local actions = { { label = "Refresh usage", action = "refresh", disabled = not provider or redeeming } }
     if is_codex then
-      local known_empty = last_codex_reset_credits ~= nil and (tonumber(last_codex_reset_credits) or 0) <= 0
       actions[#actions + 1] = {
         label = "Redeem usage limit reset",
         action = "redeem",
-        disabled = known_empty,
+        disabled = redeeming or reset_count() <= 0,
       }
     end
     return actions
@@ -583,35 +387,39 @@ local function open_usage()
     close_with_q = true,
   })
 
-  local callback = function(lines, fresh, error_message)
-    render_dialog(buf, lines, fresh, error_message, title)
+  callback = function(entry)
+    if closed then return end
+    render_dialog(buf, entry, title, provider ~= nil)
     if actions_ctrl then actions_ctrl:set_items(usage_actions()) end
   end
 
-  cache.subscribe(key, callback)
+  if key then cache.subscribe(key, callback) end
+  callback(key and cache.get(key))
+  if key then cache.prefetch(key, fetch) end
 
-  local entry = cache.get(key)
-  render_dialog(buf, entry and entry.lines or nil, entry and not entry.refreshing, entry and entry.error, title)
-
-  refresh_usage()
-
+  local timer = provider and smelt.timer.every(1000, function()
+    sync_scope()
+    cache.prefetch(key, fetch)
+  end)
   handle.win:on("close", function()
-    cache.unsubscribe(key, callback)
+    closed = true
+    if timer then timer:remove() end
+    if key then cache.unsubscribe(key, callback) end
   end)
 end
 
 -- ── Startup prefetch ───────────────────────────────────────────────────
 
+local function prefetch_active()
+  local provider, _, api_base = usage_provider()
+  if not provider then return end
+  local key = usage_key(provider, api_base)
+  cache.prefetch(key, function() return fetch_usage(provider, api_base, key) end)
+end
+
 smelt.lifecycle.on_ready(function()
-  local provider, model, api_base = active_provider()
-  -- Prefetch only matters for providers with remote usage endpoints. Claude
-  -- Code is asked when the dialog opens, so startup never launches it.
-  if is_codex_provider(provider) or is_kimi_provider(provider, api_base) then
-    local key = cache.key(provider, model)
-    cache.prefetch(key, function()
-      return fetch_provider_usage(provider, model, api_base)
-    end)
-  end
+  prefetch_active()
+  smelt.signal.subscribe("model", prefetch_active)
 end)
 
 smelt.cmd.register("usage", open_usage, { desc = "show session cost and active provider usage" })

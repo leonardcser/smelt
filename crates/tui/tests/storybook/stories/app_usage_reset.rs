@@ -1,4 +1,4 @@
-//! Codex usage reset stories.
+//! Subscription usage and reset stories.
 
 use crate::app_story;
 
@@ -45,6 +45,31 @@ app_story!(centered_modal_selected_option_inverted_bg, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(usage_claude_refresh_failure, |ctx| {
+    ctx.set_viewport(76, 28);
+    ctx.run_lua(
+        r#"
+        smelt.model.capabilities = function() return { provider_type = "claude-code" } end
+        smelt.model.pricing = function() return { source = "none" } end
+        smelt.auth.usage_scope = function() return nil end
+        local calls = 0
+        smelt.auth.managed_usage = function(provider)
+          assert(provider == "claude-code")
+          calls = calls + 1
+          if calls > 1 then return nil, "usage unavailable - check your connection" end
+          return { limits = {
+            { label = "5h limit", used = 42, limit = 100, resetAt = 1893456000 },
+            { label = "7d limit", used = 18, limit = 100 },
+          } }
+        end
+        "#,
+    );
+    ctx.run_command("usage");
+    ctx.assert_snapshot_named("fresh");
+    ctx.press_enter();
+    ctx.assert_snapshot_named("refresh_failed");
+});
+
 app_story!(usage_codex_reset_action_available, |ctx| {
     ctx.set_viewport(76, 28);
     ctx.run_lua(
@@ -58,56 +83,20 @@ app_story!(usage_codex_reset_action_available, |ctx| {
         smelt.model.list = function()
           return { { key = "gpt-5-codex", name = "gpt-5-codex", provider = "codex" } }
         end
-        smelt.auth.request = function(provider, opts)
+        smelt.auth.usage_scope = function() return "storybook" end
+        smelt.auth.managed_usage = function(provider)
           assert(provider == "codex")
-          if opts.path == "/wham/usage" then
-            return {
-              status = 200,
-              body = smelt.json.encode({
-                plan_type = "plus",
-                credits = { has_credits = true, balance = 12 },
-                rate_limit_reset_credits = { available_count = 2 },
-                rate_limit = {
-                  primary_window = {
-                    used_percent = 82,
-                    limit_window_seconds = 18000,
-                    reset_at = primary_reset,
-                  },
-                  secondary_window = {
-                    used_percent = 45,
-                    limit_window_seconds = 604800,
-                    reset_at = secondary_reset,
-                  },
-                },
-              }),
-            }
-          elseif opts.path == "/wham/rate-limit-reset-credits" then
-            return {
-              status = 200,
-              body = smelt.json.encode({
-                available_count = 2,
-                credits = {
-                  {
-                    id = "a",
-                    reset_type = "codex_rate_limits",
-                    status = "available",
-                    granted_at = "2029-12-01T00:00:00Z",
-                    expires_at = "2030-01-31T20:08:39Z",
-                    title = "Full reset (Weekly + 5 hr)",
-                  },
-                  {
-                    id = "b",
-                    reset_type = "codex_rate_limits",
-                    status = "available",
-                    granted_at = "2029-12-01T00:00:00Z",
-                    expires_at = "2030-01-31T21:08:39Z",
-                    title = "Full reset (Weekly + 5 hr)",
-                  },
-                },
-              }),
-            }
-          end
-          return { status = 200, body = smelt.json.encode({ code = "reset", windows_reset = 2 }) }
+          return {
+            plan = "plus", credits = "12",
+            resetCredits = { count = 2, inventory = {
+              { expires_at = smelt.time.parse_iso8601("2030-01-31T20:08:39Z") },
+              { expires_at = smelt.time.parse_iso8601("2030-01-31T21:08:39Z") },
+            } },
+            limits = {
+              { label = "5h limit", used = 82, limit = 100, resetAt = primary_reset },
+              { label = "7d limit", used = 45, limit = 100, resetAt = secondary_reset },
+            },
+          }
         end
         "#,
     );
@@ -128,37 +117,18 @@ app_story!(usage_codex_reset_expiry_groups, |ctx| {
         smelt.model.list = function()
           return { { key = "gpt-5-codex", name = "gpt-5-codex", provider = "codex" } }
         end
-        smelt.auth.request = function(provider, opts)
+        smelt.auth.usage_scope = function() return "storybook" end
+        smelt.auth.managed_usage = function(provider)
           assert(provider == "codex")
-          if opts.path == "/wham/usage" then
-            return {
-              status = 200,
-              body = smelt.json.encode({
-                plan_type = "plus",
-                rate_limit_reset_credits = { available_count = 3 },
-                rate_limit = {
-                  primary_window = {
-                    used_percent = 82,
-                    limit_window_seconds = 18000,
-                    reset_at = primary_reset,
-                  },
-                },
-              }),
-            }
-          elseif opts.path == "/wham/rate-limit-reset-credits" then
-            return {
-              status = 200,
-              body = smelt.json.encode({
-                available_count = 3,
-                credits = {
-                  { id = "a", status = "available", expires_at = "2030-07-31T20:08:39Z" },
-                  { id = "b", status = "available", expires_at = "2030-07-31T21:08:39Z" },
-                  { id = "c", status = "available", expires_at = "2030-08-07T12:00:00Z" },
-                },
-              }),
-            }
-          end
-          error("unexpected path " .. tostring(opts.path))
+          return {
+            plan = "plus",
+            resetCredits = { count = 3, inventory = {
+              { expires_at = smelt.time.parse_iso8601("2030-07-31T20:08:39Z") },
+              { expires_at = smelt.time.parse_iso8601("2030-07-31T21:08:39Z") },
+              { expires_at = smelt.time.parse_iso8601("2030-08-07T12:00:00Z") },
+            } },
+            limits = { { label = "5h limit", used = 82, limit = 100, resetAt = primary_reset } },
+          }
         end
         "#,
     );
@@ -180,28 +150,15 @@ app_story!(usage_codex_reset_action_unavailable, |ctx| {
         smelt.model.list = function()
           return { { key = "gpt-5-codex", name = "gpt-5-codex", provider = "codex" } }
         end
-        smelt.auth.request = function(provider, opts)
+        smelt.auth.usage_scope = function() return "storybook" end
+        smelt.auth.managed_usage = function(provider)
           assert(provider == "codex")
-          assert(opts.path == "/wham/usage")
           return {
-            status = 200,
-            body = smelt.json.encode({
-              plan_type = "plus",
-              credits = { has_credits = true, balance = 12 },
-              rate_limit_reset_credits = { available_count = 0 },
-              rate_limit = {
-                primary_window = {
-                  used_percent = 82,
-                  limit_window_seconds = 18000,
-                  reset_at = primary_reset,
-                },
-                secondary_window = {
-                  used_percent = 45,
-                  limit_window_seconds = 604800,
-                  reset_at = secondary_reset,
-                },
-              },
-            }),
+            plan = "plus", credits = "12", resetCredits = { count = 0 },
+            limits = {
+              { label = "5h limit", used = 82, limit = 100, resetAt = primary_reset },
+              { label = "7d limit", used = 45, limit = 100, resetAt = secondary_reset },
+            },
           }
         end
         "#,

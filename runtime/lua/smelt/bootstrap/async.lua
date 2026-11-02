@@ -235,12 +235,22 @@ function smelt.auth.request(provider, opts)
 end
 
 --- Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
---- provider-neutral `{ summary, limits }` rows with `{ label, used, limit,
---- resetHint? }`. Supported for `kimi-code` and `claude-code`, which asks the
---- installed Claude Code for its account's plan limits.
----@type fun(provider: string): { summary: table?, limits: table[] }?, string?
+--- provider-neutral rows with `{ label, used, limit, resetAt? }`.
+--- `resetAt` is Unix seconds, formatted by the consumer.
+--- Supported for `codex`, `kimi-code`, and `claude-code` (asks the installed
+--- Claude Code without a model request). Codex also reports plan, credits,
+--- and resetCredits `{ count, inventory? }` with `{ expires_at? }` entries.
+---@type fun(provider: string): { summary: table?, limits: table[], plan: string?, credits: string?, resetCredits: table? }?, string?
 function smelt.auth.managed_usage(provider)
   return external_or_err(function(id) internal.auth.__start_managed_usage(id, provider) end)
+end
+
+--- Redeem one Codex reset credit using credentials matching `usage_scope("codex")`.
+--- Reuse `request_id` when retrying an uncertain outcome to avoid a second redemption.
+---@type fun(scope: string, request_id: string): string?, string?
+function smelt.auth.redeem_usage_reset(scope, request_id)
+  local result, err = external_or_err(function(id) internal.auth.__start_redeem_usage_reset(id, scope, request_id) end)
+  return result and result.message, err
 end
 
 -- Run ripgrep with `pattern` over `path` off the main thread. Yields the

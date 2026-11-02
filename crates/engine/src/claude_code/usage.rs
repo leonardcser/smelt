@@ -3,8 +3,8 @@
 
 use super::transport::Process;
 use serde_json::{json, Value};
-use smelt_provider::usage::{format_reset_time, ManagedUsageReport, ManagedUsageRow};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use smelt_provider::usage::{parse_iso_time, ManagedUsageReport, ManagedUsageRow};
+use std::time::Duration;
 
 /// Asks the installed Claude Code for its account's usage limits. It starts
 /// Claude Code without sending a model request.
@@ -24,13 +24,10 @@ pub async fn usage() -> Result<ManagedUsageReport, String> {
     .await;
     process.close().await;
     let usage = usage.map_err(|_| "usage was not reported in time".to_string())??;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    parse(&usage, now)
+    parse(&usage)
 }
 
-fn parse(usage: &Value, now: u64) -> Result<ManagedUsageReport, String> {
+fn parse(usage: &Value) -> Result<ManagedUsageReport, String> {
     let limits = &usage["rate_limits"];
     if usage["rate_limits_available"] != true || !limits.is_object() {
         return Err("no plan usage limits for this account".into());
@@ -40,7 +37,7 @@ fn parse(usage: &Value, now: u64) -> Result<ManagedUsageReport, String> {
             label,
             used: percent.as_f64()?.round() as i64,
             limit: 100,
-            reset_hint: resets_at.as_str().map(|at| format_reset_time(at, now)),
+            reset_at: resets_at.as_str().and_then(parse_iso_time),
         })
     };
     let mut rows: Vec<_> = match limits["limits"].as_array() {
@@ -75,6 +72,7 @@ fn parse(usage: &Value, now: u64) -> Result<ManagedUsageReport, String> {
     Ok(ManagedUsageReport {
         summary: None,
         limits: rows,
+        ..Default::default()
     })
 }
 
@@ -82,40 +80,35 @@ fn parse(usage: &Value, now: u64) -> Result<ManagedUsageReport, String> {
 mod tests {
     use super::*;
 
-    const NOW: u64 = 1_793_181_600; // 2026-10-28T10:00:00Z
-
-    fn labels(report: &ManagedUsageReport) -> Vec<(&str, i64, Option<&str>)> {
+    fn labels(report: &ManagedUsageReport) -> Vec<(&str, i64, Option<i64>)> {
         report
             .limits
             .iter()
-            .map(|row| (row.label.as_str(), row.used, row.reset_hint.as_deref()))
+            .map(|row| (row.label.as_str(), row.used, row.reset_at))
             .collect()
     }
 
     #[test]
     fn plan_limits_are_listed_with_their_scope_and_reset() {
-        let report = parse(
-            &json!({"rate_limits_available": true, "rate_limits": {
-                "five_hour": {"utilization": 9, "resets_at": "2026-10-28T11:20:00.695098+00:00"},
-                "limits": [
-                    {"kind": "session", "group": "session", "percent": 9,
-                     "resets_at": "2026-10-28T11:20:00.695098+00:00", "scope": null},
-                    {"kind": "weekly_all", "group": "weekly", "percent": 20.4,
-                     "resets_at": "2026-11-03T03:00:00+00:00", "scope": null},
-                    {"kind": "weekly_scoped", "group": "weekly", "percent": 0,
-                     "resets_at": null, "scope": {"model": {"id": null, "display_name": "Fable"}}},
-                    {"kind": "monthly_cap", "group": "other", "percent": null},
-                ],
-                "spend": {"enabled": true, "percent": 35},
-            }}),
-            NOW,
-        )
+        let report = parse(&json!({"rate_limits_available": true, "rate_limits": {
+            "five_hour": {"utilization": 9, "resets_at": "2026-10-28T11:20:00.695098+00:00"},
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 9,
+                 "resets_at": "2026-10-28T11:20:00.695098+00:00", "scope": null},
+                {"kind": "weekly_all", "group": "weekly", "percent": 20.4,
+                 "resets_at": "2026-11-03T03:00:00+00:00", "scope": null},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 0,
+                 "resets_at": null, "scope": {"model": {"id": null, "display_name": "Fable"}}},
+                {"kind": "monthly_cap", "group": "other", "percent": null},
+            ],
+            "spend": {"enabled": true, "percent": 35},
+        }}))
         .unwrap();
         assert_eq!(
             labels(&report),
             [
-                ("5h limit", 9, Some("resets in 1h 20m")),
-                ("7d limit", 20, Some("resets in 5d 17h")),
+                ("5h limit", 9, parse_iso_time("2026-10-28T11:20:00Z")),
+                ("7d limit", 20, parse_iso_time("2026-11-03T03:00:00Z")),
                 ("Fable 7d limit", 0, None),
                 ("extra usage", 35, None),
             ]
@@ -125,19 +118,16 @@ mod tests {
 
     #[test]
     fn releases_without_the_limits_list_report_the_plan_windows() {
-        let report = parse(
-            &json!({"rate_limits_available": true, "rate_limits": {
-                "five_hour": {"utilization": 54, "resets_at": "2026-10-28T11:00:00Z"},
-                "seven_day": {"utilization": 18.4, "resets_at": null},
-                "spend": {"enabled": false, "percent": 0},
-            }}),
-            NOW,
-        )
+        let report = parse(&json!({"rate_limits_available": true, "rate_limits": {
+            "five_hour": {"utilization": 54, "resets_at": "2026-10-28T11:00:00Z"},
+            "seven_day": {"utilization": 18.4, "resets_at": null},
+            "spend": {"enabled": false, "percent": 0},
+        }}))
         .unwrap();
         assert_eq!(
             labels(&report),
             [
-                ("5h limit", 54, Some("resets in 1h")),
+                ("5h limit", 54, parse_iso_time("2026-10-28T11:00:00Z")),
                 ("7d limit", 18, None)
             ]
         );
@@ -145,11 +135,8 @@ mod tests {
 
     #[test]
     fn accounts_without_plan_limits_say_so() {
-        let error = parse(
-            &json!({"rate_limits_available": false, "rate_limits": null}),
-            NOW,
-        )
-        .unwrap_err();
+        let error =
+            parse(&json!({"rate_limits_available": false, "rate_limits": null})).unwrap_err();
         assert_eq!(error, "no plan usage limits for this account");
     }
 }

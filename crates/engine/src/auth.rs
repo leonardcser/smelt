@@ -205,15 +205,7 @@ pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<
     match provider {
         AuthProvider::Codex => {
             let tokens = provider::codex::load_tokens_passive()?;
-            if let Some(account_id) = tokens.account_id {
-                Some(model_cache_fingerprint(provider, "account_id", &account_id))
-            } else {
-                Some(model_cache_fingerprint(
-                    provider,
-                    "refresh_token",
-                    &tokens.refresh_token,
-                ))
-            }
+            Some(codex_account_scope(&tokens))
         }
         AuthProvider::Copilot => {
             let tokens = provider::copilot::load_tokens_passive()?;
@@ -232,6 +224,43 @@ pub(crate) fn model_cache_account_fingerprint(provider: AuthProvider) -> Option<
             ))
         }
     }
+}
+
+/// Login identity for usage reports, independent of routine token rotation.
+pub fn usage_scope(provider: AuthProvider) -> Option<String> {
+    match provider {
+        AuthProvider::KimiCode => provider::kimi_code::load_tokens_passive()
+            .map(|tokens| provider::kimi_code::account_scope(&tokens)),
+        _ => model_cache_account_fingerprint(provider),
+    }
+}
+
+fn codex_account_scope(tokens: &smelt_provider::codex::CodexTokens) -> String {
+    match &tokens.account_id {
+        Some(account_id) => model_cache_fingerprint(AuthProvider::Codex, "account_id", account_id),
+        None => {
+            model_cache_fingerprint(AuthProvider::Codex, "refresh_token", &tokens.refresh_token)
+        }
+    }
+}
+
+pub async fn redeem_usage_reset(
+    scope: &str,
+    request_id: &str,
+    client: &reqwest::Client,
+) -> Result<String, String> {
+    let tokens = provider::codex::ensure_access_token_full(client).await?;
+    usage::redeem(
+        &tokens,
+        scope,
+        request_id,
+        client,
+        &format!(
+            "{}/wham/rate-limit-reset-credits/consume",
+            smelt_provider::codex::CHATGPT_BACKEND_API_BASE
+        ),
+    )
+    .await
 }
 
 pub(crate) fn model_cache_fingerprint(
@@ -280,13 +309,16 @@ pub async fn authenticated_request(
     }
 }
 
+mod usage;
+
 pub async fn managed_usage(
     provider: AuthProvider,
     client: &reqwest::Client,
 ) -> Result<smelt_provider::usage::ManagedUsageReport, String> {
     match provider {
         AuthProvider::KimiCode => provider::kimi_code::managed_usage(client).await,
-        AuthProvider::Codex | AuthProvider::Copilot => {
+        AuthProvider::Codex => usage::codex(client).await,
+        AuthProvider::Copilot => {
             Err("managed usage is not supported for this provider".to_string())
         }
     }

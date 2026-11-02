@@ -170,12 +170,17 @@ fn render_usage(provider: &str, stubs: &str) -> (mlua::Lua, String) {
         smelt = {{
           __last_buf = nil,
           __command = nil,
-          lifecycle = {{ on_ready = function() end }},
+          lifecycle = {{ on_ready = function(fn) smelt.__ready = fn end }},
+          signal = {{ subscribe = function(name, fn) smelt.__model_changed = fn end }},
           cmd = {{ register = function(name, fn) if name == "usage" then smelt.__command = fn end end }},
           log = {{ warn = function() end }},
           notify = __smelt_notify_stub(nil, nil),
           spawn = function(fn) fn() end,
           task = {{ external = function(fn) return fn(1) end, resume = function() end }},
+          timer = {{ every = function(ms, fn)
+            smelt.__tick = fn
+            return {{ remove = function() if smelt.__tick == fn then smelt.__tick = nil end end }}
+          end }},
           model = {{
             current = function() return "usage-model" end,
             list = function() return {{ {{ key = "usage-model", provider = __USAGE_PROVIDER, api_base = "" }} }} end,
@@ -183,7 +188,8 @@ fn render_usage(provider: &str, stubs: &str) -> (mlua::Lua, String) {
           }},
           session = {{ cost = function() return 0 end }},
           text = {{ format_cost = function() return "$0.00" end }},
-          time = {{ format = function(stamp, fmt) return os.date(fmt, stamp) end }},
+          __now = 1700000000,
+          time = {{ now = function() return smelt.__now end, monotonic_ms = function() return smelt.__now * 1000 end, format = function(stamp, fmt) return os.date(fmt, stamp) end }},
           auth = stubs.auth,
           parse = stubs.parse,
           json = {{ encode = function() return "{{}}" end }},
@@ -197,12 +203,16 @@ fn render_usage(provider: &str, stubs: &str) -> (mlua::Lua, String) {
           }},
           dialog = {{
             content = function(opts) return {{ buf = opts.buf, on = function() end }} end,
-            menu = function() return {{ on = function() end }}, {{ set_items = function() end }} end,
+            menu = function(items, opts)
+              smelt.__actions, smelt.__submit = items, opts.on_submit
+              return {{ on = function() end }}, {{ set_items = function(_, value) smelt.__actions = value end }}
+            end,
             new = function()
-              return {{ win = {{ on = function() end }} }}
+              return {{ win = {{ on = function(_, event, fn) smelt.__close = fn end }} }}
             end,
           }},
         }}
+        smelt.auth.usage_scope = function() return "test-account" end
         "#
     ))
     .exec()
@@ -234,23 +244,11 @@ fn usage_command_renders_codex_reset_times_in_local_time() {
         "codex",
         r#"{
           auth = {
-            request = function(provider, opts)
+            managed_usage = function(provider)
               assert(provider == "codex")
-              assert(opts.path == "/wham/usage")
-              return { status = 200, body = "{}" }
-            end,
-          },
-          parse = {
-            json = function()
-              return {
-                rate_limit = {
-                  primary_window = {
-                    used_percent = 25,
-                    limit_window_seconds = 18000,
-                    reset_at = 1700000000,
-                  },
-                },
-              }
+              return { limits = {
+                { label = "5h limit", used = 25, limit = 100, resetAt = 1700000000 },
+              } }
             end,
           },
         }"#,
@@ -276,7 +274,7 @@ fn usage_command_shows_the_limits_claude_code_reports() {
             managed_usage = function(provider)
               assert(provider == "claude-code")
               return { limits = {
-                { label = "5h limit", used = 42, limit = 100, resetHint = "resets in 1h 20m" },
+                { label = "5h limit", used = 42, limit = 100, resetAt = 1700000000 },
                 { label = "Fable 7d limit", used = 3, limit = 100 },
               } }
             end,
@@ -288,7 +286,7 @@ fn usage_command_shows_the_limits_claude_code_reports() {
         "Claude Code",
         "5h limit",
         "42% used",
-        "resets in 1h 20m",
+        "resets ",
         "Fable 7d limit",
     ] {
         assert!(
@@ -297,6 +295,377 @@ fn usage_command_shows_the_limits_claude_code_reports() {
         );
     }
     assert!(!rendered.contains("No subscription usage"), "{rendered}");
+}
+
+#[test]
+fn usage_command_keeps_last_report_and_shows_refresh_failure() {
+    let (lua, _) = render_usage(
+        "claude-code",
+        r#"{
+          auth = { managed_usage = function()
+            return { limits = { { label = "5h limit", used = 42, limit = 100 } } }
+          end },
+        }"#,
+    );
+    lua.load(
+        r#"
+        smelt.auth.managed_usage = function() return nil, "connection failed" end
+        smelt.__now = smelt.__now + 61
+        smelt.__command()
+        local text = ""
+        for _, line in ipairs(smelt.__last_buf.rows) do
+          for _, span in ipairs(line) do text = text .. (span.text or "") end
+        end
+        assert(text:find("42%% used"), text)
+        assert(text:find("connection failed", 1, true), text)
+    "#,
+    )
+    .exec()
+    .expect("retain cached usage on failure");
+}
+
+#[test]
+fn usage_command_prefetches_selected_claude_code() {
+    let (lua, _) = render_usage(
+        "claude-code",
+        r#"{
+      auth = { managed_usage = function() return { limits = {} } end },
+    }"#,
+    );
+    lua.load(
+        r#"
+        package.loaded["smelt.commands.usage.cache"] = nil
+        local calls = 0
+        smelt.auth.managed_usage = function(provider)
+          assert(provider == "claude-code")
+          calls = calls + 1
+          return { limits = {} }
+        end
+        assert(load(...))()
+        smelt.__ready()
+        assert(calls == 1, "Claude Code was not prefetched")
+        smelt.__command()
+        assert(calls == 1, "opening usage ignored prefetch")
+        smelt.__submit({ item = { action = "refresh" } })
+        assert(calls == 2, "manual refresh reused cache")
+        __USAGE_PROVIDER = "anthropic"
+        smelt.__model_changed()
+        assert(calls == 2, "unsupported provider fetched subscription usage")
+        __USAGE_PROVIDER = "claude-code"
+        smelt.__now = smelt.__now + 61
+        smelt.__model_changed()
+        assert(calls == 3, "model selection did not prefetch")
+    "#,
+    )
+    .call::<()>(USAGE_LUA)
+    .expect("prefetch Claude Code at startup");
+}
+
+#[test]
+fn usage_cache_deduplicates_retains_failures_and_serializes_mutations() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+      jobs, updates = {}, {}
+      now = 100
+      smelt = {
+        spawn = function(fn) jobs[#jobs + 1] = fn end,
+        time = { monotonic_ms = function() return now * 1000 end },
+        log = { warn = function() end },
+      }
+    "#,
+    )
+    .exec()
+    .unwrap();
+    let cache: mlua::Table = lua.load(USAGE_CACHE_LUA).eval().unwrap();
+    lua.load(
+        r#"
+      local cache = ...
+      local key = cache.key("codex", "account-a")
+      assert(key ~= cache.key("codex", "account-b"))
+      local calls = 0
+      local function fetch() calls = calls + 1; return { limits = { 42 } } end
+      local function changed(entry) updates[#updates + 1] = entry end
+      cache.subscribe(key, changed)
+      cache.prefetch(key, fetch)
+      cache.refresh(key, fetch)
+      assert(#jobs == 1 and cache.get(key).refreshing)
+      table.remove(jobs, 1)()
+      assert(calls == 1 and cache.get(key).report.limits[1] == 42)
+      cache.prefetch(key, fetch)
+      assert(#jobs == 0)
+      now = 161
+      cache.prefetch(key, function() return nil, "offline" end)
+      table.remove(jobs, 1)()
+      local failed = cache.get(key)
+      assert(failed.report.limits[1] == 42 and failed.error == "offline")
+      assert(failed.fetched_at_ms == 100000 and not failed.refreshing)
+      cache.refresh(key, function() error("broken") end)
+      table.remove(jobs, 1)()
+      assert(cache.get(key).report.limits[1] == 42)
+      assert(cache.get(key).error:find("broken"))
+      cache.refresh(key, function() return { limits = { 99 } } end)
+      cache.redeem(key, function() error("redemption raced a read") end, function() end)
+      assert(#jobs == 1, "redemption started while usage was refreshing")
+      table.remove(jobs, 1)()
+      assert(cache.get(key).report.limits[1] == 99 and cache.get(key).error == nil)
+      local redemptions = 0
+      cache.redeem(key, function() redemptions = redemptions + 1; return "redeemed" end, function() end)
+      cache.redeem(key, function() error("duplicate redemption") end, function() end)
+      cache.refresh(key, fetch)
+      assert(#jobs == 1 and cache.get(key).redeeming, "redemption was not serialized")
+      table.remove(jobs, 1)()
+      assert(redemptions == 1 and not cache.get(key).redeeming)
+      local count = #updates
+      cache.unsubscribe(key, changed)
+      cache.refresh(key, fetch)
+      table.remove(jobs, 1)()
+      assert(#updates == count, "closed dialog still subscribed")
+    "#,
+    )
+    .call::<()>(cache)
+    .expect("usage cache lifecycle");
+}
+
+#[test]
+fn usage_command_scopes_cached_reports_to_credentials() {
+    let (lua, _) = render_usage(
+        "codex",
+        r#"{
+      auth = { managed_usage = function()
+        return { limits = { { label = "old-account", used = 50, limit = 100 } } }
+      end },
+    }"#,
+    );
+    lua.load(
+        r#"
+      smelt.auth.usage_scope = function() return "new-account" end
+      smelt.auth.managed_usage = function() return nil, "not logged in" end
+      smelt.__command()
+      local text = ""
+      for _, line in ipairs(smelt.__last_buf.rows) do
+        for _, span in ipairs(line) do text = text .. (span.text or "") end
+      end
+      assert(not text:find("old-account", 1, true), text)
+      assert(text:find("not logged in", 1, true), text)
+      assert(smelt.__actions[2].disabled)
+    "#,
+    )
+    .exec()
+    .expect("isolate account reports");
+}
+
+#[test]
+fn usage_command_redeems_from_report_and_refreshes_after_mutation() {
+    let (lua, _) = render_usage(
+        "codex",
+        r#"{
+      auth = { managed_usage = function()
+        return { resetCredits = { count = 1 }, limits = {} }
+      end },
+    }"#,
+    );
+    lua.load(
+        r#"
+      local modal
+      package.loaded["smelt.modal"].open = function(opts) modal = opts end
+      assert(not smelt.__actions[2].disabled)
+      smelt.__submit({ item = { action = "redeem" } })
+      assert(modal)
+      local consumed, fetched = 0, 0
+      smelt.auth.redeem_usage_reset = function(scope, request_id)
+        assert(scope == "test-account" and request_id:find("smelt-", 1, true))
+        assert(smelt.__actions[2].disabled, "redemption remained enabled in flight")
+        consumed = consumed + 1
+        return "Redeemed reset credit."
+      end
+      smelt.auth.managed_usage = function()
+        fetched = fetched + 1
+        return { resetCredits = { count = 0 }, limits = {} }
+      end
+      modal.on_submit("redeem")
+      modal.on_submit("redeem")
+      assert(consumed == 1 and fetched == 1, "redemption was repeated or refresh was skipped")
+      assert(smelt.__actions[2].disabled)
+    "#,
+    )
+    .exec()
+    .expect("redeem credit once and refresh cached report");
+}
+
+#[test]
+fn usage_command_shows_over_limit_percentage_without_overflowing_bar() {
+    let (_, rendered) = render_usage(
+        "claude-code",
+        r#"{
+      auth = { managed_usage = function()
+        return { limits = { { label = "5h limit", used = 125, limit = 100 } } }
+      end },
+    }"#,
+    );
+    assert!(rendered.contains("125% used"), "{rendered}");
+}
+
+#[test]
+fn usage_command_refreshes_visible_reports_and_stops_on_close() {
+    let (lua, _) = render_usage(
+        "codex",
+        r#"{
+      auth = { managed_usage = function()
+        return { resetCredits = { count = 1 }, limits = {} }
+      end },
+    }"#,
+    );
+    lua.load(
+        r#"
+      local jobs, calls = {}, 0
+      smelt.spawn = function(fn) jobs[#jobs + 1] = fn end
+      smelt.auth.managed_usage = function()
+        calls = calls + 1
+        return { resetCredits = { count = 0 }, limits = {} }
+      end
+      smelt.__now = smelt.__now + 60
+      assert(smelt.__tick, "visible usage has no freshness check")()
+      assert(smelt.__actions[2].disabled, "stale credits can still be spent")
+      assert(#jobs == 1)
+      smelt.__tick()
+      assert(#jobs == 1, "visible refresh was not deduplicated")
+      jobs[1]()
+      assert(calls == 1 and smelt.__actions[2].disabled)
+      smelt.__close()
+      assert(smelt.__tick == nil, "closed usage still polls")
+    "#,
+    )
+    .exec()
+    .expect("refresh visible usage");
+}
+
+#[test]
+fn usage_command_disables_expired_credits_before_cache_ttl() {
+    let (lua, _) = render_usage(
+        "codex",
+        r#"{
+      auth = { managed_usage = function()
+        return { resetCredits = { count = 1, inventory = { { expires_at = 1700000001 } } }, limits = {} }
+      end },
+    }"#,
+    );
+    lua.load(
+        r#"
+      local jobs = {}
+      smelt.spawn = function(fn) jobs[#jobs + 1] = fn end
+      smelt.__now = smelt.__now + 2
+      smelt.__tick()
+      assert(#jobs == 1 and smelt.__actions[2].disabled)
+      jobs[1]()
+      assert(smelt.__actions[2].disabled, "expired inventory became redeemable after refresh")
+    "#,
+    )
+    .exec()
+    .expect("expire known reset credits immediately");
+}
+
+#[test]
+fn usage_command_recovers_from_redemption_exceptions_with_same_request_id() {
+    let (lua, _) = render_usage(
+        "codex",
+        r#"{
+      auth = { managed_usage = function()
+        return { resetCredits = { count = 2 }, limits = {} }
+      end },
+    }"#,
+    );
+    lua.load(r#"
+      local modal, requests = nil, {}
+      package.loaded["smelt.modal"].open = function(opts) modal = opts end
+      smelt.auth.redeem_usage_reset = function(scope, id)
+        requests[#requests + 1] = id
+        if #requests == 1 then error("lost connection") end
+        return "This reset request was already redeemed."
+      end
+      smelt.__submit({ item = { action = "redeem" } })
+      modal.on_submit("redeem")
+      assert(not smelt.__actions[1].disabled and not smelt.__actions[2].disabled, "exception left usage locked")
+      smelt.__submit({ item = { action = "redeem" } })
+      modal.on_submit("redeem")
+      assert(#requests == 2 and requests[1] == requests[2], "retry can spend a second credit")
+    "#).exec().expect("recover uncertain redemption without double spending");
+}
+
+#[test]
+fn usage_command_rebinds_scope_during_deferred_fetch() {
+    let (lua, _) = render_usage(
+        "codex",
+        r#"{
+      auth = { managed_usage = function()
+        return { limits = { { label = "old-account", used = 50, limit = 100 } } }
+      end },
+    }"#,
+    );
+    lua.load(r#"
+      local jobs, calls = {}, 0
+      smelt.spawn = function(fn) jobs[#jobs + 1] = coroutine.create(fn) end
+      smelt.auth.managed_usage = function()
+        calls = calls + 1
+        local call = calls
+        if call == 1 then coroutine.yield() end
+        return { limits = { { label = call == 1 and "wrong-account" or "new-account", used = 2, limit = 100 } } }
+      end
+      smelt.__submit({ item = { action = "refresh" } })
+      assert(coroutine.resume(jobs[1]))
+      smelt.auth.usage_scope = function() return "new-account" end
+      smelt.__tick()
+      assert(#jobs == 2)
+      assert(coroutine.resume(jobs[2]))
+      assert(coroutine.resume(jobs[1]))
+      local text = ""
+      for _, line in ipairs(smelt.__last_buf.rows) do
+        for _, span in ipairs(line) do text = text .. (span.text or "") end
+      end
+      assert(text:find("new-account", 1, true), text)
+      assert(not text:find("wrong-account", 1, true) and not text:find("old-account", 1, true), text)
+    "#).exec().expect("discard late cross-account results and rebind visible dialog");
+}
+
+#[test]
+fn usage_redemption_unwinds_cancellation_after_origin_dialog_closes() {
+    let (lua, _) = render_usage(
+        "codex",
+        r#"{
+      auth = { managed_usage = function()
+        return { resetCredits = { count = 2 }, limits = {} }
+      end },
+    }"#,
+    );
+    lua.load(r#"
+      local modal, jobs, ids = nil, {}, {}
+      local close_origin = smelt.__close
+      package.loaded["smelt.modal"].open = function(opts) modal = opts end
+      smelt.spawn = function(fn) jobs[#jobs + 1] = coroutine.create(fn) end
+      smelt.auth.redeem_usage_reset = function(scope, id)
+        ids[#ids + 1] = id
+        if #ids == 1 then
+          coroutine.yield()
+          error("cancelled")
+        end
+        return "This reset request was already redeemed."
+      end
+      smelt.__submit({ item = { action = "redeem" } })
+      modal.on_submit("redeem")
+      assert(coroutine.resume(jobs[1]))
+      smelt.__command()
+      assert(smelt.__actions[1].disabled and smelt.__actions[2].disabled, "second dialog ignored in-flight redemption")
+      close_origin()
+      assert(coroutine.resume(jobs[1]))
+      assert(not smelt.__actions[1].disabled and #jobs == 1, "closed origin restarted work or left account locked")
+      smelt.__submit({ item = { action = "refresh" } })
+      assert(coroutine.resume(jobs[2]))
+      smelt.__submit({ item = { action = "redeem" } })
+      modal.on_submit("redeem")
+      assert(coroutine.resume(jobs[3]))
+      assert(#ids == 2 and ids[1] == ids[2], "uncertain outcome lost its id across dialogs")
+      assert(coroutine.resume(jobs[4]))
+    "#).exec().expect("unwind deferred cancellation and share retry state across dialogs");
 }
 
 #[test]
