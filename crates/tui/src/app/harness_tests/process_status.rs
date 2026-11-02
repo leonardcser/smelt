@@ -1,5 +1,130 @@
 use super::*;
 
+#[cfg(unix)]
+async fn request_session_completion(app: &TestApp, turn: u64) {
+    use smelt_core::session_control::{request_completion, SOCKET_ENV};
+    let control = &app.app.core.session_control;
+    control.initialize().unwrap();
+    request_completion(
+        &control.shell_env()[SOCKET_ENV],
+        &app.app.conversation.session().id,
+        turn,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn public_status_waits_for_notifying_background_jobs() {
+    use smelt_core::public_status::PublicState;
+    let mut app = TestApp::builder().build();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app.core.jobs.set_completion_sender(tx);
+    let jobs = app.app.core.jobs.clone();
+    let cwd = app.app.core.env.cwd();
+    let id = jobs
+        .spawn_background(
+            "sleep 0.02",
+            &Default::default(),
+            &cwd,
+            std::time::Instant::now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(app.public_status_state_reason().0, PublicState::Waiting);
+    app.start_turn(1);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
+    #[cfg(unix)]
+    request_session_completion(&app, 1).await;
+    app.discard_turn(crate::app::TurnEnd::Complete);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Waiting);
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completion.id, id);
+    jobs.drain_output(&id).unwrap();
+    assert_eq!(
+        app.public_status_state_reason().0,
+        PublicState::Waiting,
+        "delivery is still pending"
+    );
+    app.app.handle_job_completed(completion);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
+    app.discard_turn(crate::app::TurnEnd::Complete);
+    assert_ne!(app.public_status_state_reason().0, PublicState::Waiting);
+    assert_ne!(app.public_status_state_reason().0, PublicState::Completed);
+    let detached = jobs
+        .spawn_background_with_notification(
+            "sleep 30",
+            &Default::default(),
+            &cwd,
+            std::time::Instant::now(),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_ne!(app.public_status_state_reason().0, PublicState::Waiting);
+    jobs.stop(&detached).await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn public_status_completed_survives_focus_until_next_turn() {
+    use smelt_core::public_status::PublicState;
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    let session = app.app.conversation.session().id.clone();
+    request_session_completion(&app, 1).await;
+    assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
+    app.discard_turn(crate::app::TurnEnd::Complete);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Completed);
+    app.set_terminal_focus_for_harness(false);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Completed);
+    app.set_terminal_focus_for_harness(true);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Completed);
+    app.start_turn(2);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
+    app.discard_turn(crate::app::TurnEnd::Complete);
+    assert_ne!(app.public_status_state_reason().0, PublicState::Completed);
+    app.start_turn(3);
+    request_session_completion(&app, 3).await;
+    app.discard_turn(crate::app::TurnEnd::Cancelled);
+    assert_ne!(app.public_status_state_reason().0, PublicState::Completed);
+    app.start_turn(4);
+    request_session_completion(&app, 4).await;
+    assert!(app.run_lua(r#"smelt.settings.auto_continue = 'always'"#));
+    app.discard_turn(crate::app::TurnEnd::Complete);
+    assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
+    assert!(!app.app.core.session_control.is_completed(&session));
+    assert!(app
+        .app
+        .overlays
+        .notification()
+        .is_some_and(|notice| notice.summary.contains("session completion not applied")));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn public_status_completion_is_invalidated_by_history_changes() {
+    use smelt_core::public_status::PublicState;
+    for reset in [false, true] {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        let session = app.app.conversation.session().id.clone();
+        request_session_completion(&app, 1).await;
+        app.discard_turn(crate::app::TurnEnd::Complete);
+        assert_eq!(app.public_status_state_reason().0, PublicState::Completed);
+        if reset {
+            app.reset_session();
+        } else {
+            app.rewind_to_start();
+        }
+        assert!(!app.app.core.session_control.is_completed(&session));
+        assert_ne!(app.public_status_state_reason().0, PublicState::Completed);
+    }
+}
+
 #[test]
 fn smelt_work_busy_pushes_token_and_flips_work_cells() {
     let mut app = TestApp::builder().build();

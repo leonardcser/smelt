@@ -9,7 +9,7 @@ use crate::output_limit::{
     limit_text_tail_with_max_bytes, OutputLimiter, DEFAULT_MAX_BYTES, TRUNCATION_NOTICE,
 };
 use protocol::JobTermination;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -289,6 +289,7 @@ pub struct JobRunConfig {
 pub struct ShellSpec {
     pub program: String,
     pub args: Vec<String>,
+    pub env: HashMap<String, String>,
 }
 
 impl Default for ShellSpec {
@@ -296,6 +297,7 @@ impl Default for ShellSpec {
         Self {
             program: "sh".into(),
             args: vec!["-c".into()],
+            env: HashMap::new(),
         }
     }
 }
@@ -379,6 +381,15 @@ fn spawn_shell_job(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     apply_default_noninteractive_env(cmd.as_std_mut());
+    // Never inherit an outer smelt instance's control identity.
+    for key in [
+        crate::session_control::SOCKET_ENV,
+        crate::session_control::SESSION_ENV,
+        crate::session_control::TURN_ENV,
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.envs(&shell.env);
     configure_child_session(&mut cmd);
 
     let mut wrapped = process_wrap::tokio::CommandWrap::from(cmd);
@@ -879,6 +890,7 @@ struct ForegroundFollower {
 
 enum NotificationState {
     Pending,
+    Delivered,
     Suppressed,
     Sent,
 }
@@ -947,6 +959,7 @@ pub struct JobCompletion {
 struct JobSupervisorInner {
     jobs: Mutex<HashMap<String, Job>>,
     completion_tx: Mutex<Option<mpsc::UnboundedSender<JobCompletion>>>,
+    pending_completions: Mutex<HashSet<String>>,
     running_slots: Arc<tokio::sync::Semaphore>,
     options: SupervisorOptions,
     #[cfg(target_os = "linux")]
@@ -1227,6 +1240,7 @@ impl JobSupervisor {
         Self(Arc::new(JobSupervisorInner {
             jobs: Mutex::new(HashMap::new()),
             completion_tx: Mutex::new(None),
+            pending_completions: Mutex::new(HashSet::new()),
             running_slots: Arc::new(tokio::sync::Semaphore::new(MAX_RUNNING_JOBS)),
             options,
             #[cfg(target_os = "linux")]
@@ -1278,9 +1292,44 @@ impl JobSupervisor {
         cwd: &Path,
         started_at: Instant,
     ) -> io::Result<String> {
-        self.spawn_job(command, shell, cwd, started_at, true, false)
+        self.spawn_background_with_notification(command, shell, cwd, started_at, true)
             .await
-            .map(|(id, _)| id)
+    }
+
+    pub async fn spawn_background_with_notification(
+        &self,
+        command: &str,
+        shell: &ShellSpec,
+        cwd: &Path,
+        started_at: Instant,
+        notify_on_completion: bool,
+    ) -> io::Result<String> {
+        self.spawn_job(
+            command,
+            shell,
+            cwd,
+            started_at,
+            Some(notify_on_completion),
+            false,
+        )
+        .await
+        .map(|(id, _)| id)
+    }
+
+    pub fn has_pending_continuation(&self) -> bool {
+        let pending_job = self.0.jobs.lock().unwrap().values().any(|job| {
+            matches!(
+                job.visibility,
+                JobVisibility::Background {
+                    notification: NotificationState::Pending | NotificationState::Sent
+                }
+            )
+        });
+        pending_job || !self.0.pending_completions.lock().unwrap().is_empty()
+    }
+
+    pub fn acknowledge_completion(&self, id: &str) {
+        acknowledge_job_completion(&self.0, id);
     }
 
     async fn start_foreground(
@@ -1291,7 +1340,7 @@ impl JobSupervisor {
         started_at: Instant,
         detachable: bool,
     ) -> io::Result<JobFollower> {
-        self.spawn_job(command, shell, cwd, started_at, false, detachable)
+        self.spawn_job(command, shell, cwd, started_at, None, detachable)
             .await
             .map(|(_, follower)| follower.expect("foreground jobs have a follower"))
     }
@@ -1302,7 +1351,7 @@ impl JobSupervisor {
         shell: &ShellSpec,
         cwd: &Path,
         started_at: Instant,
-        background: bool,
+        background: Option<bool>,
         detachable: bool,
     ) -> io::Result<(String, Option<JobFollower>)> {
         let running_permit = Arc::clone(&self.0.running_slots)
@@ -1335,12 +1384,16 @@ impl JobSupervisor {
         let (stop_tx, stop_rx) = mpsc::channel(1);
         let (finished_tx, finished_rx) = watch::channel(None);
 
-        let (live_output, follower, visibility) = if background {
+        let (live_output, follower, visibility) = if let Some(notify) = background {
             (
                 None,
                 None,
                 JobVisibility::Background {
-                    notification: NotificationState::Pending,
+                    notification: if notify {
+                        NotificationState::Pending
+                    } else {
+                        NotificationState::Delivered
+                    },
                 },
             )
         } else {
@@ -1490,7 +1543,7 @@ impl JobSupervisor {
                             *notification = NotificationState::Pending;
                         }
                     }
-                    completion_if_ready(id, job)
+                    completion_if_ready(&self.0, id, job)
                 })
             } else {
                 None
@@ -1551,6 +1604,7 @@ impl JobSupervisor {
                 jobs.push(job.request_stop(StopDisposition::RemoveOnFinish));
                 true
             });
+            self.0.pending_completions.lock().unwrap().clear();
             jobs
         };
         for mut request in jobs {
@@ -1652,7 +1706,7 @@ async fn supervise_job(task: JobTask) {
             termination,
             finished_at: Instant::now(),
         };
-        let completion = completion_if_ready(&id, job);
+        let completion = completion_if_ready(&supervisor, &id, job);
         (
             completion,
             job.snapshot_output(),
@@ -1711,7 +1765,7 @@ fn mark_job_background(supervisor: &Arc<JobSupervisorInner>, id: &str, order: u6
             job.visibility = JobVisibility::Background {
                 notification: NotificationState::Pending,
             };
-            completion_if_ready(id, job)
+            completion_if_ready(supervisor, id, job)
         })
     };
     if let Some(completion) = completion {
@@ -1719,7 +1773,11 @@ fn mark_job_background(supervisor: &Arc<JobSupervisorInner>, id: &str, order: u6
     }
 }
 
-fn completion_if_ready(id: &str, job: &mut Job) -> Option<JobCompletion> {
+fn completion_if_ready(
+    supervisor: &JobSupervisorInner,
+    id: &str,
+    job: &mut Job,
+) -> Option<JobCompletion> {
     let JobLifecycle::Finished {
         exit_code,
         termination,
@@ -1735,6 +1793,12 @@ fn completion_if_ready(id: &str, job: &mut Job) -> Option<JobCompletion> {
         return None;
     }
     *notification = NotificationState::Sent;
+    // Delivery can outlive the bounded output snapshot or an explicit read.
+    supervisor
+        .pending_completions
+        .lock()
+        .unwrap()
+        .insert(id.to_string());
     Some(JobCompletion {
         id: id.to_string(),
         exit_code,
@@ -1744,9 +1808,22 @@ fn completion_if_ready(id: &str, job: &mut Job) -> Option<JobCompletion> {
 }
 
 fn send_job_completion(supervisor: &JobSupervisorInner, completion: JobCompletion) {
-    if let Some(sender) = supervisor.completion_tx.lock().unwrap().clone() {
-        let _ = sender.send(completion);
+    let id = completion.id.clone();
+    let sender = supervisor.completion_tx.lock().unwrap().clone();
+    if sender.is_none_or(|sender| sender.send(completion).is_err()) {
+        acknowledge_job_completion(supervisor, &id);
     }
+}
+
+fn acknowledge_job_completion(supervisor: &JobSupervisorInner, id: &str) {
+    if let Some(job) = supervisor.jobs.lock().unwrap().get_mut(id) {
+        if let JobVisibility::Background { notification } = &mut job.visibility {
+            if matches!(notification, NotificationState::Sent) {
+                *notification = NotificationState::Delivered;
+            }
+        }
+    }
+    supervisor.pending_completions.lock().unwrap().remove(id);
 }
 
 impl Containment {

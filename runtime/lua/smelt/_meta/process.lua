@@ -57,8 +57,10 @@ process.set_default_shell = nil
 
 --- Spawn `command` as a contained background shell job. Yields while smelt
 --- selects and verifies the containment backend, then returns an opaque job ID.
+--- `notify_on_completion` defaults to true. Set false for detached services that
+--- should neither keep the session waiting nor start a turn when they exit.
 --- Must be called from inside `smelt.spawn(fn)` or a `tool.execute`.
----@type fun(command: string): string
+---@type fun(command: string, notify_on_completion?: boolean): string
 process.spawn_bg = nil
 
 --- Stop the supervised shell job `id` and return its bounded output. Yields until

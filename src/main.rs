@@ -202,6 +202,8 @@ struct SessionArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 enum SessionCommand {
+    /// Mark the current bash-tool session complete after its turn succeeds
+    Complete,
     /// Check schema, integrity, references, indexes, and storage sizes without changing data
     Doctor(SessionDoctorArgs),
     /// Copy a transactionally consistent session database to a new file
@@ -844,8 +846,15 @@ fn with_lineage_writer<T>(
     }
 }
 
-fn run_session_command(args: SessionArgs) {
+async fn run_session_command(args: SessionArgs) {
     let result = match args.command {
+        SessionCommand::Complete => {
+            smelt_core::session_control::complete_from_env()
+                .await
+                .map(|()| {
+                    println!("session completion requested; applies after this turn succeeds");
+                })
+        }
         SessionCommand::Doctor(args) => run_session_doctor(args).and_then(|healthy| {
             if healthy {
                 Ok(())
@@ -1115,7 +1124,7 @@ async fn async_main() {
                 return;
             }
             Commands::Session(session_args) => {
-                run_session_command(session_args);
+                run_session_command(session_args).await;
                 return;
             }
             Commands::Status(status_args) => {

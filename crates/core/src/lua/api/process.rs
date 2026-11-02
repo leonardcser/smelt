@@ -13,7 +13,7 @@ use crate::lua::LuaShared;
 use crate::process;
 
 fn current_shell_spec(shared: &Arc<LuaShared>) -> process::ShellSpec {
-    shared
+    let mut shell = shared
         .default_shell
         .lock()
         .ok()
@@ -21,8 +21,12 @@ fn current_shell_spec(shared: &Arc<LuaShared>) -> process::ShellSpec {
         .map(|s| process::ShellSpec {
             program: s.program,
             args: s.args,
+            ..Default::default()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    shell.env =
+        crate::host::try_with_core(|core| core.session_control.shell_env()).unwrap_or_default();
+    shell
 }
 
 fn output_table(
@@ -137,8 +141,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let shared_spawn = Arc::clone(shared);
         m.private_live_only_fn(
             "__start_spawn_bg",
-            &["task_id", "command"],
-            move |_, (task_id, command): (u64, String)| -> LuaResult<()> {
+            &["task_id", "command", "notify_on_completion"],
+            move |_, (task_id, command, notify): (u64, String, Option<bool>)| -> LuaResult<()> {
                 let (supervisor, now) = crate::host::try_with_core(|core| {
                     (core.jobs.clone(), core.clock.instant_now())
                 })
@@ -148,7 +152,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let sink = shared_spawn.resume_sink();
                 tokio::spawn(async move {
                     let payload = match supervisor
-                        .spawn_background(&command, &shell, &cwd, now)
+                        .spawn_background_with_notification(
+                            &command,
+                            &shell,
+                            &cwd,
+                            now,
+                            notify.unwrap_or(true),
+                        )
                         .await
                     {
                         Ok(id) => serde_json::json!({ "id": id }),

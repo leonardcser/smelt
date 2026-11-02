@@ -14,6 +14,8 @@ const STATUS_HEARTBEAT_MS: u64 = 5_000;
 pub enum PublicState {
     Idle,
     Busy,
+    Waiting,
+    Completed,
     NeedsAttention,
 }
 
@@ -22,6 +24,8 @@ impl PublicState {
         match self {
             Self::Idle => "idle",
             Self::Busy => "busy",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
             Self::NeedsAttention => "needs_attention",
         }
     }

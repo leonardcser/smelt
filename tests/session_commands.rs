@@ -10,6 +10,77 @@ fn smelt(state_home: &std::path::Path, args: &[&str]) -> std::process::Output {
         .expect("run smelt")
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn session_complete_targets_owning_turn_after_cwd_changes() {
+    use smelt_core::session_control::{SessionControl, SESSION_ENV, SOCKET_ENV, TURN_ENV};
+    let control = SessionControl::default();
+    control.initialize().unwrap();
+    control.begin_turn("session-a", 7);
+    let env = control.shell_env();
+    let run = |env: std::collections::HashMap<String, String>| async move {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+            .args(["session", "complete"])
+            .current_dir("/")
+            .env_remove(SOCKET_ENV)
+            .env_remove(SESSION_ENV)
+            .env_remove(TURN_ENV)
+            .envs(env)
+            .output()
+            .await
+            .unwrap()
+    };
+    let missing = run(Default::default()).await;
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no current smelt session"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    let mut wrong = env.clone();
+    wrong.insert(SESSION_ENV.into(), "other-session".into());
+    assert!(!run(wrong).await.status.success());
+    let output = run(env.clone()).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!control.is_completed("session-a"));
+    assert!(control.finish_turn("session-a", 7, true).is_none());
+    assert!(control.is_completed("session-a"));
+    control.begin_turn("session-a", 8);
+    assert!(
+        !run(env).await.status.success(),
+        "stale shell must not complete a later turn"
+    );
+    let mut shell = smelt_core::process::ShellSpec {
+        env: control.shell_env(),
+        ..Default::default()
+    };
+    shell
+        .env
+        .insert("SMELT_TEST_BIN".into(), env!("CARGO_BIN_EXE_smelt").into());
+    let output = smelt_core::process::JobSupervisor::new()
+        .run(
+            "exec \"$SMELT_TEST_BIN\" session complete",
+            smelt_core::process::JobRunConfig {
+                timeout: Some(std::time::Duration::from_secs(10)),
+                shell,
+                cwd: std::path::PathBuf::from("/"),
+                started_at: std::time::Instant::now(),
+                cancel: None,
+                background_on_timeout: false,
+                detachable: false,
+            },
+            |_| {},
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(control.finish_turn("session-a", 8, true).is_none());
+    assert!(control.is_completed("session-a"));
+}
+
 #[test]
 fn session_storage_commands_doctor_backup_and_compact() {
     let state = tempfile::tempdir().unwrap();

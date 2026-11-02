@@ -1128,6 +1128,9 @@ impl TuiApp {
         }
         self.conversation
             .record_started_turn(turn_id, mode.clone(), turn.reasoning_effort.clone());
+        self.core
+            .session_control
+            .begin_turn(&self.conversation.session().id, turn_id);
 
         if smelt_provider::BackendKind::is_claude_code(&turn.model_target.provider_type) {
             smelt_core::permissions::claude_code::grant_plan_artifacts(
@@ -2080,6 +2083,20 @@ impl TuiApp {
                 }
             }
         }
+        if let Some((turn_id, _)) = turn {
+            if let Some(warning) = self.core.session_control.finish_turn(
+                &self.conversation.session().id,
+                turn_id,
+                matches!(end, TurnEnd::Complete)
+                    && !self.core.jobs.has_pending_continuation()
+                    && self.prompt.queue_is_empty()
+                    && !self.busy_stack.is_busy()
+                    && !self.continuation_is_scheduled()
+                    && self.public_attention_reason().is_none(),
+            ) {
+                self.notify_warn(warning.into());
+            }
+        }
         start_queued
     }
 
@@ -2252,6 +2269,7 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_job_completed(&mut self, completion: smelt_core::process::JobCompletion) {
+        self.core.jobs.acknowledge_completion(&completion.id);
         let id = display_safe_process_id(&completion.id);
         let event = protocol::ProcessStatusEvent::background_process_completed(
             id,

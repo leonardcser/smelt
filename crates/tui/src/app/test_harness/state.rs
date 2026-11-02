@@ -20,6 +20,10 @@ impl TestApp {
         }
         self.app.conversation.begin_turn();
         self.app
+            .core
+            .session_control
+            .begin_turn(&self.app.conversation.session().id, turn_id);
+        self.app
             .conversation
             .set_active(Some(crate::app::TurnState {
                 turn_id,

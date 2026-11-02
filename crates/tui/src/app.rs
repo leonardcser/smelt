@@ -2599,6 +2599,17 @@ impl TuiApp {
             WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
                 (PublicState::Busy, None)
             }
+            WorkState::Done | WorkState::Idle if self.core.jobs.has_pending_continuation() => {
+                (PublicState::Waiting, None)
+            }
+            WorkState::Done | WorkState::Idle
+                if self
+                    .core
+                    .session_control
+                    .is_completed(&self.conversation.session().id) =>
+            {
+                (PublicState::Completed, None)
+            }
             WorkState::Done if !self.platform.terminal_is_focused() => (
                 PublicState::NeedsAttention,
                 Some(PublicReason::TurnComplete),
@@ -3176,7 +3187,6 @@ impl TuiApp {
         self.notify_session_save_failure(session_id, &message);
     }
 
-    #[allow(dead_code)] // Only reachable via the Lua surface today.
     pub(crate) fn notify_warn(&mut self, message: String) {
         self.record_notice(
             smelt_core::messages::MessageKind::Warning,
@@ -3665,6 +3675,9 @@ impl TuiApp {
         // shutdown, early return, or panic. Lua title effects are committed only
         // after the platform has claimed the terminal.
         self.platform.start(http_client);
+        if let Err(error) = self.core.session_control.initialize() {
+            self.notify_warn(format!("session completion unavailable: {error}"));
+        }
         drop(platform_startup);
 
         let lua_launch_startup = smelt_perf::perf::begin("startup:lua_launch");

@@ -95,11 +95,13 @@ Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-fo
 ## `smelt.process.spawn_bg`
 
 ```lua
-fun(command: string): string
+fun(command: string, notify_on_completion?: boolean): string
 ```
 
 Spawn `command` as a contained background shell job. Yields while smelt
 selects and verifies the containment backend, then returns an opaque job ID.
+`notify_on_completion` defaults to true. Set false for detached services that
+should neither keep the session waiting nor start a turn when they exit.
 Must be called from inside `smelt.spawn(fn)` or a `tool.execute`.
 
 ## `smelt.process.stop`

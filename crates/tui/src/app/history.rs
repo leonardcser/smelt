@@ -1871,6 +1871,7 @@ impl TuiApp {
     }
 
     fn apply_rewindable_session_state(&mut self, turn_meta: Option<protocol::TurnMeta>) {
+        self.core.session_control.reset();
         self.sync_task_label_from_session();
         if let Some(meta) = turn_meta {
             self.working.restore_from_turn_meta(&meta);
@@ -1940,6 +1941,7 @@ impl TuiApp {
     }
 
     pub(super) fn finish_session_replacement(&mut self) {
+        self.core.session_control.reset();
         self.abandon_pending_turn_submission();
         self.dismiss_notification_for_session_change();
         self.stop_shell_jobs();

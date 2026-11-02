@@ -50,6 +50,7 @@ pub struct Core {
     pub files: crate::fs::FileStateCache,
     pub workspace_files: crate::workspace_files::WorkspaceFiles,
     pub jobs: JobSupervisor,
+    pub session_control: crate::session_control::SessionControl,
     pub permissions: crate::permissions::PermissionsHandle,
     pub permission_store: crate::permissions::store::PermissionStore,
     /// MCP server registry. Shared `Arc` with the engine's
@@ -121,6 +122,7 @@ impl Core {
             files: crate::fs::FileStateCache::new(),
             workspace_files,
             jobs: JobSupervisor::new(),
+            session_control: crate::session_control::SessionControl::default(),
             permissions,
             permission_store,
             mcp: None,

@@ -99,6 +99,16 @@ writable start. smelt never resends them automatically, because the provider may
 already have accepted and billed the request. Review the transcript and retry if
 you want to.
 
+### Workflow completion
+
+Run `smelt session complete` through the bash tool after a workflow's validation
+and cleanup succeed. It targets the current session regardless of cwd and
+requests `completed` after a successful turn with no pending work. Rejected
+requests produce a warning; the command does not validate the work itself.
+
+Completion survives focus changes, but not a new turn, rewind, session
+replacement, or restart. The command requires Unix and an active bash-tool session.
+
 ### Public runtime status
 
 `smelt status` exposes a small, credential-free status record for shell prompts,
@@ -121,7 +131,7 @@ JSON records contain:
 | Field | Values or meaning |
 | ----- | ----------------- |
 | `schema`, `app`, `pid` | Schema version, application name, and process id |
-| `state` | `idle`, `busy`, or `needs_attention` |
+| `state` | `idle`, `busy`, `waiting`, `completed`, or `needs_attention` |
 | `reason` | Optional `permission`, `question`, `turn_complete`, `error`, `auth`, `setup`, or `interrupted` |
 | `focus` | `focused`, `unfocused`, or `unknown` |
 | `cwd`, `session_id`, `mode` | Optional current session context |
@@ -129,9 +139,11 @@ JSON records contain:
 | `boot_id`, `process_start_time_ticks` | Optional process-identity guards, available on Linux |
 | `updated_at_ms`, `expires_at_ms` | Unix timestamps for the latest heartbeat and expiry |
 
-A scheduled automatic continuation keeps the session `busy` between turns.
-Permission requests, questions, and turn errors still report `needs_attention`.
-Detached background commands alone do not keep a completed session `busy`.
+Scheduled continuations remain `busy`. Pending background work or result delivery
+reports `waiting`; permissions, questions, and turn errors report `needs_attention`.
+
+For servers or watchers, use `background=true` with `notify_on_completion=false`
+to skip waiting and completion-triggered turns.
 
 Status is refreshed on every state change and at least every 5 seconds; stale or
 dead-process records are ignored. Files live under `$XDG_RUNTIME_DIR/smelt/status`

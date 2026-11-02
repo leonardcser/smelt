@@ -553,6 +553,12 @@ impl HeadlessApp {
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
+        if let Err(error) = self.core.session_control.initialize() {
+            eprintln!("warning: session completion unavailable: {error}");
+        }
+        self.core
+            .session_control
+            .begin_turn(&self.session.id, turn_id);
 
         let cwd_path = self.core.env.cwd();
         let cwd = cwd_path.to_string_lossy().into_owned();
@@ -891,6 +897,13 @@ impl HeadlessApp {
             }
         };
 
+        if let Some(warning) = self.core.session_control.finish_turn(
+            &self.session.id,
+            turn_id,
+            matches!(outcome, HeadlessExit::Success) && !self.core.jobs.has_pending_continuation(),
+        ) {
+            eprintln!("warning: {warning}");
+        }
         if let Some(compaction) = &compaction {
             compaction.cancel();
         }

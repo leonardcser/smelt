@@ -110,6 +110,9 @@ function M.execute(args, ctx)
   local background = args.background == true
   local background_on_timeout = args.background_on_timeout
   if background_on_timeout == nil then background_on_timeout = DEFAULT_BACKGROUND_ON_TIMEOUT end
+  if args.notify_on_completion == false and not background then
+    return { content = "notify_on_completion=false requires background=true", is_error = true }
+  end
 
   local timeout_ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
   if timeout_ms > MAX_TIMEOUT_MS then
@@ -117,9 +120,11 @@ function M.execute(args, ctx)
   end
 
   if background then
-    local job_id = smelt.process.spawn_bg(command)
+    local notify = args.notify_on_completion ~= false
+    local job_id = smelt.process.spawn_bg(command, notify)
     return {
-      content = "started background process " .. job_id .. ", you'll be notified when it completes",
+      content = "started background process " .. job_id
+        .. (notify and ", you'll be notified when it completes" or ", completion notification disabled"),
       is_error = false,
       metadata = { background_id = job_id },
     }
@@ -179,6 +184,7 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
       description = { type = "string", description = "Short (max 10 words) description of what this command does" },
       timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 120000, max: 600000)" },
       background = { type = "boolean", description = "Run the command in the background and return immediately (default: false)" },
+      notify_on_completion = { type = "boolean", description = "For background=true, notify the agent and keep the session waiting until completion (default: true). Set false for detached servers or watchers." },
       background_on_timeout = { type = "boolean", description = "If the timeout expires, keep the command running in the background instead of killing it (default: true)" },
     },
     required = { "command" },
