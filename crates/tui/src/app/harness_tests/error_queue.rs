@@ -923,9 +923,15 @@ fn cancelling_quota_pause_also_cancels_foreground_busy_work() {
     assert!(app.run_lua(r#"_G.quota_busy = smelt.work.busy("foreground work")"#));
     app.press(crossterm::event::KeyCode::Esc);
     app.press(crossterm::event::KeyCode::Esc);
+    assert!(app.run_lua("assert(smelt.work.is_busy())"));
+    assert!(app.state().queued_inputs.is_empty());
+    assert_eq!(app.state().prompt_text, "keep queued");
+
+    app.press(crossterm::event::KeyCode::Esc);
+    app.press(crossterm::event::KeyCode::Esc);
     assert!(app.run_lua("assert(not smelt.work.is_busy())"));
     assert!(!has_started_turn(&run_due_timers(&mut app, 300_000)));
-    assert_eq!(app.state().queued_inputs, vec!["keep queued"]);
+    assert!(app.run_lua("smelt.prompt.set_text('')"));
     app.press(crossterm::event::KeyCode::Enter);
     app.wait_for_turn_persistence();
     assert!(app.agent_running());

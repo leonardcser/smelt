@@ -119,15 +119,16 @@ fn escape_unqueues_before_rewinding_idle_session() {
             let mut app = TestApp::builder().with_vim(vim).build();
             app.push_user_block("previous turn");
             app.push_queued_message("follow-up".into());
-            if vim && !double {
-                assert!(app.run_lua("smelt.vim.set_mode('normal')"));
+            if !double {
+                assert!(app.run_lua("smelt.keymap.unset('', '<Esc><Esc>')"));
+                if vim {
+                    assert!(app.run_lua("smelt.vim.set_mode('normal')"));
+                }
             }
 
             app.press(KeyCode::Esc);
             if double {
                 app.press(KeyCode::Esc);
-            } else {
-                app.feed_one(SourceEvent::Tick(crate::app::ESC_CHORD_TIMEOUT_MS + 1));
             }
             drive_lua_tasks(&mut app);
 
@@ -166,14 +167,15 @@ fn escape_unqueues_before_cancelling_or_rewinding_quota_pause() {
                 assert_eq!(app.state().queued_inputs, vec!["steering", "follow-up"]);
                 app.type_text("draft");
 
-                if vim && !double {
-                    assert!(app.run_lua("smelt.vim.set_mode('normal')"));
+                if !double {
+                    assert!(app.run_lua("smelt.keymap.unset('', '<Esc><Esc>')"));
+                    if vim {
+                        assert!(app.run_lua("smelt.vim.set_mode('normal')"));
+                    }
                 }
                 app.press(KeyCode::Esc);
                 if double {
                     app.press(KeyCode::Esc);
-                } else {
-                    app.feed_one(SourceEvent::Tick(crate::app::ESC_CHORD_TIMEOUT_MS + 1));
                 }
                 drive_lua_tasks(&mut app);
 
