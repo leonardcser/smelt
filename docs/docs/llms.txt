@@ -28,8 +28,11 @@ Source: https://github.com/leonardcser/smelt
 
 - [Write plugins in Lua](https://smeltagent.dev/latest/extend/): anatomy of a plugin, state, reloading
 - [Commands, events and keymaps](https://smeltagent.dev/latest/extend/commands-and-events/)
-- [UI: overlays, dialogs, statusline](https://smeltagent.dev/latest/extend/ui/)
-- [Custom tools and transcript rendering](https://smeltagent.dev/latest/extend/tools-and-agent/)
+- [Windows, layouts and dialogs](https://smeltagent.dev/latest/extend/ui/)
+- [Bars and prompt layout](https://smeltagent.dev/latest/extend/bars/)
+- [Transcript rendering](https://smeltagent.dev/latest/extend/transcript/)
+- [Paint and screen effects](https://smeltagent.dev/latest/extend/paint/)
+- [Tools and provider hooks](https://smeltagent.dev/latest/extend/tools-and-agent/)
 - [Async tasks and I/O](https://smeltagent.dev/latest/extend/async/)
 - [Bundled plugins](https://smeltagent.dev/latest/extend/bundled-plugins/)
 - [Plugin gallery](https://smeltagent.dev/latest/extend/gallery/)

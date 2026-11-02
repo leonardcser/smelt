@@ -30,8 +30,11 @@ nav = [
   { "Extend" = [
     "extend/index.md",
     { "Commands and events" = "extend/commands-and-events.md" },
-    { "UI" = "extend/ui.md" },
-    { "Tools and transcript" = "extend/tools-and-agent.md" },
+    { "Windows and dialogs" = "extend/ui.md" },
+    { "Bars and prompt layout" = "extend/bars.md" },
+    { "Transcript rendering" = "extend/transcript.md" },
+    { "Paint and screen effects" = "extend/paint.md" },
+    { "Tools and provider hooks" = "extend/tools-and-agent.md" },
     { "Tasks and I/O" = "extend/async.md" },
     { "Bundled plugins" = "extend/bundled-plugins.md" },
     { "Plugin gallery" = "extend/gallery.md" },

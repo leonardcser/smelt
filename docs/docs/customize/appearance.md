@@ -34,8 +34,9 @@ smelt.lifecycle.on_ready(function()
 end)
 ```
 
-Any other highlight group works the same way, for example `Comment`. Colors are
-`N` or `{ R, G, B }`.
+Use the same API for any highlight group, such as `Comment`. See
+[shared styles and colors](../extend/ui.md#shared-styles-and-spans) for accepted
+color formats.
 
 Or write a full colorscheme at
 `~/.config/smelt/lua/smelt/colorschemes/mytheme.lua`:
@@ -61,16 +62,28 @@ end)
 ```
 
 A colorscheme is a table with a required `groups` map and optional `name`,
-`syntax` and `light` fields. Each group is either a style table
-(`{ fg = ..., bg = ..., bold = true }`) or the name of another group. Colors are
-`N`, `{ R, G, B }`, or a `{ dark = ..., light = ... }` pair.
+`syntax` and `light` fields. Groups accept style tables or links to other group
+names. Colorschemes also accept `{ dark = ..., light = ... }` color pairs. See
+[`ThemeSpec`](../reference/api/types.md#smeltthemethemespec) for the full schema.
 
 The bundled `runtime/lua/smelt/colorschemes/default.lua` is a worked example, and
 `runtime/lua/smelt/colorschemes/_groups.lua` lists every group with its role and
 description.
 
-`smelt.theme.use` and `smelt.theme.apply` affect the running session only, so
-call them from `on_ready` in `init.lua` to apply them on every launch.
+To start from a bundled colorscheme instead, `smelt.theme.spec` returns a copy of
+it to change and apply:
+
+```lua
+smelt.lifecycle.on_ready(function()
+  local spec = smelt.theme.spec("dracula")
+  spec.groups.Normal = { fg = { 230, 230, 240 }, bg = { 20, 10, 30 } }
+  smelt.theme.apply(spec)
+end)
+```
+
+`theme.use(name)` applies `theme.spec(name)`. Specs are isolated copies, so
+changes do not mutate the source theme. Keep theme changes in `on_ready` so
+they apply after plugins load, on launch and reload.
 
 ## File icons
 

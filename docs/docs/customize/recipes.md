@@ -11,17 +11,8 @@ later line wins. Every option used here is documented in
 [Settings](settings.md), [Providers and models](providers.md) and
 [Permissions](../reference/permissions.md).
 
-!!! note "Where `init.lua` lives"
-
-    `~/.config/smelt/init.lua` on Linux and macOS, `%APPDATA%\smelt\init.lua` on
-    Windows. Saved changes reload automatically in a running session. To append
-    a recipe from a terminal instead of opening an editor:
-
-    ```bash
-    mkdir -p ~/.config/smelt && cat >> ~/.config/smelt/init.lua <<'EOF'
-    smelt.settings.vim = true
-    EOF
-    ```
+See [Your config](index.md#your-config) for file locations and
+[Reloading](index.md#reloading) for applying changes.
 
 ## Use a local model
 
@@ -209,7 +200,5 @@ For instructions the agent should always follow in a project, such as build
 commands and conventions, use an `AGENTS.md` instead. See
 [Skills, MCP and instructions](agent.md).
 
-## Need something else?
-
-Ask the agent. smelt's built-in `customize` skill knows every option, so "make
-the accent orange" or "add a /standup command" edits your `init.lua` for you.
+For more options, see the [configuration guides](index.md) or ask the agent to
+customize your setup.

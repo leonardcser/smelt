@@ -22,11 +22,21 @@ no manifest, no build step.
     the agent can write, install and reload a plugin for you. Describe what you
     want, then treat the result as a starting point.
 
-The bundled plugins in
-[`runtime/lua/smelt/plugins/`](https://github.com/leonardcser/smelt/tree/main/runtime/lua/smelt/plugins)
-are the best examples; every pattern in these guides comes from them.
-For small plugins to copy, recorded in action, see the
-[plugin gallery](gallery.md).
+## Choose a guide
+
+| Goal | Guide |
+| ---- | ----- |
+| Add commands, react to events or bind keys | [Commands and events](commands-and-events.md) |
+| Compose windows, dialogs or pickers | [Windows and dialogs](ui.md) |
+| Change statuslines, prompt bars or jump pills | [Bars and prompt layout](bars.md) |
+| Change tool display or transcript blocks | [Transcript rendering](transcript.md) |
+| Draw cells or animate screen effects | [Paint and screen effects](paint.md) |
+| Add agent tools or provider hooks | [Tools and provider hooks](tools-and-agent.md) |
+| Wait, run processes or watch files | [Tasks and I/O](async.md) |
+
+Use the [API reference](../reference/api/index.md) for signatures and types,
+[bundled plugins](bundled-plugins.md) for working implementations, and the
+[plugin gallery](gallery.md) for small examples recorded in action.
 
 ## Anatomy of a plugin
 
@@ -97,19 +107,10 @@ works in the TUI and in CI.
 
 ## Hot reload
 
-Saved Lua files reload automatically; `F5` or `/reload` reloads manually. The
-transcript and agent state stay put, and a failing file leaves the previous
-config running (see [Reloading](../customize/index.md#reloading)).
-
-What a reload carries over, and what it does not:
-
-| Carried over | Wiped or re-read |
-| ------------ | ---------------- |
-| The transcript and agent state | Module-local Lua variables and anonymous buffers, windows and overlays |
-| Named resources and `M.state` (see below) | Timers and subscriptions, which your module body registers again |
-| `smelt.state.persistent` values | `AGENTS.md`, skills, MCP declarations and `--system-prompt` files, which only a manual `/reload` re-reads |
-
-To keep UI state across reloads:
+See [Reloading](../customize/index.md#reloading) for triggers and error handling.
+For plugins, module-local variables and anonymous UI resources are discarded;
+timers and subscriptions must be registered again. Named resources and
+`M.state` survive. To restore a plugin's UI:
 
 1. Start the module with `smelt.plugin(name)`.
 2. Keep rebuildable state, such as whether a panel is open, in `M.state`. It

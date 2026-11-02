@@ -1,9 +1,9 @@
 ---
-title: "Custom tools and transcript rendering"
-description: "Give the smelt agent new tools from Lua, control how tool calls are displayed, group the transcript, add language-server tools and wrap provider requests."
+title: "Tools and provider hooks"
+description: "Register agent tools, configure language servers and rewrite provider responses from Lua."
 ---
 
-# Tools and transcript
+# Tools and provider hooks
 
 ## Custom tools
 
@@ -14,33 +14,26 @@ control summaries, approvals and per-mode behavior.
 ```lua
 smelt.tools.register({
   name        = "present_plan",
-  description = "Present a written plan for the user to save as a draft, approve, or approve in apply mode.",
-  modes       = { "plan" },           -- only registered in plan mode
+  description = "Present a plan for review.",
+  modes       = { "plan" },
   parameters  = {
     type = "object",
     properties = {
-      title     = { type = "string", description = "..." },
-      plan      = { type = "string", description = "..." },
+      title = { type = "string", description = "Short plan title" },
+      plan = { type = "string", description = "Plan in Markdown" },
     },
+    required = { "title", "plan" },
   },
   permission_defaults = { plan = "allow" },
-  summary  = function(args) return args.title or "plan" end,
-  execute  = function(args)
-    local action = smelt.dialog.open({ ... }) -- may yield inside execute
-    if action == "approve" then smelt.mode.set("normal") end
-    if action == "apply" then smelt.mode.set("apply") end
-    return "ok"
-  end,
+  summary = function(args) return args.title end,
+  execute = function(args) return args.plan end,
 })
 ```
 
-`execute` returns a string (success) or `{ content, is_error }`. Inside it you can
-also:
-
-- chain another tool with `smelt.tools.call("name", args, parent_call_id)`, which
-  yields until the child finishes;
-- wait for user input with `smelt.task.wait(id)`, resumed later by
-  `smelt.task.resume(id, value)`.
+`execute` returns a string (success) or `{ content, is_error }`. It runs in a
+coroutine, so it can open a [dialog](ui.md#dialogs), call another tool with
+`smelt.tools.call("name", args, parent_call_id)`, or wait for another task. See
+[Tasks and I/O](async.md) for waiting and cancellation.
 
 Set `override = true` to replace a built-in tool with the same name, and use
 `smelt.tools.unregister(name)` to remove yours. The tools under
@@ -48,92 +41,8 @@ Set `override = true` to replace a built-in tool with the same name, and use
 show the conventions for parameters, `summary`, `approval_patterns`, `preflight`
 and `paths_for_workspace`.
 
-## Tool display
-
-Presentation is registered separately from execution. Provide focused callbacks
-and the default renderer keeps its status marker, duration and body layout:
-
-```lua
-smelt.transcript.register_tool("present_plan", {
-  cache_key = "my.present-plan-presentation:v1",
-  title = function(tool, ctx)
-    return tool.args.title or "plan"
-  end,
-  body = function(tool, ctx)
-    return smelt.layout.markdown(tool.args.plan or tool.output.content or "")
-  end,
-  compact = function(tool, ctx)
-    return tool.args.plan_path
-  end,
-})
-```
-
-Use `render` instead when you want to draw everything yourself, including the
-status marker and timings:
-
-```lua
-smelt.transcript.register_tool("present_plan", {
-  cache_key = "my.present-plan-complete:v1",
-  render = function(tool, ctx)
-    return smelt.layout.vbox({
-      smelt.layout.text("plan: " .. (tool.args.title or "untitled")),
-      smelt.layout.markdown(tool.args.plan or ""),
-    })
-  end,
-})
-```
-
-`cache_key` lets smelt cache your output across restarts. Bump it whenever the
-output could change, or omit it to opt out of caching.
-
-For middleware that wraps several tools, groups or ordinary blocks, use
-`smelt.transcript.extend_renderer` (see below).
-
-## Transcript groups
-
-The transcript stays flat in history, but adjacent related blocks can display as
-one group. Built in:
-
-- `explore`: `read_file`, `grep`, `glob`, `outline`, `find_symbol`
-- `lsp`: `inspect_symbol`, `inspect_symbol_at`, `find_definition`,
-  `find_references`, `diagnostics`
-- `web`: adjacent `web_search` and `web_fetch`
-
-Set their default fold state with
-[`smelt.settings.transcript`](../customize/settings.md#transcript). Register your
-own groups with `smelt.transcript.groups.register` and render them with
-`smelt.transcript.extend_renderer`:
-
-```lua
-local layout = smelt.layout
-
-smelt.transcript.groups.register({
-  name = "cargo-test-batch",
-  cache_key = "my.cargo-test-batch-plan:v1",
-  min = 2,
-  default_view = "collapsed",
-  selector = {
-    kind = "tool",
-    name = "bash",
-    terminal = true,
-    fields = { ["args.description"] = "Run cargo tests" },
-  },
-})
-
-smelt.transcript.extend_renderer("my.cargo-test-batch", function(next, node, ctx)
-  if node.kind ~= "group" or node.name ~= "cargo-test-batch" then
-    return next(node, ctx)
-  end
-
-  local summary = layout.text("ran " .. tostring(node.child_count) .. " test commands")
-  if ctx.view_state ~= "expanded" then return summary end
-  return layout.vbox({ summary, layout.group_children() })
-end, { cache_key = "my.cargo-test-batch-renderer:v1" })
-```
-
-Selectors are declarative so smelt can plan groups without calling Lua for every
-block. Add `bucket = "args.package"` (or a list of fields) to split adjacent runs
-by field value.
+Tool execution and display are independent. See [Transcript rendering](transcript.md)
+to change a tool's title or body, compose block renderers, or group related calls.
 
 ## Language-server tools
 
@@ -188,6 +97,10 @@ smelt.provider.middleware({
 })
 ```
 
-Hooks run in registration order and each sees the previous hook's replacement.
-To watch streaming tokens without changing anything, subscribe to the
-`stream_delta` event. See [`smelt.provider`](../reference/api/provider.md).
+Hooks run in registration order; each sees the previous replacement. The final
+message determines visible output, history and tool execution. Removing all
+tool calls makes it a terminal response. If it contains neither text nor calls,
+smelt retries up to the empty-response limit, then reports an error.
+
+To observe tokens without rewriting, subscribe to `stream_delta`. See the
+[provider reference](../reference/api/provider.md) for hook options.

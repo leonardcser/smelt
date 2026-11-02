@@ -64,8 +64,9 @@ signal that was never declared, so a typo is not silently ignored.
 
 ## Keymaps
 
-`smelt.keymap.set(mode, chord, handler)` binds a key. Handlers receive a context
-table, and returning `false` lets the key fall through.
+Use [global keymaps](../customize/appearance.md#keymaps) for shortcuts and
+`win:key(chord, handler)` for window-local bindings. Window bindings return a
+`Reg`. A shortcut can select behavior by focus:
 
 ```lua
 smelt.keymap.set("n", "<C-y>", function()
@@ -83,5 +84,5 @@ Pass a callback to `loaded_text_expensive` and `loaded_blocks_expensive` when a
 long session may need to load content first; without one they only see what is
 already loaded.
 
-Per-window bindings (transcript only, picker only, ...) use `win:key(chord,
-handler)`, which also returns a `Reg`.
+See the [keymap reference](../reference/api/keymap.md) for handler context and
+binding options.

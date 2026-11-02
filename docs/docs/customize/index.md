@@ -16,11 +16,6 @@ only when you need them.
     the agent edits your `init.lua` and reloads it. You approve the edit like any
     other.
 
-!!! tip "Start from a recipe"
-
-    [Recipes](recipes.md) has short, copy-paste setups for common goals:
-    a local model, vim with file icons, a cautious or hands-off agent and more.
-
 ## Your config
 
 Everything starts in `init.lua`, in the config directory: `~/.config/smelt` on
@@ -35,8 +30,13 @@ smelt.defaults.set({ mode = "plan" })
 ```
 
 If no config exists on first launch, the setup wizard writes a starter one. Use
-`--config <path>` to load a different file. The pages in this section cover what
-you can put in it.
+`--config <path>` to load a different file.
+
+Start with [Recipes](recipes.md) for common setups. Use the topic guides for
+[providers and models](providers.md), [settings](settings.md),
+[themes and keymaps](appearance.md), [custom commands](commands.md), or
+[skills, MCP and instructions](agent.md). To write a plugin, see
+[Extend](../extend/index.md).
 
 ## Project config
 

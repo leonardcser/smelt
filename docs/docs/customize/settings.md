@@ -115,6 +115,9 @@ smelt.settings.transcript = {
 - `show_timestamps = false` hides timestamps on messages and tool calls. Tool
   durations stay visible.
 
+For tool labels, markers and block presentation, see
+[Transcript rendering](../extend/transcript.md#renderer-parts).
+
 ## Request audit
 
 `request_audit` controls what is stored about each provider request in the
