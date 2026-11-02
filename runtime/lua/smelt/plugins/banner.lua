@@ -23,6 +23,7 @@ local state = {
 	held = false,
 }
 
+local MAX_LABEL_WIDTH = 64
 local FIRE_HEADROOM = 4
 local SIM_TOP_PAD = FIRE_HEADROOM * 2
 local SIM_RAMP_TICKS = 10
@@ -400,16 +401,16 @@ local function ensure_label_window(lines, width)
 	local buf = smelt.buf.new({ name = "smelt.banner.label.buf" })
 	local rendered = {}
 	for _, entry in ipairs(lines) do
-		local pad = math.max(0, math.floor((width - #entry.text) / 2))
-		rendered[#rendered + 1] = string.rep(" ", pad) .. entry.text
+		local text = smelt.text.truncate_cells(entry.text, width)
+		local pad = math.max(0, math.floor((width - smelt.text.width(text)) / 2))
+		rendered[#rendered + 1] = string.rep(" ", pad) .. text
 	end
 	buf:lines(rendered)
 	local ns = smelt.ns("smelt.banner.label")
 	buf:clear_ns(ns)
 	for i, entry in ipairs(lines) do
 		if entry.dim ~= false then
-			local pad = math.max(0, math.floor((width - #entry.text) / 2))
-			buf:mark(ns, i, pad, { end_col = pad + #entry.text, style = { dim = true } })
+			buf:mark(ns, i, 0, { end_col = #rendered[i], style = { dim = true } })
 		end
 	end
 	local win = smelt.win.new(buf, {
@@ -445,9 +446,10 @@ local function open_splash()
 	end
 	local max_label_w = 0
 	for _, entry in ipairs(label_lines) do
-		if #entry.text > max_label_w then max_label_w = #entry.text end
+		max_label_w = math.max(max_label_w, smelt.text.width(entry.text))
 	end
-	local w = math.max(logo_w, max_label_w) + 2
+	local rect = transcript_rect()
+	local w = math.min(math.max(logo_w, max_label_w) + 2, MAX_LABEL_WIDTH, rect.width)
 	-- Reserve FIRE_HEADROOM cells above the wordmark inside the paint
 	-- leaf so the fire animation grows upward without painting outside the
 	-- overlay rect (which would bleed under higher-z modals like /help).
@@ -532,7 +534,7 @@ smelt.lifecycle.on_ready(function(ctx)
 	-- or stop fitting without needing screen-position bookkeeping.
 	local t = smelt.transcript.win
 	if t and t.on then
-		t:on("resized", refresh)
+		t:on("resized", function() refresh(true) end)
 	end
 	refresh()
 	if ctx and ctx.kind == "launch" and state.decoration then

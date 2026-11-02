@@ -1839,7 +1839,15 @@ fn load_banner_plugin(lua: &mlua::Lua, ready_ctx: &str) {
         r#"
         paint_handlers = {}
         timers = {}
+        banner_width = 80
         smelt = {
+          text = {
+            width = function(s) return #s end,
+            truncate_cells = function(s, width)
+              if #s <= width then return s end
+              return s:sub(1, width - 1) .. "…"
+            end,
+          },
           notify = __smelt_notify_stub(nil, nil),
           reg = { new = function(fn) return { remove = fn } end },
           build = { display = "test" },
@@ -1869,7 +1877,7 @@ fn load_banner_plugin(lua: &mlua::Lua, ready_ctx: &str) {
           buf = {
             new = function()
               return {
-                lines = function() end,
+                lines = function(_, lines) banner_lines = lines end,
                 clear_ns = function() end,
                 mark = function() end,
               }
@@ -1883,9 +1891,12 @@ fn load_banner_plugin(lua: &mlua::Lua, ready_ctx: &str) {
           transcript = {
             is_empty = function() return true end,
             win = {
-              rect = function() return { height = 100 } end,
-              on = function() end,
-              decorate = function() return { close = function() end } end,
+              rect = function() return { width = banner_width, height = 100 } end,
+              on = function(_, event, fn) if event == "resized" then banner_resize = fn end end,
+              decorate = function(_, opts)
+                banner_layout = opts.layout
+                return { close = function() end }
+              end,
             },
           },
           events = { on = function() end },
@@ -1914,6 +1925,36 @@ fn load_banner_plugin(lua: &mlua::Lua, ready_ctx: &str) {
     lua.load(BANNER_PLUGIN_LUA)
         .exec()
         .expect("load banner plugin");
+}
+
+#[test]
+fn banner_labels_stay_single_line_with_ellipsis_across_resizes() {
+    let lua = mlua::Lua::new();
+    load_banner_plugin(&lua, "nil");
+    lua.load(
+        r#"
+        smelt.banner.source("upgrade", function() return string.rep("v", 100) end)
+        smelt.banner.refresh()
+        assert(banner_layout[2][1].opts.measure[1] == 64)
+        assert(banner_lines[2] == string.rep("v", 63) .. "…")
+
+        banner_width = 30
+        banner_resize()
+        assert(banner_layout[2][1].opts.measure[1] == 30)
+        assert(banner_lines[2] == string.rep("v", 29) .. "…")
+
+        banner_width = 80
+        banner_resize()
+        assert(banner_lines[2] == string.rep("v", 63) .. "…")
+
+        smelt.banner.source("upgrade", function() return "update ready" end)
+        smelt.banner.refresh()
+        assert(banner_lines[2]:match("^ *update ready$") ~= nil)
+        assert(#banner_lines == 2)
+        "#,
+    )
+    .exec()
+    .expect("render bounded banner labels");
 }
 
 #[test]
