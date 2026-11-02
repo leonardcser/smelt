@@ -372,6 +372,41 @@ fn centered_modal_reuses_dialog_chrome_and_action_behavior() {
 }
 
 #[test]
+fn win95_close_button_requests_quit() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    fn click(app: &mut TestApp, button: MouseButton, column: u16) {
+        app.mouse(MouseEventKind::Down(button), (column, 0));
+        app.mouse(MouseEventKind::Up(button), (column, 0));
+    }
+
+    for width in [80, 24] {
+        for offset in 0..3 {
+            let mut app = TestApp::builder().with_vim(false).build();
+            app.set_terminal_size(80, 20);
+            app.run_lua_result(include_str!("../../../../../docs/shots/gallery/win95.lua"))
+                .unwrap();
+            app.set_terminal_size(width, 20);
+            let frame = app.render_to_frame().text();
+            assert!(
+                frame.lines().next().unwrap().ends_with("[_][□][×]"),
+                "{frame}"
+            );
+
+            click(&mut app, MouseButton::Left, width - 4);
+            assert!(!app.state().pending_quit, "maximize must not quit");
+            click(&mut app, MouseButton::Left, width - 7);
+            assert!(!app.state().pending_quit, "minimize must not quit");
+            click(&mut app, MouseButton::Right, width - 2);
+            assert!(!app.state().pending_quit, "right click must not quit");
+            click(&mut app, MouseButton::Left, width - 3 + offset);
+            assert!(app.state().pending_quit, "close button must quit");
+            app.assert_invariants();
+        }
+    }
+}
+
+#[test]
 #[ignore = "set SMELT_GALLERY_DIR to independently maintained gallery sources"]
 fn gallery_api_consumers() {
     let dir = std::path::PathBuf::from(

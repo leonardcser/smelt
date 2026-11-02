@@ -254,7 +254,7 @@
    "slug": "win95",
    "title": "Windows 95",
    "category": "Layouts",
-   "summary": "Windows 95: grey everywhere, a blue title bar with its buttons, and a taskbar with Start.",
+   "summary": "Windows 95: grey everywhere, a blue title bar with a working close button, and a taskbar with Start.",
    "detail": "",
    "command": null,
    "source": "docs/shots/gallery/win95.lua",
