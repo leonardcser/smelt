@@ -49,20 +49,22 @@ Why we made these choices, and what they cost:
 
 Lower is better.
 
-|             | Memory at start | Install size | Peak memory on tasks | CPU time on tasks |
-| ----------- | --------------- | ------------ | -------------------- | ----------------- |
-| **smelt**   | **50 MiB**      | **45 MiB**   | **0.10 GiB**         | **6.1 s**         |
-| pi          | 107 MiB         | 480 MiB      | 0.14 GiB             | 9.7 s             |
-| codex       | 139 MiB         | 853 MiB      | 0.22 GiB             | 9.8 s             |
-| claude code | 189 MiB         | 313 MiB      | 0.24 GiB             | 17.5 s            |
-| opencode    | 333 MiB         | 1683 MiB     | 0.71 GiB             | 116 s             |
+<!-- bench:table -->
 
-Memory at start and install size are from the latest releases on 2026-10-31, and
-you can
-[rerun them](https://github.com/leonardcser/smelt/tree/main/benchmarks/memory).
-The task columns are medians from a Terminal-Bench 2.1 study with Qwen3.8 27B in
-October 2026, on older versions (smelt v0.6.0).
-[Full results](https://smeltagent.dev/guide/benchmarks/)
+| Agent       | Version               | Memory at start | Install size | Peak memory on tasks | CPU time on tasks |
+| ----------- | --------------------- | --------------- | ------------ | -------------------- | ----------------- |
+| **smelt**   | `v0.6.5-46-b1b4ae4d7` | **34 MiB**      | **46 MiB**   | **0.10 GiB**         | **6.1 s**         |
+| pi          | `1.5.0`               | 110 MiB         | 483 MiB      | 0.14 GiB             | 9.7 s             |
+| codex       | `0.166.0`             | 140 MiB         | 853 MiB      | 0.22 GiB             | 9.8 s             |
+| claude code | `2.1.316`             | 189 MiB         | 313 MiB      | 0.24 GiB             | 17.5 s            |
+| opencode    | `2.2.5`               | 328 MiB         | 1684 MiB     | 0.71 GiB             | 116 s             |
+
+<!-- /bench -->
+
+Versions shown apply to the reproducible startup and install measurements;
+task results come from an older Terminal-Bench study.
+[Methodology and full results](https://smeltagent.dev/guide/benchmarks/)
+· [Run the benchmarks](benchmarks/memory/)
 
 ## Install
 

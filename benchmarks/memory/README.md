@@ -35,30 +35,42 @@ free for the script and the local servers. It needs `2 + 2N` CPUs.
 
 Every agent runs with default settings. The only changes point it at the local
 server: a base URL, a dummy API key and a model name. claude code also gets
-`DISABLE_AUTOUPDATER=1`, so it does not try to update itself. The exact commands
-are in `AGENTS` in `run.py`.
-
-| Agent       | Version | Install                                          |
-| ----------- | ------- | ------------------------------------------------ |
-| smelt       | v0.6.5  | release archive, or `--smelt-binary`             |
-| pi          | 1.4.0   | `npm install -g @earendil-works/pi-coding-agent` |
-| codex       | 0.166.0 | `npm install -g @openai/codex`                   |
-| claude code | 2.1.316 | `bootstrap.sh`                                   |
-| opencode    | 2.2.5   | `npm install -g @opencode/cli`                   |
-
-The Node agents use Node 22.
+`DISABLE_AUTOUPDATER=1`, so it does not try to update itself. Version pins and
+install commands are in [`AGENTS` in run.py](run.py). The Node agents use Node 22.
 
 ## Results
 
-`results/<date>/` holds the raw output of each published run, with the machine
-it ran on. `results/2026-10-31` is in the guide: cold-start with 7 runs and
-smelt built from `main` (`v0.6.5-19-gae02ec9d5`), install with 1 run and the
-v0.6.5 release. To redraw the charts in the guide and on the homepage from a
-results folder:
+The published data is in [`results/2026-11-02`](results/2026-11-02/): 7 startup
+runs and 1 install run per agent. Each JSON file records the machine, measured
+versions and smelt build provenance. Earlier results stay in their dated folders.
+
+## Refreshing published results
+
+Pin the latest stable comparison agents in `run.py` and build smelt with
+`cargo build --locked --profile dist --bin smelt`. From this directory, run
+both measurements with the same binary:
 
 ```bash
-python3 charts.py results/2026-10-31
+folder="results/$(date +%F)"
+mkdir -p "$folder"
+python3 run.py cold-start --runs 7 --smelt-binary /path/to/smelt --out "$folder/cold-start.json"
+python3 run.py install --runs 1 --smelt-binary /path/to/smelt --out "$folder/install.json"
 ```
+
+Check that every startup sample has `requests > 0`. Add measured `versions`
+and `smelt_build` metadata to both JSON files, then regenerate:
+
+```bash
+python3 charts.py "$folder"
+```
+
+This updates the root README's versions and memory/install columns and the
+guide and homepage charts. Update the guide and homepage summary text and the
+results link above by hand. Leave historical Terminal-Bench task data unchanged.
+
+Run `python3 -m unittest discover -s .`, check that a second generation makes
+no changes, and run `git diff --check`. For docs changes, also run
+`zensical build --strict` from `docs/`.
 
 ## Limits
 

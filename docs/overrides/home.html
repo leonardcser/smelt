@@ -654,17 +654,17 @@
     </div>
     <div class="cell">
       <h2>Light on your machine</h2>
-      <p>smelt installs as one 45 MiB binary and uses 50 MiB at start. The other four agents write 313 to 1683 MiB and use 107 to 333 MiB. Latest releases on 2026-10-31, measured while waiting for the model. Lower is better.</p>
+      <p>smelt installs as one 46 MiB binary and uses 34 MiB at start. The other four agents write 313 to 1684 MiB and use 110 to 328 MiB. Measured on 2026-11-02 with a smelt main dist build and the latest stable comparison-agent releases, while waiting for the model. Lower is better.</p>
       <div class="charts">
         <figure class="chart">
           <figcaption>install size</figcaption>
           <ol>
 <!-- bench:install -->
-          <li class="me" title="smelt: 45 MiB, 1 run"><span>smelt</span><i style="--v:2.7%"></i><b>45 MiB</b></li>
+          <li class="me" title="smelt: 46 MiB, 1 run"><span>smelt</span><i style="--v:2.7%"></i><b>46 MiB</b></li>
           <li title="claude code: 313 MiB, 1 run"><span>claude code</span><i style="--v:18.6%"></i><b>313 MiB</b></li>
-          <li title="pi: 480 MiB, 1 run"><span>pi</span><i style="--v:28.5%"></i><b>480 MiB</b></li>
+          <li title="pi: 483 MiB, 1 run"><span>pi</span><i style="--v:28.7%"></i><b>483 MiB</b></li>
           <li title="codex: 853 MiB, 1 run"><span>codex</span><i style="--v:50.7%"></i><b>853 MiB</b></li>
-          <li title="opencode: 1683 MiB, 1 run"><span>opencode</span><i style="--v:100.0%"></i><b>1683 MiB</b></li>
+          <li title="opencode: 1684 MiB, 1 run"><span>opencode</span><i style="--v:100.0%"></i><b>1684 MiB</b></li>
 <!-- /bench -->
           </ol>
         </figure>
@@ -672,11 +672,11 @@
           <figcaption>memory at start</figcaption>
           <ol>
 <!-- bench:cold-start -->
-          <li class="me" title="smelt: median 50 MiB, middle half 50 to 53 MiB, 7 runs"><span>smelt</span><i style="--v:15.1%;--lo:14.9%;--hi:15.8%"></i><b>50 MiB</b></li>
-          <li title="pi: median 107 MiB, middle half 107 to 108 MiB, 7 runs"><span>pi</span><i style="--v:32.2%;--lo:32.0%;--hi:32.5%"></i><b>107 MiB</b></li>
-          <li title="codex: median 139 MiB, middle half 139 to 140 MiB, 7 runs"><span>codex</span><i style="--v:41.8%;--lo:41.6%;--hi:41.9%"></i><b>139 MiB</b></li>
-          <li title="claude code: median 189 MiB, middle half 189 to 189 MiB, 7 runs"><span>claude code</span><i style="--v:56.6%;--lo:56.6%;--hi:56.8%"></i><b>189 MiB</b></li>
-          <li title="opencode: median 333 MiB, middle half 331 to 333 MiB, 7 runs"><span>opencode</span><i style="--v:99.8%;--lo:99.2%;--hi:100.0%"></i><b>333 MiB</b></li>
+          <li class="me" title="smelt: median 34 MiB, middle half 33 to 36 MiB, 7 runs"><span>smelt</span><i style="--v:10.2%;--lo:10.1%;--hi:11.0%"></i><b>34 MiB</b></li>
+          <li title="pi: median 110 MiB, middle half 106 to 120 MiB, 7 runs"><span>pi</span><i style="--v:33.1%;--lo:31.9%;--hi:36.1%"></i><b>110 MiB</b></li>
+          <li title="codex: median 140 MiB, middle half 139 to 141 MiB, 7 runs"><span>codex</span><i style="--v:42.0%;--lo:41.8%;--hi:42.5%"></i><b>140 MiB</b></li>
+          <li title="claude code: median 189 MiB, middle half 188 to 190 MiB, 7 runs"><span>claude code</span><i style="--v:56.7%;--lo:56.6%;--hi:57.3%"></i><b>189 MiB</b></li>
+          <li title="opencode: median 328 MiB, middle half 327 to 332 MiB, 7 runs"><span>opencode</span><i style="--v:98.7%;--lo:98.5%;--hi:100.0%"></i><b>328 MiB</b></li>
 <!-- /bench -->
           </ol>
         </figure>

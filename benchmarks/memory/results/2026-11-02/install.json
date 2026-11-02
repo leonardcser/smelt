@@ -1,0 +1,56 @@
+{
+ "mode": "install",
+ "date": "2026-11-02",
+ "machine": {
+  "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
+  "kernel": "7.0.0-38-generic",
+  "podman": "podman version 5.7.0"
+ },
+ "smelt": "local build",
+ "smelt_build": {
+  "version": "v0.6.5-46-b1b4ae4d7",
+  "commit": "b1b4ae4d7a595f8417f3aadb8f3df7b2ee2ea7b9",
+  "profile": "dist",
+  "binary_bytes": 48322952,
+  "binary_sha256": "26b6b723abba0b7ccd066656311b2d54cc4561e7edd602eb9083f3c1f17e451d"
+ },
+ "versions": {
+  "smelt": "v0.6.5-46-b1b4ae4d7",
+  "pi": "1.5.0",
+  "codex": "0.166.0",
+  "claude-code": "2.1.316",
+  "opencode": "2.2.5"
+ },
+ "agents": {
+  "smelt": [
+   {
+    "disk": 48328704,
+    "requests": 0
+   }
+  ],
+  "pi": [
+   {
+    "disk": 506912768,
+    "requests": 0
+   }
+  ],
+  "codex": [
+   {
+    "disk": 894648320,
+    "requests": 0
+   }
+  ],
+  "claude-code": [
+   {
+    "disk": 328339456,
+    "requests": 0
+   }
+  ],
+  "opencode": [
+   {
+    "disk": 1765806080,
+    "requests": 0
+   }
+  ]
+ }
+}

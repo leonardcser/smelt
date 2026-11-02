@@ -46,7 +46,7 @@ NVM = (
 
 USE_NVM = "export NVM_DIR=$HOME/.nvm; . $NVM_DIR/nvm.sh; "
 
-# Agent versions are the latest at the time of the last measurement (see README.md).
+# Agent versions are pinned for repeatable comparisons (see README.md).
 # `install` is the agent's official install command; `run` makes the agent
 # send its first request to the mock server.
 AGENTS = {
@@ -61,7 +61,7 @@ AGENTS = {
         ),
     },
     "pi": {
-        "install": f"{NVM} && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.4.0",
+        "install": f"{NVM} && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.0",
         "run": USE_NVM + (
             "mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json <<'EOF'\n"
             f'{{"providers":{{"mock":{{"baseUrl":"{URL}/v1","api":"openai-completions",'
