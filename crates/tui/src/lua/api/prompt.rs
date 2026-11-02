@@ -72,6 +72,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }))
         },
     )?;
+    m.private_fn("_unqueue", &[], |_, ()| -> LuaResult<bool> {
+        Ok(crate::lua::with_agent_host(|host| host.unqueue_prompt()))
+    })?;
     m.fn_(
         "queued",
         "Return the queued prompt text rows, including while execution is paused. Queue changes invalidate the retained top bar so waiting messages remain visible above the input.",

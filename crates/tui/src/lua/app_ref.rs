@@ -647,6 +647,10 @@ impl AgentLuaHost<'_> {
             .handle_confirm_resolve(choice, message, invocation_id, request_id, &tool_name);
     }
 
+    pub(crate) fn unqueue_prompt(&mut self) -> bool {
+        self.app.drain_queued_inputs_into_prompt()
+    }
+
     pub(crate) fn cancel_engine_work(&mut self) {
         if self.app.cancel_session_handoff() {
             return;

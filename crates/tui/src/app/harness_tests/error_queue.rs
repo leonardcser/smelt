@@ -1277,8 +1277,7 @@ fn cancelling_hybrid_quota_retry_clears_backoff_without_losing_queued_work() {
     quota_error(&mut app, Some(reset));
     assert!(has_started_turn(&run_due_timers(&mut app, 60_000)));
     quota_error(&mut app, Some(reset));
-    app.press(crossterm::event::KeyCode::Esc);
-    app.press(crossterm::event::KeyCode::Esc);
+    assert!(app.run_lua("smelt.engine.cancel()"));
     complete_background_job(&mut app);
     app.reload_lua();
     assert!(!has_started_turn(&run_due_timers(&mut app, 3_600_000)));
@@ -1395,12 +1394,11 @@ fn double_escape_stops_quota_retry_but_empty_enter_can_still_resume() {
         assert!(app.run_lua(&format!("smelt.settings.vim = {vim}")));
         create_auto_goal(&mut app, "manual recovery");
         start_canonical_turn(&mut app);
-        app.push_queued_message("keep queued".into());
         quota_error(&mut app, Some(0));
         app.press(crossterm::event::KeyCode::Esc);
         app.press(crossterm::event::KeyCode::Esc);
         assert!(!has_started_turn(&run_due_timers(&mut app, 1300)));
-        assert_eq!(app.state().queued_inputs, vec!["keep queued"]);
+        assert!(app.state().queued_inputs.is_empty());
         assert!(app.run_lua(
             r#"
             local status = smelt.signal.get("auto_continue_status")
@@ -1411,7 +1409,7 @@ fn double_escape_stops_quota_retry_but_empty_enter_can_still_resume() {
         app.press(crossterm::event::KeyCode::Enter);
         app.wait_for_turn_persistence();
         assert!(app.agent_running());
-        assert_eq!(app.state().queued_inputs, vec!["keep queued"]);
+        assert!(app.state().queued_inputs.is_empty());
     }
 }
 

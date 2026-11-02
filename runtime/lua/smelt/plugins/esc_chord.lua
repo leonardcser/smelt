@@ -1,8 +1,15 @@
--- Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy`
--- tokens, e.g. /compact), or rewind to the previous turn when idle.
+-- Esc-Esc: restore queued input first, otherwise cancel in-flight work
+-- or rewind to the previous turn when idle.
 
 smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   local restore_insert = ctx.vim_mode_at_chord_start == "insert"
+
+  if __smelt_internal.prompt._unqueue() then
+    if restore_insert then
+      smelt.vim.set_mode("insert")
+    end
+    return
+  end
 
   local continuation = smelt.engine.continuation_state()
   local paused = continuation.paused and continuation.token ~= nil
@@ -23,4 +30,4 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   else
     smelt.cmd.run("rewind quiet")
   end
-end, { desc = "cancel work / rewind" })
+end, { desc = "unqueue / cancel work / rewind" })

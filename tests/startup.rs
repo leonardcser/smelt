@@ -1772,7 +1772,7 @@ async fn interactive_quota_reset_resumes_original_work_before_queued_input() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interactive_double_escape_cancels_quota_retry_without_losing_queued_input() {
+async fn interactive_double_escape_unqueues_before_cancelling_quota_retry() {
     interactive_quota_pause(true, QuotaRecovery::Cancel).await;
 }
 
@@ -1933,6 +1933,12 @@ smelt.cmd.register("quota-busy", function()
   _G.quota_busy = smelt.work.busy("foreground quota check")
 end)
 smelt.signal.subscribe("work_busy", record_busy_state)
+smelt.keymap.set("", "<F4>", function()
+  local file = assert(io.open("unqueued-input.tmp", "w"))
+  assert(file:write(tostring(#smelt.prompt.queued()), "\n", smelt.prompt.text()))
+  assert(file:close())
+  assert(os.rename("unqueued-input.tmp", "unqueued-input"))
+end)
 "#,
             provider.uri()
         ),
@@ -1958,6 +1964,7 @@ smelt.signal.subscribe("work_busy", record_busy_state)
     let mut command_submitted = false;
     let mut busy_submitted = false;
     let mut queued_at = None;
+    let mut unqueued = false;
     let mut cancelled_at = None;
     let mut follow_up_at = None;
     loop {
@@ -1992,16 +1999,25 @@ smelt.signal.subscribe("work_busy", record_busy_state)
             busy_submitted = true;
         }
         if matches!(recovery, QuotaRecovery::Cancel | QuotaRecovery::CancelBusy)
-            && cancelled_at.is_none()
+            && !unqueued
             && contains(&captured, b"resuming at")
             && (recovery != QuotaRecovery::CancelBusy
                 || std::fs::read_to_string(home.path().join("foreground-busy"))
                     .is_ok_and(|value| value == "true"))
         {
             master
-                .write_all(b"\x1b\x1b")
-                .expect("cancel scheduled retry");
-            cancelled_at = Some(Instant::now());
+                .write_all(b"\x1b\x1b\x1bOS")
+                .expect("restore queued input then inspect prompt");
+            unqueued = true;
+        }
+        if unqueued && cancelled_at.is_none() {
+            if let Ok(input) = std::fs::read_to_string(home.path().join("unqueued-input")) {
+                assert_eq!(input, "0\nqueued follow-up");
+                master
+                    .write_all(b"\x1b\x1b")
+                    .expect("cancel scheduled retry after unqueuing");
+                cancelled_at = Some(Instant::now());
+            }
         }
         if cancel_hook && cancelled_at.is_none() {
             if let Ok(kind) = std::fs::read_to_string(home.path().join("hook-pause-kind")) {

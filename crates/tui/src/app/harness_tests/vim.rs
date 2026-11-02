@@ -113,6 +113,96 @@ fn double_esc_can_rewind_after_cancelling_quota_pause() {
 }
 
 #[test]
+fn escape_unqueues_before_rewinding_idle_session() {
+    for vim in [false, true] {
+        for double in [false, true] {
+            let mut app = TestApp::builder().with_vim(vim).build();
+            app.push_user_block("previous turn");
+            app.push_queued_message("follow-up".into());
+            if vim && !double {
+                assert!(app.run_lua("smelt.vim.set_mode('normal')"));
+            }
+
+            app.press(KeyCode::Esc);
+            if double {
+                app.press(KeyCode::Esc);
+            } else {
+                app.feed_one(SourceEvent::Tick(crate::app::ESC_CHORD_TIMEOUT_MS + 1));
+            }
+            drive_lua_tasks(&mut app);
+
+            let state = app.state();
+            assert!(state.queued_inputs.is_empty());
+            assert_eq!(state.prompt_text, "follow-up");
+            assert!(state.active_modal.is_none());
+        }
+    }
+}
+
+#[test]
+fn escape_unqueues_before_cancelling_or_rewinding_quota_pause() {
+    for vim in [false, true] {
+        for cancelled in [false, true] {
+            for double in [false, true] {
+                let mut app = TestApp::builder().with_vim(vim).build();
+                app.start_submitted_turn("retry this request");
+                app.feed_one(SourceEvent::engine(EngineEvent::TurnError {
+                    message: "quota exceeded".into(),
+                    kind: Some(protocol::EngineAskErrorKind::Quota),
+                    retry_at_ms: Some(123_000),
+                }));
+                app.wait_for_turn_persistence();
+                if cancelled {
+                    assert!(app.run_lua("smelt.engine.cancel()"));
+                }
+                let token = app
+                    .eval_lua::<Option<u64>>("return smelt.engine.continuation_state().token")
+                    .unwrap();
+
+                app.type_text("steering");
+                app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+                app.type_text("follow-up");
+                app.press(KeyCode::Enter);
+                assert_eq!(app.state().queued_inputs, vec!["steering", "follow-up"]);
+                app.type_text("draft");
+
+                if vim && !double {
+                    assert!(app.run_lua("smelt.vim.set_mode('normal')"));
+                }
+                app.press(KeyCode::Esc);
+                if double {
+                    app.press(KeyCode::Esc);
+                } else {
+                    app.feed_one(SourceEvent::Tick(crate::app::ESC_CHORD_TIMEOUT_MS + 1));
+                }
+                drive_lua_tasks(&mut app);
+
+                let state = app.state();
+                assert!(state.queued_inputs.is_empty());
+                assert_eq!(state.prompt_text, "steering\nfollow-up\ndraft");
+                assert!(state.active_modal.is_none());
+                assert!(!state.agent_running);
+                if vim {
+                    assert_eq!(
+                        state.vim_mode,
+                        if double {
+                            VimMode::Insert
+                        } else {
+                            VimMode::Normal
+                        }
+                    );
+                }
+                assert_eq!(
+                    app.eval_lua::<Option<u64>>("return smelt.engine.continuation_state().token")
+                        .unwrap(),
+                    token
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn vim_insert_double_esc_cancels_running_agent_on_second_press() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.start_turn(1);

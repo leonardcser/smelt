@@ -953,6 +953,7 @@ impl TuiApp {
             return outcome;
         }
 
+        self.drain_queued_inputs_into_prompt();
         EventOutcome::Noop
     }
 
@@ -972,13 +973,11 @@ impl TuiApp {
             return outcome;
         }
 
-        if self.conversation.turn_pause().is_some() {
-            self.conversation.clear_continuation();
+        if self.drain_queued_inputs_into_prompt() {
             return EventOutcome::Noop;
         }
-        if !self.prompt.queue_is_empty() {
-            self.drain_queued_inputs_into_prompt();
-            return EventOutcome::Noop;
+        if self.conversation.turn_pause().is_some() {
+            self.conversation.clear_continuation();
         }
 
         EventOutcome::Noop

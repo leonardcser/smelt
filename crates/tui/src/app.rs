@@ -1495,7 +1495,7 @@ impl TuiApp {
         true
     }
 
-    pub(crate) fn drain_queued_inputs_into_prompt(&mut self) {
+    pub(crate) fn drain_queued_inputs_into_prompt(&mut self) -> bool {
         let (request_count, queued) = self.prompt.drain_for_prompt();
         if request_count > 0 {
             self.core.engine.send(protocol::UiCommand::Unsteer {
@@ -1503,7 +1503,7 @@ impl TuiApp {
             });
         }
         if queued.is_empty() {
-            return;
+            return false;
         }
 
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -1521,6 +1521,7 @@ impl TuiApp {
             prefix.push('\n');
         }
         self.prompt.prepend_attached(&mut pctx, prefix, ids);
+        true
     }
 
     pub(crate) fn clear_prompt_prediction(&mut self) {
