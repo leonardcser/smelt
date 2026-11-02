@@ -27,13 +27,10 @@ local function build_items()
   return items
 end
 
-local function rank_history(items, query, original)
+local function rank_history(items, query)
   local by_history_index = {}
   for pos, item in ipairs(items) do
-    local source = original[item._idx]
-    if source and source._history_index then
-      by_history_index[source._history_index] = pos
-    end
+    if item._history_index then by_history_index[item._history_index] = pos end
   end
 
   local out = {}

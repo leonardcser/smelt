@@ -35,8 +35,9 @@ function smelt.provider.normalize(result, opts)
 end
 
 --- Return the stable identity key used to preserve selection across provider refreshes.
----@type fun(item: table?): string?
+---@type fun(item: string|table?): string?
 function smelt.provider.item_key(item)
+  if type(item) == "string" then return item end
   if not item then return nil end
   return item.id or item.path or item.insert_text or item.label
 end

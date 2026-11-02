@@ -17,7 +17,7 @@ provider.has_real_rows = nil
 provider.is_loading = nil
 
 --- Return the stable identity key used to preserve selection across provider refreshes.
----@type fun(item: table?): string?
+---@type fun(item: string|table?): string?
 provider.item_key = nil
 
 --- Return every registered provider as an array of tables. Each entry has `name`, `type`, `api_base`, `api_key_env`, and a `models` array.

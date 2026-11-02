@@ -5,6 +5,7 @@
 if not (smelt.prompt and smelt.prompt.register_completer and smelt.files) then return end
 
 local path_format = require("smelt.completers.path_format")
+local file_row = require("smelt.widgets.file_row")
 
 -- Returns the byte offset of the `@` anchor when the cursor sits inside an
 -- `@…` zone. Mirrors the previous Rust `cursor_in_at_zone` helper: `@` must
@@ -36,14 +37,15 @@ end
 
 smelt.prompt.register_completer({
   limit = 200,
+  render = function(item) return file_row.picker(item) end,
   detect = function(text, cpos)
     return cursor_in_at_zone(text, cpos)
   end,
   matches = function(anchor, text, cpos, limit)
-    return path_format.mark_file_icon_rows(smelt.files.search(query_at(anchor, text, cpos), {
+    return smelt.files.search(query_at(anchor, text, cpos), {
       limit = limit,
       include_dirs = true,
-    }))
+    })
   end,
   query = function(text, anchor, cpos)
     return query_at(anchor, text, cpos)

@@ -3,7 +3,7 @@
 -- One singleton orchestrator owns the prompt's `text_changed` subscription.
 -- Each registered completer declares:
 --   detect(text, cpos)             -> anchor_byte | nil
---   items(anchor, text, cpos)?      -> { { label, description?, prefix_color?, prefix?, search_terms? }, ... }
+--   items(anchor, text, cpos)?      -> { { label, description?, prefix_style?, prefix?, search_terms? }, ... }
 --   matches(anchor, text, cpos, limit)? -> already-filtered/ranked rows or `{ items, status?, message?, searching?, scanning? }`
 --   query(text, anchor, cpos)?     -> string (required with items; optional with matches)
 --   accept(item, anchor, action)   -- action ∈ "enter" | "tab"
@@ -12,8 +12,8 @@
 --   auto?                          -- false: do not auto-open on text_changed
 --   accept_single?                 -- false: keep picker open even when manual Tab has one match
 --   prefix?                        -- picker row prefix glyph
---   prefix_color?                  -- color of the prefix glyph
---   label_color?                   -- color of the label
+--   prefix_style?                  -- shared style for the prefix glyph
+--   label_style?                   -- shared style for the label
 --
 -- Modality lock (`smelt.prompt.acquire`) blocks the orchestrator from
 -- auto-opening while another widget owns the prompt. The lock is released
@@ -81,14 +81,7 @@ function smelt.prompt.is_modal()
   return lock_count > 0
 end
 
-local function prepare_picker_items(list, spec)
-  for _, it in ipairs(list) do
-    if it.prefix_color == nil then it.prefix_color = spec.prefix_color end
-    if it.label_color == nil then it.label_color = spec.label_color end
-    if it.prefix == nil then it.prefix = spec.prefix end
-  end
-  return list
-end
+local prepare_picker_items = require("smelt.widgets.picker_rows")
 
 local function rank_items(all, query)
   if query == "" then
@@ -441,6 +434,7 @@ end
 ---@field auto? boolean Set false to prevent text_changed from auto-opening this completer.
 ---@field accept_single? boolean Set false to keep a manual Tab picker open when there is exactly one match.
 ---@field on_select? fun(item: table): nil Live selection callback.
+---@field render? fun(item: table): string|smelt.picker.Item Format a display row without changing the candidate passed to selection and acceptance callbacks. Not called for loading/error rows.
 
 --- Completer specification handed to `smelt.prompt.register_completer` for bounded,
 --- already-ranked providers.
@@ -457,6 +451,7 @@ end
 ---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
 ---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
 ---@field on_select? fun(item: table): nil Live selection callback.
+---@field render? fun(item: table): string|smelt.picker.Item Format a display row without changing the candidate passed to selection and acceptance callbacks. Not called for loading/error rows.
 
 -- Register a completer spec. Returns a `Reg` whose `:remove()` unregisters the
 -- completer and closes the picker if it was active.
@@ -468,6 +463,7 @@ function smelt.prompt.register_completer(spec)
   assert(type(spec.items) == "function" or type(spec.matches) == "function", "spec.items or spec.matches required")
   if spec.items then assert(type(spec.query) == "function", "spec.query required with spec.items") end
   if spec.query then assert(type(spec.query) == "function", "spec.query must be a function") end
+  if spec.render ~= nil then assert(type(spec.render) == "function", "spec.render must be a function") end
   assert(type(spec.accept) == "function", "spec.accept required")
   table.insert(registry, spec)
   return smelt.reg.new(function()

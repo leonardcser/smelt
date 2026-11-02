@@ -22,8 +22,8 @@ smelt.prompt.register_completer({
         out[#out + 1] = {
           label        = c.name,
           description  = c.desc,
-          prefix_color = "SmeltAccent",
-          label_color  = "SmeltAccent",
+          prefix_style = { fg = "SmeltAccent" },
+          label_style  = { fg = "SmeltAccent" },
         }
       end
     end

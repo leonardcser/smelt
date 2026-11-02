@@ -40,6 +40,10 @@ path.expand = nil
 ---@type fun(p: string): string?
 path.extension = nil
 
+--- Return `(glyph, color)` for `p`, using the bundled nvim-web-devicons mapping and a generic icon for unknown types. Color is a hex RGB string. Options: `{ colors = true, light = false }`; color is nil when colors are disabled. Does not access the filesystem or depend on the file_icons setting. Returns `(nil, nil)` when `p` has no file name.
+---@type fun(p: string, opts: table?): string?, string?
+path.icon = nil
+
 --- Return `true` if `p` is an absolute path on the current platform.
 ---@type fun(p: string): boolean
 path.is_absolute = nil

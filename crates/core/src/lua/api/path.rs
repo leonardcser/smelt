@@ -16,6 +16,32 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         Tier::Host,
     )?;
     m.fn_(
+        "icon",
+        "Return `(glyph, color)` for `p`, using the bundled nvim-web-devicons mapping and a generic icon for unknown types. Color is a hex RGB string. Options: `{ colors = true, light = false }`; color is nil when colors are disabled. Does not access the filesystem or depend on the file_icons setting. Returns `(nil, nil)` when `p` has no file name.",
+        &["p", "opts"],
+        |_, (p, opts): (String, Option<mlua::Table>)| -> LuaResult<(Option<String>, Option<String>)> {
+            let (colors, light) = match opts {
+                Some(opts) => (
+                    opts.get::<Option<bool>>("colors")?.unwrap_or(true),
+                    opts.get::<Option<bool>>("light")?.unwrap_or(false),
+                ),
+                None => (true, false),
+            };
+            let options = crate::content::file_icons::FileIconOptions::new(true, colors, light, None);
+            Ok(match crate::content::file_icons::lookup_path_with_color(Path::new(&p), &options) {
+                Some((icon, color)) => {
+                    let color = match color {
+                        Some(crate::style::Color::Rgb { r, g, b }) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+                        _ => None,
+                    };
+                    (Some(icon.to_string()), color)
+                }
+                None => (None, None),
+            })
+        },
+    )?;
+
+    m.fn_(
         "normalize",
         "Normalize `p` by collapsing redundant `.`, `..`, and separator components without touching the filesystem.",
         &["p"],

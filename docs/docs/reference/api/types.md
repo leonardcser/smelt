@@ -1187,8 +1187,8 @@ Row accepted by picker constructors. A bare string is also accepted and is treat
 | `label` | `string` | yes | Primary text shown for this row. |
 | `description` | `string` |  | Secondary text shown next to the label. |
 | `prefix` | `string` |  | Small prefix rendered before the label. |
-| `prefix_color` | `integer \| string \| false \| number[]` |  | Color of the prefix: any color, or a theme group name such as `"SmeltAccent"`. |
-| `label_color` | `integer \| string \| false \| number[]` |  | Color of the label: any color, or a theme group name. |
+| `prefix_style` | `string \| smelt.Style` |  | Shared style for the prefix: a theme group or style table. |
+| `label_style` | `string \| smelt.Style` |  | Shared style for the label: a theme group or style table. |
 | `search_terms` | `string` |  | Extra text considered by fuzzy pickers. |
 
 ### `smelt.picker.NewOpts`
@@ -1221,8 +1221,9 @@ persistent `on_enter` handling.
 | `loading_poll_ms` | `integer` |  | Quiet polling interval before the initial loading row appears. |
 | `selected` | `integer` |  | Initial selected row (1-based, clamped); defaults to 1. |
 | `on_select` | `fun(item: string\|smelt.picker.Item): nil` |  | Fires on every cursor move. |
+| `render` | `fun(item: any): string\|smelt.picker.Item` |  | Format a display row without changing the original item passed to callbacks. Not called for loading/error rows. |
 | `on_enter` | `fun(item: string\|smelt.picker.Item, idx: integer): nil` |  | Persistent-mode accept handler. |
-| `rank` | `fun(items: table[], query: string, original: (string\|smelt.picker.Item)[]): integer[]` |  | Custom filter/ranker. Return 1-based row indices in display order. |
+| `rank` | `fun(items: (string\|smelt.picker.Item)[], query: string): integer[]` |  | Rank the original items. Return 1-based indices in display order; invalid indices are ignored. |
 | `on_dismiss` | `fun(): nil` |  | Fires on Esc/Ctrl-C. |
 
 ### `smelt.picker.OpenResult`
@@ -1247,7 +1248,7 @@ Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the sa
 | --- | --- | --- | --- |
 | `win` | `fun(): smelt.win.Win` | yes | Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input). |
 | `close` | `fun(): nil` | yes | Close the picker overlay. No-op if already closed. |
-| `items` | `fun(items: table, selected: integer?): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, prefix_color?, label_color?, prefix?, icon?, ... }`. `icon = { kind = "file"|"dir", path = string }` renders file-list icons unless `prefix` is set. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining. |
+| `items` | `fun(items: table, selected: integer?): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `smelt.picker.Item`; rows are formatted in Lua before passing them to the picker. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining. |
 | `selected` | `fun(idx: integer?): any` | yes | Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining. |
 | `move` | `fun(delta: integer): smelt.picker.Picker` | yes | Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 
@@ -1268,6 +1269,7 @@ sets ranked in Lua.
 | `auto` | `boolean` |  | Set false to prevent text_changed from auto-opening this completer. |
 | `accept_single` | `boolean` |  | Set false to keep a manual Tab picker open when there is exactly one match. |
 | `on_select` | `fun(item: table): nil` |  | Live selection callback. |
+| `render` | `fun(item: table): string\|smelt.picker.Item` |  | Format a display row without changing the candidate passed to selection and acceptance callbacks. Not called for loading/error rows. |
 
 ### `smelt.prompt.MatchesCompleterSpec`
 
@@ -1290,6 +1292,7 @@ already-ranked providers.
 | `loading_delay_ms` | `integer` |  | Delay before showing an initial loading row when there are no stale rows to keep. |
 | `loading_poll_ms` | `integer` |  | Quiet polling interval before the initial loading row appears. |
 | `on_select` | `fun(item: table): nil` |  | Live selection callback. |
+| `render` | `fun(item: table): string\|smelt.picker.Item` |  | Format a display row without changing the candidate passed to selection and acceptance callbacks. Not called for loading/error rows. |
 
 ### `smelt.provider.Config`
 

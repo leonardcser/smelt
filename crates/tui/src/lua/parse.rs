@@ -433,16 +433,20 @@ pub(crate) fn color_to_lua(lua: &Lua, color: Color) -> LuaResult<mlua::Value> {
     })
 }
 
+pub(crate) fn resolved_style(value: mlua::Value, groups: Groups) -> Result<Style, String> {
+    if value.is_nil() {
+        Ok(Style::new())
+    } else {
+        LuaStyle::parse(value, groups)?.resolve_with(groups)
+    }
+}
+
 fn span(t: &mlua::Table, groups: Groups) -> Result<Span<'static>, String> {
     let text: String = t
         .get::<String>("text")
         .map_err(|e| format!("span.text: {e}"))?;
     let value = t.get::<mlua::Value>("style").map_err(|e| e.to_string())?;
-    let resolved = if value.is_nil() {
-        Style::new()
-    } else {
-        LuaStyle::parse(value, groups)?.resolve_with(groups)?
-    };
+    let resolved = resolved_style(value, groups)?;
     Ok(Span::styled(text, resolved))
 }
 

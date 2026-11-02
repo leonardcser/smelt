@@ -399,42 +399,33 @@ fn theme_picker_confirms_selection_without_callback_error() {
 
 #[test]
 fn prompt_picker_custom_rank_uses_returned_indices() {
-    let mut app = TestApp::builder().build();
-    assert!(app.run_lua(
-        r#"
-            _G.prompt_picker_rank_result = nil
-            _G.prompt_picker_rank_calls = 0
+    for key in [KeyCode::Enter, KeyCode::Tab] {
+        let mut app = TestApp::builder().build();
+        app.run_lua_result(
+            r#"
+            local first = { label = 'first', payload = { value = 1 } }
+            local second = { label = 'second', payload = { value = 2 } }
             smelt.spawn(function()
                 local result = smelt.picker.open({
-                    placement = "prompt_docked",
-                    items = {
-                        { label = "alpha" },
-                        { label = "beta" },
-                        { label = "gamma" },
-                    },
-                    rank = function(items, query, original)
-                        _G.prompt_picker_rank_calls = _G.prompt_picker_rank_calls + 1
-                        assert(#items == 3)
-                        assert(query == "")
-                        assert(original[1].label == "alpha")
-                        return { 3, {}, 1, 99 }
+                    placement = 'prompt_docked', items = { first, second },
+                    rank = function(items, query)
+                        assert(items[1] == first and items[2] == second)
+                        assert(items[2].payload.value == 2 and items[2]._idx == nil)
+                        return query == '' and { 1, 2 } or { 2, false, 0, 99 }
                     end,
+                    render = function(item) return 'custom ' .. item.payload.value end,
                 })
-                if result then
-                    _G.prompt_picker_rank_result = result.item.label .. ":" .. tostring(result.index)
-                end
+                assert(result.item == second and result.index == 2)
+                rank_accepted = true
             end)
         "#,
-    ));
-
-    drive_lua_tasks(&mut app);
-    app.press(KeyCode::Enter);
-    drive_lua_tasks(&mut app);
-
-    assert!(app.run_lua(
-        r#"
-            assert(_G.prompt_picker_rank_calls >= 1)
-            assert(_G.prompt_picker_rank_result == "gamma:3")
-        "#,
-    ));
+        )
+        .unwrap();
+        drive_lua_tasks(&mut app);
+        app.type_text("filter");
+        assert!(app.render_to_frame().text().contains("custom 2"));
+        app.press(key);
+        drive_lua_tasks(&mut app);
+        app.run_lua_result("assert(rank_accepted)").unwrap();
+    }
 }

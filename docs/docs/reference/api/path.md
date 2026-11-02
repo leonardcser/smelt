@@ -75,6 +75,14 @@ fun(p: string): string?
 
 Return the file extension of `p` (without the leading dot), or `nil` if there is none.
 
+## `smelt.path.icon`
+
+```lua
+fun(p: string, opts: table?): string?, string?
+```
+
+Return `(glyph, color)` for `p`, using the bundled nvim-web-devicons mapping and a generic icon for unknown types. Color is a hex RGB string. Options: `{ colors = true, light = false }`; color is nil when colors are disabled. Does not access the filesystem or depend on the file_icons setting. Returns `(nil, nil)` when `p` has no file name.
+
 ## `smelt.path.is_absolute`
 
 ```lua

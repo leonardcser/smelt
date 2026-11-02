@@ -15,72 +15,45 @@
 --     stays on the same row. Returns nil when the user dismisses.
 --
 -- opts.items     = { entry, ... } | function() -> { entry, ... }
---   entry = { label, description?, prefix_color?, search_terms? }
+--   entry = { label, description?, prefix_style?, search_terms? }
 -- opts.on_select = function(item)   -- fires on navigation
 -- opts.on_enter  = function(item, idx)  -- persistent mode; see above
--- opts.rank      = function(items, query, original) -> { idx, ... }
+-- opts.rank      = function(items, query) -> { idx, ... }
 --   Returns 1-based indices into `items` in display order; missing/invalid
 --   indices are ignored.
 -- opts.provider  = function(query, limit) -> { items, searching?, scanning?, message?, status? }
 --   Provider results use the same contract as completers. While loading, the
 --   picker keeps stale rows and polls until fresh rows arrive.
 
-local function filter_items(all_items, query, rank, original)
-  return smelt.perf.time("picker:filter", function()
-    if rank then
-      local ranked = rank(all_items, query, original) or {}
-      local out = {}
-      for _, idx in ipairs(ranked) do
-        if type(idx) == "number" and all_items[idx] then
-          out[#out + 1] = all_items[idx]
-        end
-      end
-      return out
-    end
+local function search_keys(items)
+  local keys = {}
+  for i, item in ipairs(items) do
+    keys[i] = type(item) == "string" and item
+      or item._hay or ((item.label or "") .. " " .. (item.description or "") .. " " .. (item.search_terms or ""))
+  end
+  return keys
+end
 
-    local order = smelt.fuzzy.rank(all_items, query)
-    local out = {}
-    for i, idx in ipairs(order) do out[i] = all_items[idx] end
-    return out
+local function filter_items(items, query, rank, keys)
+  if query == "" and not rank then return items, nil end
+  local order = smelt.perf.time("picker:rank", function()
+    if rank then return rank(items, query) or {} end
+    return smelt.fuzzy.rank(keys, query)
   end)
+  local rows, indices = {}, {}
+  for _, idx in ipairs(order) do
+    if type(idx) == "number" and items[idx] then
+      rows[#rows + 1] = items[idx]
+      indices[#indices + 1] = idx
+    end
+  end
+  return rows, indices
 end
 
-local function to_picker_items(list)
-  local out = {}
-  for i, it in ipairs(list) do
-    out[i] = {
-      label       = it.label,
-      description = it.description,
-      prefix_color = it.prefix_color,
-      label_color = it.label_color,
-      prefix      = it.prefix,
-    }
-  end
-  return out
-end
+local picker_rows = require("smelt.widgets.picker_rows")
 
-local function stamp(original)
-  local all = {}
-  for i, item in ipairs(original) do
-    local it = type(item) == "string" and { label = item } or item
-    all[i] = {
-      label        = it.label,
-      description  = it.description,
-      prefix_color = it.prefix_color,
-      label_color  = it.label_color,
-      prefix       = it.prefix,
-      search_terms = it.search_terms,
-      id           = it.id,
-      path         = it.path,
-      insert_text  = it.insert_text,
-      kind         = it.kind,
-      _idx         = i,
-      _synthetic   = it._synthetic,
-      _hay         = it._hay
-        or ((it.label or "") .. " " .. (it.description or "") .. " " .. (it.search_terms or "")),
-    }
-  end
-  return all
+local function synthetic(item)
+  return type(item) == "table" and item._synthetic
 end
 
 local function resolve_items(items)
@@ -100,8 +73,9 @@ end
 ---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
 ---@field selected? integer Initial selected row (1-based, clamped); defaults to 1.
 ---@field on_select? fun(item: string|smelt.picker.Item): nil Fires on every cursor move.
+---@field render? fun(item: any): string|smelt.picker.Item Format a display row without changing the original item passed to callbacks. Not called for loading/error rows.
 ---@field on_enter? fun(item: string|smelt.picker.Item, idx: integer): nil Persistent-mode accept handler.
----@field rank? fun(items: table[], query: string, original: (string|smelt.picker.Item)[]): integer[] Custom filter/ranker. Return 1-based row indices in display order.
+---@field rank? fun(items: (string|smelt.picker.Item)[], query: string): integer[] Rank the original items. Return 1-based indices in display order; invalid indices are ignored.
 ---@field on_dismiss? fun(): nil Fires on Esc/Ctrl-C.
 
 function __smelt_internal.picker.open_prompt(opts)
@@ -159,12 +133,16 @@ function __smelt_internal.picker.open_prompt(opts)
   end
 
   provider_state = initial_provider_state
-  local all_items = stamp(original)
-  local current = provider_fn and all_items or ((query == "" and not rank) and all_items or filter_items(all_items, query, rank, original))
+  local keys = not provider_fn and not rank and search_keys(original) or nil
+  local current, indices = original, nil
+  if not provider_fn then current, indices = filter_items(original, query, rank, keys) end
   local selected = math.max(1, math.min(#current, math.floor(tonumber(opts.selected) or 1)))
 
+  local function original_index()
+    return indices and indices[selected] or selected
+  end
   local picker = smelt.picker.new({
-    items     = to_picker_items(current),
+    items     = picker_rows(current, opts),
     placement = "prompt_docked",
   })
   picker:selected(selected - 1)
@@ -176,10 +154,8 @@ function __smelt_internal.picker.open_prompt(opts)
   lifecycle:add(lock_reg)
 
   local function fire_on_select()
-    if current[selected] and not current[selected]._synthetic then
-      local orig = original[current[selected]._idx]
-      lifecycle:call("on_select", on_select, orig)
-    end
+    local item = current[selected]
+    if item and not synthetic(item) then lifecycle:call("on_select", on_select, item) end
   end
   fire_on_select()
 
@@ -189,16 +165,6 @@ function __smelt_internal.picker.open_prompt(opts)
     selected = ((selected - 1 + delta) % n) + 1
     picker:selected(selected - 1)
     fire_on_select()
-  end
-
-  -- Find the position of the logical item with `idx` (1-based original
-  -- index) in `current`, or `nil` if it dropped out of the filtered view.
-  local function pos_of(idx)
-    if not idx then return nil end
-    for i, it in ipairs(current) do
-      if it._idx == idx then return i end
-    end
-    return nil
   end
 
   local provider_poll_reg = nil
@@ -218,8 +184,7 @@ function __smelt_internal.picker.open_prompt(opts)
 
     local old_key = (not reset_to_top) and smelt.provider.item_key(current[selected]) or nil
     original = rows or {}
-    all_items = stamp(original)
-    current = all_items
+    current, indices = original, nil
     provider_state = normalized
 
     if #current == 0 then
@@ -229,7 +194,7 @@ function __smelt_internal.picker.open_prompt(opts)
       selected = __smelt_internal.provider.select_row(current, old_key, not reset_to_top, fallback)
     end
 
-    picker:items(to_picker_items(current), selected - 1)
+    picker:items(picker_rows(current, opts), selected - 1)
     fire_on_select()
 
     if normalized.loading then
@@ -272,32 +237,18 @@ function __smelt_internal.picker.open_prompt(opts)
       return
     end
 
-    local anchor_idx = current[selected] and current[selected]._idx
-    original = resolve_items(opts.items)
-    all_items = stamp(original or {})
+    local old_key = smelt.provider.item_key(current[selected])
+    original = resolve_items(opts.items) or {}
+    keys = not rank and search_keys(original) or nil
     query = smelt.prompt.text() or ""
-    current = (query == "" and not rank) and all_items or filter_items(all_items, query, rank, original)
-    if #current == 0 then
-      selected = 1
-    else
-      selected = pos_of(anchor_idx) or math.min(selected, #current)
-    end
-    picker:items(to_picker_items(current), selected - 1)
+    current, indices = filter_items(original, query, rank, keys)
+    selected = __smelt_internal.provider.select_row(current, old_key, true, math.max(1, math.min(selected, #current)))
+    picker:items(picker_rows(current, opts), selected - 1)
     fire_on_select()
   end
 
-  local function accept(action, picked, item)
-    picked = picked or current[selected]
-    if not picked then
-      lifecycle:close(nil)
-      return true
-    end
-    if picked._synthetic then
-      return false
-    end
-    local idx = picked._idx
-    lifecycle:close({ action = action, index = idx, item = item or original[idx] })
-    return true
+  local function accept(action, item, index)
+    lifecycle:close(item and { action = action, index = index, item = item } or nil)
   end
 
   -- Picker renders reversed: index 0 is at the bottom (closest to prompt).
@@ -311,27 +262,24 @@ function __smelt_internal.picker.open_prompt(opts)
   lifecycle:add(prompt:key("enter", function()
     if persistent then
       local picked = current[selected]
-      if not picked or picked._synthetic then return end
-      local orig = original[picked._idx]
-      if not lifecycle:call("on_enter", on_enter, orig, picked._idx) then
+      if not picked or synthetic(picked) then return end
+      if not lifecycle:call("on_enter", on_enter, picked, original_index()) then
         lifecycle:close(nil)
         return
       end
       refresh()
     else
-      local picked = current[selected]
-      if picked and picked._synthetic then return end
-      local item = picked and original[picked._idx] or nil
-      if picked then smelt.prompt.set_text("") end
-      accept("enter", picked, item)
+      local item, index = current[selected], original_index()
+      if synthetic(item) then return end
+      if item then smelt.prompt.set_text("") end
+      accept("enter", item, index)
     end
   end))
   lifecycle:add(prompt:key("tab", function()
-    local picked = current[selected]
-    if picked and picked._synthetic then return end
-    local item = picked and original[picked._idx] or nil
-    if picked then smelt.prompt.set_text(picked.label) end
-    accept("tab", picked, item)
+    local item, index = current[selected], original_index()
+    if synthetic(item) then return end
+    if item then smelt.prompt.set_text(type(item) == "string" and item or item.label) end
+    accept("tab", item, index)
   end))
   lifecycle:add(prompt:key("esc", function() lifecycle:dismiss() end))
   lifecycle:add(prompt:key("c-c", function() lifecycle:dismiss() end))
@@ -343,11 +291,11 @@ function __smelt_internal.picker.open_prompt(opts)
       return
     end
 
-    current = (query == "" and not rank) and all_items or filter_items(all_items, query, rank, original)
+    current, indices = filter_items(original, query, rank, keys)
     -- Reset selection to the top match on each keystroke; the user is
     -- searching, so "best match" beats "stay where you were".
     selected = 1
-    picker:items(to_picker_items(current), 0)
+    picker:items(picker_rows(current, opts), 0)
     fire_on_select()
   end))
 

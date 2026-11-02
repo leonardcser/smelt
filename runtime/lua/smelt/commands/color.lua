@@ -4,7 +4,7 @@ local presets = smelt.theme.presets
 local preset_names, items = {}, {}
 for i, p in ipairs(presets) do
   preset_names[i] = p.name
-  items[i] = { label = p.name, description = p.detail, prefix_color = p.ansi, prefix = "● " }
+  items[i] = { label = p.name, description = p.detail, prefix_style = { fg = p.ansi }, prefix = "● " }
 end
 
 -- Apply `ansi` to the slug pill bg and the bar/separator fg (prompt
@@ -53,7 +53,7 @@ smelt.cmd.register_picker("color", {
       separator_fg = (smelt.theme.get("SmeltSeparator") or {}).fg,
     }
   end,
-  on_select  = function(item) if item.prefix_color then apply(item.prefix_color) end end,
+  on_select  = function(item) if item.prefix_style then apply(item.prefix_style.fg) end end,
   on_enter   = function(item) smelt.cmd.run("/color " .. item.label) end,
   on_dismiss = function()
     -- Restore both groups to their pre-picker values.

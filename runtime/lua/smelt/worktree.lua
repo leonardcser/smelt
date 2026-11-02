@@ -76,8 +76,8 @@ function M.picker_items(opts)
       description = current_worktree.path or info.cwd or "",
       search_terms = table.concat({ "current", current_worktree.name or "", current_worktree.branch or "", current_worktree.path or "" }, " "),
       action = "status",
-      prefix_color = opts.accent,
-      label_color = opts.accent,
+      prefix_style = { fg = opts.accent },
+      label_style = { fg = opts.accent },
     }
   else
     rows[#rows + 1] = {

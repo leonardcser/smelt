@@ -213,7 +213,7 @@ plugin shows the full pattern with a file tree, folding and refresh.
 ## Pickers
 
 `smelt.picker.open(opts)` asks the user to choose one item. Items are strings or
-`{ label, description, prefix_color, search_terms }` records. With `placement =
+`{ label, description, prefix_style, search_terms }` records. With `placement =
 "prompt_docked"` the prompt filters them using `smelt.fuzzy.rank`. It returns
 `{ index, item, action }`, or `nil` when dismissed.
 
@@ -226,6 +226,13 @@ smelt.spawn(function()
   if choice then smelt.log.info("picked " .. choice.item) end
 end)
 ```
+
+Pass `render(item)` to `smelt.picker.open` or a completer specification to return
+a display string or a picker row (`label`, `description`, `prefix`, and styles).
+Filtering, selection callbacks and acceptance still use the original items.
+
+`require("smelt.widgets.file_row").picker` is the shared file-row formatter.
+Wrap it to customize `@`, path completion and `/files` together.
 
 To restyle future pickers, wrap `smelt.picker.new` and configure the window
 returned by `picker:win()`:

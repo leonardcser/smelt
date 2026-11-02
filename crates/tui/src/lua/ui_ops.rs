@@ -974,91 +974,26 @@ pub(crate) fn parse_picker_item(
             if let Ok(desc) = t.get::<String>("description") {
                 item = item.with_description(desc);
             }
-            let explicit_prefix = t.get::<Option<String>>("prefix").ok().flatten();
-            if let Some(prefix) = explicit_prefix {
+            if let Some(prefix) = t.get::<Option<String>>("prefix").ok().flatten() {
                 item = item.with_prefix(prefix);
-            } else {
-                item = apply_picker_icon(app, item, t);
             }
             let groups = |name: &str| app.ui.theme().lookup(name);
-            let fg = |key: &str| -> Result<Option<smelt_core::style::Style>, String> {
+            let style = |key: &str| {
                 let value = t
                     .get::<mlua::Value>(key)
                     .map_err(|e| format!("picker item.{key}: {e}"))?;
-                let color = crate::lua::parse::color(&value, crate::lua::parse::Layer::Fg, &groups)
-                    .map_err(|e| format!("picker item.{key}: {e}"))?;
-                Ok(color.map(|c| smelt_core::style::Style::new().fg(c)))
+                crate::lua::parse::resolved_style(value, &groups)
+                    .map_err(|e| format!("picker item.{key}: {e}"))
             };
-            if let Some(style) = fg("prefix_color")? {
-                item = item.with_prefix_style(style);
-            }
-            if let Some(style) = fg("label_color")? {
-                item = item.with_label_style(style);
-            }
-            Ok(item)
+            Ok(item
+                .with_prefix_style(style("prefix_style")?)
+                .with_label_style(style("label_style")?))
         }
         other => Err(format!(
             "picker item: expected string or table, got {}",
             other.type_name()
         )),
     }
-}
-
-fn apply_picker_icon(
-    app: &TuiApp,
-    item: crate::picker::PickerItem,
-    t: &mlua::Table,
-) -> crate::picker::PickerItem {
-    let Some(icon) = t.get::<Option<mlua::Table>>("icon").ok().flatten() else {
-        return item;
-    };
-    let Some(kind) = icon.get::<Option<String>>("kind").ok().flatten() else {
-        return item;
-    };
-    let Some(path) = icon.get::<Option<String>>("path").ok().flatten() else {
-        return item;
-    };
-    apply_file_icon(app, item, &kind, &path)
-}
-
-fn apply_file_icon(
-    app: &TuiApp,
-    item: crate::picker::PickerItem,
-    kind: &str,
-    path: &str,
-) -> crate::picker::PickerItem {
-    let settings = &app.core.config.settings;
-    if !settings.file_icons {
-        return item;
-    }
-
-    let colors = settings.file_icon_colors;
-    if kind == "dir" {
-        let style = if colors {
-            app.ui.theme().get("Directory")
-        } else {
-            Default::default()
-        };
-        return item.with_prefix(" ").with_prefix_style(style);
-    }
-
-    let options = smelt_core::content::file_icons::FileIconOptions::new(
-        settings.file_icons,
-        colors,
-        app.ui.theme().is_light(),
-        None,
-    );
-    let Some(icon) =
-        smelt_core::content::file_icons::lookup_path(std::path::Path::new(path), &options)
-    else {
-        return item;
-    };
-    let style = icon
-        .group
-        .map(|group| app.ui.theme().resolve(group))
-        .unwrap_or_default();
-    item.with_prefix(format!("{} ", icon.icon))
-        .with_prefix_style(style)
 }
 
 pub(crate) fn window_buffer_empty_pub(app: &TuiApp, win: WinId) -> bool {

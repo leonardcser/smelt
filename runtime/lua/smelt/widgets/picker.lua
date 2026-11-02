@@ -87,6 +87,10 @@ function smelt.picker.open(opts)
     error("smelt.picker.open: expected table of options", 2)
   end
 
+  if opts.render ~= nil and type(opts.render) ~= "function" then
+    error("smelt.picker.open: opts.render must be a function", 2)
+  end
+
   local uses_prompt = opts.placement == "prompt_docked"
     or opts.provider ~= nil
     or opts.rank ~= nil
@@ -103,7 +107,10 @@ function smelt.picker.open(opts)
     error("smelt.picker.open: opts.items must be a non-empty table", 2)
   end
   local items = opts.items
-  local picker = smelt.picker.new(opts)
+  local picker = smelt.picker.new({
+    items = opts.render and require("smelt.widgets.picker_rows")(items, opts) or items,
+    placement = opts.placement,
+  })
   if not picker then return nil end
   picker:selected(math.max(1, math.min(#items, math.floor(tonumber(opts.selected) or 1))) - 1)
   local win = picker:win()

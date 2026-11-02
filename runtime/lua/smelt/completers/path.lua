@@ -5,6 +5,7 @@
 if not (smelt.prompt and smelt.prompt.register_completer and smelt.fs and smelt.path) then return end
 
 local path_format = require("smelt.completers.path_format")
+local file_row = require("smelt.widgets.file_row")
 
 local function token_at(text, cpos)
   if cpos > #text then cpos = #text end
@@ -64,10 +65,7 @@ local function complete_path(token, limit)
     limit = limit,
     insert_prefix = token.dir_token,
   })
-  if result then
-    path_format.mark_file_icon_rows(result)
-    return result
-  end
+  if result then return result end
   return { items = {}, status = "empty", message = err or "no matches" }
 end
 
@@ -82,6 +80,7 @@ smelt.prompt.register_completer({
   auto = false,
   accept_single = true,
   limit = 200,
+  render = function(item) return file_row.picker(item) end,
   detect = function(text, cpos)
     local token = path_token(text, cpos)
     return token and token.start or nil

@@ -30,7 +30,7 @@ Return true when a provider or normalized result is still loading.
 ## `smelt.provider.item_key`
 
 ```lua
-fun(item: table?): string?
+fun(item: string|table?): string?
 ```
 
 Return the stable identity key used to preserve selection across provider refreshes.

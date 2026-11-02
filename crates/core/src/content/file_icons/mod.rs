@@ -67,34 +67,36 @@ pub(super) struct IconEntry {
 }
 
 pub fn lookup_path(path: &Path, options: &FileIconOptions) -> Option<FileIcon> {
+    let (icon, color) = lookup_path_with_color(path, options)?;
+    Some(FileIcon {
+        icon,
+        group: color.map(|fg| {
+            intern_anonymous_style(Style {
+                fg: Some(fg),
+                ..Default::default()
+            })
+        }),
+    })
+}
+
+pub(crate) fn lookup_path_with_color(
+    path: &Path,
+    options: &FileIconOptions,
+) -> Option<(&'static str, Option<Color>)> {
     if !options.enabled {
         return None;
     }
     let file_name = path.file_name()?.to_str()?;
     let entry = lookup(file_name).unwrap_or(&generated::DEFAULT_ICON);
-    Some(FileIcon {
-        icon: entry.icon,
-        group: icon_group(entry, options),
-    })
-}
-
-fn icon_group(entry: &IconEntry, options: &FileIconOptions) -> Option<HlGroup> {
-    if !options.colors {
-        return None;
-    }
-    let color = if options.light {
-        entry.light
-    } else {
-        entry.dark
-    };
-    Some(intern_anonymous_style(Style {
-        fg: Some(Color::Rgb {
-            r: color.0,
-            g: color.1,
-            b: color.2,
-        }),
-        ..Default::default()
-    }))
+    let color = options.colors.then(|| {
+        let (r, g, b) = if options.light {
+            entry.light
+        } else {
+            entry.dark
+        };
+        Color::Rgb { r, g, b }
+    });
+    Some((entry.icon, color))
 }
 
 fn lookup(file_name: &str) -> Option<&'static IconEntry> {
