@@ -73,7 +73,7 @@ def normalize_replay_paths(site: Path) -> None:
     """Keep local replay URLs within this version, including in old releases."""
     for page in site.rglob("*.html"):
 
-        def replace(match: re.Match[str]) -> str:
+        def replace(match: re.Match[str], page: Path = page) -> str:
             asset = site / match[1]
             if not asset.is_file():
                 raise FileNotFoundError(f"{page}: missing replay {match[1]}")
