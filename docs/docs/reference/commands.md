@@ -71,16 +71,17 @@ with both kinds of changes appears in both. Status letters are colored: green fo
 added, yellow for modified, red for deleted and conflicted, blue for renamed.
 
 Click a file to jump to it, or a folder to fold it. Drag the divider to resize the
-panes. `s`, `u` and `-` stage and unstage a single file without touching the
-working tree. If a refresh fails, the previous view stays with a `stale - r
-refresh` marker.
+panes. `s`, `u` and `-` stage and unstage the selected file, folder, or section
+without touching the working tree. Folders include all descendants, even when
+collapsed. `-` stages an unstaged selection or unstages a staged selection.
+If a refresh fails, the previous view stays with a `stale - r refresh` marker.
 
 | Key | Action |
 | --- | ------ |
 | `Tab` / `Shift-Tab` | Switch between files and diff |
 | `[` / `]` | Previous/next file |
 | `{` / `}` | Previous/next hunk |
-| `s` / `u`, `-` | Stage/unstage the selected file; `-` toggles by section |
+| `s` / `u`, `-` | Stage/unstage the selected file, folder, or section; `-` toggles by section |
 | `Enter` | Expand/collapse unchanged context, or open a file or folder from the tree |
 | `v` / `V`, `y` | Visual selection and copy |
 | `r` | Refresh |

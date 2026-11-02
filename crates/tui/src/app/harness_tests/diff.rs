@@ -7,6 +7,37 @@ fn preview(app: &TestApp) -> WinId {
         .expect("diff preview")
 }
 
+async fn wait_for_diff_section(app: &mut TestApp, label: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        app.feed_one(SourceEvent::LuaWakeup);
+        paint_diff(app);
+        let found = app
+            .ui_probe()
+            .named_win("smelt.diff.files")
+            .is_some_and(|win| {
+                app.ui_probe()
+                    .buf(app.ui_probe().win(win).unwrap().buf)
+                    .unwrap()
+                    .lines()
+                    .iter()
+                    .any(|line| {
+                        line.strip_prefix(label)
+                            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
+                    })
+            });
+        if found {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "waiting for {label}: {}",
+            app.render_to_frame().text()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 fn open_fixture(app: &mut TestApp, lines: usize) {
     assert!(app.run_lua(&format!(r#"
         local patch = 'diff --git a/first.rs b/first.rs\n@@ -0,0 +1,{lines} @@\n'
@@ -889,34 +920,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     app.set_terminal_size(120, 30);
     app.type_text("/diff");
     app.press(KeyCode::Enter);
-    async fn wait(app: &mut TestApp, text: &str) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            app.feed_one(SourceEvent::LuaWakeup);
-            paint_diff(app);
-            let found = app
-                .ui_probe()
-                .named_win("smelt.diff.files")
-                .is_some_and(|win| {
-                    app.ui_probe()
-                        .buf(app.ui_probe().win(win).unwrap().buf)
-                        .unwrap()
-                        .lines()
-                        .iter()
-                        .any(|line| line.starts_with(text))
-                });
-            if found {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "waiting for {text}: {}",
-                app.render_to_frame().text()
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-    wait(&mut app, "unstaged (2)").await;
+    wait_for_diff_section(&mut app, "unstaged (2)").await;
     let win = preview(&app);
     let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
     let source = Arc::clone(app.ui_probe().win(win).unwrap().row_source().unwrap());
@@ -933,7 +937,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     app.type_text("4GL");
     paint_diff(&mut app);
     app.type_char('-');
-    wait(&mut app, "unstaged (1)").await;
+    wait_for_diff_section(&mut app, "unstaged (1)").await;
     assert_eq!(git(&["show", ":a.rs"]), "working\n");
     assert_eq!(git(&["show", ":b.rs"]), "other staged\n");
     assert!(selected_header(&app).contains("c.rs"));
@@ -954,7 +958,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
 
     app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
     app.type_char('s');
-    wait(&mut app, "unstaged (0)").await;
+    wait_for_diff_section(&mut app, "unstaged (0)").await;
     assert_eq!(git(&["show", ":c.rs"]), "new\n");
     assert!(app.render_to_frame().text().contains("all staged"));
     assert!(app.ui_probe().win(win).unwrap().row_source().is_none());
@@ -975,15 +979,15 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     assert!(selected_header(&app).contains("a.rs"));
     assert!(selected_header(&app).contains("staged"));
     app.type_char('u');
-    wait(&mut app, "staged (2)").await;
+    wait_for_diff_section(&mut app, "staged (2)").await;
     assert_eq!(git(&["show", ":a.rs"]), "base\n");
     assert!(selected_header(&app).contains("b.rs"));
     app.type_char('-');
-    wait(&mut app, "staged (1)").await;
+    wait_for_diff_section(&mut app, "staged (1)").await;
     assert_eq!(git(&["show", ":b.rs"]), "base\n");
     assert!(selected_header(&app).contains("c.rs"));
     app.type_char('-');
-    wait(&mut app, "staged (0)").await;
+    wait_for_diff_section(&mut app, "staged (0)").await;
     assert!(git(&["diff", "--cached", "--name-only"]).is_empty());
     assert!(app.render_to_frame().text().contains("nothing staged"));
     app.type_char('-');
@@ -1000,7 +1004,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
         "u on unstaged is inert"
     );
     app.type_char('s');
-    wait(&mut app, "unstaged (2)").await;
+    wait_for_diff_section(&mut app, "unstaged (2)").await;
     assert!(
         selected_header(&app).contains("b.rs"),
         "last entry falls back to previous file"
@@ -1016,6 +1020,73 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
             body
         );
     }
+    app.press(KeyCode::Esc);
+}
+
+#[tokio::test]
+async fn diff_tree_groups_toggle_index_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+    for path in ["src/a.rs", "src/nested/b.rs", "outside.rs"] {
+        std::fs::write(dir.path().join(path), "base\n").unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    std::fs::write(dir.path().join("src/a.rs"), "partial\n").unwrap();
+    git(&["add", "src/a.rs"]);
+    for path in ["src/a.rs", "src/nested/b.rs", "outside.rs"] {
+        std::fs::write(dir.path().join(path), "working\n").unwrap();
+    }
+    std::fs::write(dir.path().join("src/new.rs"), "new\n").unwrap();
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(120, 30);
+    app.type_text("/diff");
+    app.press(KeyCode::Enter);
+    wait_for_diff_section(&mut app, "unstaged (4)").await;
+    app.press(KeyCode::Tab);
+    // Select and collapse src, then stage all descendants, not outside.rs.
+    app.type_text("gjh-");
+    wait_for_diff_section(&mut app, "unstaged (1)").await;
+    assert_eq!(
+        git(&["diff", "--cached", "--name-only"]),
+        "src/a.rs\nsrc/nested/b.rs\nsrc/new.rs\n"
+    );
+    assert_eq!(git(&["show", ":src/a.rs"]), "working\n");
+
+    // Stage the entire unstaged section, then unstage the staged section.
+    app.type_text("g-");
+    wait_for_diff_section(&mut app, "unstaged (0)").await;
+    assert_eq!(git(&["diff", "--cached", "--name-only"]).lines().count(), 4);
+    app.type_text("gj-");
+    wait_for_diff_section(&mut app, "staged (0)").await;
+    assert!(git(&["diff", "--cached"]).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/a.rs")).unwrap(),
+        "working\n"
+    );
+
+    // Explicit stage/unstage also work on section and folder selections.
+    app.type_text("gs");
+    wait_for_diff_section(&mut app, "unstaged (0)").await;
+    app.type_text("gjju");
+    wait_for_diff_section(&mut app, "staged (1)").await;
+    assert_eq!(git(&["diff", "--cached", "--name-only"]), "outside.rs\n");
     app.press(KeyCode::Esc);
 }
 

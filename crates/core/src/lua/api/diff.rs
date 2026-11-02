@@ -88,6 +88,7 @@ impl mlua::UserData for LuaDiffTree {
                     let value = lua.create_table()?;
                     value.set("index", node.file.map(|file| file + 1))?;
                     value.set("first", node.first + 1)?;
+                    value.set("last", node.end)?;
                     value.set("parent", node.parent)?;
                     value.set("children", node.children)?;
                     value.set("section", node.section.name())?;
@@ -309,6 +310,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         fields: vec![
             LuaClassField { name: "index", ty: "integer".into(), optional: true, doc: "File index, or nil for a directory." },
             LuaClassField { name: "first", ty: "integer".into(), optional: false, doc: "First descendant file index." },
+            LuaClassField { name: "last", ty: "integer".into(), optional: false, doc: "Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section." },
             LuaClassField { name: "parent", ty: "integer".into(), optional: true, doc: "Visible parent directory row." },
             LuaClassField { name: "children", ty: "boolean".into(), optional: false, doc: "Whether this row is an expandable directory. Section headings are fixed." },
             LuaClassField { name: "section", ty: "'unstaged'|'staged'".into(), optional: false, doc: "Section containing this row." },
@@ -357,7 +359,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             view.set_wakeup(parse_shared.wakeup_tx.get().cloned());
             Ok(LuaDiff(view, None))
         })?;
-    let git = LuaMod::advanced(lua, smelt, "git", "Asynchronous Git snapshots and explicit file-level staging. `git.diff(opts?)` yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action)` updates the selected file's real index entries, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.", Tier::Host)?;
+    let git = LuaMod::advanced(lua, smelt, "git", "Asynchronous Git snapshots and explicit file or range staging. `git.diff(opts?)` yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.", Tier::Host)?;
     let index_shared = Arc::clone(shared);
     let shared = Arc::clone(shared);
     git.private_live_only_fn(
@@ -395,19 +397,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     git.private_live_only_fn(
         "__start_index",
-        &["task_id", "diff", "file", "action"],
+        &["task_id", "diff", "file", "action", "last"],
         move |_,
-              (id, diff, index, action): (u64, LuaDiff, usize, String)|
+              (id, diff, index, action, last): (u64, LuaDiff, usize, String, Option<usize>)|
               -> LuaResult<LuaDiffJob> {
             let repository =
                 Arc::clone(diff.1.as_ref().ok_or_else(|| {
                     LuaError::external("index operations require a Git snapshot")
                 })?);
-            let file = index
+            let start = index
                 .checked_sub(1)
-                .and_then(|i| diff.0.diff.files.get(i))
-                .cloned()
                 .ok_or_else(|| LuaError::external("invalid diff file index"))?;
+            let end = last.unwrap_or(index);
+            if start >= end || end > diff.0.diff.files.len() {
+                return Err(LuaError::external("invalid diff file range"));
+            }
+            if diff.0.diff.files[start].section != diff.0.diff.files[end - 1].section {
+                return Err(LuaError::external("index selection must belong to one section"));
+            }
             let action = match action.as_str() {
                 "stage" => crate::git::IndexAction::Stage,
                 "unstage" => crate::git::IndexAction::Unstage,
@@ -426,7 +433,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             let wakeup = index_shared.wakeup_tx.get().cloned();
             tokio::spawn(async move {
                 let mutation = tokio::time::timeout(std::time::Duration::from_secs(120),
-                    crate::git::update_index(repository.root.clone(), file, action, cancel.clone()))
+                    crate::git::update_index(repository.root.clone(), &diff.0.diff.files[start..end], action, cancel.clone()))
                     .await.unwrap_or_else(|_| Err("git index operation timed out after 120 seconds; refresh to verify repository state".into()));
                 let value = match mutation {
                     Err(error) => Err(error),

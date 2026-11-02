@@ -105,43 +105,51 @@ pub(crate) enum IndexAction {
     Toggle,
 }
 
-/// Mutate only the selected file's index entries. A toggle acts on the selected
-/// section, never on a different section that also contains the same path.
+/// Mutate only the selected files' index entries in one Git operation. A toggle
+/// acts on their shared section, not another section containing the same paths.
 pub(crate) async fn update_index(
     root: PathBuf,
-    file: crate::diff::File,
+    files: &[crate::diff::File],
     action: IndexAction,
     cancel: CancellationToken,
 ) -> Result<(), String> {
+    let Some(first) = files.first() else {
+        return Ok(());
+    };
+    if files.iter().any(|file| file.section != first.section) {
+        return Err("index selection must belong to one section".into());
+    }
     let status = read_status(&root, &cancel).await?;
     let stage = match action {
         IndexAction::Stage => true,
         IndexAction::Unstage => false,
-        IndexAction::Toggle => file.section == crate::diff::Section::Unstaged,
+        IndexAction::Toggle => first.section == crate::diff::Section::Unstaged,
     };
     let mut paths = Vec::new();
-    if let Some(current) = status.get(&file.raw_path) {
-        if if stage {
-            current.worktree != ' '
-        } else {
-            current.index != ' '
-        } {
-            paths.push(file.raw_path.clone());
-            if !stage && current.index == 'R' {
-                if let Some(old) = &current.old_path {
-                    paths.push(old.clone());
+    for file in files {
+        if let Some(current) = status.get(&file.raw_path) {
+            if if stage {
+                current.worktree != ' '
+            } else {
+                current.index != ' '
+            } {
+                paths.push(file.raw_path.clone());
+                if !stage && current.index == 'R' {
+                    if let Some(old) = &current.old_path {
+                        paths.push(old.clone());
+                    }
                 }
             }
         }
-    }
-    if file.raw_old_path != file.raw_path {
-        if let Some(old) = status.get(&file.raw_old_path) {
-            if if stage {
-                old.worktree == 'D'
-            } else {
-                old.index == 'D'
-            } {
-                paths.push(file.raw_old_path.clone());
+        if file.raw_old_path != file.raw_path {
+            if let Some(old) = status.get(&file.raw_old_path) {
+                if if stage {
+                    old.worktree == 'D'
+                } else {
+                    old.index == 'D'
+                } {
+                    paths.push(file.raw_old_path.clone());
+                }
             }
         }
     }
@@ -152,16 +160,23 @@ pub(crate) async fn update_index(
     }
     if !stage
         && status.iter().any(|(other, state)| {
-            state.index != ' '
-                && !paths.contains(other)
-                && paths.iter().any(|path| {
-                    other
-                        .strip_prefix(path.as_slice())
-                        .is_some_and(|rest| rest.starts_with(b"/"))
-                        || (state.index != 'D'
-                            && path
-                                .strip_prefix(other.as_slice())
-                                .is_some_and(|rest| rest.starts_with(b"/")))
+            if state.index == ' ' || paths.binary_search(other).is_ok() {
+                return false;
+            }
+            let selected_ancestor = other.iter().enumerate().any(|(end, byte)| {
+                *byte == b'/'
+                    && paths
+                        .binary_search_by(|path| path.as_slice().cmp(&other[..end]))
+                        .is_ok()
+            });
+            selected_ancestor
+                || (state.index != 'D' && {
+                    let mut prefix = other.clone();
+                    prefix.push(b'/');
+                    let descendant = paths.partition_point(|path| path < &prefix);
+                    paths
+                        .get(descendant)
+                        .is_some_and(|path| path.starts_with(&prefix))
                 })
         })
     {
@@ -841,7 +856,7 @@ mod tests {
         let file = snapshot.view.diff.files[0].clone();
         update_index(
             root.to_owned(),
-            file.clone(),
+            std::slice::from_ref(&file),
             IndexAction::Stage,
             CancellationToken::new(),
         )
@@ -851,7 +866,7 @@ mod tests {
         assert_eq!(file_status(&file, &status), ('A', ' '));
         update_index(
             root.to_owned(),
-            file.clone(),
+            std::slice::from_ref(&file),
             IndexAction::Unstage,
             CancellationToken::new(),
         )
@@ -870,7 +885,7 @@ mod tests {
         assert_eq!(file.status, "R");
         update_index(
             root.to_owned(),
-            file.clone(),
+            std::slice::from_ref(&file),
             IndexAction::Unstage,
             CancellationToken::new(),
         )
@@ -881,7 +896,7 @@ mod tests {
         assert_eq!(status[b"renamed".as_slice()].worktree, '?');
         update_index(
             root.to_owned(),
-            file.clone(),
+            std::slice::from_ref(&file),
             IndexAction::Stage,
             CancellationToken::new(),
         )
@@ -903,15 +918,18 @@ mod tests {
         let before = repository_files(&root.join(".git"));
         let cancel = CancellationToken::new();
         cancel.cancel();
-        assert!(
-            update_index(root.to_owned(), file.clone(), IndexAction::Stage, cancel)
-                .await
-                .is_err()
-        );
+        assert!(update_index(
+            root.to_owned(),
+            std::slice::from_ref(&file),
+            IndexAction::Stage,
+            cancel
+        )
+        .await
+        .is_err());
         assert_eq!(before, repository_files(&root.join(".git")));
         update_index(
             root.to_owned(),
-            file.clone(),
+            std::slice::from_ref(&file),
             IndexAction::Toggle,
             CancellationToken::new(),
         )
@@ -924,7 +942,7 @@ mod tests {
             .unwrap();
         update_index(
             root.to_owned(),
-            staged.view.diff.files[0].clone(),
+            &staged.view.diff.files[..1],
             IndexAction::Toggle,
             CancellationToken::new(),
         )
@@ -936,7 +954,7 @@ mod tests {
         std::fs::write(root.join(".git/index.lock"), "held").unwrap();
         assert!(update_index(
             root.to_owned(),
-            file,
+            &[file],
             IndexAction::Stage,
             CancellationToken::new()
         )
@@ -978,7 +996,7 @@ mod tests {
         .unwrap();
         update_index(
             root.to_owned(),
-            renamed,
+            &[renamed],
             IndexAction::Unstage,
             CancellationToken::new(),
         )
@@ -1022,7 +1040,7 @@ mod tests {
                     .count(),
                 2
             );
-            update_index(root.to_owned(), file, action, CancellationToken::new())
+            update_index(root.to_owned(), &[file], action, CancellationToken::new())
                 .await
                 .unwrap();
             let status = read_status(root, &CancellationToken::new()).await.unwrap();
@@ -1054,7 +1072,7 @@ mod tests {
         );
         update_index(
             root.to_owned(),
-            file.clone(),
+            std::slice::from_ref(&file),
             IndexAction::Toggle,
             CancellationToken::new(),
         )
@@ -1064,7 +1082,7 @@ mod tests {
         assert_eq!(file_status(&file, &status), ('M', ' '));
         update_index(
             root.to_owned(),
-            file,
+            &[file],
             IndexAction::Unstage,
             CancellationToken::new(),
         )
@@ -1090,7 +1108,7 @@ mod tests {
             .clone();
         update_index(
             root.to_owned(),
-            file,
+            &[file],
             IndexAction::Stage,
             CancellationToken::new(),
         )
@@ -1119,7 +1137,7 @@ mod tests {
         assert!(
             update_index(
                 root.to_owned(),
-                file,
+                &[file],
                 IndexAction::Unstage,
                 CancellationToken::new()
             )
@@ -1128,6 +1146,81 @@ mod tests {
             "unstaging a file discarded staged descendants"
         );
         assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn batch_unstage_checks_file_directory_conflicts_not_name_prefixes() {
+        for (old_path, new_path) in [("src/a", "src/a/child"), ("src/a/child", "src/a")] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            run(root, &["init", "-q"]);
+            run(root, &["config", "user.name", "test"]);
+            run(root, &["config", "user.email", "test@example.invalid"]);
+            std::fs::create_dir_all(root.join(old_path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(old_path), "old file\n").unwrap();
+            std::fs::write(root.join("src/ab"), "base\n").unwrap();
+            run(root, &["add", "."]);
+            run(root, &["commit", "-qm", "base"]);
+            run(root, &["rm", "-q", old_path]);
+            std::fs::create_dir_all(root.join(new_path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(new_path), "replacement\n").unwrap();
+            std::fs::write(root.join("src/ab"), "changed\n").unwrap();
+            run(root, &["add", "."]);
+            let snapshot = working_diff(root.to_owned(), 3, CancellationToken::new())
+                .await
+                .unwrap();
+            let files = &snapshot.view.diff.files;
+            assert_eq!(files.len(), 3);
+            let removed = files.iter().find(|file| file.path == old_path).unwrap();
+            let similar = files.iter().find(|file| file.path == "src/ab").unwrap();
+            let before = std::fs::read(root.join(".git/index")).unwrap();
+            let error = update_index(
+                root.to_owned(),
+                &[removed.clone(), similar.clone()],
+                IndexAction::Unstage,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.contains("conflicting staged paths"),
+                "{old_path}: {error}"
+            );
+            assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), before);
+
+            update_index(
+                root.to_owned(),
+                std::slice::from_ref(similar),
+                IndexAction::Unstage,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let status = read_status(root, &CancellationToken::new()).await.unwrap();
+            assert_eq!(status[b"src/ab".as_slice()].index, ' ');
+            assert_eq!(
+                status.values().filter(|state| state.index != ' ').count(),
+                2
+            );
+
+            update_index(
+                root.to_owned(),
+                files,
+                IndexAction::Unstage,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            run(root, &["diff", "--cached", "--exit-code"]);
+            assert_eq!(
+                std::fs::read_to_string(root.join(new_path)).unwrap(),
+                "replacement\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("src/ab")).unwrap(),
+                "changed\n"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1159,7 +1252,7 @@ mod tests {
                 .clone();
             update_index(
                 root.to_owned(),
-                file.clone(),
+                std::slice::from_ref(&file),
                 IndexAction::Stage,
                 CancellationToken::new(),
             )
@@ -1173,7 +1266,7 @@ mod tests {
             assert_eq!(status[path].index, 'A');
             update_index(
                 root.to_owned(),
-                file,
+                &[file],
                 IndexAction::Unstage,
                 CancellationToken::new(),
             )
@@ -1182,6 +1275,34 @@ mod tests {
             let status = read_status(root, &CancellationToken::new()).await.unwrap();
             assert!(status.values().all(|state| state.index == ' '));
         }
+        update_index(
+            root.to_owned(),
+            &snapshot.view.diff.files,
+            IndexAction::Toggle,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let staged = working_diff(root.to_owned(), 3, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(staged.view.diff.files.len(), paths.len());
+        assert!(staged
+            .view
+            .diff
+            .files
+            .iter()
+            .all(|file| file.section == crate::diff::Section::Staged));
+        update_index(
+            root.to_owned(),
+            &staged.view.diff.files,
+            IndexAction::Toggle,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let status = read_status(root, &CancellationToken::new()).await.unwrap();
+        assert!(status.values().all(|state| state.index == ' '));
     }
 
     #[tokio::test]

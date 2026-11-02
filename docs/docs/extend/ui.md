@@ -205,9 +205,9 @@ end)
   `win:document(nil)` restores the original buffer.
 - Syntax highlighting arrives in the background; text and navigation work
   immediately.
-- `smelt.git.index(diff, index, action)` stages or unstages one file
-  (`"stage"`, `"unstage"` or `"toggle"`) without touching the worktree, and
-  returns a fresh snapshot.
+- `smelt.git.index(diff, index, action, last?)` stages or unstages one file,
+  or an inclusive range within one section (`"stage"`, `"unstage"` or `"toggle"`),
+  without touching the worktree, and returns a fresh snapshot.
 
 The bundled
 [`smelt.plugins.diff`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/plugins/diff.lua)

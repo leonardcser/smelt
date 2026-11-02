@@ -471,6 +471,7 @@ Metadata for one visible file-tree row. File indices are one-based and tree rows
 | --- | --- | --- | --- |
 | `index` | `integer` |  | File index, or nil for a directory. |
 | `first` | `integer` | yes | First descendant file index. |
+| `last` | `integer` | yes | Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section. |
 | `parent` | `integer` |  | Visible parent directory row. |
 | `children` | `boolean` | yes | Whether this row is an expandable directory. Section headings are fixed. |
 | `section` | `'unstaged'\|'staged'` | yes | Section containing this row. |

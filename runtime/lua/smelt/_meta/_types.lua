@@ -328,6 +328,7 @@
 ---@class smelt.diff.TreeNode
 ---@field index? integer File index, or nil for a directory.
 ---@field first integer First descendant file index.
+---@field last integer Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section.
 ---@field parent? integer Visible parent directory row.
 ---@field children boolean Whether this row is an expandable directory. Section headings are fixed.
 ---@field section 'unstaged'|'staged' Section containing this row.

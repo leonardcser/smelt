@@ -106,6 +106,7 @@ pub struct TreeNode {
     pub children: bool,
     pub file: Option<usize>,
     pub first: usize,
+    pub end: usize,
     pub parent: Option<u64>,
     pub expanded: bool,
 }
@@ -303,6 +304,9 @@ impl DiffTree {
             children: node.is_directory(),
             file: node.file,
             first: node.first,
+            end: self.index.nodes[node.end - 1]
+                .file
+                .map_or(node.first, |file| file + 1),
             parent: node.parent.and_then(|index| state.row(index)),
             expanded: !state.collapsed.contains(&index),
         })
@@ -554,11 +558,17 @@ mod tests {
         assert_eq!(tree.snapshot().total_rows, 10);
         assert_eq!(tree.file_row(0, false), Some(3));
         assert_eq!(tree.node(3).unwrap().parent, Some(2));
+        for (row, range) in [(0, 0..4), (1, 0..2), (2, 0..1), (3, 0..1), (5, 2..3)] {
+            let node = tree.node(row).unwrap();
+            assert_eq!(node.first..node.end, range);
+        }
         assert_eq!(tree.toggle(5), Some(5));
         let tests_fold = tree.collapsed();
         assert_eq!(tree.toggle(2), Some(2));
         assert_eq!(tree.toggle(1), Some(1));
         assert_eq!(tree.snapshot().total_rows, 6);
+        let collapsed = tree.node(1).unwrap();
+        assert_eq!(collapsed.first..collapsed.end, 0..2);
         assert!(tree.file_row(0, false).is_none());
         assert_eq!(tree.file_row(0, true), Some(3));
         assert_eq!(tree.collapsed(), tests_fold);
@@ -591,6 +601,11 @@ mod tests {
                 let row = tree.section_row(section);
                 let node = tree.node(row).unwrap();
                 assert!(node.group && node.expanded && !node.children);
+                assert_eq!(
+                    node.first..node.end,
+                    diff.files.partition_point(|file| file.section < section)
+                        ..diff.files.partition_point(|file| file.section <= section)
+                );
                 assert_eq!(tree.toggle(row), None);
                 assert!(tree.rows(row..row + 1, &crate::theme::Theme::default())[0]
                     .text

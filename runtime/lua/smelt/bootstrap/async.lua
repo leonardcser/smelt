@@ -181,19 +181,20 @@ function smelt.git.diff(opts)
   return job:take()
 end
 
---- Stage, unstage, or toggle one file from a Git snapshot. File indices are
---- one-based. Toggle stages an unstaged entry and unstages a staged entry.
+--- Stage, unstage, or toggle files from a Git snapshot. File indices are
+--- one-based. Optional last selects an inclusive range within one section.
+--- Toggle stages unstaged entries and unstages staged entries in one operation.
 --- Updates the real index, never worktree contents, then acquires and indexes
 --- both sections off the UI thread. Yields inside `smelt.spawn`. A successful
 --- index operation returns index_updated=true even if refresh fails: diff is then
 --- nil and refresh_error explains why. Retain the old snapshot as stale and
 --- refresh before another mutation. nil, error means the mutation did not report
 --- success; cancellation/timeouts may require refreshing to verify repository state.
----@type fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle"): { root: string, index_updated: boolean, branch: string?, diff: smelt.diff.Diff?, refresh_error: string? }?, string?
-function smelt.git.index(diff, file, action)
+---@type fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle", last: integer?): { root: string, index_updated: boolean, branch: string?, diff: smelt.diff.Diff?, refresh_error: string? }?, string?
+function smelt.git.index(diff, file, action, last)
   require_yieldable("smelt.git.index")
   local id = smelt.task.alloc()
-  local job = internal.git.__start_index(id, diff, file, action)
+  local job = internal.git.__start_index(id, diff, file, action, last)
   smelt.task.wait(id)
   return job:take()
 end

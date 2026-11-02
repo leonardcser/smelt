@@ -343,19 +343,20 @@ function M.open()
     if changing or loading or stale or not diff then return end
     if focused == "preview" and smelt.vim.mode() ~= "normal" then return end
     local node = focused == "files" and selected_node() or nil
-    local index = focused == "files" and node and node.index or (focused == "preview" and selected)
-    if not index then return end
+    local index = node and node.first or (focused == "preview" and selected)
+    local finish = node and node.last or index
+    if not index or index > finish then return end
     local keep = diff:file(index)
     if (action == "stage" and keep.section ~= "unstaged") or
        (action == "unstage" and keep.section ~= "staged") then return end
-    reveal_file(index)
+    if not node or node.index then reveal_file(index) end
     local first, last = diff:section_range(keep.section)
-    local next_file = index < last and diff:file(index + 1) or (index > first and diff:file(index - 1) or nil)
+    local next_file = finish < last and diff:file(finish + 1) or (index > first and diff:file(index - 1) or nil)
     local operation = keep.section == "unstaged" and "stage" or "unstage"
     busy = operation == "stage" and "staging" or "unstaging"
     status()
     changing = smelt.spawn(function()
-      local result, err = smelt.git.index(diff, index, action)
+      local result, err = smelt.git.index(diff, index, action, finish)
       if closed then return end
       changing, busy = nil, nil
       if not result then

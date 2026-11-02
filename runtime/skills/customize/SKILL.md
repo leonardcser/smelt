@@ -628,7 +628,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.fs` - Sync filesystem primitives.
 - `smelt.fs.file_state` - Cached file-state tracker used by tools to detect external modifications between reads and writes.
 - `smelt.fuzzy` - Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
-- `smelt.git` - Asynchronous Git snapshots and explicit file-level staging.
+- `smelt.git` - Asynchronous Git snapshots and explicit file or range staging.
 - `smelt.grep` - Ripgrep wrapper for searching files.
 - `smelt.html` - HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 - `smelt.http` - Asynchronous HTTP get/post.

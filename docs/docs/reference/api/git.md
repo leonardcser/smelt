@@ -1,6 +1,6 @@
 ---
 title: "smelt.git: Lua API reference"
-description: "Asynchronous Git snapshots and explicit file-level staging. Lua API reference for smelt.git in smelt, the Lua-scriptable terminal coding agent."
+description: "Asynchronous Git snapshots and explicit file or range staging. Lua API reference for smelt.git in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.git`
@@ -11,7 +11,7 @@ description: "Asynchronous Git snapshots and explicit file-level staging. Lua AP
 
 **Advanced:** Low-level building block for plugins that need full control. It may change more freely than the rest of the API.
 
-Asynchronous Git snapshots and explicit file-level staging. `git.diff(opts?)` yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action)` updates the selected file's real index entries, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.
+Asynchronous Git snapshots and explicit file or range staging. `git.diff(opts?)` yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.
 
 ## `smelt.git.diff`
 
@@ -29,13 +29,14 @@ until explicitly refreshed; a clean repository returns an empty diff.
 ## `smelt.git.index`
 
 ```lua
-fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle"): { root: string, index_updated: boolean, branch: string?, diff: smelt.diff.Diff?, refresh_error: string? }?, string?
+fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle", last: integer?): { root: string, index_updated: boolean, branch: string?, diff: smelt.diff.Diff?, refresh_error: string? }?, string?
 ```
 
 Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff)
 
-Stage, unstage, or toggle one file from a Git snapshot. File indices are
-one-based. Toggle stages an unstaged entry and unstages a staged entry.
+Stage, unstage, or toggle files from a Git snapshot. File indices are
+one-based. Optional last selects an inclusive range within one section.
+Toggle stages unstaged entries and unstages staged entries in one operation.
 Updates the real index, never worktree contents, then acquires and indexes
 both sections off the UI thread. Yields inside `smelt.spawn`. A successful
 index operation returns index_updated=true even if refresh fails: diff is then

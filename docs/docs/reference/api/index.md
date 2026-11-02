@@ -98,7 +98,7 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.files`](files.md): Workspace file search.
 - [`smelt.fs`](fs.md): Sync filesystem primitives.
 - [`smelt.fs.file_state`](fs_file_state.md): Cached file-state tracker used by tools to detect external modifications between reads and writes. Advanced.
-- [`smelt.git`](git.md): Asynchronous Git snapshots and explicit file-level staging. Advanced.
+- [`smelt.git`](git.md): Asynchronous Git snapshots and explicit file or range staging. Advanced.
 - [`smelt.grep`](grep.md): Ripgrep wrapper for searching files.
 - [`smelt.http`](http.md): Asynchronous HTTP get/post.
 - [`smelt.http.cache`](http_cache.md): Runtime-owned HTTP response cache.
