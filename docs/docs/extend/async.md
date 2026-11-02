@@ -127,17 +127,3 @@ local reg = smelt.fs.watch(smelt.session.info().cwd, function(ev)
 end)
 -- later: reg:remove()
 ```
-
-`smelt.git.watch(handler, opts?)` watches a Git repository for changes that can
-alter `smelt.git.diff`, including tracked files under ignored directories, the
-index, `HEAD` and refs. Reads, untracked ignored files and lock files are dropped,
-so loading a diff never wakes it. Bursts are coalesced off-thread over 150 ms.
-`handler()` is an invalidation notice, not a file-event stream. `opts.cwd`
-defaults to the session workspace. Registration returns after watches are
-installed, or raises on setup failure. It returns a `Reg`.
-
-```lua
-local reg = smelt.git.watch(function()
-  smelt.log.info("Git changes may be outdated")
-end)
-```

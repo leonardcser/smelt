@@ -1,4 +1,4 @@
--- /diff: continuous, virtualized Git diff viewer. Layout, loading lifecycle,
+-- /diff: snapshot-based, virtualized Git diff viewer. Layout, loading lifecycle,
 -- sidebar synchronization and interaction policy live here; native documents
 -- index patch bytes and materialize only the visible rows.
 
@@ -14,11 +14,8 @@ function M.open()
   local cwd = smelt.session.cwd()
 
   local closed, loading, changing, overlay = false, nil, nil, nil
-  local diff, selected, busy, shown
+  local diff, selected, busy
   local stale = false
-  -- Set when the repository changed while a reload had to wait.
-  local outdated = false
-  local watch, mode_watch, pending_install
   local file_count = 0
   local focused = "preview"
   local tree, sidebar_count, folder_press
@@ -44,16 +41,14 @@ function M.open()
   local split = layout.split("horizontal", { size = 34, min_first = 26, min_second = 32 })
   local overlay_opts = { name = "smelt.diff", anchor = "center", width = "94%", height = "85%", modal = true, border = "none" }
   local function status()
-    local label = busy or (stale and "stale - r refresh") or false
-    if overlay and label == shown then return end
-    shown = label
+    local label = busy or (stale and "stale - r refresh")
     local files_leaf = layout.leaf(sidebar, {
       border = { top = "Comment", bottom = "Comment", left = "Comment" },
       title = smelt.dialog.title(" files "),
     })
     overlay_opts.layout = split:layout(files_leaf,
       layout.leaf(preview, { border = { top = "Comment", bottom = "Comment", right = "Comment" },
-        title = smelt.dialog.title(label and (" changes - " .. label .. " ") or " changes ") }))
+        title = smelt.dialog.title(label and (" changes - " .. label .. " ") or " snapshot - r refresh ") }))
     overlay = smelt.overlay.new(overlay_opts)
   end
 
@@ -86,10 +81,8 @@ function M.open()
     closed = true
     if loading then loading:remove(); loading = nil end
     if changing then changing:remove(); changing = nil end
-    if watch then watch:remove(); watch = nil end
-    if mode_watch then mode_watch:remove(); mode_watch = nil end
     active = nil
-    diff, tree, selected, folder_press, pending_install = nil, nil, nil, nil, nil
+    diff, tree, selected, folder_press = nil, nil, nil, nil
     file_count = 0
   end
 
@@ -280,18 +273,7 @@ function M.open()
   preview:key("<S-Left>", function() preview:pan(-4) end)
   preview:key("<S-Right>", function() preview:pan(4) end)
 
-  local function visual_selection()
-    local mode = focused == "preview" and smelt.vim.mode()
-    return mode == "visual" or mode == "visual_line"
-  end
-
   local function install(result, keep, next_file, restore_position)
-    -- A user can enter Visual mode while Git is still running.
-    if visual_selection() then
-      pending_install = { result = result, keep = keep, next_file = next_file, restore = restore_position }
-      return
-    end
-    pending_install = nil
     local previous_tree = tree
     local sidebar_scroll = tree and sidebar:scroll()
     local sidebar_row = sidebar:cursor() or 0
@@ -332,61 +314,36 @@ function M.open()
     end
   end
 
-  local follow
-
-  -- Quiet loads come from the watcher: no busy label and no error toast, since
-  -- the next change retries anyway.
-  local function load(quiet)
+  local function refresh()
+    sidebar_count, folder_press = nil, nil
     if changing then return end
     if loading then loading:remove() end
-    outdated = false
-    if not quiet then
-      busy = diff and "refreshing" or "loading"
-      status()
-    end
+    busy = diff and "refreshing" or "loading"
+    status()
     loading = smelt.spawn(function()
-      local result, err = smelt.git.diff({ cwd = cwd, previous = diff })
+      local result, err = smelt.git.diff({ cwd = cwd })
       if closed then return end
       loading, busy = nil, nil
       if not result then
         if diff then
           stale = true
-          if not quiet then smelt.notify.error("refresh failed: " .. display(err)) end
+          smelt.notify.error("refresh failed: " .. display(err))
         else
           preview:document(nil)
           preview_buf:lines({ "", "load failed", display(err or "git diff failed"), "r retry" })
           build_tree()
         end
-      elseif result.unchanged then
-        stale = false
       else
         local keep = selected and diff:file(selected)
         install(result, keep, nil, true)
       end
       status()
-      if outdated then follow() end
     end)
-  end
-
-  local function refresh()
-    sidebar_count, folder_press = nil, nil
-    load(false)
-  end
-
-  -- Reloading replaces the preview document, which would drop a Visual
-  -- selection, so wait for the preview to return to Normal mode.
-  function follow()
-    if closed then return end
-    if loading or changing or visual_selection() then
-      outdated = true
-      return
-    end
-    load(true)
   end
 
   local function change_index(action)
     sidebar_count, folder_press = nil, nil
-    if changing or (loading and busy) or stale or not diff then return end
+    if changing or loading or stale or not diff then return end
     if focused == "preview" and smelt.vim.mode() ~= "normal" then return end
     local node = focused == "files" and selected_node() or nil
     local index = node and node.first or (focused == "preview" and selected)
@@ -395,8 +352,6 @@ function M.open()
     local keep = diff:file(index)
     if (action == "stage" and keep.section ~= "unstaged") or
        (action == "unstage" and keep.section ~= "staged") then return end
-    -- Explicit index actions take priority over a quiet background load.
-    if loading then loading:remove(); loading = nil end
     if not node or node.index then reveal_file(index) end
     local first, last = diff:section_range(keep.section)
     local next_file = finish < last and diff:file(finish + 1) or (index > first and diff:file(index - 1) or nil)
@@ -417,7 +372,6 @@ function M.open()
         install(result, keep, next_file)
       end
       status()
-      if outdated then follow() end
     end)
   end
 
@@ -443,21 +397,6 @@ function M.open()
   active = { close = close }
   preview_buf:lines({ "", "loading" })
   preview:focus()
-  local ok, reg = pcall(smelt.git.watch, function() follow() end, { cwd = cwd })
-  if ok then
-    watch = reg
-  else
-    smelt.notify.warn("live diff unavailable; use r to refresh: " .. display(tostring(reg)))
-  end
-  mode_watch = smelt.signal.subscribe("vim_mode", function()
-    if visual_selection() then return end
-    if pending_install then
-      local pending = pending_install
-      install(pending.result, pending.keep, pending.next_file, pending.restore)
-      status()
-    end
-    if outdated then follow() end
-  end)
   refresh()
 end
 

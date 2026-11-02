@@ -4,7 +4,7 @@ expression: frame.text()
 ---
 
 
-   ┌ files ──────────────────────────┬─ changes ─────────────────────────────────────────────────────────┐
+   ┌ files ──────────────────────────┬─ snapshot - r refresh ────────────────────────────────────────────┐
    │ unstaged (2) +4 -1              │         M  src/parser.rs  unstaged +1 -1                          │
    │ ▼ src/                          │         @@ -1,22 +1,22 @@                                         │
    │   M parser.rs +1 -1             │  1   1    unchanged context                                       │

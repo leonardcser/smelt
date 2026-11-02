@@ -1,5 +1,5 @@
 //! Filesystem watcher registry shared between `LuaShared` and the
-//! `smelt.fs.watch` and `smelt.git.watch` Lua APIs. Kept neutral of the api layer so
+//! `smelt.fs.watch` Lua API. Kept neutral of the api layer so
 //! `shared.rs` doesn't need to depend on `crate::lua::api::*`.
 
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -18,43 +18,30 @@ pub struct WatcherState {
     pub closed: bool,
 }
 
-/// What a `WatcherEntry` observes.
-pub enum WatchTarget {
-    Path { path: PathBuf, mode: RecursiveMode },
-    Repository(crate::git_watch::Repository),
-}
-
-enum Subscription {
-    Path {
-        _watcher: RecommendedWatcher,
-    },
-    Repository {
-        _watcher: crate::git_watch::RepositoryWatcher,
-    },
-}
-
 /// Lives in `LuaShared::watchers`. Candidate entries retain only desired
 /// subscription values until generation commit. Dropping an active entry tears
 /// down its OS subscription.
 pub struct WatcherEntry {
     pub state: Arc<Mutex<WatcherState>>,
-    target: WatchTarget,
+    path: PathBuf,
+    mode: RecursiveMode,
     sink: crate::lua::LuaResumeSink,
-    /// Held only for its drop, which ends the OS subscription.
-    subscription: Option<Subscription>,
+    watcher: Option<RecommendedWatcher>,
 }
 
 impl WatcherEntry {
     pub fn new(
-        target: WatchTarget,
+        path: PathBuf,
+        mode: RecursiveMode,
         sink: crate::lua::LuaResumeSink,
         active: bool,
     ) -> Result<Self, String> {
         let mut entry = Self {
             state: Arc::new(Mutex::new(WatcherState::default())),
-            target,
+            path,
+            mode,
             sink,
-            subscription: None,
+            watcher: None,
         };
         if active {
             entry.activate()?;
@@ -63,65 +50,40 @@ impl WatcherEntry {
     }
 
     pub fn activate(&mut self) -> Result<(), String> {
-        if self.subscription.is_some() {
+        if self.watcher.is_some() {
             return Ok(());
         }
         let state = Arc::clone(&self.state);
         let sink = self.sink.clone();
-        let coalesce = matches!(self.target, WatchTarget::Repository(_));
-        let deliver = move |event: &notify::Event| deliver(&state, &sink, event, coalesce);
-        self.subscription = Some(match &self.target {
-            WatchTarget::Path { path, mode } => {
-                let mut watcher = RecommendedWatcher::new(
-                    move |result: notify::Result<notify::Event>| {
-                        if let Ok(event) = result {
-                            deliver(&event);
-                        }
-                    },
-                    Config::default(),
-                )
-                .map_err(|error| error.to_string())?;
-                watcher
-                    .watch(path, *mode)
-                    .map_err(|error| error.to_string())?;
-                Subscription::Path { _watcher: watcher }
-            }
-            WatchTarget::Repository(repository) => Subscription::Repository {
-                _watcher: crate::git_watch::watch(repository.clone(), move || {
-                    deliver(&notify::Event::new(notify::EventKind::Any));
-                })?,
+        let mut watcher = RecommendedWatcher::new(
+            move |result: notify::Result<notify::Event>| {
+                let Ok(event) = result else { return };
+                let payload = event_to_json(&event);
+                let resume = {
+                    let Ok(mut state) = state.lock() else {
+                        return;
+                    };
+                    if state.closed {
+                        return;
+                    }
+                    state.pending.push(payload);
+                    state
+                        .armed
+                        .take()
+                        .map(|task_id| (task_id, std::mem::take(&mut state.pending)))
+                };
+                if let Some((task_id, events)) = resume {
+                    sink.resolve_json(task_id, serde_json::Value::Array(events));
+                }
             },
-        });
+            Config::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        watcher
+            .watch(&self.path, self.mode)
+            .map_err(|error| error.to_string())?;
+        self.watcher = Some(watcher);
         Ok(())
-    }
-}
-
-/// Queue `event` and resolve the armed task, if any, with everything queued.
-fn deliver(
-    state: &Mutex<WatcherState>,
-    sink: &crate::lua::LuaResumeSink,
-    event: &notify::Event,
-    coalesce: bool,
-) {
-    let payload = event_to_json(event);
-    let resume = {
-        let Ok(mut state) = state.lock() else {
-            return;
-        };
-        if state.closed {
-            return;
-        }
-        if coalesce {
-            state.pending.clear();
-        }
-        state.pending.push(payload);
-        state
-            .armed
-            .take()
-            .map(|task_id| (task_id, std::mem::take(&mut state.pending)))
-    };
-    if let Some((task_id, events)) = resume {
-        sink.resolve_json(task_id, serde_json::Value::Array(events));
     }
 }
 

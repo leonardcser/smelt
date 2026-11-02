@@ -102,7 +102,7 @@ fs.size = nil
 --- `detail` carries notify's sub-kind when one is reported (e.g. `kind = "create"` → `detail = "file" | "folder"`).
 --- `opts.recursive` defaults to true; set false to watch only the immediate
 --- entries of a directory. Returns a `Reg` whose `:remove()` stops the
---- watcher and cancels the polling coroutine.
+--- watcher and cancels event delivery.
 ---@type fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg
 fs.watch = nil
 

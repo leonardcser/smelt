@@ -22,7 +22,6 @@ pub mod file_ref;
 pub mod fs;
 pub mod fuzzy;
 pub mod git;
-pub mod git_watch;
 pub mod grep;
 pub mod headless;
 pub mod headless_app;

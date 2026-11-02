@@ -11,10 +11,8 @@ local git = {}
 --- Load separate unstaged (index to worktree) and staged (HEAD to index) changes
 --- without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
 --- defaults to the runtime workspace and `context` to 3. The snapshot is stable
---- until explicitly refreshed; a clean repository returns an empty diff. Pass
---- `previous` to compare contents off-thread: `unchanged` is true when patch,
---- section metadata and context match, so a viewer can retain its document.
----@type fun(opts: { cwd: string?, context: integer?, previous: smelt.diff.Diff? }?): { root: string, branch: string, diff: smelt.diff.Diff, unchanged: boolean }?, string?
+--- until explicitly refreshed; a clean repository returns an empty diff.
+---@type fun(opts: { cwd: string?, context: integer? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
 git.diff = nil
 
 --- Stage, unstage, or toggle files from a Git snapshot. File indices are
@@ -28,16 +26,5 @@ git.diff = nil
 --- success; cancellation/timeouts may require refreshing to verify repository state.
 ---@type fun(diff: smelt.diff.Diff, file: integer, action: "stage"|"unstage"|"toggle", last: integer?): { root: string, index_updated: boolean, branch: string?, diff: smelt.diff.Diff?, refresh_error: string? }?, string?
 git.index = nil
-
---- Watch a Git repository for changes that can alter `smelt.git.diff`, including
---- tracked files under ignored directories, the index, HEAD and refs. Reads,
---- untracked ignored files and lock files are dropped. Change bursts are
---- coalesced off-thread over 150 ms; `handler()` is an invalidation notice, not
---- a file-event stream. `opts.cwd` defaults to the runtime workspace. Registration
---- returns after watches are installed, or raises on setup failure. Returns a
---- `Reg` whose `:remove()` stops watching.
----@see smelt.git.diff
----@type fun(handler: fun(), opts: { cwd: string? }?): smelt.Reg
-git.watch = nil
 
 return git

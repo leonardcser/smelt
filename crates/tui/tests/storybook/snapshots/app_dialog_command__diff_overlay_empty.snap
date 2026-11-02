@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 
-  ┌ files ──────────────────────────┬─ changes ─────────────────────────────┐
+  ┌ files ──────────────────────────┬─ snapshot - r refresh ────────────────┐
   │ unstaged (0)                    │                                       │
   │                                 │ clean                                 │
   │ staged (0)                      │ r refresh                             │

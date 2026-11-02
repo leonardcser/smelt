@@ -74,15 +74,14 @@ Click a file to jump to it, or a folder to fold it. Drag the divider to resize t
 panes. `s`, `u` and `-` stage and unstage the selected file, folder, or section
 without touching the working tree. Folders include all descendants, even when
 collapsed. `-` stages an unstaged selection or unstages a staged selection.
-
-The view follows the repository while it is open: edits, new files, staging and
-commits made by the agent or outside smelt appear without a refresh, and your
-file, folder, or section selection is kept when the target still exists.
-Refreshes also preserve collapsed folders and restore your scroll position.
-Untracked ignored files such as build output do not trigger updates; tracked
-files remain watched even under ignored directories. During a Visual selection,
-the update waits until you leave Visual mode. If a refresh fails, the previous
-view stays with a `stale - r refresh` marker.
+The viewer loads a snapshot when opened. Changes made outside the viewer do not
+update it automatically; press `r` to load the current repository state. Staging
+and unstaging in the viewer refresh the snapshot after the operation. Staging uses
+the selected files' current contents, not the displayed patch; refresh first if
+files may have changed. Folder and section actions use the paths in the snapshot.
+Refreshes preserve collapsed folders and restore selection and scroll position
+when possible.
+If a refresh fails, the previous view stays with a `stale - r refresh` marker.
 
 | Key | Action |
 | --- | ------ |
@@ -92,7 +91,7 @@ view stays with a `stale - r refresh` marker.
 | `s` / `u`, `-` | Stage/unstage the selected file, folder, or section; `-` toggles by section |
 | `Enter` | Expand/collapse unchanged context, or open a file or folder from the tree |
 | `v` / `V`, `y` | Visual selection and copy |
-| `r` | Refresh now |
+| `r` | Refresh |
 | `q`, `Esc`, `Ctrl-C` | Close |
 
 Vim motions (`j`/`k`, `gg`/`G`, `w`/`b`, counts, `Ctrl-U`/`Ctrl-D`) work in both

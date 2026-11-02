@@ -494,7 +494,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.block_nav` | Transcript block navigation. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
-| `smelt.plugins.diff` | /diff: continuous, virtualized Git diff viewer. |
+| `smelt.plugins.diff` | /diff: snapshot-based, virtualized Git diff viewer. |
 | `smelt.plugins.donut` | /donut - Andy Sloane's donut.c, spinning over everything on screen. |
 | `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
 | `smelt.plugins.goal` | Goal lifecycle plugin. |

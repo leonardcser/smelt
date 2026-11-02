@@ -2152,10 +2152,7 @@ async fn fs_watch_delivers_events_until_removed() {
         .exec()
         .expect("watch setup");
 
-    // Let the polling coroutine reach its first __watch_arm before we
-    // mutate the directory.
-    let _ = pump_until_async(&rt, 50, |_| false).await;
-
+    // Changes can arrive before the Lua task arms its first wait.
     std::fs::write(dir.path().join("a.txt"), "one").unwrap();
     // notify backends batch events; give them up to 2s on macOS (FSEvents
     // delivers via a thread with a small flush interval).
@@ -2170,7 +2167,6 @@ async fn fs_watch_delivers_events_until_removed() {
     // Stop the watcher; further mutations must not increment.
     let events_before: i64 = get_global(&rt, "EVENTS");
     rt.lua.load("REG:remove()").exec().unwrap();
-    let _ = pump_until_async(&rt, 100, |_| false).await;
     std::fs::write(dir.path().join("b.txt"), "two").unwrap();
     let _ = pump_until_async(&rt, 400, |_| false).await;
     let events_after: i64 = get_global(&rt, "EVENTS");
