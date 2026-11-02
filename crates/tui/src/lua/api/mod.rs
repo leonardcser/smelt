@@ -74,6 +74,51 @@ fn optional_str(s: &str) -> Option<&str> {
     }
 }
 
+fn register_build_metadata(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    let build = lua.create_table()?;
+    build.set("version", APP_VERSION)?;
+    build.set("sha", optional_str(BUILD_SHA))?;
+    build.set("date", optional_str(BUILD_DATE))?;
+    build.set("target", BUILD_TARGET)?;
+    build.set("tag", optional_str(BUILD_TAG))?;
+    build.set("commits", BUILD_COMMITS.parse::<u32>().unwrap_or(0))?;
+    build.set("dirty", BUILD_DIRTY == "1")?;
+    build.set("display", DISPLAY)?;
+    build.set("release", is_release_build())?;
+    smelt.set("build", build)?;
+    smelt.set("api_version", API_VERSION)
+}
+
+pub(super) fn register_host_extensions(
+    lua: &Lua,
+    smelt: &mlua::Table,
+    keymap: &mlua::Table,
+    shared: &Arc<smelt_core::lua::LuaShared>,
+) -> LuaResult<()> {
+    register_build_metadata(lua, smelt)?;
+    engine::register(lua, smelt, shared)?;
+    keymap::register(lua, keymap, shared)?;
+    model::register(lua, smelt)?;
+    permissions::register(lua, smelt, shared)?;
+    settings::register(lua, smelt, shared)?;
+    text::register(lua, smelt)?;
+    theme::register(lua, smelt)?;
+    smelt.set("keymap", keymap.clone())?;
+    let host_root = LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::Host);
+    host_root.private_fn("__ui_host_available", &[], |_, ()| {
+        Ok(crate::lua::app_ref::ui_host_available())
+    })?;
+    host_root.advanced_fn(
+        "ns",
+        "Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.",
+        &["name"],
+        |_, name: String| -> LuaResult<u32> {
+            Ok(smelt_core::buffer::create_namespace(&name).0)
+        },
+    )?;
+    Ok(())
+}
+
 impl LuaRuntime {
     pub(super) fn register_api(
         lua: &Lua,
@@ -88,18 +133,6 @@ impl LuaRuntime {
         let smelt = lua.create_table()?;
         let smelt_keymap = lua.create_table()?;
 
-        let build = lua.create_table()?;
-        build.set("version", APP_VERSION)?;
-        build.set("sha", optional_str(BUILD_SHA))?;
-        build.set("date", optional_str(BUILD_DATE))?;
-        build.set("target", BUILD_TARGET)?;
-        build.set("tag", optional_str(BUILD_TAG))?;
-        build.set("commits", BUILD_COMMITS.parse::<u32>().unwrap_or(0))?;
-        build.set("dirty", BUILD_DIRTY == "1")?;
-        build.set("display", DISPLAY)?;
-        build.set("release", is_release_build())?;
-        smelt.set("build", build)?;
-        smelt.set("api_version", API_VERSION)?;
         record_module_doc(
             "smelt",
             "Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.",
@@ -155,6 +188,8 @@ impl LuaRuntime {
             cache_root,
         )?;
 
+        register_host_extensions(lua, &smelt, &smelt_keymap, &shared.core)?;
+
         // UiHost-tier bindings
         buf::register(lua, &smelt, shared)?;
         win::register(lua, &smelt, shared)?;
@@ -164,29 +199,20 @@ impl LuaRuntime {
         notify::register(lua, &smelt, shared)?;
         work::register(lua, &smelt)?;
         prompt::register(lua, &smelt)?;
-        theme::register(lua, &smelt)?;
         confirm::register(lua, &smelt, shared)?;
         layout::register(lua, &smelt, shared)?;
         paint::register(lua, &smelt, shared)?;
         render::register(lua, &smelt)?;
         search::register(lua, &smelt)?;
-        text::register(lua, &smelt)?;
-        engine::register(lua, &smelt, shared)?;
         inspect::register(lua, &smelt, shared)?;
         history::register(lua, &smelt)?;
         input::register(lua, &smelt, shared)?;
-        keymap::register(lua, &smelt_keymap, shared)?;
         metrics::register(lua, &smelt)?;
         config::register(lua, &smelt)?;
-        model::register(lua, &smelt)?;
-        permissions::register(lua, &smelt, shared)?;
         session::register(lua, &smelt, shared)?;
-        settings::register(lua, &smelt, shared)?;
         terminal::register(lua, &smelt, shared)?;
         transcript::register(lua, &smelt)?;
         vim::register(lua, &smelt)?;
-
-        smelt.set("keymap", smelt_keymap)?;
 
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
@@ -229,18 +255,6 @@ impl LuaRuntime {
                 })?;
                 crate::lua::with_agent_host(|host| host.set_reasoning_effort(effort))
                     .map_err(LuaError::RuntimeError)
-            },
-        )?;
-        let host_root = LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::Host);
-        host_root.private_fn("__ui_host_available", &[], |_, ()| {
-            Ok(crate::lua::app_ref::ui_host_available())
-        })?;
-        host_root.advanced_fn(
-            "ns",
-            "Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.",
-            &["name"],
-            |_, name: String| -> LuaResult<u32> {
-                Ok(smelt_core::buffer::create_namespace(&name).0)
             },
         )?;
         let smelt_root = LuaMod::extend_supported(lua, smelt.clone(), "smelt", Tier::UiHost);

@@ -31,6 +31,32 @@ async fn shell_escape_propagates_child_status() {
     assert!(out.events.is_empty());
 }
 
+#[tokio::test]
+async fn headless_skips_syntax_warmup() {
+    let h = Harness::new().await;
+    h.write_config("anthropic", "claude-test");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .args(["--headless", "--bench", "-m", "test/claude-test", "!exit 0"])
+        .env("XDG_CONFIG_HOME", h.config_dir.path())
+        .env("XDG_DATA_HOME", h.config_dir.path())
+        .env("XDG_STATE_HOME", h.config_dir.path())
+        .env("XDG_CACHE_HOME", h.config_dir.path())
+        .env("SMELT_TEST_API_KEY", "stub-key")
+        .current_dir(h.config_dir.path())
+        .output()
+        .expect("launch headless smelt");
+
+    assert!(out.status.success(), "stderr: {:?}", out.stderr);
+    let trace = String::from_utf8(out.stdout).expect("UTF-8 startup trace");
+    assert!(trace.contains("startup:services"), "{trace}");
+    assert!(
+        !trace.contains("startup:syntax_warmup_scheduled"),
+        "{trace}"
+    );
+    assert!(!trace.contains("warmup:syntect"), "{trace}");
+}
+
 /// Plain turn: user types a prompt; provider returns a single text
 /// content block; engine emits the streaming + completion events.
 #[tokio::test]

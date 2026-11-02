@@ -1,12 +1,13 @@
 //! `smelt.keymap` - register chord→callback and expose `keymap.help`.
 //! Chords and modes are canonicalized at registration; unknown values raise immediately.
 
-use crate::lua::{LuaHandle, LuaShared};
+use crate::lua::LuaHandle;
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
+use smelt_core::lua::LuaShared;
 use smelt_core::lua::RegisteredKeymap;
 use std::sync::Arc;
 

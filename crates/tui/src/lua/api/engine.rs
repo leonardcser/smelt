@@ -1,12 +1,12 @@
 //! `smelt.engine` - cancel, ask, inherited ask, and submit_command for Lua-rendered turns.
 
-use crate::lua::LuaShared;
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use smelt_core::lua::ask::{self, AskRequest};
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::lua_type::LuaCallback;
 use smelt_core::lua::module::LuaMod;
+use smelt_core::lua::LuaShared;
 use std::sync::Arc;
 
 /// Current continuation identity and automatic-dispatch pause. Scoped to the current session.

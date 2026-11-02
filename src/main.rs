@@ -1066,7 +1066,7 @@ async fn async_main() {
     let lua_early_startup = smelt_perf::perf::begin("startup:lua_early");
     let (mut cwd, initial_message) = startup::prepare_launch(std::env::args_os(), env.cwd());
     env.set_cwd(cwd.clone());
-    let mut lua_runtime = tui::lua::LuaRuntime::new_for_runtime(
+    let mut lua_runtime = smelt_core::lua::LuaRuntime::new_for_runtime(
         &env,
         None,
         std::env::var_os("SMELT_RUNTIME_DIR").map(std::path::PathBuf::from),
@@ -1079,7 +1079,7 @@ async fn async_main() {
 
     let cli_parse_startup = smelt_perf::perf::begin("startup:cli_parse");
     let lua_flag_specs: Vec<tui::CliFlagSpec> = lua_runtime
-        .core_shared()
+        .shared()
         .cli_flag_specs
         .lock()
         .map(|s| s.clone())
@@ -1090,7 +1090,7 @@ async fn async_main() {
         tui::CliFlagValue::String(id) if !id.is_empty() => Some(id.clone()),
         _ => None,
     });
-    if let Ok(mut map) = lua_runtime.core_shared().cli_flag_values.lock() {
+    if let Ok(mut map) = lua_runtime.shared().cli_flag_values.lock() {
         *map = lua_flag_values;
     }
     lua_runtime.freeze_launch_inputs();
@@ -1180,6 +1180,7 @@ async fn async_main() {
 
     let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
     let (resolved_startup, project_trust) = if args.headless {
+        tui::lua::register_host_extensions(&mut lua_runtime);
         lua_runtime.load_host_bootstrap();
         lua_runtime.load_host_autoload();
         lua_runtime.load_user_config();
@@ -1210,15 +1211,6 @@ async fn async_main() {
     let lua_tool_defaults = lua_runtime.tool_defaults();
     let lua_mode_behaviors = lua_runtime.mode_behaviors();
 
-    // One reqwest client shared across startup tasks (Codex / Copilot auth refresh,
-    // context-window fetch) so we only build one rustls config + parse webpki-roots
-    // once. The engine builds its own client because it sets a custom user-agent
-    // for provider request gating.
-    let startup_http_client = smelt_provider::http_client_builder()
-        .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .unwrap_or_else(|_| smelt_provider::http_client());
-
     let startup::ResolvedStartup {
         runtime,
         startup_overrides,
@@ -1227,7 +1219,7 @@ async fn async_main() {
         mut startup_auth_error,
     } = resolved_startup;
     lua_runtime
-        .core_shared()
+        .shared()
         .lsp
         .configure_detached(runtime.lsp.clone(), &cwd, env.home());
 
@@ -1240,7 +1232,10 @@ async fn async_main() {
         );
     }
 
-    std::thread::spawn(tui::warm_up_syntect);
+    if !args.headless {
+        smelt_perf::perf::record_value("startup:syntax_warmup_scheduled", 1);
+        std::thread::spawn(tui::warm_up_syntect);
+    }
 
     if args.headless && runtime.active_model().is_none() {
         eprintln!(
@@ -1452,7 +1447,7 @@ async fn async_main() {
             headless_system_prompt.push_str("\n\n");
             headless_system_prompt.push_str(&fragments.join("\n\n"));
         }
-        let headless_lua = Some(lua_runtime.into_core());
+        let headless_lua = Some(lua_runtime);
         let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = smelt_core::HeadlessApp::new(
             core,
@@ -1492,6 +1487,12 @@ async fn async_main() {
             std::process::exit(exit.code());
         }
     } else {
+        // Share one client across TUI startup tasks (auth refresh and
+        // context-window fetch). Headless uses only the engine's client.
+        let startup_http_client = smelt_provider::http_client_builder()
+            .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| smelt_provider::http_client());
         let tui_construct_startup = smelt_perf::perf::begin("startup:tui_construct");
         let session_persistence = if args.ephemeral {
             match tui::app::SessionPersistence::ephemeral() {
@@ -1504,6 +1505,7 @@ async fn async_main() {
         } else {
             tui::app::SessionPersistence::persistent()
         };
+        let lua_runtime = tui::lua::LuaRuntime::from_core(lua_runtime);
         let mut app = tui::app::TuiApp::new(
             runtime,
             startup_overrides,

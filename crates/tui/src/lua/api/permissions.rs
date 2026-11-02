@@ -325,7 +325,7 @@ fn permission_decision_label(decision: protocol::Decision) -> &'static str {
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
-    shared: &Arc<crate::lua::LuaShared>,
+    shared: &Arc<smelt_core::lua::LuaShared>,
 ) -> LuaResult<()> {
     let m = LuaMod::supported(
         lua,
@@ -387,7 +387,7 @@ pub(super) fn register(
             Ok(LuaPermissionList(out))
         },
     )?;
-    let sync_context = Arc::clone(&shared.core);
+    let sync_context = Arc::clone(shared);
     ui.live_only_fn(
         "sync",
         "Replace selected permission entries. Omitted fields are unchanged. Persisted replacements require the revision from `smelt.permissions.list()` and a call may replace only one of `workspace` or `repository`, so a stale snapshot cannot discard concurrent grants.",
@@ -430,7 +430,7 @@ pub(super) fn register(
             .map_err(LuaError::external)
         },
     )?;
-    let grant_context = Arc::clone(&shared.core);
+    let grant_context = Arc::clone(shared);
     ui.live_only_fn(
         "grant_session",
         "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode?, tool, access = \"read\"|\"write\", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` to scope the grant to one mode.",

@@ -56,7 +56,7 @@ fn unknown_key_err(key: &str) -> LuaError {
 }
 
 fn apply_setting(
-    shared: &Arc<crate::lua::LuaShared>,
+    shared: &Arc<smelt_core::lua::LuaShared>,
     key: String,
     parsed: SettingValue,
 ) -> LuaResult<()> {
@@ -65,7 +65,7 @@ fn apply_setting(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(key, parsed);
-    if shared.core.external_effects_active() {
+    if shared.external_effects_active() {
         crate::lua::try_with_runtime_host(|host| host.schedule_runtime_reconcile());
     }
     Ok(())
@@ -115,7 +115,7 @@ fn lua_to_setting(key: &str, value: mlua::Value) -> LuaResult<SettingValue> {
 pub(super) fn register(
     lua: &Lua,
     smelt: &mlua::Table,
-    shared: &Arc<crate::lua::LuaShared>,
+    shared: &Arc<smelt_core::lua::LuaShared>,
 ) -> LuaResult<()> {
     let settings_tbl = LuaMod::supported(
         lua,

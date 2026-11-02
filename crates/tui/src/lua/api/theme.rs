@@ -79,7 +79,6 @@ pub(crate) fn inherit_metadata(source: &Lua, target: &Lua) {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    sync_metadata(lua, crate::theme::default_baked());
     crate::lua::parse::register_style_doc();
     let m = LuaMod::supported(
         lua,
@@ -188,8 +187,8 @@ plugins flip glyphs or contrast levels based on the current palette.",
         |lua, ()| {
             Ok(lua
                 .app_data_ref::<ThemeMetadata>()
-                .expect("theme metadata is initialized")
-                .is_light)
+                .map(|metadata| metadata.is_light)
+                .unwrap_or_else(|| crate::theme::default_baked().is_light()))
         },
     )?;
 
@@ -200,9 +199,12 @@ plugins flip glyphs or contrast levels based on the current palette.",
         |lua, ()| {
             Ok(lua
                 .app_data_ref::<ThemeMetadata>()
-                .expect("theme metadata is initialized")
-                .syntax_theme
-                .clone())
+                .map(|metadata| metadata.syntax_theme.clone())
+                .unwrap_or_else(|| {
+                    crate::theme::default_baked()
+                        .syntax_theme()
+                        .map(str::to_owned)
+                }))
         },
     )?;
 

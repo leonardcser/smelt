@@ -66,7 +66,7 @@ pub struct WorkspaceFiles {
     projects: HashMap<PathBuf, ProjectSearch>,
     roots: HashMap<PathBuf, PathBuf>,
     git_roots: HashSet<PathBuf>,
-    search_worker: SearchWorker,
+    search_worker: Option<SearchWorker>,
 }
 
 #[derive(Debug)]
@@ -377,7 +377,7 @@ impl WorkspaceFiles {
             projects: HashMap::new(),
             roots: HashMap::new(),
             git_roots: HashSet::new(),
-            search_worker: SearchWorker::new(),
+            search_worker: None,
         }
     }
 
@@ -404,7 +404,10 @@ impl WorkspaceFiles {
             include_dirs: request.include_dirs,
             generation: snapshot.generation,
         };
-        Ok(self.search_worker.request(key, snapshot))
+        Ok(self
+            .search_worker
+            .get_or_insert_with(SearchWorker::new)
+            .request(key, snapshot))
     }
 
     pub fn accept(&mut self, request: AcceptRequest) -> Result<(), String> {
@@ -1669,6 +1672,27 @@ mod tests {
             &root,
             &root.join("crates/app/bazel-smelt")
         ));
+    }
+
+    #[test]
+    fn interactive_search_worker_starts_only_on_demand() {
+        let project = tempfile::tempdir().unwrap();
+        let mut files = WorkspaceFiles::default();
+        assert!(files.search_worker.is_none());
+        files.warmup(project.path()).unwrap();
+        assert!(files.search_worker.is_none());
+        wait_until_ready(&mut files, project.path());
+        let request = SearchRequest {
+            query: String::new(),
+            cwd: project.path().to_path_buf(),
+            limit: 20,
+            offset: 0,
+            include_dirs: false,
+        };
+        files.search(request.clone()).unwrap();
+        assert!(files.search_worker.is_none());
+        files.search_interactive(request).unwrap();
+        assert!(files.search_worker.is_some());
     }
 
     #[test]

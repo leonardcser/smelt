@@ -625,11 +625,32 @@ impl std::ops::DerefMut for LuaRuntime {
     }
 }
 
+/// Register host-capable bindings that still live in the frontend crate.
+/// No TUI shared state or UI-only namespaces are created.
+pub fn register_host_extensions(runtime: &mut smelt_core::lua::LuaRuntime) {
+    if runtime.load_error.is_none() {
+        let result = (|| -> mlua::Result<()> {
+            let smelt = runtime.lua.globals().get("smelt")?;
+            let keymap = runtime.lua.globals().get("smelt_keymap")?;
+            api::register_host_extensions(&runtime.lua, &smelt, &keymap, runtime.shared())
+        })();
+        if let Err(error) = result {
+            runtime.load_error = Some(error.to_string());
+        }
+    }
+}
+
 impl LuaRuntime {
+    /// Attach TUI bindings to the VM that evaluated launch-time CLI declarations.
+    pub fn from_core(core: smelt_core::lua::LuaRuntime) -> Self {
+        let shared = Arc::new(LuaShared::with_core(Arc::clone(core.shared())));
+        Self::with_core(core, shared, false)
+    }
+
     /// Build an isolated fixture runtime and register the `smelt` global.
     /// Does not load `init.lua` - call [`LuaRuntime::load_autoload`] after
     /// startup snapshots are available so plugins see real data at registration time.
-    /// Production startup uses [`LuaRuntime::new_for_runtime`] and loads the UI
+    /// Production startup uses [`LuaRuntime::from_core`] and loads the UI
     /// bootstrap from an actual application scope.
     pub fn new() -> Self {
         Self::with_shared(Arc::new(LuaShared::default()))
@@ -802,13 +823,13 @@ impl LuaRuntime {
     }
 
     pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
-        mode_names(&self.core)
+        self.core.mode_names()
     }
 
     pub fn mode_behaviors(
         &self,
     ) -> std::collections::HashMap<String, smelt_core::permissions::ModeBehavior> {
-        mode_behaviors(&self.core)
+        self.core.mode_behaviors()
     }
 }
 
@@ -816,8 +837,8 @@ fn collect_desired_state(core: &smelt_core::lua::LuaRuntime) -> LuaDesiredState 
     LuaDesiredState {
         config: core.to_config(),
         modes: ModeDeclarations {
-            cycle: mode_names(core),
-            behaviors: mode_behaviors(core),
+            cycle: core.mode_names(),
+            behaviors: core.mode_behaviors(),
         },
         permissions: PermissionDeclarations {
             rules: core.permission_rules_snapshot().unwrap_or_default(),
@@ -825,65 +846,6 @@ fn collect_desired_state(core: &smelt_core::lua::LuaRuntime) -> LuaDesiredState 
         },
         default_shell: core.default_shell_snapshot(),
     }
-}
-
-fn mode_names(core: &smelt_core::lua::LuaRuntime) -> Vec<protocol::AgentMode> {
-    let result: mlua::Result<Vec<String>> = (|| {
-        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
-        let mode: mlua::Table = smelt.get("mode")?;
-        let list: mlua::Function = mode.get("list")?;
-        let rows: mlua::Table = list.call(())?;
-        let mut names = Vec::new();
-        for row in rows.sequence_values::<mlua::Table>() {
-            let row = row?;
-            names.push(row.get::<String>("name")?);
-        }
-        Ok(names)
-    })();
-    result
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|name| protocol::AgentMode::parse(&name))
-        .collect()
-}
-
-fn mode_behaviors(
-    core: &smelt_core::lua::LuaRuntime,
-) -> std::collections::HashMap<String, smelt_core::permissions::ModeBehavior> {
-    let result: mlua::Result<
-        std::collections::HashMap<String, smelt_core::permissions::ModeBehavior>,
-    > = (|| {
-        let smelt: mlua::Table = core.lua.globals().get("smelt")?;
-        let mode: mlua::Table = smelt.get("mode")?;
-        let list: mlua::Function = mode.get("list")?;
-        let rows: mlua::Table = list.call(())?;
-        let mut out = std::collections::HashMap::new();
-        for row in rows.sequence_values::<mlua::Table>() {
-            let row = row?;
-            let name = row.get::<String>("name")?;
-            let spec = row.get::<mlua::Table>("permissions")?;
-            let default_decision = match spec.get::<Option<String>>("default_decision")?.as_deref()
-            {
-                Some("allow") => protocol::Decision::Allow,
-                Some("deny") => protocol::Decision::Deny,
-                _ => protocol::Decision::Ask,
-            };
-            out.insert(
-                name,
-                smelt_core::permissions::ModeBehavior {
-                    default_decision,
-                    allow_subcommands_by_default: spec
-                        .get("allow_subcommands_by_default")
-                        .unwrap_or(false),
-                    ask_on_output_redirection: spec
-                        .get("ask_on_output_redirection")
-                        .unwrap_or(true),
-                },
-            );
-        }
-        Ok(out)
-    })();
-    result.unwrap_or_default()
 }
 
 pub struct FailedLuaCandidate {

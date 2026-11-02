@@ -5090,6 +5090,31 @@ fn headless_stream_multiline_data() {
 }
 
 #[test]
+fn headless_does_not_register_ui_only_namespaces() {
+    let output = run_headless_config(
+        r#"
+for _, name in ipairs({ "buf", "win", "dialog", "overlay", "picker", "paint", "render", "input", "terminal", "vim" }) do
+  assert(rawget(smelt, name) == nil, "unexpected UI namespace: " .. name)
+end
+assert(type(smelt.build.display) == "string")
+assert(smelt.api_version == "1")
+assert(type(smelt.permissions.extend) == "function")
+assert(type(smelt.engine.on_prepare_request) == "function")
+assert(type(smelt.model.list) == "function")
+assert(type(smelt.text.width) == "function")
+local ok, err = pcall(smelt.engine.ask, { system = "test" })
+assert(not ok and tostring(err):find("requires an active terminal UI", 1, true), tostring(err))
+"#,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"headless-config-ok");
+}
+
+#[test]
 fn headless_settings_load_before_shell_dispatch() {
     let output = run_headless_config(
         r#"

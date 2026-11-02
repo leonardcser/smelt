@@ -420,6 +420,18 @@ impl LuaRuntime {
         Self::with_host_bootstrap(shared, LuaLoadPaths::from_process())
     }
 
+    /// Build a launch runtime with host APIs and no evaluated bootstrap chunks.
+    pub fn new_for_runtime(
+        env: &engine::env::RuntimeEnv,
+        config_dir: Option<PathBuf>,
+        runtime_override: Option<PathBuf>,
+        project_cwd: Option<PathBuf>,
+    ) -> Self {
+        #[allow(clippy::arc_with_non_send_sync)]
+        let shared = Arc::new(LuaShared::default());
+        Self::with_shared_for_runtime(shared, env, config_dir, runtime_override, project_cwd)
+    }
+
     /// Build a runtime from a captured process environment without evaluating
     /// bootstrap chunks. The owning frontend loads the appropriate bootstrap
     /// exactly once after its host capabilities are available.
@@ -514,7 +526,64 @@ impl LuaRuntime {
         }
     }
 
-    pub(crate) fn shared(&self) -> &Arc<LuaShared> {
+    pub fn mode_names(&self) -> Vec<protocol::AgentMode> {
+        let result: LuaResult<Vec<String>> = (|| {
+            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
+            let mode: mlua::Table = smelt.get("mode")?;
+            let list: mlua::Function = mode.get("list")?;
+            let rows: mlua::Table = list.call(())?;
+            let mut names = Vec::new();
+            for row in rows.sequence_values::<mlua::Table>() {
+                names.push(row?.get::<String>("name")?);
+            }
+            Ok(names)
+        })();
+        result
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| protocol::AgentMode::parse(&name))
+            .collect()
+    }
+
+    pub fn mode_behaviors(
+        &self,
+    ) -> std::collections::HashMap<String, crate::permissions::ModeBehavior> {
+        let result: LuaResult<std::collections::HashMap<String, crate::permissions::ModeBehavior>> =
+            (|| {
+                let smelt: mlua::Table = self.lua.globals().get("smelt")?;
+                let mode: mlua::Table = smelt.get("mode")?;
+                let list: mlua::Function = mode.get("list")?;
+                let rows: mlua::Table = list.call(())?;
+                let mut out = std::collections::HashMap::new();
+                for row in rows.sequence_values::<mlua::Table>() {
+                    let row = row?;
+                    let name = row.get::<String>("name")?;
+                    let spec = row.get::<mlua::Table>("permissions")?;
+                    let default_decision =
+                        match spec.get::<Option<String>>("default_decision")?.as_deref() {
+                            Some("allow") => protocol::Decision::Allow,
+                            Some("deny") => protocol::Decision::Deny,
+                            _ => protocol::Decision::Ask,
+                        };
+                    out.insert(
+                        name,
+                        crate::permissions::ModeBehavior {
+                            default_decision,
+                            allow_subcommands_by_default: spec
+                                .get("allow_subcommands_by_default")
+                                .unwrap_or(false),
+                            ask_on_output_redirection: spec
+                                .get("ask_on_output_redirection")
+                                .unwrap_or(true),
+                        },
+                    );
+                }
+                Ok(out)
+            })();
+        result.unwrap_or_default()
+    }
+
+    pub fn shared(&self) -> &Arc<LuaShared> {
         &self.shared
     }
 
