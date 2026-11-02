@@ -52,15 +52,26 @@ pub(super) fn emit_buffer_row_clipped(
     style_overlay: Option<(bool, bool)>,
 ) -> u16 {
     let mut highlights = Vec::new();
-    emit_buffer_row_clipped_with_scratch(buf, row, max_cols, out, style_overlay, &mut highlights)
+    emit_buffer_row_clipped_with_scratch(
+        buf,
+        row,
+        max_cols,
+        out,
+        style_overlay,
+        None,
+        &mut highlights,
+    )
 }
 
+/// Copies `row` of `buf` into `out`, at most `max_cols` wide. `fill_bg` goes under every cell that
+/// sets no background of its own, for a row its renderer filled to its width.
 pub(super) fn emit_buffer_row_clipped_with_scratch(
     buf: &smelt_core::buffer::Buffer,
     row: u16,
     max_cols: u16,
     out: &mut LineBuilder,
     style_overlay: Option<(bool, bool)>,
+    fill_bg: Option<smelt_core::style::Color>,
     highlights: &mut Vec<smelt_core::buffer::Span>,
 ) -> u16 {
     let text = buf.get_line(row as usize).unwrap_or("");
@@ -80,7 +91,11 @@ pub(super) fn emit_buffer_row_clipped_with_scratch(
         if h.col_start > col_idx {
             let end = h.col_start.min(text_width);
             let plain = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
-            let style = style_overlay.map(|overlay| overlay_style(None, overlay));
+            let style = under_fill(
+                out,
+                style_overlay.map(|overlay| overlay_style(None, overlay)),
+                fill_bg,
+            );
             if !emit_to_line_width(out, plain, style, SpanMeta::default(), max_line_cols) {
                 return out.current_line_width().saturating_sub(start_width);
             }
@@ -91,11 +106,15 @@ pub(super) fn emit_buffer_row_clipped_with_scratch(
             continue;
         }
         let segment = smelt_buffer::text::slice_cells(text, col_idx as usize, end as usize);
-        let style = overlay_style(
-            Some(out.theme().resolve(h.hl)),
-            style_overlay.unwrap_or_default(),
+        let style = under_fill(
+            out,
+            Some(overlay_style(
+                Some(out.theme().resolve(h.hl)),
+                style_overlay.unwrap_or_default(),
+            )),
+            fill_bg,
         );
-        if !emit_to_line_width(out, segment, Some(style), h.meta.clone(), max_line_cols) {
+        if !emit_to_line_width(out, segment, style, h.meta.clone(), max_line_cols) {
             return out.current_line_width().saturating_sub(start_width);
         }
         col_idx = end;
@@ -106,7 +125,11 @@ pub(super) fn emit_buffer_row_clipped_with_scratch(
         } else {
             smelt_buffer::text::slice_cells(text, col_idx as usize, text_width as usize)
         };
-        let style = style_overlay.map(|overlay| overlay_style(None, overlay));
+        let style = under_fill(
+            out,
+            style_overlay.map(|overlay| overlay_style(None, overlay)),
+            fill_bg,
+        );
         emit_to_line_width(out, tail, style, SpanMeta::default(), max_line_cols);
     }
     out.current_line_width().saturating_sub(start_width)
@@ -114,6 +137,18 @@ pub(super) fn emit_buffer_row_clipped_with_scratch(
 
 fn display_width_u16(text: &str) -> u16 {
     display_width(text).min(u16::MAX as usize) as u16
+}
+
+/// `style`, or the line's current one, with `fill_bg` under it where it has no background.
+fn under_fill(
+    out: &LineBuilder,
+    style: Option<smelt_core::style::Style>,
+    fill_bg: Option<smelt_core::style::Color>,
+) -> Option<smelt_core::style::Style> {
+    let Some(bg) = fill_bg else { return style };
+    let mut style = style.unwrap_or_else(|| out.current_style());
+    style.bg.get_or_insert(bg);
+    Some(style)
 }
 
 fn overlay_style(

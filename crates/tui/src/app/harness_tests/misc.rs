@@ -117,6 +117,44 @@ fn response_draft_acceptance_separates_attempts() {
 }
 
 #[test]
+fn renderer_extensions_wrap_streamed_answers_once_they_finish() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+        smelt.transcript.extend_renderer("test.answer_marker", function(next, block, ctx)
+          if block.kind == "assistant" then
+            return smelt.layout.vbox({ smelt.layout.text("answer-marker"), next(block, ctx) })
+          end
+          return next(block, ctx)
+        end)
+        "#,
+    ));
+    app.start_turn(1);
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "streamed ".into(),
+    }));
+    app.render_silent();
+    app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
+        delta: "answer".into(),
+    }));
+    app.render_silent();
+    app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        history: None,
+        meta: Some(protocol::TurnMeta {
+            elapsed_ms: 1,
+            avg_tps: None,
+            display_tps: None,
+            interrupted: false,
+        }),
+    }));
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("answer-marker"), "{frame}");
+    assert!(frame.contains("streamed answer"), "{frame}");
+    app.assert_invariants();
+}
+
+#[test]
 fn response_draft_rejection_preserves_cancelled_previous_turn() {
     let mut app = TestApp::builder().build();
     app.start_turn(1);

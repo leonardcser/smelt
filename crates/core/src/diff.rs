@@ -1372,8 +1372,7 @@ mod tests {
     /// Every row's colours equal a full parse of its side's whole source,
     /// whichever order the rows are first requested in.
     fn assert_syntax_matches_full_sides(view: &DiffView, path: &str) {
-        use crate::content::highlight::source::{Syntax, SyntaxParser};
-        use crate::style::Color;
+        use crate::content::highlight::source::{syntax_color, Syntax, SyntaxParser};
         let theme = crate::content::highlight::syntax_theme(&THEME);
         let highlighter = syntect::highlighting::Highlighter::new(theme);
         let fresh = || [0, 1].map(|_| SyntaxParser::new(Syntax::for_path(path)));
@@ -1402,12 +1401,7 @@ mod tests {
             parsers[side].line(text, |bytes, stack| {
                 let end = bytes.end.min(source.len());
                 if bytes.start < end {
-                    let fg = highlighter.style_for_stack(stack).foreground;
-                    let color = Color::Rgb {
-                        r: fg.r,
-                        g: fg.g,
-                        b: fg.b,
-                    };
+                    let color = syntax_color(highlighter.style_for_stack(stack).foreground);
                     cells[cell(bytes.start)..cell(end)].fill(Some(color));
                 }
             });

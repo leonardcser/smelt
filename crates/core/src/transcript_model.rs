@@ -4475,8 +4475,21 @@ impl BlockHistory {
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
         LayoutKey {
             content_hash: self.layout_content_hash(id),
-            sidecar_hash: self.sidecar_hash(id),
+            sidecar_hash: self.layout_sidecar_hash(id),
             ..base
+        }
+    }
+
+    /// The renderer inputs besides content: the tool state's revision and,
+    /// while the block streams, that it streams. A streaming block may render
+    /// on a native fast path, so finishing must change its key for renderers
+    /// to see it.
+    fn layout_sidecar_hash(&self, id: BlockId) -> u64 {
+        let revision = self.sidecar_hash(id);
+        if self.status(id) == Some(Status::Streaming) {
+            crate::utils::hash_serializable(&(revision, Status::Streaming))
+        } else {
+            revision
         }
     }
 

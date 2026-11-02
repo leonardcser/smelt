@@ -246,9 +246,8 @@ pub(super) fn line_regions<'a>(
                 smelt_buffer::text::slice(line, cursor..span.byte_start),
             ));
         }
-        let [r, g, b] = span.foreground;
         regions.push((
-            Color::Rgb { r, g, b },
+            span.foreground,
             smelt_buffer::text::slice(line, span.byte_start..span.byte_end),
         ));
         cursor = span.byte_end;
@@ -290,11 +289,11 @@ fn split_regions_into_rows(
 }
 
 /// One retained syntax-color range within an inline source span.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InlineSyntaxSpan {
     pub byte_start: usize,
     pub byte_end: usize,
-    pub foreground: [u8; 3],
+    pub foreground: Color,
 }
 
 /// Syntax colours for one logical line in the language token `lang`
@@ -339,8 +338,7 @@ fn print_spans_range(
         if cursor < byte_start {
             out.print(smelt_buffer::text::slice(line, cursor..byte_start));
         }
-        let [r, g, b] = span.foreground;
-        out.set_fg(Color::Rgb { r, g, b });
+        out.set_fg(span.foreground);
         out.print(smelt_buffer::text::slice(line, byte_start..byte_end));
         cursor = byte_end;
     }

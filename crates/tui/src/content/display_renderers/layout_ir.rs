@@ -2616,9 +2616,8 @@ fn print_retained_inline_syntax(
         if cursor < byte_start {
             out.print(smelt_buffer::text::slice(source, cursor..byte_start));
         }
-        let [r, g, b] = highlight.foreground;
         out.save_style();
-        out.set_fg(smelt_core::style::Color::Rgb { r, g, b });
+        out.set_fg(highlight.foreground);
         out.print(smelt_buffer::text::slice(source, byte_start..byte_end));
         out.pop_style();
         cursor = byte_end;
@@ -4506,6 +4505,56 @@ mod tests {
     }
 
     #[test]
+    fn panel_in_hbox_column_fills_its_column_with_its_background() {
+        let bg = smelt_core::style::Color::AnsiValue(4);
+        let mut theme = Theme::default();
+        theme.set(
+            "Bubble",
+            smelt_core::style::Style {
+                bg: Some(bg),
+                ..Default::default()
+            },
+        );
+        let layout = BlockLayout::Hbox(vec![
+            HboxItem {
+                constraint: Constraint::Fill(1),
+                layout: retained_text_layout("x"),
+                copy_owner: false,
+            },
+            HboxItem {
+                constraint: Constraint::Fill(1),
+                layout: BlockLayout::Panel {
+                    child: Box::new(retained_text_layout("ab")),
+                    spec: PanelSpec {
+                        hl_group: "Bubble".into(),
+                        padding: 0,
+                    },
+                },
+                copy_owner: true,
+            },
+        ]);
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, 8);
+            render_layout_ir_into(&mut out, &layout, 8);
+            out.finish();
+        }
+
+        let mut spans = Vec::new();
+        buf.highlights_at_into(0, &mut spans);
+        let bg_at = |col: u16| {
+            spans
+                .iter()
+                .rev()
+                .find(|s| s.col_start <= col && col < s.col_end)
+                .and_then(|s| theme.resolve(s.hl).bg)
+        };
+        assert_eq!(buf.lines()[0], "x   ab  ");
+        assert_eq!(bg_at(1), None, "the plain column stays unfilled");
+        assert!((4..8).all(|col| bg_at(col) == Some(bg)), "{spans:?}");
+    }
+
+    #[test]
     fn panel_renders_child_ranges_past_terminal_row_limits() {
         let layout = panel_layout(retained_text_layout("x".repeat(70_001)), 1);
         let options = InlineOptions::default();
@@ -5120,6 +5169,29 @@ mod tests {
         assert_eq!(
             measure_layout_ir_plan(&layout, 1, &InlineOptions::default()).rows(),
             lines.len()
+        );
+    }
+
+    #[test]
+    fn fit_column_shrinks_to_retained_markdown() {
+        let markdown = |text: &str| {
+            BlockLayout::Leaf(IrLeaf::Content(RetainedContentSpec {
+                content: smelt_core::transcript_content::TranscriptContent::from(text),
+                render: ContentRenderSpec::Markdown {
+                    dim: false,
+                    italic: false,
+                    inline: false,
+                },
+            }))
+        };
+
+        assert_eq!(
+            hbox::intrinsic_layout_width(&markdown("short\nlonger line\n"), 40),
+            11
+        );
+        assert_eq!(
+            hbox::intrinsic_layout_width(&markdown(&"x".repeat(80)), 40),
+            40
         );
     }
 

@@ -424,15 +424,23 @@ pub(crate) fn stack_colors(stacks: &[Vec<Scope>], theme: &crate::theme::Theme) -
     let highlighter = Highlighter::new(syntax_theme(theme));
     stacks
         .iter()
-        .map(|stack| {
-            let fg = highlighter.style_for_stack(stack).foreground;
-            Color::Rgb {
-                r: fg.r,
-                g: fg.g,
-                b: fg.b,
-            }
-        })
+        .map(|stack| syntax_color(highlighter.style_for_stack(stack).foreground))
         .collect()
+}
+
+/// A syntax theme colour as a terminal colour. Themes made for terminals
+/// (bat's `ansi` and `base16`) encode palette colours in the alpha channel:
+/// 0 is the palette index in red, 1 the terminal's default.
+pub(crate) fn syntax_color(c: syntect::highlighting::Color) -> Color {
+    match c.a {
+        0 => Color::AnsiValue(c.r),
+        1 => Color::Reset,
+        _ => Color::Rgb {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        },
+    }
 }
 
 /// Colours a single line with no surrounding source.
@@ -463,17 +471,14 @@ fn span_list(spans: impl Iterator<Item = (Range<usize>, Color)>) -> Vec<InlineSy
         if bytes.is_empty() {
             continue;
         }
-        let Color::Rgb { r, g, b } = fg else {
-            continue;
-        };
         match out.last_mut() {
-            Some(last) if last.foreground == [r, g, b] && last.byte_end == bytes.start => {
+            Some(last) if last.foreground == fg && last.byte_end == bytes.start => {
                 last.byte_end = bytes.end;
             }
             _ => out.push(InlineSyntaxSpan {
                 byte_start: bytes.start,
                 byte_end: bytes.end,
-                foreground: [r, g, b],
+                foreground: fg,
             }),
         }
     }
@@ -489,7 +494,7 @@ mod tests {
     }
 
     /// Colours of every byte, for comparing span lists that split differently.
-    fn byte_colors(line: &str, spans: &[InlineSyntaxSpan]) -> Vec<Option<[u8; 3]>> {
+    fn byte_colors(line: &str, spans: &[InlineSyntaxSpan]) -> Vec<Option<Color>> {
         let mut colors = vec![None; line.len()];
         for span in spans {
             colors[span.byte_start..span.byte_end].fill(Some(span.foreground));
@@ -499,6 +504,21 @@ mod tests {
 
     fn full(syntax: Syntax, lines: &[&str]) -> Vec<Vec<InlineSyntaxSpan>> {
         SourceHighlighter::new(syntax).spans(lines, 0..lines.len(), &theme())
+    }
+
+    #[test]
+    fn terminal_themes_color_with_the_terminal_palette() {
+        let mut theme = theme();
+        theme.set_syntax_theme(Some("ansi".to_string()));
+        let colors: Vec<Color> =
+            line_spans(Syntax::for_ext("rs"), "fn main() { let x = 1; }", &theme)
+                .iter()
+                .map(|span| span.foreground)
+                .collect();
+        assert!(colors.iter().any(|c| matches!(c, Color::AnsiValue(_))));
+        assert!(colors
+            .iter()
+            .all(|c| matches!(c, Color::AnsiValue(_) | Color::Reset)));
     }
 
     #[test]

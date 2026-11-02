@@ -1,4 +1,5 @@
 use super::*;
+use smelt_core::transcript_content::TranscriptContent;
 
 pub(super) fn solve_ir_hbox_widths(
     items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
@@ -44,7 +45,12 @@ pub(super) fn intrinsic_layout_width(layout: &LayoutIr, total_width: u16) -> u16
 
 fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
     match leaf {
-        IrLeaf::Content(_) => total_width,
+        IrLeaf::Content(spec) => match spec.render {
+            ContentRenderSpec::Markdown { .. } => {
+                intrinsic_content_width(&spec.content, total_width)
+            }
+            _ => total_width,
+        },
         IrLeaf::Text(spec) => spec
             .content
             .lines()
@@ -80,6 +86,22 @@ fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
         IrLeaf::Separator(spec) => styled_spans_width(&spec.label).min(u16::MAX as usize) as u16,
         IrLeaf::SourceView(_) => total_width,
     }
+}
+
+// The widest source line, so a fit column holding an answer shrinks to it. The scan stops at the
+// first line that already fills the parent.
+fn intrinsic_content_width(content: &TranscriptContent, total_width: u16) -> u16 {
+    let read = content.read();
+    let mut widest = 0;
+    for line in 0..read.logical_line_count() {
+        if let Some(text) = read.line(line) {
+            widest = widest.max(display_width_u16(text.trim_end_matches('\n')));
+        }
+        if widest >= total_width {
+            return total_width;
+        }
+    }
+    widest
 }
 
 const MAX_HBOX_SCRATCH_SETS: usize = 4;
@@ -253,15 +275,26 @@ pub(super) fn render_ir_hbox(
                 if idx == copy_owner && row < outcome.line_count {
                     apply_temp_decoration(out, &scratch.buffers[idx], row, false);
                 }
+                // A row filled to its width, a panel's, fills its own column.
+                let fill = (row < outcome.line_count)
+                    .then(|| scratch.buffers[idx].decoration_at(row).fill_bg)
+                    .flatten();
                 let emitted = emit_buffer_row_clipped_with_scratch(
                     &scratch.buffers[idx],
                     buffer_row,
                     col_width,
                     out,
                     None,
+                    fill,
                     &mut scratch.highlights,
                 );
+                out.save_style();
+                out.reset_style();
+                if let Some(bg) = fill {
+                    out.set_bg(bg);
+                }
                 print_hbox_padding(out, col_width.saturating_sub(emitted));
+                out.pop_style();
             }
             out.newline();
         }
