@@ -19,6 +19,7 @@ import functools
 import http.server
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -65,6 +66,23 @@ def home_files() -> list[str]:
     return [*HOME, *(f"docs/{replay}" for replay in replays)]
 
 
+def normalize_replay_paths(site: Path) -> None:
+    """Keep local replay URLs within this version, including in old releases."""
+    for page in site.rglob("*.html"):
+
+        def replace(match: re.Match[str]) -> str:
+            asset = site / match[1]
+            if not asset.is_file():
+                raise FileNotFoundError(f"{page}: missing replay {match[1]}")
+            relative = Path(os.path.relpath(asset, page.parent)).as_posix()
+            return f'data-replay="{relative}"'
+
+        text = page.read_text()
+        normalized = re.sub(r'data-replay="(?:\./|\.\./)*(assets/replays/[^"?#]+)"', replace, text)
+        if normalized != text:
+            page.write_text(normalized)
+
+
 def build(source: Path, name: str, strict: bool) -> bool:
     """Build the docs tree at `source` into `site/<name>/`."""
     config = source / "zensical.toml"
@@ -82,6 +100,7 @@ def build(source: Path, name: str, strict: bool) -> bool:
     if subprocess.run(command, cwd=source).returncode != 0:
         print(f"warning: the docs for {name} did not build, leaving them out", file=sys.stderr)
         return False
+    normalize_replay_paths(source / "site")
     shutil.copytree(source / "site", SITE / name)
     return True
 

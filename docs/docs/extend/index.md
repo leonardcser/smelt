@@ -59,7 +59,7 @@ return M
 
 Save it and `/hello` is available straight away:
 
-<figure class="term" data-replay="../../assets/replays/plugin.json" aria-label="Running the /hello command from the plugin" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+<figure class="term" data-replay="../assets/replays/plugin.json" aria-label="Running the /hello command from the plugin" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 `smelt.plugin(name)` gives the module a stable identity. It exposes `M.state`,
 which survives `/reload`, and it names the buffers, windows and overlays you
