@@ -4,13 +4,17 @@
 //! wrapping, highlight spans, grid continuation cells, snapshots, and diff
 //! flushing agree on the width of emitted text.
 
-/// Width of one Unicode scalar in terminal cells.
+/// Unicode scalar width, not necessarily the width of a terminal grapheme.
 ///
 /// This can be zero for combining marks and joiners. Text layout should iterate
 /// [`graphemes`] and measure each cluster with [`text_width`] rather than summing
 /// scalar widths.
 pub fn char_width(ch: char) -> usize {
     unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1)
+}
+
+fn is_regional_indicator(ch: char) -> bool {
+    matches!(ch, '\u{1f1e6}'..='\u{1f1ff}')
 }
 
 /// Saturating `u16` form of [`char_width`].
@@ -91,15 +95,26 @@ impl DoubleEndedIterator for GraphemeIndices<'_> {
 
 /// Width of emitted text in terminal cells.
 ///
-/// `UnicodeWidthStr` preserves sequence behavior for variation selectors, ZWJ
-/// emoji, regional indicators, and combining marks.
+/// Measure the same grapheme units that the grid paints. Shaping across
+/// separate clusters does not reduce the number of terminal cells they occupy.
 pub fn text_width(text: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     // Printable ASCII is one cell per byte; most painted text is ASCII.
     if text.bytes().all(|b| matches!(b, b' '..=b'~')) {
         return text.len();
     }
-    UnicodeWidthStr::width(text)
+    graphemes(text)
+        .map(|cluster| {
+            let width = UnicodeWidthStr::width(cluster);
+            // Grapheme-aware terminals use two cells for an unpaired flag
+            // indicator too. unicode-width assigns it one; complete flags use two.
+            if width == 1 && cluster.chars().next().is_some_and(is_regional_indicator) {
+                2
+            } else {
+                width
+            }
+        })
+        .sum()
 }
 
 /// Width of adjacent text runs measured as one terminal string.
@@ -189,6 +204,22 @@ mod tests {
     }
 
     #[test]
+    fn regional_indicators_use_two_cells_per_grapheme() {
+        for (text, width) in [
+            ("\u{1f1e8}", 2),
+            ("\u{1f1e8}\u{1f1e6}", 2),
+            ("\u{1f1e8}\u{1f1e6}\u{1f1fa}", 4),
+            ("\u{1f1e8}\u{1f1e6}\u{1f1fa}\u{1f1f8}", 4),
+            ("x\u{1f1e8}y", 4),
+            ("\u{1f1e8} \u{1f1e6}", 5),
+            ("\u{1f1e8}\u{301}", 2),
+        ] {
+            assert_eq!(text_width(text), width, "{text:?}");
+            assert_eq!(graphemes(text).map(text_width).sum::<usize>(), width);
+        }
+    }
+
+    #[test]
     fn private_use_icons_follow_unicode_width() {
         assert_eq!(char_width('\u{e6b2}'), 1);
         assert_eq!(text_width("\u{e6b2} "), 2);
@@ -229,6 +260,8 @@ mod tests {
     fn text_width_matches_grapheme_sum() {
         for text in [
             "abc",
+            "\u{0644}\u{0627}",
+            "\u{1f1e8}\u{1f1e6}\u{1f1fa}",
             "a漢b",
             "a\u{308}b",
             "👩\u{200d}💻x",

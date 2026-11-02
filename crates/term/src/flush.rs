@@ -490,6 +490,8 @@ mod tests {
     fn flush_streams_complete_graphemes_and_tracks_their_width() {
         for (grapheme, width) in [
             ("a\u{308}", 1),
+            ("\u{1f1e8}", 2),
+            ("\u{1f1e8}\u{1f1e6}\u{1f1fa}", 4),
             ("👩\u{200d}💻", 2),
             ("9\u{fe0f}", 2),
             ("🇨🇦", 2),
@@ -546,15 +548,18 @@ mod tests {
 
     #[test]
     fn flush_clears_wide_glyph_continuation() {
-        let mut prev = Grid::new(10, 1);
-        prev.as_mut_slice().set(0, 0, '漢', Style::default());
-        prev.as_mut_slice().set(2, 0, 'A', Style::default());
-        let curr = Grid::new(10, 1);
-        let s = flush_to_string(&curr, &prev);
+        for glyph in ["\u{6f22}", "\u{1f1e8}", "\u{1f1e8}\u{1f1e6}"] {
+            let mut prev = Grid::new(10, 1);
+            let end = prev.as_mut_slice().put_str(0, 0, glyph, Style::default());
+            assert_eq!(end, 2);
+            prev.as_mut_slice().set(end, 0, 'A', Style::default());
+            let curr = Grid::new(10, 1);
+            let s = flush_to_string(&curr, &prev);
 
-        assert!(
-            s.contains("\x1b[1;1H   "),
-            "clearing a wide glyph must rewrite its continuation cell, got {s:?}"
-        );
+            assert!(
+                s.contains("\x1b[1;1H   "),
+                "clearing a wide glyph must rewrite its continuation cell, got {s:?}"
+            );
+        }
     }
 }

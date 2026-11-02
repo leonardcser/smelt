@@ -355,9 +355,10 @@ struct CachedContentTextLine {
 struct ContentFileLayout {
     width: u16,
     wrap_ends: Vec<usize>,
-    active_line: bool,
     active_row_cells: usize,
-    active_row_trailing_cr: bool,
+    tail: String,
+    tail_row_cells: usize,
+    tail_wrap_len: usize,
     last_used: u64,
 }
 
@@ -1129,6 +1130,7 @@ impl TranscriptContent {
                             .wrap_ends
                             .capacity()
                             .saturating_mul(std::mem::size_of::<usize>())
+                            .saturating_add(layout.tail.capacity())
                     })
                     .sum::<usize>(),
             )
@@ -2048,56 +2050,62 @@ impl ContentFileLayout {
         Self {
             width: width.max(1),
             wrap_ends: Vec::new(),
-            active_line: false,
             active_row_cells: 0,
-            active_row_trailing_cr: false,
+            tail: String::new(),
+            tail_row_cells: 0,
+            tail_wrap_len: 0,
             last_used: 0,
         }
     }
 
     fn append(&mut self, chunk_start: usize, chunk: &str) {
-        for (local_offset, ch) in chunk.char_indices() {
-            let offset = chunk_start.saturating_add(local_offset);
-            if ch == '\n' {
-                if !self.active_line {
-                    self.begin_line();
-                }
-                self.active_line = false;
+        if chunk.is_empty() {
+            return;
+        }
+        // A later append can extend the last cluster or change its width.
+        // Reconsider only that cluster, not the already indexed rows.
+        let reconsider_tail = !self.tail.is_empty()
+            && (!self.tail.is_ascii()
+                || !chunk.is_ascii()
+                || (self.tail == "\r" && chunk.starts_with('\n')));
+        let (start, source) = if reconsider_tail {
+            self.active_row_cells = self.tail_row_cells;
+            self.wrap_ends.truncate(self.tail_wrap_len);
+            (
+                chunk_start.saturating_sub(self.tail.len()),
+                Cow::Owned(format!("{}{chunk}", self.tail)),
+            )
+        } else {
+            (chunk_start, Cow::Borrowed(chunk))
+        };
+        let mut last_start = 0;
+        for (local_offset, cluster) in smelt_buffer::cell_width::grapheme_indices(&source) {
+            last_start = local_offset;
+            self.tail_row_cells = self.active_row_cells;
+            self.tail_wrap_len = self.wrap_ends.len();
+            if cluster.ends_with('\n') {
                 self.active_row_cells = 0;
-                self.active_row_trailing_cr = false;
                 continue;
             }
-
-            if !self.active_line {
-                self.begin_line();
-            }
-            if self.active_row_trailing_cr {
-                self.active_row_trailing_cr = false;
-            }
-            if ch == '\r' {
-                self.active_row_trailing_cr = true;
+            if cluster == "\r" {
                 continue;
             }
-
-            let cells = if ch == '\t' {
+            let cells = if cluster == "\t" {
                 4
             } else {
-                smelt_buffer::cell_width::char_width(ch)
+                smelt_buffer::cell_width::text_width(cluster)
             };
             if self.active_row_cells.saturating_add(cells) > usize::from(self.width)
                 && self.active_row_cells > 0
             {
-                self.wrap_ends.push(offset);
+                self.wrap_ends.push(start.saturating_add(local_offset));
                 self.active_row_cells = 0;
             }
             self.active_row_cells = self.active_row_cells.saturating_add(cells);
         }
-    }
-
-    fn begin_line(&mut self) {
-        self.active_line = true;
-        self.active_row_cells = 0;
-        self.active_row_trailing_cr = false;
+        self.tail.clear();
+        self.tail
+            .push_str(smelt_buffer::text::slice(&source, last_start..source.len()));
     }
 }
 
@@ -2331,10 +2339,8 @@ fn retain_source_word(
     trailing_space: bool,
     width: usize,
 ) {
-    let mut word_width = 0usize;
-    entry.visit_chars(state.word_start..word_end, |_, ch| {
-        word_width = word_width.saturating_add(smelt_buffer::cell_width::char_width(ch));
-    });
+    let word = entry.slice(state.word_start..word_end);
+    let word_width = smelt_buffer::cell_width::text_width(&word);
     let total_width = word_width.saturating_add(usize::from(trailing_space));
     if state.column.saturating_add(total_width) > width
         && state.column > 0
@@ -2347,19 +2353,19 @@ fn retain_source_word(
     }
 
     if word_width > width {
-        entry.visit_chars(state.word_start..word_end, |offset, ch| {
-            let char_end = offset.saturating_add(ch.len_utf8());
-            let char_width = smelt_buffer::cell_width::char_width(ch);
-            if state.column.saturating_add(char_width) > width && state.column > 0 {
+        for (local_offset, cluster) in smelt_buffer::cell_width::grapheme_indices(&word) {
+            let offset = state.word_start.saturating_add(local_offset);
+            let cells = smelt_buffer::cell_width::text_width(cluster);
+            if state.column.saturating_add(cells) > width && state.column > 0 {
                 push_source_row(rows, first_row, state.chunk_start..state.chunk_end);
                 state.chunk_start = offset;
                 state.column = 0;
                 state.has_non_space = false;
             }
-            state.chunk_end = char_end;
-            state.column = state.column.saturating_add(char_width);
+            state.chunk_end = offset.saturating_add(cluster.len());
+            state.column = state.column.saturating_add(cells);
             state.has_non_space = true;
-        });
+        }
     } else {
         state.chunk_end = word_end;
         state.column = state.column.saturating_add(word_width);
@@ -3334,6 +3340,39 @@ mod tests {
             range
         };
         assert_eq!(retained_first_row_range, first_row_range);
+    }
+
+    #[test]
+    fn layouts_preserve_graphemes_across_streamed_appends() {
+        for (text, expected) in [
+            (
+                "a\u{1f469}\u{200d}\u{1f4bb}X",
+                vec!["a\u{1f469}\u{200d}\u{1f4bb}", "X"],
+            ),
+            ("a\u{1f1e8}X", vec!["a\u{1f1e8}", "X"]),
+            ("a\u{1f1e8}\u{1f1e6}X", vec!["a\u{1f1e8}\u{1f1e6}", "X"]),
+            ("ab9\u{fe0f}X", vec!["ab", "9\u{fe0f}X"]),
+        ] {
+            let content = TranscriptContent::new();
+            for ch in text.chars() {
+                content.append_owned(ch.to_string());
+                content.file_layout_rows(3);
+                content.text_layout_rows(3, false);
+            }
+            let mut file_rows = Vec::new();
+            content.visit_file_layout_line_rows(3, 0, 0..usize::MAX, |row| {
+                file_rows.push(row.text().into_owned());
+            });
+            assert_eq!(file_rows, expected, "file layout: {text:?}");
+            assert_eq!(content.file_layout_rows(3), expected.len());
+
+            let mut text_rows = Vec::new();
+            content.visit_text_layout_rows(3, false, 0..usize::MAX, |row| {
+                text_rows.push(row.text().into_owned());
+            });
+            assert_eq!(text_rows, expected, "text layout: {text:?}");
+            assert_eq!(content.text_layout_rows(3, false), expected.len());
+        }
     }
 
     #[test]

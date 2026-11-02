@@ -45,6 +45,7 @@ struct TerminalModes {
     bracketed_paste: bool,
     focus_events: bool,
     line_wrap: bool,
+    grapheme_clustering: bool,
 }
 
 impl TerminalModes {
@@ -57,6 +58,7 @@ impl TerminalModes {
             bracketed_paste: false,
             focus_events: false,
             line_wrap: true,
+            grapheme_clustering: false,
         }
     }
 }
@@ -71,6 +73,7 @@ impl Default for TerminalModes {
             bracketed_paste: false,
             focus_events: false,
             line_wrap: true,
+            grapheme_clustering: true,
         }
     }
 }
@@ -78,7 +81,9 @@ impl Default for TerminalModes {
 /// Configures the terminal modes a [`TerminalSession`] enters. The hardware
 /// caret is always hidden while the session is active: paint any visible
 /// cursor into the grid, and use `Grid::set_terminal_cursor_position` to
-/// anchor the hidden caret for input methods.
+/// anchor the hidden caret for input methods. Sessions request Unicode grapheme
+/// clustering (mode 2027) to match grid widths, restoring the saved mode during
+/// suspension and on exit. Terminals without this mode ignore the request.
 #[derive(Clone, Debug)]
 pub struct TerminalSessionBuilder {
     modes: TerminalModes,
@@ -255,6 +260,12 @@ impl<W: Write> TerminalSession<W> {
             self.writer.queue(EnterAlternateScreen)?;
             self.modes.alternate_screen = true;
         }
+        if modes.grapheme_clustering {
+            // Grid widths use whole graphemes. With mode 2027 off, terminals
+            // can advance by scalar widths and leave cells outside our diff.
+            self.writer.write_all(b"\x1b[?2027s\x1b[?2027h")?;
+            self.modes.grapheme_clustering = true;
+        }
         if !modes.line_wrap {
             self.writer.queue(DisableLineWrap)?;
             self.modes.line_wrap = false;
@@ -309,6 +320,9 @@ impl<W: Write> TerminalSession<W> {
         if raw_mode {
             terminal::enable_raw_mode()?;
             self.raw_mode = true;
+        }
+        if self.modes.grapheme_clustering {
+            self.writer.write_all(b"\x1b[?2027s\x1b[?2027h")?;
         }
         if !self.modes.line_wrap {
             self.writer.queue(DisableLineWrap)?;
@@ -373,6 +387,11 @@ fn queue_input_release(w: &mut impl Write, modes: &mut TerminalModes) -> io::Res
     if !modes.line_wrap {
         w.queue(EnableLineWrap)?;
         modes.line_wrap = true;
+    }
+    if modes.grapheme_clustering {
+        // Restore the caller's saved value rather than assuming it was off.
+        w.write_all(b"\x1b[?2027r")?;
+        modes.grapheme_clustering = false;
     }
     Ok(())
 }
@@ -488,6 +507,7 @@ mod tests {
             bracketed_paste: true,
             focus_events: true,
             line_wrap: false,
+            grapheme_clustering: true,
         }
     }
 
@@ -499,6 +519,31 @@ mod tests {
         assert!(!session.writer.bytes.is_empty());
 
         session.restore().unwrap();
+        assert_eq!(session.modes, TerminalModes::inactive());
+    }
+
+    #[test]
+    fn grapheme_width_mode_is_scoped_to_active_rendering() {
+        let mut session = test_session(TestWriter::default());
+        session.enter_modes(TerminalModes::default()).unwrap();
+        let entered = String::from_utf8(session.writer.bytes.clone()).unwrap();
+        assert!(entered.contains("\x1b[?2027s\x1b[?2027h"));
+        assert!(!entered.contains("\x1b[?2027r"));
+
+        session.writer.bytes.clear();
+        session.suspend(|| ());
+        let suspended = String::from_utf8(session.writer.bytes.clone()).unwrap();
+        let release = suspended.find("\x1b[?2027r").unwrap();
+        let resume = suspended.find("\x1b[?2027s\x1b[?2027h").unwrap();
+        assert!(release < resume);
+        assert!(session.modes.grapheme_clustering);
+
+        session.writer.bytes.clear();
+        session.restore().unwrap();
+        let restored = String::from_utf8(session.writer.bytes.clone()).unwrap();
+        assert!(restored.contains("\x1b[?2027r"));
+        assert!(!restored.contains("\x1b[?2027h"));
+        assert!(!restored.contains("\x1b[?2027l"));
         assert_eq!(session.modes, TerminalModes::inactive());
     }
 

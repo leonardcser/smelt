@@ -1172,7 +1172,7 @@ fn diff_row_layout(cache: &DiffIr, max_content: usize) -> Rc<DiffRowLayout> {
 }
 
 fn visit_render_span_rows(
-    spans: &[RenderSpan],
+    spans: Vec<RenderSpan>,
     max_width: usize,
     row_range: std::ops::Range<usize>,
     mut visit: impl FnMut(usize, &[RenderSpan]),
@@ -1184,13 +1184,19 @@ fn visit_render_span_rows(
         return;
     }
 
+    let line = InlineLine::new(
+        spans
+            .into_iter()
+            .map(|span| InlineRun::new(span.text, span.meta, BreakPolicy::PreserveSpaces))
+            .collect(),
+    );
     let mut row_index = 0usize;
     let mut row = Vec::new();
     let mut column = 0usize;
-    for span in spans {
+    for span in &line.runs {
         let mut segment_start = 0usize;
-        for (offset, ch) in span.text.char_indices() {
-            let width = smelt_buffer::cell_width::char_width(ch);
+        for (offset, cluster) in smelt_buffer::cell_width::grapheme_indices(&span.text) {
+            let width = smelt_buffer::cell_width::text_width(cluster);
             if column.saturating_add(width) > max_width && column > 0 {
                 if (start_row..end_row).contains(&row_index) {
                     push_render_span(
@@ -1497,7 +1503,7 @@ pub fn print_retained_file_view(
             )
         };
         visit_render_span_rows(
-            &spans,
+            spans,
             max_content,
             range.row_offset..row_end,
             |visual_row, row| {
@@ -1704,7 +1710,7 @@ pub fn print_retained_code_block(
             &[],
         );
         visit_render_span_rows(
-            &spans,
+            spans,
             usize::from(width),
             range.row_offset..row_end,
             |visual_row, row| {
@@ -2382,6 +2388,41 @@ mod tests {
             .iter()
             .map(|part| SharedContentSlice::from_owned((*part).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn styled_row_wrapping_keeps_split_graphemes_together() {
+        let first = RenderMeta {
+            fg: (1, 2, 3),
+            highlighted: false,
+        };
+        let second = RenderMeta {
+            fg: (4, 5, 6),
+            highlighted: true,
+        };
+        let spans = vec![
+            RenderSpan {
+                text: "a\u{1f469}".into(),
+                meta: first.clone(),
+            },
+            RenderSpan {
+                text: "\u{200d}\u{1f4bb}X".into(),
+                meta: second.clone(),
+            },
+        ];
+        let mut rows = Vec::new();
+        visit_render_span_rows(spans, 3, 0..usize::MAX, |_, row| rows.push(row.to_vec()));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0]
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>(),
+            "a\u{1f469}\u{200d}\u{1f4bb}"
+        );
+        assert!(rows[0].iter().all(|span| span.meta == first));
+        assert_eq!(rows[1][0].text, "X");
+        assert_eq!(rows[1][0].meta, second);
     }
 
     #[test]
