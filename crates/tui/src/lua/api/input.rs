@@ -177,18 +177,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "Create a single-line input and return an `Input` handle. Options: `text?`, `placeholder?`, plus window opts accepted by `smelt.win.new` (`name`, `pad_left`, `pad_right`, `wrap`, `scrollbar`, etc.).",
         &["opts"],
         move |lua, opts: Option<mlua::Table>| -> LuaResult<Option<LuaInput>> {
-            let opts = input_opts(lua, opts)?;
-            let name = opts
-                .get::<Option<String>>("name")?
-                .or_else(|| crate::lua::auto_name_for_scope(lua, "input"));
-            if let Some(name) = name {
-                opts.set("name", name.clone())?;
-                opts.set("buf_name", format!("{name}.buf"))?;
-            }
-            let text = opts.get::<Option<String>>("text")?.unwrap_or_default();
+            let mut opts = smelt_core::lua::options::LuaOptions::new(opts.map_or_else(|| lua.create_table(), Ok)?, "input");
+            let text = opts.string("text")?.unwrap_or_default();
+            let buf_name = opts.string("buf_name")?;
+            let mut window_opts = super::win::parse_window_opts(lua, &mut opts)?.for_input();
+            opts.finish()?;
+            window_opts.name = window_opts.name.or_else(|| crate::lua::auto_name_for_scope(lua, "input"));
             let buf_opts = lua.create_table()?;
-            if let Some(buf_name) = opts.get::<Option<String>>("buf_name")? {
-                buf_opts.set("name", buf_name)?;
+            if let Some(name) = window_opts.name.as_ref().map(|name| format!("{name}.buf")).or(buf_name) {
+                buf_opts.set("name", name)?;
             }
             buf_opts.set("editable", true)?;
             let buf = super::buf::create_or_open(&shared, Some(&buf_opts))?;
@@ -203,24 +200,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                 });
             });
-            opts.set("surface", opts.get::<Option<String>>("surface")?.unwrap_or_else(|| "editable_text".into()))?;
-            opts.set("kind", "input")?;
-            opts.set("wrap", opts.get::<Option<bool>>("wrap")?.unwrap_or(false))?;
-            opts.set("scrollbar", opts.get::<Option<bool>>("scrollbar")?.unwrap_or(false))?;
-            opts.set("placeholder", opts.get::<Option<String>>("placeholder")?.unwrap_or_default())?;
-            let win = super::win::open_or_refresh(buf, Some(&opts))?;
+            let win = window_opts.open(buf);
             Ok(win.map(|win| LuaInput { win }))
         },
     )?;
 
     Ok(())
-}
-
-fn input_opts(lua: &Lua, opts: Option<mlua::Table>) -> LuaResult<mlua::Table> {
-    match opts {
-        Some(opts) => Ok(opts),
-        None => lua.create_table(),
-    }
 }
 
 fn input_text(win: crate::smelt_edit::WinId) -> Option<String> {

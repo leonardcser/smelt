@@ -310,7 +310,7 @@ local function register_present_plan()
 
       local action = smelt.dialog.open({
         title = {
-          { text = "plan", fg = plan_mode_fg(), bold = true },
+          { text = "plan", style = { fg = plan_mode_fg(), bold = true } },
         },
         border       = { top = "SmeltModePlan" },
         blocks_agent = true,

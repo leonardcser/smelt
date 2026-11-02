@@ -96,20 +96,20 @@ local function open(filepath)
 
 	local overlay = smelt.overlay.new({
 		title = smelt.dialog.title({
-			{ text = " diff ", fg = "green", bold = true },
-			{ text = rel .. " ", fg = "white" },
-			{ text = "(q / esc to close) ", fg = "grey" },
+			{ text = " diff ", style = { fg = "green", bold = true } },
+			{ text = rel .. " ", style = { fg = "white" } },
+			{ text = "(q / esc to close) ", style = { fg = "grey" } },
 		}),
 		anchor = "center",
 		width = "90%",
 		height = "85%",
 		layout = smelt.ui.layout.hbox({
 			{
-				smelt.ui.layout.leaf(left_win, { title = smelt.dialog.title({ { text = " HEAD ", fg = "red" } }) }),
+				smelt.ui.layout.leaf(left_win, { title = smelt.dialog.title({ { text = " HEAD ", style = { fg = "red" } } }) }),
 				width = "fill",
 			},
 			{
-				smelt.ui.layout.leaf(right_win, { title = smelt.dialog.title({ { text = " working ", fg = "green" } }) }),
+				smelt.ui.layout.leaf(right_win, { title = smelt.dialog.title({ { text = " working ", style = { fg = "green" } } }) }),
 				width = "fill",
 			},
 		}, { gap = 1 }),

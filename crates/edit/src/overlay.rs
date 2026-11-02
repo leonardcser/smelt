@@ -334,6 +334,8 @@ impl Decoration {
 pub struct Overlay {
     pub layout: LayoutTree,
     pub anchor: Anchor,
+    /// Keep navigation targets below this top-anchored overlay in its owner.
+    pub reserve: bool,
     /// How wide the overlay rect is along the horizontal axis. Resolved
     /// against the terminal width every frame, or the anchor window's with
     /// [`Self::anchor_width`]. Default `Fit` reads the layout's natural
@@ -386,6 +388,7 @@ impl Overlay {
         Self {
             layout,
             anchor,
+            reserve: false,
             width: Constraint::Fit,
             anchor_width: false,
             height: Constraint::Fit,

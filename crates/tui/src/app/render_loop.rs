@@ -619,10 +619,6 @@ impl TuiApp {
                 transcript_visible,
             );
         }
-        {
-            let _perf = smelt_perf::perf::begin("compositor:dispatch_committed_transcript_view");
-            self.dispatch_committed_transcript_view();
-        }
         self.dispatch_pending_transcript_hydration();
         prepared_transcript
     }
@@ -731,9 +727,9 @@ impl TuiApp {
         self.conversation.commit_transcript_view(state);
     }
 
-    fn dispatch_committed_transcript_view(&mut self) {
+    fn dispatch_committed_transcript_view(&mut self) -> bool {
         let Some(view) = self.conversation.committed_transcript_view() else {
-            return;
+            return false;
         };
         let callbacks = self
             .lua
@@ -752,6 +748,7 @@ impl TuiApp {
                     .map(|payload| (callback, payload))
             })
             .collect();
+        let invoked = !prepared.is_empty();
         let lua = self.lua.execution();
         crate::lua::scope_app(self, move || {
             for (callback, payload) in prepared {
@@ -760,6 +757,7 @@ impl TuiApp {
                 }
             }
         });
+        invoked
     }
 
     pub(crate) fn render_normal(&mut self) {
@@ -1073,9 +1071,6 @@ impl TuiApp {
         self.ui.resolve_tail_scrolls();
         self.ui.sync_scroll_links();
 
-        let queued_owned = self.prompt.queued_texts();
-        let queued: &[String] = &queued_owned;
-
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
 
         // Hidden is the right baseline; sync paths below set Block when focus owns the caret.
@@ -1084,7 +1079,7 @@ impl TuiApp {
 
         // Resolve widths before retained renderers run, then measure their
         // updated content before preparing the transcript or painting a frame.
-        let (mut prompt_rect, _) = {
+        let (prompt_rect, _) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
             self.ensure_main_layout()
         };
@@ -1097,44 +1092,29 @@ impl TuiApp {
         self.conversation.sync_active_tool_elapsed(now);
         self.sync_transcript_renderer_generation();
 
-        let dialog_windows = self.active_docked_dialog().and_then(|id| {
-            let modal = self.ui.docked_surface(id)?.modal();
-            self.ui.modal_leaves(modal).map(<[_]>::to_vec)
-        });
-        if let Some(windows) = dialog_windows {
-            let _p = smelt_perf::perf::begin("compositor:lua_renderers");
-            self.dispatch_lua_renderers(Some(&windows));
-            (prompt_rect, _) = self.ensure_main_layout();
-        }
-
-        // Lay out the prompt for this frame's text before Lua observers run,
-        // so the cursor position they read follows the latest edit.
-        {
-            let _p = smelt_perf::perf::begin("compositor:input");
-            self.sync_input_layer(prompt_rect, has_prompt_cursor);
-        }
-
-        // Commit the retained transcript view before Lua observers run. Stale
-        // content or viewport inputs project here; unchanged frames reuse the
-        // existing bounded row tape. Plugins receive one coherent snapshot and
-        // can update overlays for this same frame.
-        let prepared_transcript = {
-            let _perf = smelt_perf::perf::begin("compositor:prepare_committed_transcript_view");
-            self.prepare_committed_transcript_view(has_transcript_cursor)
+        let prepared_transcript =
+            self.reconcile_main_layout(prompt_rect, has_prompt_cursor, has_transcript_cursor);
+        let notified = {
+            let _perf = smelt_perf::perf::begin("compositor:dispatch_committed_transcript_view");
+            self.dispatch_committed_transcript_view()
         };
-        self.publish_view_signals();
-        // Frame preparation can publish animation, committed-view, and cursor
-        // signals. Apply their retained renderer invalidations before
-        // repainting windows.
-        self.drain_signals_pending();
-
-        {
-            let _p = smelt_perf::perf::begin("compositor:lua_renderers");
-            self.dispatch_lua_renderers(None);
+        if notified {
+            // Observers can populate overlay renderers for this frame. Root
+            // geometry changes apply next frame, not to the view just delivered.
+            self.drain_signals_pending();
+            let dirty = self
+                .lua
+                .shared()
+                .win_renderers
+                .lock()
+                .is_ok_and(|renderers| renderers.values().any(|renderer| renderer.dirty));
+            if dirty {
+                self.dispatch_lua_renderers(None);
+            }
+            if self.lua.shared().layout_refresh_pending() {
+                self.request_continuation_render();
+            }
         }
-        // Suppress unused-variable warning when queued is only forwarded into Lua state.
-        let _ = queued;
-
         if has_transcript_cursor {
             self.ui
                 .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
@@ -1512,7 +1492,11 @@ impl TuiApp {
         let mut window_leaves: Vec<crate::smelt_edit::WinId> = Vec::new();
         let layout = crate::lua::ui_ops::build_layout_tree(self, &node, &mut window_leaves)
             .and_then(|(_, tree)| {
-                crate::lua::ui_ops::validate_split_mounts(&tree, self.ui.layout_trees().skip(1))?;
+                crate::lua::ui_ops::validate_split_mounts(
+                    &tree,
+                    self.ui.layout_trees().skip(1),
+                    |_| false,
+                )?;
                 Ok(tree)
             });
         match layout {
@@ -1524,10 +1508,56 @@ impl TuiApp {
         }
     }
 
+    /// Resolve renderer-driven sizing before notifying committed-view observers.
+    fn reconcile_main_layout(
+        &mut self,
+        mut prompt_rect: layout::Rect,
+        has_prompt_cursor: bool,
+        has_transcript_cursor: bool,
+    ) -> Option<crate::smelt_edit::PreparedWindowRequest> {
+        const MAX_LAYOUT_PASSES: usize = 8;
+        let dialog_windows = self.active_docked_dialog().and_then(|id| {
+            let modal = self.ui.docked_surface(id)?.modal();
+            self.ui.modal_leaves(modal).map(<[_]>::to_vec)
+        });
+        if let Some(windows) = dialog_windows {
+            let _perf = smelt_perf::perf::begin("compositor:lua_renderers");
+            self.dispatch_lua_renderers(Some(&windows));
+            (prompt_rect, _) = self.ensure_main_layout();
+        }
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            {
+                let _perf = smelt_perf::perf::begin("compositor:input");
+                self.sync_input_layer(prompt_rect, has_prompt_cursor);
+            }
+            let prepared = {
+                let _perf = smelt_perf::perf::begin("compositor:prepare_committed_transcript_view");
+                self.prepare_committed_transcript_view(has_transcript_cursor)
+            };
+            self.publish_view_signals();
+            self.drain_signals_pending();
+            {
+                let _perf = smelt_perf::perf::begin("compositor:lua_renderers");
+                self.dispatch_lua_renderers(None);
+            }
+            if !self.lua.shared().layout_refresh_pending() {
+                return prepared;
+            }
+            if passes == MAX_LAYOUT_PASSES {
+                self.lua.shared().take_layout_refresh();
+                self.record_lua_error(format!("UI layout did not settle after {MAX_LAYOUT_PASSES} passes; check layout composer and window renderers"));
+                return prepared;
+            }
+            (prompt_rect, _) = self.ensure_main_layout();
+        }
+    }
+
     /// Invoke dirty Lua renderers registered via `Win:set_renderer(fn)`.
     /// Each callback owns retained backing-buffer content and runs after
-    /// registration, invalidation, or a change in resolved content size. Closed
-    /// windows stay dirty so reopening them repaints before content is shown.
+    /// registration, invalidation, or a change in resolved content size. Unmounted
+    /// windows stay dirty; destroyed windows release their renderer callbacks.
     fn dispatch_lua_renderers(&mut self, windows: Option<&[crate::smelt_edit::WinId]>) {
         let lua = self.lua.lua();
         let shared = self.lua.shared();
@@ -1543,30 +1573,35 @@ impl TuiApp {
                 return;
             }
             let sizes = self.ui.resolved_win_sizes();
-            guard
-                .iter_mut()
-                .filter_map(|(raw_id, renderer)| {
-                    let win_id = crate::smelt_edit::WinId(*raw_id);
-                    if windows.is_some_and(|windows| !windows.contains(&win_id)) {
-                        return None;
+            let mut entries = Vec::new();
+            guard.retain(|raw_id, renderer| {
+                let win_id = crate::smelt_edit::WinId(*raw_id);
+                let Some(&size) = sizes.get(&win_id) else {
+                    if self.ui.win(win_id).is_none() {
+                        return false;
                     }
-                    let Some(&size) = sizes.get(&win_id) else {
-                        renderer.dirty = true;
-                        renderer.rendered_size = None;
-                        return None;
-                    };
-                    if !renderer.dirty && renderer.rendered_size == Some(size) {
-                        return None;
-                    }
-                    renderer.dirty = false;
-                    renderer.rendered_size = Some(size);
-                    lua.registry_value::<mlua::Function>(&renderer.handle.key)
-                        .ok()
-                        .map(|function| (win_id, function))
-                })
-                .collect()
+                    renderer.dirty = true;
+                    renderer.rendered_size = None;
+                    return true;
+                };
+                if windows.is_some_and(|windows| !windows.contains(&win_id))
+                    || (!renderer.dirty && renderer.rendered_size == Some(size))
+                {
+                    return true;
+                }
+                renderer.dirty = false;
+                renderer.rendered_size = Some(size);
+                if let Ok(function) = lua.registry_value::<mlua::Function>(&renderer.handle.key) {
+                    entries.push((win_id, function));
+                }
+                true
+            });
+            entries
         };
         for (win_id, function) in entries {
+            if self.ui.win(win_id).is_none() {
+                continue;
+            }
             let win_ud = crate::lua::api::win::LuaWin { id: win_id };
             let result = crate::lua::scope_app(self, move || function.call::<()>((win_ud,)));
             if let Err(error) = result {
@@ -2088,7 +2123,7 @@ mod tests {
             smelt.prompt.top.win:set_renderer(function(win)
               _G.animation_renderer_calls = _G.animation_renderer_calls + 1
               win:buf():lines({ tostring(smelt.signal.get("work_elapsed_ms")) })
-              smelt.timer.set(16, function() win:invalidate_renderer() end)
+              smelt.timer.set(16, function() win:invalidate() end)
             end)
             "#,
         )
@@ -2226,7 +2261,7 @@ mod tests {
         app.render_silent();
         assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(1));
 
-        app.run_lua_result("retained_renderer_win:invalidate_renderer()")
+        app.run_lua_result("retained_renderer_win:invalidate()")
             .expect("invalidate retained window renderer");
         app.render_silent();
         assert_eq!(app.lua_int_global("retained_renderer_calls"), Some(2));

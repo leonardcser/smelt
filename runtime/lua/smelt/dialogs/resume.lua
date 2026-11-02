@@ -92,7 +92,7 @@ local function make_render(now_ms)
       local meta = string.rep(" ", LEADING + SIZE_COL + GAP + TIME_COL + GAP)
       return {
         text = meta .. prefix .. "Unavailable - " .. unavailable_reason(entry),
-        marks = { { col = 0, opts = { end_col = #meta + #prefix, dim = true } } },
+        marks = { { col = 0, opts = { end_col = #meta + #prefix, style = { dim = true } } } },
       }
     end
     local size_str = format_size(entry.size_bytes)
@@ -105,11 +105,11 @@ local function make_render(now_ms)
       time_ago(ts, now_ms),
       string.rep(" ", GAP)
     )
-    local marks = { { col = 0, opts = { end_col = #meta, dim = true } } }
+    local marks = { { col = 0, opts = { end_col = #meta, style = { dim = true } } } }
     if prefix ~= "" then
       marks[#marks + 1] = {
         col = #meta,
-        opts = { end_col = #meta + #prefix, dim = true },
+        opts = { end_col = #meta + #prefix, style = { dim = true } },
       }
     end
     return {
@@ -126,7 +126,7 @@ local function update_state_label(buf, workspace_only)
   buf:mark(NS_STATE, 1, 0, {
     virt_text     = label,
     virt_text_pos = "right_align",
-    dim           = true,
+    style         = { dim = true },
   })
 end
 

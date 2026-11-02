@@ -5,7 +5,7 @@
 //! a repeat call with the same name returns the existing buf with
 //! its mutable opts re-applied.
 
-use crate::lua::parse::{ColorRef, Layer};
+use crate::lua::parse::LuaStyle;
 use crate::lua::LuaShared;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
@@ -40,18 +40,6 @@ impl From<LuaVirtTextPos> for smelt_core::buffer::VirtTextPos {
     }
 }
 
-/// Resolve an optional `fg`/`bg` color argument against the active theme.
-fn resolve_color(
-    color: &Option<ColorRef>,
-    layer: Layer,
-) -> LuaResult<Option<Option<smelt_core::style::Color>>> {
-    color
-        .as_ref()
-        .map(|c| c.resolve(layer, &crate::lua::theme_group))
-        .transpose()
-        .map_err(LuaError::RuntimeError)
-}
-
 /// Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful
 /// subset of `nvim_buf_set_extmark`'s keyset; pick highlight or
 /// virt-text fields, not both.
@@ -73,22 +61,8 @@ pub struct LuaMarkOpts {
     /// Right-gravity flag for the end-of-range cursor.
     pub end_right_gravity: Option<bool>,
 
-    /// Theme group whose style is applied as the highlight base.
-    pub hl_group: Option<String>,
-    /// Foreground override: any color, or a theme group name. Takes
-    /// precedence over `hl_group`.
-    pub fg: Option<ColorRef>,
-    /// Background override: any color, or a theme group name. Takes
-    /// precedence over `hl_group`.
-    pub bg: Option<ColorRef>,
-    /// Force-bold the highlight.
-    pub bold: Option<bool>,
-    /// Force-dim the highlight.
-    pub dim: Option<bool>,
-    /// Force-italic the highlight.
-    pub italic: Option<bool>,
-    /// Force reverse-video on the highlight.
-    pub reverse: Option<bool>,
+    /// Shared style applied to the highlight or virtual text.
+    pub style: Option<LuaStyle>,
     /// Extend the highlight past the last column to fill the EOL.
     pub hl_eol: Option<bool>,
     /// Paint only on the window's cursor row. Decorates the
@@ -97,9 +71,6 @@ pub struct LuaMarkOpts {
 
     /// Virtual-text chunk to render alongside the line.
     pub virt_text: Option<String>,
-    /// Theme group applied to the virt-text chunk. `fg`, `bg`, and text
-    /// attributes below can further override it.
-    pub virt_text_hl: Option<String>,
     /// Where the virt-text appears relative to the line.
     pub virt_text_pos: Option<LuaVirtTextPos>,
 
@@ -491,6 +462,8 @@ pub(super) fn create_or_open(
         .and_then(|t| t.get::<Option<String>>("name").ok())
         .flatten();
 
+    let name = smelt_core::lua::reg::RegistrationScope::name(name);
+
     // Optional access lets bootstrap chunks call `smelt.buf.new` before the
     // frontend host is in scope. The buffer is created on the launch reload.
     let (buffer_id, clash) = crate::lua::try_with_ui_host(|host| {
@@ -526,6 +499,16 @@ pub(super) fn create_or_open(
                     if let Some(ref name) = name {
                         ui.name_buf(name.clone(), buffer_id);
                     }
+                    smelt_core::lua::reg::RegistrationScope::resource(
+                        "buffer",
+                        buffer_id.0,
+                        move || {
+                            crate::lua::try_with_ui_host(|host| {
+                                host.with_ui(|ui| ui.buf_destroy(buffer_id).is_some())
+                            })
+                            .unwrap_or(false)
+                        },
+                    );
                     (buffer_id, None)
                 }
                 Err(clash) => (crate::smelt_edit::BufId(0), Some(clash)),
@@ -548,45 +531,10 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
     use smelt_core::content::builder::LineBuilder;
     use smelt_core::content::highlight::print_inline_syntax;
     use smelt_core::style::Style;
-    use smelt_core::theme::intern;
-
-    struct SpanStyle {
-        hl: Option<String>,
-        dim: bool,
-        bold: bool,
-        italic: bool,
-        reverse: bool,
-        fg: Option<Option<smelt_core::style::Color>>,
-        bg: Option<Option<smelt_core::style::Color>>,
-    }
-
     struct Span {
         text: String,
-        style: SpanStyle,
+        style: Style,
         syntax: Option<String>,
-    }
-
-    fn decode_style(tbl: Option<mlua::Table>) -> LuaResult<SpanStyle> {
-        let Some(tbl) = tbl else {
-            return Ok(SpanStyle {
-                hl: None,
-                dim: false,
-                bold: false,
-                italic: false,
-                reverse: false,
-                fg: None,
-                bg: None,
-            });
-        };
-        Ok(SpanStyle {
-            hl: tbl.get::<Option<String>>("hl")?,
-            dim: tbl.get::<Option<bool>>("dim")?.unwrap_or(false),
-            bold: tbl.get::<Option<bool>>("bold")?.unwrap_or(false),
-            italic: tbl.get::<Option<bool>>("italic")?.unwrap_or(false),
-            reverse: tbl.get::<Option<bool>>("reverse")?.unwrap_or(false),
-            fg: resolve_color(&tbl.get("fg")?, Layer::Fg)?,
-            bg: resolve_color(&tbl.get("bg")?, Layer::Bg)?,
-        })
     }
 
     let mut decoded: Vec<Vec<Span>> = Vec::new();
@@ -608,7 +556,12 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
         let mut spans: Vec<Span> = Vec::new();
         for span_val in line_tbl.sequence_values::<mlua::Table>() {
             let span_tbl = span_val?;
-            let style = decode_style(span_tbl.get::<Option<mlua::Table>>("style")?)?;
+            let style = span_tbl
+                .get::<Option<LuaStyle>>("style")?
+                .as_ref()
+                .map(LuaStyle::resolve)
+                .transpose()?
+                .unwrap_or_default();
             spans.push(Span {
                 text: span_tbl.get::<Option<String>>("text")?.unwrap_or_default(),
                 style,
@@ -628,19 +581,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
             let mut sink = LineBuilder::replacing(buf, &theme_snap, width);
             for spans in &decoded {
                 for span in spans {
-                    let group = span.style.hl.as_deref().map(intern);
-                    let mut style = Style::new();
-                    style.dim = span.style.dim;
-                    style.bold = span.style.bold;
-                    style.italic = span.style.italic;
-                    style.reverse = span.style.reverse;
-                    if let Some(fg) = span.style.fg {
-                        style.fg = fg;
-                    }
-                    if let Some(bg) = span.style.bg {
-                        style.bg = bg;
-                    }
-                    sink.push(group, style);
+                    sink.push(None, span.style);
                     if let Some(lang) = &span.syntax {
                         print_inline_syntax(&mut sink, lang, &span.text, 0..span.text.len());
                     } else {
@@ -741,67 +682,17 @@ fn set_extmark(
 }
 
 fn build_virt_text_hl(opts: &LuaMarkOpts) -> LuaResult<Option<String>> {
-    if opts.fg.is_none()
-        && opts.bg.is_none()
-        && opts.bold.is_none()
-        && opts.dim.is_none()
-        && opts.italic.is_none()
-        && opts.reverse.is_none()
-    {
-        return Ok(opts.virt_text_hl.clone());
-    }
-
-    let mut style = match opts.virt_text_hl.as_deref() {
-        Some(name) => crate::lua::theme_group(name).unwrap_or_default(),
-        None => smelt_core::style::Style::default(),
-    };
-    if let Some(fg) = resolve_color(&opts.fg, Layer::Fg)? {
-        style.fg = fg;
-    }
-    if let Some(bg) = resolve_color(&opts.bg, Layer::Bg)? {
-        style.bg = bg;
-    }
-    if let Some(b) = opts.bold {
-        style.bold = b;
-    }
-    if let Some(b) = opts.dim {
-        style.dim = b;
-    }
-    if let Some(b) = opts.italic {
-        style.italic = b;
-    }
-    if let Some(b) = opts.reverse {
-        style.reverse = b;
-    }
-
-    let group = smelt_core::theme::intern_anonymous_style(style);
-    Ok(smelt_core::theme::name_of(group))
+    opts.style
+        .as_ref()
+        .map(|style| style.group().map(smelt_core::theme::name_of))
+        .transpose()
+        .map(Option::flatten)
 }
 
 fn build_highlight_style(opts: &LuaMarkOpts) -> LuaResult<crate::smelt_edit::SpanStyle> {
-    use smelt_core::style::Style;
-
-    let mut style = match opts.hl_group.as_deref() {
-        Some(name) => crate::lua::theme_group(name).unwrap_or_default(),
-        None => Style::default(),
-    };
-    if let Some(fg) = resolve_color(&opts.fg, Layer::Fg)? {
-        style.fg = fg;
-    }
-    if let Some(bg) = resolve_color(&opts.bg, Layer::Bg)? {
-        style.bg = bg;
-    }
-    if let Some(b) = opts.bold {
-        style.bold = b;
-    }
-    if let Some(b) = opts.dim {
-        style.dim = b;
-    }
-    if let Some(b) = opts.italic {
-        style.italic = b;
-    }
-    if let Some(b) = opts.reverse {
-        style.reverse = b;
-    }
-    Ok(style)
+    opts.style
+        .as_ref()
+        .map(LuaStyle::resolve)
+        .transpose()
+        .map(Option::unwrap_or_default)
 }

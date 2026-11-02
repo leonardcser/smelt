@@ -16,12 +16,12 @@ Register Lua callbacks against custom paint regions. UiHost-only.
 ## `smelt.paint.frame`
 
 ```lua
-fun(func: fun(arg1: smelt.paint.Slice, arg2: smelt.paint.Ctx), opts: smelt.paint.FrameOpts?): smelt.paint.Paint
+fun(func: fun(arg1: smelt.paint.Slice, arg2: smelt.paint.Ctx), opts: smelt.paint.FrameOpts?): smelt.paint.Effect
 ```
 
-Types: [`smelt.paint.Slice`](types.md#smeltpaintslice), [`smelt.paint.Ctx`](types.md#smeltpaintctx), [`smelt.paint.FrameOpts`](types.md#smeltpaintframeopts), [`smelt.paint.Paint`](types.md#smeltpaintpaint)
+Types: [`smelt.paint.Slice`](types.md#smeltpaintslice), [`smelt.paint.Ctx`](types.md#smeltpaintctx), [`smelt.paint.FrameOpts`](types.md#smeltpaintframeopts), [`smelt.paint.Effect`](types.md#smeltpainteffect)
 
-Register `func(slice, ctx)` over the whole screen and return its `Paint` handle. It runs after everything else has painted and before the frame is sent, so it can read, recolor, move, or replace any cell: screen-wide effects such as fades, color filters, or melting text. `ctx` is a `smelt.paint.Ctx`, with `cursor` for effects that follow it and, with `opts.history`, `prev`, `damage` and `scroll` for effects that react to change. Remove the handle to stop the effect.
+Register `func(slice, ctx)` over the finished screen and return an `Effect` handle. It can read, recolor or move cells before the frame is sent. `ctx.cursor` follows the caret; opt-in `history` exposes `prev`, `damage` and `scrolls`. An Effect is not a layout leaf. Remove it to stop.
 
 ## `smelt.paint.register`
 

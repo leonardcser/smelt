@@ -9,7 +9,7 @@ description: "Reference for every namespace of the smelt Lua API: commands, keym
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 91 namespace(s), 462 function(s), 126 class(es), 14 alias(es).
+**Coverage:** 92 namespace(s), 468 function(s), 129 class(es), 14 alias(es).
 
 Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).
 
@@ -76,6 +76,7 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.paint`](paint.md) (UI only): Register Lua callbacks against custom paint regions. Advanced.
 - [`smelt.picker`](picker.md) (UI only): Picker facade. 1 advanced function(s).
 - [`smelt.prompt`](prompt.md) (some UI only): The main editable input surface: win handle, text get/set, and cursor control.
+- [`smelt.style`](style.md) (UI only): Compose shared style values without resolving their theme references, or resolve a current style snapshot.
 - [`smelt.terminal`](terminal.md) (UI only): Terminal integration helpers.
 - [`smelt.theme`](theme.md) (some UI only): List bundled colorschemes, or apply, read, and override the active one.
 - [`smelt.ui`](ui.md) (UI only): Screen-composition primitives: main layout composer and per-window renderer registration.

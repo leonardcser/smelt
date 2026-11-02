@@ -54,6 +54,7 @@ mod state;
 mod task;
 mod time;
 mod timer;
+pub use timer::set_timer;
 mod tools;
 mod transcript;
 mod transcript_groups;

@@ -15,9 +15,8 @@
 -- renderer and places into any layout with `bar:node()`. The statusline, the
 -- headerline and the bars around the prompt are such bars.
 --
--- `style` is a subset of `smelt.buf.MarkOpts` (`fg`, `bg`, `hl_group`, `bold`,
--- `dim`, `italic`). `fg` / `bg` take any color form, including a theme group
--- name. The same table is forwarded verbatim to `buf:mark`.
+-- `style` accepts `smelt.Style|string`, shared with buffer marks and Paint.
+-- `fg` / `bg` take any color form, including a theme group name.
 --
 -- A laid-out row is `{ text, highlights }` where each highlight carries
 -- `bytes_start` / `bytes_end` (byte offsets, the unit `buf:mark` expects), the
@@ -39,8 +38,8 @@ local RULE_MIN_CELLS = 4
 --- shrink first. An item whose text is empty is skipped.
 ---@class smelt.bar.Item
 ---@field text? string Text to show. Ignored when `runs` is set.
----@field runs? smelt.bar.Run[] Consecutive styled pieces of one item; they drop together and are never truncated.
----@field style? smelt.buf.MarkOpts Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
+---@field runs? smelt.Span[] Consecutive styled pieces of one item; they drop together and are never truncated.
+---@field style? smelt.Style|string Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
 ---@field priority? integer Drop order when space runs out; higher values drop first, and 0 is never dropped. Defaults to 0.
 ---@field separated? boolean Draw a `·` between this item and the previous separated item on the same side.
 ---@field truncatable? boolean Allow shrinking this item before dropping it.
@@ -52,13 +51,20 @@ local RULE_MIN_CELLS = 4
 
 --- What a source gets on every repaint.
 ---@class smelt.bar.Context
----@field width integer The bar's width in cells.
+---@field width integer Content width for sources; a width budget during view construction. Renderers receive their actual width.
 ---@field rows? integer Rows left for this source while the layout gives the bar fewer rows than it wants: the bar's rows minus the rows earlier sources took. Nil when every row fits.
+---@field invalidate_after fun(ms: integer) Schedule the destination's next repaint. Use this rather than capturing a particular bar.
+---@field state table Host state. Transcript bars expose { label, target?, view }; other bars default to an empty table. A view factory's context stays live until its view is released.
 
---- A styled piece of a `runs` item.
----@class smelt.bar.Run
+--- Portable content with its update dependencies. Wrappers retain `signals` and call `render(ctx)`.
+---@class smelt.bar.Source
+---@field render fun(ctx: smelt.bar.Context): smelt.bar.Item|smelt.bar.Item[]|nil Render for the destination's size and scheduler.
+---@field signals? (string|{ [1]: string, [2]: fun(value: any): any })[] Signals that invalidate the destination. A pair adds a display-value projection, so insignificant changes do not repaint.
+
+--- Styled text for buffer lines, titles and bar runs.
+---@class smelt.Span
 ---@field text string Text to show.
----@field style? smelt.buf.MarkOpts Highlight applied to the text.
+---@field style? smelt.Style|string Highlight applied to the text.
 ---@field selectable? boolean Include the text in drag-copy. Defaults to the item's setting.
 
 -- ── rows ────────────────────────────────────────────────────────────
@@ -92,9 +98,7 @@ local function write_rows(buf, rows, ns)
   for i, row in ipairs(rows) do
     for _, hl in ipairs(row.highlights or {}) do
       if hl.bytes_end > hl.bytes_start then
-        local opts = {}
-        for k, v in pairs(hl.style) do opts[k] = v end
-        opts.end_col = hl.bytes_end
+        local opts = { style = hl.style, end_col = hl.bytes_end }
         if hl.selectable ~= nil then opts.selectable = hl.selectable end
         buf:mark(ns, i, hl.bytes_start, opts)
       end
@@ -130,7 +134,12 @@ end
 
 local function has_block_bg(entry)
   local style = entry.item.style
-  return style ~= nil and (style.bg ~= nil or style.hl_group ~= nil)
+  if type(style) == "table" and style.bg ~= nil then return true end
+  if type(style) == "string" or (style and style.hl_group) then
+    if entry.block_bg == nil then entry.block_bg = smelt.style.resolve(style).bg ~= nil end
+    return entry.block_bg
+  end
+  return false
 end
 
 local function gap_between(prev, entry)
@@ -302,13 +311,19 @@ local function side_gap(entries)
   return 1
 end
 
--- A copy of `style` backed by `bg`. `hl_group` carries its own bg, so an item
--- that picked one (a mode pill) keeps it instead of getting `bg` pasted on top.
+-- Keep explicit backgrounds, including false. Foreground-only groups still
+-- inherit the bar background; their reference must survive theme changes.
 local function on_bg(style, bg)
-  local s = {}
-  if style then for k, v in pairs(style) do s[k] = v end end
-  if bg and not s.bg and not s.hl_group then s.bg = bg end
-  return s
+  if bg == nil then return style or {} end
+  if style == nil then return { bg = bg } end
+  if type(style) == "table" and style.bg ~= nil then return style end
+  local group = type(style) == "string" and style or style.hl_group
+  if group and smelt.style.resolve(group).bg ~= nil then return style end
+  -- Marks validate the completed style; inheritance only copies references.
+  local merged = { bg = bg }
+  if type(style) == "string" then merged.hl_group = style
+  else for key, value in pairs(style) do merged[key] = value end end
+  return merged
 end
 
 local function text_width(runs)
@@ -474,55 +489,61 @@ local LOOK = {
   rule_style = true,
   fill_selectable = true,
   visible = true,
+  style = true,
+  on_press = true,
 }
--- Look keys whose `false` is a value rather than "restore the default".
-local BOOLEAN_LOOK = { fill_selectable = true, visible = true }
 
 --- Look of a bar, set with `bar:configure(config)`. Absent keys keep their
---- current value; `false` resets a key to its default.
+--- current value; `bar:reset(key)` restores constructor defaults.
 ---@class smelt.bar.Config
 ---@field layout? "strip"|"rule" `"strip"` fills the row; `"rule"` draws a horizontal line with the items set into it.
 ---@field bg? string|false Theme group that fills the empty cells and backs items without their own background.
----@field separator? string|false Text between neighbouring `separated` items. Defaults to `" · "`.
----@field separator_style? smelt.buf.MarkOpts|false Style of the separator text.
----@field rule? string|false Cell repeated to draw a rule. Defaults to `"─"`.
----@field rule_style? smelt.buf.MarkOpts|false Style of the rule. Defaults to `{ fg = "SmeltSeparator" }`.
+---@field separator? string Text between neighbouring `separated` items. Defaults to `" · "`.
+---@field separator_style? smelt.Style|string Style of the separator text.
+---@field rule? string Cell repeated to draw a rule. Defaults to `"─"`.
+---@field rule_style? smelt.Style|string Style of the rule. Defaults to `{ fg = "SmeltSeparator" }`.
 ---@field fill_selectable? boolean Include the filler between items in drag-copy.
 ---@field visible? boolean `false` hides the bar: it takes no rows and its sources stay registered.
+---@field style? smelt.Style|string Default style for items without their own style.
+---@field on_press? false|fun(ctx: smelt.bar.Context, event: table) Left-button action shared by every leaf; false disables it.
 
 --- Options for `smelt.bar.new`. The look keys of `smelt.bar.Config` set the
---- defaults that `bar:configure({ key = false })` restores.
+--- defaults that `bar:reset(key)` restores.
 ---@class smelt.bar.Opts
 ---@field name string Unique name; it labels errors and names the bar's window.
 ---@field layout? "strip"|"rule" Defaults to `"strip"`.
 ---@field bg? string Theme group behind the empty cells.
 ---@field separator? string Text between neighbouring `separated` items.
----@field separator_style? smelt.buf.MarkOpts Style of the separator text.
+---@field separator_style? smelt.Style|string Style of the separator text.
 ---@field rule? string Cell repeated to draw a rule.
----@field rule_style? smelt.buf.MarkOpts Style of the rule.
+---@field rule_style? smelt.Style|string Style of the rule.
 ---@field fill_selectable? boolean Include the filler between items in drag-copy.
 ---@field visible? boolean Defaults to `true`.
+---@field style? smelt.Style|string Default style for items without their own style.
+---@field on_press? false|fun(ctx: smelt.bar.Context, event: table) Left-button action for the bar's leaves.
 ---@field min_rows? integer Rows kept even when no source shows an item. Defaults to 1; 0 makes the bar collapse while empty.
----@field sources? { [1]: string, [2]: fun(ctx: smelt.bar.Context): smelt.bar.Item[]? }[] Built-in sources added in order; `bar:builtin(name)` returns them.
----@field win_opts? table Extra `smelt.win.new` options for the bar's window, such as `focus_on_click` or `resize`.
+---@field sources? { [1]: string, [2]: smelt.bar.Source|(fun(ctx: smelt.bar.Context): (smelt.bar.Item|smelt.bar.Item[]|nil)) }[] Built-in sources added in order; `bar:builtin(name)` returns them.
+---@field win_opts? table Extra window options, such as focus_on_click or padding.
 
 --- A bar: named sources whose items lay out in a strip or a rule. It owns a
 --- window and its renderer; `bar:node()` places it in a layout.
 ---@class smelt.bar.Bar
 ---@field name string The name given to `smelt.bar.new`.
----@field win smelt.win.Win The window the bar renders into.
----@field add fun(self: smelt.bar.Bar, name: string, handler: fun(ctx: smelt.bar.Context): smelt.bar.Item[]?, opts?: { builtin?: boolean }): smelt.Reg Add a named source. `handler(ctx)` runs on every repaint (see `smelt.bar.Context`) and returns an item or a list of them; an error skips the source and shows a notification. Sources run in the order they were added. Adding an existing name replaces that source in place. `opts.builtin` also records it as the default that `bar:builtin(name)` returns, for features that ship a source. Returns a `Reg` that removes the source, unless a later `add` replaced it.
+---@field win smelt.win.Win? Source-rendering window. Overlay bars have none while unmounted or using a replacement view.
+---@field add fun(self: smelt.bar.Bar, name: string, handler: smelt.bar.Source|(fun(ctx: smelt.bar.Context): (smelt.bar.Item|smelt.bar.Item[]|nil)), opts?: { row?: integer, align_right?: boolean, priority?: integer }): smelt.Reg Add or replace a named source. Its signals update this bar; removal removes subscriptions. Placement overrides do not modify returned items. Errors skip the source and notify. The Reg removes only this registration, not a later replacement.
+---@field add_builtin fun(self: smelt.bar.Bar, name: string, source: smelt.bar.Source|(fun(ctx: smelt.bar.Context): (smelt.bar.Item|smelt.bar.Item[]|nil))): smelt.Reg Add a default source retrievable with builtin(name). Prefer constructor sources for a new bar.
 ---@field remove fun(self: smelt.bar.Bar, name: string) Remove every source named `name`.
 ---@field clear fun(self: smelt.bar.Bar) Remove every source, built-in ones included.
----@field builtin fun(self: smelt.bar.Bar, name: string): (fun(ctx: smelt.bar.Context): smelt.bar.Item[]?)? The built-in source named `name`, so a replacement can fall back to it.
----@field configure fun(self: smelt.bar.Bar, config: smelt.bar.Config) Change the look. Absent keys stay; `false` restores a key's default.
+---@field builtin fun(self: smelt.bar.Bar, name: string): smelt.bar.Source? The built-in source, including its signals, so it can be moved or wrapped without losing updates.
+---@field configure fun(self: smelt.bar.Bar, config: smelt.bar.Config) Validate and change the look atomically. Absent keys stay unchanged.
+---@field reset fun(self: smelt.bar.Bar, key?: string) Restore one constructor default, or every look option when key is omitted.
 ---@field config fun(self: smelt.bar.Bar): smelt.bar.Config The current look.
 ---@field invalidate fun(self: smelt.bar.Bar) Repaint after state a source reads changes outside a built-in signal. Adding, replacing and removing sources repaint on their own.
 ---@field invalidate_after fun(self: smelt.bar.Bar, ms: integer) Repaint after `ms` milliseconds. An animated source asks for its next frame on every paint; the earliest pending request wins.
 ---@field rows fun(self: smelt.bar.Bar): integer Rows the bar wants: 0 while hidden, the view rows when a view replaces it, 1 for a rule, otherwise one per distinct item `row` and at least `min_rows`.
----@field highlight fun(self: smelt.bar.Bar, style: smelt.buf.MarkOpts?) Paint the rule and the separators with `style` until called with nil, for example while the bar is dragged. The look stays as configured.
+---@field highlight fun(self: smelt.bar.Bar, style: smelt.Style|string?) Paint the rule and the separators with `style` until called with nil, for example while the bar is dragged. The look stays as configured.
 ---@field node fun(self: smelt.bar.Bar): smelt.ui.layout, integer The bar's layout node and rows, for layout composers.
----@field set_view fun(self: smelt.bar.Bar, node: smelt.ui.layout?, rows: integer?) Replace the bar with any layout node, such as a paint leaf, taking `rows` rows (default 1). `nil` restores the bar.
+---@field set_view fun(self: smelt.bar.Bar, factory: (fun(ctx: smelt.bar.Context): smelt.ui.layout)?) Build a measured replacement view with fresh leaves. The bar releases its resources and registrations on replacement or host teardown; failed construction preserves the current view. Names inside a factory are local to that view. Give Paint leaves a measure. nil restores source rendering.
 
 local Bar = {}
 Bar.__index = Bar
@@ -567,7 +588,7 @@ end
 local function collect(bar, width, rows)
   local items = {}
   for _, src in ipairs(bar.sources) do
-    local ctx = { width = width }
+    local ctx = { width = width, state = bar.context.state, invalidate_after = bar.schedule }
     if rows then ctx.rows = math.max(rows - #rows_of(items), 0) end
     local ok, result = pcall(src.handler, ctx)
     if not ok then
@@ -575,6 +596,13 @@ local function collect(bar, width, rows)
     elseif type(result) == "table" then
       if result.text or result.runs then result = { result } end
       for _, item in ipairs(result) do
+        if src.presentation or (bar.style and item.style == nil) then
+          local copy = {}
+          for key, value in pairs(item) do copy[key] = value end
+          for key, value in pairs(src.presentation or {}) do copy[key] = value end
+          if copy.style == nil then copy.style = bar.style end
+          item = copy
+        end
         items[#items + 1] = item
       end
     end
@@ -590,6 +618,7 @@ local function items_of(bar, width, rows)
   width = width or bar.items_width or smelt.terminal.size().width
   if not bar.items or bar.items_width ~= width then
     bar.items, bar.items_width, bar.folded = collect(bar, width), width, nil
+    bar.item_rows = rows_of(bar.items)
   end
   if not rows then return bar.items end
   if not bar.folded or bar.folded.rows ~= rows then
@@ -599,37 +628,149 @@ local function items_of(bar, width, rows)
 end
 
 function Bar:rows()
-  if not self.visible then return 0 end
-  if self.view then return self.view.rows end
+  if not self.visible or (self.hosted and not self.host_opts) then return 0 end
+  local view = self.presentation
+  if view and view.owner then
+    local size = smelt.terminal.size()
+    return select(2, smelt.ui.layout.size(view.node, self.hosted and self.context.width or (self.items_width or size.width), size.height))
+  end
   if self.layout == "rule" then return 1 end
-  return math.max(self.min_rows, #rows_of(items_of(self, self.items_width)))
+  items_of(self, self.items_width)
+  return math.max(self.min_rows, #self.item_rows)
 end
 
 function Bar:highlight(style)
   self.highlighted = style
-  if self.win then self.win:invalidate_renderer() end
+  if self.win then self.win:invalidate() end
 end
 
 -- The layout composer calls this, so the rows it returns are the rows
 -- `invalidate` compares against.
 function Bar:node()
+  local view = self.presentation
+  if not view then return smelt.ui.layout.vbox({}), 0 end
   self.shown_rows = self:rows()
-  if self.view then return self.view.node, self.shown_rows end
-  return smelt.ui.layout.leaf(self.win), self.shown_rows
+  if not view.owner and not self.hosted then view.measure:set(0, self.shown_rows) end
+  return view.node, self.shown_rows
 end
 
-function Bar:set_view(node, rows)
-  if node == nil then
-    self.view = nil
-  else
-    self.view = { node = node, rows = rows or 1 }
+local function clear_press(view)
+  if not view.press_regs then return end
+  for _, reg in ipairs(view.press_regs) do reg:remove() end
+  view.press_regs = nil
+end
+
+local function release_view(bar, view)
+  if not view then return end
+  clear_press(view)
+  if view == bar.source_view then return end
+  if view.owner then view.owner:remove()
+  elseif view.win then
+    view.win:set_renderer(nil)
+    view.win:close()
   end
+end
+
+local function build_view(bar, factory)
+  local leaves
+  local node, owner = __smelt_internal.ui.layout.build_view(function(ctx)
+    local node = factory(ctx)
+    leaves = smelt.ui.layout.leaves(node)
+    return node
+  end, bar.context, bar.presentation and bar.presentation.node)
+  return { node = node, owner = owner, leaves = leaves }
+end
+
+function Bar:_mount_view(view)
+  local opts = {}
+  for key, value in pairs(self.host_opts) do opts[key] = value end
+  opts.layout = view.node
+  return smelt.overlay.new(opts)
+end
+
+function Bar:set_view(factory)
+  assert(factory == nil or type(factory) == "function", "bar.set_view: expected factory or nil")
+  if factory == nil and self.view_factory == nil then self:invalidate(); return end
+  if self.hosted and (not self.host_opts or not self.visible) then
+    self.view_factory = factory
+  else
+    if not self.hosted then self.context.width = self.items_width or smelt.terminal.size().width end
+    local candidate = factory and build_view(self, factory) or self.source_view or self:_default_view()
+    local ok, overlay = pcall(function()
+      self:_wire_press(candidate)
+      if self.hosted then return self:_mount_view(candidate) end
+    end)
+    if not ok then release_view(self, candidate); error(overlay, 0) end
+    local previous = self.presentation
+    self.presentation, self.view_factory = candidate, factory
+    if self.hosted then self.overlay, self.win = overlay, candidate.win end
+    release_view(self, previous)
+  end
+  self:invalidate()
   smelt.ui.layout.invalidate()
+end
+
+-- Overlay hosts only supply navigation state and placement. Presentation and
+-- resource lifetime use the same bar implementation as root-layout bars.
+function Bar:_hide()
+  if self.overlay then self.overlay:close() end
+  self.overlay = nil
+  release_view(self, self.presentation)
+  self.presentation, self.win = nil, nil
+  if self.repaint then self.repaint:remove(); self.repaint = nil end
+end
+
+function Bar:_remount()
+  if not self.host_opts then return end
+  if not self.visible then self:_hide(); return end
+  local candidate = self.presentation
+  if not candidate then
+    candidate = self.view_factory and build_view(self, self.view_factory) or self:_default_view()
+    self:_wire_press(candidate)
+  end
+  local ok, overlay = pcall(self._mount_view, self, candidate)
+  if not ok then
+    if candidate ~= self.presentation then release_view(self, candidate) end
+    error(overlay, 0)
+  end
+  self.presentation, self.overlay, self.win = candidate, overlay, candidate.win
+end
+
+function Bar:_present(state, width, opts)
+  local resized = self.context.width ~= width
+  self.context.state, self.context.width = state, width
+  self.host_opts = opts
+  local label = self.builtins.label
+  local label_only = label and #self.sources == 1 and self.sources[1].handler == label.render
+  local changed = resized or self.last_label ~= state.label or not label_only
+  if changed then self.items, self.folded = nil, nil end
+  if resized and self.overlay then self:_hide() end
+  if not self.overlay and self.visible then self:_remount() end
+  local view = self.presentation
+  if view and view.owner then
+    for _, leaf in ipairs(view.leaves) do leaf:invalidate() end
+  elseif self.overlay and changed then
+    self.last_label = state.label
+    self:invalidate()
+  end
+end
+
+function Bar:_dismiss()
+  self.host_opts = nil
+  self:_hide()
 end
 
 function Bar:invalidate()
   self.items, self.folded = nil, nil
-  if self.win then self.win:invalidate_renderer() end
+  local view = self.presentation
+  if view then
+    if view.owner then
+      for _, leaf in ipairs(view.leaves) do leaf:invalidate() end
+    else
+      view.win:invalidate()
+      if self.hosted then self:_measure_default(view) end
+    end
+  end
   -- The height follows the items, so relayout in the same frame when the row
   -- count changes.
   if self.shown_rows and self:rows() ~= self.shown_rows then
@@ -650,28 +791,84 @@ function Bar:invalidate_after(ms)
   end)
 end
 
+local function projected_change(project, value, previous)
+  return project(value) ~= project(previous)
+end
+
+local function detach(bar, source)
+  for _, dependency in ipairs(source.dependencies) do
+    local group = dependency.group
+    group.members[dependency] = nil
+    if next(group.members) == nil then
+      group.reg:remove()
+      bar.signal_groups[dependency.key] = nil
+    end
+  end
+end
+
 function Bar:add(name, handler, opts)
   if type(name) ~= "string" or name == "" then
     error(self.name .. ":add: name must be a non-empty string", 2)
   end
-  if type(handler) ~= "function" then
-    error(self.name .. ":add: handler must be a function", 2)
+  local render = type(handler) == "table" and handler.render or handler
+  if type(render) ~= "function" then
+    error(self.name .. ":add: source must be a function or { render, signals }", 2)
   end
-  local entry = { name = name, handler = handler }
+  local entry = { name = name, handler = render, dependencies = {} }
+  for key, value in pairs(opts or {}) do
+    if key == "row" or key == "priority" then
+      assert(math.type(value) == "integer", "bar source " .. key .. ": expected integer")
+    elseif key == "align_right" then
+      assert(type(value) == "boolean", "bar source " .. key .. ": expected boolean")
+    else error("bar source: unknown option " .. tostring(key), 2) end
+    entry.presentation = entry.presentation or {}
+    entry.presentation[key] = value
+  end
+  if type(handler) == "table" then
+    local ok, err = pcall(function()
+      for _, signal in ipairs(handler.signals or {}) do
+        local key, project = signal, nil
+        if type(signal) == "table" then key, project = signal[1], signal[2] end
+        assert(project == nil or type(project) == "function", "bar source: signal projection must be a function")
+        local group = self.signal_groups[key]
+        if not group then
+          group = { members = {} }
+          group.reg = __smelt_internal.signal.subscribe_shared(key, function(value, previous)
+            for dependency in pairs(group.members) do
+              if not dependency.project then self:invalidate(); return end
+              local ok, changed = pcall(projected_change, dependency.project, value, previous)
+              if not ok then
+                smelt.notify.error(self.name .. " signal `" .. key .. "`: " .. tostring(changed))
+              elseif changed then
+                self:invalidate()
+                return
+              end
+            end
+          end)
+          self.signal_groups[key] = group
+        end
+        local dependency = { key = key, project = project, group = group }
+        group.members[dependency] = true
+        entry.dependencies[#entry.dependencies + 1] = dependency
+      end
+    end)
+    if not ok then detach(self, entry); error(err, 2) end
+  end
   local replaced = false
   for i, src in ipairs(self.sources) do
     if src.name == name then
+      detach(self, src)
       self.sources[i] = entry
       replaced = true
       break
     end
   end
   if not replaced then self.sources[#self.sources + 1] = entry end
-  if opts and opts.builtin then self.builtins[name] = handler end
   self:invalidate()
   return smelt.reg.new(function()
     for i, src in ipairs(self.sources) do
       if src == entry then
+        detach(self, src)
         table.remove(self.sources, i)
         self:invalidate()
         return
@@ -680,14 +877,24 @@ function Bar:add(name, handler, opts)
   end)
 end
 
+function Bar:add_builtin(name, source)
+  local reg = self:add(name, source)
+  self.builtins[name] = type(source) == "table" and source or { render = source }
+  return reg
+end
+
 function Bar:remove(name)
   for i = #self.sources, 1, -1 do
-    if self.sources[i].name == name then table.remove(self.sources, i) end
+    if self.sources[i].name == name then
+      detach(self, self.sources[i])
+      table.remove(self.sources, i)
+    end
   end
   self:invalidate()
 end
 
 function Bar:clear()
+  for _, src in ipairs(self.sources) do detach(self, src) end
   self.sources = {}
   self:invalidate()
 end
@@ -704,12 +911,32 @@ function Bar:configure(config)
     if not LOOK[key] then
       error(self.name .. ":configure: unknown key `" .. tostring(key) .. "`", 2)
     end
-    if value == false and not BOOLEAN_LOOK[key] then value = self.defaults[key] end
+    if key == "rule_style" or key == "separator_style" or key == "style" then smelt.style.resolve(value) end
+    if key == "on_press" and value ~= false and type(value) ~= "function" then error("bar.on_press: expected function or false", 2) end
+    if key == "bg" then smelt.theme.rgb(value, "bg") end
     if key == "layout" and value ~= "strip" and value ~= "rule" then
       error(self.name .. ':configure: layout must be "strip" or "rule"', 2)
+    elseif (key == "separator" or key == "rule") and type(value) ~= "string" then
+      error(self.name .. ":configure: " .. key .. " must be a string", 2)
+    elseif (key == "visible" or key == "fill_selectable") and type(value) ~= "boolean" then
+      error(self.name .. ":configure: " .. key .. " must be a boolean", 2)
     end
-    self[key] = value
   end
+  for key, value in pairs(config) do self[key] = value end
+  if config.on_press ~= nil then self:_wire_press() end
+  if self.hosted then self:_remount() end
+  self:invalidate()
+  smelt.ui.layout.invalidate()
+end
+
+function Bar:reset(key)
+  if key ~= nil and not LOOK[key] then error(self.name .. ":reset: unknown key " .. tostring(key), 2) end
+  for name in pairs(LOOK) do
+    if key == nil or name == key then self[name] = self.defaults[name] end
+  end
+  if key == nil or key == "on_press" then self:_wire_press() end
+  if key == nil then self:set_view(nil) end
+  if self.hosted then self:_remount() end
   self:invalidate()
   smelt.ui.layout.invalidate()
 end
@@ -734,9 +961,13 @@ local function layout_rows(bar, width, rows)
     return out
   end
   local items = items_of(bar, width)
-  if #rows_of(items) > rows then items = items_of(bar, width, rows) end
+  local item_rows = bar.item_rows
+  if #item_rows > rows then
+    items = items_of(bar, width, rows)
+    item_rows = rows_of(items)
+  end
   local slot = {}
-  for i, r in ipairs(rows_of(items)) do slot[r] = i end
+  for i, r in ipairs(item_rows) do slot[r] = i end
   local by_slot = {}
   for _, item in ipairs(items) do
     local i = slot[item.row or 1]
@@ -751,8 +982,65 @@ local function layout_rows(bar, width, rows)
   return out
 end
 
---- Create a bar (see `smelt.bar.Opts`).
-function M.new(opts)
+function Bar:_natural_width()
+  if self.layout == "rule" then return self.context.width end
+  local rows, width = {}, 0
+  for _, item in ipairs(items_of(self, self.context.width)) do
+    local row = item.row or 1
+    rows[row] = rows[row] or {}
+    rows[row][#rows[row] + 1] = item
+  end
+  local separator = smelt.text.width(self.separator or DEFAULT_SEPARATOR)
+  for _, items in pairs(rows) do
+    local entries = entries_of(items)
+    local left = side_size(entries, false, separator)
+    local right, count = side_size(entries, true, separator)
+    width = math.max(width, left + right + (count > 0 and side_gap(entries) or 0))
+  end
+  return math.min(self.context.width, width)
+end
+
+-- Fit sources get their actual width before height is measured, so responsive
+-- rows are correct on the first frame, including a newly opened overlay.
+function Bar:_measure_default(view)
+  local width = self:_natural_width()
+  items_of(self, width)
+  local rows = self.layout == "rule" and 1 or math.max(self.min_rows, #self.item_rows)
+  view.measure:set(width, rows)
+end
+
+function Bar:_wire_press(view)
+  view = view or self.presentation
+  if not view then return end
+  clear_press(view)
+  if not self.on_press then return end
+  view.press_regs = {}
+  for _, leaf in ipairs(view.leaves) do
+    view.press_regs[#view.press_regs + 1] = leaf:on("press", function(ev)
+      if self.on_press and (ev.button == nil or ev.button == "left") then self.on_press(self.context, ev) end
+    end)
+  end
+end
+
+function Bar:_default_view()
+  local win_opts = { name = self.name .. (self.hosted and ".win" or ""), scrollbar = false, surface = "selectable_text" }
+  for key, value in pairs(self.win_opts) do win_opts[key] = value end
+  local buf = smelt.buf.new({ name = self.hosted and self.name .. ".buf" or self.name })
+  local win = smelt.win.new(buf, win_opts)
+  if not win then return nil end
+  local measure = smelt.ui.layout.measure(0, self.min_rows)
+  local view = { win = win, measure = measure, leaves = { win }, node = smelt.ui.layout.leaf(win, { measure = measure }) }
+  if self.hosted then self:_measure_default(view) end
+  local ns = smelt.ns(self.name)
+  win:set_renderer(function()
+    local height = (win:rect() or {}).height or self:rows()
+    write_rows(buf, layout_rows(self, win:content_width() or self.context.width, height), ns)
+    if self.shown_rows and self:rows() ~= self.shown_rows then smelt.ui.layout.invalidate() end
+  end)
+  return view
+end
+
+local function new_bar(opts, hosted)
   if type(opts) ~= "table" or type(opts.name) ~= "string" or opts.name == "" then
     error("smelt.bar.new: opts.name must be a non-empty string", 2)
   end
@@ -762,34 +1050,36 @@ function M.new(opts)
   if defaults.visible == nil then defaults.visible = true end
   local bar = setmetatable({
     name = opts.name,
+    hosted = hosted,
+    win_opts = opts.win_opts or {},
+    context = { state = {}, width = smelt.terminal.size().width },
     min_rows = opts.min_rows or 1,
     defaults = defaults,
     sources = {}, -- ordered { name, handler } pairs
+    signal_groups = {},
     builtins = {},
     items = nil, -- collected on demand, dropped on invalidate
     folded = nil, -- items for fewer rows than wanted, dropped on invalidate
     shown_rows = nil, -- rows the layout last reserved
   }, Bar)
   for key, value in pairs(defaults) do bar[key] = value end
+  bar.schedule = function(ms) bar:invalidate_after(ms) end
 
-  local win_opts = { name = opts.name, scrollbar = false, surface = "selectable_text" }
-  for key, value in pairs(opts.win_opts or {}) do win_opts[key] = value end
-  bar.win = smelt.win.new(smelt.buf.new({ name = opts.name }), win_opts)
-  if bar.win then
-    local ns = smelt.ns(opts.name)
-    bar.win:set_renderer(function(win)
-      local buf = win:buf()
-      if not buf then return end
-      local height = (win:rect() or {}).height or bar:rows()
-      write_rows(buf, layout_rows(bar, win:content_width() or 80, height), ns)
-    end)
+  bar.context.invalidate_after = bar.schedule
+  if not hosted then
+    bar.source_view = bar:_default_view()
+    bar.presentation = bar.source_view
+    bar.win = bar.source_view and bar.source_view.win
+    bar:_wire_press()
   end
-
   for _, source in ipairs(opts.sources or {}) do
-    bar:add(source[1], source[2], { builtin = true })
+    bar:add_builtin(source[1], source[2])
   end
   return bar
 end
+
+function M.new(opts) return new_bar(opts, false) end
+function M.overlay(opts) return new_bar(opts, true) end
 
 smelt.bar = smelt.bar or {}
 

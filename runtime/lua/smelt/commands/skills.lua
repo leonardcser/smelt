@@ -37,7 +37,7 @@ smelt.cmd.register("skills", function()
     buf:lines(lines)
     for i, range in ipairs(dim_ranges) do
       if range.finish > range.start then
-        buf:mark(NS_DIM, i, range.start, { end_col = range.finish, dim = true })
+        buf:mark(NS_DIM, i, range.start, { end_col = range.finish, style = { dim = true } })
       end
     end
 

@@ -519,6 +519,10 @@ impl ConversationLuaHost<'_> {
         self.app.loaded_transcript_block_at_row(row)
     }
 
+    pub(crate) fn transcript_top_inset(&self) -> crate::smelt_edit::RowIndex {
+        self.app.transcript_top_inset()
+    }
+
     pub(crate) fn committed_transcript_view(&self) -> Option<crate::app::CommittedTranscriptView> {
         self.app.conversation.committed_transcript_view()
     }
@@ -1016,24 +1020,51 @@ impl UiLuaHost<'_> {
         resized
     }
 
-    pub(crate) fn layout_windows(
+    pub(crate) fn validate_view_layout(
         &mut self,
         node: &crate::lua::api::overlay_layout::LayoutNode,
-    ) -> Result<Vec<crate::smelt_edit::WinId>, String> {
+        previous: Option<&crate::lua::api::overlay_layout::LayoutNode>,
+    ) -> Result<(), String> {
         use crate::lua::api::overlay_layout::LayoutNode;
-        let mut windows = Vec::new();
-        let mut stack = vec![node];
+        let (_, tree) = crate::lua::ui_ops::build_layout_tree(self.app, node, &mut Vec::new())?;
+        let replaced: std::collections::HashSet<_> = previous
+            .into_iter()
+            .flat_map(LayoutNode::nodes)
+            .filter_map(|node| match node {
+                LayoutNode::Split { split, .. } => Some(split.id()),
+                _ => None,
+            })
+            .collect();
+        crate::lua::ui_ops::validate_split_mounts(&tree, self.app.ui.layout_trees(), |id| {
+            replaced.contains(&id)
+        })
+    }
+
+    pub(crate) fn measure_layout(
+        &mut self,
+        node: &crate::lua::api::overlay_layout::LayoutNode,
+        cap: (u16, u16),
+    ) -> Result<(u16, u16), String> {
+        let (_, tree) = crate::lua::ui_ops::build_layout_tree(self.app, node, &mut Vec::new())?;
+        Ok(self.app.ui.measure_layout(&tree, cap))
+    }
+
+    pub(crate) fn layout_leaves(
+        &mut self,
+        node: &crate::lua::api::overlay_layout::LayoutNode,
+    ) -> Result<Vec<crate::lua::paint::LeafKind>, String> {
+        use crate::lua::api::overlay_layout::LayoutNode;
+        use crate::lua::paint::LeafKind;
+        let mut leaves = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        while let Some(node) = stack.pop() {
+        for node in node.nodes() {
             match node {
                 LayoutNode::Leaf { raw_id, .. } => {
-                    match self.app.resolve_leaf_id(*raw_id).ok_or_else(|| {
+                    let leaf = self.app.resolve_leaf_id(*raw_id).ok_or_else(|| {
                         format!("layout leaf references missing window/paint id {raw_id}")
-                    })? {
-                        crate::lua::paint::LeafKind::Window(win) if seen.insert(win) => {
-                            windows.push(win)
-                        }
-                        _ => {}
+                    })?;
+                    if seen.insert(*raw_id) {
+                        leaves.push(leaf);
                     }
                 }
                 LayoutNode::DialogStage { id } => {
@@ -1043,18 +1074,22 @@ impl UiLuaHost<'_> {
                         .docked_surface(*id)
                         .ok_or_else(|| format!("layout references missing docked dialog {}", id.0))?
                         .modal();
-                    if let Some(leaves) = self.app.ui.modal_leaves(modal) {
-                        windows.extend(leaves.iter().copied().filter(|win| seen.insert(*win)));
+                    if let Some(windows) = self.app.ui.modal_leaves(modal) {
+                        leaves.extend(
+                            windows
+                                .iter()
+                                .copied()
+                                .filter(|win| seen.insert(win.0))
+                                .map(LeafKind::Window),
+                        );
                     }
                 }
-                LayoutNode::Frame { child, .. } => stack.push(child),
-                LayoutNode::Split { children, .. } => stack.extend(children.iter().rev()),
-                LayoutNode::Container { items, .. } => {
-                    stack.extend(items.iter().rev().map(|item| &item.node))
-                }
+                LayoutNode::Frame { .. }
+                | LayoutNode::Split { .. }
+                | LayoutNode::Container { .. } => {}
             }
         }
-        Ok(windows)
+        Ok(leaves)
     }
 
     pub(crate) fn open_decoration(

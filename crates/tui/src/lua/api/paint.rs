@@ -120,16 +120,52 @@ impl LuaType for LuaPaintReg {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct LuaEffectReg {
+    id: crate::smelt_edit::layout::PaintId,
+}
+
+impl LuaType for LuaEffectReg {
+    fn lua_type() -> String {
+        "smelt.paint.Effect".into()
+    }
+}
+
+fn lifecycle_methods<T: 'static, M: mlua::UserDataMethods<T>>(
+    methods: &mut M,
+    id: fn(&T) -> crate::smelt_edit::layout::PaintId,
+) {
+    methods.add_method("remove", move |_, this, ()| {
+        Ok(crate::lua::with_ui_host(|host| host.remove_paint(id(this))))
+    });
+    methods.add_method("invalidate", move |_, this, ()| {
+        Ok(crate::lua::with_ui_host(|host| {
+            host.invalidate_paint(id(this), None)
+        }))
+    });
+    methods.add_method("invalidate_after", move |_, this, ms: u64| {
+        Ok(crate::lua::with_ui_host(|host| {
+            host.invalidate_paint(id(this), Some(std::time::Duration::from_millis(ms)))
+        }))
+    });
+}
+
+impl mlua::UserData for LuaEffectReg {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        lifecycle_methods(methods, |this| this.id);
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Effect#{}", this.id.0))
+        });
+    }
+}
+
 impl mlua::UserData for LuaPaintReg {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Paint#{}", this.id.0))
         });
 
-        methods.add_method("remove", |_, this, ()| -> LuaResult<bool> {
-            let removed = crate::lua::with_ui_host(|host| host.remove_paint(this.id));
-            Ok(removed)
-        });
+        lifecycle_methods(methods, |this| this.id);
 
         methods.add_method("rect", |lua, this, ()| -> LuaResult<mlua::Value> {
             let rect =
@@ -139,18 +175,6 @@ impl mlua::UserData for LuaPaintReg {
                 Some(r) => Ok(mlua::Value::Table(crate::lua::parse::rect_to_lua(lua, r)?)),
                 None => Ok(mlua::Value::Nil),
             }
-        });
-
-        methods.add_method("invalidate", |_, this, ()| -> LuaResult<bool> {
-            Ok(crate::lua::with_ui_host(|host| {
-                host.invalidate_paint(this.id, None)
-            }))
-        });
-
-        methods.add_method("invalidate_after", |_, this, ms: u64| -> LuaResult<bool> {
-            Ok(crate::lua::with_ui_host(|host| {
-                host.invalidate_paint(this.id, Some(std::time::Duration::from_millis(ms)))
-            }))
         });
 
         methods.add_function(
@@ -213,6 +237,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         },
     });
 
+    record_class(LuaClassDecl {
+        name: "smelt.paint.Effect",
+        classification: smelt_core::lua::doc::classification_for_type("smelt.paint.Effect"),
+        doc: "Screen-wide effect returned by smelt.paint.frame. Not a layout leaf and has no leaf events or rectangle.",
+        fields: smelt_core::class_methods! {
+            "remove" => fn() -> bool, "Remove the effect. Returns false if already removed.",
+            "invalidate" => fn() -> bool, "Request a frame. Returns false after removal.",
+            "invalidate_after" => fn(ms: u64) -> bool, "Request another frame after ms milliseconds. The earliest pending request wins; stops when the effect no longer asks.",
+        },
+    });
+
     let s = shared.clone();
     m.fn_(
         "register",
@@ -230,9 +265,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let s = shared.clone();
     m.fn_(
         "frame",
-        "Register `func(slice, ctx)` over the whole screen and return its `Paint` handle. It runs after everything else has painted and before the frame is sent, so it can read, recolor, move, or replace any cell: screen-wide effects such as fades, color filters, or melting text. `ctx` is a `smelt.paint.Ctx`, with `cursor` for effects that follow it and, with `opts.history`, `prev`, `damage` and `scroll` for effects that react to change. Remove the handle to stop the effect.",
+        "Register `func(slice, ctx)` over the finished screen and return an `Effect` handle. It can read, recolor or move cells before the frame is sent. `ctx.cursor` follows the caret; opt-in `history` exposes `prev`, `damage` and `scrolls`. An Effect is not a layout leaf. Remove it to stop.",
         &["func", "opts"],
-        move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, crate::lua::paint::PaintCtx), ()>, Option<LuaFrameOpts>)| -> LuaResult<LuaPaintReg> {
+        move |lua, (func, opts): (LuaCallback<(LuaPaintSlice, crate::lua::paint::PaintCtx), ()>, Option<LuaFrameOpts>)| -> LuaResult<LuaEffectReg> {
             let opts = opts.unwrap_or_default();
             let map_pointer = opts
                 .map_pointer
@@ -246,7 +281,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 },
                 pointer: opts.pointer.unwrap_or(false),
             };
-            register_paint(lua, &s, func, opts.name, options)
+            register_paint(lua, &s, func, opts.name, options).map(|paint| LuaEffectReg { id: paint.id })
         },
     )?;
 
@@ -260,8 +295,13 @@ fn register_paint(
     name: Option<String>,
     options: crate::lua::paint::PaintOptions,
 ) -> LuaResult<LuaPaintReg> {
-    let name = name.or_else(|| crate::lua::auto_name_for_scope(lua, "paint"));
+    let name = smelt_core::lua::reg::RegistrationScope::name(
+        name.or_else(|| crate::lua::auto_name_for_scope(lua, "paint")),
+    );
     let handle_id = crate::lua::register_callback_handle(shared, lua, func.into_inner())?;
     let paint_id = crate::lua::with_ui_host(|host| host.register_paint(handle_id, name, options));
+    smelt_core::lua::reg::RegistrationScope::resource("paint", paint_id.0, move || {
+        crate::lua::try_with_ui_host(|host| host.remove_paint(paint_id)).unwrap_or(false)
+    });
     Ok(LuaPaintReg { id: paint_id })
 }

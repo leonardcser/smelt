@@ -2256,8 +2256,8 @@ fn prompt_block_takes_a_background_and_drops_its_rules() {
 
     assert!(app.run_lua(
         r#"
-        smelt.prompt.top:configure({ layout = false })
-        smelt.prompt.bottom:configure({ layout = false })
+        smelt.prompt.top:reset("layout")
+        smelt.prompt.bottom:reset("layout")
         "#,
     ));
     let text = app.render_to_frame().text();

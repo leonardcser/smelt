@@ -25,6 +25,8 @@ mod resources;
 mod scroll_geometry;
 mod search;
 mod transcript_folds;
+mod ui_api;
+mod ui_pills;
 mod vim;
 
 fn ask_messages(cmds: Vec<protocol::UiCommand>) -> Vec<(String, Vec<protocol::Message>)> {
@@ -465,7 +467,7 @@ async fn compaction_prepare_probe_compacts_after_lua_reload() {
 // with the same `name` and a different `title` and assert the chrome
 // title is updated in place (no close+reopen).
 
-// `apply_window_opts` should only mutate fields that are present in
+// Window configuration should only mutate fields that are present in
 // opts. A named refresh that omits `wrap` must NOT silently reset
 // wrap to its default - that would clobber the prior value.
 
@@ -532,7 +534,6 @@ fn find_anon_paint(app: &TestApp) -> crate::smelt_edit::layout::PaintId {
         .filter_map(|n| reg.id_by_name(n))
         .collect();
     reg.all_ids()
-        .into_iter()
         .find(|id| !named.contains(id))
         .expect("anonymous paint id present")
 }

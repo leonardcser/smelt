@@ -780,6 +780,17 @@ impl Ui {
             .chain(self.overlays.iter().map(|(_, value)| &value.layout))
     }
 
+    /// Measure a subtree with the same window sizing policy used by rendering.
+    pub fn measure_layout(&self, tree: &LayoutTree, cap: (u16, u16)) -> (u16, u16) {
+        tree.natural_size_with(
+            cap,
+            &UiLeafSizer {
+                wins: &self.wins,
+                bufs: &self.bufs,
+            },
+        )
+    }
+
     fn resolve_splits(&self) -> HashMap<WinId, Rect> {
         let sizer = UiLeafSizer {
             wins: &self.wins,
@@ -3129,10 +3140,34 @@ impl Ui {
         }
     }
 
-    fn resolved_overlay_rect(&self, id: OverlayId) -> Option<Rect> {
+    pub fn resolved_overlay_rect(&self, id: OverlayId) -> Option<Rect> {
         self.resolve_overlays(None)
             .into_iter()
             .find_map(|(oid, rect, _)| if oid == id { Some(rect) } else { None })
+    }
+
+    /// Reservations describe one top region, not additive overlay heights.
+    pub fn reserved_top_inset(&self, window: WinId) -> u16 {
+        if !self.overlays.iter().any(|(_, overlay)| overlay.reserve) {
+            return 0;
+        }
+        let Some(viewport) = self.split_rect(window) else {
+            return 0;
+        };
+        self.resolve_overlays(None)
+            .into_iter()
+            .filter_map(|(_, rect, overlay)| {
+                if !overlay.reserve
+                    || !matches!(overlay.anchor, Anchor::Win { target, .. } if target.0 == window.0)
+                {
+                    return None;
+                }
+                let covered = rect.intersection(viewport);
+                (covered.width > 0 && covered.height > 0)
+                    .then(|| covered.bottom().saturating_sub(viewport.y))
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     fn chrome_owner_rect(&self, owner: overlay::ChromeOwner) -> Option<Rect> {

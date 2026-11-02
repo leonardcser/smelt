@@ -274,16 +274,16 @@ local function render_menu(buf, items, has_descriptions, numbered, width)
     if item.disabled then
       for row = m.label_row, m.last_row do
         local line = rendered[row] or ""
-        if #line > 0 then buf:mark(NS_MENU_DISABLED, row, 0, { end_col = #line, dim = true }) end
+        if #line > 0 then buf:mark(NS_MENU_DISABLED, row, 0, { end_col = #line, style = { dim = true } }) end
       end
     else
       if numbered and m.label_start > 0 then
-        buf:mark(NS_MENU_NUM, m.label_row, 0, { end_col = m.label_start, dim = true })
+        buf:mark(NS_MENU_NUM, m.label_row, 0, { end_col = m.label_start, style = { dim = true } })
       end
       if m.desc_row and m.desc_end and m.desc_end > 0 then
         for row = m.desc_row, m.last_row do
           local line = rendered[row] or ""
-          if #line > 0 then buf:mark(NS_MENU_DESC, row, 0, { end_col = #line, dim = true }) end
+          if #line > 0 then buf:mark(NS_MENU_DESC, row, 0, { end_col = #line, style = { dim = true } }) end
         end
       end
     end
@@ -424,8 +424,8 @@ function smelt.dialog.menu(items, opts)
     for _, span in ipairs(m.label_spans or {}) do
       if span.end_col > span.start then
         buf:mark(NS_MENU_SELECTED, span.row, span.start, {
-          end_col  = span.end_col,
-          hl_group = "SmeltAccent",
+          end_col = span.end_col,
+          style = "SmeltAccent",
         })
       end
     end
@@ -705,12 +705,12 @@ end
 
 local function copy_title_span(span)
   if type(span) == "string" then
-    return { text = span, dim = true }
+    return { text = span, style = { dim = true } }
   end
   if type(span) ~= "table" then return span end
   local out = {}
   for k, v in pairs(span) do out[k] = v end
-  out.dim = true
+  out.style = smelt.style.merge(span.style or {}, { dim = true })
   return out
 end
 
@@ -724,7 +724,7 @@ function smelt.dialog.title(title, opts)
 
   local spans
   if type(title) == "string" then
-    spans = { { text = title, dim = true } }
+    spans = { { text = title, style = { dim = true } } }
   elseif type(title) == "table" then
     if title.text ~= nil then
       spans = { copy_title_span(title) }

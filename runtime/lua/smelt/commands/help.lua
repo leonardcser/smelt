@@ -227,8 +227,7 @@ local function toggle()
       local lines, marks = build_layout(sections, content_width)
       buf:lines(lines):clear_ns(NS_HELP)
       for _, mark in ipairs(marks) do
-        local opts = mark.opts or {}
-        opts.end_col = mark.end_col
+        local opts = { style = mark.opts, end_col = mark.end_col }
         buf:mark(NS_HELP, mark.row, mark.col, opts)
       end
     end
@@ -246,8 +245,8 @@ local function toggle()
       layout = smelt.ui.layout.leaf(leaf, {
         border = { all = "Comment" },
         title = smelt.dialog.title({
-          { text = " help ", bold = true },
-          { text = "(F1 to close) ", fg = "grey" },
+          { text = " help ", style = { bold = true } },
+          { text = "(F1 to close) ", style = { fg = "grey" } },
         }),
       }),
     })

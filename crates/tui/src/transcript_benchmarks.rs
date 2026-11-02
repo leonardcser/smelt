@@ -22,6 +22,110 @@ fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
 }
 
 #[test]
+fn default_ui_frame_benchmark_suite() {
+    if !benchmark_target_enabled() {
+        return;
+    }
+    let samples = env_positive_usize("SMELT_UI_BENCH_SAMPLES", 1000);
+    for case in ["idle", "typing", "streaming", "scrolling"] {
+        let mut app = TestApp::builder()
+            .with_ephemeral(true)
+            .with_vim(false)
+            .build();
+        app.set_terminal_size(120, 40);
+        app.animate_with_virtual_clock();
+        for i in 0..100 {
+            app.push_transcript_block(smelt_core::transcript_model::Block::User {
+                text: format!("default UI prompt {i}"),
+                image_labels: Vec::new(),
+                command: false,
+                sent_at_ms: None,
+            });
+            app.push_transcript_block(smelt_core::transcript_model::Block::Text {
+                content: format!(
+                    "default UI response {i}\n{}",
+                    "alpha beta gamma delta\n".repeat(4)
+                )
+                .into(),
+            });
+        }
+        app.render_silent();
+        if case == "streaming" {
+            app.start_turn(1);
+        }
+        if case == "scrolling" {
+            app.pin_transcript_scroll(150);
+        }
+        let mut timings = Vec::with_capacity(samples);
+        let (mut allocs, mut bytes) = (0, 0);
+        smelt_perf::alloc::set_enabled(true);
+        for i in 0..samples + 32 {
+            app.clock.advance(std::time::Duration::from_millis(16));
+            app.app
+                .lua
+                .lua()
+                .globals()
+                .set(
+                    "animation_now",
+                    engine::clock::unix_time_ms(app.clock.as_ref()),
+                )
+                .unwrap();
+            let before = smelt_perf::alloc::thread_snapshot();
+            let start = std::time::Instant::now();
+            app.tick_timers();
+            match case {
+                "typing" if i % 2 == 0 => app.type_char('a'),
+                "typing" => app.press(KeyCode::Backspace),
+                "streaming" => {
+                    app.feed_one(SourceEvent::engine(protocol::EngineEvent::TextDelta {
+                        delta: "streamed text ".into(),
+                    }))
+                }
+                "scrolling" => {
+                    use crossterm::event::{Event, MouseEvent, MouseEventKind};
+                    let rect = app.app.layout.transcript;
+                    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+                        kind: if i % 2 == 0 {
+                            MouseEventKind::ScrollUp
+                        } else {
+                            MouseEventKind::ScrollDown
+                        },
+                        column: rect.x + 2,
+                        row: rect.y + 2,
+                        modifiers: KeyModifiers::NONE,
+                    })));
+                }
+                "idle" => {}
+                _ => unreachable!(),
+            }
+            app.render_silent();
+            let elapsed = elapsed_ms(start.elapsed());
+            let after = smelt_perf::alloc::thread_snapshot();
+            if i >= 32 {
+                timings.push(elapsed);
+                allocs += after.0 - before.0;
+                bytes += after.1 - before.1;
+            }
+        }
+        if case == "streaming" {
+            assert!(app.streaming_state().text);
+        }
+        if case == "scrolling" {
+            let viewport = app.transcript_window();
+            assert!(viewport.scroll_top > 0 && !viewport.following_tail);
+        }
+        let stats = TailStats::from(&timings);
+        println!(
+            "DEFAULT_UI,{case},{samples},{:.6},{:.6},{:.1},{:.1}",
+            stats.p50,
+            stats.p95,
+            allocs as f64 / samples as f64,
+            bytes as f64 / samples as f64
+        );
+    }
+}
+
+#[test]
 fn transcript_layout_projection_benchmark_suite() {
     if !benchmark_target_enabled() {
         return;

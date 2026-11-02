@@ -190,6 +190,19 @@ fun(row: integer): table?
 
 Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 
+## `smelt.transcript.pills`
+
+```lua
+{ top: smelt.bar.Bar, bottom: smelt.bar.Bar }
+```
+
+Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Transcript-anchored bars with a built-in `label` source. Sources, view
+factories and press handlers receive ctx.state = { label, target?, view }.
+
 ## `smelt.transcript.register_tool`
 
 ```lua
@@ -265,7 +278,7 @@ fun(rows: integer): nil
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Reserve `rows` at the top of the transcript viewport for overlays such as the scroll pill. Block motions and `reveal` keep their target below them. Defaults to zero.
+Set the minimum rows above transcript navigation targets. Reserving overlays can increase this inset; overlapping reservations are not added together. Defaults to zero.
 
 ## `smelt.transcript.view`
 
@@ -299,7 +312,7 @@ Types: [`smelt.transcript.View`](types.md#smelttranscriptview), [`smelt.Reg`](ty
 
 **Availability:** Terminal UI only; raises in headless mode.
 
-Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
+Observe committed transcript views after layout settles and before paint, at most once per frame. Receives an immutable View and runs again only when observable view or navigation state changes. Root layout changes requested by a watcher apply next frame. Returns a removable registration.
 
 ## `smelt.transcript.win`
 

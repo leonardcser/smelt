@@ -42,6 +42,22 @@ impl From<LuaColorLayer> for smelt_core::palette::Layer {
     }
 }
 
+// Composition retains Lua references; drawing APIs use the compiled LuaStyle.
+struct StyleValue(mlua::Value);
+
+impl smelt_core::lua::lua_type::LuaType for StyleValue {
+    fn lua_type() -> String {
+        <crate::lua::parse::LuaStyle as smelt_core::lua::lua_type::LuaType>::lua_type()
+    }
+}
+
+impl mlua::FromLua for StyleValue {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
+        crate::lua::parse::LuaStyle::from_lua(value.clone(), lua)?.resolve()?;
+        Ok(Self(value))
+    }
+}
+
 #[derive(Clone)]
 struct ThemeMetadata {
     is_light: bool,
@@ -64,6 +80,7 @@ pub(crate) fn inherit_metadata(source: &Lua, target: &Lua) {
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     sync_metadata(lua, crate::theme::default_baked());
+    crate::lua::parse::register_style_doc();
     let m = LuaMod::supported(
         lua,
         smelt,
@@ -113,6 +130,22 @@ resolve to an empty table.",
             crate::lua::parse::style_to_lua(lua, style)
         },
     )?;
+
+    let styles = LuaMod::supported(lua, smelt, "style", "Compose shared style values without resolving their theme references, or resolve a current style snapshot.", Tier::UiHost)?;
+    styles.fn_("resolve", "Validate a shared style and resolve its theme references. The result is a snapshot; keep references in long-lived views to follow theme changes.", &["style"], |lua, (style,): (crate::lua::parse::LuaStyle,)| {
+        crate::lua::parse::style_to_lua(lua, style.resolve()?)
+    })?;
+    styles.fn_("merge", "Return a fresh style table with patch fields over base fields. Strings become hl_group references; colors and explicit false stay unchanged. Neither input is modified. A patch hl_group replaces the base group reference, while other explicit base fields remain.", &["base", "patch"], |lua, (base, patch): (StyleValue, StyleValue)| -> LuaResult<mlua::Table> {
+        let out = lua.create_table()?;
+        for value in [base.0, patch.0] {
+            match value {
+                mlua::Value::String(group) => out.set("hl_group", group)?,
+                mlua::Value::Table(spec) => for pair in spec.pairs::<mlua::Value, mlua::Value>() { let (key, value) = pair?; out.raw_set(key, value)?; },
+                _ => unreachable!("validated style"),
+            }
+        }
+        Ok(out)
+    })?;
 
     m.fn_(
         "rgb",

@@ -29,6 +29,10 @@ ui_layout.invalidate = nil
 ---@type fun(win_or_paint: any, opts: table?): smelt.ui.layout
 ui_layout.leaf = nil
 
+--- Return live Win and Paint handles in declaration order, without duplicates. Frame effects are not leaves. Useful for wiring interaction and invalidation across a composed view.
+---@type fun(node: smelt.ui.layout): smelt.win.Win | smelt.paint.Paint[]
+ui_layout.leaves = nil
+
 --- Construct a shareable natural-size handle for use with `smelt.ui.layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.
 ---@type fun(w: integer?, h: integer?): smelt.ui.layout.Measure
 ui_layout.measure = nil
@@ -37,6 +41,10 @@ ui_layout.measure = nil
 ---@see smelt.ui.layout.invalidate
 ---@type fun(composer: function?): nil
 ui_layout.set = nil
+
+--- Measure a layout subtree against a width and height budget, using the same natural sizes, window wrapping and chrome as the compositor. Does not paint or run retained renderers. Give Paint leaves a measure; an unmeasured Paint has no natural size.
+---@type fun(node: smelt.ui.layout, width: integer, height: integer): integer, integer
+ui_layout.size = nil
 
 --- Create a retained split handle independent of its children. axis is horizontal (side by side) or vertical (stacked). Use handle:layout(first, second, chrome_opts) in composers; rebuilding children preserves sizing. Handle methods inspect, restore, reset, resize, or equalize this exact split.
 ---@type fun(axis: string, opts: smelt.ui.layout.SplitOpts?): smelt.ui.layout.Split

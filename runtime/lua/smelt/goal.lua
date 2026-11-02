@@ -349,13 +349,13 @@ end
 
 local function register_headerline()
   local headerline = require("smelt.headerline")
-  headerline:add("goal", function()
-    local goal = session_goal()
-    if is_visible(goal) then return banner_items(goal) end
-  end, { builtin = true })
-  subscriptions[#subscriptions + 1] = smelt.signal.subscribe("goal", function()
-    headerline:invalidate()
-  end)
+  headerline:add_builtin("goal", {
+    signals = { "goal" },
+    render = function()
+      local goal = session_goal()
+      if is_visible(goal) then return banner_items(goal) end
+    end,
+  })
 end
 
 function M.current()

@@ -79,6 +79,19 @@ Good fits:
 
 Every fuzz-found bug should get a committed seed under `fuzz/seeds/<target>/regression/`.
 
+## Default UI performance
+
+```bash
+set -o pipefail; SMELT_TRANSCRIPT_BENCH_TARGET=1 cargo test -p smelt-tui --features harness,transcript-bench default_ui_frame_benchmark_suite -- --nocapture --test-threads=1 2>&1 | tail -120
+```
+
+Measures timers, input and repaint at 120 x 40, without UI customization. After
+32 warmup frames, each case reports median/p95 milliseconds and UI-thread
+allocations/bytes per frame: idle, typing, streaming and scrolling. The virtual
+clock advances so streamed text and scheduled animations actually update.
+Compare identical profiles and fixtures across revisions on a quiet machine.
+Build each revision in a separate target directory.
+
 ## Diff viewer performance
 
 Run the optimized indexing and full-app overlay benchmarks with:

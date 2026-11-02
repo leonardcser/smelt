@@ -76,6 +76,10 @@ prompt.register_completer = nil
 ---@type fun(start: integer, end: integer, text: string): integer
 prompt.replace_range = nil
 
+--- Make a window a mouse-drag handle for resizing the prompt. Pass false to disable it. This prompt-specific interaction is independent of the window's style and renderer.
+---@type fun(win: smelt.win.Win, enabled: boolean?): nil
+prompt.set_resize_handle = nil
+
 --- Replace the prompt buffer with `text`. The cursor lands at the end and undo state is reset.
 ---@type fun(text: string): nil
 prompt.set_text = nil
@@ -84,6 +88,7 @@ prompt.set_text = nil
 ---@type fun(): string
 prompt.text = nil
 
+--- ── top and bottom bars ─────────────────────────────────────────────
 --- The bar right above the prompt input, a rule by default. Built-in sources:
 --- `pause`, `indicator`, `elapsed` and `retry` on the left, `model`, `tokens`
 --- and `cost` on the right. Dragging it resizes the prompt.

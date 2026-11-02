@@ -33,7 +33,7 @@ local function render_job(job)
       { text = meta, style = { dim = true } },
       { text = command, syntax = "bash" },
     },
-    marks = { { col = 0, opts = { end_col = #meta, dim = true } } },
+    marks = { { col = 0, opts = { end_col = #meta, style = { dim = true } } } },
   }
 end
 

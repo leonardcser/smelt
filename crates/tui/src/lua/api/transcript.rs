@@ -702,7 +702,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "watch_view",
-        "Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.",
+        "Observe committed transcript views after layout settles and before paint, at most once per frame. Receives an immutable View and runs again only when observable view or navigation state changes. Root layout changes requested by a watcher apply next frame. Returns a removable registration.",
         &["callback"],
         |lua, callback: LuaCallback<(LuaTranscriptView,), ()>| -> LuaResult<LuaReg> {
             let shared = super::win::current_shared(lua)?;
@@ -717,36 +717,31 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "reveal",
         "Reveal a semantic transcript `target` returned by a committed view. Targets are validated against their originating session and block identity before sparse projection is changed. `opts.align` currently accepts `top`; `opts.top_padding` reserves rows above the target and defaults to the `top_inset`; `opts.move_cursor` defaults to true and puts the cursor at the start of the target's text.",
         &["target", "opts"],
-        |lua, (target, opts): (LuaTranscriptTarget, Option<LuaTranscriptRevealOpts>)| -> LuaResult<bool> {
+        |_, (target, opts): (LuaTranscriptTarget, Option<LuaTranscriptRevealOpts>)| -> LuaResult<bool> {
             let opts = opts.unwrap_or_default();
             let align = opts.align.unwrap_or(LuaTranscriptRevealAlign::Top);
-            let top_padding = match opts.top_padding {
-                Some(rows) => rows,
-                None => super::win::current_shared(lua)?
-                    .transcript_top_inset
-                    .load(std::sync::atomic::Ordering::Acquire),
-            };
             let move_cursor = opts.move_cursor.unwrap_or(true);
-            Ok(crate::lua::try_with_conversation_host(|host| match align {
-                LuaTranscriptRevealAlign::Top => host.reveal_transcript_target_at_top(
-                    &target.session_id,
-                    target.record_index,
-                    target.block_id,
-                    top_padding,
-                    move_cursor,
-                ),
-            })
-            .unwrap_or(false))
+            Ok(crate::lua::try_with_conversation_host(|host| {
+                let top_padding = opts.top_padding.unwrap_or_else(|| host.transcript_top_inset());
+                match align {
+                    LuaTranscriptRevealAlign::Top => host.reveal_transcript_target_at_top(
+                        &target.session_id,
+                        target.record_index,
+                        target.block_id,
+                        top_padding,
+                        move_cursor,
+                    ),
+                }
+            }).unwrap_or(false))
         },
     )?;
     m.fn_(
         "top_inset",
-        "Reserve `rows` at the top of the transcript viewport for overlays such as the scroll pill. Block motions and `reveal` keep their target below them. Defaults to zero.",
+        "Set the minimum rows above transcript navigation targets. Reserving overlays can increase this inset; overlapping reservations are not added together. Defaults to zero.",
         &["rows"],
         |lua, rows: crate::smelt_edit::RowIndex| -> LuaResult<()> {
-            super::win::current_shared(lua)?
-                .transcript_top_inset
-                .store(rows, std::sync::atomic::Ordering::Release);
+            let shared = super::win::current_shared(lua)?;
+            shared.transcript_top_inset.store(rows, std::sync::atomic::Ordering::Release);
             Ok(())
         },
     )?;

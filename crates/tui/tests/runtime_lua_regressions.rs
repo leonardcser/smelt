@@ -24,6 +24,20 @@ const USAGE_CACHE_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/
 fn install_explicit_api_fixtures(lua: &mlua::Lua) {
     lua.load(
         r#"
+        function __smelt_style_stub()
+          return {
+            resolve = function(style) return type(style) == 'table' and style or {} end,
+            merge = function(base, patch)
+              local out = {}
+              for _, style in ipairs({ base, patch }) do
+                if type(style) == 'string' then out.hl_group = style
+                else for key, value in pairs(style) do out[key] = value end end
+              end
+              return out
+            end,
+          }
+        end
+
         function __smelt_notify_stub(notices, errors)
           return {
             info = function(msg) if notices then notices[#notices + 1] = msg end end,
@@ -430,6 +444,9 @@ fn dialog_menu_disabled_items_are_not_selectable_or_submittable() {
     )
     .exec()
     .expect("install dialog stubs");
+    lua.load("smelt.style = __smelt_style_stub()")
+        .exec()
+        .unwrap();
     lua.load(DIALOG_LUA)
         .set_name("dialog.lua")
         .set_environment(bootstrap_fixture_environment(&lua, "dialog.lua"))
@@ -976,6 +993,7 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
             end,
             subscribe = function(name, fn)
               smelt.__subscribers[name] = fn
+              return { remove = function() end }
             end,
           },
           __subscribers = {},
@@ -1012,11 +1030,13 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
           ui = {
             layout = {
               invalidate = function() end,
+              measure = function() return { set = function() end } end,
               leaf = function(win) return { leaf = win } end,
               vbox = function(children) return { vbox = children } end,
             },
           },
           prompt = {
+            set_resize_handle = function() end,
             win = { on = function() end },
             queued_rows = function() return {} end,
             queued = function() return {} end,
@@ -1036,14 +1056,16 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
               function b:lines(lines) self._lines = lines end
               function b:clear_ns() self._marks = {} end
               function b:mark(ns, row, start_col, opts)
+                local style = opts.style or {}
+                if type(style) == "string" then style = { hl_group = style } end
                 self._marks[#self._marks + 1] = {
                   ns = ns,
                   row = row,
                   start_col = start_col,
                   end_col = opts.end_col,
-                  fg = opts.fg,
-                  hl_group = opts.hl_group,
-                  bold = opts.bold,
+                  fg = style.fg,
+                  hl_group = style.hl_group,
+                  bold = style.bold,
                 }
               end
               return b
@@ -1056,7 +1078,8 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
               function w:content_width() return 60 end
               function w:rect() return { height = 1 } end
               function w:set_renderer(fn) self.renderer = fn end
-              function w:invalidate_renderer() end
+              function w:invalidate() end
+              function w:on() return { remove = function() end } end
               smelt.__wins[w._opts.name] = w
               return w
             end,
@@ -1073,7 +1096,10 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
 
     let bar_src = BAR_LUA.to_string();
     let bar_loader = lua
-        .create_function(move |lua, ()| lua.load(&bar_src).eval::<mlua::Value>())
+        .create_function(move |lua, ()| {
+            lua.load("smelt.style = __smelt_style_stub(); __smelt_internal = { signal = { subscribe_shared = smelt.signal.subscribe } }").exec()?;
+            lua.load(&bar_src).eval::<mlua::Value>()
+        })
         .expect("bar loader");
     let package: mlua::Table = lua.globals().get("package").expect("package table");
     let preload: mlua::Table = package.get("preload").expect("preload table");
@@ -1310,14 +1336,17 @@ fn prompt_top_builtin_sources_are_reachable_by_name() {
         .load(
             r#"
             local indicator = smelt.prompt.top:builtin("indicator")
-            smelt.prompt.top:add("indicator", function()
-              local items = indicator()
-              table.insert(items, { text = "wrapped", priority = 1 })
-              return items
-            end)
+            smelt.prompt.top:add("indicator", {
+              signals = indicator.signals,
+              render = function(ctx)
+                local items = indicator.render(ctx)
+                table.insert(items, { text = "wrapped", priority = 1 })
+                return items
+              end,
+            })
             local top = assert(smelt.__wins["smelt.prompt.top"])
             top:renderer()
-            return type(indicator) == "function",
+            return type(indicator.render) == "function",
               smelt.prompt.top:builtin("nope") == nil,
               top:buf()._lines[1]
             "#,
@@ -1727,11 +1756,13 @@ fn scroll_pills_use_committed_transcript_views() {
         "top scroll pill should navigate from the committed view"
     );
     assert!(
-        SCROLL_PILLS_LUA.contains("smelt.transcript.reveal(state.top_target"),
+        include_str!("../../../runtime/lua/smelt/scroll_pills.lua")
+            .contains("smelt.transcript.reveal(ctx.state.target"),
         "top scroll pill should reveal an opaque semantic target"
     );
     assert!(
-        SCROLL_PILLS_LUA.contains("smelt.transcript.follow_tail()"),
+        include_str!("../../../runtime/lua/smelt/scroll_pills.lua")
+            .contains("smelt.transcript.follow_tail()"),
         "bottom scroll pill should use the semantic tail command"
     );
     assert!(!SCROLL_PILLS_LUA.contains("signal.subscribe"));
@@ -1782,6 +1813,9 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
 
         smelt = {
           ns = function(name) return name end,
+          style = __smelt_style_stub(),
+          terminal = { size = function() return { width = 30, height = 5 } end },
+          reg = { new = function(fn) return { remove = fn } end },
           text = {
             width = function(text) return #text end,
             fit = function(text) return text end,
@@ -1803,7 +1837,11 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
                   win_handlers[name] = win_handlers[name] or {}
                   win_handlers[name][event] = fn
                   handlers[event] = fn
-                end
+                  return { remove = function() end }
+                end,
+                close = function() end,
+                set_renderer = function() end,
+                invalidate = function() end,
               }
             end,
           },
@@ -1815,10 +1853,15 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
                 close = function()
                   active[name] = math.max((active[name] or 0) - 1, 0)
                 end,
+                rect = function() return { height = 1 } end,
               }
             end,
           },
-          ui = { layout = { leaf = function() return {} end } },
+          ui = { layout = {
+            leaf = function() return {} end,
+            invalidate = function() end,
+            measure = function() return { set = function() end } end,
+          } },
           transcript = {
             top_inset = function(rows) top_inset = rows end,
             watch_view = function(fn)
@@ -1870,16 +1913,30 @@ fn install_scroll_pills_fixture(lua: &mlua::Lua) {
           if name == "scrolled" or name == "focus" or name == "blur" then
             assert(view_handler, "view_handler")(view)
           else
-            assert(handlers[name], name)()
+            assert(handlers[name], name)({ button = "left" })
           end
         end
-        function __win_event(win, event) assert(win_handlers[win] and win_handlers[win][event], win .. ":" .. event)() end
+        function __win_event(win, event) assert(win_handlers[win] and win_handlers[win][event], win .. ":" .. event)({ button = "left" }) end
         function __publish() assert(view_handler, "view_handler")(view) end
         "#,
     )
     .exec()
     .expect("install fake smelt api");
 
+    let bars = lua
+        .load(BAR_LUA)
+        .eval::<mlua::Table>()
+        .expect("load shared bars");
+    lua.globals()
+        .get::<mlua::Table>("package")
+        .unwrap()
+        .get::<mlua::Table>("loaded")
+        .unwrap()
+        .set("smelt._bar", bars)
+        .unwrap();
+    lua.load(include_str!("../../../runtime/lua/smelt/scroll_pills.lua"))
+        .exec()
+        .expect("install pill presentation slots");
     lua.load(SCROLL_PILLS_LUA)
         .exec()
         .expect("load scroll pills plugin");

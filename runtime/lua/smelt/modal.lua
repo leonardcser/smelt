@@ -63,16 +63,15 @@ local function render_actions(buf, actions, selected, width)
   buf:lines({ line }):clear_ns(NS_ACTION_LABEL):clear_ns(NS_ACTION_DISABLED)
   for i, item in ipairs(spans) do
     if item.disabled then
-      buf:mark(NS_ACTION_DISABLED, 1, item.start_col, { end_col = item.end_col, dim = true })
+      buf:mark(NS_ACTION_DISABLED, 1, item.start_col, { end_col = item.end_col, style = { dim = true } })
     else
       local mark = {
         end_col = item.end_col,
-        fg = "Normal",
-        bg = "CursorLine",
+        style = { fg = "Normal", bg = "CursorLine" },
       }
       if i == selected then
-        mark.reverse = true
-        mark.bold = true
+        mark.style.reverse = true
+        mark.style.bold = true
       end
       buf:mark(NS_ACTION_LABEL, 1, item.start_col, mark)
     end
@@ -83,7 +82,7 @@ local function modal_title(title)
   if title == nil or title == "" then return nil end
   if smelt.dialog and smelt.dialog.title then return smelt.dialog.title(title, { pad = true }) end
   if type(title) == "table" then return title end
-  return { { text = " " .. tostring(title) .. " ", dim = true } }
+  return { { text = " " .. tostring(title) .. " ", style = { dim = true } } }
 end
 
 function M.open(opts)

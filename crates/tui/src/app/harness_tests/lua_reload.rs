@@ -3010,7 +3010,7 @@ fn lua_buf_win_overlay_contracts_are_available() {
             assert(lines[2] == "two", "second line")
             assert(buf:line(1) == "one", "line getter")
             assert(buf:line(0) == nil, "line zero nil")
-            local mark_id = buf:mark(ns, 1, 1, { end_row = 1, end_col = 3, hl_group = "Normal" })
+            local mark_id = buf:mark(ns, 1, 1, { end_row = 1, end_col = 3, style = "Normal" })
             assert(type(mark_id) == "number", "mark id")
             assert(buf:clear_ns(ns) == buf, "clear ns chain")
             assert(buf:styled({

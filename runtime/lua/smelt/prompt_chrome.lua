@@ -25,23 +25,8 @@ local SECONDARY_PRIORITY = 3
 local OPTIONAL_PRIORITY = 4
 local COMMENT_DIM_STYLE = { fg = "Comment", dim = true }
 local subscriptions = {}
-
-local function invalidate_on(invalidate, names)
-  for _, name in ipairs(names) do
-    subscriptions[#subscriptions + 1] = smelt.signal.subscribe(name, invalidate)
-  end
-end
-
-local function invalidate_when_changed(invalidate, name, display_value)
-  subscriptions[#subscriptions + 1] = smelt.signal.subscribe(
-    name,
-    function(value, previous)
-      if display_value(value) ~= display_value(previous) then invalidate() end
-    end)
-end
-
--- The prompt top bar, assigned below; built-in sources animate through it.
-local top
+local input_signals = { "input_epoch", "prompt_queue_revision" }
+local tip_signals = { "input_epoch", "notification_visible", "prompt_queue_revision", "work_state" }
 
 -- ── queue ───────────────────────────────────────────────────────────
 
@@ -95,7 +80,10 @@ smelt.prompt.queue = bar.new({
   name = "smelt.prompt.queue",
   min_rows = 0,
   -- The stash goes first so it keeps its row when the queue folds.
-  sources = { { "stash", stash_source }, { "queued", queued_source } },
+  sources = {
+    { "stash", { render = stash_source, signals = input_signals } },
+    { "queued", { render = queued_source, signals = input_signals } },
+  },
   win_opts = { pad_left = 2, pad_right = 2, focus_on_click = smelt.prompt.win },
 })
 
@@ -128,13 +116,18 @@ end
 ---@type smelt.bar.Bar
 smelt.prompt.aux = bar.new({
   name = "smelt.prompt.aux",
-  sources = { { "tip", tip_source } },
+  sources = { { "tip", { render = tip_source, signals = tip_signals } } },
   win_opts = { pad_left = 2, pad_right = 2, focus_on_click = smelt.prompt.win },
 })
 
 -- ── built-in sources of the top bar ─────────────────────────────────
 
-local builtin = {}
+local top_sources = {}
+local function seconds(value) return math.floor((tonumber(value) or 0) / 1000) end
+local function retry_seconds(value) return math.max(1, math.ceil((tonumber(value) or 0) / 1000)) end
+local function define(name, signals, render)
+  top_sources[#top_sources + 1] = { name, { render = render, signals = signals } }
+end
 
 -- ── built-in sources: working indicator (left) ───────────────────────
 --
@@ -150,7 +143,7 @@ local function work_state()
   return state
 end
 
-builtin.pause = function()
+define("pause", { "auto_continue_status" }, function()
   local pause = smelt.signal.get("auto_continue_status")
   if not pause then return nil end
   local reason = pause.kind == "quota" and "quota exceeded"
@@ -169,7 +162,7 @@ builtin.pause = function()
     { text = reason, style = COMMENT_DIM_STYLE, priority = INDICATOR_PRIORITY, separated = true },
     { text = action, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY, separated = true },
   }
-end
+end)
 
 -- One coal says what the turn is doing. It catches when the turn starts or
 -- resumes and then breathes. It heats with tool calls: each call bumps it, it
@@ -327,7 +320,7 @@ local function typed_label(label, now)
   return { runs = runs, priority = LABEL_PRIORITY }
 end
 
-builtin.indicator = function()
+define("indicator", { "auto_continue_status", "work_state", "work_label" }, function(ctx)
   local state = work_state()
   if not state then return nil end
 
@@ -351,7 +344,7 @@ builtin.indicator = function()
       mark = working_coal(now)
     end
     local item = typed_label(label, now)
-    top:invalidate_after(next_frame(now))
+    ctx.invalidate_after(next_frame(now))
     return { mark, item }
   end
 
@@ -362,7 +355,7 @@ builtin.indicator = function()
   elseif state == "done" then
     local cool = done_at and math.min((now - done_at) / COOL_MS, 1) or 1
     mark = coal_item(mix(heat(), ash(), cool))
-    if cool < 1 then top:invalidate_after(next_frame(now)) end
+    if cool < 1 then ctx.invalidate_after(next_frame(now)) end
   else
     mark = coal_item(ash())
   end
@@ -371,15 +364,15 @@ builtin.indicator = function()
     items[#items + 1] = { text = label, style = COMMENT_DIM_STYLE, priority = LABEL_PRIORITY }
   end
   return items
-end
+end)
 
 -- Duration suppressed for `interrupted` (label alone reads cleaner).
-builtin.elapsed = function()
+define("elapsed", { "auto_continue_status", "work_state", { "work_elapsed_ms", seconds } }, function(ctx)
   local state = work_state()
   if not state or state == "interrupted" then return nil end
   local elapsed_ms = smelt.signal.get("work_elapsed_ms") or 0
   if state == "working" or state == "busy" or state == "retrying" then
-    top:invalidate_after(1000 - elapsed_ms % 1000)
+    ctx.invalidate_after(1000 - elapsed_ms % 1000)
   end
   local secs = math.floor(elapsed_ms / 1000)
   if secs <= 0 then return nil end
@@ -388,20 +381,20 @@ builtin.elapsed = function()
     style = COMMENT_DIM_STYLE,
     priority = SECONDARY_PRIORITY,
   }
-end
+end)
 
-builtin.retry = function()
+define("retry", { "auto_continue_status", "work_state", "work_retry_attempt", { "work_retry_remaining_ms", retry_seconds } }, function(ctx)
   if not work_state() then return nil end
   local attempt = smelt.signal.get("work_retry_attempt") or 0
   if attempt <= 0 then return nil end
   local remaining_ms = smelt.signal.get("work_retry_remaining_ms") or 0
-  if remaining_ms > 0 then top:invalidate_after((remaining_ms - 1) % 1000 + 1) end
+  if remaining_ms > 0 then ctx.invalidate_after((remaining_ms - 1) % 1000 + 1) end
   return {
     text = string.format("(retrying in %ds #%d)", math.max(1, math.ceil(remaining_ms / 1000)), attempt),
     style = COMMENT_DIM_STYLE,
     priority = OPTIONAL_PRIORITY,
   }
-end
+end)
 
 -- ── built-in sources: model, tokens and cost (right) ─────────────────
 
@@ -431,7 +424,7 @@ local function model_label(key, resolved)
   return provider .. "/" .. resolved
 end
 
-builtin.model = function()
+define("model", { "model", "reasoning", "fast_mode", "session_epoch", "work_state", "tokens_used" }, function()
   local status = session_status()
   local model = status.model or smelt.model.current()
   if not model or model == "" then return nil end
@@ -463,9 +456,9 @@ builtin.model = function()
     }
   end
   return items
-end
+end)
 
-builtin.tokens = function()
+define("tokens", { "tokens_used", "session_epoch", "model", "work_state" }, function()
   if not smelt.settings.show_tokens then return nil end
   local context = session_status().context or {}
   local ctx = context.tokens
@@ -489,9 +482,9 @@ builtin.tokens = function()
     align_right = true,
     separated = true,
   }
-end
+end)
 
-builtin.cost = function()
+define("cost", { "tokens_used", "session_epoch", "work_state" }, function()
   if not smelt.settings.show_cost then return nil end
   local cost = smelt.session.cost()
   if not cost or cost <= 0 then return nil end
@@ -502,14 +495,9 @@ builtin.cost = function()
     align_right = true,
     separated = true,
   }
-end
+end)
 
 -- ── top and bottom bars ─────────────────────────────────────────────
-
-local top_sources = {}
-for _, name in ipairs({ "pause", "indicator", "elapsed", "retry", "model", "tokens", "cost" }) do
-  top_sources[#top_sources + 1] = { name, builtin[name] }
-end
 
 --- The bar right above the prompt input, a rule by default. Built-in sources:
 --- `pause`, `indicator`, `elapsed` and `retry` on the left, `model`, `tokens`
@@ -520,9 +508,10 @@ smelt.prompt.top = bar.new({
   name = "smelt.prompt.top",
   layout = "rule",
   sources = top_sources,
-  win_opts = { focus_on_click = smelt.prompt.win, resize = "prompt" },
+  win_opts = { focus_on_click = smelt.prompt.win },
 })
-top = smelt.prompt.top
+local top = smelt.prompt.top
+if top.win then smelt.prompt.set_resize_handle(top.win) end
 
 --- The bar right below the prompt input, a plain rule with no sources by
 --- default.
@@ -539,35 +528,6 @@ smelt.prompt.bottom = bar.new({
 local aux, queue, bottom = smelt.prompt.aux, smelt.prompt.queue, smelt.prompt.bottom
 local function invalidate_aux() aux:invalidate() end
 local function invalidate_queue() queue:invalidate() end
-local function invalidate_top() top:invalidate() end
-
-invalidate_on(invalidate_aux, {
-  "input_epoch",
-  "notification_visible",
-  "prompt_queue_revision",
-  "work_state",
-})
-invalidate_on(invalidate_queue, {
-  "input_epoch",
-  "prompt_queue_revision",
-})
-invalidate_on(invalidate_top, {
-  "auto_continue_status",
-  "fast_mode",
-  "model",
-  "reasoning",
-  "session_epoch",
-  "tokens_used",
-  "work_label",
-  "work_retry_attempt",
-  "work_state",
-})
-invalidate_when_changed(invalidate_top, "work_elapsed_ms", function(value)
-  return math.floor((tonumber(value) or 0) / 1000)
-end)
-invalidate_when_changed(invalidate_top, "work_retry_remaining_ms", function(value)
-  return math.max(1, math.ceil((tonumber(value) or 0) / 1000))
-end)
 -- The bar that resizes the prompt lights up while it is dragged.
 subscriptions[#subscriptions + 1] = smelt.signal.subscribe("prompt_resize_active", function(active)
   top:highlight(active and { hl_group = "SmeltResizeHandle" } or nil)

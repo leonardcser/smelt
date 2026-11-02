@@ -138,7 +138,7 @@ pub(crate) fn color_literal(v: &mlua::Value) -> Result<Option<Color>, String> {
 fn color_str(s: &str) -> Result<Color, String> {
     let lower = s.trim().to_ascii_lowercase();
     if let Some(hex) = lower.strip_prefix('#') {
-        if hex.len() != 6 {
+        if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(format!("color: '#{hex}' must be 6 hex digits"));
         }
         let r = u8::from_str_radix(&hex[0..2], 16).map_err(|e| format!("color: {e}"))?;
@@ -170,46 +170,126 @@ fn color_str(s: &str) -> Result<Color, String> {
 
 // ── style + span + title ───────────────────────────────────────────────
 
+/// Shared style value: a theme group or a table of overrides.
+#[derive(Clone, Debug)]
+pub(crate) enum LuaStyle {
+    Group(String),
+    Spec(StylePatch),
+}
+
+impl smelt_core::lua::lua_type::LuaType for LuaStyle {
+    fn lua_type() -> String {
+        "smelt.Style | string".into()
+    }
+}
+
+pub(crate) fn register_style_doc() {
+    use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField};
+    let mut fields = vec![LuaClassField {
+        name: "hl_group",
+        ty: "string".into(),
+        optional: true,
+        doc: "Theme group used as the base style; explicit fields override it.",
+    }];
+    for name in ["fg", "bg"] {
+        fields.push(LuaClassField {
+            name,
+            ty: COLOR_TYPE.into(),
+            optional: true,
+            doc: "Color override. false selects the terminal default.",
+        });
+    }
+    for name in [
+        "bold",
+        "dim",
+        "italic",
+        "underline",
+        "crossedout",
+        "reverse",
+    ] {
+        fields.push(LuaClassField {
+            name,
+            ty: "boolean".into(),
+            optional: true,
+            doc: "Attribute override. false clears it.",
+        });
+    }
+    smelt_core::lua::doc::record_class(LuaClassDecl {
+            name: "smelt.Style", classification: smelt_core::lua::doc::classification_for_type("smelt.Style"),
+            doc: "Shared style fields for Paint, spans, marks, bars and window chrome. A string theme-group name is shorthand for { hl_group = name }.", fields,
+        });
+}
+
+impl FromLua for LuaStyle {
+    fn from_lua(value: mlua::Value, _: &Lua) -> LuaResult<Self> {
+        Self::parse(value, &crate::lua::theme_group).map_err(LuaError::external)
+    }
+}
+
+impl LuaStyle {
+    fn parse(value: mlua::Value, groups: Groups) -> Result<Self, String> {
+        match value {
+            mlua::Value::String(name) => Ok(Self::Group(
+                name.to_str().map_err(|e| e.to_string())?.to_string(),
+            )),
+            mlua::Value::Table(table) => Ok(Self::Spec(style_patch(&table, groups)?)),
+            other => Err(format!(
+                "style: expected theme group or style table, got {}",
+                other.type_name()
+            )),
+        }
+    }
+
+    fn resolve_with(&self, groups: Groups) -> Result<Style, String> {
+        match self {
+            Self::Group(name) => {
+                groups(name).ok_or_else(|| format!("style: unknown theme group '{name}'"))
+            }
+            Self::Spec(patch) => Ok(patch.apply_raw(Style::new())),
+        }
+    }
+
+    pub(crate) fn resolve(&self) -> LuaResult<Style> {
+        self.resolve_with(&crate::lua::theme_group)
+            .map_err(LuaError::external)
+    }
+
+    pub(crate) fn resolved_patch(&self) -> LuaResult<StylePatch> {
+        match self {
+            Self::Group(_) => Ok(StylePatch {
+                group: Some(self.resolve()?),
+                ..Default::default()
+            }),
+            Self::Spec(patch) => Ok(*patch),
+        }
+    }
+
+    pub(crate) fn group(&self) -> LuaResult<smelt_core::theme::HlGroup> {
+        match self {
+            Self::Group(name) => {
+                self.resolve()?;
+                Ok(smelt_core::theme::intern(name))
+            }
+            Self::Spec(_) => Ok(smelt_core::theme::intern_anonymous_style(self.resolve()?)),
+        }
+    }
+}
+
+pub(crate) use smelt_core::lua::options::validate_keys;
+
 /// Read style fields (`fg`, `bg`, `bold`, `dim`, `italic`, `underline`, `crossedout`, `reverse`)
-/// off a table. Unrecognised keys are ignored. Colors take any form [`color`]
+/// off a table. Unknown keys raise. Colors take any form [`color`]
 /// accepts, with theme groups looked up in `groups`; `fg = false` /
 /// `bg = false` ask for the terminal default.
-pub(crate) fn style(t: &mlua::Table, groups: Groups) -> Result<Style, String> {
-    let read = |key: &str, layer| {
-        let value = t.get::<mlua::Value>(key).map_err(|e| e.to_string())?;
-        color(&value, layer, groups).map_err(|e| format!("{key}: {e}"))
-    };
-    let mut style = Style::new();
-    if let Some(c) = read("fg", Layer::Fg)? {
-        style = style.fg(c);
-    }
-    if let Some(c) = read("bg", Layer::Bg)? {
-        style = style.bg(c);
-    }
-    if t.get::<bool>("bold").unwrap_or(false) {
-        style = style.bold();
-    }
-    if t.get::<bool>("dim").unwrap_or(false) {
-        style = style.dim();
-    }
-    if t.get::<bool>("italic").unwrap_or(false) {
-        style = style.italic();
-    }
-    if t.get::<bool>("underline").unwrap_or(false) {
-        style = style.underline();
-    }
-    if t.get::<bool>("crossedout").unwrap_or(false) {
-        style = style.crossedout();
-    }
-    if t.get::<bool>("reverse").unwrap_or(false) {
-        style = style.reverse();
-    }
-    Ok(style)
+#[cfg(test)]
+fn style(t: &mlua::Table, groups: Groups) -> Result<Style, String> {
+    Ok(style_patch(t, groups)?.apply_raw(Style::new()))
 }
 
 /// A partial style: `None` fields keep the base style's value.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct StylePatch {
+    group: Option<Style>,
     fg: Option<Option<Color>>,
     bg: Option<Option<Color>>,
     bold: Option<bool>,
@@ -222,6 +302,14 @@ pub(crate) struct StylePatch {
 
 impl StylePatch {
     pub(crate) fn apply(self, base: Style) -> Style {
+        let mut out = self.apply_raw(base);
+        out.fg = out.fg.filter(|color| *color != Color::Reset);
+        out.bg = out.bg.filter(|color| *color != Color::Reset);
+        out
+    }
+
+    fn apply_raw(self, base: Style) -> Style {
+        let base = self.group.unwrap_or(base);
         Style {
             fg: self.fg.unwrap_or(base.fg),
             bg: self.bg.unwrap_or(base.bg),
@@ -238,14 +326,37 @@ impl StylePatch {
 /// Parse a partial style table: only keys present in `t` change.
 /// `fg = false` / `bg = false` clear a color.
 pub(crate) fn style_patch(t: &mlua::Table, groups: Groups) -> Result<StylePatch, String> {
+    validate_keys(
+        t,
+        &[
+            "hl_group",
+            "fg",
+            "bg",
+            "bold",
+            "dim",
+            "italic",
+            "underline",
+            "crossedout",
+            "reverse",
+        ],
+        "style",
+    )
+    .map_err(|e| e.to_string())?;
     let mut patch = StylePatch::default();
+    if let Some(name) = t
+        .get::<Option<String>>("hl_group")
+        .map_err(|e| e.to_string())?
+    {
+        patch.group =
+            Some(groups(&name).ok_or_else(|| format!("style: unknown theme group '{name}'"))?);
+    }
     for (key, layer, slot) in [
         ("fg", Layer::Fg, &mut patch.fg),
         ("bg", Layer::Bg, &mut patch.bg),
     ] {
         match t.get::<mlua::Value>(key).map_err(|e| e.to_string())? {
             mlua::Value::Nil => {}
-            mlua::Value::Boolean(false) => *slot = Some(None),
+            mlua::Value::Boolean(false) => *slot = Some(Some(Color::Reset)),
             value => *slot = Some(color(&value, layer, groups).map_err(|e| format!("{key}: {e}"))?),
         }
     }
@@ -257,7 +368,11 @@ pub(crate) fn style_patch(t: &mlua::Table, groups: Groups) -> Result<StylePatch,
         ("crossedout", &mut patch.crossedout),
         ("reverse", &mut patch.reverse),
     ] {
-        *slot = t.get::<Option<bool>>(key).map_err(|e| e.to_string())?;
+        *slot = match t.get::<mlua::Value>(key).map_err(|e| e.to_string())? {
+            mlua::Value::Nil => None,
+            mlua::Value::Boolean(value) => Some(value),
+            _ => return Err(format!("style.{key}: expected boolean")),
+        };
     }
     Ok(patch)
 }
@@ -322,16 +437,22 @@ fn span(t: &mlua::Table, groups: Groups) -> Result<Span<'static>, String> {
     let text: String = t
         .get::<String>("text")
         .map_err(|e| format!("span.text: {e}"))?;
-    Ok(Span::styled(text, style(t, groups)?))
+    let value = t.get::<mlua::Value>("style").map_err(|e| e.to_string())?;
+    let resolved = if value.is_nil() {
+        Style::new()
+    } else {
+        LuaStyle::parse(value, groups)?.resolve_with(groups)?
+    };
+    Ok(Span::styled(text, resolved))
 }
 
 /// Parse a Lua-side title spec into a styled [`Line`]. Surface:
 ///
 /// - omitted / `nil` → `None`
 /// - string → single-span Line with default style
-/// - single-span table `{ text = "...", fg = "red", bold = true }` →
+/// - single-span table `{ text = "...", style = { fg = "red", bold = true } }` →
 ///   single-span Line
-/// - sequence of span tables `{ {text=..,fg=..}, " ", {text=..} }` →
+/// - sequence of span tables `{ {text=..,style=..}, " ", {text=..} }` →
 ///   multi-span Line. List items can be plain strings (default style)
 ///   or span tables.
 pub(crate) fn title(
@@ -761,11 +882,10 @@ mod tests {
     }
 
     #[test]
-    fn style_unrecognised_keys_are_ignored() {
+    fn style_rejects_unknown_keys() {
         let lua = lua();
-        let t = eval_table(&lua, r#"return { fg = "red", text = "hi", kind = "min" }"#);
-        let s = style(&t, &groups).unwrap();
-        assert_eq!(s.fg, Some(Color::Red));
+        let t = eval_table(&lua, r#"return { fg = "red", boldd = true }"#);
+        assert!(style(&t, &groups).unwrap_err().contains("unknown option"));
     }
 
     // ── title ──────────────────────────────────────────────────────────
@@ -784,7 +904,7 @@ mod tests {
         let lua = lua();
         let v = eval_value(
             &lua,
-            r#"return { text = "warn", fg = "yellow", bold = true }"#,
+            r#"return { text = "warn", style = { fg = "yellow", bold = true } }"#,
         );
         let line = title(Some(v), &groups).unwrap().expect("some line");
         assert_eq!(line.spans.len(), 1);
@@ -798,7 +918,7 @@ mod tests {
         let lua = lua();
         let v = eval_value(
             &lua,
-            r#"return { { text = "[", fg = "grey" }, "info", { text = "]", fg = "grey" } }"#,
+            r#"return { { text = "[", style = { fg = "grey" } }, "info", { text = "]", style = { fg = "grey" } } }"#,
         );
         let line = title(Some(v), &groups).unwrap().expect("some line");
         assert_eq!(line.spans.len(), 3);

@@ -835,6 +835,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "smelt.paint",
             "smelt.picker",
             "smelt.prompt",
+            "smelt.style",
             "smelt.terminal",
             "smelt.theme",
             "smelt.ui",

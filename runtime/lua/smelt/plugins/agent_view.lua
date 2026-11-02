@@ -50,7 +50,7 @@ function M.open()
       local text = string.format("%s%s  %s", string.rep("  ", math.min(run.depth or 0, 8) + 1), run.title, run.status)
       local hl = (run.status == "running" or run.status == "queued" or run.status == "waiting") and "SmeltToolPending"
         or (run.status == "failed" or run.status == "blocked") and "ErrorMsg" or nil
-      return { text = text, marks = hl and { { col = 0, opts = { end_col = #text, hl_group = hl } } } }
+      return { text = text, marks = hl and { { col = 0, opts = { end_col = #text, style = hl } } } }
     end,
   })
   local function narrow() return (smelt.ui.size().width or 80) < 90 end

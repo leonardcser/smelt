@@ -55,6 +55,16 @@ fun(win_or_paint: any, opts: table?): smelt.ui.layout
 
 Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).
 
+## `smelt.ui.layout.leaves`
+
+```lua
+fun(node: smelt.ui.layout): smelt.win.Win | smelt.paint.Paint[]
+```
+
+Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.paint.Paint`](types.md#smeltpaintpaint)
+
+Return live Win and Paint handles in declaration order, without duplicates. Frame effects are not leaves. Useful for wiring interaction and invalidation across a composed view.
+
 ## `smelt.ui.layout.measure`
 
 ```lua
@@ -72,6 +82,14 @@ fun(composer: function?): nil
 ```
 
 Register the retained main layout composer. The callback receives a state table (`term_w`, `term_h`, `prompt_input_rows`, plus `dialog` while a root dialog is active) and returns a layout userdata built via `smelt.ui.layout.{vbox,hbox,leaf}`. `state.dialog` is an opaque transcript-dialog stage with host-owned sizing and expansion behavior. While a root dialog is active, the returned tree must include the current stage exactly once and no retained dialog stages from earlier calls; otherwise the host uses the safe transcript-dialog-statusline fallback. Passing `nil` clears the composer and reverts to the engine's hardcoded layout. The tree is retained until dimensions change or `smelt.ui.layout.invalidate()` is called.
+
+## `smelt.ui.layout.size`
+
+```lua
+fun(node: smelt.ui.layout, width: integer, height: integer): integer, integer
+```
+
+Measure a layout subtree against a width and height budget, using the same natural sizes, window wrapping and chrome as the compositor. Does not paint or run retained renderers. Give Paint leaves a measure; an unmeasured Paint has no natural size.
 
 ## `smelt.ui.layout.split`
 

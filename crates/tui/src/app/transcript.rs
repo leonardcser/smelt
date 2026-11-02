@@ -10980,6 +10980,12 @@ impl TuiApp {
         self.reveal_transcript_block(record_index, Some(block_id), top_padding, cursor)
     }
 
+    pub(crate) fn transcript_top_inset(&self) -> crate::smelt_edit::RowIndex {
+        self.lua.transcript_top_inset().max(u64::from(
+            self.ui.reserved_top_inset(crate::app::TRANSCRIPT_WIN),
+        ))
+    }
+
     /// Jump the transcript cursor `count` blocks of the kind bound to
     /// `motion.kind`, revealing the target block below the transcript's top
     /// inset. Returns false when the jump cannot be revealed, so the motion
@@ -11001,7 +11007,7 @@ impl TuiApp {
         else {
             return false;
         };
-        let top_inset = self.lua.transcript_top_inset();
+        let top_inset = self.transcript_top_inset();
         self.reveal_transcript_block(
             block.record_index,
             Some(block.block_id),

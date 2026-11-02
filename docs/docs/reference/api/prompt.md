@@ -159,6 +159,18 @@ fun(start: integer, end: integer, text: string): integer
 
 UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.
 
+## `smelt.prompt.set_resize_handle`
+
+```lua
+fun(win: smelt.win.Win, enabled: boolean?): nil
+```
+
+Types: [`smelt.win.Win`](types.md#smeltwinwin)
+
+**Availability:** Terminal UI only; raises in headless mode.
+
+Make a window a mouse-drag handle for resizing the prompt. Pass false to disable it. This prompt-specific interaction is independent of the window's style and renderer.
+
 ## `smelt.prompt.set_text`
 
 ```lua
@@ -189,6 +201,7 @@ Types: [`smelt.bar.Bar`](types.md#smeltbarbar)
 
 **Availability:** Terminal UI only; raises in headless mode.
 
+── top and bottom bars ─────────────────────────────────────────────
 The bar right above the prompt input, a rule by default. Built-in sources:
 `pause`, `indicator`, `elapsed` and `retry` on the left, `model`, `tokens`
 and `cost` on the right. Dragging it resizes the prompt.

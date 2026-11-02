@@ -123,6 +123,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "__open",
         &["opts"],
         |_, (opts,): (LuaDialogOpenOpts,)| -> LuaResult<LuaDockedDialog> {
+            if smelt_core::lua::reg::RegistrationScope::active() {
+                return Err(mlua::Error::external(
+                    "view factories return layouts; open dialogs outside construction",
+                ));
+            }
             let opts = opts.0;
             let layout = opts
                 .get::<mlua::AnyUserData>("layout")?

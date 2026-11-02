@@ -35,9 +35,9 @@ local function render_bash_header(buf, tool_name, command, desc, width)
   buf:lines(plain)
      :clear_ns(NS_HEADER_TOOL)
      :clear_ns(NS_HEADER_DESC)
-  buf:mark(NS_HEADER_TOOL, 1, 0, { end_col = #tool_name, hl_group = "SmeltAccent" })
+  buf:mark(NS_HEADER_TOOL, 1, 0, { end_col = #tool_name, style = "SmeltAccent" })
   if type(desc) == "string" and desc ~= "" then
-    buf:mark(NS_HEADER_DESC, #plain, 0, { end_col = #desc, dim = true })
+    buf:mark(NS_HEADER_DESC, #plain, 0, { end_col = #desc, style = { dim = true } })
   end
 end
 
@@ -59,7 +59,7 @@ local function render_label_value_header(buf, tool_name, summary_lines, desc, wi
   local value = summary_text(summary_lines)
   if value == "" then
     local lines = { {
-      { text = tool_name, style = { hl = "SmeltAccent" } },
+      { text = tool_name, style = "SmeltAccent" },
       { text = ":" },
     } }
     if type(desc) == "string" and desc ~= "" then
@@ -74,7 +74,7 @@ local function render_label_value_header(buf, tool_name, summary_lines, desc, wi
     local spans
     if row.is_first then
       spans = {
-        { text = tool_name, style = { hl = "SmeltAccent" } },
+        { text = tool_name, style = "SmeltAccent" },
         { text = ": " },
       }
     else

@@ -22,14 +22,14 @@ local function signal(name) return smelt.signal.get(name) end
 
 local sources = {}
 
-local function define(name, handler)
-  sources[#sources + 1] = { name, handler }
+local function define(name, signals, render)
+  sources[#sources + 1] = { name, { render = render, signals = signals } }
 end
 
 -- Slug pill. SmeltSlug carries fg only; fall back to SmeltAccent's fg as the
 -- pill bg when no explicit bg has been set (default), so `/color` (which
 -- writes SmeltSlug.bg) and theme swaps both propagate naturally.
-define("slug", function()
+define("slug", { "task_label", "session_epoch" }, function()
   local task_label = signal("task_label")
   if not smelt.settings.show_slug or not task_label or task_label == "" then return nil end
   local slug = smelt.theme.get("SmeltSlug") or {}
@@ -48,7 +48,7 @@ define("slug", function()
   }
 end)
 
-define("vim_mode", function()
+define("vim_mode", { "vim_mode" }, function()
   local vim_label = signal("vim_mode")
   if not vim_label or vim_label == "" then return nil end
   return {
@@ -58,7 +58,7 @@ define("vim_mode", function()
   }
 end)
 
-define("agent_mode", function()
+define("agent_mode", { "agent_mode", "session_epoch" }, function()
   local status = smelt.session.status and smelt.session.status() or {}
   local mode = status.mode or {}
   local mode_name = mode.name or signal("agent_mode")
@@ -71,7 +71,7 @@ define("agent_mode", function()
   }
 end)
 
-define("tps", function()
+define("tps", { "tps" }, function()
   local tps = signal("tps") or 0
   if not smelt.settings.show_tps or tps <= 0 then return nil end
   return {
@@ -82,7 +82,7 @@ define("tps", function()
   }
 end)
 
-define("permission", function()
+define("permission", { "permission_pending" }, function()
   if not signal("permission_pending") then return nil end
   return {
     text = "permission pending",
@@ -92,7 +92,7 @@ define("permission", function()
   }
 end)
 
-define("keymap", function()
+define("keymap", { "keymap_pending" }, function()
   local keymap_pending = signal("keymap_pending")
   if not keymap_pending or keymap_pending == "" then return nil end
   return {
@@ -103,7 +103,7 @@ define("keymap", function()
   }
 end)
 
-define("procs", function()
+define("procs", { "running_procs" }, function()
   local procs = signal("running_procs") or 0
   if procs <= 0 then return nil end
   return {
@@ -114,7 +114,7 @@ define("procs", function()
   }
 end)
 
-define("worktree", function()
+define("worktree", { "cwd_managed_worktree", "cwd_worktree_path" }, function()
   local cwd_worktree_path = signal("cwd_worktree_path")
   if not signal("cwd_managed_worktree") or not cwd_worktree_path or cwd_worktree_path == "" then
     return nil
@@ -129,7 +129,7 @@ define("worktree", function()
   }
 end)
 
-define("vim_pending", function()
+define("vim_pending", { "vim_pending_input" }, function()
   local vim_pending = signal("vim_pending_input")
   if not vim_pending or vim_pending == "" then return nil end
   return {
@@ -139,7 +139,7 @@ define("vim_pending", function()
   }
 end)
 
-define("cursor", function()
+define("cursor", { "cursor_pos", "viewport_pos", "input_epoch" }, function()
   local pos = signal("cursor_pos")
   if not pos or not pos.line or pos.line <= 0 then return nil end
   local viewport = signal("viewport_pos")
@@ -168,25 +168,5 @@ smelt.statusline = bar.new({
   separator_style = { fg = "SmeltSeparator", dim = true },
   sources = sources,
 })
-
-local function invalidate() smelt.statusline:invalidate() end
-for _, name in ipairs({
-  "agent_mode",
-  "cursor_pos",
-  "cwd_managed_worktree",
-  "cwd_worktree_path",
-  "input_epoch",
-  "keymap_pending",
-  "permission_pending",
-  "running_procs",
-  "session_epoch",
-  "task_label",
-  "tps",
-  "viewport_pos",
-  "vim_mode",
-  "vim_pending_input",
-}) do
-  smelt.signal.subscribe(name, invalidate)
-end
 
 return smelt.statusline

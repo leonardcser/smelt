@@ -67,8 +67,8 @@ end
 
 local function panel_title()
 	return smelt.dialog.title({
-		{ text = " performance ", bold = true },
-		{ text = "(F12 to close) ", fg = "grey" },
+		{ text = " performance ", style = { bold = true } },
+		{ text = "(F12 to close) ", style = { fg = "grey" } },
 	})
 end
 
@@ -157,7 +157,7 @@ local function paint_body()
 	local lines, spans = compose_lines(snap, label_w, max_rows)
 	buf:lines(lines):clear_ns(NS_HL)
 	for _, sp in ipairs(spans) do
-		buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, fg = sp.role })
+		buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, style = { fg = sp.role } })
 	end
 end
 

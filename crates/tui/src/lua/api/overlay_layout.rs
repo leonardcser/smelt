@@ -125,6 +125,22 @@ pub(crate) enum LayoutNode {
 }
 
 impl LayoutNode {
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &Self> {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            let node = stack.pop()?;
+            match node {
+                Self::Frame { child, .. } => stack.push(child),
+                Self::Split { children, .. } => stack.extend(children.iter().rev()),
+                Self::Container { items, .. } => {
+                    stack.extend(items.iter().rev().map(|item| &item.node));
+                }
+                Self::DialogStage { .. } | Self::Leaf { .. } => {}
+            }
+            Some(node)
+        })
+    }
+
     pub(crate) fn dialog_stage_counts(
         &self,
         active: Option<crate::smelt_edit::ContainerId>,
@@ -177,6 +193,25 @@ pub(crate) struct LayoutItem {
 pub struct LuaUiLayout(pub(crate) LayoutNode);
 
 impl mlua::UserData for LuaUiLayout {}
+
+pub struct LuaLeaf(crate::lua::paint::LeafKind);
+
+impl LuaType for LuaLeaf {
+    fn lua_type() -> String {
+        "smelt.win.Win | smelt.paint.Paint".into()
+    }
+}
+
+impl IntoLua for LuaLeaf {
+    fn into_lua(self, lua: &Lua) -> LuaResult<mlua::Value> {
+        match self.0 {
+            crate::lua::paint::LeafKind::Window(id) => super::win::LuaWin { id }.into_lua(lua),
+            crate::lua::paint::LeafKind::Paint(id) => {
+                super::paint::LuaPaintReg { id }.into_lua(lua)
+            }
+        }
+    }
+}
 
 impl FromLua for LuaUiLayout {
     fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
@@ -352,17 +387,12 @@ fn create_split(axis: Axis, opts: Option<&mlua::Table>) -> LuaResult<LuaSplit> {
         .transpose()?
         .flatten()
         .map(|styles| -> LuaResult<_> {
-            let normal = crate::lua::parse::style(
-                &styles.get::<mlua::Table>("normal")?,
-                &crate::lua::theme_group,
-            )
-            .map_err(LuaError::external)?;
+            let normal = styles
+                .get::<crate::lua::parse::LuaStyle>("normal")?
+                .resolve()?;
             let active = styles
-                .get::<Option<mlua::Table>>("active")?
-                .map(|style| {
-                    crate::lua::parse::style(&style, &crate::lua::theme_group)
-                        .map_err(LuaError::external)
-                })
+                .get::<Option<crate::lua::parse::LuaStyle>>("active")?
+                .map(|style| style.resolve())
                 .transpose()?
                 .unwrap_or(normal);
             Ok(DividerStyles { normal, active })
@@ -619,10 +649,57 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
         },
     )?;
 
+    m.private_fn(
+        "build_view",
+        &["factory", "ctx", "previous"],
+        |_,
+         (factory, ctx, previous): (
+            smelt_core::lua::lua_type::LuaCallback<(mlua::Table,), LuaUiLayout>,
+            mlua::Table,
+            Option<LuaUiLayout>,
+        )|
+         -> LuaResult<(LuaUiLayout, smelt_core::lua::reg::LuaReg)> {
+            use smelt_core::lua::reg::RegistrationScope;
+            let scope = RegistrationScope::new();
+            let node = factory.into_inner().call::<LuaUiLayout>(ctx)?;
+            let leaves = crate::lua::with_ui_host(|host| host.layout_leaves(&node.0))
+                .map_err(LuaError::external)?;
+            for leaf in leaves {
+                let (kind, id) = match leaf {
+                    crate::lua::paint::LeafKind::Window(id) => ("window", id.0),
+                    crate::lua::paint::LeafKind::Paint(id) => ("paint", id.0),
+                };
+                if !RegistrationScope::owns(kind, id) {
+                    return Err(LuaError::external(
+                        "view factory must return fresh leaves owned by this view",
+                    ));
+                }
+            }
+            crate::lua::with_ui_host(|host| {
+                host.validate_view_layout(&node.0, previous.as_ref().map(|node| &node.0))
+            })
+            .map_err(LuaError::external)?;
+            Ok((node, scope.finish()))
+        },
+    )?;
+
+    m.fn_("size", "Measure a layout subtree against a width and height budget, using the same natural sizes, window wrapping and chrome as the compositor. Does not paint or run retained renderers. Give Paint leaves a measure; an unmeasured Paint has no natural size.", &["node", "width", "height"], |_, (node, width, height): (LuaUiLayout, u16, u16)| -> LuaResult<(u16, u16)> {
+        crate::lua::with_ui_host(|host| host.measure_layout(&node.0, (width, height))).map_err(LuaError::external)
+    })?;
+
     m.fn_("windows", "Return a layout's live window leaves in declaration order, excluding paints and repeated windows. Useful for installing shared callbacks and composing dialog bodies from arbitrary layouts.", &["node"], |_, (node,): (LuaUiLayout,)| -> LuaResult<Vec<super::win::LuaWin>> {
-        crate::lua::with_ui_host(|host| host.layout_windows(&node.0))
-            .map(|windows| windows.into_iter().map(|id| super::win::LuaWin { id }).collect())
+        crate::lua::with_ui_host(|host| host.layout_leaves(&node.0))
+            .map(|leaves| leaves.into_iter().filter_map(|leaf| match leaf {
+                crate::lua::paint::LeafKind::Window(id) => Some(super::win::LuaWin { id }),
+                _ => None,
+            }).collect())
             .map_err(mlua::Error::external)
+    })?;
+
+    m.fn_("leaves", "Return live Win and Paint handles in declaration order, without duplicates. Frame effects are not leaves. Useful for wiring interaction and invalidation across a composed view.", &["node"], |_, (node,): (LuaUiLayout,)| -> LuaResult<Vec<LuaLeaf>> {
+        crate::lua::with_ui_host(|host| host.layout_leaves(&node.0))
+            .map(|leaves| leaves.into_iter().map(LuaLeaf).collect())
+            .map_err(LuaError::external)
     })?;
 
     m.fn_("split", "Create a retained split handle independent of its children. axis is horizontal (side by side) or vertical (stacked). Use handle:layout(first, second, chrome_opts) in composers; rebuilding children preserves sizing. Handle methods inspect, restore, reset, resize, or equalize this exact split.", &["axis", "opts"],

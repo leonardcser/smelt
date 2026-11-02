@@ -286,6 +286,9 @@ fn tokenize_chord_spec(input: &str) -> Option<Vec<String>> {
 /// inside an event-loop callback). Plugin authors get auto-named
 /// hot-reload-survivable resources without typing `opts.name = "..."`.
 pub(crate) fn auto_name_for_scope(lua: &Lua, kind: &str) -> Option<String> {
+    if smelt_core::lua::reg::RegistrationScope::active() {
+        return None;
+    }
     let f = smelt_core::lua::module::internal_api_function(lua, "smelt", "__auto_name").ok()?;
     f.call::<Option<String>>(kind).ok().flatten()
 }

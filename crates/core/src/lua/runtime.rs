@@ -143,6 +143,7 @@ pub const BOOTSTRAP_CHUNKS: &[BootstrapChunk] = &[
     BootstrapChunk::ui("prompt_chrome.lua"),
     BootstrapChunk::ui("statusline.lua"),
     BootstrapChunk::ui("headerline.lua"),
+    BootstrapChunk::ui("scroll_pills.lua"),
     BootstrapChunk::ui("layout.lua"),
     BootstrapChunk::host("modes.lua"),
 ];

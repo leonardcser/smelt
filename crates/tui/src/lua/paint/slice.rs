@@ -172,6 +172,16 @@ pub struct LuaRecolorOpts {
     pub defaults: Option<bool>,
 }
 
+/// Partial cell returned from a map callback. Omitted fields preserve the cell.
+#[derive(LuaOpts)]
+#[lua(name = "smelt.paint.CellPatch")]
+pub struct LuaCellPatch {
+    /// Replacement grapheme; omitted keeps the glyph.
+    pub ch: Option<String>,
+    /// Shared style patch; omitted properties keep their existing values.
+    pub style: Option<crate::lua::parse::LuaStyle>,
+}
+
 fn channel(value: f64) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
@@ -263,13 +273,12 @@ fn one_grapheme_or_space(text: Option<&str>) -> LuaResult<&str> {
     Ok(symbol)
 }
 
-fn style_arg(style: Option<mlua::Table>) -> LuaResult<Style> {
-    match style {
-        Some(t) => {
-            crate::lua::parse::style(&t, &crate::lua::theme_group).map_err(LuaError::RuntimeError)
-        }
-        None => Ok(Style::new()),
-    }
+fn style_arg(style: Option<crate::lua::parse::LuaStyle>) -> LuaResult<Style> {
+    style
+        .as_ref()
+        .map(crate::lua::parse::LuaStyle::resolve)
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 fn cell_to_lua(lua: &Lua, cell: &Cell) -> LuaResult<mlua::Table> {
@@ -346,7 +355,14 @@ impl mlua::UserData for PaintSliceUd {
         });
         methods.add_method(
             "set",
-            |_, _, (x, y, ch, style): (i32, i32, Option<String>, Option<mlua::Table>)| {
+            |_,
+             _,
+             (x, y, ch, style): (
+                i32,
+                i32,
+                Option<String>,
+                Option<crate::lua::parse::LuaStyle>,
+            )| {
                 let symbol = one_grapheme_or_space(ch.as_deref())?;
                 let style = style_arg(style)?;
                 with_canvas(|c| {
@@ -360,7 +376,7 @@ impl mlua::UserData for PaintSliceUd {
         );
         methods.add_method(
             "put_str",
-            |_, _, (x, y, text, style): (i32, i32, String, Option<mlua::Table>)| {
+            |_, _, (x, y, text, style): (i32, i32, String, Option<crate::lua::parse::LuaStyle>)| {
                 let style = style_arg(style)?;
                 with_canvas(|c| Ok(put_str(c, x, y, &text, style)))
             },
@@ -375,7 +391,7 @@ impl mlua::UserData for PaintSliceUd {
                 i32,
                 i32,
                 Option<String>,
-                Option<mlua::Table>,
+                Option<crate::lua::parse::LuaStyle>,
             )| {
                 let symbol = one_grapheme_or_space(ch.as_deref())?;
                 let style = style_arg(style)?;
@@ -387,10 +403,9 @@ impl mlua::UserData for PaintSliceUd {
             },
         );
         methods.add_method(
-            "set_style",
-            |_, _, (x, y, w, h, patch): (i32, i32, i32, i32, mlua::Table)| {
-                let patch = crate::lua::parse::style_patch(&patch, &crate::lua::theme_group)
-                    .map_err(LuaError::RuntimeError)?;
+            "patch_style",
+            |_, _, (x, y, w, h, patch): (i32, i32, i32, i32, crate::lua::parse::LuaStyle)| {
+                let patch = patch.resolved_patch()?;
                 with_canvas(|c| {
                     let rect = clip(c, x, y, w, h);
                     for y in rect.y..rect.bottom() {
@@ -419,14 +434,13 @@ impl mlua::UserData for PaintSliceUd {
                             x += 1;
                             continue;
                         }
-                        let out: Option<mlua::Table> = f.call((cell_to_lua(lua, &cell)?, x, y))?;
+                        let out: Option<LuaCellPatch> = f.call((cell_to_lua(lua, &cell)?, x, y))?;
                         if let Some(out) = out {
-                            let style = match out.get::<Option<mlua::Table>>("style")? {
-                                Some(t) => crate::lua::parse::style(&t, &crate::lua::theme_group)
-                                    .map_err(LuaError::RuntimeError)?,
+                            let style = match out.style {
+                                Some(patch) => patch.resolved_patch()?.apply(cell.style),
                                 None => cell.style,
                             };
-                            match out.get::<Option<String>>("ch")? {
+                            match out.ch {
                                 Some(ch) => {
                                     let symbol = one_grapheme_or_space(Some(&ch))?;
                                     c.set_symbol(x, y, symbol, style);
@@ -483,7 +497,7 @@ macro_rules! doc_type {
     };
 }
 doc_type!(PaintCell, "smelt.paint.Cell");
-doc_type!(PaintStyle, "smelt.paint.Style");
+use crate::lua::parse::LuaStyle;
 doc_type!(PaintCtx, "smelt.paint.Ctx");
 
 fn field(name: &'static str, ty: &str, optional: bool, doc: &'static str) -> LuaClassField {
@@ -498,23 +512,7 @@ fn field(name: &'static str, ty: &str, optional: bool, doc: &'static str) -> Lua
 /// Register the `smelt.paint.Slice` and `smelt.paint.Snapshot` class docs.
 /// Keep in sync with the `UserData` impls above.
 pub fn register_paint_slice_docs() {
-    let color = crate::lua::parse::COLOR_TYPE;
     let classification = smelt_core::lua::doc::classification_for_type;
-    record_class(LuaClassDecl {
-        name: "smelt.paint.Style",
-        classification: classification("smelt.paint.Style"),
-        doc: "The style of a cell. Colors take any color form: an ANSI index, `\"#rrggbb\"`, an ANSI name, a theme group name such as `\"Comment\"`, `{ r, g, b }`, or `false` for the terminal default.",
-        fields: vec![
-            field("fg", color, true, "Glyph color. Unset keeps the terminal default."),
-            field("bg", color, true, "Background color. When writing, unset keeps the background underneath. Reads give `false` for the terminal default, so a cell read and written back stays the same."),
-            field("bold", "boolean", true, "Bold text."),
-            field("dim", "boolean", true, "Dim text."),
-            field("italic", "boolean", true, "Italic text."),
-            field("underline", "boolean", true, "Underlined text."),
-            field("crossedout", "boolean", true, "Struck-through text."),
-            field("reverse", "boolean", true, "Swap the glyph and background colors."),
-        ],
-    });
     record_class(LuaClassDecl {
         name: "smelt.paint.Cell",
         classification: classification("smelt.paint.Cell"),
@@ -532,7 +530,7 @@ pub fn register_paint_slice_docs() {
                 false,
                 "Cells the glyph covers: 1, 2 for a wide glyph, 0 for its right half.",
             ),
-            field("style", "smelt.paint.Style", false, "The cell's style."),
+            field("style", "smelt.Style", false, "The cell's style."),
             field(
                 "image",
                 "boolean",
@@ -581,11 +579,11 @@ pub fn register_paint_slice_docs() {
             "width" => fn() -> u16, "Return the slice width in cells.",
             "height" => fn() -> u16, "Return the slice height in cells.",
             "get" => fn(x: i32, y: i32) -> Option<PaintCell>, "Return the cell at `(x, y)`, or `nil` outside the slice.",
-            "set" => fn(x: i32, y: i32, ch: Option<String>, style: Option<PaintStyle>) -> (), "Write one grapheme cluster (default a space) at `(x, y)`.",
-            "put_str" => fn(x: i32, y: i32, text: String, style: Option<PaintStyle>) -> i32, "Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.",
-            "fill" => fn(x: i32, y: i32, w: i32, h: i32, ch: Option<String>, style: Option<PaintStyle>) -> (), "Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).",
-            "set_style" => fn(x: i32, y: i32, w: i32, h: i32, patch: PaintStyle) -> (), "Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.",
-            "map" => fn(f: LuaCallback<(PaintCell, i32, i32), Option<mlua::Table>>) -> (), "Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style.",
+            "set" => fn(x: i32, y: i32, ch: Option<String>, style: Option<LuaStyle>) -> (), "Write one grapheme cluster (default a space) at `(x, y)`.",
+            "put_str" => fn(x: i32, y: i32, text: String, style: Option<LuaStyle>) -> i32, "Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.",
+            "fill" => fn(x: i32, y: i32, w: i32, h: i32, ch: Option<String>, style: Option<LuaStyle>) -> (), "Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).",
+            "patch_style" => fn(x: i32, y: i32, w: i32, h: i32, patch: LuaStyle) -> (), "Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.",
+            "map" => fn(f: LuaCallback<(PaintCell, i32, i32), Option<LuaCellPatch>>) -> (), "Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or patch its style. Omitted style fields preserve the existing cell.",
             "recolor" => fn(f: mlua::Function, opts: Option<LuaRecolorOpts>) -> (), "Pass every color on the slice through `f(r, g, b, layer)`, where `layer` is `\"fg\"` or `\"bg\"` and the channels are 0-255 as the terminal shows them. Return new `r, g, b` (rounded and clamped), or `nil` to keep the color. `f` runs once per distinct color, not per cell, so screen-wide filters such as night shift or color-blind simulation stay cheap. Image cells keep their colors.",
             "snapshot" => fn() -> PaintSnapshot, "Copy the slice into a `Snapshot` that stays valid after the callback, for example to keep the screen as it was before a change.",
             "blit" => fn(snapshot: PaintSnapshot, x: Option<i32>, y: Option<i32>) -> (), "Draw `snapshot` with its top-left cell at `(x, y)` (default `0, 0`). Cells outside the slice are dropped.",
@@ -694,7 +692,7 @@ mod tests {
             assert(slice:put_str(-1, 1, "語b") == 2)
             assert(slice:put_str(0, 5, "zz") == 2)
             slice:fill(3, -1, 9, 9, "#")
-            slice:set_style(-5, -5, 100, 100, { bold = true })
+            slice:patch_style(-5, -5, 100, 100, { bold = true })
             assert(slice:get(-1, 0) == nil and slice:get(0, 2) == nil)
             "##,
         )
@@ -770,7 +768,7 @@ mod tests {
             .put_str(0, 0, "abc", Style::default().fg(Color::Red).bold());
         run_on_grid(
             &mut grid,
-            "slice:set_style(1, 0, 5, 1, { bg = 'blue', bold = false })",
+            "slice:patch_style(1, 0, 5, 1, { bg = 'blue', bold = false })",
         )
         .unwrap();
 

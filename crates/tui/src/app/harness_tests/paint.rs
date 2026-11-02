@@ -127,18 +127,16 @@ fn theme_rgb_resolves_every_color_through_the_palette() {
 }
 
 #[test]
-fn frame_paint_placed_in_a_layout_runs_once_per_frame() {
+fn frame_effect_cannot_be_placed_in_a_layout() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(
         r#"
         _G.__calls = 0
         local fx = smelt.paint.frame(function() _G.__calls = _G.__calls + 1 end)
-        smelt.overlay.new({
-            anchor = "screen_at", corner = "nw", row = 0, col = 0,
-            width = 4, height = 1, border = "none", modal = false,
-            layout = smelt.ui.layout.leaf(fx),
-        })
+        local ok = pcall(function() smelt.ui.layout.leaf(fx) end)
+        assert(not ok, "a frame effect is not a leaf")
+        assert(fx.rect == nil and fx.on == nil)
         "#
     ));
 
@@ -158,7 +156,7 @@ fn leaf_paint_reads_and_restyles_what_is_under_it() {
         end)
         _G.__over = smelt.paint.register(function(slice)
             _G.__seen = slice:get(1, 0).ch
-            slice:set_style(0, 0, 3, 1, { bold = true })
+            slice:patch_style(0, 0, 3, 1, { bold = true })
         end)
         for i, paint in ipairs({ _G.__under, _G.__over }) do
             smelt.overlay.new({
@@ -865,7 +863,7 @@ fn every_color_argument_rejects_unknown_theme_groups() {
             buf:lines({ "hello" })
             local calls = {
               rgb = function() return smelt.theme.rgb("Coment") end,
-              mark = function() return buf:mark(1, 1, 0, { end_col = 2, fg = "Coment" }) end,
+              mark = function() return buf:mark(1, 1, 0, { end_col = 2, style = { fg = "Coment" } }) end,
             }
             local out = {}
             for _, name in ipairs({ "rgb", "mark" }) do

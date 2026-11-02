@@ -40,8 +40,8 @@ end
 
 local function title(pending)
 	return smelt.dialog.title({
-		{ text = " which-key ", bold = true },
-		{ text = pending .. " ", fg = "grey" },
+		{ text = " which-key ", style = { bold = true } },
+		{ text = pending .. " ", style = { fg = "grey" } },
 	})
 end
 
@@ -82,7 +82,7 @@ local function paint(rows)
 
 	state.buf:lines(lines):clear_ns(NS_HL)
 	for _, sp in ipairs(spans) do
-		state.buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, fg = sp.fg, bold = sp.bold })
+		state.buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, style = { fg = sp.fg, bold = sp.bold } })
 	end
 end
 

@@ -78,7 +78,7 @@ local function update()
   local line = buf:line(1) or ""
   buf:mark(ns, 1, #line, {
     virt_text = placeholder,
-    virt_text_hl = "GhostText",
+    style = "GhostText",
   })
 end
 

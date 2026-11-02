@@ -95,15 +95,16 @@ smelt.signal.subscribe("work_state", function(state)
 end)
 
 -- Each frame asks for the next one, until "done" has decoded.
-smelt.prompt.top:add("indicator", function()
+local function indicator(ctx)
   if smelt.signal.get("work_state") == "done" and not smelt.signal.get("auto_continue_status") then
     local phase = done_at and smelt.time.now_ms() - done_at or DECODE_MS
-    if phase < DECODE_MS then smelt.prompt.top:invalidate_after(FRAME_MS) end
+    if phase < DECODE_MS then ctx.invalidate_after(FRAME_MS) end
     return render(palette(), DONE, #DONE, phase, 0, false)
   end
-  if not working() then return fallback() end
-  smelt.prompt.top:invalidate_after(FRAME_MS)
+  if not working() then return fallback.render(ctx) end
+  ctx.invalidate_after(FRAME_MS)
   local now = smelt.time.now_ms()
   local round = math.floor(now / CYCLE_MS)
   return render(palette(), WORDS[round % #WORDS + 1], WIDTH, now % CYCLE_MS, round, true)
-end)
+end
+smelt.prompt.top:add("indicator", { render = indicator, signals = fallback.signals })

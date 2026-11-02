@@ -303,6 +303,17 @@ impl mlua::UserData for LuaWin {
             |_, this, opts: mlua::Table| -> LuaResult<LuaDecoration> {
                 let id = crate::lua::with_ui_host(|host| host.open_decoration(this.id, opts))
                     .map_err(|e| LuaError::RuntimeError(format!("win:decorate: {e}")))?;
+                smelt_core::lua::reg::RegistrationScope::resource(
+                    "decoration",
+                    u64::from(id.0),
+                    move || {
+                        crate::lua::try_with_ui_host(|host| {
+                            host.close_decoration(id);
+                            true
+                        })
+                        .unwrap_or(false)
+                    },
+                );
                 Ok(LuaDecoration { id })
             },
         );
@@ -489,12 +500,16 @@ impl mlua::UserData for LuaWin {
         // ── configure(opts) - chainable ────────────────────────────
         methods.add_function(
             "configure",
-            |_,
+            |lua,
              (this_ud, opts): (mlua::AnyUserData, mlua::Table)|
              -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
+                let mut reader = smelt_core::lua::options::LuaOptions::new(opts, "win");
+                let opts = parse_window_opts(lua, &mut reader)?;
+                reader.finish()?;
+                opts.check_configuration()?;
                 crate::lua::with_ui_host(|host| {
-                    host.with_ui(|ui| apply_window_opts(ui, this.id, &opts));
+                    host.with_ui(|ui| opts.apply(ui, this.id));
                 });
                 Ok(this_ud)
             },
@@ -666,6 +681,7 @@ impl mlua::UserData for LuaWin {
                     Some(f) => Some(LuaHandle::from_func(lua, f)?),
                     None => None,
                 };
+                let installed = handle.is_some();
                 if let Ok(mut map) = shared.win_renderers.lock() {
                     match handle {
                         Some(handle) => {
@@ -683,13 +699,49 @@ impl mlua::UserData for LuaWin {
                         }
                     }
                 }
+                if installed && smelt_core::lua::reg::RegistrationScope::owns("window", this.id.0) {
+                    let weak = Arc::downgrade(&shared.core);
+                    let win = this.id;
+                    smelt_core::lua::reg::RegistrationScope::resource(
+                        "renderer",
+                        win.0,
+                        move || {
+                            weak.upgrade().is_some_and(|shared| {
+                                shared
+                                    .win_renderers
+                                    .lock()
+                                    .is_ok_and(|mut renderers| renderers.remove(&win.0).is_some())
+                            })
+                        },
+                    );
+                }
                 Ok(this_ud)
             },
         );
 
-        // ── invalidate_renderer() - repaint retained window content ──
+        methods.add_method(
+            "invalidate_after",
+            |lua, this, ms: u64| -> LuaResult<LuaReg> {
+                let shared = current_shared(lua)?;
+                let weak = Arc::downgrade(&shared.core);
+                let win = this.id;
+                let callback = lua.create_function(move |_, ()| {
+                    if let Some(shared) = weak.upgrade() {
+                        if let Ok(mut renderers) = shared.win_renderers.lock() {
+                            if let Some(renderer) = renderers.get_mut(&win.0) {
+                                renderer.dirty = true;
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+                smelt_core::lua::api::set_timer(lua, &shared.core, ms, callback)
+            },
+        );
+
+        // ── invalidate() - repaint retained window content ──
         methods.add_function(
-            "invalidate_renderer",
+            "invalidate",
             |lua, this_ud: mlua::AnyUserData| -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 let shared = current_shared(lua)?;
@@ -895,12 +947,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.",
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
-            "configure" => fn(opts: mlua::Table) -> LuaWin, "Change the window's live options and return the handle. Works on built-in windows such as `smelt.prompt.win`. Absent keys stay unchanged. Accepts `style` (theme group layered over `Normal` as the window's base, filling every row including padding; `false` clears it), `prefix` (text painted into the left padding: a string for the first row, or `{ first, rest?, style? }` where `rest` goes on every later content row and `style` is a theme group; it is clipped to `pad_left`, so widen the padding to fit; `false` clears it), `focus_on_click` (a `Win` that a click on this window focuses instead, as the bars around the prompt do; `false` clears it), `resize = \"prompt\"` (dragging this window resizes the prompt and a double click resets it; `false` clears it), `pad_left`, `pad_right`, `scrollbar`, `wrap`, `surface`, `cursor_line`, `selection_highlight`, `hide_cursor`, `vim_enabled` and `gutter`.",
+            "configure" => fn(opts: mlua::Table) -> LuaWin, "Atomically change live options, including on built-in windows. Unknown keys, wrong types and invalid enum values raise before any change. Absent keys stay unchanged. `style` is a shared style value filling every row including padding; false clears it. `prefix` is a string or `{ first, rest?, style? }`, clipped to pad_left; false clears it. `focus_on_click` is a Win or false. Also accepts pad_left, pad_right, scrollbar, wrap, surface, cursor_line, selection_highlight, hide_cursor, vim_enabled and gutter. Prompt resize gestures are configured through smelt.prompt.set_resize_handle, not window options.",
             "row_highlights" => fn(specs: Option<mlua::Table>) -> LuaWin, "Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
             "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
-            "set_renderer" => fn(renderer: Option<LuaCallback<(LuaWin,), ()>>) -> LuaWin, "Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate_renderer`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.",
-            "invalidate_renderer" => fn() -> LuaWin, "Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.",
+            "set_renderer" => fn(renderer: Option<LuaCallback<(LuaWin,), ()>>) -> LuaWin, "Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.",
+            "invalidate" => fn() -> LuaWin, "Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.",
+            "invalidate_after" => fn(ms: u64) -> LuaReg, "Invalidate this window after ms milliseconds. Returns a cancellable one-shot registration; timers are allocated only when requested.",
         },
     });
 
@@ -953,7 +1006,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     static NEW_DOC: OnceLock<String> = OnceLock::new();
     let new_doc = NEW_DOC.get_or_init(|| {
         format!(
-            "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell. `opts.pad_left` / `opts.pad_right` inset the content. `opts.style` names a theme group layered over `Normal` as the window's base style. `opts.prefix` paints text into the left padding (see `Win:configure`). `Win:configure(opts)` changes these later.",
+            "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell. `opts.pad_left` / `opts.pad_right` inset the content. `opts.style` accepts a shared style value layered over `Normal` as the window's base style. `opts.prefix` paints text into the left padding (see `Win:configure`). `Win:configure(opts)` changes these later.",
             crate::smelt_edit::Gutters::default().scrollbar
         )
     });
@@ -964,229 +1017,296 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |lua,
          (buf, opts): (super::buf::LuaBuf, Option<mlua::Table>)|
          -> LuaResult<Option<LuaWin>> {
-            // Auto-name from active plugin scope when caller didn't.
-            let opts = match opts {
-                Some(t) => {
-                    let has_name = t.get::<Option<String>>("name").ok().flatten().is_some();
-                    if !has_name {
-                        if let Some(auto) = crate::lua::auto_name_for_scope(lua, "win") {
-                            t.set("name", auto)?;
-                        }
-                    }
-                    Some(t)
-                }
-                None => {
-                    if let Some(auto) = crate::lua::auto_name_for_scope(lua, "win") {
-                        let t = lua.create_table()?;
-                        t.set("name", auto)?;
-                        Some(t)
-                    } else {
-                        None
-                    }
-                }
-            };
-            Ok(open_or_refresh(buf.id, opts.as_ref())?.map(|id| LuaWin { id }))
+            let mut reader = smelt_core::lua::options::LuaOptions::new(
+                opts.map_or_else(|| lua.create_table(), Ok)?,
+                "win",
+            );
+            let mut opts = parse_window_opts(lua, &mut reader)?;
+            reader.finish()?;
+            opts.name = opts
+                .name
+                .or_else(|| crate::lua::auto_name_for_scope(lua, "win"));
+            Ok(opts.open(buf.id).map(|id| LuaWin { id }))
         },
     )?;
 
     Ok(())
 }
 
-/// Implementation of `smelt.win.new(buf, opts?)`. If `opts.name` matches an
-/// open window, refresh its mutable opts and return the existing id;
-/// otherwise open a fresh split.
-pub(super) fn open_or_refresh(
-    buf_id: crate::smelt_edit::BufId,
-    opts: Option<&mlua::Table>,
-) -> LuaResult<Option<crate::smelt_edit::WinId>> {
-    // Optional access lets bootstrap chunks call `smelt.win.new` before the
-    // frontend host is in scope. The window is opened on the launch reload.
-    let Some(win) = crate::lua::try_with_ui_host(|host| -> Option<crate::smelt_edit::WinId> {
-        let name: Option<String> = opts
-            .and_then(|table| table.get::<Option<String>>("name").ok())
-            .flatten();
-        if let Some(ref name) = name {
-            let existing = host.with_ui(|ui| ui.touch_named_win(name));
-            if let Some(existing) = existing {
-                if let Some(options) = opts {
-                    host.with_ui(|ui| apply_window_opts(ui, existing, options));
-                }
-                return Some(existing);
+#[derive(Clone, Copy)]
+enum WindowKind {
+    Input,
+    List,
+}
+
+/// Parsed before any host mutation; applying options cannot call back into Lua.
+#[derive(Default)]
+pub(super) struct WindowOptions {
+    pub(super) name: Option<String>,
+    kind: Option<WindowKind>,
+    placeholder: Option<String>,
+    initial_cursor: Option<u64>,
+    wrap: Option<bool>,
+    surface: Option<crate::smelt_edit::WindowSurface>,
+    cursor_line: Option<bool>,
+    selection_highlight: Option<bool>,
+    hide_cursor: Option<bool>,
+    vim_enabled: Option<bool>,
+    line_numbers: Option<bool>,
+    pad_left: Option<u16>,
+    pad_right: Option<u16>,
+    scrollbar: Option<bool>,
+    style: Option<Option<smelt_core::theme::HlGroup>>,
+    prefix: Option<Option<crate::smelt_edit::PadPrefix>>,
+    focus: Option<Option<crate::smelt_edit::WinId>>,
+}
+
+impl WindowOptions {
+    fn check_configuration(&self) -> LuaResult<()> {
+        for (key, present) in [
+            ("name", self.name.is_some()),
+            ("kind", self.kind.is_some()),
+            ("placeholder", self.placeholder.is_some()),
+            ("initial_cursor", self.initial_cursor.is_some()),
+        ] {
+            if present {
+                return Err(LuaError::external(format!(
+                    "win.{key}: constructor-only option"
+                )));
             }
         }
-        let pad_left = opts
-            .and_then(|table| table.get::<u64>("pad_left").ok())
-            .unwrap_or(0) as u16;
-        let pad_right = opts
-            .and_then(|table| table.get::<u64>("pad_right").ok())
-            .unwrap_or(0) as u16;
-        let scrollbar = opts
-            .and_then(|table| table.get::<Option<bool>>("scrollbar").ok().flatten())
-            .unwrap_or_else(|| crate::smelt_edit::Gutters::default().scrollbar);
-        let window = host.with_ui(|ui| {
-            let window = ui.win_open_split(
-                buf_id,
-                crate::smelt_edit::SplitConfig {
-                    gutters: crate::smelt_edit::Gutters {
-                        pad_left,
-                        pad_right,
-                        scrollbar,
-                    },
-                },
-            );
-            if let Some(window_id) = window {
-                if let Some(window) = ui.win_mut(window_id) {
+        Ok(())
+    }
+
+    pub(super) fn for_input(mut self) -> Self {
+        self.kind = Some(WindowKind::Input);
+        self.surface
+            .get_or_insert_with(crate::smelt_edit::WindowSurface::editable_text);
+        self.wrap.get_or_insert(false);
+        self.scrollbar.get_or_insert(false);
+        self
+    }
+
+    pub(super) fn open(&self, buf: crate::smelt_edit::BufId) -> Option<crate::smelt_edit::WinId> {
+        let name = smelt_core::lua::reg::RegistrationScope::name(self.name.clone());
+        let gutters = crate::smelt_edit::Gutters {
+            pad_left: self.pad_left.unwrap_or(0),
+            pad_right: self.pad_right.unwrap_or(0),
+            scrollbar: self
+                .scrollbar
+                .unwrap_or_else(|| crate::smelt_edit::Gutters::default().scrollbar),
+        };
+        // Bootstrap chunks may run before the frontend host is in scope.
+        crate::lua::try_with_ui_host(|host| {
+            if let Some(name) = &name {
+                if let Some(existing) = host.with_ui(|ui| ui.touch_named_win(name)) {
+                    host.with_ui(|ui| self.apply(ui, existing));
+                    return Some(existing);
+                }
+            }
+            let window = host.with_ui(|ui| {
+                let id = ui.win_open_split(buf, crate::smelt_edit::SplitConfig { gutters })?;
+                if let Some(window) = ui.win_mut(id) {
                     window.gutter = Some(std::sync::Arc::new(
                         crate::smelt_edit::gutter::LineNumberGutter::new(),
                     ));
                     window.wrap = true;
                 }
-                if let Some(options) = opts {
-                    apply_window_opts(ui, window_id, options);
+                self.apply(ui, id);
+                if let Some(name) = &name {
+                    ui.name_win(name.clone(), id);
                 }
-                if let Some(ref name) = name {
-                    ui.name_win(name.clone(), window_id);
+                Some(id)
+            });
+            if let Some(id) = window {
+                smelt_core::lua::reg::RegistrationScope::resource("window", id.0, move || {
+                    crate::lua::try_with_ui_host(|host| {
+                        host.close_overlay_leaf(id);
+                        true
+                    })
+                    .unwrap_or(false)
+                });
+                match self.kind {
+                    Some(WindowKind::Input) => {
+                        host.configure_input_leaf(id, self.placeholder.clone().unwrap_or_default())
+                    }
+                    Some(WindowKind::List) => {
+                        host.configure_list_leaf(id, self.initial_cursor.unwrap_or(0))
+                    }
+                    None => {}
                 }
             }
             window
-        });
-        if let (Some(window_id), Some(options)) = (window, opts) {
-            if let Ok(Some(kind)) = options.get::<Option<String>>("kind") {
-                match kind.as_str() {
-                    "input" => {
-                        let placeholder = options
-                            .get::<Option<String>>("placeholder")
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        host.configure_input_leaf(window_id, placeholder);
-                    }
-                    "list" => {
-                        let initial = options
-                            .get::<Option<u64>>("initial_cursor")
-                            .ok()
-                            .flatten()
-                            .unwrap_or(0);
-                        host.configure_list_leaf(window_id, initial);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        window
-    }) else {
-        return Ok(None);
-    };
-    Ok(win)
+        })
+        .flatten()
+    }
 }
 
-/// Apply the mutable subset of window opts to an existing window. Used
-/// by `smelt.win.new()` on both the create and named-refresh paths.
-fn apply_window_opts(
-    ui: &mut crate::smelt_edit::Ui,
-    win_id: crate::smelt_edit::WinId,
-    opts: &mlua::Table,
-) {
-    let Some(w) = ui.win_mut(win_id) else {
-        return;
-    };
-    if let Ok(Some(wrap)) = opts.get::<Option<bool>>("wrap") {
-        w.wrap = wrap;
-    }
-    if let Some(surface) = surface_from_opts(opts) {
-        w.set_surface(surface);
-    }
-    if let Ok(Some(cursor_line)) = opts.get::<Option<bool>>("cursor_line") {
-        w.set_cursor_line_highlight(cursor_line);
-    }
-    if let Ok(Some(selection_highlight)) = opts.get::<Option<bool>>("selection_highlight") {
-        w.set_list_selection_highlight(selection_highlight);
-    }
-    if let Ok(Some(hide_cursor)) = opts.get::<Option<bool>>("hide_cursor") {
-        w.hide_cursor = hide_cursor;
-    }
-    if let Ok(Some(vim_enabled)) = opts.get::<Option<bool>>("vim_enabled") {
-        w.set_vim_enabled(vim_enabled);
-    }
-    if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
-        w.gutter = match gutter.as_str() {
-            "line_numbers" => Some(std::sync::Arc::new(
-                crate::smelt_edit::gutter::LineNumberGutter::new(),
-            )),
-            "none" | "" => None,
-            _ => None,
+pub(super) fn parse_window_opts(
+    lua: &Lua,
+    opts: &mut smelt_core::lua::options::LuaOptions,
+) -> LuaResult<WindowOptions> {
+    use crate::lua::parse::LuaStyle;
+    let mut out = WindowOptions::default();
+    for (key, slot) in [
+        ("wrap", &mut out.wrap),
+        ("cursor_line", &mut out.cursor_line),
+        ("selection_highlight", &mut out.selection_highlight),
+        ("hide_cursor", &mut out.hide_cursor),
+        ("vim_enabled", &mut out.vim_enabled),
+        ("scrollbar", &mut out.scrollbar),
+    ] {
+        *slot = match opts.get::<mlua::Value>(key)? {
+            mlua::Value::Nil => None,
+            mlua::Value::Boolean(value) => Some(value),
+            _ => return Err(LuaError::external(format!("win.{key}: expected boolean"))),
         };
     }
-    if let Ok(Some(pad_left)) = opts.get::<Option<u16>>("pad_left") {
-        w.config.gutters.pad_left = pad_left;
+    for (key, slot) in [
+        ("pad_left", &mut out.pad_left),
+        ("pad_right", &mut out.pad_right),
+    ] {
+        *slot = match opts.get::<mlua::Value>(key)? {
+            mlua::Value::Nil => None,
+            mlua::Value::Integer(n) if (0..=u16::MAX as i64).contains(&n) => Some(n as u16),
+            _ => {
+                return Err(LuaError::external(format!(
+                    "win.{key}: expected integer in 0..65535"
+                )))
+            }
+        };
     }
-    if let Ok(Some(pad_right)) = opts.get::<Option<u16>>("pad_right") {
-        w.config.gutters.pad_right = pad_right;
-    }
-    if let Ok(Some(scrollbar)) = opts.get::<Option<bool>>("scrollbar") {
-        w.config.gutters.scrollbar = scrollbar;
-    }
-    match opts.get::<mlua::Value>("style") {
-        Ok(mlua::Value::String(group)) => {
-            w.set_style(Some(smelt_core::theme::intern(&group.to_string_lossy())));
+    out.initial_cursor = match opts.get::<mlua::Value>("initial_cursor")? {
+        mlua::Value::Nil => None,
+        mlua::Value::Integer(n) if n >= 0 => Some(n as u64),
+        _ => {
+            return Err(LuaError::external(
+                "win.initial_cursor: expected non-negative integer",
+            ))
         }
-        Ok(mlua::Value::Boolean(false)) => w.set_style(None),
-        _ => {}
-    }
-    match opts.get::<mlua::Value>("prefix") {
-        Ok(mlua::Value::String(first)) => w.set_prefix(Some(crate::smelt_edit::PadPrefix {
-            first: first.to_string_lossy(),
+    };
+    out.name = opts.string("name")?;
+    out.placeholder = opts.string("placeholder")?;
+    out.surface = match opts.string("surface")?.as_deref() {
+        None => None,
+        Some("editable_text") => Some(crate::smelt_edit::WindowSurface::editable_text()),
+        Some("readonly_text") => Some(crate::smelt_edit::WindowSurface::readonly_text()),
+        Some("selectable_text") => Some(crate::smelt_edit::WindowSurface::selectable_text()),
+        Some("inert") => Some(crate::smelt_edit::WindowSurface::inert()),
+        Some("list") => Some(crate::smelt_edit::WindowSurface::list(true)),
+        Some("list_inert") => Some(crate::smelt_edit::WindowSurface::list(false)),
+        Some(value) => {
+            return Err(LuaError::external(format!(
+                "win.surface: unknown value '{value}'"
+            )))
+        }
+    };
+    out.line_numbers = match opts.string("gutter")?.as_deref() {
+        None => None,
+        Some("line_numbers") => Some(true),
+        Some("none") => Some(false),
+        Some(value) => {
+            return Err(LuaError::external(format!(
+                "win.gutter: unknown value '{value}'"
+            )))
+        }
+    };
+    out.kind = match opts.string("kind")?.as_deref() {
+        None => None,
+        Some("input") => Some(WindowKind::Input),
+        Some("list") => Some(WindowKind::List),
+        Some(value) => {
+            return Err(LuaError::external(format!(
+                "win.kind: unknown value '{value}'"
+            )))
+        }
+    };
+    out.style = match opts.get::<mlua::Value>("style")? {
+        mlua::Value::Nil => None,
+        mlua::Value::Boolean(false) => Some(None),
+        value => Some(Some(LuaStyle::from_lua(value, lua)?.group()?)),
+    };
+    out.prefix = match opts.get::<mlua::Value>("prefix")? {
+        mlua::Value::Nil => None,
+        mlua::Value::Boolean(false) => Some(None),
+        mlua::Value::String(first) => Some(Some(crate::smelt_edit::PadPrefix {
+            first: first.to_str()?.to_string(),
             ..Default::default()
         })),
-        Ok(mlua::Value::Table(spec)) => w.set_prefix(Some(crate::smelt_edit::PadPrefix {
-            first: spec
-                .get::<Option<String>>("first")
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
-            rest: spec
-                .get::<Option<String>>("rest")
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
-            style: spec
-                .get::<Option<String>>("style")
-                .ok()
-                .flatten()
-                .map(|group| smelt_core::theme::intern(&group)),
-        })),
-        Ok(mlua::Value::Boolean(false)) => w.set_prefix(None),
-        _ => {}
-    }
-    match opts.get::<mlua::Value>("focus_on_click") {
-        Ok(mlua::Value::UserData(ud)) => {
-            if let Ok(target) = ud.borrow::<LuaWin>() {
-                w.click_focus = Some(target.id);
-            }
+        mlua::Value::Table(spec) => {
+            let mut spec = smelt_core::lua::options::LuaOptions::new(spec, "win.prefix");
+            let prefix = crate::smelt_edit::PadPrefix {
+                first: spec.string("first")?.unwrap_or_default(),
+                rest: spec.string("rest")?.unwrap_or_default(),
+                style: spec
+                    .get::<Option<LuaStyle>>("style")?
+                    .map(|style| style.group())
+                    .transpose()?,
+            };
+            spec.finish()?;
+            Some(Some(prefix))
         }
-        Ok(mlua::Value::Boolean(false)) => w.click_focus = None,
-        _ => {}
-    }
-    match opts.get::<mlua::Value>("resize") {
-        Ok(mlua::Value::String(target)) => {
-            w.prompt_resize_handle = target.to_string_lossy() == "prompt";
+        _ => {
+            return Err(LuaError::external(
+                "win.prefix: expected string, prefix table or false",
+            ))
         }
-        Ok(mlua::Value::Boolean(false)) => w.prompt_resize_handle = false,
-        _ => {}
-    }
+    };
+    out.focus = match opts.get::<mlua::Value>("focus_on_click")? {
+        mlua::Value::Nil => None,
+        mlua::Value::Boolean(false) => Some(None),
+        value => Some(Some(LuaWin::from_lua(value, lua)?.id)),
+    };
+    Ok(out)
 }
 
-fn surface_from_opts(opts: &mlua::Table) -> Option<crate::smelt_edit::WindowSurface> {
-    if let Ok(Some(surface)) = opts.get::<Option<String>>("surface") {
-        return match surface.as_str() {
-            "editable_text" => Some(crate::smelt_edit::WindowSurface::editable_text()),
-            "readonly_text" => Some(crate::smelt_edit::WindowSurface::readonly_text()),
-            "selectable_text" => Some(crate::smelt_edit::WindowSurface::selectable_text()),
-            "inert" => Some(crate::smelt_edit::WindowSurface::inert()),
-            "list" => Some(crate::smelt_edit::WindowSurface::list(true)),
-            "list_inert" => Some(crate::smelt_edit::WindowSurface::list(false)),
-            _ => None,
-        };
+impl WindowOptions {
+    fn apply(&self, ui: &mut crate::smelt_edit::Ui, win_id: crate::smelt_edit::WinId) {
+        let Some(w) = ui.win_mut(win_id) else { return };
+        if let Some(wrap) = self.wrap {
+            w.wrap = wrap;
+        }
+        if let Some(surface) = self.surface {
+            w.set_surface(surface);
+        }
+        if let Some(cursor_line) = self.cursor_line {
+            w.set_cursor_line_highlight(cursor_line);
+        }
+        if let Some(selection_highlight) = self.selection_highlight {
+            w.set_list_selection_highlight(selection_highlight);
+        }
+        if let Some(hide_cursor) = self.hide_cursor {
+            w.hide_cursor = hide_cursor;
+        }
+        if let Some(vim_enabled) = self.vim_enabled {
+            w.set_vim_enabled(vim_enabled);
+        }
+        if let Some(line_numbers) = self.line_numbers {
+            w.gutter = if line_numbers {
+                Some(std::sync::Arc::new(
+                    crate::smelt_edit::gutter::LineNumberGutter::new(),
+                ))
+            } else {
+                None
+            };
+        }
+        if let Some(pad_left) = self.pad_left {
+            w.config.gutters.pad_left = pad_left;
+        }
+        if let Some(pad_right) = self.pad_right {
+            w.config.gutters.pad_right = pad_right;
+        }
+        if let Some(scrollbar) = self.scrollbar {
+            w.config.gutters.scrollbar = scrollbar;
+        }
+        if let Some(style) = self.style {
+            w.set_style(style);
+        }
+        if let Some(prefix) = &self.prefix {
+            w.set_prefix(prefix.clone());
+        }
+        if let Some(focus) = self.focus {
+            w.click_focus = focus;
+        }
     }
-    None
 }

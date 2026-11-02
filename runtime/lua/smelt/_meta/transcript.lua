@@ -93,6 +93,12 @@ transcript.move_block = nil
 ---@type fun(row: integer): table?
 transcript.node_at_row = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Transcript-anchored bars with a built-in `label` source. Sources, view
+--- factories and press handlers receive ctx.state = { label, target?, view }.
+---@type { top: smelt.bar.Bar, bottom: smelt.bar.Bar }
+transcript.pills = nil
+
 --- Register or replace presentation policy for a tool. The supported fields are
 --- copied, so later table mutation has no effect; re-register to change behavior
 --- or cache keys. The returned registration removes only this exact replacement.
@@ -127,7 +133,7 @@ transcript.set_renderer = nil
 transcript.stream = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Reserve `rows` at the top of the transcript viewport for overlays such as the scroll pill. Block motions and `reveal` keep their target below them. Defaults to zero.
+--- Set the minimum rows above transcript navigation targets. Reserving overlays can increase this inset; overlapping reservations are not added together. Defaults to zero.
 ---@type fun(rows: integer): nil
 transcript.top_inset = nil
 
@@ -142,7 +148,7 @@ transcript.view = nil
 transcript.visible_blocks = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
---- Observe committed transcript views. The callback runs after semantic projection has committed and before the frame is painted, receives one immutable `View`, and is called again only when observable view or navigation state changes. Returns a removable registration.
+--- Observe committed transcript views after layout settles and before paint, at most once per frame. Receives an immutable View and runs again only when observable view or navigation state changes. Root layout changes requested by a watcher apply next frame. Returns a removable registration.
 ---@type fun(callback: fun(value: smelt.transcript.View)): smelt.Reg
 transcript.watch_view = nil
 

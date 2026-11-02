@@ -409,7 +409,7 @@ local function ensure_label_window(lines, width)
 	for i, entry in ipairs(lines) do
 		if entry.dim ~= false then
 			local pad = math.max(0, math.floor((width - #entry.text) / 2))
-			buf:mark(ns, i, pad, { end_col = pad + #entry.text, dim = true })
+			buf:mark(ns, i, pad, { end_col = pad + #entry.text, style = { dim = true } })
 		end
 	end
 	local win = smelt.win.new(buf, {

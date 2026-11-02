@@ -13,7 +13,7 @@
 --     render = function(it)
 --       return {
 --         text  = string.format("%s%s", string.rep("  ", it.depth or 0), it.label),
---         marks = { { col = 0, opts = { end_col = 8, dim = true } } },
+--         marks = { { col = 0, opts = { end_col = 8, style = { dim = true } } } },
 --       }
 --     end,
 --     filter = function(it) return it.cwd == current_cwd end,
@@ -112,7 +112,7 @@ local function render_visible(self)
     for i = 1, pad do lines[i] = "" end
     lines[pad + 1] = self.empty_text
     self.buf:lines(lines)
-    self.buf:mark(NS, pad + 1, 0, { end_col = #self.empty_text, dim = true })
+    self.buf:mark(NS, pad + 1, 0, { end_col = #self.empty_text, style = { dim = true } })
     self.row_offset = pad
     return
   end

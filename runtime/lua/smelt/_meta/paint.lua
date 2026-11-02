@@ -8,9 +8,8 @@
 ---@class smelt.paint
 local paint = {}
 
---- Register `func(slice, ctx)` over the whole screen and return its `Paint` handle. It runs after everything else has painted and before the frame is sent, so it can read, recolor, move, or replace any cell: screen-wide effects such as fades, color filters, or melting text. `ctx` is a `smelt.paint.Ctx`, with `cursor` for effects that follow it and, with `opts.history`, `prev`, `damage` and `scroll` for effects that react to change. Remove the handle to stop the effect.
----@see smelt.paint.Ctx
----@type fun(func: fun(arg1: smelt.paint.Slice, arg2: smelt.paint.Ctx), opts: smelt.paint.FrameOpts?): smelt.paint.Paint
+--- Register `func(slice, ctx)` over the finished screen and return an `Effect` handle. It can read, recolor or move cells before the frame is sent. `ctx.cursor` follows the caret; opt-in `history` exposes `prev`, `damage` and `scrolls`. An Effect is not a layout leaf. Remove it to stop.
+---@type fun(func: fun(arg1: smelt.paint.Slice, arg2: smelt.paint.Ctx), opts: smelt.paint.FrameOpts?): smelt.paint.Effect
 paint.frame = nil
 
 --- Register `func(slice, ctx)` as a paint leaf and return its `Paint` handle. Use the handle anywhere a window id is accepted in the layout / overlay APIs; the callback runs each frame the leaf is visible, in its layer order, so the slice already holds what was painted below it. See `smelt.paint.Ctx` for what `ctx` holds.

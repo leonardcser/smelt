@@ -71,6 +71,7 @@ impl LuaType for LuaOverlayNewOpts {
                 LuaClassField { name: "min_height", ty: "integer | string | table".into(), optional: true, doc: "Optional lower bound applied after height resolves." },
                 LuaClassField { name: "modal", ty: "boolean".into(), optional: true, doc: "Whether the overlay blocks input behind it. Defaults to true, or false when `transparent`." },
                 LuaClassField { name: "blocks_agent", ty: "boolean".into(), optional: true, doc: "Whether the overlay should block agent progress while open." },
+                LuaClassField { name: "reserve", ty: "boolean".into(), optional: true, doc: "Keep navigation targets below this top-anchored window overlay. Uses its clipped bottom edge; overlapping reservations are not added. Does not move or stack overlays. Defaults to false." },
                 LuaClassField { name: "transparent", ty: "boolean".into(), optional: true, doc: "Draw the overlay as a see-through layer: its rect is not cleared, so only the cells its leaves draw cover what is under it, and the mouse passes through. Not modal by default; cannot be modal, draggable or resizable." },
                 LuaClassField { name: "z", ty: "integer".into(), optional: true, doc: "Z-index. Higher overlays render above lower overlays." },
                 LuaClassField { name: "draggable", ty: "boolean | smelt.overlay.DragConfig".into(), optional: true, doc: "Enable or configure mouse dragging." },
@@ -100,10 +101,22 @@ impl LuaType for LuaOverlay {
     }
 }
 
+impl FromLua for LuaOverlay {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
+        Ok(*mlua::AnyUserData::from_lua(value, lua)?.borrow::<Self>()?)
+    }
+}
+
 impl mlua::UserData for LuaOverlay {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(format!("Overlay#{}", this.id.0))
+        });
+
+        methods.add_method("rect", |lua, this, ()| -> LuaResult<Option<mlua::Table>> {
+            crate::lua::with_ui_host(|host| host.with_ui(|ui| ui.resolved_overlay_rect(this.id)))
+                .map(|rect| crate::lua::parse::rect_to_lua(lua, rect))
+                .transpose()
         });
 
         methods.add_method("close", |_, this, ()| -> LuaResult<()> {
@@ -234,6 +247,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         classification: smelt_core::lua::doc::classification_for_type("smelt.overlay.Overlay"),
         doc: "Overlay handle returned by `smelt.overlay.new(opts)`.",
         fields: smelt_core::class_methods! {
+            "rect" => fn() -> Option<mlua::Table>, "Return the current compositor-resolved rectangle, including chrome, or nil when closed or its anchor is unavailable.",
             "close" => fn() -> (), "Close the overlay. No-op if already closed.",
             "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.",
         },
@@ -244,6 +258,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings.",
         &["opts"],
         |lua, (opts,): (LuaOverlayNewOpts,)| -> LuaResult<LuaOverlay> {
+            if smelt_core::lua::reg::RegistrationScope::active() {
+                return Err(LuaError::external("view factories return layouts; open overlays outside construction"));
+            }
             let opts = opts.0;
             let keymaps: Option<mlua::Table> = opts.get("keymaps").ok().flatten();
             // Auto-name overlays declared without `opts.name` inside a

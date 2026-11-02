@@ -18,7 +18,7 @@ local buf = smelt.buf.new()
 local win = smelt.win.new(buf, { surface = "inert" })
 
 smelt.overlay.new({
-  title     = { { text = " perf ", bold = true } },
+  title     = { { text = " perf ", style = { bold = true } } },
   anchor    = "screen_at",
   corner    = "ne",
   width     = 44,
@@ -180,13 +180,36 @@ prompt:on("text_changed", function()
   if not buf then return end
   buf:clear_ns(ns):mark(ns, 1, 0, {
     end_col  = 999,
-    hl_group = "DiagnosticHint",
+    style = "DiagnosticHint",
     priority = 200,
   })
 end)
 ```
 
-Event names and `mark` options are type-checked in your editor.
+Event names and `mark` options are type-checked in your editor. Window options
+are validated before any change is applied; unknown keys, invalid types and
+unknown enum values raise at the call site.
+
+### Shared styles and spans
+
+Paint, buffer marks, styled buffer spans, bar items, overlay titles, window
+backgrounds and prefixes accept the same style value: a theme-group name, or a
+`smelt.Style` table. A table can use `hl_group` as its base and override `fg`,
+`bg`, `bold`, `dim`, `italic`, `underline`, `crossedout` and `reverse`.
+
+```lua
+local style = { hl_group = "Comment", fg = "#88bbff", underline = true }
+buf:mark(ns, 1, 0, { end_col = 4, style = style })
+buf:styled({ { { text = "info", style = style } } })
+win:configure({ style = style, prefix = { first = "> ", style = style } })
+-- Overlay titles use the same { text, style } span shape.
+```
+
+Range, gravity, selection and copy options belong to the mark, not the style.
+`smelt.style.merge(base, patch)` combines styles without changing either input
+or resolving their theme references. Explicit `false` values stay intact.
+`smelt.style.resolve(style)` returns a resolved snapshot. String window styles
+follow theme changes; window style tables are resolved when configured.
 
 ## Paint
 
@@ -196,7 +219,8 @@ A paint is a Lua function that draws cells directly. There are two kinds:
   overlay like a window. `fn` draws that leaf's rectangle.
 - `smelt.paint.frame(fn, opts)` draws over the whole finished screen, just
   before smelt sends the frame. Use it for screen-wide effects: fades, color
-  filters, melting text, a mouse trail.
+  filters, melting text, a mouse trail. Its `Effect` handle has only `remove`,
+  `invalidate` and `invalidate_after`; it is not a layout leaf.
 
 Both call `fn(slice, ctx)`. Coordinates are `(x, y)` cells from the top-left.
 They may be negative or past the edge: writes outside the slice are dropped and
@@ -205,7 +229,13 @@ holds what was painted below it, so a paint can read cells and draw over them.
 A write whose style leaves `bg` unset keeps the background underneath; pass
 `bg = false` for the terminal's default background instead. Reads give
 `bg = false` for that default, so a cell read with `get` and written elsewhere
-with `set` looks the same there.
+with `set` looks the same there. Drawing with `set`, `put_str` and `fill`
+replaces text attributes; `patch_style` and the `style` returned from `map`
+preserve omitted fields. Use explicit `false` to clear an attribute or select
+the terminal's default color.
+
+A slice belongs to one callback invocation. Keeping it and using it later,
+even from another paint callback, raises. Keep a `snapshot()` instead.
 
 | Method | Does |
 | ------ | ---- |
@@ -213,8 +243,8 @@ with `set` looks the same there.
 | `set(x, y, ch, style)` | Write one grapheme |
 | `put_str(x, y, text, style)` | Write a string, clipped at the edges |
 | `fill(x, y, w, h, ch, style)` | Fill a rectangle |
-| `set_style(x, y, w, h, patch)` | Change only the style of a rectangle, keeping the glyphs |
-| `map(fn(cell, x, y))` | Visit every cell; return `{ ch?, style? }` to replace it |
+| `patch_style(x, y, w, h, patch)` | Change only the style of a rectangle, keeping the glyphs |
+| `map(fn(cell, x, y))` | Visit each glyph; return `{ ch?, style? }` to replace its glyph and patch its style |
 | `recolor(fn(r, g, b, layer), opts)` | Pass every color through `fn`, once per distinct color |
 | `snapshot()` | Copy the slice into a `Snapshot` you can keep |
 | `blit(snapshot, x, y)` | Draw a snapshot back, shifted by `(x, y)` |
@@ -276,7 +306,7 @@ end
 local cell = slice:get(x, y)
 local fg = smelt.theme.rgb(cell.style.fg, "fg")
 local bg = smelt.theme.rgb(cell.style.bg, "bg")
-slice:set_style(x, y, 1, 1, { fg = mix(fg, bg, 0.5) })
+slice:patch_style(x, y, 1, 1, { fg = mix(fg, bg, 0.5) })
 ```
 
 ### Repainting
@@ -333,7 +363,7 @@ fx = smelt.paint.frame(function(slice, ctx)
     if b.streaming and b.rect then
       for _, d in ipairs(ctx.damage) do
         if d.y >= b.rect.y and d.y < b.rect.y + b.rect.height then
-          slice:set_style(d.x, d.y, d.width, 1, { fg = { 255, 236, 170 }, bold = true })
+          slice:patch_style(d.x, d.y, d.width, 1, { fg = { 255, 236, 170 }, bold = true })
         end
       end
     end
@@ -438,6 +468,17 @@ smelt.prompt.bottom:add("hint", function()
 end)
 ```
 
+A source can be a function, or `{ render = fn, signals = { ... } }`. A signal
+name invalidates the destination bar when its value changes; `{ name, project }`
+compares `project(value)` instead, to avoid repainting insignificant changes.
+Subscriptions belong to the registration: replacing or removing it removes them.
+Built-ins carry their own dependencies, so moving them requires no extra wiring.
+A source that animates calls `ctx.invalidate_after(ms)` to schedule its destination,
+without capturing a particular bar.
+
+`add(name, source, { row, align_right, priority })` can override placement without
+modifying the source's returned items.
+
 A source is called with `ctx`, where `ctx.width` is the bar's width in cells, for
 items that span the line. When the layout gives a strip fewer rows than it
 wants, `ctx.rows` is how many rows are left for this source after the sources
@@ -449,7 +490,7 @@ raises an error is skipped and shows a notification. Each item is a table:
 | ----- | ------- |
 | `text` | What to show. Items with empty text are skipped |
 | `runs` | A list of `{ text, style }` pieces instead of `text`, for coloring each character; the pieces drop together |
-| `style` | `fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`; colors take any color form, including theme group names |
+| `style` | A shared style table or theme-group name |
 | `priority` | Higher drops first when the line is narrow; `0` (the default) never drops; in a strip it is cut at the edge with `…` when it does not fit |
 | `align_right` | Pack against the right edge |
 | `separated` | Put a `·` between this item and the previous separated one |
@@ -471,10 +512,13 @@ for the cases it does not draw:
 ```lua
 local fallback = smelt.prompt.top:builtin("indicator")
 
-smelt.prompt.top:add("indicator", function()
-  if smelt.signal.get("work_state") ~= "working" then return fallback() end
-  return { text = "thinking", style = { fg = "SmeltAccent" }, priority = 1 }
-end)
+smelt.prompt.top:add("indicator", {
+  signals = fallback.signals,
+  render = function(ctx)
+    if smelt.signal.get("work_state") ~= "working" then return fallback.render(ctx) end
+    return { text = "thinking", style = "SmeltAccent", priority = 1 }
+  end,
+})
 
 smelt.prompt.top:remove("cost")
 ```
@@ -488,25 +532,34 @@ smelt.statusline:add("cwd", function()
 end)
 ```
 
-To draw a bar yourself, swap it for any layout node with `set_view(node, rows)`,
-and pass `nil` to restore it. A paint leaf can draw
-anything, including animation:
+`set_view(factory)` replaces any bar with a measured layout. Create fresh leaves
+inside the factory; the bar owns their resources, timers and subscriptions and
+releases them on replacement or teardown. Failed construction keeps the current
+view. Names inside a factory are local to that view. Create shared buffers outside
+factories. Return a layout; open dialogs and overlays from event handlers, not
+during construction. `ctx.width` is a construction budget; use the renderer's
+actual width for drawing. Pass `nil` to restore sources.
 
 ```lua
-local paint
-paint = smelt.paint.register(function(slice, ctx)
-  for x = 0, slice:width() - 1 do
-    local hue = (x * 4 + ctx.now_ms // 20) % 256
-    slice:set(x, 0, " ", { bg = { hue, 80, 255 - hue } })
-  end
-  paint:invalidate_after(33)
+smelt.statusline:set_view(function(ctx)
+  local paint = smelt.paint.register(function(slice, frame)
+    for x = 0, slice:width() - 1 do
+      local hue = (x * 4 + frame.now_ms // 20) % 256
+      slice:set(x, 0, " ", { bg = { hue, 80, 255 - hue } })
+    end
+    ctx.invalidate_after(33)
+  end)
+  return smelt.ui.layout.leaf(paint, { measure = { 0, 1 } })
 end)
-smelt.statusline:set_view(smelt.ui.layout.leaf(paint), 1)
 ```
+
+The node's natural size includes borders and padding. Paint needs an explicit
+`measure`; windows use their content. `layout.size(node, width, height)` measures
+without painting.
 
 A bar repaints only when something it shows changes. A source that animates
 draws from `smelt.time.monotonic_ms()` and asks for its next frame on every
-paint with `invalidate_after(ms)`, the way the built-in `indicator` breathes while the agent
+render with `ctx.invalidate_after(ms)`, the way the built-in `indicator` breathes while the agent
 works and cools its dot after. The `indicator` uses wall time,
 `smelt.time.now_ms()`, on purpose: it keeps the animation in step across
 several smelt windows. A source that depends on state of its own calls
@@ -515,8 +568,10 @@ several smelt windows. A source that depends on state of its own calls
 ### Bar look
 
 Every bar takes the same look options through `configure`. Absent keys stay as
-they are, and `false` restores a key's default. `config()` returns the current
-look.
+they are. `reset(key)` restores one constructor default; `reset()` restores all
+look options and the source-rendered view, without changing source registrations.
+`false` is a value, never a reset sentinel. `config()` returns the
+current look. Validation happens before any option changes.
 
 | Key | Meaning |
 | --- | ------- |
@@ -526,14 +581,17 @@ look.
 | `rule`, `rule_style` | The cell a rule repeats (default `"─"`) and its style (default `{ fg = "SmeltSeparator" }`) |
 | `fill_selectable` | Include the filler between items in drag-copy |
 | `visible` | `false` hides the bar and frees its rows; its sources stay registered |
+| `style` | Default style for items without their own style |
+| `on_press` | Left-button action, called with `(ctx, event)` for any leaf; `false` disables it |
 
 ```lua
 smelt.statusline:configure({ separator = " | " })
 smelt.prompt.bottom:configure({ rule = "╌", rule_style = { fg = "Comment" } })
 ```
 
-Each bar renders into its own window, `bar.win`. A window takes a base style
-with `Win:configure({ style = group })`, which fills every row, its padding
+Source-rendered bars draw into `bar.win`. Hosted bars have no window while
+hidden or using a custom view. A window takes a base style with
+`Win:configure({ style = group })`, which fills every row, its padding
 included, and sits under the text and row highlights. Together with bar looks
 this reshapes the prompt. A filled block with no rules, in the color of sent
 messages:
@@ -569,9 +627,6 @@ A one-row prompt, with the model in the statusline instead:
 smelt.prompt.top:configure({ visible = false })
 smelt.prompt.bottom:configure({ visible = false })
 smelt.statusline:add("model", smelt.prompt.top:builtin("model"))
-for _, name in ipairs({ "model", "reasoning" }) do
-  smelt.signal.subscribe(name, function() smelt.statusline:invalidate() end)
-end
 ```
 
 Queued messages and the stash marker still show above a prompt whose top bar
@@ -585,17 +640,22 @@ The stash marker can move, for example into the statusline:
 ```lua
 local stash = smelt.prompt.queue:builtin("stash")
 smelt.prompt.queue:remove("stash")
-smelt.statusline:add("stash", function(ctx)
-  local item = stash(ctx)
-  if item then item.row, item.text = nil, "stashed" end
-  return item
-end)
+smelt.statusline:add("stash", {
+  signals = stash.signals,
+  render = function(ctx)
+    local item = stash.render(ctx)
+    if item then item.text = "stashed" end
+    return item
+  end,
+}, { row = 1 })
 ```
 
 The goal header is the `goal` source of `smelt.headerline`. Its state is the
 `goal` signal (the session's goal table, or nil), so a plugin can show it
-anywhere: `smelt.statusline:add("goal", smelt.headerline:builtin("goal"))`
-plus a subscription to `goal` that invalidates the statusline.
+anywhere: `smelt.statusline:add("goal", smelt.headerline:builtin("goal"))`.
+The source's subscription follows it. Use
+`smelt.prompt.set_resize_handle(win, enabled)` to give a different window the
+prompt-resize gesture; this interaction is separate from generic window options.
 
 ### Your own bars
 
@@ -604,7 +664,7 @@ plus a subscription to `goal` that invalidates the statusline.
 source shows an item, default `1`), `sources`, a list of `{ name, fn }` pairs
 that `bar:builtin(name)` returns later, and `win_opts` for its window. A
 feature that ships a source for an existing bar adds it with
-`bar:add(name, fn, { builtin = true })`, so users can wrap it the same way.
+`bar:add_builtin(name, source)`, so users can wrap it the same way.
 Place a bar in a layout with `bar:node()`, which returns the node and the rows
 the bar wants:
 
@@ -614,9 +674,9 @@ tabs:add("sessions", function() return { text = " main " } end)
 
 local default = require("smelt.layout").compose
 smelt.ui.layout.set(function(state)
-  local node, rows = tabs:node()
+  local node = tabs:node()
   return smelt.ui.layout.vbox({
-    { height = rows, node },
+    { height = "fit", node },
     { height = "fill", default(state) },
   })
 end)
@@ -625,3 +685,40 @@ end)
 `smelt.prompt.node({ input_rows, max_rows })` returns the whole prompt block,
 from the auxiliary row down to the bottom bar, and its rows, so a custom layout
 can place it anywhere. The default layout is `require("smelt.layout").compose`.
+
+## Jump pills
+
+`smelt.transcript.pills.top` and `.bottom` are bars hosted over the transcript.
+They have a built-in `label` source and the same methods as the statusline.
+`ctx.state` holds the latest `{ label, target, view }`; navigation and cursor
+avoidance stay built in.
+
+```lua
+local bottom = smelt.transcript.pills.bottom
+bottom:add("label", function() return { text = " ↓ latest " } end)
+bottom:configure({ style = { fg = "SmeltAccent", bg = "SmeltScrollPillBg", bold = true } })
+```
+
+Custom views use the same owned factory API. The captured context stays live,
+and every leaf gets the bar's press action:
+
+```lua
+smelt.transcript.pills.top:set_view(function(ctx)
+  local paint = smelt.paint.register(function(slice)
+    slice:put_str(0, 0, " ↑ " .. ctx.state.label, "SmeltAccent")
+  end)
+  return smelt.ui.layout.leaf(paint, { measure = { 40, 1 } })
+end)
+```
+
+`set_view(nil)` restores source rendering. `configure({ visible = false })`
+hides a bar. Restore its default label with `bar:add("label", bar:builtin("label"))`.
+Disabling the bundled `scroll_pills` plugin disables both controls.
+
+Top-anchored overlays can declare `reserve = true` to keep navigation targets
+below them. Reservations use current geometry and do not add overlapping heights
+or move overlays. `smelt.transcript.top_inset(rows)` sets an independent minimum.
+
+Custom Paint, pointer tracking and screen history are opt-in. Changing labels,
+styles or bar sources does not enable them. Animations stop when they no longer
+request another frame.

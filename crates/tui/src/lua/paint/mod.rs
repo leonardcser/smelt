@@ -230,8 +230,8 @@ impl PaintRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn all_ids(&self) -> Vec<PaintId> {
-        self.handles.keys().copied().collect()
+    pub(crate) fn all_ids(&self) -> impl Iterator<Item = PaintId> + '_ {
+        self.handles.keys().copied()
     }
 
     /// Drop every anonymous paint-to-handle mapping while preserving named
@@ -464,7 +464,6 @@ pub(crate) fn paint(
     let Some(func) = callback(runtime, slot.handle) else {
         return Ok(());
     };
-    let ud = runtime.lua.create_userdata(slice::PaintSliceUd)?;
     let ctx_tbl = build_ctx_table(
         &runtime.lua,
         slice.grid_rect(),
@@ -474,7 +473,12 @@ pub(crate) fn paint(
         changes,
     )?;
     let _perf = smelt_perf::perf::begin("lua:paint");
-    slice::scope_slice(slice, || func.call::<()>((ud, ctx_tbl)))
+    slice::scope_slice(slice, || {
+        runtime.lua.scope(|scope| {
+            let ud = scope.create_userdata(slice::PaintSliceUd)?;
+            func.call::<()>((ud, ctx_tbl))
+        })
+    })
 }
 
 /// Map screen cell `at` through the pointer-map callback `handle`, on a

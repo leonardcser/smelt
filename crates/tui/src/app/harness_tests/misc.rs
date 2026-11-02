@@ -426,10 +426,12 @@ fn statusline_view_can_be_replaced_by_a_paint() {
     app.set_terminal_size(40, 12);
     assert!(app.run_lua(
         r#"
-        local paint = smelt.paint.register(function(slice)
-          for y = 0, slice:height() - 1 do slice:put_str(0, y, "painted " .. y) end
+        smelt.statusline:set_view(function()
+          local paint = smelt.paint.register(function(slice)
+            for y = 0, slice:height() - 1 do slice:put_str(0, y, "painted " .. y) end
+          end)
+          return smelt.ui.layout.leaf(paint, { measure = { 0, 2 } })
         end)
-        smelt.statusline:set_view(smelt.ui.layout.leaf(paint), 2)
         "#,
     ));
 

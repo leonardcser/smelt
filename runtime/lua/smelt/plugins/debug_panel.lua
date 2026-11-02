@@ -17,8 +17,8 @@ local PANEL_H = 30
 
 local function panel_title()
 	return smelt.dialog.title({
-		{ text = " debug ", bold = true },
-		{ text = "(F3 to close) ", fg = "grey" },
+		{ text = " debug ", style = { bold = true } },
+		{ text = "(F3 to close) ", style = { fg = "grey" } },
 	})
 end
 
@@ -248,7 +248,7 @@ local function paint()
 	end
 	buf:lines(lines):clear_ns(NS_HL)
 	for _, sp in ipairs(spans) do
-		buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, fg = sp.role or "Comment" })
+		buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, style = { fg = sp.role or "Comment" } })
 	end
 end
 

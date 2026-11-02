@@ -303,6 +303,13 @@ fn expand_lua_opts(input: &DeriveInput) -> syn::Result<TokenStream2> {
         from_lua_field_reads.push(read);
     }
 
+    let unknown_check = if rest_field.is_none() {
+        quote! {
+            ::smelt_core::lua::options::validate_keys(&__t, &[ #( #named_keys ),* ], #lua_name)?;
+        }
+    } else {
+        quote! {}
+    };
     let has_regular_fields = !from_lua_field_reads.is_empty();
     let rest_read = match rest_field {
         Some((fname, ty, _)) => {
@@ -366,6 +373,7 @@ fn expand_lua_opts(input: &DeriveInput) -> syn::Result<TokenStream2> {
         impl ::mlua::FromLua for #struct_ident {
             fn from_lua(__value: ::mlua::Value, __lua: &::mlua::Lua) -> ::mlua::Result<Self> {
                 let __t: ::mlua::Table = ::mlua::FromLua::from_lua(__value, __lua)?;
+                #unknown_check
                 ::std::result::Result::Ok(Self {
                     #( #from_lua_field_reads ),*
                     #trailing_comma

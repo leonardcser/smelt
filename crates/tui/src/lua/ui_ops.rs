@@ -116,10 +116,12 @@ pub(crate) fn build_layout_tree(
 }
 
 /// Validate the lowered tree, including opaque dialog stages, against the other
-/// registered presentation trees. Callers exclude the tree they are replacing.
+/// registered presentation trees. Callers exclude the tree they are replacing,
+/// or identify splits in the replaced subtree when replacing part of a tree.
 pub(crate) fn validate_split_mounts<'a>(
     tree: &LayoutTree,
     existing: impl Iterator<Item = &'a LayoutTree>,
+    replaced: impl Fn(crate::smelt_edit::layout::SplitId) -> bool,
 ) -> Result<(), String> {
     let mut ids = std::collections::HashSet::new();
     let duplicate = tree.splits().any(|split| !ids.insert(split.id()));
@@ -127,7 +129,7 @@ pub(crate) fn validate_split_mounts<'a>(
         || (!ids.is_empty()
             && existing
                 .flat_map(LayoutTree::splits)
-                .any(|split| ids.contains(&split.id())))
+                .any(|split| ids.contains(&split.id()) && !replaced(split.id())))
     {
         return Err("a split handle can be mounted only once at a time".into());
     }
@@ -140,10 +142,9 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     // overlay tree hot-reload in place. `size_override` on the existing
     // overlay is left intact so user-resized panels stay resized.
     let name: Option<String> = opts.get::<Option<String>>("name").ok().flatten();
-    let title = crate::lua::parse::title(
-        opts.get::<mlua::Value>("title").ok(),
-        &crate::lua::theme_group,
-    )
+    let title = crate::lua::parse::title(opts.get::<mlua::Value>("title").ok(), &|group| {
+        app.ui.theme().lookup(group)
+    })
     .map_err(|e| format!("overlay title: {e}"))?;
     let layout_ud: mlua::AnyUserData = opts
         .get("layout")
@@ -156,6 +157,22 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     };
     let (term_w, term_h) = app.ui.terminal_size();
     let anchor = parse_overlay_anchor(&opts, term_w, term_h)?;
+    let reserve = match opts
+        .get::<mlua::Value>("reserve")
+        .map_err(|e| e.to_string())?
+    {
+        mlua::Value::Nil => false,
+        mlua::Value::Boolean(value) => value,
+        _ => return Err("overlay.reserve: expected boolean".into()),
+    };
+    if reserve
+        && !matches!(anchor, Anchor::Win { attach: Align::N | Align::NW | Align::NE, row_offset, .. } if row_offset >= 0)
+    {
+        return Err(
+            "overlay.reserve requires a top-anchored window overlay with non-negative row_offset"
+                .into(),
+        );
+    }
     let border = crate::lua::parse::border(&opts).map_err(|e| format!("overlay border: {e}"))?;
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let transparent: bool = opts.get("transparent").unwrap_or(false);
@@ -208,12 +225,14 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         app.ui
             .layout_trees()
             .filter(|tree| !replaced.is_some_and(|overlay| std::ptr::eq(*tree, &overlay.layout))),
+        |_| false,
     )?;
 
     if let Some(ref n) = name {
         if let Some((id, ov)) = app.ui.lookup_named_overlay_mut(n) {
             ov.layout = layout;
             ov.anchor = anchor;
+            ov.reserve = reserve;
             ov.width = width;
             ov.height = height;
             ov.max_width = max_width;
@@ -243,7 +262,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         }
     }
 
-    let overlay = Overlay::new(layout, anchor)
+    let mut overlay = Overlay::new(layout, anchor)
         .with_z(z)
         .modal(modal)
         .blocks_agent(blocks_agent)
@@ -256,6 +275,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .with_max_height(max_height)
         .with_min_width(min_width)
         .with_min_height(min_height);
+    overlay.reserve = reserve;
     let id = app.ui.overlay_open(overlay);
     if let Some(n) = name {
         app.ui.name_overlay(n, id);
@@ -295,7 +315,7 @@ pub(crate) fn open_decoration(
 
     let mut window_leaves = Vec::new();
     let (_root_constraint, layout) = build_layout_tree(app, &layout_node, &mut window_leaves)?;
-    validate_split_mounts(&layout, app.ui.layout_trees())?;
+    validate_split_mounts(&layout, app.ui.layout_trees(), |_| false)?;
     let (term_w, _) = app.ui.terminal_size();
     for &win_id in &window_leaves {
         let content_w = app.ui.win_content_width(win_id).unwrap_or(term_w);

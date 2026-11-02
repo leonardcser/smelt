@@ -14,43 +14,69 @@
 ---@class smelt.Reg
 ---@field remove fun(): boolean Undo the registration. Returns `true` the first time; `false` on subsequent calls or when the underlying target is already gone.
 
+--- Styled text for buffer lines, titles and bar runs.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.Span
+---@field text string Text to show.
+---@field style? smelt.Style|string Highlight applied to the text.
+---@field selectable? boolean Include the text in drag-copy. Defaults to the item's setting.
+
+--- Shared style fields for Paint, spans, marks, bars and window chrome. A string theme-group name is shorthand for { hl_group = name }.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.Style
+---@field hl_group? string Theme group used as the base style; explicit fields override it.
+---@field fg? integer | string | false | number[] Color override. false selects the terminal default.
+---@field bg? integer | string | false | number[] Color override. false selects the terminal default.
+---@field bold? boolean Attribute override. false clears it.
+---@field dim? boolean Attribute override. false clears it.
+---@field italic? boolean Attribute override. false clears it.
+---@field underline? boolean Attribute override. false clears it.
+---@field crossedout? boolean Attribute override. false clears it.
+---@field reverse? boolean Attribute override. false clears it.
+
 --- A bar: named sources whose items lay out in a strip or a rule. It owns a
 --- window and its renderer; `bar:node()` places it in a layout.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.bar.Bar
 ---@field name string The name given to `smelt.bar.new`.
----@field win smelt.win.Win The window the bar renders into.
----@field add fun(self: smelt.bar.Bar, name: string, handler: fun(ctx: smelt.bar.Context): smelt.bar.Item[]?, opts?: { builtin?: boolean }): smelt.Reg Add a named source. `handler(ctx)` runs on every repaint (see `smelt.bar.Context`) and returns an item or a list of them; an error skips the source and shows a notification. Sources run in the order they were added. Adding an existing name replaces that source in place. `opts.builtin` also records it as the default that `bar:builtin(name)` returns, for features that ship a source. Returns a `Reg` that removes the source, unless a later `add` replaced it.
+---@field win smelt.win.Win? Source-rendering window. Overlay bars have none while unmounted or using a replacement view.
+---@field add fun(self: smelt.bar.Bar, name: string, handler: smelt.bar.Source|(fun(ctx: smelt.bar.Context): (smelt.bar.Item|smelt.bar.Item[]|nil)), opts?: { row?: integer, align_right?: boolean, priority?: integer }): smelt.Reg Add or replace a named source. Its signals update this bar; removal removes subscriptions. Placement overrides do not modify returned items. Errors skip the source and notify. The Reg removes only this registration, not a later replacement.
+---@field add_builtin fun(self: smelt.bar.Bar, name: string, source: smelt.bar.Source|(fun(ctx: smelt.bar.Context): (smelt.bar.Item|smelt.bar.Item[]|nil))): smelt.Reg Add a default source retrievable with builtin(name). Prefer constructor sources for a new bar.
 ---@field remove fun(self: smelt.bar.Bar, name: string) Remove every source named `name`.
 ---@field clear fun(self: smelt.bar.Bar) Remove every source, built-in ones included.
----@field builtin fun(self: smelt.bar.Bar, name: string): (fun(ctx: smelt.bar.Context): smelt.bar.Item[]?)? The built-in source named `name`, so a replacement can fall back to it.
----@field configure fun(self: smelt.bar.Bar, config: smelt.bar.Config) Change the look. Absent keys stay; `false` restores a key's default.
+---@field builtin fun(self: smelt.bar.Bar, name: string): smelt.bar.Source? The built-in source, including its signals, so it can be moved or wrapped without losing updates.
+---@field configure fun(self: smelt.bar.Bar, config: smelt.bar.Config) Validate and change the look atomically. Absent keys stay unchanged.
+---@field reset fun(self: smelt.bar.Bar, key?: string) Restore one constructor default, or every look option when key is omitted.
 ---@field config fun(self: smelt.bar.Bar): smelt.bar.Config The current look.
 ---@field invalidate fun(self: smelt.bar.Bar) Repaint after state a source reads changes outside a built-in signal. Adding, replacing and removing sources repaint on their own.
 ---@field invalidate_after fun(self: smelt.bar.Bar, ms: integer) Repaint after `ms` milliseconds. An animated source asks for its next frame on every paint; the earliest pending request wins.
 ---@field rows fun(self: smelt.bar.Bar): integer Rows the bar wants: 0 while hidden, the view rows when a view replaces it, 1 for a rule, otherwise one per distinct item `row` and at least `min_rows`.
----@field highlight fun(self: smelt.bar.Bar, style: smelt.buf.MarkOpts?) Paint the rule and the separators with `style` until called with nil, for example while the bar is dragged. The look stays as configured.
+---@field highlight fun(self: smelt.bar.Bar, style: smelt.Style|string?) Paint the rule and the separators with `style` until called with nil, for example while the bar is dragged. The look stays as configured.
 ---@field node fun(self: smelt.bar.Bar): smelt.ui.layout, integer The bar's layout node and rows, for layout composers.
----@field set_view fun(self: smelt.bar.Bar, node: smelt.ui.layout?, rows: integer?) Replace the bar with any layout node, such as a paint leaf, taking `rows` rows (default 1). `nil` restores the bar.
+---@field set_view fun(self: smelt.bar.Bar, factory: (fun(ctx: smelt.bar.Context): smelt.ui.layout)?) Build a measured replacement view with fresh leaves. The bar releases its resources and registrations on replacement or host teardown; failed construction preserves the current view. Names inside a factory are local to that view. Give Paint leaves a measure. nil restores source rendering.
 
 --- Look of a bar, set with `bar:configure(config)`. Absent keys keep their
---- current value; `false` resets a key to its default.
+--- current value; `bar:reset(key)` restores constructor defaults.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.bar.Config
 ---@field layout? "strip"|"rule" `"strip"` fills the row; `"rule"` draws a horizontal line with the items set into it.
 ---@field bg? string|false Theme group that fills the empty cells and backs items without their own background.
----@field separator? string|false Text between neighbouring `separated` items. Defaults to `" · "`.
----@field separator_style? smelt.buf.MarkOpts|false Style of the separator text.
----@field rule? string|false Cell repeated to draw a rule. Defaults to `"─"`.
----@field rule_style? smelt.buf.MarkOpts|false Style of the rule. Defaults to `{ fg = "SmeltSeparator" }`.
+---@field separator? string Text between neighbouring `separated` items. Defaults to `" · "`.
+---@field separator_style? smelt.Style|string Style of the separator text.
+---@field rule? string Cell repeated to draw a rule. Defaults to `"─"`.
+---@field rule_style? smelt.Style|string Style of the rule. Defaults to `{ fg = "SmeltSeparator" }`.
 ---@field fill_selectable? boolean Include the filler between items in drag-copy.
 ---@field visible? boolean `false` hides the bar: it takes no rows and its sources stay registered.
+---@field style? smelt.Style|string Default style for items without their own style.
+---@field on_press? false|fun(ctx: smelt.bar.Context, event: table) Left-button action shared by every leaf; false disables it.
 
 --- What a source gets on every repaint.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.bar.Context
----@field width integer The bar's width in cells.
+---@field width integer Content width for sources; a width budget during view construction. Renderers receive their actual width.
 ---@field rows? integer Rows left for this source while the layout gives the bar fewer rows than it wants: the bar's rows minus the rows earlier sources took. Nil when every row fits.
+---@field invalidate_after fun(ms: integer) Schedule the destination's next repaint. Use this rather than capturing a particular bar.
+---@field state table Host state. Transcript bars expose { label, target?, view }; other bars default to an empty table. A view factory's context stays live until its view is released.
 
 --- One piece of bar content. Items are laid out left to right, with
 --- `align_right` items packed against the right edge. Give an item either
@@ -62,8 +88,8 @@
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.bar.Item
 ---@field text? string Text to show. Ignored when `runs` is set.
----@field runs? smelt.bar.Run[] Consecutive styled pieces of one item; they drop together and are never truncated.
----@field style? smelt.buf.MarkOpts Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
+---@field runs? smelt.Span[] Consecutive styled pieces of one item; they drop together and are never truncated.
+---@field style? smelt.Style|string Highlight applied to the text (`fg`, `bg`, `hl_group`, `bold`, `dim`, `italic`).
 ---@field priority? integer Drop order when space runs out; higher values drop first, and 0 is never dropped. Defaults to 0.
 ---@field separated? boolean Draw a `·` between this item and the previous separated item on the same side.
 ---@field truncatable? boolean Allow shrinking this item before dropping it.
@@ -74,28 +100,29 @@
 ---@field fill? string Theme group that styles the empty space of this item's row instead of the bar's background.
 
 --- Options for `smelt.bar.new`. The look keys of `smelt.bar.Config` set the
---- defaults that `bar:configure({ key = false })` restores.
+--- defaults that `bar:reset(key)` restores.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
 ---@class smelt.bar.Opts
 ---@field name string Unique name; it labels errors and names the bar's window.
 ---@field layout? "strip"|"rule" Defaults to `"strip"`.
 ---@field bg? string Theme group behind the empty cells.
 ---@field separator? string Text between neighbouring `separated` items.
----@field separator_style? smelt.buf.MarkOpts Style of the separator text.
+---@field separator_style? smelt.Style|string Style of the separator text.
 ---@field rule? string Cell repeated to draw a rule.
----@field rule_style? smelt.buf.MarkOpts Style of the rule.
+---@field rule_style? smelt.Style|string Style of the rule.
 ---@field fill_selectable? boolean Include the filler between items in drag-copy.
 ---@field visible? boolean Defaults to `true`.
+---@field style? smelt.Style|string Default style for items without their own style.
+---@field on_press? false|fun(ctx: smelt.bar.Context, event: table) Left-button action for the bar's leaves.
 ---@field min_rows? integer Rows kept even when no source shows an item. Defaults to 1; 0 makes the bar collapse while empty.
----@field sources? { [1]: string, [2]: fun(ctx: smelt.bar.Context): smelt.bar.Item[]? }[] Built-in sources added in order; `bar:builtin(name)` returns them.
----@field win_opts? table Extra `smelt.win.new` options for the bar's window, such as `focus_on_click` or `resize`.
+---@field sources? { [1]: string, [2]: smelt.bar.Source|(fun(ctx: smelt.bar.Context): (smelt.bar.Item|smelt.bar.Item[]|nil)) }[] Built-in sources added in order; `bar:builtin(name)` returns them.
+---@field win_opts? table Extra window options, such as focus_on_click or padding.
 
---- A styled piece of a `runs` item.
+--- Portable content with its update dependencies. Wrappers retain `signals` and call `render(ctx)`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
----@class smelt.bar.Run
----@field text string Text to show.
----@field style? smelt.buf.MarkOpts Highlight applied to the text.
----@field selectable? boolean Include the text in drag-copy. Defaults to the item's setting.
+---@class smelt.bar.Source
+---@field render fun(ctx: smelt.bar.Context): smelt.bar.Item|smelt.bar.Item[]|nil Render for the destination's size and scheduler.
+---@field signals? (string|{ [1]: string, [2]: fun(value: any): any })[] Signals that invalidate the destination. A pair adds a display-value projection, so insignificant changes do not repaint.
 
 --- Buffer handle returned by `smelt.buf.new(opts?)`. Handles to the same buffer compare equal with `==`. Setter methods return the same handle for chaining.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
@@ -117,17 +144,10 @@
 ---@field priority? integer Higher-priority marks paint over lower-priority ones.
 ---@field right_gravity? boolean If true, the mark sticks with text inserted to its right.
 ---@field end_right_gravity? boolean Right-gravity flag for the end-of-range cursor.
----@field hl_group? string Theme group whose style is applied as the highlight base.
----@field fg? integer | string | false | number[] Foreground override: any color, or a theme group name. Takes precedence over `hl_group`.
----@field bg? integer | string | false | number[] Background override: any color, or a theme group name. Takes precedence over `hl_group`.
----@field bold? boolean Force-bold the highlight.
----@field dim? boolean Force-dim the highlight.
----@field italic? boolean Force-italic the highlight.
----@field reverse? boolean Force reverse-video on the highlight.
+---@field style? smelt.Style | string Shared style applied to the highlight or virtual text.
 ---@field hl_eol? boolean Extend the highlight past the last column to fill the EOL.
 ---@field on_cursor_row? boolean Paint only on the window's cursor row. Decorates the selected list item without re-rendering on every move.
 ---@field virt_text? string Virtual-text chunk to render alongside the line.
----@field virt_text_hl? string Theme group applied to the virt-text chunk. `fg`, `bg`, and text attributes below can further override it.
 ---@field virt_text_pos? smelt.buf.VirtTextPos Where the virt-text appears relative to the line.
 ---@field selectable? boolean If false, the range is skipped by mouse selection.
 ---@field yank_as? string Override the yanked string when the user copies this range.
@@ -552,6 +572,7 @@
 ---@field min_height? integer | string | table Optional lower bound applied after height resolves.
 ---@field modal? boolean Whether the overlay blocks input behind it. Defaults to true, or false when `transparent`.
 ---@field blocks_agent? boolean Whether the overlay should block agent progress while open.
+---@field reserve? boolean Keep navigation targets below this top-anchored window overlay. Uses its clipped bottom edge; overlapping reservations are not added. Does not move or stack overlays. Defaults to false.
 ---@field transparent? boolean Draw the overlay as a see-through layer: its rect is not cleared, so only the cells its leaves draw cover what is under it, and the mouse passes through. Not modal by default; cannot be modal, draggable or resizable.
 ---@field z? integer Z-index. Higher overlays render above lower overlays.
 ---@field draggable? boolean | smelt.overlay.DragConfig Enable or configure mouse dragging.
@@ -561,6 +582,7 @@
 --- Overlay handle returned by `smelt.overlay.new(opts)`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
 ---@class smelt.overlay.Overlay
+---@field rect fun(): table? Return the current compositor-resolved rectangle, including chrome, or nil when closed or its anchor is unavailable.
 ---@field close fun(): nil Close the overlay. No-op if already closed.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.
 
@@ -578,8 +600,14 @@
 ---@class smelt.paint.Cell
 ---@field ch string The grapheme cluster. The right half of a wide glyph reads as `""`.
 ---@field width integer Cells the glyph covers: 1, 2 for a wide glyph, 0 for its right half.
----@field style smelt.paint.Style The cell's style.
+---@field style smelt.Style The cell's style.
 ---@field image? boolean Set when the cell shows part of an image.
+
+--- Partial cell returned from a map callback. Omitted fields preserve the cell.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.paint.CellPatch
+---@field ch? string Replacement grapheme; omitted keeps the glyph.
+---@field style? smelt.Style | string Shared style patch; omitted properties keep their existing values.
 
 --- Per-frame values a paint callback receives.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
@@ -596,6 +624,13 @@
 ---@field prev? smelt.paint.Snapshot The screen as smelt drew it on the previous frame, before frame paints. Only with `opts.history`, and absent on the first frame.
 ---@field damage? { x: integer, y: integer, width: integer, height: integer }[] One-row runs of cells that changed since `prev`, in reading order. Every row on the first frame and after a resize. Scrolls that `scrolls` reports are taken out: a moved cell counts only if it differs from the cell it moved from. Only with `opts.history`.
 ---@field scrolls? smelt.paint.Scroll[] Every window whose text scrolled since `prev`, in painter order. Empty when nothing scrolled. Only with `opts.history`.
+
+--- Screen-wide effect returned by smelt.paint.frame. Not a layout leaf and has no leaf events or rectangle.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.paint.Effect
+---@field remove fun(): boolean Remove the effect. Returns false if already removed.
+---@field invalidate fun(): boolean Request a frame. Returns false after removal.
+---@field invalidate_after fun(ms: integer): boolean Request another frame after ms milliseconds. The earliest pending request wins; stops when the effect no longer asks.
 
 --- Options for `smelt.paint.frame`.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
@@ -642,11 +677,11 @@
 ---@field width fun(): integer Return the slice width in cells.
 ---@field height fun(): integer Return the slice height in cells.
 ---@field get fun(x: integer, y: integer): smelt.paint.Cell? Return the cell at `(x, y)`, or `nil` outside the slice.
----@field set fun(x: integer, y: integer, ch: string?, style: smelt.paint.Style?): nil Write one grapheme cluster (default a space) at `(x, y)`.
----@field put_str fun(x: integer, y: integer, text: string, style: smelt.paint.Style?): integer Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.
----@field fill fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: smelt.paint.Style?): nil Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).
----@field set_style fun(x: integer, y: integer, w: integer, h: integer, patch: smelt.paint.Style): nil Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.
----@field map fun(f: fun(arg1: smelt.paint.Cell, arg2: integer, arg3: integer): table?): nil Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or full style.
+---@field set fun(x: integer, y: integer, ch: string?, style: smelt.Style | string?): nil Write one grapheme cluster (default a space) at `(x, y)`.
+---@field put_str fun(x: integer, y: integer, text: string, style: smelt.Style | string?): integer Write `text` from `(x, y)`, dropping the graphemes outside the slice and stopping at the right edge. Returns the column after the text, at most the slice width.
+---@field fill fun(x: integer, y: integer, w: integer, h: integer, ch: string?, style: smelt.Style | string?): nil Fill the part of a rectangle inside the slice with one grapheme cluster (default a space).
+---@field patch_style fun(x: integer, y: integer, w: integer, h: integer, patch: smelt.Style | string): nil Change only the style of a rectangle, keeping its glyphs. Keys present in `patch` override the current style; `fg = false` / `bg = false` clear a color.
+---@field map fun(f: fun(arg1: smelt.paint.Cell, arg2: integer, arg3: integer): smelt.paint.CellPatch?): nil Call `f(cell, x, y)` for every cell, skipping the right halves of wide glyphs. Return `nil` to keep the cell, or `{ ch?, style? }` to replace its glyph and/or patch its style. Omitted style fields preserve the existing cell.
 ---@field recolor fun(f: function, opts: smelt.paint.RecolorOpts?): nil Pass every color on the slice through `f(r, g, b, layer)`, where `layer` is `"fg"` or `"bg"` and the channels are 0-255 as the terminal shows them. Return new `r, g, b` (rounded and clamped), or `nil` to keep the color. `f` runs once per distinct color, not per cell, so screen-wide filters such as night shift or color-blind simulation stay cheap. Image cells keep their colors.
 ---@field snapshot fun(): smelt.paint.Snapshot Copy the slice into a `Snapshot` that stays valid after the callback, for example to keep the screen as it was before a change.
 ---@field blit fun(snapshot: smelt.paint.Snapshot, x: integer?, y: integer?): nil Draw `snapshot` with its top-left cell at `(x, y)` (default `0, 0`). Cells outside the slice are dropped.
@@ -658,18 +693,6 @@
 ---@field width fun(): integer Return the snapshot width in cells.
 ---@field height fun(): integer Return the snapshot height in cells.
 ---@field get fun(x: integer, y: integer): smelt.paint.Cell? Return the cell at `(x, y)`, or `nil` outside the snapshot.
-
---- The style of a cell. Colors take any color form: an ANSI index, `"#rrggbb"`, an ANSI name, a theme group name such as `"Comment"`, `{ r, g, b }`, or `false` for the terminal default.
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
----@class smelt.paint.Style
----@field fg? integer | string | false | number[] Glyph color. Unset keeps the terminal default.
----@field bg? integer | string | false | number[] Background color. When writing, unset keeps the background underneath. Reads give `false` for the terminal default, so a cell read and written back stays the same.
----@field bold? boolean Bold text.
----@field dim? boolean Dim text.
----@field italic? boolean Italic text.
----@field underline? boolean Underlined text.
----@field crossedout? boolean Struck-through text.
----@field reverse? boolean Swap the glyph and background colors.
 
 --- Effect-level decisions that apply to tools without a more specific rule.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -1337,12 +1360,13 @@
 ---@field placeholder fun(text: string, opts: table?): smelt.win.Win Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the stored text survives so an undo back to an empty buffer makes it visible again. The prompt renders placeholders as wrapped ghost text; other windows render a single virtual-text row. Returns the handle for chaining.
 ---@field clear_placeholder fun(): nil Clear the window's placeholder text and opts. Idempotent.
 ---@field placeholder_text fun(): string? Return the current placeholder text, or `nil` if none is set.
----@field configure fun(opts: table): smelt.win.Win Change the window's live options and return the handle. Works on built-in windows such as `smelt.prompt.win`. Absent keys stay unchanged. Accepts `style` (theme group layered over `Normal` as the window's base, filling every row including padding; `false` clears it), `prefix` (text painted into the left padding: a string for the first row, or `{ first, rest?, style? }` where `rest` goes on every later content row and `style` is a theme group; it is clipped to `pad_left`, so widen the padding to fit; `false` clears it), `focus_on_click` (a `Win` that a click on this window focuses instead, as the bars around the prompt do; `false` clears it), `resize = "prompt"` (dragging this window resizes the prompt and a double click resets it; `false` clears it), `pad_left`, `pad_right`, `scrollbar`, `wrap`, `surface`, `cursor_line`, `selection_highlight`, `hide_cursor`, `vim_enabled` and `gutter`.
+---@field configure fun(opts: table): smelt.win.Win Atomically change live options, including on built-in windows. Unknown keys, wrong types and invalid enum values raise before any change. Absent keys stay unchanged. `style` is a shared style value filling every row including padding; false clears it. `prefix` is a string or `{ first, rest?, style? }`, clipped to pad_left; false clears it. `focus_on_click` is a Win or false. Also accepts pad_left, pad_right, scrollbar, wrap, surface, cursor_line, selection_highlight, hide_cursor, vim_enabled and gutter. Prompt resize gestures are configured through smelt.prompt.set_resize_handle, not window options.
 ---@field row_highlights fun(specs: table?): smelt.win.Win Replace window-owned row background highlights and return the handle. Specs are `smelt.win.RowHighlight` tables. Pass nil or `{}` to clear. Use this for selection/cursor backgrounds that belong to a window view rather than buffer text.
 ---@field link_scroll fun(others: smelt.win.Win): smelt.win.Win Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.
 ---@field scroll fun(arg: any): any Read or write the window's scroll state. No arg returns `{ top, left, follow, total, viewport, max, overflow, at_top, at_bottom, needs_tail_repin }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`; `needs_tail_repin` means content overflows and the viewport is not already at bottom). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `"tail"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.
----@field set_renderer fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate_renderer`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.
----@field invalidate_renderer fun(): smelt.win.Win Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.
+---@field set_renderer fun(renderer: fun(value: smelt.win.Win)?): smelt.win.Win Register a retained renderer for this window, or clear it with nil. While mounted, it runs before paint after registration, `invalidate`, or a change in resolved content width or window height. Its backing buffer remains authoritative between runs. An unmounted window stays dirty and runs when a layout mounts it.
+---@field invalidate fun(): smelt.win.Win Mark this window's retained renderer dirty. It repaints during the next compositor frame in which the window is mounted. Returns the handle for chaining.
+---@field invalidate_after fun(ms: integer): smelt.Reg Invalidate this window after ms milliseconds. Returns a cancellable one-shot registration; timers are allocated only when requested.
 
 --- Where a virtual-text chunk is rendered relative to the line.
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.

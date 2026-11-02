@@ -320,11 +320,13 @@ end)
 The handler returns an item or a list of them. Each item is
 `{ text, style?, priority?, align_right?, truncatable?, separated?, row? }`
 (`smelt.bar.Item`); `row = 2` and up make a strip taller. To draw a bar
-yourself, `bar:set_view(smelt.ui.layout.leaf(paint), rows)` swaps it for any
-layout node, and `bar:set_view(nil)` restores it. `add` and `remove`
-invalidate automatically. If a source closes over plugin-owned state that
-changes independently of a built-in signal, call `bar:invalidate()` after
-changing it. The canonical worked example lives at
+yourself, use `bar:set_view(function(ctx) ... return measured_layout end)`.
+Create fresh leaves inside the factory; the bar owns their resources and
+registrations. Names are local to that view. `bar:set_view(nil)` restores sources. Sources can be
+`{ render = fn, signals = { "signal_name" } }` to update automatically.
+Use `ctx.invalidate_after(ms)` for animation. Built-ins carry their dependencies
+when moved. A wrapper calls `source.render(ctx)` and retains `source.signals`.
+For state without a signal, call `bar:invalidate()` after changing it. The canonical worked example lives at
 `$XDG_DATA_HOME/smelt/builtins/lua/smelt/statusline.lua`. Each built-in segment
 is its own source (statusline: `slug`, `vim_mode`, `agent_mode`, `tps`,
 `permission`, `keymap`, `procs`, `worktree`, `vim_pending`, `cursor`; prompt
@@ -337,10 +339,10 @@ place it in a layout with `bar:node()`.
 
 Every bar takes `bar:configure(config)` (`smelt.bar.Config`):
 `layout = "strip" | "rule"`, `bg`, `separator`, `separator_style`, `rule`,
-`rule_style`, `fill_selectable` and `visible`. `false` restores a key's
-default. Any window, `smelt.prompt.win` and each bar's `bar.win` included,
-takes `win:configure({ style = group, pad_left = n, pad_right = n, prefix = ...
-})`; `style` is a theme group painted as the window's base, and `prefix` paints
+`rule_style`, `fill_selectable` and `visible`. `bar:reset(key)` restores a
+constructor default. Any window, `smelt.prompt.win` and each bar's `bar.win`
+included, takes `win:configure({ style = group, pad_left = n, pad_right = n,
+prefix = ... })`; `style` is a theme group or shared style table, and `prefix` paints
 a marker such as `"> "` into the left padding. A filled prompt block:
 
 ```lua
@@ -358,6 +360,17 @@ A one-row prompt: `smelt.prompt.top:configure({ visible = false })` and
 `smelt.prompt.bottom:configure({ visible = false })`.
 `smelt.prompt.node({ input_rows, max_rows })` returns the whole prompt block
 for a custom `smelt.ui.layout.set` composer.
+
+### Customize jump pills
+
+`smelt.transcript.pills.top` and `.bottom` are bars with a built-in `label`
+source. Replace labels with `bar:add("label", function(ctx) ... end)` and styles
+with `bar:configure({ style = "SmeltAccent" })`. Sources and view factories read
+`ctx.state = { label, target, view }`; a factory's context stays live for its
+renderers. Click navigation stays built in; `on_press` can replace it.
+`smelt.style.merge(base, patch)` preserves style references and explicit false.
+`smelt.style.resolve(style)` returns a snapshot. Top-anchored overlays can use
+`reserve = true` to keep navigation targets below their current geometry.
 
 ### Pin startup defaults (model / mode / reasoning)
 
@@ -675,6 +688,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.session.messages` - Session messages.
 - `smelt.session.slug` - Session slug.
 - `smelt.session.title` - Session title.
+- `smelt.style` - Compose shared style values without resolving their theme references, or resolve a current style snapshot.
 - `smelt.terminal` - Terminal integration helpers.
 - `smelt.tips` - Discovery tips shown in the prompt bar and banner.
 - `smelt.ui` - Screen-composition primitives: main layout composer and per-window renderer registration.

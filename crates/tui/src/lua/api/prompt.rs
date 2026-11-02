@@ -25,6 +25,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "set_resize_handle",
+        "Make a window a mouse-drag handle for resizing the prompt. Pass false to disable it. This prompt-specific interaction is independent of the window's style and renderer.",
+        &["win", "enabled"],
+        |_, (win, enabled): (super::win::LuaWin, Option<bool>)| -> LuaResult<()> {
+            crate::lua::try_with_ui_host(|host| host.with_ui(|ui| {
+                if let Some(window) = ui.win_mut(win.id) {
+                    window.prompt_resize_handle = enabled.unwrap_or(true);
+                }
+            }));
+            Ok(())
+        },
+    )?;
+    m.fn_(
         "text",
         "Return the prompt input buffer's current text. Internal attachment markers are stripped - plugins see only the user-visible characters.",
         &[],

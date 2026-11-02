@@ -23,8 +23,7 @@ end
 
 local function mark(marks, ns, line, start_col, end_col, opts)
   if end_col <= start_col then return end
-  opts = opts or {}
-  opts.end_col = end_col
+  opts = { style = opts, end_col = end_col }
   marks[#marks + 1] = { ns = ns, line = line, start_col = start_col, opts = opts }
 end
 

@@ -114,6 +114,7 @@ nav = [
       { "`smelt.paint`" = "reference/api/paint.md" },
       { "`smelt.picker`" = "reference/api/picker.md" },
       { "`smelt.prompt`" = "reference/api/prompt.md" },
+      { "`smelt.style`" = "reference/api/style.md" },
       { "`smelt.terminal`" = "reference/api/terminal.md" },
       { "`smelt.theme`" = "reference/api/theme.md" },
       { "`smelt.ui`" = "reference/api/ui.md" },

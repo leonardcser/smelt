@@ -122,6 +122,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     {
         let shared = Arc::clone(shared);
+        // Source Regs own this shared subscription, not the factory that happens
+        // to attach its first source. The last source removes it.
+        m.private_fn(
+            "subscribe_shared",
+            &["name", "handler"],
+            move |lua, (name, handler): (LuaSignalName, LuaCallback<(mlua::Value, mlua::Value), ()>)| {
+                require_declared_state(&name.0)?;
+                let handle = LuaHandle::from_func(lua, handler.into_inner())?;
+                Ok(LuaReg::unscoped(signal_subscription(name.0, handle, shared.generation_id())))
+            },
+        )?;
+    }
+
+    {
+        let shared = Arc::clone(shared);
         m.fn_(
             "new",
             "Declare a signal named `name` with `initial` as its starting value. No-op if the signal already exists.",
@@ -180,6 +195,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 }
 
 pub(super) fn subscribe_lua_signal(name: String, handle: LuaHandle, generation: u64) -> LuaReg {
+    LuaReg::new(signal_subscription(name, handle, generation))
+}
+
+fn signal_subscription(name: String, handle: LuaHandle, generation: u64) -> impl FnOnce() -> bool {
     let sub_id = crate::host::try_with_core(|core| {
         core.signals.subscribe_kind_for_generation(
             &name,
@@ -188,12 +207,12 @@ pub(super) fn subscribe_lua_signal(name: String, handle: LuaHandle, generation: 
         )
     })
     .flatten();
-    let Some(sub_id) = sub_id else {
-        return LuaReg::new(|| false);
-    };
-    LuaReg::new(move || {
-        crate::host::try_with_core(|core| core.signals.unsubscribe(&name, sub_id)).unwrap_or(false)
-    })
+    move || {
+        sub_id.is_some_and(|sub_id| {
+            crate::host::try_with_core(|core| core.signals.unsubscribe(&name, sub_id))
+                .unwrap_or(false)
+        })
+    }
 }
 
 pub(super) fn subscribe_lua_event(name: String, handle: LuaHandle, generation: u64) -> LuaReg {

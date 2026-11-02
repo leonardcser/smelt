@@ -12,6 +12,26 @@ use std::time::Duration;
 
 type TimerHandler = LuaCallback<(), ()>;
 
+/// Schedule one callback in the active Lua generation without going through a
+/// replaceable public Lua facade. Used by retained UI invalidation as well.
+pub fn set_timer(
+    lua: &Lua,
+    shared: &LuaShared,
+    ms: u64,
+    handler: mlua::Function,
+) -> LuaResult<LuaReg> {
+    let handle = LuaHandle::from_func(lua, handler)?;
+    let generation = shared.generation_id();
+    let id = crate::host::try_with_core(|core| {
+        core.timers
+            .set_for_generation(Duration::from_millis(ms), handle, generation)
+    })
+    .unwrap_or(0);
+    Ok(LuaReg::new(move || {
+        crate::host::try_with_core(|core| core.timers.cancel(id)).unwrap_or(false)
+    }))
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::supported(
         lua,
@@ -27,19 +47,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "Schedule `handler` to run once after `ms` milliseconds. Returns a `Reg` whose `:remove()` cancels the timer before it fires.",
             &["ms", "handler"],
             move |lua, (ms, handler): (u64, TimerHandler)| -> LuaResult<LuaReg> {
-                let handle = LuaHandle::from_func(lua, handler.into_inner())?;
-                let generation = shared.generation_id();
-                let id = crate::host::try_with_core(|core| {
-                    core.timers.set_for_generation(
-                        Duration::from_millis(ms),
-                        handle,
-                        generation,
-                    )
-                })
-                .unwrap_or(0);
-                Ok(LuaReg::new(move || {
-                    crate::host::try_with_core(|core| core.timers.cancel(id)).unwrap_or(false)
-                }))
+                set_timer(lua, &shared, ms, handler.into_inner())
             },
         )?;
     }
