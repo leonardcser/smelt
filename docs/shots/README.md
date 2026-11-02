@@ -25,6 +25,21 @@ bun run record -- --cached       # re-render the last recordings, no model calls
 bun run all
 ```
 
+## Social card preview
+
+```bash
+cd docs/shots
+bun src/social.ts                                # homepage title
+bun src/social.ts 'Themes and keymaps' Customize   # custom title and section
+bun test src/social.test.ts
+```
+
+Writes a 1200 x 630 preview to `.cache/social/card.png`, using the website's
+`home.js` background and local fonts. Titles shrink to at most two lines.
+To publish the default card, run without arguments, then copy the PNG to
+`../docs/assets/social-card.png`. All pages share that checked-in image;
+normal docs builds do not need Bun or Chromium.
+
 ## Plugin gallery
 
 The gallery page (`docs/docs/gallery/index.md`) shows the plugins in `gallery/`, each recorded in

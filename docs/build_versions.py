@@ -38,7 +38,7 @@ TREES = ("docs", "runtime")
 SELECTOR_CSS = "stylesheets/versions.css"
 # The landing page, relative to `docs/`. It belongs to the site, not to any one
 # version, so every build takes it from main, with the replays it embeds.
-HOME = ("overrides/home.html", "docs/index.md", "docs/javascripts/home.js")
+HOME = ("overrides/home.html", "docs/index.md", "docs/javascripts/home.js", "docs/assets/social-card.png")
 # Files fetched at the site root by tools that don't run the 404 redirect,
 # like `curl | sh` and LLM crawlers, taken from main.
 ROOT = ("install.sh", "llms.txt")
