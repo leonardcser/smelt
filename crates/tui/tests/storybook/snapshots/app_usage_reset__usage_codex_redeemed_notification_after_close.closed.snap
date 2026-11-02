@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  info  Redeemed reset credit. Reset 1 usage window.
+────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                           1:1 100%

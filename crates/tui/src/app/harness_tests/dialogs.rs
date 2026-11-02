@@ -959,6 +959,45 @@ fn root_dialog_pauses_notification_visibility_and_ttl() {
 }
 
 #[test]
+fn notification_tracks_prompt_layout_after_dialog_close() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    app.render_silent();
+    open_root_test_dialog(&mut app);
+    app.render_silent();
+    app.run_lua_result(
+        r#"smelt.notify.info("Redeemed reset credit. Reset 1 usage window.", "usage")"#,
+    )
+    .unwrap();
+    app.press(KeyCode::Esc);
+
+    // Switch to the minimal layout and back without replacing the notification.
+    for with_aux in [true, false, true] {
+        app.run_lua_result(if with_aux {
+            "smelt.ui.layout.set(require('smelt.layout').compose)"
+        } else {
+            "smelt.ui.layout.set(nil)"
+        })
+        .unwrap();
+        let frame = app.render_to_frame();
+        let aux = app.ui_probe().named_win("smelt.prompt.aux").unwrap();
+        let aux_rect = app.ui_probe().split_rect(aux);
+        assert_eq!(aux_rect.is_some(), with_aux);
+        let row = if let Some(rect) = aux_rect {
+            rect.y
+        } else {
+            app.ui_probe().split_rect(crate::app::PROMPT_WIN).unwrap().y - 1
+        };
+        assert!(
+            frame.rows[usize::from(row)]
+                .contains("info  Redeemed reset credit. Reset 1 usage window."),
+            "{}",
+            frame.text()
+        );
+    }
+}
+
+#[test]
 fn root_dialog_preserves_notification_scope() {
     let mut app = TestApp::builder().build();
     let session_id = app.session_snapshot().id.clone();

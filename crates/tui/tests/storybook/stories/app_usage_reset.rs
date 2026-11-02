@@ -105,6 +105,34 @@ app_story!(usage_codex_reset_action_available, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(usage_codex_redeemed_notification_after_close, |ctx| {
+    ctx.set_viewport(76, 20);
+    ctx.run_lua(
+        r#"
+        smelt.model.capabilities = function() return { provider_type = "codex" } end
+        smelt.model.pricing = function() return { source = "none" } end
+        smelt.auth.usage_scope = function() return "storybook-redeem" end
+        local redeemed = false
+        smelt.auth.managed_usage = function()
+          return {
+            resetCredits = { count = redeemed and 0 or 1 },
+            limits = { { label = "5h limit", used = redeemed and 0 or 100, limit = 100 } },
+          }
+        end
+        smelt.auth.redeem_usage_reset = function()
+          redeemed = true
+          return "Redeemed reset credit. Reset 1 usage window."
+        end
+        "#,
+    );
+    ctx.run_command("usage");
+    ctx.press_char('j');
+    ctx.press_enter();
+    ctx.press_enter();
+    ctx.press_char('q');
+    ctx.assert_snapshot_named("closed");
+});
+
 app_story!(usage_codex_reset_expiry_groups, |ctx| {
     ctx.set_viewport(76, 30);
     ctx.run_lua(

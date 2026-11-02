@@ -978,6 +978,18 @@ impl TuiApp {
                     .is_some_and(|win| scroll.is_pinned_to_tail(win))
             });
         self.ui.set_layout(tree);
+        // A toast restored inside a Lua callback can precede the deferred
+        // prompt layout. Resolve its anchor again against the mounted chrome.
+        if let Some(id) = self
+            .overlays
+            .notification()
+            .and_then(|notification| self.ui.overlay_for_leaf(notification.win))
+        {
+            let anchor = layout::anchor_for_prompt_toast(&self.ui);
+            if let Some(overlay) = self.ui.overlay_mut(id) {
+                overlay.anchor = anchor;
+            }
+        }
         let next_layout = layout::LayoutState::from_ui(&self.ui);
         let transcript_viewport_resized = next_layout.transcript.width
             != previous_transcript_rect.width
