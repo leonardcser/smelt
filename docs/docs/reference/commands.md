@@ -28,6 +28,7 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/theme [name]`                          | Preview a bundled UI and syntax theme for this session |
 | `/color [name]`                          | Set session color |
 | `/stats`                                 | Show token usage statistics |
+| `/context`                               | Show context usage as a colored grid |
 | `/usage`, `/cost`                        | Show session cost and active-provider usage limits |
 | `/thinking [mode]`                       | Set thinking block presentation: `open`, `close`, `peek`, `toggle` |
 | `/reasoning [level]`                     | Pick a model-supported reasoning effort, or set one explicitly |
@@ -55,6 +56,31 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/changelog`                             | Open the release notes of recent smelt releases |
 | `/upgrade [check\|status]`                | Update smelt, check for updates, or view installation progress |
 | `/exit`, `/quit`                         | Exit (also `:q`, `:qa`, `:wq`, `:wqa`) |
+
+### Context size
+
+`/context` shows a colored grid of the model's context window with a small
+legend in prompt order: system prompt, skills, `AGENTS.md` instructions,
+plugin guidance, tools, history, and free space. The header shows estimated tokens,
+window size, and percentage used. Each square represents an equal share of the
+window. Overfull contexts use a full grid and show a percentage above 100%.
+If the window size is unknown, the grid shows the composition of used context.
+
+| Legend | What it contains |
+| --- | --- |
+| System | smelt's built-in agent rules, or your `--system-prompt` override. |
+| Skills | Available skill names and short descriptions, not their full guides. |
+| Instructions | Global `~/.config/smelt/AGENTS.md` and the nearest project `AGENTS.md`. |
+| Plugins | Extra agent instructions added by enabled Lua plugins. |
+| Tools | Names, descriptions, and input schemas for tools the agent can call. |
+| History | Messages, tool results, loaded guides, and any compaction summary. |
+| Free | Context space left for more input. |
+
+The command is local: it makes no model request and adds no conversation history.
+The `~` marker means an estimate: UTF-8 bytes divided by four, not a provider
+tokenizer. Provider framing, attachment tokenization, and hidden instructions
+can differ. Native agent backends show a `partial` marker. Cached tokens still
+occupy context. Unsent prompt text and in-flight request snapshots are excluded.
 
 ### Upgrade status
 

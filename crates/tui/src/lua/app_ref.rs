@@ -1515,6 +1515,150 @@ impl SessionLuaHost<'_> {
         self.app.assemble_system_prompt()
     }
 
+    pub(crate) fn context_breakdown(&self) -> serde_json::Value {
+        let app = &self.app;
+        let model = app.core.config.active_model();
+        let native =
+            model.is_some_and(|m| smelt_provider::BackendKind::is_claude_code(&m.provider_type));
+        let tools_enabled = model.is_none_or(|m| m.config.tool_calling());
+        let mut sections = Vec::new();
+        let mut accounted = 0usize;
+        let mut add = |kind: &str, name: &str, text: &str| {
+            if !text.is_empty() {
+                accounted += text.len();
+                sections
+                    .push(serde_json::json!({ "kind": kind, "name": name, "bytes": text.len() }));
+            }
+        };
+        if let Some(prompt) = &app.prompt_inputs.system_prompt_override {
+            if !native {
+                add("system", "System prompt override", prompt);
+            }
+        } else if !native {
+            let base = engine::build_system_prompt(
+                engine::SystemPromptBehavior::Interactive,
+                engine::SystemPromptCapabilities::from_tool_calling(tools_enabled),
+                None,
+                None,
+            );
+            add("system", "Base system prompt", &base);
+        }
+        if native || app.prompt_inputs.system_prompt_override.is_none() {
+            let skills = (
+                "skills",
+                "Skill catalog",
+                if native {
+                    app.core
+                        .skills
+                        .as_ref()
+                        .and_then(|skills| skills.native_prompt_section())
+                } else {
+                    app.prompt_inputs.skill_section.as_deref()
+                },
+            );
+            let instructions = (
+                "instructions",
+                "AGENTS.md instructions",
+                app.prompt_inputs.instructions.as_deref(),
+            );
+            let extras = if native {
+                [instructions, skills]
+            } else {
+                [skills, instructions]
+            };
+            for (kind, name, text) in extras {
+                if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+                    add(kind, name, if native { text } else { text.trim() });
+                }
+            }
+        }
+        for (i, fragment) in app.lua.system_prompt_fragments().iter().enumerate() {
+            if !native || !fragment.trim().is_empty() {
+                add("plugins", &format!("Plugin guidance {}", i + 1), fragment);
+            }
+        }
+        let system_bytes = app.assemble_system_prompt().len();
+        if system_bytes > accounted {
+            let separators = serde_json::json!({
+                "kind": "system",
+                "name": if native { "Native host guidance and separators" } else { "Prompt separators" },
+                "bytes": system_bytes - accounted,
+            });
+            if native {
+                sections.insert(0, separators);
+            } else {
+                sections.push(separators);
+            }
+        }
+        let plugin_tools = if tools_enabled {
+            app.lua.tool_defs(
+                app.core.config.mode.clone(),
+                smelt_core::lua::ToolVisibility::Interactive,
+            )
+        } else {
+            Vec::new()
+        };
+        let mut tools: Vec<_> = plugin_tools
+            .iter()
+            .filter(|tool| {
+                tool.modes
+                    .as_ref()
+                    .is_none_or(|modes| modes.contains(&app.core.config.mode))
+            })
+            .map(|tool| {
+                smelt_provider::ToolDefinition::new(smelt_provider::FunctionSchema {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool.parameters.clone(),
+                })
+            })
+            .collect();
+        if tools_enabled {
+            if let Some(mcp) = &app.core.mcp {
+                let permissions = app.active_permissions();
+                for tool in mcp.tool_defs() {
+                    let name = tool.qualified_name();
+                    let overridden = plugin_tools
+                        .iter()
+                        .any(|p| p.override_core && p.name == name);
+                    if !overridden
+                        && permissions.check_subcommand(app.core.config.mode.clone(), "mcp", &name)
+                            != protocol::Decision::Deny
+                    {
+                        tools.push(smelt_provider::ToolDefinition::new(
+                            smelt_provider::FunctionSchema {
+                                name,
+                                description: tool.description,
+                                parameters: tool.input_schema,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        // Count array brackets and commas without serializing the schemas again.
+        let mut tool_bytes = 2 + tools.len().saturating_sub(1);
+        let tool_rows: Vec<_> = tools
+            .iter()
+            .map(|tool| {
+                let bytes = engine::serialized_json_len(tool);
+                tool_bytes += bytes;
+                serde_json::json!({ "name": tool.function.name, "bytes": bytes })
+            })
+            .collect();
+        let messages = app.model_history_messages();
+        let history_bytes = engine::serialized_json_len(&messages);
+        serde_json::json!({
+            "sections": sections,
+            "system_bytes": system_bytes,
+            "tools": tool_rows,
+            "tool_bytes": tool_bytes,
+            "history_bytes": history_bytes,
+            "message_count": messages.len(),
+            "native": native,
+        })
+    }
+
     pub(crate) fn session_cost(&self) -> f64 {
         self.app.conversation.session().session_cost_usd
     }

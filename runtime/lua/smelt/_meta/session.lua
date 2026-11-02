@@ -19,6 +19,10 @@ session.artifact_dir = nil
 ---@type fun(spec: table): boolean?
 session.checkpoint = nil
 
+--- Measure the next-turn prompt inputs without making a model request. Returns ordered `sections` (`kind`, `name`, `bytes`), `tools` (`name`, `bytes`), `system_bytes`, `tool_bytes` (JSON array), `history_bytes` (model-visible message JSON), `message_count`, and `native`. Section kinds are `system`, `skills`, `instructions`, or `plugins`. Includes active Lua and MCP tools filtered for the current mode. Byte counts are not provider token counts; use approximately one token per four bytes. Native backends own additional hidden context not measured here. Explicitly materializes model-visible history, so call on demand rather than in render loops.
+---@type fun(): any
+session.context_breakdown = nil
+
 --- Set or clear a named hidden model-visible context note. `context_note(name, text)` creates or replaces that note for future turns; `context_note(name, nil)` clears it. Named notes do not replace each other, so plugins can maintain independent steering state. UiHost-only.
 ---@type fun(name: string, text: string?, opts: table?): nil
 session.context_note = nil

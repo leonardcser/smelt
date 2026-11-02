@@ -21,7 +21,9 @@ impl Write for ByteCounter {
     }
 }
 
-pub(crate) fn serialized_json_len(value: &impl serde::Serialize) -> usize {
+/// Count serialized JSON bytes without allocating a payload buffer.
+/// Returns zero if serialization fails.
+pub fn serialized_json_len(value: &impl serde::Serialize) -> usize {
     let mut counter = ByteCounter::default();
     serde_json::to_writer(&mut counter, value)
         .map(|()| counter.0)

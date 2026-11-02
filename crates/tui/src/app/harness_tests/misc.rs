@@ -2294,6 +2294,132 @@ fn optional_goal_and_notebook_plugins_follow_config_reload() {
 }
 
 #[test]
+fn context_breakdown_measures_prompt_sources_and_active_tools() {
+    let mut app = TestApp::builder().build();
+    app.configure_prompt_inputs_for_harness(
+        None,
+        Some("Instructions from /project/AGENTS.md:\nUse UTF-8: 日本語".into()),
+        Some("# Skills\nExample skill".into()),
+    );
+    assert!(app.run_lua(
+        r#"
+        smelt.agent.add_system_prompt("Plugin guidance")
+        smelt.tools.register({ name = "plan_only_probe", modes = { "plan" },
+          description = "not visible in normal mode", execute = function() end })
+    "#
+    ));
+    let data: serde_json::Value = serde_json::from_str(
+        &app.eval_lua::<String>("return smelt.json.encode(smelt.session.context_breakdown())")
+            .unwrap(),
+    )
+    .unwrap();
+    let sections = data["sections"].as_array().unwrap();
+    assert_eq!(
+        sections
+            .iter()
+            .take(4)
+            .map(|section| section["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["system", "skills", "instructions", "plugins"]
+    );
+    let prompt = app.assemble_system_prompt();
+    assert!(prompt.find("# Skills").unwrap() < prompt.find("Instructions from").unwrap());
+    assert!(prompt.find("Instructions from").unwrap() < prompt.find("Plugin guidance").unwrap());
+    assert_eq!(
+        sections
+            .iter()
+            .map(|r| r["bytes"].as_u64().unwrap())
+            .sum::<u64>(),
+        data["system_bytes"].as_u64().unwrap()
+    );
+    assert_eq!(data["system_bytes"], prompt.len());
+    let tools = data["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|r| r["name"] == "read_file"));
+    assert!(!tools.iter().any(|r| r["name"] == "plan_only_probe"));
+    let sum: u64 = tools.iter().map(|r| r["bytes"].as_u64().unwrap()).sum();
+    assert_eq!(data["tool_bytes"], sum + tools.len() as u64 + 1);
+
+    app.configure_prompt_inputs_for_harness(
+        Some("override".into()),
+        Some("ignored".into()),
+        Some("ignored skills".into()),
+    );
+    let data: serde_json::Value = serde_json::from_str(
+        &app.eval_lua::<String>("return smelt.json.encode(smelt.session.context_breakdown())")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!data["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["kind"] == "instructions" || r["kind"] == "skills"));
+    assert_eq!(data["system_bytes"], app.assemble_system_prompt().len());
+
+    let mut model = app.core_probe().config.active_model().unwrap().clone();
+    model.config.tool_calling = Some(false);
+    app.replace_active_model_for_harness(model);
+    let data: serde_json::Value = serde_json::from_str(
+        &app.eval_lua::<String>("return smelt.json.encode(smelt.session.context_breakdown())")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(data["tools"].as_array().unwrap().is_empty());
+    assert_eq!(data["tool_bytes"], 2);
+}
+
+#[test]
+fn native_context_breakdown_follows_native_prompt_sources() {
+    let mut app = TestApp::builder().build();
+    let mut model = app.core_probe().config.active_model().unwrap().clone();
+    model.provider_type = "claude-code".into();
+    app.replace_active_model_for_harness(model);
+    app.configure_prompt_inputs_for_harness(
+        Some("native override".into()),
+        Some("Native project rules".into()),
+        Some("ignored non-native skill catalog".into()),
+    );
+    let data: serde_json::Value = serde_json::from_str(
+        &app.eval_lua::<String>("return smelt.json.encode(smelt.session.context_breakdown())")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["native"], true);
+    let sections = data["sections"].as_array().unwrap();
+    assert_eq!(sections[0]["kind"], "system");
+    assert_eq!(sections[1]["kind"], "instructions");
+    let prompt = app.assemble_system_prompt();
+    assert!(!prompt.contains("ignored non-native skill catalog"));
+    assert_eq!(
+        sections
+            .iter()
+            .map(|section| section["bytes"].as_u64().unwrap())
+            .sum::<u64>(),
+        prompt.len() as u64
+    );
+    assert_eq!(data["system_bytes"], prompt.len());
+}
+
+#[test]
+fn context_command_opens_local_breakdown_without_changing_history() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(120, 40);
+    let before = app.model_history_messages();
+    assert!(app.run_lua("smelt.cmd.run('context')"));
+    app.settle_lua();
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("■"), "{frame}");
+    assert!(frame.contains("System"), "{frame}");
+    assert!(frame.contains("Tools"), "{frame}");
+    assert!(frame.contains("window unknown"), "{frame}");
+    assert_eq!(app.model_history_messages(), before);
+    app.press(KeyCode::Esc);
+    app.settle_lua();
+    assert!(app.state().active_modal.is_none());
+    app.assert_invariants();
+}
+
+#[test]
 fn assembled_system_prompt_uses_engine_template() {
     let app = TestApp::builder().build();
 

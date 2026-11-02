@@ -29,6 +29,14 @@ fun(spec: table): boolean?
 
 Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns `true` when a checkpoint was installed, or `nil` when the boundary would be a no-op. Use `smelt.session.model_messages()` to read the model-visible messages after checkpointing.
 
+## `smelt.session.context_breakdown`
+
+```lua
+fun(): any
+```
+
+Measure the next-turn prompt inputs without making a model request. Returns ordered `sections` (`kind`, `name`, `bytes`), `tools` (`name`, `bytes`), `system_bytes`, `tool_bytes` (JSON array), `history_bytes` (model-visible message JSON), `message_count`, and `native`. Section kinds are `system`, `skills`, `instructions`, or `plugins`. Includes active Lua and MCP tools filtered for the current mode. Byte counts are not provider token counts; use approximately one token per four bytes. Native backends own additional hidden context not measured here. Explicitly materializes model-visible history, so call on demand rather than in render loops.
+
 ## `smelt.session.context_note`
 
 ```lua

@@ -74,6 +74,49 @@ app_story!(composed_dialog_picker_views, |ctx| {
     ctx.assert_snapshot_named("centered");
 });
 
+app_story!(context_grid, |ctx| {
+    ctx.set_viewport(80, 26);
+    ctx.run_lua(
+        r#"
+        smelt.settings.show_tips = false
+        context_window = 32000
+        smelt.session.status = function() return { context = { window = context_window } } end
+        smelt.session.context_breakdown = function()
+            return { system_bytes = 16000, tool_bytes = 16000, history_bytes = 48000,
+                sections = {
+                    { kind = 'system', name = 'Base system prompt', bytes = 4000 },
+                    { kind = 'skills', name = 'Skill catalog', bytes = 2000 },
+                    { kind = 'instructions', name = 'AGENTS.md instructions', bytes = 8000 },
+                    { kind = 'plugins', name = 'Extension guidance', bytes = 2000 },
+                } }
+        end
+    "#,
+    );
+    ctx.run_command("context");
+    ctx.assert_snapshot();
+    ctx.press_key(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    ctx.set_viewport(48, 26);
+    ctx.run_command("context");
+    ctx.assert_snapshot_named("narrow");
+    ctx.press_key(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    ctx.run_lua("context_window = 16000");
+    ctx.run_command("context");
+    ctx.assert_snapshot_named("overfull");
+    ctx.press_key(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    ctx.run_lua("context_window = nil");
+    ctx.run_command("context");
+    ctx.assert_snapshot_named("unknown_window");
+});
+
 app_story!(help_overlay, |ctx| {
     // `/help` opens a centered overlay (not a dialog) built from
     // `smelt.keymap.help()`. The overlay snapshot captures the

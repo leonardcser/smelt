@@ -497,6 +497,15 @@ pub(super) fn register(
             Ok(crate::lua::try_with_session_host(|host| host.system_prompt()).unwrap_or_default())
         },
     )?;
+    m.live_only_fn(
+        "context_breakdown",
+        "Measure the next-turn prompt inputs without making a model request. Returns ordered `sections` (`kind`, `name`, `bytes`), `tools` (`name`, `bytes`), `system_bytes`, `tool_bytes` (JSON array), `history_bytes` (model-visible message JSON), `message_count`, and `native`. Section kinds are `system`, `skills`, `instructions`, or `plugins`. Includes active Lua and MCP tools filtered for the current mode. Byte counts are not provider token counts; use approximately one token per four bytes. Native backends own additional hidden context not measured here. Explicitly materializes model-visible history, so call on demand rather than in render loops.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Value> {
+            let breakdown = crate::lua::with_session_host(|host| host.context_breakdown());
+            smelt_core::lua::serde_to_lua(lua, &breakdown)
+        },
+    )?;
     m.fn_(
         "cost",
         "Cumulative session cost in USD across every model call this session has made.",

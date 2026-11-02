@@ -40,6 +40,7 @@ pub use paths::{config_dir, data_dir, home_dir, state_dir};
 pub use reqwest::Client as HttpClient;
 
 pub use provider::EngineProvider;
+pub use request_log::serialized_json_len;
 pub use skills::SkillLoader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

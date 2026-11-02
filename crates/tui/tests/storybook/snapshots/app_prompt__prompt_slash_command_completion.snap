@@ -4,7 +4,7 @@ expression: frame.text()
 ---
 
 
- /copy         copy recent conversation message(s…
+ /context      show context usage as a colored gr…
  /compact      compact conversation history
  /color        set session color
  /clear        start new conversation
