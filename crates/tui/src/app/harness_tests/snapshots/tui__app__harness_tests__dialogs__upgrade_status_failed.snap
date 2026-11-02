@@ -1,0 +1,9 @@
+---
+source: crates/tui/src/app/harness_tests/dialogs.rs
+expression: upgrade_status_dialog(&mut app)
+---
+─ upgrade status ───────────────────────────────────────────
+ failed
+
+ Checksum mismatch
+ ○ normal                                             1:1 0%

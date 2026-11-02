@@ -4076,7 +4076,10 @@ mod tests {
             r#"
             smelt.buf.new = function(opts)
               assert(opts.readonly)
-              return { source = function(_, text) _G.status_text = text end }
+              return {
+                source = function() end,
+                styled = function() _G.status_updates = (_G.status_updates or 0) + 1 end,
+              }
             end
             smelt.dialog.viewer = function(opts)
               assert(opts.title == "upgrade status")
@@ -4087,7 +4090,7 @@ mod tests {
         );
         assert!(rt.run_command("upgrade", Some("status".into())));
         assert_eq!(cli_calls(&rt), [UPGRADE_STATUS]);
-        assert!(lua_eval::<String>(&rt, "return _G.status_text").contains("Compiling smelt-tui"));
+        assert_eq!(lua_eval::<u32>(&rt, "return _G.status_updates"), 1);
         rt.lua.load(r#"
             _G.cli.status = status_report('{"operation_id":"worker","running":false,"stage":"interrupted","channel":"unstable","target":"main@abc1234"}')
             _G.upgrade_progress_tick()
@@ -4095,7 +4098,7 @@ mod tests {
             _G.upgrade_progress_tick()
         "#).exec().unwrap();
         assert_eq!(cli_calls(&rt), [UPGRADE_STATUS]);
-        assert!(lua_eval::<String>(&rt, "return _G.status_text").contains("interrupted"));
+        assert_eq!(lua_eval::<u32>(&rt, "return _G.status_updates"), 2);
         assert_eq!(
             drain_warnings(&rt),
             ["main@abc1234 (unstable): interrupted, run /upgrade to retry"]

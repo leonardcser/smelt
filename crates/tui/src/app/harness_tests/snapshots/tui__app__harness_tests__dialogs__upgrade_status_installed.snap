@@ -1,0 +1,8 @@
+---
+source: crates/tui/src/app/harness_tests/dialogs.rs
+expression: upgrade_status_dialog(&mut app)
+---
+─ upgrade status ───────────────────────────────────────────
+ installed, restart smelt to use it
+ v0.7.0
+ ○ normal                                             1:1 0%

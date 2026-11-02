@@ -139,24 +139,32 @@ local status_view
 
 local function update_view(status, err)
   if not status_view then return end
-  local text = err and ("Could not read upgrade status: " .. err)
-    or "No upgrade has been recorded for this installation. Run /upgrade to start one."
+  local lines = err and { "Could not read upgrade status", err }
+    or { "No upgrades yet", "Run /upgrade to check and install updates." }
   if status then
-    text = "Target: " .. (status.target or "not resolved yet")
-      .. "\nChannel: " .. (status.channel or "unknown")
-      .. "\nStatus: " .. (stages[status.stage] or status.stage or "unknown")
-    if status.stage == "downloading" then text = text .. "\nDownloaded: " .. download_text(status) end
-    if status.activity then text = text .. "\nActivity: " .. status.activity end
-    if status.error then text = text .. "\nError: " .. status.error end
+    local details = {}
+    if status.target then details[#details + 1] = status.target end
+    if status.channel then details[#details + 1] = status.channel end
     if status.started_at then
       local ended = status.running and os.time() or (status.updated_at or os.time())
-      text = text .. "\n\nElapsed: " .. math.max(0, ended - status.started_at) .. "s"
+      details[#details + 1] = smelt.text.format_duration(math.max(0, ended - status.started_at))
     end
-    if status.executable then text = text .. "\nInstallation: " .. status.executable end
+    lines = { stages[status.stage] or status.stage or "unknown", table.concat(details, " · ") }
+    if status.stage == "downloading" then lines[#lines + 1] = download_text(status) end
+    if status.activity then lines[#lines + 1] = status.activity end
+    if status.error then
+      if lines[#lines] ~= "" then lines[#lines + 1] = "" end
+      lines[#lines + 1] = status.error
+    end
   end
+  local text = table.concat(lines, "\n")
   if status_view.text ~= text then
     status_view.text = text
-    status_view.buf:source(text)
+    local styled = {}
+    for i, line in ipairs(lines) do
+      styled[i] = { { text = line, style = { bold = i == 1, dim = i == 2 and not err } } }
+    end
+    status_view.buf:styled(styled)
   end
 end
 
@@ -297,7 +305,7 @@ smelt.cmd.register("upgrade", function(args)
       local buf = smelt.buf.new({ readonly = true })
       buf:source("Reading upgrade status…")
       local handle = smelt.dialog.viewer({
-        title = "upgrade status", buf = buf, min_height = "20%", max_height = "50%",
+        title = "upgrade status", buf = buf, interactive = false, max_height = "50%",
       })
       local view = { buf = buf }
       status_view = view

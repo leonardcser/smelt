@@ -1,0 +1,8 @@
+---
+source: crates/tui/src/app/harness_tests/dialogs.rs
+expression: upgrade_status_dialog(&mut app)
+---
+─ upgrade status ───────────────────────────────────────────
+ Could not read upgrade status
+ status file unavailable
+ ○ normal                                             1:1 0%

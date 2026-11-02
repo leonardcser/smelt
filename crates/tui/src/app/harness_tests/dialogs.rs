@@ -13,27 +13,59 @@ fn upgrade_status_view_shows_shared_download_progress() {
         smelt.cmd.run("upgrade status")
     "#).unwrap();
     drive_lua_tasks(&mut app);
-    let frame = app.render_to_frame().text();
-    assert!(frame.contains("upgrade status"), "{frame}");
-    assert!(frame.contains("Target: v0.7.0"), "{frame}");
-    assert!(
-        frame.contains("Downloaded: 18.0 MiB / 32.0 MiB (56%)"),
-        "{frame}"
-    );
-    let dialog = frame
-        .lines()
-        .skip_while(|line| !line.starts_with("─ upgrade status "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    insta::assert_snapshot!("upgrade_status_download", dialog);
+    insta::assert_snapshot!("upgrade_status_download", upgrade_status_dialog(&mut app));
     app.set_terminal_size(60, 24);
-    let narrow = app.render_to_frame().text();
-    assert!(
-        narrow.contains("Downloaded: 18.0 MiB / 32.0 MiB (56%)"),
-        "{narrow}"
+    insta::assert_snapshot!(
+        "upgrade_status_download_narrow",
+        upgrade_status_dialog(&mut app)
     );
     app.type_char('q');
     assert!(app.run_lua("assert(smelt.state.get('upgrade').snapshot.status.running)"));
+}
+
+#[test]
+fn upgrade_status_view_updates_guidance_without_reopening() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(60, 24);
+    assert!(app.run_lua(
+        r#"
+        smelt.settings.autoupgrade = "off"
+        smelt.process.run = function() return upgrade_reply end
+        "#
+    ));
+    for (name, reply) in [
+        (
+            "upgrade_status_empty",
+            r#"{ exit_code = 0, stdout = '{"current":"v0.6.2"}' }"#,
+        ),
+        (
+            "upgrade_status_failed",
+            r#"{ exit_code = 0, stdout = '{"current":"v0.6.2","status":{"stage":"failed","error":"Checksum mismatch","running":false}}' }"#,
+        ),
+        (
+            "upgrade_status_installed",
+            r#"{ exit_code = 0, stdout = '{"current":"v0.7.0","status":{"stage":"installed","target":"v0.7.0","running":false}}' }"#,
+        ),
+        (
+            "upgrade_status_unavailable",
+            r#"{ exit_code = 1, stderr = 'error: status file unavailable' }"#,
+        ),
+    ] {
+        assert!(app.run_lua(&format!(
+            "upgrade_reply = {reply}; smelt.cmd.run('upgrade status')"
+        )));
+        drive_lua_tasks(&mut app);
+        insta::assert_snapshot!(name, upgrade_status_dialog(&mut app));
+    }
+}
+
+fn upgrade_status_dialog(app: &mut TestApp) -> String {
+    app.render_to_frame()
+        .text()
+        .lines()
+        .skip_while(|line| !line.starts_with("─ upgrade status "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn open_root_test_dialog(app: &mut TestApp) {
