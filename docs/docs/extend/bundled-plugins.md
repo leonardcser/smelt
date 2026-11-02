@@ -31,7 +31,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.diff` | /diff: snapshot-based, virtualized Git diff viewer. |
 | `smelt.plugins.donut` | /donut - Andy Sloane's donut.c, spinning over everything on screen. |
-| `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
+| `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan artifacts and approval UI. |
 | `smelt.plugins.predict` | Input prediction plugin. |
