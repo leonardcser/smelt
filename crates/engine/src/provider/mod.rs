@@ -535,7 +535,6 @@ impl EngineProvider {
             return config;
         }
 
-        smelt_provider::catalog::refresh(self.client.http());
         if let Some(tokens) = smelt_provider::catalog::output_tokens(
             self.backend.as_config_str(),
             &self.api_base,
@@ -552,9 +551,6 @@ impl EngineProvider {
         config: &ModelConfig,
         model: &str,
     ) -> ReasoningEffort {
-        if config.supports_reasoning.is_none() {
-            smelt_provider::catalog::refresh(self.client.http());
-        }
         let supports_reasoning = config.supports_reasoning.or_else(|| {
             smelt_provider::catalog::supports_reasoning(
                 self.backend.as_config_str(),

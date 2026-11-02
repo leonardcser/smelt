@@ -4903,7 +4903,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml_edit",
- "zstd",
 ]
 
 [[package]]

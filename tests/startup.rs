@@ -93,6 +93,98 @@ fn spawn_in_pty(mut command: Command) -> (File, ChildProcessGroup) {
     (master, process)
 }
 
+#[test]
+fn model_switch_loads_catalog_metadata_offline_in_terminal() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = TcpListener::bind("127.0.0.1:0").unwrap();
+    provider.set_nonblocking(true).unwrap();
+    let config = root.path().join("init.lua");
+    let report = root.path().join("catalog-report.tsv");
+    let ready = root.path().join("ready");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+smelt.settings.autoupgrade = "off"
+smelt.settings.auto_continue = "off"
+smelt.settings.show_prediction = false
+smelt.settings.vim = false
+smelt.provider.register("local", {{
+  type = "anthropic-compatible", api_base = "http://{}", api_key_env = "MOCK_KEY",
+  models = {{ "claude-haiku-4-5", "claude-sonnet-4-6" }},
+}})
+smelt.lifecycle.on_ready(function()
+  smelt.model.set("local/claude-haiku-4-5")
+  local f = assert(io.open({:?}, "w")); f:write("ready"); f:close()
+end)
+smelt.keymap.set("", "<F4>", function()
+  local cap = smelt.model.capabilities()
+  local price = smelt.model.pricing()
+  if not cap or not price then return end
+  local f = assert(io.open({:?}, "a"))
+  f:write(smelt.model.current(), "\t", tostring(cap.max_tokens), "\t",
+    tostring(price.input), "\t", price.source, "\t", tostring(cap.supports_image), "\n")
+  f:close()
+end)
+smelt.keymap.set("", "<F5>", function() smelt.model.set("local/claude-sonnet-4-6") end)
+"#,
+            provider.local_addr().unwrap(),
+            ready.to_str().unwrap(),
+            report.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut command = isolated_smelt_command(root.path());
+    command
+        .args(["--config", config.to_str().unwrap()])
+        .env("TERM", "xterm-256color")
+        .env("MOCK_KEY", "test")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("NO_PROXY", "127.0.0.1");
+    let (mut master, mut process) = spawn_in_pty(command);
+    let mut captured = Vec::new();
+    let mut terminal = pty_terminal();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut queried_at = None;
+    let mut switched = false;
+    loop {
+        drain_provider_requests(&provider);
+        let before = captured.len();
+        drain_pty(&mut master, &mut captured);
+        terminal.process(&captured[before..]);
+        let screen = terminal.screen().contents();
+        let recorded = std::fs::read_to_string(&report).unwrap_or_default();
+        let haiku = recorded.contains("local/claude-haiku-4-5\t64000\t1.0\tmodels.dev\ttrue")
+            || recorded.contains("local/claude-haiku-4-5\t64000\t1\tmodels.dev\ttrue");
+        let sonnet = recorded.contains("local/claude-sonnet-4-6\t128000\t3.0\tmodels.dev\ttrue")
+            || recorded.contains("local/claude-sonnet-4-6\t128000\t3\tmodels.dev\ttrue");
+        if haiku && !switched {
+            master.write_all(b"\x1b[15~").unwrap();
+            switched = true;
+        }
+        if haiku && sonnet {
+            assert!(switched);
+            assert!(!screen.contains("Lua error"), "{screen}");
+            break;
+        }
+        if ready.exists()
+            && queried_at.is_none_or(|at: Instant| at.elapsed() >= Duration::from_millis(50))
+        {
+            master.write_all(b"\x1bOS").unwrap();
+            queried_at = Some(Instant::now());
+        }
+        assert!(
+            process.child.try_wait().unwrap().is_none(),
+            "smelt exited:\n{screen}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "catalog did not follow model switch:\n{recorded}\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())

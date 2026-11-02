@@ -3,22 +3,21 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const SNAPSHOT: &str = "crates/provider/data/models.json.zst";
+const SNAPSHOT: &str = "crates/provider/data/models.catalog";
 
 pub(crate) fn run(args: Vec<String>) {
     let json = match args.first() {
         Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}")),
         None => download(),
     };
-    let trimmed = smelt_provider::catalog::trim(&json).expect("input is not a models.dev catalog");
-    let compressed = zstd::bulk::compress(trimmed.as_bytes(), 19).expect("compress catalog");
+    let snapshot =
+        smelt_provider::catalog::write_snapshot(&json).expect("input is not a models.dev catalog");
     let path = crate::repo_root().join(SNAPSHOT);
-    std::fs::write(&path, &compressed).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    std::fs::write(&path, &snapshot).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     eprintln!(
-        "wrote {} ({} KB, {} KB trimmed JSON)",
+        "wrote {} ({} KB, provider-indexed catalog)",
         PathBuf::from(SNAPSHOT).display(),
-        compressed.len() / 1024,
-        trimmed.len() / 1024
+        snapshot.len() / 1024
     );
 }
 

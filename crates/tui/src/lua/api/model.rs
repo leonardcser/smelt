@@ -6,12 +6,20 @@ use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
 
+fn catalog_model_name(active: &smelt_core::runtime_state::ActiveModel) -> &str {
+    active
+        .catalog
+        .resolved
+        .as_deref()
+        .unwrap_or(&active.model_name)
+}
+
 fn resolved_input_modalities(active: &smelt_core::runtime_state::ActiveModel) -> Vec<String> {
     let mut values = active.config.input_modalities.clone().unwrap_or_default();
     if let Some(catalog) = smelt_provider::catalog::input_modalities(
         &active.provider_type,
         &active.api_base,
-        &active.model_name,
+        catalog_model_name(active),
     ) {
         values.extend(catalog);
     }
@@ -92,7 +100,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 return Ok(None);
             };
             let resolved = smelt_provider::resolve_pricing(
-                &active.model_name,
+                catalog_model_name(&active),
                 &active.provider_type,
                 &active.api_base,
                 &active.config,
@@ -136,7 +144,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let catalog = smelt_provider::catalog::lookup(
                 &active.provider_type,
                 &active.api_base,
-                &active.model_name,
+                catalog_model_name(&active),
             );
             let max_tokens = active
                 .config
@@ -305,4 +313,30 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::runtime_state::{ActiveModel, ModelAvailability};
+
+    #[test]
+    fn catalog_uses_discovered_model_id_without_changing_selection() {
+        let mut active = ActiveModel {
+            key: "claude/sonnet".into(),
+            provider_name: "claude".into(),
+            model_name: "sonnet".into(),
+            display_name: None,
+            api_base: String::new(),
+            api_key_env: String::new(),
+            provider_type: "claude-code".into(),
+            config: Default::default(),
+            catalog: Default::default(),
+            availability: ModelAvailability::Available,
+        };
+        assert_eq!(catalog_model_name(&active), "sonnet");
+        active.catalog.resolved = Some("claude-sonnet-4-6".into());
+        assert_eq!(catalog_model_name(&active), "claude-sonnet-4-6");
+        assert_eq!(active.model_name, "sonnet");
+    }
 }

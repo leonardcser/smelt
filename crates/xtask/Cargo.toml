@@ -23,4 +23,3 @@ tempfile.workspace = true
 libc.workspace = true
 clap = { version = "4", features = ["derive"] }
 smelt-provider.workspace = true
-zstd = "0.14.3"

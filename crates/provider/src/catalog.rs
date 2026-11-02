@@ -1,30 +1,35 @@
-//! Models.dev catalog: pricing + capabilities + context limits.
+//! Models.dev metadata, loaded only for requested provider/model pairs.
 //!
-//! Lookups never wait on the network. The first lookup loads the disk cache,
-//! or the snapshot embedded at build time when the cache is missing or
-//! expired. A background download replaces it with the live catalog and
-//! refreshes the cache, which has a 1h TTL. The snapshot and the cache hold
-//! the models.dev JSON trimmed to the fields smelt reads, so one parser reads
-//! all three sources. `cargo xtask update-model-catalog` regenerates the
-//! snapshot.
+//! The embedded snapshot and disk cache contain independently compressed
+//! provider blocks. Opening either reads only its small provider directory.
+//! A lookup streams matching blocks, deserializes only the requested model,
+//! and memoizes the result. Lookups never wait for the network.
+//!
+//! Refresh starts on demand and streams the upstream document to disk before
+//! repacking one provider at a time. New configurations and discovered models
+//! use the same lookup path; there is no settings-derived allowlist to maintain.
 
-use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
+mod archive;
+mod compiler;
+#[cfg(test)]
+#[path = "catalog/tests.rs"]
+mod service_tests;
+
+#[cfg(any(test, feature = "fuzz"))]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Cursor, Seek};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio::time::Instant;
 
 use crate::pricing::ModelPricing;
-
-fn key_path(cache_dir: &Path, key: &str) -> PathBuf {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    let hash = hasher.finish();
-    cache_dir.join(format!("{hash:x}"))
-}
+use archive::Archive;
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -33,37 +38,9 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn cache_get(cache_dir: Option<&Path>, key: &str) -> Option<String> {
-    let path = key_path(cache_dir?, key);
-    let contents = std::fs::read_to_string(&path).ok()?;
-    let (first_line, rest) = contents.split_once('\n')?;
-    let expires: u64 = first_line.parse().ok()?;
-    if now_secs() > expires {
-        let _ = std::fs::remove_file(&path);
-        return None;
-    }
-    Some(rest.to_string())
-}
-
-fn cache_put_with_ttl(cache_dir: Option<&Path>, key: &str, value: &str, ttl: Duration) {
-    let Some(dir) = cache_dir else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(dir);
-    let path = key_path(dir, key);
-    let expires = now_secs() + ttl.as_secs();
-    let data = format!("{expires}\n{value}");
-    if let Ok(mut file) = atomic_write_file::AtomicWriteFile::open(path) {
-        use std::io::Write;
-        if file.write_all(data.as_bytes()).is_ok() {
-            let _ = file.commit();
-        }
-    }
-}
-
 /// One row in the catalog. New fields slot in here as they're needed -
 /// new consumers don't pay a separate fetch.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub pricing: Option<ModelPricing>,
     pub context_window: Option<u32>,
@@ -72,135 +49,366 @@ pub struct ModelEntry {
     pub input_modalities: Option<Vec<String>>,
 }
 
-type Catalog = HashMap<(String, String), ModelEntry>;
+#[cfg(any(test, feature = "fuzz"))]
+#[derive(Debug, Default, PartialEq)]
+struct Catalog {
+    entries: Vec<ModelEntry>,
+    providers: HashMap<String, HashMap<String, usize>>,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl Catalog {
+    #[cfg(test)]
+    fn get(&self, provider: &str, model: &str) -> Option<&ModelEntry> {
+        let index = self.providers.get(provider)?.get(model)?;
+        self.entries.get(*index)
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn len(&self) -> usize {
+        self.providers.values().map(HashMap::len).sum()
+    }
+}
 
 pub const MODELS_API_URL: &str = "https://models.dev/api.json";
-const CACHE_KEY: &str = "models_dev";
+const CACHE_FILE: &str = "models-dev-v1.catalog";
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
-/// Bound on the whole catalog download. It runs in the background, so this
-/// only has to outlast a slow link for the multi-megabyte body.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long to skip the network after a failed fetch, so every request does
-/// not start another download while offline.
-const RETRY_AFTER: Duration = Duration::from_secs(60);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_CACHED_MODELS: usize = 128;
+const MAX_DOWNLOAD: usize = 64 * 1024 * 1024;
 
-/// Trimmed models.dev catalog from the last `cargo xtask update-model-catalog`,
-/// zstd-compressed.
-static SNAPSHOT: &[u8] = include_bytes!("../data/models.json.zst");
+static SNAPSHOT: &[u8] = include_bytes!("../data/models.catalog");
+static SERVICE: OnceLock<Arc<Service>> = OnceLock::new();
 
-/// Cache directory of the local load. Set by `init`; until then the catalog
-/// is off and every lookup returns `None`.
-static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
-static CATALOG: RwLock<Option<Arc<Catalog>>> = RwLock::new(None);
-/// Whether `CATALOG` holds a cached or downloaded catalog rather than the
-/// embedded snapshot.
-static FRESH: AtomicBool = AtomicBool::new(false);
-static LAST_FAILURE: Mutex<Option<Instant>> = Mutex::new(None);
-static FETCHING: AtomicBool = AtomicBool::new(false);
-
-fn recently_failed(failed_at: Option<Instant>, now: Instant) -> bool {
-    failed_at.is_some_and(|at| now.duration_since(at) < RETRY_AFTER)
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct Request {
+    providers: Vec<String>,
+    model: String,
 }
 
-/// Turn the catalog on, keeping its disk cache in `cache_dir`. Only the first
-/// call counts.
-pub fn init(cache_dir: Option<PathBuf>) {
-    let _ = CACHE_DIR.set(cache_dir);
+struct Resolved {
+    entry: Option<ModelEntry>,
+    generation: u64,
+    last_used: u64,
+    /// A refresh confirms misses for retained requests. New misses can request
+    /// one recheck, subject to the catalog-wide download cooldown.
+    confirmed: bool,
 }
 
-/// The loaded catalog, loading the local copy on first use. Concurrent first
-/// callers wait for the one load instead of parsing it again.
-fn current() -> Option<Arc<Catalog>> {
-    if let Some(catalog) = CATALOG.read().unwrap_or_else(|e| e.into_inner()).clone() {
-        return Some(catalog);
-    }
-    let cache_dir = CACHE_DIR.get()?;
-    let mut slot = CATALOG.write().unwrap_or_else(|e| e.into_inner());
-    if slot.is_none() {
-        let (catalog, fresh) = load_local(cache_dir.as_deref());
-        *slot = Some(Arc::new(catalog));
-        FRESH.store(fresh, Ordering::Release);
-    }
-    slot.clone()
+#[derive(Default)]
+struct State {
+    source: Option<Arc<Archive>>,
+    requested: HashMap<Request, Resolved>,
+    generation: u64,
+    clock: u64,
+    refresh_after: Option<Instant>,
+    refresh_scheduled: bool,
 }
 
-/// The disk cache if it is valid, else the embedded snapshot. The flag tells
-/// which one it is.
-fn load_local(cache_dir: Option<&Path>) -> (Catalog, bool) {
-    match cache_get(cache_dir, CACHE_KEY)
-        .as_deref()
-        .and_then(parse)
-        .filter(|map| !map.is_empty())
-    {
-        Some(map) => (map, true),
-        None => (snapshot(), false),
+impl State {
+    fn cached(&mut self, request: &Request) -> Option<Option<ModelEntry>> {
+        let resolved = self.requested.get_mut(request)?;
+        if resolved.generation != self.generation {
+            return None;
+        }
+        self.clock = self.clock.wrapping_add(1);
+        resolved.last_used = self.clock;
+        Some(resolved.entry.clone())
+    }
+
+    fn remember(&mut self, request: Request, entry: Option<ModelEntry>) {
+        let confirmed = self
+            .requested
+            .get(&request)
+            .is_some_and(|value| value.confirmed);
+        if self.requested.len() >= MAX_CACHED_MODELS && !self.requested.contains_key(&request) {
+            let oldest = self
+                .requested
+                .iter()
+                .max_by_key(|(_, value)| self.clock.wrapping_sub(value.last_used))
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.requested.remove(&oldest);
+            }
+        }
+        self.clock = self.clock.wrapping_add(1);
+        self.requested.insert(
+            request,
+            Resolved {
+                entry,
+                confirmed,
+                generation: self.generation,
+                last_used: self.clock,
+            },
+        );
+    }
+
+    fn needs_refresh(&self) -> bool {
+        !self.requested.is_empty()
+            && (self
+                .source
+                .as_ref()
+                .is_none_or(|source| now_secs() >= source.expires())
+                || self
+                    .requested
+                    .values()
+                    .any(|value| value.entry.is_none() && !value.confirmed))
     }
 }
 
-fn snapshot() -> Catalog {
-    zstd::decode_all(SNAPSHOT)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .as_deref()
-        .and_then(parse)
-        .unwrap_or_default()
+struct Service {
+    cache_dir: Option<PathBuf>,
+    client: reqwest::Client,
+    runtime: Option<tokio::runtime::Handle>,
+    url: String,
+    source_load: Mutex<()>,
+    state: Mutex<State>,
 }
 
-/// Load the catalog in the background: the local copy first, then the
-/// network unless the cache was fresh. A no-op before `init`, while a load
-/// runs, once a fresh catalog is loaded, and shortly after a failed download.
-pub fn refresh(client: &reqwest::Client) {
-    let Some(cache_dir) = CACHE_DIR.get() else {
-        return;
-    };
-    if FRESH.load(Ordering::Acquire) {
-        return;
+impl Service {
+    fn new(cache_dir: Option<PathBuf>, client: reqwest::Client, url: String) -> Self {
+        Self {
+            cache_dir,
+            client,
+            runtime: tokio::runtime::Handle::try_current().ok(),
+            url,
+            source_load: Mutex::new(()),
+            state: Mutex::new(State::default()),
+        }
     }
-    let failed_at = *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner());
-    if recently_failed(failed_at, Instant::now()) {
-        return;
-    }
-    if FETCHING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let client = client.clone();
-    tokio::spawn(async move {
-        let _ = tokio::task::spawn_blocking(current).await;
-        if !FRESH.load(Ordering::Acquire) {
-            let installed = match download(&client, MODELS_API_URL, FETCH_TIMEOUT).await {
-                Some(json) => {
-                    tokio::task::spawn_blocking(move || install(&json, cache_dir.as_deref()))
-                        .await
-                        .unwrap_or(false)
+
+    fn lookup(self: &Arc<Self>, request: Request) -> Option<ModelEntry> {
+        loop {
+            let cached = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cached(&request);
+            if let Some(entry) = cached {
+                self.schedule_refresh();
+                return entry;
+            }
+            let mut source = self.source()?;
+            let entry = match source.lookup(&request.providers, &request.model) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    source = self.fallback(&source)?;
+                    source
+                        .lookup(&request.providers, &request.model)
+                        .ok()
+                        .flatten()
                 }
-                None => false,
             };
-            if !installed {
-                *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !state
+                .source
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &source))
+            {
+                continue;
             }
-        }
-        FETCHING.store(false, Ordering::Release);
-    });
-}
-
-/// Look up `(provider_type, api_base, model)` in the catalog. Returns `None`
-/// if the catalog is off or the entry isn't listed. The `api_base` is used to
-/// disambiguate providers that share a wire format (e.g. Kimi exposes an
-/// Anthropic-compatible endpoint but has its own catalog key).
-pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelEntry> {
-    let catalog = current()?;
-    for key in catalog_keys(provider_type, api_base) {
-        if let Some(entry) = catalog.get(&(key.clone(), model.to_string())) {
-            return Some(entry.clone());
-        }
-        let slug = model_slug(model);
-        if slug != model {
-            if let Some(entry) = catalog.get(&(key, slug)) {
-                return Some(entry.clone());
-            }
+            // Another lookup or refresh may have completed while this reader
+            // waited. Never insert metadata from an obsolete archive.
+            let entry = if let Some(cached) = state.cached(&request) {
+                cached
+            } else {
+                state.remember(request.clone(), entry.clone());
+                entry
+            };
+            drop(state);
+            self.schedule_refresh();
+            return entry;
         }
     }
-    None
+
+    fn source(&self) -> Option<Arc<Archive>> {
+        if let Some(source) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .source
+            .clone()
+        {
+            return Some(source);
+        }
+        let _load = self.source_load.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(source) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .source
+            .clone()
+        {
+            return Some(source);
+        }
+        let source = Arc::new(load_local(self.cache_dir.as_deref()).ok()?);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Some(state.source.get_or_insert(source).clone())
+    }
+
+    fn fallback(&self, failed: &Arc<Archive>) -> Option<Arc<Archive>> {
+        let _load = self.source_load.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .source
+            .clone()?;
+        if !Arc::ptr_eq(&current, failed) {
+            return Some(current);
+        }
+        let fallback = Arc::new(snapshot().ok()?);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .source
+            .as_ref()
+            .is_some_and(|source| Arc::ptr_eq(source, failed))
+        {
+            state.source = Some(fallback);
+            state.generation = state.generation.wrapping_add(1);
+            state.requested.clear();
+        }
+        state.source.clone()
+    }
+
+    fn schedule_refresh(self: &Arc<Self>) {
+        let Some(runtime) = &self.runtime else { return };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.refresh_scheduled || !state.needs_refresh() {
+            return;
+        }
+        let after = state.refresh_after;
+        state.refresh_scheduled = true;
+        let guard = RefreshGuard {
+            service: self.clone(),
+            attempted: false,
+        };
+        drop(state);
+        runtime.spawn(async move {
+            let mut guard = guard;
+            if let Some(after) = after {
+                tokio::time::sleep_until(after).await;
+            }
+            let needed = guard
+                .service
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .needs_refresh();
+            let recheck = if needed {
+                guard.attempted = true;
+                guard.service.fetch().await
+            } else {
+                true
+            };
+            let service = guard.service.clone();
+            drop(guard);
+            // A new miss can arrive after installation or the final need check.
+            // Recheck on normal completion, not from cancellation cleanup.
+            if recheck {
+                service.schedule_refresh();
+            }
+        });
+    }
+
+    async fn fetch(self: &Arc<Self>) -> bool {
+        let Some(download) = download(&self.client, &self.url, FETCH_TIMEOUT).await else {
+            return false;
+        };
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            let mut download = download;
+            download.rewind()?;
+            let mut file = tempfile::tempfile()?;
+            archive::write(
+                BufReader::new(download),
+                BufWriter::new(&mut file),
+                now_secs() + CACHE_TTL.as_secs(),
+            )?;
+            persist(&mut file, service.cache_dir.as_deref());
+            service.install(Archive::open(file)?);
+            Ok(())
+        })
+        .await
+        .is_ok_and(|result| result.is_ok())
+    }
+
+    fn install(&self, archive: Archive) {
+        let source = Arc::new(archive);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = state.source.replace(source);
+        state.generation = state.generation.wrapping_add(1);
+        // Invalidate values lazily instead of rereading every retained model
+        // at refresh time. Retained misses need no second download.
+        for resolved in state.requested.values_mut() {
+            resolved.confirmed = true;
+        }
+        // Closing an obsolete archive must not hold the result-cache lock.
+        drop(state);
+        drop(previous);
+    }
+}
+
+struct RefreshGuard {
+    service: Arc<Service>,
+    attempted: bool,
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        let mut state = self.service.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.refresh_scheduled = false;
+        if self.attempted {
+            state.refresh_after = Some(Instant::now() + REFRESH_INTERVAL);
+        }
+    }
+}
+
+fn snapshot() -> io::Result<Archive> {
+    Archive::open(Cursor::new(SNAPSHOT))
+}
+
+fn load_local(cache_dir: Option<&Path>) -> io::Result<Archive> {
+    cache_dir
+        .and_then(|dir| File::open(dir.join(CACHE_FILE)).ok())
+        .and_then(|file| Archive::open(file).ok())
+        .map_or_else(snapshot, Ok)
+}
+
+fn persist(file: &mut File, cache_dir: Option<&Path>) {
+    let Some(dir) = cache_dir else { return };
+    let _ = (|| -> io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let mut output = atomic_write_file::AtomicWriteFile::open(dir.join(CACHE_FILE))?;
+        file.rewind()?;
+        io::copy(file, &mut output)?;
+        output.commit()
+    })();
+}
+
+/// Enable on-demand catalog lookup and refresh. Initialization performs no
+/// catalog I/O or download. Only the first call counts.
+pub fn init(cache_dir: Option<PathBuf>, client: reqwest::Client) {
+    let _ = SERVICE.set(Arc::new(Service::new(
+        cache_dir,
+        client,
+        MODELS_API_URL.to_string(),
+    )));
+}
+
+/// Resolve a model from local provider blocks, registering this exact request
+/// for future refreshes. New models require no catalog reinitialization.
+pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelEntry> {
+    SERVICE.get()?.lookup(Request {
+        providers: catalog_keys(provider_type, api_base),
+        model: model.to_string(),
+    })
 }
 
 /// Convenience: pull just the context window out of the catalog. The
@@ -224,28 +432,41 @@ pub fn input_modalities(provider_type: &str, api_base: &str, model: &str) -> Opt
     lookup(provider_type, api_base, model).and_then(|e| e.input_modalities)
 }
 
-async fn download(client: &reqwest::Client, url: &str, timeout: Duration) -> Option<String> {
-    let resp = client.get(url).timeout(timeout).send().await.ok()?;
-    resp.error_for_status().ok()?.text().await.ok()
+async fn download(client: &reqwest::Client, url: &str, timeout: Duration) -> Option<File> {
+    let mut response = client
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_DOWNLOAD as u64)
+    {
+        return None;
+    }
+    let file = tempfile::tempfile().ok()?;
+    let mut output = tokio::fs::File::from_std(file.try_clone().ok()?);
+    let mut size = 0usize;
+    while let Some(chunk) = response.chunk().await.ok()? {
+        size = size.checked_add(chunk.len())?;
+        if size > MAX_DOWNLOAD {
+            return None;
+        }
+        output.write_all(&chunk).await.ok()?;
+    }
+    output.flush().await.ok()?;
+    Some(file)
 }
 
-/// Make a downloaded catalog the current one and cache it trimmed. Returns
-/// `false`, changing nothing, when `json` is not a catalog.
-fn install(json: &str, cache_dir: Option<&Path>) -> bool {
-    let Some(root) = deserialize(json) else {
-        return false;
-    };
-    let Ok(trimmed) = serde_json::to_string(&root) else {
-        return false;
-    };
-    let map = index(root);
-    if map.is_empty() {
-        return false;
-    }
-    cache_put_with_ttl(cache_dir, CACHE_KEY, &trimmed, CACHE_TTL);
-    *CATALOG.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(map));
-    FRESH.store(true, Ordering::Release);
-    true
+/// Build the seekable embedded snapshot from upstream JSON. Used by xtask;
+/// normal startup never parses the complete catalog.
+pub fn write_snapshot(json: &str) -> io::Result<Vec<u8>> {
+    let mut output = Cursor::new(Vec::new());
+    archive::write(json.as_bytes(), &mut output, 0)?;
+    Ok(output.into_inner())
 }
 
 /// Maps smelt's `provider_type` + `api_base` to the candidate catalog keys
@@ -284,7 +505,7 @@ pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Opti
         "kimi-code" => Some("kimi-for-coding"),
         "anthropic-compatible" => detected_catalog_key(api_base).or(Some("anthropic")),
         "openai" | "codex" => Some("openai"),
-        "anthropic" => Some("anthropic"),
+        "anthropic" | "claude-code" => Some("anthropic"),
         "copilot" | "github-copilot" => Some("github-copilot"),
         "openai-compatible" => None,
         other => Some(other),
@@ -321,198 +542,67 @@ fn model_slug(name: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
-fn insert_entry(
-    map: &mut Catalog,
-    provider_keys: &[String],
-    model_keys: &[String],
-    entry: ModelEntry,
-) {
-    for provider_key in provider_keys {
-        for model_key in model_keys {
-            map.entry((provider_key.clone(), model_key.clone()))
-                .or_insert_with(|| entry.clone());
-        }
-    }
-}
+#[cfg(any(test, feature = "fuzz"))]
+type CatalogRoot = BTreeMap<String, compiler::Provider>;
 
-// Only the fields smelt reads. `trim` writes them back out, skipping absent
-// ones, so a trimmed catalog parses to the same map as the full one.
-#[derive(Serialize, Deserialize)]
-struct CatalogProvider {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api: Option<String>,
-    #[serde(default)]
-    models: BTreeMap<String, CatalogModel>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct CatalogModel {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    release_date: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_updated: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cost: Option<CatalogCost>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<CatalogLimit>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    modalities: Option<CatalogModalities>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<bool>,
-}
-
-// `Option<f64>` (not `#[serde(default)] f64`) so a null for any single cost
-// field doesn't fail the whole catalog - fall back to 0.0 per field.
-#[derive(Serialize, Deserialize)]
-struct CatalogCost {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_read: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_write: Option<f64>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct CatalogLimit {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<u32>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct CatalogModalities {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input: Option<Vec<String>>,
-}
-
-type CatalogRoot = BTreeMap<String, CatalogProvider>;
-
+#[cfg(any(test, feature = "fuzz"))]
 fn deserialize(json: &str) -> Option<CatalogRoot> {
     serde_json::from_str(json).ok()
 }
 
-/// Cut a models.dev catalog down to the fields smelt reads. Returns `None`
-/// for JSON that isn't a catalog.
-pub fn trim(json: &str) -> Option<String> {
+#[cfg(test)]
+fn trim(json: &str) -> Option<String> {
     serde_json::to_string(&deserialize(json)?).ok()
 }
 
+#[cfg(any(test, feature = "fuzz"))]
 fn parse(json: &str) -> Option<Catalog> {
     deserialize(json).map(index)
 }
 
+#[cfg(any(test, feature = "fuzz"))]
 fn index(root: CatalogRoot) -> Catalog {
-    let mut map = HashMap::new();
-    for (provider, provider_val) in root {
-        let mut provider_keys = vec![provider.clone()];
-        if let Some(api) = provider_val.api.as_deref().and_then(api_key) {
-            provider_keys.push(api);
-        }
-        let provider_model_aliases = [
-            Some(provider.clone()),
-            provider_val.name.as_deref().map(model_slug),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|alias| !alias.is_empty())
-        .collect::<Vec<_>>();
-        let mut default_entry: Option<(String, ModelEntry)> = None;
-        let has_provider_model_alias = provider_val.models.keys().any(|model_id| {
-            provider_model_aliases
-                .iter()
-                .any(|alias| model_id == alias || model_slug(model_id) == *alias)
-        });
-        for (model_id, model_val) in provider_val.models {
-            let pricing = model_val.cost.and_then(|cost| {
-                let input = cost.input.unwrap_or(0.0);
-                let output = cost.output.unwrap_or(0.0);
-                if input == 0.0 && output == 0.0 {
-                    return None;
-                }
-                Some(ModelPricing {
-                    input,
-                    output,
-                    cache_read: cost.cache_read.unwrap_or(0.0),
-                    cache_write: cost.cache_write.unwrap_or(0.0),
-                })
-            });
-            let context_window = model_val
-                .limit
-                .as_ref()
-                .and_then(|l| l.context)
-                .filter(|v| *v > 0);
-            let output_tokens = model_val
-                .limit
-                .as_ref()
-                .and_then(|l| l.output)
-                .filter(|v| *v > 0);
-            let supports_reasoning = model_val.reasoning;
-            let input_modalities = model_val.modalities.and_then(|m| {
-                let mut values = m
-                    .input?
-                    .into_iter()
-                    .map(|v| v.to_ascii_lowercase())
-                    .filter(|v| !v.is_empty())
-                    .collect::<Vec<_>>();
-                values.sort();
-                values.dedup();
-                (!values.is_empty()).then_some(values)
-            });
-            if pricing.is_none()
-                && context_window.is_none()
-                && output_tokens.is_none()
-                && supports_reasoning.is_none()
-                && input_modalities.is_none()
-            {
-                continue;
-            }
-            let entry = ModelEntry {
-                pricing,
-                context_window,
-                output_tokens,
-                supports_reasoning,
-                input_modalities,
-            };
-            let mut model_keys = vec![model_id.clone()];
-            if let Some(name) = model_val.name.as_deref() {
-                let slug = model_slug(name);
-                if !slug.is_empty() && !model_keys.iter().any(|key| key == &slug) {
-                    model_keys.push(slug);
-                }
-            }
-            insert_entry(&mut map, &provider_keys, &model_keys, entry.clone());
-            let default_sort = model_val
-                .last_updated
-                .or(model_val.release_date)
-                .unwrap_or_default();
-            if !default_sort.is_empty()
-                && default_entry
-                    .as_ref()
-                    .is_none_or(|(current_sort, _)| default_sort > *current_sort)
-            {
-                default_entry = Some((default_sort, entry));
-            }
-        }
-        if !has_provider_model_alias {
-            if let Some((_, entry)) = default_entry {
-                insert_entry(&mut map, &provider_keys, &provider_model_aliases, entry);
+    let mut catalog = Catalog::default();
+    for (id, mut provider) in root {
+        let api = provider.api.take().as_deref().and_then(api_key);
+        let compiled = compiler::compile_provider(&id, provider);
+        let offset = catalog.entries.len();
+        catalog.entries.extend(compiled.entries);
+        for key in std::iter::once(id).chain(api) {
+            for (model, index) in &compiled.models {
+                catalog
+                    .providers
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(model.clone())
+                    .or_insert(offset + index);
             }
         }
     }
-    map
+    catalog
 }
 
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) fn fuzz_parse_len(json: &str) -> Option<usize> {
-    parse(json).map(|entries| entries.len())
+    let indexed = parse(json)?;
+    if indexed.is_empty() {
+        return Some(0);
+    }
+    let archive = Archive::open(Cursor::new(write_snapshot(json).ok()?)).ok()?;
+    for (provider, model, index) in indexed
+        .providers
+        .iter()
+        .flat_map(|(provider, models)| {
+            models
+                .iter()
+                .map(move |(model, index)| (provider, model, index))
+        })
+        .take(8)
+    {
+        let actual = archive.lookup(std::slice::from_ref(provider), model).ok()?;
+        assert_eq!(actual.as_ref(), Some(&indexed.entries[*index]));
+    }
+    Some(indexed.len())
 }
 
 #[cfg(test)]
@@ -533,11 +623,15 @@ mod tests {
 
     #[test]
     fn snapshot_lists_the_main_providers() {
-        let catalog = snapshot();
-        for provider in ["anthropic", "openai", "github-copilot"] {
+        let catalog = snapshot().unwrap();
+        for (provider, model) in [
+            ("anthropic", "claude-haiku-4-5"),
+            ("openai", "gpt-4o"),
+            ("github-copilot", "claude-haiku-4.5"),
+        ] {
             assert!(
-                catalog.keys().any(|(key, _)| key == provider),
-                "snapshot has no {provider} models"
+                catalog.lookup(&[provider.into()], model).unwrap().is_some(),
+                "snapshot has no {provider}/{model}"
             );
         }
     }
@@ -573,55 +667,61 @@ mod tests {
         assert_eq!(parse(&trimmed).unwrap(), parse(json).unwrap());
     }
 
+    fn packed(json: &str, expires: u64) -> Vec<u8> {
+        let mut bytes = Cursor::new(Vec::new());
+        archive::write(json.as_bytes(), &mut bytes, expires).unwrap();
+        bytes.into_inner()
+    }
+
     #[test]
-    fn local_load_prefers_a_valid_cache() {
+    fn local_load_prefers_cache_even_when_stale_for_offline_use() {
         let dir = tempfile::tempdir().unwrap();
         let json = r#"{"openai": {"models": {"gpt-4": {"limit": {"output": 4096}}}}}"#;
-        cache_put_with_ttl(Some(dir.path()), CACHE_KEY, json, CACHE_TTL);
-
-        let (catalog, fresh) = load_local(Some(dir.path()));
-
-        assert!(fresh);
-        assert_eq!(catalog, parse(json).unwrap());
+        for expires in [1, now_secs() + CACHE_TTL.as_secs()] {
+            std::fs::write(dir.path().join(CACHE_FILE), packed(json, expires)).unwrap();
+            let catalog = load_local(Some(dir.path())).unwrap();
+            assert_eq!(catalog.expires(), expires);
+            assert_eq!(
+                catalog
+                    .lookup(&["openai".into()], "gpt-4")
+                    .unwrap()
+                    .unwrap()
+                    .output_tokens,
+                Some(4096)
+            );
+        }
     }
 
     #[test]
     fn local_load_falls_back_to_the_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        cache_put_with_ttl(Some(dir.path()), CACHE_KEY, "not json", CACHE_TTL);
-
-        let (catalog, fresh) = load_local(Some(dir.path()));
-
-        assert!(!fresh);
-        assert_eq!(catalog, snapshot());
+        std::fs::write(dir.path().join(CACHE_FILE), "not an archive").unwrap();
+        let catalog = load_local(Some(dir.path())).unwrap();
+        assert_eq!(catalog.expires(), 0);
+        assert!(catalog
+            .lookup(&["openai".into()], "gpt-4o")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
-    fn install_rejects_a_download_that_is_not_a_catalog() {
-        let dir = tempfile::tempdir().unwrap();
-
-        assert!(!install("<html>rate limited</html>", Some(dir.path())));
-        assert!(!install("{}", Some(dir.path())));
-        assert!(cache_get(Some(dir.path()), CACHE_KEY).is_none());
+    fn archive_rejects_invalid_catalogs_and_trailing_data() {
+        for json in [
+            "<html>rate limited</html>",
+            "{}",
+            "[]",
+            "null",
+            "{\"provider\":{}}",
+            "{\"p\":{\"models\":{\"x\":{\"reasoning\":true}}}} garbage",
+        ] {
+            assert!(write_snapshot(json).is_err(), "accepted {json}");
+        }
     }
 
     #[test]
     fn trim_rejects_non_catalog_json() {
         assert!(trim("[]").is_none());
         assert!(trim("not json").is_none());
-    }
-
-    #[test]
-    fn failed_fetch_backs_off_until_the_retry_window_passes() {
-        let failed_at = Instant::now();
-
-        assert!(!recently_failed(None, failed_at));
-        assert!(recently_failed(Some(failed_at), failed_at));
-        assert!(recently_failed(
-            Some(failed_at),
-            failed_at + RETRY_AFTER - Duration::from_secs(1)
-        ));
-        assert!(!recently_failed(Some(failed_at), failed_at + RETRY_AFTER));
     }
 
     #[test]
@@ -633,6 +733,7 @@ mod tests {
     #[test]
     fn catalog_key_maps_anthropic_aliases_to_anthropic() {
         assert_eq!(catalog_key("anthropic", ""), Some("anthropic"));
+        assert_eq!(catalog_key("claude-code", ""), Some("anthropic"));
         assert_eq!(catalog_key("anthropic-compatible", ""), Some("anthropic"));
     }
 
@@ -678,7 +779,7 @@ mod tests {
             }}
         }"#;
         let map = parse(json).unwrap();
-        let entry = map.get(&("openai".into(), "gpt-4o".into())).unwrap();
+        let entry = map.get("openai", "gpt-4o").unwrap();
         assert_eq!(
             entry.input_modalities.as_deref(),
             Some(["image".to_string(), "pdf".to_string(), "text".to_string()].as_slice())
@@ -700,13 +801,13 @@ mod tests {
         }"#;
         let map = parse(json).unwrap();
         assert_eq!(
-            map.get(&("kimi-for-coding".into(), "moonshot-v1".into()))
+            map.get("kimi-for-coding", "moonshot-v1")
                 .unwrap()
                 .supports_reasoning,
             Some(false)
         );
         assert_eq!(
-            map.get(&("kimi-for-coding".into(), "moonshot-think".into()))
+            map.get("kimi-for-coding", "moonshot-think")
                 .unwrap()
                 .supports_reasoning,
             Some(true)
@@ -724,7 +825,7 @@ mod tests {
             }}
         }"#;
         let map = parse(json).unwrap();
-        let entry = map.get(&("openai".into(), "gpt-4".into())).unwrap();
+        let entry = map.get("openai", "gpt-4").unwrap();
         let pricing = entry.pricing.unwrap();
         assert_eq!(pricing.input, 30.0);
         assert_eq!(entry.context_window, Some(128_000));
@@ -743,10 +844,7 @@ mod tests {
         }"#;
         let map = parse(json).unwrap();
         let entry = map
-            .get(&(
-                "api:https://openrouter.ai/api/v1".into(),
-                "moonshotai/kimi-k2.6".into(),
-            ))
+            .get("api:https://openrouter.ai/api/v1", "moonshotai/kimi-k2.6")
             .unwrap();
         assert_eq!(entry.output_tokens, Some(32_768));
     }
@@ -759,7 +857,7 @@ mod tests {
             }}
         }"#;
         let map = parse(json).unwrap();
-        let entry = map.get(&("moonshotai".into(), "kimi-k2.6".into())).unwrap();
+        let entry = map.get("moonshotai", "kimi-k2.6").unwrap();
         assert_eq!(entry.output_tokens, Some(32_768));
     }
 
@@ -784,17 +882,85 @@ mod tests {
             }
         }"#;
         let map = parse(json).unwrap();
-        let provider_entry = map
-            .get(&("kimi-for-coding".into(), "kimi-for-coding".into()))
-            .unwrap();
+        let provider_entry = map.get("kimi-for-coding", "kimi-for-coding").unwrap();
         let api_entry = map
-            .get(&(
-                "api:https://api.kimi.com/coding/v1".into(),
-                "kimi-for-coding".into(),
-            ))
+            .get("api:https://api.kimi.com/coding/v1", "kimi-for-coding")
             .unwrap();
         assert_eq!(provider_entry.output_tokens, Some(32_768));
         assert_eq!(api_entry.output_tokens, Some(32_768));
+    }
+
+    #[test]
+    fn aliases_share_one_model_entry() {
+        let map = parse(
+            r#"{"provider": {
+                "name": "Provider Name", "api": "https://example.com/v1",
+                "models": {"model-id": {
+                    "name": "Display Name", "last_updated": "2026-04",
+                    "modalities": {"input": ["text", "image"]}
+                }}
+            }}"#,
+        )
+        .unwrap();
+
+        assert_eq!(map.entries.len(), 1);
+        assert_eq!(map.len(), 8);
+        let canonical = map.get("provider", "model-id").unwrap();
+        for provider in ["provider", "api:https://example.com/v1"] {
+            for model in ["model-id", "display-name", "provider", "provider-name"] {
+                assert!(std::ptr::eq(canonical, map.get(provider, model).unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn alias_collisions_keep_the_first_entry() {
+        let map = parse(
+            r#"{
+                "a": {"api": "https://example.com/v1", "models": {
+                    "first": {"name": "Shared", "limit": {"output": 100}},
+                    "shared": {"limit": {"output": 200}}
+                }},
+                "b": {"api": "https://example.com/v1", "models": {
+                    "shared": {"limit": {"output": 300}},
+                    "unique": {"limit": {"output": 400}}
+                }}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(map.get("a", "shared").unwrap().output_tokens, Some(100));
+        assert_eq!(map.get("b", "shared").unwrap().output_tokens, Some(300));
+        assert_eq!(
+            map.get("api:https://example.com/v1", "shared")
+                .unwrap()
+                .output_tokens,
+            Some(100)
+        );
+        assert_eq!(
+            map.get("api:https://example.com/v1", "unique")
+                .unwrap()
+                .output_tokens,
+            Some(400)
+        );
+    }
+
+    #[test]
+    fn provider_default_does_not_replace_an_explicit_model_alias() {
+        let map = parse(
+            r#"{"provider": {"models": {
+                "new": {"last_updated": "2026-04", "limit": {"output": 200}},
+                "provider": {"last_updated": "2025-01", "limit": {"output": 100}}
+            }}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            map.get("provider", "provider").unwrap().output_tokens,
+            Some(100)
+        );
+        assert!(map.get("provider", "missing").is_none());
+        assert!(map.get("missing", "provider").is_none());
     }
 
     #[test]
@@ -805,7 +971,7 @@ mod tests {
             }}
         }"#;
         let map = parse(json).unwrap();
-        let entry = map.get(&("openai".into(), "ctx-only".into())).unwrap();
+        let entry = map.get("openai", "ctx-only").unwrap();
         assert!(entry.pricing.is_none());
         assert_eq!(entry.context_window, Some(200_000));
         assert!(entry.output_tokens.is_none());
@@ -819,7 +985,7 @@ mod tests {
             }}
         }"#;
         let map = parse(json).unwrap();
-        let entry = map.get(&("openai".into(), "out-only".into())).unwrap();
+        let entry = map.get("openai", "out-only").unwrap();
         assert!(entry.pricing.is_none());
         assert!(entry.context_window.is_none());
         assert_eq!(entry.output_tokens, Some(8192));
@@ -833,7 +999,7 @@ mod tests {
             }}
         }"#;
         let map = parse(json).unwrap();
-        let entry = map.get(&("anthropic".into(), "claude-3".into())).unwrap();
+        let entry = map.get("anthropic", "claude-3").unwrap();
         assert!(entry.pricing.is_some());
         assert!(entry.context_window.is_none());
     }
