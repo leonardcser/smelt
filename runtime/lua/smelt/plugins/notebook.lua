@@ -100,7 +100,7 @@ smelt.transcript.register_tool("edit_notebook", {
 
 smelt.tools.register({
   name = "edit_notebook",
-  description = "Edit a Jupyter notebook (.ipynb) cell. Supports replacing, inserting, and deleting cells. Identify cells by cell_id or cell_number (0-indexed).",
+  description = "Edit a Jupyter notebook (.ipynb) cell: replace, insert, or delete.",
   override = true,
   execution_mode = "sequential",
   effect = "write",
@@ -109,29 +109,29 @@ smelt.tools.register({
     properties = {
       notebook_path = {
         type = "string",
-        description = "The absolute path to the Jupyter notebook file",
+        description = "Absolute notebook path.",
       },
       cell_number = {
         type = "integer",
-        description = "The 0-indexed cell number to edit. Used when cell_id is not provided.",
+        description = "0-based cell index; used when cell_id is omitted.",
       },
       cell_id = {
         type = "string",
-        description = "The ID of the cell to edit. Takes precedence over cell_number. When inserting, the new cell is placed after this cell (omit to insert at the beginning).",
+        description = "Cell ID; overrides cell_number. Insert after this cell; omit to insert first.",
       },
       new_source = {
         type = "string",
-        description = "The new source content for the cell. Required for replace and insert.",
+        description = "New cell source; required for replace/insert.",
       },
       cell_type = {
         type = "string",
         enum = { "code", "markdown" },
-        description = "The cell type. Required for insert, defaults to current type for replace.",
+        description = "Required for insert; defaults to current cell type for replace.",
       },
       edit_mode = {
         type = "string",
         enum = { "replace", "insert", "delete" },
-        description = "The edit operation. Defaults to replace.",
+        description = "Default: replace.",
       },
     },
     required = { "notebook_path" },

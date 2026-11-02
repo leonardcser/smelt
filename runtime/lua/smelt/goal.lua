@@ -590,11 +590,11 @@ local function register_tools()
 
   smelt.tools.register({
     name = "update_goal",
-    description = "Report on the current goal. Set progress to record durable progress when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass, including the first one after the goal is set; do not use it for routine substeps, individual tool calls, or live activity. Set state to report the goal as done or genuinely blocked, and give the evidence or exact blocker in reason. Use state=done only when current evidence proves the objective is complete. Use state=blocked only when no meaningful progress is possible without user input or an external-state change. Do not call unless a goal already exists. This tool cannot pause, resume, clear, or rewrite goals. Use clear_goal only when the user explicitly asks to remove the goal.",
+    description = "Report only on an existing goal. Set progress when starting a meaningful user-facing step, sprint, phase, milestone, or validation pass, including the first after goal creation; not routine substeps, individual tool calls, or live activity. state=done requires current evidence proving the objective complete. state=blocked requires that no meaningful progress is possible without user input or external-state change. Give completion evidence or the exact blocker in reason. This tool cannot pause, resume, clear, or rewrite goals. Use clear_goal only when the user explicitly asks to remove the goal.",
     parameters = {
       type = "object",
       properties = {
-        progress = { type = "string", description = "Durable progress label, such as 'Step 2/5, implementing validation', 'Sprint 1/3, stabilizing imports', '75%, validating regressions', or 'Review, simplifying changes'. Not moment-to-moment activity. Do not invent numbers." },
+        progress = { type = "string", description = "Durable label, e.g. 'Step 2/5, implementing validation', 'Sprint 1/3, stabilizing imports', '75%, validating regressions', or 'Review, simplifying changes'. Never invent numbers." },
         state = { type = "string", enum = { "done", "blocked" }, description = "Lifecycle state to report." },
         reason = { type = "string", description = "Evidence for completion or the exact blocker. Only with state." },
       },

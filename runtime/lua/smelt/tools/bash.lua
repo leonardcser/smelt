@@ -176,16 +176,16 @@ smelt.tools.register(__smelt_internal.tools.with_watchdog({
   default_allow = DEFAULT_ALLOW,
   subpattern_parser = "shell",
   description =
-  "Execute a non-interactive bash command and return its output. Commands time out after 2 minutes by default (configurable up to 10 minutes); by default, a still-running command is moved to the background on timeout. Use background=true to start it in the background immediately. Background commands notify you automatically when they finish, even after you end your turn. Do not sleep or poll just to wait for completion. Do other work, or end your turn if nothing else is ready. Use read_process_output to inspect output when needed, and stop_process to stop a job. Avoid broad filename-based cleanup with pkill -f or killall: it can kill smelt or unrelated processes. For processes not managed by this tool, identify and verify the exact target PID before stopping it. Do not use shell backgrounding (`&`) in the command string. For commands expected to produce very long output (e.g. test runners, build logs), pipe the output through `head`, `tail`, or `grep` to keep only the relevant parts and reduce context usage. The shell working directory does not persist between calls. `cd` inside a command is local to that invocation. Prefer absolute paths to avoid relying on the current directory. Do not run interactive commands (editors, pagers, interactive rebases, etc.); they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
+  "Run non-interactive bash and return output. Background jobs automatically notify on completion by default, even after your turn. Do not sleep or poll just to wait; do other work, or end your turn if nothing is ready. Use read_process_output to inspect output and stop_process to stop jobs. Avoid broad filename-based cleanup with pkill -f or killall: it can kill smelt or unrelated processes. For processes not managed by this tool, identify and verify the exact PID before stopping it. Do not use shell backgrounding (`&`). Pipe long output (e.g. test or build logs) through head, tail, or grep to retain relevant parts and save context. The working directory is not preserved between calls; cd affects only that invocation. Prefer absolute paths. Do not run interactive commands (editors, pagers, interactive rebases): they hang. Ask the user to run them if no non-interactive alternative exists.",
   parameters = {
     type = "object",
     properties = {
-      command = { type = "string", description = "Shell command to execute" },
-      description = { type = "string", description = "Short (max 10 words) description of what this command does" },
-      timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 120000, max: 600000)" },
-      background = { type = "boolean", description = "Run the command in the background and return immediately (default: false)" },
+      command = { type = "string", description = "Shell command to execute." },
+      description = { type = "string", description = "Command summary (max 10 words)." },
+      timeout_ms = { type = "integer", description = "Timeout in milliseconds; default: 120000; max: 600000." },
+      background = { type = "boolean", description = "Start in background; return immediately. Default: false." },
       notify_on_completion = { type = "boolean", description = "For background=true, notify the agent and keep the session waiting until completion (default: true). Set false for detached servers or watchers." },
-      background_on_timeout = { type = "boolean", description = "If the timeout expires, keep the command running in the background instead of killing it (default: true)" },
+      background_on_timeout = { type = "boolean", description = "On timeout, keep running in background instead of killing. Default: true." },
     },
     required = { "command" },
   },

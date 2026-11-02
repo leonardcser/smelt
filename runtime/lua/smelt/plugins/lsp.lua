@@ -386,13 +386,13 @@ local function call_backend(name, args)
 end
 
 local function path_param(desc)
-  return { type = "string", description = desc or "Absolute path to the source file." }
+  return { type = "string", description = desc or "Absolute source file path." }
 end
 
 local function position_params(properties)
   properties.file_path = path_param()
-  properties.line = { type = "integer", description = "1-based line number of the symbol position." }
-  properties.column = { type = "integer", description = "1-based character column of the symbol position." }
+  properties.line = { type = "integer", description = "1-based symbol line." }
+  properties.column = { type = "integer", description = "1-based character column." }
   return properties
 end
 
@@ -522,41 +522,41 @@ function M.setup(opts)
     file_path = path_param("Optional source file used to infer the language server."),
   }, {})
 
-  register_tool("outline", "Return a compact semantic outline for a source file, with optional symbol, kind, name, and depth filters and source ranges when available.", {
+  register_tool("outline", "Return a compact semantic file outline with optional symbol, kind, name, and depth filters, plus source ranges when available.", {
     file_path = path_param(),
-    max_symbols = { type = "integer", description = "Maximum outline symbols to return. Defaults to 200 and is capped by the backend." },
+    max_symbols = { type = "integer", description = "Max symbols; default: 200, backend-capped." },
     symbol = { type = "string", description = "Only include this exact symbol name and ancestors/children needed for context." },
-    kind = { type = "string", description = "Optional symbol kind filter, such as function, method, class, struct, trait, interface, module, or enum." },
-    name_contains = { type = "string", description = "Only include symbols whose names contain this text, case-insensitive." },
+    kind = { type = "string", description = "Kind filter, e.g. function, method, class, struct, trait, interface, module, enum." },
+    name_contains = { type = "string", description = "Case-insensitive name substring." },
     max_depth = { type = "integer", description = "Maximum nesting depth for unfiltered outlines, with 0 showing only top-level symbols. Filtered outlines still search nested symbols and return matching context." },
   }, { "file_path" })
 
-  register_tool("find_symbol", "Find workspace symbols by semantic name search. Results are ranked, optionally filtered by kind, path, and exact match, and include limit and truncation metadata.", {
-    query = { type = "string", description = "Symbol name or fuzzy query to send to the language server." },
-    kind = { type = "string", description = "Optional symbol kind filter, such as function, method, class, struct, trait, interface, module, enum, variable, or constant." },
-    path_glob = { type = "string", description = "Optional glob filter applied to returned file paths, such as crates/core/**/*.rs." },
-    limit = { type = "integer", description = "Maximum symbols to return. Defaults to 20 and is capped by the backend." },
-    exact = { type = "boolean", description = "Only return exact symbol-name matches after case-sensitive ranking. Defaults to false." },
+  register_tool("find_symbol", "Find workspace symbols by semantic name search. Ranked results support kind/path/exact filters, limit, and truncation metadata.", {
+    query = { type = "string", description = "Symbol name or fuzzy language-server query." },
+    kind = { type = "string", description = "Kind filter, e.g. function, method, class, struct, trait, interface, module, enum, variable, constant." },
+    path_glob = { type = "string", description = "File-path glob filter, e.g. crates/core/**/*.rs." },
+    limit = { type = "integer", description = "Max symbols; default: 20, backend-capped." },
+    exact = { type = "boolean", description = "Only return exact symbol-name matches after case-sensitive ranking; default: false." },
   }, { "query" })
 
   register_tool("inspect_symbol_at", "Inspect a symbol at a source position using semantic data: hover info, definitions, type definitions, implementations, outline context, and summarized references.", position_params({
-    depth = { type = "integer", description = "Expansion depth. 0 returns identity and direct links; 1 also includes summarized references. Defaults to 1." },
+    depth = { type = "integer", description = "Expansion depth: 0 returns identity and direct links; 1 also includes summarized references (default)." },
   }), { "file_path", "line", "column" })
 
   register_tool("inspect_symbol", "Inspect a symbol resolved from a workspace query using semantic data: hover info, definitions, type definitions, implementations, outline context, and summarized references.", {
     query = { type = "string", description = "Symbol query to resolve before inspection." },
-    kind = { type = "string", description = "Optional symbol kind filter used with query." },
-    path_glob = { type = "string", description = "Optional path glob used with query." },
-    exact = { type = "boolean", description = "Require an exact symbol-name match. Defaults to true." },
-    depth = { type = "integer", description = "Expansion depth. 0 returns identity and direct links; 1 also includes summarized references. Defaults to 1." },
+    kind = { type = "string", description = "Kind filter for query." },
+    path_glob = { type = "string", description = "Path glob for query." },
+    exact = { type = "boolean", description = "Require exact symbol name; default: true." },
+    depth = { type = "integer", description = "Expansion depth: 0 returns identity and direct links; 1 also includes summarized references (default)." },
   }, { "query" })
 
   register_tool("find_definition", "Find the definition for the symbol at a source position.", position_params({}), { "file_path", "line", "column" })
 
-  register_tool("find_references", "Find semantic references to a symbol at a source position. Returns normalized locations with snippets by default, or raw language-server locations with raw=true. Both modes honor limit and report truncation metadata.", position_params({
-    include_declaration = { type = "boolean", description = "Include the defining declaration when supported. Defaults to false." },
-    limit = { type = "integer", description = "Maximum locations to show. Defaults to 50 and is capped by the backend." },
-    raw = { type = "boolean", description = "Return raw language-server locations instead of normalized locations. Defaults to false." },
+  register_tool("find_references", "Find semantic references at a source position. Default: normalized locations with snippets; raw=true: raw language-server locations. Both honor limit and report truncation metadata.", position_params({
+    include_declaration = { type = "boolean", description = "Include defining declaration when supported; default: false." },
+    limit = { type = "integer", description = "Max locations; default: 50, backend-capped." },
+    raw = { type = "boolean", description = "Raw rather than normalized locations; default: false." },
   }), { "file_path", "line", "column" })
 
   register_tool("diagnostics", "Return language server diagnostics for a file or workspace.", {

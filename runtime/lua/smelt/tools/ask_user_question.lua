@@ -5,7 +5,7 @@
 
 smelt.tools.register({
   name = "ask_user_question",
-  description = "Ask the user questions to gather preferences, clarify instructions, or get decisions on implementation choices. Present 1-4 questions with 2-4 options each.",
+  description = "Ask the user for preferences, instruction clarification, or implementation decisions.",
   execution_mode = "sequential",
   headless = false,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
@@ -17,28 +17,27 @@ smelt.tools.register({
         type = "array",
         minItems = 1,
         maxItems = 4,
-        description = "Questions to ask the user (1-4 questions)",
         items = {
           type = "object",
           properties = {
             question = {
               type = "string",
-              description = "The complete question to ask the user.",
+              description = "Full question text.",
             },
             header = {
               type = "string",
-              description = "Very short label (max 12 chars).",
+              description = "Short label (max 12 characters).",
             },
             options = {
               type = "array",
               minItems = 2,
               maxItems = 4,
-              description = "The available choices. An 'Other' free-text entry is added automatically. Do not include one yourself.",
+              description = "An 'Other' free-text option is added automatically; do not add one.",
               items = {
                 type = "object",
                 properties = {
                   label       = { type = "string", description = "Display text (1-5 words)." },
-                  description = { type = "string", description = "Explanation of this option." },
+                  description = { type = "string", description = "Option explanation." },
                 },
                 required = { "label", "description" },
               },
