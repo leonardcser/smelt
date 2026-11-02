@@ -53,8 +53,33 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/reload`                                | Reload Lua config, prompt inputs, and the active model's context-window limit without restarting (also `F5`) |
 | `/version`                               | Show the running build identity as a notification |
 | `/changelog`                             | Open the release notes of recent smelt releases |
-| `/upgrade [check]`                       | Install the newest smelt build in the background (or only check with `check`) |
+| `/upgrade [check\|status]`                | Start or follow a background upgrade; check for updates or view live installation status |
 | `/exit`, `/quit`                         | Exit (also `:q`, `:qa`, `:wq`, `:wqa`) |
+
+### Upgrade status
+
+`/upgrade` starts an installation in the background, or follows the existing
+installation when another session is already upgrading the same executable.
+`/upgrade status` opens a live status view with the active channel, target,
+stage, elapsed time, download progress, and recent build activity. Download
+percentages appear only when the total size is known; compilation has no
+percentage estimate. The banner also shows progress while an upgrade runs.
+`/upgrade check` checks release availability only for the requesting session.
+Standalone checks do not acquire the installation lock or publish shared status;
+they do not block an installation. An actual upgrade still shares its initial
+checking stage, along with download, build, and install progress.
+
+Closing the status view or exiting the initiating session does not cancel the
+installer. If the installer itself is killed, another session reports the
+operation as interrupted. Run `/upgrade` to start a fresh attempt; leftover
+lock or status files do not prevent retries. Downloads are restarted, not
+resumed from a partial archive. Unstable builds use an isolated staging root,
+so a Cargo process that outlives a killed installer cannot overwrite the live
+executable, including one installed by a later attempt.
+
+From a shell, use `smelt upgrade status` (or add `--json`) to inspect the same
+installation offline. `smelt upgrade` runs in the foreground by default;
+`smelt upgrade --background` starts or follows a detached installer.
 
 ### Goals
 

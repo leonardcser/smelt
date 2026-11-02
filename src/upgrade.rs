@@ -8,20 +8,25 @@
 //! executing its old image; the next launch uses the new one.
 //!
 //! The unstable channel compares the build commit with `main` and rebuilds
-//! with `cargo install` into the install root of the running binary.
+//! with `cargo install` into isolated staging. Only the lock-owning installer
+//! validates and swaps the candidate into the live installation.
 //!
 //! Installs hold an exclusive lock next to the executable, so concurrent
 //! sessions never download or build the same upgrade twice. An install keeps
 //! running if smelt quits meanwhile, and keeps the lock until it ends.
 //!
-//! `--json` prints one [`Report`] line on stdout for the bundled upgrade
-//! plugin. Sessions started before an upgrade run the new binary's CLI, so
-//! keep its fields backward compatible (see `json_report_keeps_its_field_names`).
+//! `--json` preserves [`Report`] fields for completed foreground commands.
+//! Background startup and status reads return the same [`Snapshot`] envelope.
+//! Older sessions run the new binary's CLI, so keep report fields backward
+//! compatible (see `json_report_keeps_its_field_names`).
+
+mod status;
 
 use clap::{Args, Subcommand, ValueEnum};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use status::{Snapshot, Stage, Status};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -57,6 +62,13 @@ pub struct UpgradeArgs {
     /// Print one JSON status line on stdout instead of text
     #[arg(long, global = true)]
     json: bool,
+    /// Start or follow an upgrade without waiting for installation
+    #[arg(long, conflicts_with = "worker")]
+    background: bool,
+    #[arg(long, hide = true)]
+    worker: bool,
+    #[arg(long, hide = true, value_enum, default_value_t = InstallPolicy::Always)]
+    policy: InstallPolicy,
     #[command(subcommand)]
     command: Option<UpgradeCommand>,
 }
@@ -65,13 +77,39 @@ pub struct UpgradeArgs {
 enum UpgradeCommand {
     /// Check for updates without installing
     Check,
+    /// Show shared installation progress without contacting GitHub
+    Status,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Channel {
     Stable,
     Unstable,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InstallPolicy {
+    Always,
+    Auto,
+}
+
+struct InstallOptions {
+    channel: Channel,
+    policy: InstallPolicy,
+    acknowledge: bool,
+}
+
+enum Outcome {
+    Complete(Report),
+    Following(Snapshot),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum WorkerReply {
+    Snapshot(Snapshot),
+    Error { error: String },
 }
 
 /// Outcome of a check or an install.
@@ -154,30 +192,63 @@ fn say_out(line: std::fmt::Arguments) {
 }
 
 pub async fn run_upgrade_command(args: UpgradeArgs) {
+    match execute(&args).await {
+        Ok(_) if args.worker => {}
+        Ok(Outcome::Complete(report)) if args.json => print_json(&report),
+        Ok(Outcome::Complete(report)) => print_report(&report, args.command.is_some()),
+        Ok(Outcome::Following(snapshot)) if args.json => print_json(&snapshot),
+        Ok(Outcome::Following(snapshot)) => say_out(format_args!("{}", snapshot.text())),
+        Err(error) => {
+            if args.worker {
+                print_json(&WorkerReply::Error { error });
+            } else {
+                say_err(format_args!("error: {error}"));
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_json(value: &impl Serialize) {
+    say_out(format_args!(
+        "{}",
+        serde_json::to_string(value).expect("upgrade reply serializes")
+    ));
+}
+
+async fn execute(args: &UpgradeArgs) -> Result<Outcome, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate smelt: {e}"))?;
+    if matches!(args.command, Some(UpgradeCommand::Status)) {
+        return Snapshot::read(&exe, tui::DISPLAY).map(Outcome::Following);
+    }
+    if args.background && args.command.is_none() {
+        return start_background(args.channel, args.policy)
+            .await
+            .map(Outcome::Following);
+    }
     let client = smelt_provider::http_client_builder()
         .user_agent(concat!("smelt-upgrade/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| smelt_provider::http_client());
     let source = Source::default();
     let build = Build::current();
-    let result = match args.command {
-        Some(UpgradeCommand::Check) => check(&client, &source, &build, args.channel).await,
-        None => match std::env::current_exe() {
-            Ok(exe) => upgrade(&client, &source, &build, args.channel, &exe).await,
-            Err(err) => Err(format!("cannot locate the smelt executable: {err}")),
-        },
-    };
-    match result {
-        Ok(report) if args.json => say_out(format_args!(
-            "{}",
-            serde_json::to_string(&report).expect("report serializes")
-        )),
-        Ok(report) => print_report(&report, args.command.is_some()),
-        Err(err) => {
-            say_err(format_args!("error: {err}"));
-            std::process::exit(1);
-        }
+    if matches!(args.command, Some(UpgradeCommand::Check)) {
+        return check(&client, &source, &build, args.channel)
+            .await
+            .map(Outcome::Complete);
     }
+    upgrade_inner(
+        &client,
+        &source,
+        &build,
+        &exe,
+        InstallOptions {
+            channel: args.channel,
+            policy: args.policy,
+            acknowledge: args.worker,
+        },
+    )
+    .await
 }
 
 fn print_report(report: &Report, check_only: bool) {
@@ -228,29 +299,174 @@ async fn check(
     })
 }
 
-async fn upgrade(
+async fn upgrade_inner(
     client: &reqwest::Client,
     source: &Source,
     build: &Build,
-    channel: Channel,
     exe: &Path,
-) -> Result<Report, String> {
-    let mut report = check(client, source, build, channel).await?;
-    if !report.update {
-        return Ok(report);
-    }
-    let _lock = InstallLock::acquire(exe)?;
-    match channel {
-        Channel::Stable => {
-            let target = build.target.as_deref().ok_or_else(|| {
-                "smelt build target is unknown; cannot pick a release asset".to_string()
-            })?;
-            install_release(client, &source.web, &report.latest, target, exe).await?;
+    options: InstallOptions,
+) -> Result<Outcome, String> {
+    let InstallOptions {
+        channel,
+        policy,
+        acknowledge,
+    } = options;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let _lock = loop {
+        if let Some(lock) = InstallLock::try_acquire(exe)? {
+            break lock;
         }
-        Channel::Unstable => install_main(&report.latest, exe)?,
+        if let Some(status) = status::read(exe)? {
+            if status.running {
+                let snapshot = Snapshot {
+                    current: build.display.clone(),
+                    status: Some(status),
+                };
+                if acknowledge {
+                    print_json(&snapshot);
+                }
+                return Ok(Outcome::Following(snapshot));
+            }
+        }
+        // A status reader briefly holds a shared lock, or the installer is
+        // finishing. Neither is an active operation to follow.
+        if tokio::time::Instant::now() >= deadline {
+            return Err("upgrade lock is changing owners; retry the command".into());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let previous = status::read(exe).ok().flatten();
+    let mut status = Status::new(exe, Some(channel), Stage::Checking);
+    status.failed_target = previous.and_then(|s| {
+        s.failed_target.or_else(|| {
+            (s.running || matches!(s.stage, Stage::Failed | Stage::Interrupted))
+                .then_some(s.target)
+                .flatten()
+        })
+    });
+    status.save()?;
+    if acknowledge {
+        print_json(&Snapshot {
+            current: build.display.clone(),
+            status: Some(status.clone()),
+        });
     }
-    report.installed = Some(report.latest.clone());
-    Ok(report)
+    let result: Result<Report, String> = async {
+        let mut report = check(client, source, build, channel).await?;
+        status.target = Some(report.latest.clone());
+        if !report.update {
+            status.target = Some(report.current.clone());
+            status.stage(Stage::UpToDate);
+            return Ok(report);
+        }
+        let wanted = match policy {
+            InstallPolicy::Always => true,
+            InstallPolicy::Auto => {
+                report.auto_install && status.failed_target.as_deref() != Some(&report.latest)
+            }
+        };
+        if !wanted {
+            status.stage(Stage::Available);
+            return Ok(report);
+        }
+        match channel {
+            Channel::Stable => {
+                let target = build.target.as_deref().ok_or_else(|| {
+                    "smelt build target is unknown; cannot pick a release asset".to_string()
+                })?;
+                install_release(
+                    client,
+                    &source.web,
+                    &report.latest,
+                    target,
+                    exe,
+                    &mut status,
+                )
+                .await?;
+                report.installed = Some(report.latest.clone());
+            }
+            Channel::Unstable => {
+                report.installed = Some(install_main(&report.latest, exe, &mut status).await?);
+            }
+        }
+        status.failed_target = None;
+        status.stage(Stage::Installed);
+        Ok(report)
+    }
+    .await;
+    if let Err(err) = &result {
+        status.error = Some(err.clone());
+        status.failed_target = status.target.clone();
+        status.stage(Stage::Failed);
+    }
+    result.map(Outcome::Complete)
+}
+
+/// The worker acknowledges only after acquiring the installation lock and
+/// publishing status. It has no terminal or inherited UI output pipes.
+async fn start_background(channel: Channel, policy: InstallPolicy) -> Result<Snapshot, String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate smelt: {e}"))?;
+    if let Ok(snapshot) = Snapshot::read(&exe, tui::DISPLAY) {
+        if snapshot.status.as_ref().is_some_and(|s| s.running) {
+            return Ok(snapshot);
+        }
+    }
+    let mut command = tokio::process::Command::new(&exe);
+    command
+        .args([
+            "upgrade",
+            "--worker",
+            "--channel",
+            match channel {
+                Channel::Stable => "stable",
+                Channel::Unstable => "unstable",
+            },
+            "--policy",
+            match policy {
+                InstallPolicy::Always => "always",
+                InstallPolicy::Auto => "auto",
+            },
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    detach_worker(command.as_std_mut());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("start upgrade worker: {e}"))?;
+    let mut stdout = BufReader::new(child.stdout.take().expect("worker stdout piped"));
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), stdout.read_line(&mut line))
+        .await
+        .map_err(|_| {
+            "upgrade worker did not acknowledge startup; inspect `smelt upgrade status`".to_string()
+        })?
+        .map_err(|e| format!("read upgrade worker: {e}"))?;
+    if line.is_empty() {
+        let exit = child
+            .wait()
+            .await
+            .map_err(|e| format!("wait for upgrade worker: {e}"))?;
+        return Err(format!("upgrade worker exited before startup ({exit})"));
+    }
+    match serde_json::from_str(&line)
+        .map_err(|e| format!("invalid upgrade worker response: {e}"))?
+    {
+        WorkerReply::Snapshot(snapshot) => Ok(snapshot),
+        WorkerReply::Error { error } => Err(error),
+    }
+}
+
+fn detach_worker(command: &mut Command) {
+    smelt_core::process::without_controlling_terminal(command);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
 }
 
 async fn latest_stable_tag(client: &reqwest::Client, web: &str) -> Result<String, String> {
@@ -340,6 +556,7 @@ async fn install_release(
     tag: &str,
     target: &str,
     exe: &Path,
+    status: &mut Status,
 ) -> Result<(), String> {
     // Staging next to the executable keeps the final rename on one
     // filesystem, and fails before any download when the directory is not
@@ -348,16 +565,27 @@ async fn install_release(
     let asset = release_asset(target);
     let base = format!("{web}/releases/download/{tag}");
     say_err(format_args!("downloading {asset} from {tag}..."));
-    let sums = download(client, &format!("{base}/SHA256SUMS"), REQUEST_TIMEOUT).await?;
+    status.stage(Stage::Downloading);
+    let sums = download(client, &format!("{base}/SHA256SUMS"), REQUEST_TIMEOUT, None).await?;
     let expected = checksum_for(&String::from_utf8_lossy(&sums), &asset)
         .ok_or_else(|| format!("SHA256SUMS of {tag} has no entry for {asset}"))?;
-    let archive = download(client, &format!("{base}/{asset}"), DOWNLOAD_TIMEOUT).await?;
+    let archive = download(
+        client,
+        &format!("{base}/{asset}"),
+        DOWNLOAD_TIMEOUT,
+        Some(status),
+    )
+    .await?;
+    status.stage(Stage::Verifying);
     verify_checksum(&archive, &expected).map_err(|actual| {
         format!("{asset} checksum mismatch: expected {expected}, got {actual}")
     })?;
+    status.stage(Stage::Extracting);
     let candidate = staging.unpack(&archive)?;
+    status.stage(Stage::Validating);
     self_check(&candidate, tag).await?;
     say_err(format_args!("installing to {}...", exe.display()));
+    status.stage(Stage::Installing);
     staging.install(exe, &candidate)
 }
 
@@ -365,19 +593,40 @@ async fn download(
     client: &reqwest::Client,
     url: &str,
     timeout: Duration,
+    mut status: Option<&mut Status>,
 ) -> Result<Vec<u8>, String> {
-    let response = client
+    let mut response = client
         .get(url)
         .timeout(timeout)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|e| format!("download failed: {e}"))?;
-    let bytes = response
-        .bytes()
+    if let Some(status) = &mut status {
+        status.total_bytes = response.content_length();
+        status.downloaded_bytes = 0;
+        status.publish();
+    }
+    let mut bytes = Vec::new();
+    let mut last_update = std::time::Instant::now();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| format!("download failed: {e}"))?;
-    Ok(bytes.to_vec())
+        .map_err(|e| format!("download failed: {e}"))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if let Some(status) = &mut status {
+            status.downloaded_bytes = bytes.len() as u64;
+            if last_update.elapsed() >= Duration::from_millis(250) {
+                status.publish();
+                last_update = std::time::Instant::now();
+            }
+        }
+    }
+    if let Some(status) = &mut status {
+        status.publish();
+    }
+    Ok(bytes)
 }
 
 /// Checksum listed for `file` in `sha256sum` output.
@@ -415,6 +664,18 @@ fn verify_checksum(data: &[u8], expected: &str) -> Result<(), String> {
 /// Run the candidate once so a binary that cannot start on this machine, or
 /// reports another version, never replaces a working one.
 async fn self_check(candidate: &Path, tag: &str) -> Result<(), String> {
+    let version = candidate_identity(candidate).await?;
+    if version == tag {
+        Ok(())
+    } else {
+        Err(format!(
+            "smelt candidate failed its self-check: expected {tag}, got `{version}`"
+        ))
+    }
+}
+
+async fn candidate_identity(candidate: &Path) -> Result<String, String> {
+    validate_candidate(candidate)?;
     let output = tokio::time::timeout(
         SELF_CHECK_TIMEOUT,
         tokio::process::Command::new(candidate)
@@ -424,18 +685,24 @@ async fn self_check(candidate: &Path, tag: &str) -> Result<(), String> {
             .output(),
     )
     .await
-    .map_err(|_| "downloaded smelt did not answer `--version`".to_string())?
-    .map_err(|e| format!("downloaded smelt does not run on this machine: {e}"))?;
+    .map_err(|_| "smelt candidate did not answer `--version`".to_string())?
+    .map_err(|e| format!("smelt candidate does not run on this machine: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if output.status.success() && stdout.split_whitespace().any(|word| word == tag) {
-        Ok(())
-    } else {
-        Err(format!(
-            "downloaded smelt failed its self-check: expected {tag}, got `{}` ({})",
-            stdout.trim(),
-            output.status
-        ))
+    let mut words = stdout.split_whitespace();
+    let name = words.next();
+    let version = words
+        .next()
+        .filter(|version| parse_version(version).is_some());
+    if output.status.success() && name == Some("smelt") {
+        if let Some(version) = version {
+            return Ok(version.to_string());
+        }
     }
+    Err(format!(
+        "smelt candidate failed its self-check: `{}` ({})",
+        stdout.trim(),
+        output.status
+    ))
 }
 
 /// Private directory next to the executable. Removed on drop unless it must
@@ -534,6 +801,9 @@ pub fn cleanup_stale_staging() {
 }
 
 fn cleanup_stale_staging_in(parent: &Path, executable: &Path, max_age: Duration) {
+    if status::read(executable).is_ok_and(|status| status.is_some_and(|s| s.running)) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(parent) else {
         return;
     };
@@ -560,21 +830,21 @@ fn cleanup_stale_staging_in(parent: &Path, executable: &Path, max_age: Duration)
 
 fn validate_candidate(candidate: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(candidate)
-        .map_err(|error| format!("release archive did not contain `smelt`: {error}"))?;
+        .map_err(|error| format!("smelt candidate is missing: {error}"))?;
     if !metadata.file_type().is_file() {
         return Err(format!(
-            "release archive `smelt` entry is not a regular file: {}",
+            "smelt candidate is not a regular file: {}",
             candidate.display()
         ));
     }
     if metadata.len() == 0 {
-        return Err("release archive contained an empty `smelt` executable".to_string());
+        return Err("smelt candidate is empty".to_string());
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o111 == 0 {
-            return Err("release archive `smelt` entry is not executable".to_string());
+            return Err("smelt candidate is not executable".to_string());
         }
     }
     Ok(())
@@ -673,8 +943,16 @@ struct InstallLock {
     _file: fs::File,
 }
 
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        // A concurrent fork can briefly inherit this descriptor before exec.
+        // Releasing ownership must not wait for that unrelated child to exec.
+        let _ = fs4::FileExt::unlock(&self._file);
+    }
+}
+
 impl InstallLock {
-    fn acquire(exe: &Path) -> Result<Self, String> {
+    fn try_acquire(exe: &Path) -> Result<Option<Self>, String> {
         let dir = exe
             .parent()
             .ok_or_else(|| format!("{} has no parent directory", exe.display()))?;
@@ -690,31 +968,16 @@ impl InstallLock {
                     dir.display()
                 )
             })?;
-        // Fail instead of waiting: a waiter runs the old image and would
-        // install the same version again.
+        // Follow instead of waiting: a waiter runs the old image and could
+        // install the same version again after the owner finishes.
         match fs4::FileExt::try_lock(&file) {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(fs4::TryLockError::WouldBlock) => {
-                Err("another smelt upgrade is already running".to_string())
-            }
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(fs4::TryLockError::WouldBlock) => Ok(None),
             Err(fs4::TryLockError::Error(e)) => {
                 Err(format!("lock upgrade {}: {e}", path.display()))
             }
         }
     }
-}
-
-/// The `cargo install --root` that places the binary at `exe`.
-fn install_root(exe: &Path) -> Result<&Path, String> {
-    exe.parent()
-        .filter(|bin| bin.file_name().is_some_and(|name| name == "bin"))
-        .and_then(Path::parent)
-        .ok_or_else(|| {
-            format!(
-                "cannot upgrade {} from main: cargo installs into a `bin` directory",
-                exe.display()
-            )
-        })
 }
 
 fn main_install_args(root: &Path) -> Result<Vec<&str>, String> {
@@ -723,18 +986,41 @@ fn main_install_args(root: &Path) -> Result<Vec<&str>, String> {
     Ok(args)
 }
 
-fn install_main(latest: &str, exe: &Path) -> Result<(), String> {
-    let args = main_install_args(install_root(exe)?)?;
+async fn install_main(latest: &str, exe: &Path, status: &mut Status) -> Result<String, String> {
+    // Cargo never receives the live install root. If this worker dies, its
+    // orphaned child can finish building but cannot replace the live executable.
+    let staging = Staging::create(exe)?;
+    let args = main_install_args(&staging.root)?;
     say_err(format_args!(
         "building {latest} with cargo install; this may take a few minutes..."
     ));
-    run("cargo", &args, "cargo install")
+    status.stage(Stage::Building);
+    run_with_status("cargo", &args, "cargo install", Some(status))?;
+    let candidate = staging
+        .root
+        .join("bin")
+        .join(format!("smelt{}", std::env::consts::EXE_SUFFIX));
+    status.stage(Stage::Validating);
+    let version = candidate_identity(&candidate).await?;
+    status.target = Some(version.clone());
+    status.stage(Stage::Installing);
+    staging.install(exe, &candidate)?;
+    Ok(version)
 }
 
 /// Run a helper program. Its output goes to stderr so stdout stays reserved
 /// for the report. A failure reports the first `error:` line the program
 /// printed, which names the root cause.
 fn run(program: &str, args: &[&str], label: &str) -> Result<(), String> {
+    run_with_status(program, args, label, None)
+}
+
+fn run_with_status(
+    program: &str,
+    args: &[&str],
+    label: &str,
+    mut status: Option<&mut Status>,
+) -> Result<(), String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -747,6 +1033,23 @@ fn run(program: &str, args: &[&str], label: &str) -> Result<(), String> {
         for line in BufReader::new(stderr).split(b'\n').map_while(Result::ok) {
             let line = String::from_utf8_lossy(&line);
             say_err(format_args!("{line}"));
+            if let Some(status) = &mut status {
+                let activity = line.trim();
+                if [
+                    "Compiling ",
+                    "Checking ",
+                    "Updating ",
+                    "Downloading ",
+                    "Installing ",
+                    "Finished ",
+                ]
+                .iter()
+                .any(|prefix| activity.starts_with(prefix))
+                {
+                    status.activity = Some(activity.chars().take(240).collect());
+                    status.publish();
+                }
+            }
             if cause.is_none() {
                 cause = line.trim().strip_prefix("error: ").map(str::to_string);
             }
@@ -838,30 +1141,19 @@ mod tests {
     }
 
     #[test]
-    fn unstable_installs_into_the_root_of_the_running_binary() {
-        assert_eq!(
-            install_root(Path::new("/home/me/.cargo/bin/smelt")).unwrap(),
-            Path::new("/home/me/.cargo")
-        );
-        assert_eq!(
-            install_root(Path::new("/usr/local/bin/smelt")).unwrap(),
-            Path::new("/usr/local")
-        );
-        let err = install_root(Path::new("/repo/target/release/smelt")).unwrap_err();
-        assert!(err.contains("`bin` directory"), "{err}");
-        let args = main_install_args(Path::new("/home/me/.cargo")).unwrap();
-        assert_eq!(args[args.len() - 2..], ["--root", "/home/me/.cargo"]);
+    fn unstable_build_uses_explicit_staging_root() {
+        let args = main_install_args(Path::new("/tmp/staging")).unwrap();
+        assert_eq!(args[args.len() - 2..], ["--root", "/tmp/staging"]);
     }
 
     #[test]
     fn install_lock_admits_one_holder_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("smelt");
-        let first = InstallLock::acquire(&exe).unwrap();
-        let err = InstallLock::acquire(&exe).err().unwrap();
-        assert_eq!(err, "another smelt upgrade is already running");
+        let first = InstallLock::try_acquire(&exe).unwrap().unwrap();
+        assert!(InstallLock::try_acquire(&exe).unwrap().is_none());
         drop(first);
-        assert!(InstallLock::acquire(&exe).is_ok());
+        assert!(InstallLock::try_acquire(&exe).unwrap().is_some());
     }
 
     #[test]
@@ -1129,11 +1421,12 @@ mod tests {
 
         /// A release archive whose `smelt` prints `version_output`.
         fn release_archive(version_output: &str) -> Vec<u8> {
+            release_archive_script(&format!("#!/bin/sh\necho 'smelt {version_output}'\n"))
+        }
+
+        fn release_archive_script(script: &str) -> Vec<u8> {
             let dir = tempfile::tempdir().unwrap();
-            executable(
-                &dir.path().join("smelt"),
-                &format!("#!/bin/sh\necho 'smelt {version_output}'\n"),
-            );
+            executable(&dir.path().join("smelt"), script);
             fs::write(dir.path().join("LICENSE"), "MIT").unwrap();
             let archive = dir.path().join("release.tar.gz");
             let status = Command::new("tar")
@@ -1184,15 +1477,192 @@ mod tests {
         }
 
         async fn upgrade_in(dir: &Path, server: &MockServer) -> Result<Report, String> {
+            upgrade_with_policy(dir, server, &release_build("0.6.2"), InstallPolicy::Always).await
+        }
+
+        async fn upgrade_with_policy(
+            dir: &Path,
+            server: &MockServer,
+            build: &Build,
+            policy: InstallPolicy,
+        ) -> Result<Report, String> {
             let client = smelt_provider::http_client();
-            upgrade(
+            match upgrade_inner(
                 &client,
                 &source(server),
-                &release_build("0.6.2"),
-                Channel::Stable,
+                build,
                 &dir.join("smelt"),
+                InstallOptions {
+                    channel: Channel::Stable,
+                    policy,
+                    acknowledge: false,
+                },
             )
-            .await
+            .await?
+            {
+                Outcome::Complete(report) => Ok(report),
+                Outcome::Following(_) => Err("unexpected concurrent installer".into()),
+            }
+        }
+
+        #[tokio::test]
+        async fn build_worker_fixture() {
+            let Some(dir) = std::env::var_os("SMELT_BUILD_WORKER_FIXTURE") else {
+                return;
+            };
+            let dir = PathBuf::from(dir);
+            let exe = dir.join("bin/smelt");
+            let _lock = InstallLock::try_acquire(&exe).unwrap().unwrap();
+            let mut status = Status::new(&exe, Some(Channel::Unstable), Stage::Building);
+            status.save().unwrap();
+            install_main("main@abc1234", &exe, &mut status)
+                .await
+                .unwrap();
+        }
+
+        #[test]
+        fn unstable_build_validates_and_swaps_only_successful_candidates() {
+            for case in ["success", "build_failure", "invalid_candidate"] {
+                let dir = tempfile::tempdir().unwrap();
+                fs::create_dir(dir.path().join("bin")).unwrap();
+                let exe = dir.path().join("bin/smelt");
+                executable(&exe, "old");
+                executable(
+                    &dir.path().join("cargo"),
+                    r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --root ]; then shift; root=$1; fi
+  shift
+done
+if [ "$SMELT_BUILD_WORKER_CASE" = build_failure ]; then echo 'error: fixture build failed' >&2; exit 1; fi
+mkdir -p "$root/bin"
+if [ "$SMELT_BUILD_WORKER_CASE" = invalid_candidate ]; then
+  printf '#!/bin/sh\necho invalid\n' > "$root/bin/smelt"
+else
+  printf '#!/bin/sh\necho smelt v0.6.3-1-abc1234\n' > "$root/bin/smelt"
+fi
+chmod +x "$root/bin/smelt"
+"#,
+                );
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "upgrade::tests::install::build_worker_fixture",
+                        "--nocapture",
+                    ])
+                    .env("SMELT_BUILD_WORKER_FIXTURE", dir.path())
+                    .env("SMELT_BUILD_WORKER_CASE", case)
+                    .env(
+                        "PATH",
+                        format!(
+                            "{}:{}",
+                            dir.path().display(),
+                            std::env::var("PATH").unwrap()
+                        ),
+                    )
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.success(),
+                    case == "success",
+                    "{case}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let installed = fs::read_to_string(&exe).unwrap();
+                if case == "success" {
+                    assert!(installed.contains("smelt v0.6.3-1-abc1234"));
+                } else {
+                    assert_eq!(installed, "old", "{case}");
+                }
+                assert!(staging_dirs(&dir.path().join("bin")).is_empty());
+            }
+        }
+
+        #[test]
+        fn killed_build_worker_cannot_leave_cargo_installing_into_live_root() {
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::fs::OpenOptionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir(dir.path().join("bin")).unwrap();
+            let exe = dir.path().join("bin/smelt");
+            executable(&exe, "old");
+            let control = dir.path().join("control");
+            let fifo = std::ffi::CString::new(control.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            executable(
+                &dir.path().join("cargo"),
+                r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --root ]; then shift; root=$1; fi
+  shift
+done
+echo "$root" > "$SMELT_BUILD_WORKER_FIXTURE/root"
+echo "Compiling fixture $$" >&2
+read release < "$SMELT_BUILD_WORKER_FIXTURE/control"
+mkdir -p "$root/bin"
+printf '#!/bin/sh\necho smelt v0.6.3-1-abc1234\n' > "$root/bin/smelt"
+chmod +x "$root/bin/smelt"
+echo done > "$SMELT_BUILD_WORKER_FIXTURE/done"
+"#,
+            );
+            let mut worker = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "upgrade::tests::install::build_worker_fixture",
+                    "--nocapture",
+                ])
+                .env("SMELT_BUILD_WORKER_FIXTURE", dir.path())
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        dir.path().display(),
+                        std::env::var("PATH").unwrap()
+                    ),
+                )
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut reader = BufReader::new(worker.stderr.take().unwrap());
+            let cargo_pid = loop {
+                let mut line = String::new();
+                assert!(
+                    reader.read_line(&mut line).unwrap() > 0,
+                    "worker exited before Cargo started"
+                );
+                if let Some(pid) = line.trim().strip_prefix("Compiling fixture ") {
+                    break pid.parse::<i32>().unwrap();
+                }
+            };
+            worker.kill().unwrap();
+            worker.wait().unwrap();
+            let lock = InstallLock::try_acquire(&exe)
+                .unwrap()
+                .expect("dead worker released lock");
+            fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&control)
+                .unwrap()
+                .write_all(b"go\n")
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !dir.path().join("done").exists() {
+                if std::time::Instant::now() > deadline {
+                    unsafe {
+                        libc::kill(cargo_pid, libc::SIGKILL);
+                    }
+                    panic!("orphan Cargo did not finish");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop(lock);
+            assert_eq!(
+                fs::read_to_string(&exe).unwrap(),
+                "old",
+                "orphan Cargo replaced live executable"
+            );
         }
 
         #[tokio::test]
@@ -1203,12 +1673,116 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             executable(&dir.path().join("smelt"), "old");
 
-            let report = upgrade_in(dir.path(), &server).await.unwrap();
+            let report = upgrade_with_policy(
+                dir.path(),
+                &server,
+                &release_build("0.6.2"),
+                InstallPolicy::Auto,
+            )
+            .await
+            .unwrap();
 
             assert_eq!(report.installed.as_deref(), Some("v0.6.3"));
             let installed = fs::read_to_string(dir.path().join("smelt")).unwrap();
             assert!(installed.contains("smelt v0.6.3"), "{installed}");
             assert!(staging_dirs(dir.path()).is_empty());
+            let status = status::read(&dir.path().join("smelt")).unwrap().unwrap();
+            assert_eq!(status.stage, Stage::Installed);
+            assert!(!status.running);
+            assert_eq!(status.target.as_deref(), Some("v0.6.3"));
+            assert_eq!(status.downloaded_bytes, archive.len() as u64);
+            assert_eq!(status.total_bytes, Some(archive.len() as u64));
+        }
+
+        #[tokio::test]
+        async fn auto_worker_rechecks_safety_before_downloading() {
+            let server = MockServer::start().await;
+            serve_latest_release(&server, "v0.6.3").await;
+            let dir = tempfile::tempdir().unwrap();
+            executable(&dir.path().join("smelt"), "old");
+            let mut build = release_build("0.6.2");
+            build.release = false;
+            let report = upgrade_with_policy(dir.path(), &server, &build, InstallPolicy::Auto)
+                .await
+                .unwrap();
+            assert!(report.update);
+            assert!(report.installed.is_none());
+            assert_eq!(fs::read_to_string(dir.path().join("smelt")).unwrap(), "old");
+            let status = status::read(&dir.path().join("smelt")).unwrap().unwrap();
+            assert_eq!(status.stage, Stage::Available);
+            assert!(!status.running);
+            assert!(server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == "HEAD"));
+        }
+
+        #[tokio::test]
+        async fn failed_auto_target_survives_new_workers_until_explicit_retry() {
+            let server = MockServer::start().await;
+            let archive = release_archive("v0.6.3");
+            serve_release(&server, "v0.6.3", &archive, &"0".repeat(64)).await;
+            let dir = tempfile::tempdir().unwrap();
+            executable(&dir.path().join("smelt"), "old");
+            assert!(upgrade_in(dir.path(), &server)
+                .await
+                .unwrap_err()
+                .contains("checksum mismatch"));
+            let fixed = MockServer::start().await;
+            serve_release(&fixed, "v0.6.3", &archive, &sha256_hex(&archive)).await;
+            for _ in 0..2 {
+                let report = upgrade_with_policy(
+                    dir.path(),
+                    &fixed,
+                    &release_build("0.6.2"),
+                    InstallPolicy::Auto,
+                )
+                .await
+                .unwrap();
+                assert!(report.installed.is_none());
+                let status = status::read(&dir.path().join("smelt")).unwrap().unwrap();
+                assert_eq!(status.stage, Stage::Available);
+                assert_eq!(status.failed_target.as_deref(), Some("v0.6.3"));
+            }
+            assert!(fixed
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == "HEAD"));
+            assert!(upgrade_in(dir.path(), &fixed)
+                .await
+                .unwrap()
+                .installed
+                .is_some());
+            assert!(status::read(&dir.path().join("smelt"))
+                .unwrap()
+                .unwrap()
+                .failed_target
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn status_write_failure_does_not_abort_verified_installation() {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let exe = dir.path().join("smelt");
+            executable(&exe, "old");
+            let status_path = dir.path().join(".smelt-upgrade.status.json");
+            let script = format!(
+                "#!/bin/sh\nrm -f '{}'\nmkdir '{}'\necho smelt v0.6.3\n",
+                status_path.display(),
+                status_path.display()
+            );
+            let archive = release_archive_script(&script);
+            serve_release(&server, "v0.6.3", &archive, &sha256_hex(&archive)).await;
+            let report = upgrade_in(dir.path(), &server)
+                .await
+                .expect("telemetry is not installation");
+            assert_eq!(report.installed.as_deref(), Some("v0.6.3"));
+            assert_eq!(fs::read_to_string(&exe).unwrap(), script);
         }
 
         #[tokio::test]
@@ -1247,6 +1821,10 @@ mod tests {
                 assert!(error.contains(expected), "{case}: {error}");
                 assert_eq!(fs::read_to_string(dir.path().join("smelt")).unwrap(), "old");
                 assert!(staging_dirs(dir.path()).is_empty(), "{case}");
+                let status = status::read(&dir.path().join("smelt")).unwrap().unwrap();
+                assert_eq!(status.stage, Stage::Failed);
+                assert!(!status.running);
+                assert_eq!(status.error.as_deref(), Some(error.as_str()));
             }
         }
 

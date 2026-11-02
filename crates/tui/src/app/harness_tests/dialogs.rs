@@ -1,5 +1,41 @@
 use super::*;
 
+#[test]
+fn upgrade_status_view_shows_shared_download_progress() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    app.run_lua_result(r#"
+        smelt.settings.autoupgrade = "off"
+        smelt.process.run = function(_, args)
+          assert(args[2] == "status", "status view must not start an installation")
+          return { exit_code = 0, stdout = '{"current":"v0.6.2","status":{"operation_id":"shared-worker","channel":"stable","target":"v0.7.0","stage":"downloading","running":true,"downloaded_bytes":18874368,"total_bytes":33554432,"executable":"/opt/smelt/bin/smelt"}}' }
+        end
+        smelt.cmd.run("upgrade status")
+    "#).unwrap();
+    drive_lua_tasks(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("upgrade status"), "{frame}");
+    assert!(frame.contains("Target: v0.7.0"), "{frame}");
+    assert!(
+        frame.contains("Downloaded: 18.0 MiB / 32.0 MiB (56%)"),
+        "{frame}"
+    );
+    let dialog = frame
+        .lines()
+        .skip_while(|line| !line.starts_with("─ upgrade status "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("upgrade_status_download", dialog);
+    app.set_terminal_size(60, 24);
+    let narrow = app.render_to_frame().text();
+    assert!(
+        narrow.contains("Downloaded: 18.0 MiB / 32.0 MiB (56%)"),
+        "{narrow}"
+    );
+    app.type_char('q');
+    assert!(app.run_lua("assert(smelt.state.get('upgrade').snapshot.status.running)"));
+}
+
 fn open_root_test_dialog(app: &mut TestApp) {
     assert!(app.run_lua(
         r#"

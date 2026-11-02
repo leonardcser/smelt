@@ -1,0 +1,11 @@
+---
+source: crates/tui/src/app/harness_tests/dialogs.rs
+expression: dialog
+---
+─ upgrade status ───────────────────────────────────────────────────────────────────────────────────
+ Target: v0.7.0
+ Channel: stable
+ Status: downloading
+ Downloaded: 18.0 MiB / 32.0 MiB (56%)
+ Installation: /opt/smelt/bin/smelt
+ ○ normal                                                                                     1:1 0%

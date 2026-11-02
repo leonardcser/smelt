@@ -9,19 +9,19 @@
 --
 -- With `autoupgrade = "auto"` (the default), updates the CLI marks as safe
 -- install without asking. The running session keeps its version until the
--- next launch. Background work never raises error toasts: failures go to the
--- log and a later check retries.
+-- next launch. Automatic installs stay quiet; failure details remain in shared
+-- status, and `/upgrade` can retry them.
 --
 -- Commands:
---   /upgrade        install the newest build now
---   /upgrade check  check now and report the result
+--   /upgrade         start or follow an installation
+--   /upgrade check   check now and report the result
+--   /upgrade status  live status shared by sessions using this installation
 --   /changelog      release notes of recent releases
 
 local RELEASES_URL = "https://api.github.com/repos/leonardcser/smelt/releases?per_page=20"
 local CHECK_EVERY_SECS = 3600
 local RETRY_SECS = 300
-local CHECK_TIMEOUT_SECS = 60
-local INSTALL_TIMEOUT_SECS = { stable = 900, unstable = 3600 }
+local REQUEST_TIMEOUT_SECS = 60
 
 local notify = smelt.notify.scoped("upgrade")
 
@@ -30,10 +30,7 @@ local session = smelt.state.get("upgrade")
 -- Captured once at startup: after an upgrade replaces the file, the OS may
 -- report the running image under another name.
 if session.exe == nil then session.exe = smelt.os.exe_path() or false end
--- Versions whose automatic install failed; `/upgrade` still retries them.
-session.failed = session.failed or {}
 session.last_check = session.last_check or 0
--- session.status: nil | { kind = "available" | "installed", version = string }
 
 local function mode()
   local m = smelt.settings.autoupgrade
@@ -60,27 +57,16 @@ end
 
 if session.updated_from == nil then session.updated_from = previous_version() or false end
 
-smelt.banner.source("upgrade", function()
-  local status = session.status
-  if status and status.kind == "installed" then
-    return status.version .. " installed, restart smelt to use it"
-  elseif status and status.kind == "available" then
-    return "update " .. status.version .. " available  →  /upgrade"
-  elseif session.updated_from then
-    return "previously v" .. session.updated_from .. "  →  /changelog"
-  end
-end)
-
 -- ── checks and installs ───────────────────────────────────────────────
 
 -- Run `smelt upgrade [args] --json`. Returns the report, or nil and a one-line
 -- error.
-local function run_cli(args, ch, timeout_secs)
+local function run_cli(args)
   if not session.exe then return nil, "cannot locate the smelt executable" end
   local argv = { "upgrade" }
   for _, arg in ipairs(args) do argv[#argv + 1] = arg end
-  for _, arg in ipairs({ "--json", "--channel", ch }) do argv[#argv + 1] = arg end
-  local result, err = smelt.process.run(session.exe, argv, { timeout_secs = timeout_secs })
+  for _, arg in ipairs({ "--json", "--channel", channel() }) do argv[#argv + 1] = arg end
+  local result, err = smelt.process.run(session.exe, argv, { timeout_secs = REQUEST_TIMEOUT_SECS })
   if not result then return nil, err or "failed to run smelt upgrade" end
   if result.timed_out then return nil, "smelt upgrade timed out" end
   if result.exit_code ~= 0 then
@@ -92,110 +78,240 @@ local function run_cli(args, ch, timeout_secs)
     for line in ("\n" .. (result.stderr or "")):gmatch("\nerror: ([^\r\n]+)") do last = line end
     return nil, last or ("smelt upgrade exited with " .. tostring(result.exit_code))
   end
-  local report = smelt.parse.json(result.stdout or "")
-  if type(report) ~= "table" or type(report.latest) ~= "string" then
+  local reply = smelt.parse.json(result.stdout or "")
+  if type(reply) ~= "table" or type(reply.current) ~= "string"
+      or (reply.status ~= nil and type(reply.status) ~= "table")
+      or (args[1] == "check" and (type(reply.latest) ~= "string" or type(reply.update) ~= "boolean")) then
     return nil, "unexpected output from smelt upgrade"
   end
-  return report
+  return reply
 end
 
-local function set_status(kind, version)
-  local status = session.status or {}
-  if status.kind == kind and status.version == version then return end
-  session.status = kind and { kind = kind, version = version } or nil
-  smelt.banner.refresh()
+local stages = {
+  starting = "starting", checking = "checking for updates", downloading = "downloading",
+  available = "update available, run /upgrade to install",
+  verifying = "verifying checksum", extracting = "extracting", validating = "validating executable",
+  installing = "installing", building = "building", installed = "installed, restart smelt to use it",
+  up_to_date = "up to date", failed = "failed", interrupted = "interrupted, run /upgrade to retry",
+}
+
+local function download_text(status)
+  local bytes, total = status.downloaded_bytes or 0, status.total_bytes
+  local text = string.format("%.1f MiB", bytes / 1048576)
+  if total and total > 0 then
+    text = text .. string.format(" / %.1f MiB (%d%%)", total / 1048576,
+      math.min(100, math.floor(bytes * 100 / total)))
+  end
+  return text
 end
 
--- `version` is what the binary on disk reports. Another session or a manual
--- install may have replaced it; this session runs its old image until restart.
-local function set_disk_version(version)
-  if version ~= smelt.build.display then
-    set_status("installed", version)
+local function status_text(status)
+  local text = (status.target or "smelt") .. " (" .. (status.channel or "unknown channel") .. "): "
+    .. (stages[status.stage] or status.stage or "unknown")
+  if status.stage == "downloading" then text = text .. " " .. download_text(status) end
+  if status.activity then text = text .. ": " .. status.activity end
+  if status.error then text = text .. ": " .. status.error end
+  return text
+end
+
+local function banner_text()
+  local snapshot, check = session.snapshot, session.check
+  local status = snapshot and snapshot.status
+  local current = check and check.current or snapshot and snapshot.current
+  if status and status.running then
+    return status_text(status) .. "  →  /upgrade status"
+  elseif status and (status.stage == "failed" or status.stage == "interrupted") then
+    return "upgrade " .. status.stage .. "  →  /upgrade status"
+  elseif current and current ~= smelt.build.display then
+    return current .. " installed, restart smelt to use it"
+  elseif check and check.update then
+    return "update " .. check.latest .. " available  →  /upgrade"
+  elseif not check and status and status.stage == "available" and status.target then
+    return "update " .. status.target .. " available  →  /upgrade"
+  elseif session.updated_from then
+    return "previously v" .. session.updated_from .. "  →  /changelog"
+  end
+end
+
+smelt.banner.source("upgrade", banner_text)
+
+local status_view
+
+local function update_view(status, err)
+  if not status_view then return end
+  local text = err and ("Could not read upgrade status: " .. err)
+    or "No upgrade has been recorded for this installation. Run /upgrade to start one."
+  if status then
+    text = "Target: " .. (status.target or "not resolved yet")
+      .. "\nChannel: " .. (status.channel or "unknown")
+      .. "\nStatus: " .. (stages[status.stage] or status.stage or "unknown")
+    if status.stage == "downloading" then text = text .. "\nDownloaded: " .. download_text(status) end
+    if status.activity then text = text .. "\nActivity: " .. status.activity end
+    if status.error then text = text .. "\nError: " .. status.error end
+    if status.started_at then
+      local ended = status.running and os.time() or (status.updated_at or os.time())
+      text = text .. "\n\nElapsed: " .. math.max(0, ended - status.started_at) .. "s"
+    end
+    if status.executable then text = text .. "\nInstallation: " .. status.executable end
+  end
+  if status_view.text ~= text then
+    status_view.text = text
+    status_view.buf:source(text)
+  end
+end
+
+local function notify_result(snapshot)
+  local status = snapshot.status
+  local text = status_text(status)
+  if status.stage == "up_to_date" then
+    text = snapshot.current == smelt.build.display and ("smelt is up to date (" .. snapshot.current .. ")")
+      or (snapshot.current .. " installed, restart smelt to use it")
+  end
+  if status.stage == "failed" then notify.error(text)
+  elseif status.stage == "interrupted" then notify.warn(text)
+  else notify.info(text) end
+end
+
+local function apply_shared(snapshot, observe)
+  local previous_banner = banner_text()
+  local notified = false
+  session.snapshot = snapshot
+  if session.check and session.check.current ~= snapshot.current then session.check = nil end
+  local status = snapshot.status
+  if status and status.running then
+    if observe then session.observed = status.operation_id end
   else
-    set_status(nil)
+    if status and session.observed and session.observed == status.operation_id then
+      notify_result(snapshot)
+      notified = true
+    end
+    session.observed = nil
   end
+  if previous_banner ~= banner_text() then smelt.banner.refresh() end
+  update_view(status)
+  return notified
 end
 
--- One check, then an install when `install` asks for it: "never", "auto"
--- (when the CLI marks the update safe), or "always". `verbose` reports every
--- outcome; background passes only announce new updates in notify mode.
-local function pass(ch, install, verbose)
-  local report, err = run_cli({ "check" }, ch, CHECK_TIMEOUT_SECS)
-  if not report then
-    session.last_check = os.time() - CHECK_EVERY_SECS + RETRY_SECS
-    if verbose then notify.warn("upgrade check failed: " .. err) end
-    return
-  end
-
-  if not report.update then
-    set_disk_version(report.current)
-    if verbose then
-      if session.status then
-        notify.info(report.current .. " is installed, restart smelt to use it")
-      else
-        notify.info("smelt is up to date (" .. report.current .. ")")
-      end
+local function apply_check(report, verbose)
+  local previous_banner = banner_text()
+  session.check = report
+  if report.update then
+    local key = report.channel .. ":" .. report.latest
+    if verbose or (mode() == "notify" and session.announced ~= key) then
+      session.announced = key
+      notify.info("update " .. report.latest .. " available, run /upgrade")
     end
-    return
+  elseif verbose then
+    notify.info(report.current == smelt.build.display and ("smelt is up to date (" .. report.current .. ")")
+      or (report.current .. " installed, restart smelt to use it"))
   end
-
-  local latest = report.latest
-  local wanted = install == "always"
-    or (install == "auto" and report.auto_install and not session.failed[latest])
-  if not wanted then
-    local status = session.status
-    local announced = status and status.kind == "available" and status.version == latest
-    set_status("available", latest)
-    if verbose then
-      notify.info("update " .. latest .. " available, run /upgrade to install it")
-    elseif not announced and mode() == "notify" then
-      notify.info("update " .. latest .. " available, run /upgrade")
-    end
-    return
-  end
-
-  if verbose then notify.info("installing " .. latest .. " in the background…") end
-  local done, install_err = run_cli({}, ch, INSTALL_TIMEOUT_SECS[ch])
-  if not done then
-    session.failed[latest] = true
-    set_status("available", latest)
-    if verbose then notify.error("upgrade to " .. latest .. " failed: " .. install_err) end
-    return
-  end
-  set_disk_version(done.installed or done.current)
-  if verbose and session.status then
-    notify.info(session.status.version .. " installed, restart smelt to use it")
-  end
+  if previous_banner ~= banner_text() then smelt.banner.refresh() end
 end
 
-local busy = false
-
-local function start(install, verbose)
+-- Serialize CLI requests, but keep the latest explicit command when a quiet
+-- poll is in flight. Operation liveness always comes from the next snapshot.
+local busy, pending = false, nil
+local function request(action, verbose)
   if busy then
-    if verbose then notify.info("an upgrade check is already running") end
+    if verbose then pending = action end
     return
   end
   busy = true
-  local ch = channel()
   smelt.spawn(function()
-    local ok, err = pcall(pass, ch, install, verbose)
+    local ok, err = pcall(function()
+      local args = action == "status" and { "status" } or { "--background" }
+      if action == "auto" then
+        args = { "--background", "--policy", "auto" }
+      end
+      local snapshot, read_err = run_cli(args)
+      if not snapshot then
+        session.last_check = os.time() - CHECK_EVERY_SECS + RETRY_SECS
+        update_view(nil, read_err)
+        if verbose then notify.warn("upgrade request failed: " .. read_err) end
+        return
+      end
+      local notified = apply_shared(snapshot, verbose)
+      if verbose and not notified and action ~= "status" and snapshot.status then
+        if snapshot.status.running then
+          notify.info(status_text(snapshot.status) .. "; run /upgrade status for progress")
+        else
+          notify_result(snapshot)
+        end
+      end
+    end)
     busy = false
+    if not ok then error(err, 0) end
+    if pending then
+      local action = pending
+      pending = nil
+      request(action, true)
+    end
+  end)
+end
+
+-- Availability checks are session-local and do not serialize with installers.
+local checking, check_verbose = false, false
+local function check_updates(automatic, verbose)
+  check_verbose = check_verbose or verbose
+  if checking then return end
+  checking = true
+  smelt.spawn(function()
+    local ok, err = pcall(function()
+      local report, check_err = run_cli({ "check" })
+      if not report then
+        session.last_check = os.time() - CHECK_EVERY_SECS + RETRY_SECS
+        if check_verbose then notify.warn("upgrade check failed: " .. check_err) end
+        return
+      end
+      apply_check(report, check_verbose)
+      if automatic and mode() == "auto" and report.update and report.auto_install == true then
+        request("auto", false)
+      end
+    end)
+    checking, check_verbose = false, false
     if not ok then error(err, 0) end
   end)
 end
 
+smelt.tick.every(1, function()
+  local status = session.snapshot and session.snapshot.status
+  if (status and status.running) or status_view then request("status", false) end
+end)
+
 -- Ticks every minute so that switching `autoupgrade` on takes effect soon.
 smelt.tick.every(60, function()
-  if mode() == "off" or os.time() - session.last_check < CHECK_EVERY_SECS then return end
-  session.last_check = os.time()
-  start(mode() == "auto" and "auto" or "never", false)
+  local m = mode()
+  if m ~= "off" and not checking and os.time() - session.last_check >= CHECK_EVERY_SECS then
+    session.last_check = os.time()
+    check_updates(m == "auto", false)
+  else
+    local status = session.snapshot and session.snapshot.status
+    if not (status and status.running) then request("status", false) end
+  end
 end)
 
 smelt.cmd.register("upgrade", function(args)
-  local check_only = (args or ""):match("^%s*check%s*$") ~= nil
-  notify.info("checking for updates…")
-  start(check_only and "never" or "always", true)
-end, { desc = "install the newest smelt build", args = { "check" } })
+  local action = (args or ""):match("^%s*(.-)%s*$")
+  if action == "status" then
+    if not status_view then
+      local buf = smelt.buf.new({ readonly = true })
+      buf:source("Reading upgrade status…")
+      local handle = smelt.dialog.viewer({
+        title = "upgrade status", buf = buf, min_height = "20%", max_height = "50%",
+      })
+      local view = { buf = buf }
+      status_view = view
+      handle.win:on("close", function() if status_view == view then status_view = nil end end)
+    end
+    request("status", true)
+    return
+  end
+  if action ~= "" and action ~= "check" then
+    notify.warn("usage: /upgrade [check|status]")
+    return
+  end
+  if action == "check" then check_updates(false, true) else request("start", true) end
+end, { desc = "start or follow an upgrade", args = { "check", "status" } })
 
 -- ── /changelog ────────────────────────────────────────────────────────
 
