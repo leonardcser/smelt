@@ -1245,6 +1245,64 @@ fn tool_preparation_yields_and_retains_independent_invocation_snapshots() {
 }
 
 #[test]
+fn tool_display_hooks_report_failures_once_and_allow_nil() {
+    for (hook, body, message) in [
+        ("summary", "error('hook failed')", "hook failed"),
+        ("summary", "return false", "tool summary"),
+        ("preview_output", "error('hook failed')", "hook failed"),
+        (
+            "preview_output",
+            "return false",
+            "expected result table or nil, got boolean",
+        ),
+        (
+            "preview_output",
+            "return { display_content = false }",
+            "invalid result",
+        ),
+        ("summary", "return nil", ""),
+        ("preview_output", "return nil", ""),
+    ] {
+        let rt = fresh();
+        rt.lua
+            .load(format!(
+                r#"
+            hook_errors = {{}}
+            smelt.notify = {{ error = function(message)
+                hook_errors[#hook_errors + 1] = message
+            end }}
+            smelt.tools.register({{
+                name = "display_hook",
+                {hook} = function() {body} end,
+                execute = function() return "" end,
+            }})
+        "#
+            ))
+            .exec()
+            .unwrap();
+        let args = HashMap::new();
+        if hook == "summary" {
+            assert_eq!(rt.tool_summary("display_hook", &args).as_plain_text(), "");
+        } else {
+            assert!(rt
+                .tool_preview_output("display_hook", &args, None)
+                .is_none());
+        }
+        let errors: Vec<String> = get_global::<mlua::Table>(&rt, "hook_errors")
+            .sequence_values()
+            .collect::<mlua::Result<_>>()
+            .unwrap();
+        if message.is_empty() {
+            assert!(errors.is_empty(), "{hook}: {errors:?}");
+        } else {
+            assert_eq!(errors.len(), 1, "{hook}: {errors:?}");
+            assert!(errors[0].starts_with(&format!("tool {hook} `display_hook`:")));
+            assert!(errors[0].contains(message), "{}", errors[0]);
+        }
+    }
+}
+
+#[test]
 fn tool_preparation_errors_and_invalid_results_fail_closed() {
     for hook in [
         "prepare = function() error('preparation failed') end",

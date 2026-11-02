@@ -1,3 +1,4 @@
+use crate::fs_watch::{wait_for_change, Signal as WorkerMsg};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -100,12 +101,6 @@ pub enum SearchSource {
     #[default]
     Workspace,
     Git,
-}
-
-#[derive(Debug)]
-enum WorkerMsg {
-    Rescan,
-    Shutdown,
 }
 
 struct SearchWorker {
@@ -471,7 +466,7 @@ impl WorkspaceFiles {
             }
             project
                 .worker_tx
-                .send(WorkerMsg::Rescan)
+                .send(WorkerMsg::Changed)
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -735,14 +730,7 @@ fn spawn_project_worker(
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         scan_project(&root, kind, &state);
-        while let Ok(WorkerMsg::Rescan) = rx.recv() {
-            loop {
-                match rx.recv_timeout(RESCAN_DEBOUNCE) {
-                    Ok(WorkerMsg::Rescan) => {}
-                    Ok(WorkerMsg::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                }
-            }
+        while wait_for_change(&rx, RESCAN_DEBOUNCE) {
             scan_project(&root, kind, &state);
         }
     });
@@ -797,7 +785,7 @@ fn run_watcher(
                     .as_ref()
                     .is_some_and(|index| event.paths.contains(index));
             if index_changed || (!tracked_only && relevant_event(&watch_root, &event)) {
-                let _ = worker_tx.send(WorkerMsg::Rescan);
+                let _ = worker_tx.send(WorkerMsg::Changed);
                 if !tracked_only {
                     enqueue_new_directory_watches(&watch_root, &event, &callback_watch_tx);
                 }
@@ -2470,43 +2458,7 @@ mod tests {
         peak_bytes: usize,
     }
 
-    #[derive(Clone, Copy, Debug)]
-    struct BenchStats {
-        mean: f64,
-        stddev: f64,
-        min: f64,
-        max: f64,
-    }
-
-    impl BenchStats {
-        fn from(values: &[f64]) -> Self {
-            let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance = if values.len() > 1 {
-                values
-                    .iter()
-                    .map(|value| {
-                        let delta = value - mean;
-                        delta * delta
-                    })
-                    .sum::<f64>()
-                    / (values.len() - 1) as f64
-            } else {
-                0.0
-            };
-            let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-            let max = values.iter().copied().fold(0.0, f64::max);
-            Self {
-                mean,
-                stddev: variance.sqrt(),
-                min,
-                max,
-            }
-        }
-
-        fn display(self) -> String {
-            format!("{:.2}±{:.2}", self.mean, self.stddev)
-        }
-    }
+    use smelt_test_support::bench::Stats as BenchStats;
 
     fn file_search_bench_runs() -> usize {
         env_usize("SMELT_FILE_SEARCH_BENCH_RUNS", 10)

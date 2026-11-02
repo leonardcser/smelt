@@ -1,9 +1,27 @@
 # Transcript benchmarks
 
-Benchmarks are feature-gated release tests. Most run through
-`cargo xtask bench-transcript-layout`; a few store and TUI suites run directly
-with `cargo test`. All of them build isolated fixtures. Never benchmark against a
-live sessions root: copy one with SQLite's online backup API first.
+Transcript timing suites are feature-gated, ignored release tests. Run them
+through `cargo xtask bench-transcript-layout`; `--suite NAME` selects exactly one
+suite, without environment-variable enable flags. `--help` lists names and
+options. The default runs layout, navigation, and tall-write fixtures; the
+additional flags below retain their combined-suite behavior.
+
+All suites build isolated fixtures. Never benchmark against a live sessions
+root: copy one with SQLite's online backup API first. See [Testing](../TESTING.md)
+for the repository-wide command map.
+
+```bash
+cargo xtask bench-transcript-layout --suite layout --runs 5
+cargo xtask bench-transcript-layout --suite stream --stream-workload bash --runs 5
+cargo xtask bench-transcript-layout --suite ui
+cargo xtask bench-transcript-layout --suite resume-dialog
+```
+
+The runner builds once per package/profile/feature set, then executes only the
+selected ignored tests. Summary timings use sample standard deviation and
+nearest-rank percentiles. Peak RSS is measured by GNU time on Linux when
+available; the runner otherwise samples `/proc`, or reports memory unavailable
+on platforms without either measurement source.
 
 Put `TMPDIR` under `~/tmp` for 50 MiB and larger fixtures so temporary databases
 do not fill `/tmp`. Use `--debug` only for instrumentation work, never for timing
@@ -189,17 +207,17 @@ before wrapping it with `/usr/bin/time -v`, or rustc dominates peak RSS.
 cargo test --profile release-fast --test startup \
   interactive_lifecycle_benchmark_suite --no-run
 
-SMELT_LIFECYCLE_BENCH_TARGET=1 \
 SMELT_LIFECYCLE_BENCH_FIXTURE="$HOME/tmp/session-fixtures/sessions" \
 SMELT_LIFECYCLE_BENCH_SESSION_ID='<session-id>' \
 SMELT_LIFECYCLE_BENCH_READY_TEXT='<unique visible tail text>' \
 SMELT_LIFECYCLE_BENCH_RUNS=10 \
 cargo test --profile release-fast --test startup \
-  interactive_lifecycle_benchmark_suite -- --nocapture
+  interactive_lifecycle_benchmark_suite -- --ignored --nocapture
 ```
 
-Launches the real executable in a PTY against a fresh copy per run and reports
-launch to first frame, launch to visible tail, Ctrl-C to exit, and RSS.
+Launches Cargo's built executable in a PTY against a fresh copy per run and
+reports launch to first frame, launch to visible tail, Ctrl-C to exit, and RSS.
+`SMELT_LIFECYCLE_BENCH_TARGET=/absolute/path/to/smelt` selects another binary.
 `SMELT_LIFECYCLE_BENCH_FIRST_FRAME_TEXT` and
 `SMELT_LIFECYCLE_BENCH_TIMEOUT_SECS` override the first-frame marker and phase
 timeout. Resume must stay bounded by the loaded tail, not history length or
@@ -209,22 +227,52 @@ database size.
 
 ```bash
 # Sparse store indexes at 10K, 100K, and 1M records; must load zero payloads.
-SMELT_SPARSE_INDEX_BENCH=1 SMELT_SPARSE_INDEX_BENCH_RUNS=1001 \
+SMELT_SPARSE_INDEX_BENCH_RUNS=1001 \
 cargo test --release -p smelt-store sparse_index_scaling_benchmark_suite \
   -- --ignored --nocapture
 
 # Sparse watcher dispatch; must reuse one metadata and one hydration reader.
-SMELT_TRANSCRIPT_BENCH_TARGET=1 SMELT_TRANSCRIPT_SPARSE_WATCHER_BENCH=1 \
-cargo test --release -p smelt-tui --features harness,transcript-bench \
-  transcript_sparse_watcher_benchmark_suite -- --nocapture
+cargo xtask bench-transcript-layout --suite sparse-watch
 
 # Sparse versus hydrated autonomous frames.
-SMELT_TRANSCRIPT_BENCH_TARGET=1 SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_BENCH=1 \
-cargo test --release -p smelt-tui --features harness,transcript-bench \
-  transcript_sparse_autonomous_frame_benchmark_suite -- --nocapture
+cargo xtask bench-transcript-layout --suite sparse-idle
 
 # Session catalog queries at 1K and 100K rows.
-SMELT_CATALOG_BENCH=1 SMELT_CATALOG_BENCH_ROWS=100000 SMELT_CATALOG_BENCH_RUNS=101 \
+SMELT_CATALOG_BENCH_ROWS=100000 SMELT_CATALOG_BENCH_RUNS=101 \
 cargo test --release -p smelt-store catalog_query_benchmark_suite \
   -- --ignored --nocapture
 ```
+
+## Session storage resource acceptance
+
+Run before landing changes to fork capture, retained archives, or metadata
+persistence. These tests check root reuse, allocation bounds independent of
+archive bytes/record count, exact forked/source content, and title-save storage
+growth. They are resource contracts, not timing benchmarks. Their larger fixtures
+and process-wide allocation samples require isolated processes, so use nextest:
+
+```bash
+set -o pipefail
+cargo nextest run -p smelt-tui --features harness,transcript-bench \
+  --run-ignored ignored-only --test-threads 1 \
+  -E 'test(transcript_benchmarks::session_storage_)' 2>&1 | tail -120
+```
+
+Smaller core/store ownership, command-size and storage-sharing contracts run in
+the standard suite. Do not add these acceptance runs to commit/push hooks.
+
+## Other performance workloads
+
+- `cargo xtask bench-diff`: indexed core access, real Git loading, virtualized
+  viewer frames, and stage/unstage interaction.
+- `cargo xtask bench-search`: incremental viewer search with distant/absent matches.
+- `cargo xtask bench-file-search --help`: fuzzy ranking over a generated path tree.
+- `cargo run --release -p xtask -- bench-lineage-search --help`: derived history
+  search latency, memory, verification work and storage over an isolated corpus.
+  This command builds its search projection; never point it at live sessions.
+- [Cross-agent memory/install](../benchmarks/memory/README.md): reproducible
+  published comparisons with versioned data, not a product gate.
+
+Timing targets here are manual acceptance criteria. Compare optimized runs on the
+same idle machine with the same fixtures. Remove settled diagnostic experiments
+once their lasting assertions have an owner; Git history retains the experiment.

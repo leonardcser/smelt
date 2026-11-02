@@ -222,53 +222,57 @@ impl DaemonResponse {
 
 #[cfg(unix)]
 async fn ensure_daemon(socket: &Path, root: &Path) -> Result<(), String> {
+    ensure_daemon_with(socket, || spawn_daemon(socket, root)).await
+}
+
+#[cfg(unix)]
+async fn ensure_daemon_with(
+    socket: &Path,
+    start: impl AsyncFnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     if let Some(parent) = socket.parent() {
         ensure_private_dir(parent)
             .map_err(|err| format!("prepare LSP daemon dir {}: {err}", parent.display()))?;
     }
-    let lock = socket.with_extension("startup");
+    // Keep the inode: unlinking a lock lets another process lock a different file.
+    let path = socket.with_extension("startup");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|err| format!("open LSP daemon lock {}: {err}", path.display()))?;
+    let deadline = tokio::time::Instant::now() + STARTUP_WAIT;
     loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-        {
-            Ok(file) => {
-                let _guard = StartupLock {
-                    path: lock.clone(),
-                    _file: file,
-                };
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
                 if tokio::net::UnixStream::connect(socket).await.is_ok() {
                     return Ok(());
                 }
-                let _ = tokio::fs::remove_file(socket).await;
-                spawn_daemon(socket, root).await?;
-                return wait_for_socket(socket).await;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if wait_for_socket(socket).await.is_ok() {
-                    return Ok(());
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "timed out waiting for LSP daemon {}",
+                        socket.display()
+                    ));
                 }
-                let _ = tokio::fs::remove_file(&lock).await;
+                tokio::time::sleep(SPAWN_RETRY_INTERVAL).await;
             }
-            Err(err) => {
-                return Err(format!("create LSP daemon lock {}: {err}", lock.display()));
+            Err(std::fs::TryLockError::Error(err)) => {
+                return Err(format!("lock LSP daemon {}: {err}", path.display()));
             }
         }
     }
-}
-
-#[cfg(unix)]
-struct StartupLock {
-    path: PathBuf,
-    _file: std::fs::File,
-}
-
-#[cfg(unix)]
-impl Drop for StartupLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+    if tokio::net::UnixStream::connect(socket).await.is_ok() {
+        return Ok(());
     }
+    let _ = tokio::fs::remove_file(socket).await;
+    start().await?;
+    wait_for_socket(socket).await
 }
 
 #[cfg(unix)]
@@ -480,6 +484,47 @@ mod tests {
     use super::*;
     use crate::lsp::LspServerConfig;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn concurrent_startup_reuses_one_daemon_after_abandoned_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        std::fs::write(socket.with_extension("startup"), "abandoned marker").unwrap();
+        let listener = std::cell::RefCell::new(None);
+        let starts = std::cell::Cell::new(0);
+        let start = async || {
+            starts.set(starts.get() + 1);
+            // Leave time for the other caller to observe the held startup lock.
+            tokio::task::yield_now().await;
+            listener.replace(Some(tokio::net::UnixListener::bind(&socket).unwrap()));
+            Ok(())
+        };
+        let (first, second) = tokio::join!(
+            ensure_daemon_with(&socket, start),
+            ensure_daemon_with(&socket, start),
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(starts.get(), 1);
+        assert!(socket.with_extension("startup").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_startup_releases_ownership_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let error = ensure_daemon_with(&socket, async || Err("spawn failed".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error, "spawn failed");
+        let mut listener = None;
+        ensure_daemon_with(&socket, async || {
+            listener = Some(tokio::net::UnixListener::bind(&socket).unwrap());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     #[cfg(unix)]

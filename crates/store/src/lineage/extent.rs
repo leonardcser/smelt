@@ -1532,10 +1532,6 @@ mod benchmark_tests {
     #[test]
     #[ignore = "manual sparse index scaling benchmark"]
     fn sparse_index_scaling_benchmark_suite() {
-        if std::env::var("SMELT_SPARSE_INDEX_BENCH").as_deref() != Ok("1") {
-            eprintln!("SPARSE_INDEX_BENCH_SKIPPED");
-            return;
-        }
         let runs = benchmark_runs();
         for record_count in benchmark_counts() {
             let temp = tempfile::tempdir().expect("sparse index benchmark directory");

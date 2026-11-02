@@ -15,6 +15,7 @@ pub(crate) mod events;
 mod harness_tests;
 pub(crate) mod history;
 pub(crate) mod host_dispatch;
+mod latest_worker;
 pub(crate) mod lua_bridge;
 pub(crate) mod lua_handlers;
 pub(crate) mod managed_models;

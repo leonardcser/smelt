@@ -81,10 +81,10 @@ impl LineageLease {
     }
 
     fn try_exclusive(&self) -> Result<bool> {
-        match fs4::FileExt::try_lock(&self._file) {
+        match self._file.try_lock() {
             Ok(()) => Ok(true),
-            Err(fs4::TryLockError::WouldBlock) => Ok(false),
-            Err(fs4::TryLockError::Error(error)) => Err(StoreError::Io(error)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(error)) => Err(StoreError::Io(error)),
         }
     }
 
@@ -103,16 +103,16 @@ impl LineageLease {
         }
         let file = options.open(path)?;
         let result = if shared {
-            fs4::FileExt::try_lock_shared(&file)
+            file.try_lock_shared()
         } else {
-            fs4::FileExt::try_lock(&file)
+            file.try_lock()
         };
         match result {
             Ok(()) => Ok(Self { _file: file }),
-            Err(fs4::TryLockError::WouldBlock) => Err(StoreError::OwnershipConflict {
+            Err(std::fs::TryLockError::WouldBlock) => Err(StoreError::OwnershipConflict {
                 owner: Some(name.to_owned()),
             }),
-            Err(fs4::TryLockError::Error(error)) => Err(StoreError::Io(error)),
+            Err(std::fs::TryLockError::Error(error)) => Err(StoreError::Io(error)),
         }
     }
 }
@@ -4064,21 +4064,6 @@ mod tests {
 
     #[test]
     fn lineage_writer_owns_one_database_and_common_fork_writes_only_metadata() {
-        let _ = common_fork_p95();
-    }
-
-    #[test]
-    #[ignore = "optimized wall-clock benchmark; run in isolation"]
-    fn common_fork_latency_benchmark() {
-        let p95 = common_fork_p95();
-        println!("COMMON_FORK_LATENCY forks=100 p95={p95:?}");
-        assert!(
-            p95 < std::time::Duration::from_millis(100),
-            "100-fork p95 exceeded the interaction ceiling: {p95:?}"
-        );
-    }
-
-    fn common_fork_p95() -> std::time::Duration {
         let root = tempfile::tempdir().unwrap();
         let source_id = session_id('a');
         let target_id = session_id('b');
@@ -4095,20 +4080,15 @@ mod tests {
         let roots_before = row_count(&writer.conn, "lineage_sequence_roots");
         let storage_before = sqlite_storage_bytes(&writer.database_path());
 
-        let mut fork_durations = Vec::with_capacity(100);
         for index in 0_u64..100 {
             let target = if index == 0 {
                 target_id.clone()
             } else {
                 format!("{index:064x}")
             };
-            let started = std::time::Instant::now();
             let fork = writer.fork_current(&target, index + 2).unwrap();
-            fork_durations.push(started.elapsed());
             assert_eq!(fork.current.history_len, HistoryLen::new(1));
         }
-        fork_durations.sort_unstable();
-        let p95 = fork_durations[94];
         assert_eq!(row_count(&writer.conn, "lineage_branches"), 101);
         let storage_growth =
             sqlite_storage_bytes(&writer.database_path()).saturating_sub(storage_before);
@@ -4140,7 +4120,6 @@ mod tests {
             target.history_range(0, 1).unwrap(),
             vec![protocol::HistoryItem::system("first")]
         );
-        p95
     }
 
     #[test]

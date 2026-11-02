@@ -94,6 +94,17 @@ impl MarkdownLine {
 }
 
 impl MarkdownNode {
+    fn range(&self) -> Range<usize> {
+        match self {
+            Self::Source { range }
+            | Self::Text { range, .. }
+            | Self::Code { range, .. }
+            | Self::Math { range }
+            | Self::Table { range, .. }
+            | Self::Rule { range } => range.clone(),
+        }
+    }
+
     pub fn dynamic_retained_bytes(&self) -> usize {
         match self {
             Self::Source { .. } | Self::Math { .. } | Self::Rule { .. } => 0,
@@ -146,61 +157,6 @@ pub fn markdown_nodes_retained_bytes(nodes: &[MarkdownNode]) -> usize {
                 .map(MarkdownNode::dynamic_retained_bytes)
                 .sum::<usize>(),
         )
-}
-
-#[derive(Clone, Debug)]
-enum SpecialBlock {
-    Text {
-        range: Range<usize>,
-        kind: MarkdownTextKind,
-        lines: Vec<MarkdownLine>,
-    },
-    Code {
-        range: Range<usize>,
-        lang: String,
-        body: Vec<Range<usize>>,
-    },
-    Math {
-        range: Range<usize>,
-    },
-    Table {
-        range: Range<usize>,
-        alignments: Vec<ColumnAlignment>,
-        rows: Vec<Vec<String>>,
-    },
-    Rule {
-        range: Range<usize>,
-    },
-}
-
-impl SpecialBlock {
-    fn range(&self) -> Range<usize> {
-        match self {
-            SpecialBlock::Text { range, .. }
-            | SpecialBlock::Code { range, .. }
-            | SpecialBlock::Math { range }
-            | SpecialBlock::Table { range, .. }
-            | SpecialBlock::Rule { range } => range.clone(),
-        }
-    }
-
-    fn into_node(self) -> MarkdownNode {
-        match self {
-            SpecialBlock::Text { range, kind, lines } => MarkdownNode::Text { range, kind, lines },
-            SpecialBlock::Code { range, lang, body } => MarkdownNode::Code { range, lang, body },
-            SpecialBlock::Math { range } => MarkdownNode::Math { range },
-            SpecialBlock::Table {
-                range,
-                alignments,
-                rows,
-            } => MarkdownNode::Table {
-                range,
-                alignments,
-                rows,
-            },
-            SpecialBlock::Rule { range } => MarkdownNode::Rule { range },
-        }
-    }
 }
 
 fn collect_math_blocks(source: &str) -> Vec<Range<usize>> {
@@ -272,7 +228,7 @@ pub fn parse_markdown_with_options<'a>(
             .into_iter()
             .flat_map(|block| without_math_range(block, &range))
             .collect();
-        specials.push(SpecialBlock::Math { range });
+        specials.push(MarkdownNode::Math { range });
     }
     specials.sort_by_key(|block| block.range().start);
     specials.dedup_by(|a, b| a.range() == b.range());
@@ -290,7 +246,7 @@ pub fn parse_markdown_with_options<'a>(
             });
         }
         pos = range.end;
-        nodes.push(block.into_node());
+        nodes.push(block);
     }
     if pos < source.len() || nodes.is_empty() {
         nodes.push(MarkdownNode::Source {
@@ -301,12 +257,12 @@ pub fn parse_markdown_with_options<'a>(
     MarkdownBlock { source, nodes }
 }
 
-fn without_math_range(block: SpecialBlock, math: &Range<usize>) -> Vec<SpecialBlock> {
+fn without_math_range(block: MarkdownNode, math: &Range<usize>) -> Vec<MarkdownNode> {
     let range = block.range();
     if range.end <= math.start || range.start >= math.end {
         return vec![block];
     }
-    if let SpecialBlock::Text { kind, lines, .. } = block {
+    if let MarkdownNode::Text { kind, lines, .. } = block {
         let mut parts = Vec::new();
         let before: Vec<_> = lines
             .iter()
@@ -314,7 +270,7 @@ fn without_math_range(block: SpecialBlock, math: &Range<usize>) -> Vec<SpecialBl
             .cloned()
             .collect();
         if !before.is_empty() {
-            parts.push(SpecialBlock::Text {
+            parts.push(MarkdownNode::Text {
                 range: range.start..math.start,
                 kind,
                 lines: before,
@@ -325,7 +281,7 @@ fn without_math_range(block: SpecialBlock, math: &Range<usize>) -> Vec<SpecialBl
             .filter(|line| line.source.start >= math.end)
             .collect();
         if !after.is_empty() {
-            parts.push(SpecialBlock::Text {
+            parts.push(MarkdownNode::Text {
                 range: math.end..range.end,
                 kind,
                 lines: after,
@@ -1038,7 +994,7 @@ fn collect_special_blocks(
     source: &str,
     protected: &str,
     inline_options: &InlineOptions,
-) -> Vec<SpecialBlock> {
+) -> Vec<MarkdownNode> {
     let parser = Parser::new_ext(protected, markdown_options()).into_offset_iter();
     let mut out = Vec::new();
     let mut text_stack: Vec<OpenText> = Vec::new();
@@ -1067,7 +1023,7 @@ fn collect_special_blocks(
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((start, lang, body)) = code.take() {
-                    out.push(SpecialBlock::Code {
+                    out.push(MarkdownNode::Code {
                         range: start..range.end,
                         lang,
                         body,
@@ -1090,7 +1046,7 @@ fn collect_special_blocks(
                 };
                 push_open_text_event(&mut text_stack, Event::End(end), range);
                 if let Some(lines) = lines {
-                    out.push(SpecialBlock::Text {
+                    out.push(MarkdownNode::Text {
                         range: text_range,
                         kind: open.kind,
                         lines,
@@ -1098,7 +1054,7 @@ fn collect_special_blocks(
                 }
             }
             Event::DisplayMath(_) if text_stack.is_empty() => {
-                out.push(SpecialBlock::Math { range });
+                out.push(MarkdownNode::Math { range });
             }
             Event::Text(_) => {
                 if let Some((_, _, body)) = code.as_mut() {
@@ -1116,7 +1072,7 @@ fn collect_special_blocks(
             }
             Event::End(TagEnd::Table) => {
                 if let Some(table) = table.take() {
-                    out.push(SpecialBlock::Table {
+                    out.push(MarkdownNode::Table {
                         range: table.start..range.end,
                         alignments: table.alignments,
                         rows: table.rows,
@@ -1142,7 +1098,7 @@ fn collect_special_blocks(
                     }
                 }
             }
-            Event::Rule => out.push(SpecialBlock::Rule { range }),
+            Event::Rule => out.push(MarkdownNode::Rule { range }),
             event => push_open_text_event(&mut text_stack, event, range),
         }
     }

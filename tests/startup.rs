@@ -2897,27 +2897,17 @@ fn process_rss_kib(_pid: u32) -> u64 {
     0
 }
 
-fn nearest_rank(sorted: &[f64], percentile: usize) -> f64 {
-    let rank = sorted.len().saturating_mul(percentile).div_ceil(100).max(1);
-    sorted[rank.saturating_sub(1).min(sorted.len().saturating_sub(1))]
-}
-
-fn print_sample_summary(name: &str, unit: &str, mut values: Vec<f64>) {
-    values.sort_by(f64::total_cmp);
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>()
-        / values.len() as f64;
+fn print_sample_summary(name: &str, unit: &str, values: Vec<f64>) {
+    let stats = smelt_test_support::bench::Stats::from(&values);
     println!(
-        "LIFECYCLE_BENCH_SUMMARY metric={name} runs={} mean_{unit}={mean:.3} stddev_{unit}={:.3} p50_{unit}={:.3} p95_{unit}={:.3} p99_{unit}={:.3} max_{unit}={:.3}",
+        "LIFECYCLE_BENCH_SUMMARY metric={name} runs={} mean_{unit}={:.3} stddev_{unit}={:.3} p50_{unit}={:.3} p95_{unit}={:.3} p99_{unit}={:.3} max_{unit}={:.3}",
         values.len(),
-        variance.sqrt(),
-        nearest_rank(&values, 50),
-        nearest_rank(&values, 95),
-        nearest_rank(&values, 99),
-        values.last().copied().unwrap_or_default(),
+        stats.mean,
+        stats.stddev,
+        stats.p50,
+        stats.p95,
+        stats.p99,
+        stats.max,
     );
 }
 
@@ -3072,11 +3062,11 @@ impl LifecycleBenchmark<'_> {
 }
 
 #[test]
+#[ignore = "manual PTY lifecycle benchmark; see docs/transcript-layout-benchmarks.md"]
 fn interactive_lifecycle_benchmark_suite() {
-    let Some(target) = std::env::var_os("SMELT_LIFECYCLE_BENCH_TARGET") else {
-        return;
-    };
-    let target = std::path::PathBuf::from(target);
+    let target = std::env::var_os("SMELT_LIFECYCLE_BENCH_TARGET")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_smelt")));
     assert!(target.is_file(), "benchmark target must be a smelt binary");
     let fixture = std::env::var_os("SMELT_LIFECYCLE_BENCH_FIXTURE").map(std::path::PathBuf::from);
     let session_id = fixture.as_ref().map(|_| {

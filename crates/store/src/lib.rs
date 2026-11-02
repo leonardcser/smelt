@@ -112,8 +112,7 @@ pub use catalog::{
     MAX_CATALOG_PAGE_SIZE,
 };
 pub use compression::{
-    benchmark_zstd_compression, CompressionReport, CompressionSample, ObjectCompression,
-    DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
+    ObjectCompression, DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
 };
 pub use diagnostics::{DoctorReport, StorageStats};
 pub use error::{Result, StoreError};

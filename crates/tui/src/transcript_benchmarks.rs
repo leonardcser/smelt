@@ -2,10 +2,7 @@ use crate::app::test_harness::*;
 use crate::app::AppFocus;
 use crate::smelt_edit::VimMode;
 use crossterm::event::{KeyCode, KeyModifiers};
-
-fn benchmark_target_enabled() -> bool {
-    std::env::var("SMELT_TRANSCRIPT_BENCH_TARGET").as_deref() == Ok("1")
-}
+use smelt_test_support::bench::Stats;
 
 fn transcript_row_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
     app.app
@@ -22,10 +19,8 @@ fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn default_ui_frame_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
     let samples = env_positive_usize("SMELT_UI_BENCH_SAMPLES", 1000);
     for case in ["idle", "typing", "streaming", "scrolling"] {
         let mut app = TestApp::builder()
@@ -114,7 +109,7 @@ fn default_ui_frame_benchmark_suite() {
             let viewport = app.transcript_window();
             assert!(viewport.scroll_top > 0 && !viewport.following_tail);
         }
-        let stats = TailStats::from(&timings);
+        let stats = Stats::from(&timings);
         println!(
             "DEFAULT_UI,{case},{samples},{:.6},{:.6},{:.1},{:.1}",
             stats.p50,
@@ -126,18 +121,14 @@ fn default_ui_frame_benchmark_suite() {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_layout_projection_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
     crate::content::transcript_buf::tests::benchmark_support::run_layout_benchmark();
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_true_resume_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
     crate::content::transcript_buf::tests::benchmark_support::run_true_resume_benchmark();
 }
 
@@ -153,70 +144,6 @@ struct NavSample {
     rows: crate::smelt_edit::RowIndex,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct NavStats {
-    mean: f64,
-    stddev: f64,
-}
-
-impl NavStats {
-    fn from(values: &[f64]) -> Self {
-        assert!(!values.is_empty(), "benchmark statistics require samples");
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = if values.len() > 1 {
-            values
-                .iter()
-                .map(|value| {
-                    let delta = value - mean;
-                    delta * delta
-                })
-                .sum::<f64>()
-                / (values.len() - 1) as f64
-        } else {
-            0.0
-        };
-        Self {
-            mean,
-            stddev: variance.sqrt(),
-        }
-    }
-
-    fn display(self) -> String {
-        format!("{:.2}±{:.2}", self.mean, self.stddev)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TailStats {
-    mean: f64,
-    stddev: f64,
-    p50: f64,
-    p95: f64,
-    p99: f64,
-    max: f64,
-}
-
-impl TailStats {
-    fn from(values: &[f64]) -> Self {
-        let basic = NavStats::from(values);
-        let mut sorted = values.to_vec();
-        sorted.sort_by(f64::total_cmp);
-        Self {
-            mean: basic.mean,
-            stddev: basic.stddev,
-            p50: nearest_rank(&sorted, 50),
-            p95: nearest_rank(&sorted, 95),
-            p99: nearest_rank(&sorted, 99),
-            max: *sorted.last().expect("non-empty benchmark samples"),
-        }
-    }
-}
-
-fn nearest_rank(sorted: &[f64], percentile: usize) -> f64 {
-    let rank = sorted.len().saturating_mul(percentile).div_ceil(100).max(1);
-    sorted[rank - 1]
-}
-
 fn elapsed_ms(elapsed: std::time::Duration) -> f64 {
     elapsed.as_secs_f64() * 1_000.0
 }
@@ -229,7 +156,7 @@ fn env_positive_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn navigation_bench_runs() -> usize {
+fn benchmark_runs() -> usize {
     env_positive_usize("SMELT_TRANSCRIPT_BENCH_RUNS", 3)
 }
 
@@ -1305,10 +1232,8 @@ fn run_resumed_wheel_scroll_bench_sample(
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_resumed_wheel_scroll_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
     run_resumed_wheel_scroll_bench_sample(
         resumed_wheel_bench_bytes(),
         resumed_wheel_bench_frames(),
@@ -1814,15 +1739,8 @@ fn print_resume_perf(label: &str, snapshot: &smelt_perf::perf::Snapshot) {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn resume_dialog_open_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
-    if std::env::var("SMELT_RESUME_BENCH").ok().as_deref() != Some("1") {
-        eprintln!("RESUME_DIALOG_BENCH_SKIPPED");
-        return;
-    }
-
     let guard = test_home_guard();
     let count = resume_bench_session_count();
     let preview_bytes = resume_bench_preview_bytes();
@@ -1904,19 +1822,9 @@ fn resume_dialog_open_benchmark_suite() {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_layout_search_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
-    if std::env::var("SMELT_TRANSCRIPT_BENCH_SEARCH")
-        .ok()
-        .as_deref()
-        != Some("1")
-    {
-        eprintln!("TRANSCRIPT_SEARCH_BENCH_SKIPPED");
-        return;
-    }
-    let runs = navigation_bench_runs();
+    let runs = benchmark_runs();
     let target_bytes = search_bench_bytes();
     if transcript_bench_warmup_enabled() {
         let _warmup = run_search_bench_sample(target_bytes, false);
@@ -1947,7 +1855,7 @@ fn transcript_layout_search_benchmark_suite() {
                 .iter()
                 .map(|sample| search_bench_metric_values(sample)[index].1)
                 .collect::<Vec<_>>();
-            (label, NavStats::from(&values))
+            (label, Stats::from(&values))
         })
         .collect::<Vec<_>>();
     let summary_metrics = metric_stats
@@ -2211,12 +2119,10 @@ fn run_tall_write_sample(line_count: usize) -> TallWriteSample {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_layout_tall_write_file_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
     smelt_perf::perf::set_enabled(true);
-    let runs = navigation_bench_runs();
+    let runs = benchmark_runs();
     let lines = tall_write_line_count();
     if transcript_bench_warmup_enabled() {
         let _ = run_tall_write_sample(lines);
@@ -2238,7 +2144,7 @@ fn transcript_layout_tall_write_file_benchmark_suite() {
         samples.push(sample);
     }
     let stats = |get: fn(&TallWriteSample) -> f64| {
-        TailStats::from(&samples.iter().map(get).collect::<Vec<_>>())
+        Stats::from(&samples.iter().map(get).collect::<Vec<_>>())
     };
     let collapsed = stats(|sample| sample.collapsed_scroll_ms);
     let expand = stats(|sample| sample.expand_ms);
@@ -2444,13 +2350,9 @@ fn run_tall_diff_sample(line_count: usize) -> TallDiffSample {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_layout_tall_retained_diff_benchmark_suite() {
-    if !benchmark_target_enabled()
-        || std::env::var("SMELT_TRANSCRIPT_TALL_DIFF").as_deref() != Ok("1")
-    {
-        return;
-    }
-    let runs = navigation_bench_runs();
+    let runs = benchmark_runs();
     let lines = tall_diff_line_count();
     if transcript_bench_warmup_enabled() {
         let _ = run_tall_diff_sample(lines);
@@ -2484,13 +2386,13 @@ fn transcript_layout_tall_retained_diff_benchmark_suite() {
         samples.push(sample);
     }
 
-    let first = TailStats::from(
+    let first = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.first_render_ms)
             .collect::<Vec<_>>(),
     );
-    let warm = TailStats::from(
+    let warm = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.warm_render_ms)
@@ -2520,20 +2422,10 @@ fn transcript_layout_tall_retained_diff_benchmark_suite() {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_layout_navigation_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
-    if std::env::var("SMELT_TRANSCRIPT_BENCH_SKIP_NAV")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        eprintln!("TRANSCRIPT_LAYOUT_NAV_SKIPPED");
-        return;
-    }
     smelt_perf::perf::set_enabled(true);
-    let runs = navigation_bench_runs();
+    let runs = benchmark_runs();
     let _warmup = run_navigation_sample();
     let mut samples = Vec::with_capacity(runs);
     for run in 0..runs {
@@ -2553,38 +2445,38 @@ fn transcript_layout_navigation_benchmark_suite() {
         samples.push(sample);
     }
 
-    let search = NavStats::from(
+    let search = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.search_ms)
             .collect::<Vec<_>>(),
     );
-    let ctrl_d = NavStats::from(
+    let ctrl_d = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.ctrl_d20_ms)
             .collect::<Vec<_>>(),
     );
-    let ctrl_u = NavStats::from(
+    let ctrl_u = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.ctrl_u20_ms)
             .collect::<Vec<_>>(),
     );
-    let gg = NavStats::from(
+    let gg = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.gg_ms)
             .collect::<Vec<_>>(),
     );
-    let g = NavStats::from(&samples.iter().map(|sample| sample.g_ms).collect::<Vec<_>>());
-    let previous_user_pill = TailStats::from(
+    let g = Stats::from(&samples.iter().map(|sample| sample.g_ms).collect::<Vec<_>>());
+    let previous_user_pill = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.previous_user_pill_ms)
             .collect::<Vec<_>>(),
     );
-    let bottom_pill = TailStats::from(
+    let bottom_pill = Stats::from(
         &samples
             .iter()
             .map(|sample| sample.bottom_pill_ms)
@@ -2660,14 +2552,10 @@ fn transcript_layout_navigation_benchmark_suite() {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_sparse_watcher_benchmark_suite() {
-    if !benchmark_target_enabled()
-        || std::env::var("SMELT_TRANSCRIPT_SPARSE_WATCHER_BENCH").as_deref() != Ok("1")
-    {
-        return;
-    }
     let block_count = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_WATCHER_BLOCKS", 5_000);
-    let runs = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_WATCHER_RUNS", 1_001);
+    let runs = env_positive_usize("SMELT_TRANSCRIPT_BENCH_RUNS", 1_001);
     let mut app = TestApp::builder().with_vim(true).build();
     app.app.handle_resize(100, 32);
     for index in 0..block_count {
@@ -2845,12 +2733,8 @@ fn assert_within_twenty_five_percent(label: &str, sparse: u64, hydrated: u64) {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_sparse_autonomous_frame_benchmark_suite() {
-    if !benchmark_target_enabled()
-        || std::env::var("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_BENCH").as_deref() != Ok("1")
-    {
-        return;
-    }
     let target_bytes =
         env_positive_usize("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_BYTES", 5 * 1024 * 1024);
     let frames = env_positive_usize("SMELT_TRANSCRIPT_SPARSE_AUTONOMOUS_FRAMES", 600);
@@ -3159,7 +3043,7 @@ struct StreamEventAccumulator {
 struct StreamEventSample {
     kind: StreamEventKind,
     count: usize,
-    dispatch: TailStats,
+    dispatch: Stats,
     allocs: u64,
     bytes: u64,
     max_event_bytes: u64,
@@ -3183,9 +3067,9 @@ struct StreamSample {
     scroll: bool,
     idle_frames: usize,
     total_ms: f64,
-    dispatch: TailStats,
-    render: TailStats,
-    frame: TailStats,
+    dispatch: Stats,
+    render: Stats,
+    frame: Stats,
     event_samples: Vec<StreamEventSample>,
     traced_frames: usize,
     request_to_flush_p99_ms: f64,
@@ -3200,13 +3084,6 @@ struct StreamSample {
     metadata_open_attempts: usize,
     hydration_open_attempts: usize,
     total_open_attempts: usize,
-}
-
-fn stream_benchmark_enabled() -> bool {
-    matches!(
-        std::env::var("SMELT_TRANSCRIPT_STREAM_BENCH").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
 }
 
 fn stream_benchmark_history_blocks() -> usize {
@@ -3723,15 +3600,16 @@ fn stream_benchmark_events(
     (events, active_output_bytes)
 }
 
-fn stream_frame_stats(snapshot: &smelt_perf::perf::Snapshot) -> TailStats {
+fn stream_frame_stats(snapshot: &smelt_perf::perf::Snapshot) -> Stats {
     let row = snapshot
         .durations
         .iter()
         .find(|row| row.label == "app:tick_compositor")
         .expect("stream benchmark renders at least one compositor frame");
-    TailStats {
+    Stats {
         mean: row.total_us as f64 / row.count as f64 / 1_000.0,
         stddev: 0.0,
+        min: f64::NAN, // Perf snapshots do not retain minima.
         p50: row.p50_us as f64 / 1_000.0,
         p95: row.p95_us as f64 / 1_000.0,
         p99: row.p99_us as f64 / 1_000.0,
@@ -4155,7 +4033,7 @@ fn run_stream_benchmark_sample() -> StreamSample {
             (!accumulator.dispatch_ms.is_empty()).then(|| StreamEventSample {
                 kind,
                 count: accumulator.dispatch_ms.len(),
-                dispatch: TailStats::from(&accumulator.dispatch_ms),
+                dispatch: Stats::from(&accumulator.dispatch_ms),
                 allocs: accumulator.allocs,
                 bytes: accumulator.bytes,
                 max_event_bytes: accumulator.max_event_bytes,
@@ -4180,8 +4058,8 @@ fn run_stream_benchmark_sample() -> StreamSample {
         scroll,
         idle_frames,
         total_ms,
-        dispatch: TailStats::from(&dispatch_ms),
-        render: TailStats::from(&render_ms),
+        dispatch: Stats::from(&dispatch_ms),
+        render: Stats::from(&render_ms),
         frame,
         event_samples,
         traced_frames,
@@ -4264,12 +4142,9 @@ fn print_stream_sample(sample: &StreamSample) {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_stream_benchmark_suite() {
-    if !benchmark_target_enabled() || !stream_benchmark_enabled() {
-        return;
-    }
-
-    let runs = navigation_bench_runs();
+    let runs = benchmark_runs();
     let mut samples = Vec::with_capacity(runs);
     for _ in 0..runs {
         let sample = run_stream_benchmark_sample();
@@ -4284,8 +4159,8 @@ fn transcript_stream_benchmark_suite() {
         .iter()
         .map(|sample| sample.frame.p99)
         .collect::<Vec<_>>();
-    let total = TailStats::from(&totals);
-    let frame = TailStats::from(&frame_p99);
+    let total = Stats::from(&totals);
+    let frame = Stats::from(&frame_p99);
     println!(
         "TRANSCRIPT_STREAM_SUMMARY runs={} workload={} history_blocks={} resumed_bytes={} resumed_position={} boundary_record_bytes={} terminal_width={} terminal_height={} parallel_tools={} chunks={} final_bytes={} scheduled={} scroll={} idle_frames={} total_mean_ms={:.3} total_p95_ms={:.3} frame_p99_mean_ms={:.3} frame_p99_max_ms={:.3}",
         runs,
@@ -4330,25 +4205,7 @@ struct HotPathSample {
     counters: HotPathCounters,
 }
 
-const HOT_PATH_OPERATIONS: &[&str] = &[
-    "noop_save",
-    "request_append",
-    "history_appended",
-    "turn_complete",
-    "rewind_delete_suffix",
-    "provider_history_read",
-    "provider_history_uncheckpointed_read",
-    "engine_request_materialization",
-    "submit_enter",
-    "submit_first_render",
-];
-
-fn hot_path_enabled() -> bool {
-    matches!(
-        std::env::var("SMELT_TRANSCRIPT_HOT_PATH").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
-}
+use crate::benchmark_config::HOT_PATH_OPERATIONS;
 
 fn hot_path_history_len() -> usize {
     std::env::var("SMELT_TRANSCRIPT_HOT_PATH_HISTORY")
@@ -4374,21 +4231,13 @@ fn hot_path_heterogeneous() -> bool {
 
 fn hot_path_operation_filter() -> Option<std::collections::HashSet<String>> {
     let value = std::env::var("SMELT_TRANSCRIPT_HOT_PATH_OPERATIONS").ok()?;
-    let operations = value
-        .split(',')
-        .map(str::trim)
-        .filter(|operation| !operation.is_empty())
-        .map(str::to_string)
-        .collect::<std::collections::HashSet<_>>();
-    assert!(!operations.is_empty(), "hot-path operation filter is empty");
-    for operation in &operations {
-        assert!(
-            HOT_PATH_OPERATIONS.contains(&operation.as_str()),
-            "unknown hot-path operation {operation:?}; expected one of {}",
-            HOT_PATH_OPERATIONS.join(",")
-        );
-    }
-    Some(operations)
+    Some(
+        crate::benchmark_config::named_list(&value, HOT_PATH_OPERATIONS.iter().copied())
+            .expect("SMELT_TRANSCRIPT_HOT_PATH_OPERATIONS")
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 fn hot_path_fixture_dir() -> Option<std::path::PathBuf> {
@@ -5331,16 +5180,9 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_layout_hot_path_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
-    if !hot_path_enabled() {
-        eprintln!("TRANSCRIPT_HOT_PATH_BENCH_SKIPPED set SMELT_TRANSCRIPT_HOT_PATH=1 to run");
-        return;
-    }
-
-    let runs = navigation_bench_runs();
+    let runs = benchmark_runs();
     let history_len = hot_path_history_len();
     let fixture = hot_path_fixture_dir();
     eprintln!(
@@ -5432,7 +5274,7 @@ fn transcript_layout_hot_path_benchmark_suite() {
         if operation_samples.is_empty() {
             continue;
         }
-        let stats = TailStats::from(&operation_samples);
+        let stats = Stats::from(&operation_samples);
         let sample_history_len = samples
             .iter()
             .find(|sample| sample.operation == *operation)
@@ -5467,60 +5309,9 @@ fn transcript_layout_hot_path_benchmark_suite() {
     }
 }
 
-/// Measures small reads against an explicitly supplied local lineage without
-/// claiming its writer or changing canonical data. Payloads are never printed.
-#[test]
-#[ignore = "requires explicit local lineage; read-only performance investigation"]
-fn large_session_read_only_benchmark() {
-    let root = std::env::var("SMELT_SESSION_BENCH_ROOT").expect("sessions root");
-    let lineage = std::env::var("SMELT_SESSION_BENCH_LINEAGE").expect("lineage ID");
-    let session = std::env::var("SMELT_SESSION_BENCH_ID").expect("session ID");
-    let reader =
-        smelt_store::LineageSessionReader::open_existing_in_lineage(root, lineage, session)
-            .expect("open local session read-only");
-    let state = reader.snapshot().expect("read session state");
-    let end = state.head.history_len.get();
-    let records = state.head.transcript_record_count.get();
-    assert!(end > 0 && records > 0);
-    drop(state);
-
-    smelt_perf::alloc::enable();
-    for operation in ["snapshot", "one_history_item", "one_transcript_record"] {
-        let mut times = Vec::new();
-        let mut allocated = Vec::new();
-        for _ in 0..20 {
-            let (sample, snapshot) =
-                capture_hot_path_sample(operation, end as usize, || match operation {
-                    "snapshot" => {
-                        std::hint::black_box(reader.snapshot().unwrap());
-                    }
-                    "one_history_item" => {
-                        let rows = reader.history_range(end - 1, end).unwrap();
-                        assert_eq!(rows.len(), 1);
-                        std::hint::black_box(rows);
-                    }
-                    "one_transcript_record" => {
-                        let rows = reader.transcript_range(records - 1, records).unwrap();
-                        assert_eq!(rows.len(), 1);
-                        std::hint::black_box(rows);
-                    }
-                    _ => unreachable!(),
-                });
-            times.push(sample.ms);
-            allocated.push(sample.thread_bytes_allocated);
-            if times.len() == 1 {
-                print_hot_path_perf(operation, &snapshot);
-            }
-        }
-        let stats = TailStats::from(&times);
-        eprintln!(
-            "LARGE_SESSION_READ operation={operation} history_len={end} median_ms={:.3} p95_ms={:.3} mean_alloc_bytes={}",
-            stats.p50, stats.p95, allocated.iter().sum::<u64>() / allocated.len() as u64,
-        );
-    }
-}
-
-fn saved_archive_bench_app(checkpoint_count: usize) -> (TestApp, usize) {
+fn saved_archive_bench_app(
+    checkpoint_count: usize,
+) -> (TestApp, smelt_store::LineageSessionReader, usize) {
     use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent, Session};
 
     let mut app = TestApp::builder().build();
@@ -5576,28 +5367,29 @@ fn saved_archive_bench_app(checkpoint_count: usize) -> (TestApp, usize) {
         .sum();
     app.app.load_session(session);
     app.app.restore_screen();
-    let receipt = save_bench_fixture(&mut app, "large-session turn start");
-    wait_for_bench_catalog(&app, "large-session turn start", &receipt);
+    let receipt = save_bench_fixture(&mut app, "archive acceptance");
+    wait_for_bench_catalog(&app, "archive acceptance", &receipt);
     app.app.handle_resize(100, 32);
     app.render_silent();
-    (app, archive_bytes)
+    let address = app.app.conversation.transcript().store_address().unwrap();
+    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+        &address.sessions_root,
+        &address.lineage_id,
+        &address.session_id,
+    )
+    .unwrap();
+    (app, reader, archive_bytes)
 }
 
 /// Measures public SDK root copying with an unchanged archive. Cold fixture
 /// construction and historical verification stay outside the sample.
 #[test]
-#[ignore = "fork root-copy allocation acceptance; run optimized and process-isolated"]
-fn public_fork_root_copy_hot_work_is_bounded() {
+#[ignore = "manual resource acceptance; see TESTING.md"]
+fn session_storage_public_fork_reuses_archive_roots() {
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
-        let (app, archive_bytes) = saved_archive_bench_app(checkpoints);
+        let (app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
         let address = app.app.conversation.transcript().store_address().unwrap();
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &address.sessions_root,
-            &address.lineage_id,
-            &address.session_id,
-        )
-        .unwrap();
         let original = reader.snapshot().unwrap();
         let target = app
             .app
@@ -5644,14 +5436,7 @@ fn public_fork_root_copy_hot_work_is_bounded() {
         assert_eq!(copied.history_root_id, original.history_root_id);
         assert_eq!(copied.transcript_root_id, original.transcript_root_id);
         assert_eq!(copied.side_tables, original.side_tables);
-        assert_eq!(
-            copied.metadata.first_user_message,
-            original.metadata.first_user_message
-        );
-        assert_eq!(
-            copied.metadata.checkpoint_events_json,
-            original.metadata.checkpoint_events_json
-        );
+        assert_archive_retained(&original, &copied);
         assert_eq!(reader.snapshot().unwrap(), original);
         assert_hot_path_at_most(&perf, sample.operation, "store:object:bytes_hydrated", 0);
         eprintln!(
@@ -5671,8 +5456,8 @@ fn public_fork_root_copy_hot_work_is_bounded() {
 /// Measures actual command capture with many short retained records, independently
 /// of archive body size. Cold resume, settlement and exact reads are outside the sample.
 #[test]
-#[ignore = "fork record-count allocation acceptance; run optimized and process-isolated"]
-fn retained_record_count_clean_fork_request_allocation_is_bounded() {
+#[ignore = "manual resource acceptance; see TESTING.md"]
+fn session_storage_clean_fork_capture_is_independent_of_record_count() {
     use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent, Session};
 
     smelt_perf::alloc::enable();
@@ -5785,14 +5570,7 @@ fn retained_record_count_clean_fork_request_allocation_is_bounded() {
         );
         assert_eq!(saved.history_root_id, original.history_root_id);
         assert_eq!(saved.transcript_root_id, original.transcript_root_id);
-        assert_eq!(
-            saved.metadata.checkpoint_events_json,
-            original.metadata.checkpoint_events_json
-        );
-        assert_eq!(
-            saved.metadata.checkpoint_json,
-            original.metadata.checkpoint_json
-        );
+        assert_archive_retained(&original, &saved);
         assert_eq!(saved.side_tables, original.side_tables);
         assert_eq!(
             fork.history_range(0, saved.head.history_len.get()).unwrap(),
@@ -5814,116 +5592,35 @@ fn retained_record_count_clean_fork_request_allocation_is_bounded() {
     }
 }
 
-/// Measures the clean fork command after resume. Worker persistence and cold
-/// historical verification stay outside the UI-thread allocation sample.
 #[test]
-#[ignore = "clean fork request allocation acceptance; run optimized and process-isolated"]
-fn unchanged_archive_clean_fork_request_allocation_is_bounded() {
-    smelt_perf::alloc::enable();
-    let mut samples = Vec::new();
-    for checkpoints in [0, 32, 128] {
-        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let address = app.app.conversation.transcript().store_address().unwrap();
-        let root = address.sessions_root.clone();
-        let source_id = address.session_id.clone();
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &root,
-            &address.lineage_id,
-            &source_id,
-        )
-        .unwrap();
-        let original = reader.snapshot().unwrap();
-        let history = reader
-            .history_range(0, original.head.history_len.get())
-            .unwrap();
-        let records = reader
-            .transcript_range(0, original.head.transcript_record_count.get())
-            .unwrap();
-        assert!(app.resume_session(&source_id));
-        assert!(!app.session_is_read_only());
-        assert!(!app.session_document_has_unflushed_work());
-
-        let (sample, perf) = capture_hot_path_sample("clean_fork_request", checkpoints, || {
-            assert!(app.run_lua(r#"smelt.cmd.run("fork")"#));
-        });
-        eprintln!(
-            "CLEAN_FORK_UI checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}",
-            sample.thread_bytes_allocated, sample.process_bytes_allocated,
-        );
-        print_hot_path_perf(sample.operation, &perf);
-        app.wait_for_session_lifecycle();
-        let fork_id = app.app.conversation.session().id.clone();
-        assert_ne!(fork_id, source_id);
-        assert!(!app.session_is_read_only());
-        assert!(!app.session_document_has_unflushed_work());
-        let fork = smelt_store::LineageSessionReader::open_existing(&root, &fork_id).unwrap();
-        let saved = fork.snapshot().unwrap();
-        assert_eq!(
-            saved.identity.parent_id.as_deref(),
-            Some(source_id.as_str())
-        );
-        assert_eq!(saved.head.revision, smelt_store::Revision::new(2));
-        assert_eq!(saved.history_root_id, original.history_root_id);
-        assert_eq!(saved.transcript_root_id, original.transcript_root_id);
-        assert_eq!(saved.head.history_len, original.head.history_len);
-        assert_eq!(
-            saved.head.transcript_record_count,
-            original.head.transcript_record_count
-        );
-        assert_eq!(
-            saved.metadata.checkpoint_events_json,
-            original.metadata.checkpoint_events_json
-        );
-        assert_eq!(
-            saved.metadata.checkpoint_json,
-            original.metadata.checkpoint_json
-        );
-        assert_eq!(
-            saved.metadata.first_user_message,
-            original.metadata.first_user_message
-        );
-        assert_eq!(saved.metadata.title, original.metadata.title);
-        assert_eq!(saved.metadata.slug, original.metadata.slug);
-        assert_eq!(saved.side_tables, original.side_tables);
-        assert_eq!(
-            fork.history_range(0, saved.head.history_len.get()).unwrap(),
-            history
-        );
-        assert_eq!(
-            fork.transcript_range(0, saved.head.transcript_record_count.get())
-                .unwrap(),
-            records
-        );
-        assert_eq!(reader.snapshot().unwrap(), original);
-        samples.push((checkpoints, sample.thread_bytes_allocated));
-    }
-    let baseline = samples[0].1;
-    for (checkpoints, allocated) in samples {
-        assert!(
-            allocated <= baseline + 256 * 1024,
-            "{checkpoints} retained checkpoints inflate clean fork initiation to {allocated} UI-thread allocated bytes, baseline {baseline}"
-        );
-    }
+#[ignore = "manual resource acceptance; see TESTING.md"]
+fn session_storage_clean_fork_capture_is_independent_of_archive_bytes() {
+    assert_archive_fork_capture_bounded(false);
 }
 
-/// Measures the actual Lua request for a fork that preserves pending edits. Worker
-/// persistence and cold verification are outside the UI-thread allocation sample.
 #[test]
-#[ignore = "preserved fork request allocation acceptance; run optimized and process-isolated"]
-fn unchanged_archive_preserved_fork_request_allocation_is_bounded() {
-    smelt_perf::alloc::enable();
+#[ignore = "manual resource acceptance; see TESTING.md"]
+fn session_storage_preserved_fork_capture_is_independent_of_archive_bytes() {
+    assert_archive_fork_capture_bounded(true);
+}
+
+// Keep worker persistence and cold historical verification outside the UI sample.
+fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
+    let operation = if preserve_pending {
+        "preserved_fork_request"
+    } else {
+        "clean_fork_request"
+    };
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
-        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let address = app.app.conversation.transcript().store_address().unwrap();
-        let root = address.sessions_root.clone();
-        let source_id = address.session_id.clone();
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &root,
-            &address.lineage_id,
-            &source_id,
-        )
-        .unwrap();
+        let (mut app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
+        let address = app
+            .app
+            .conversation
+            .transcript()
+            .store_address()
+            .unwrap()
+            .clone();
         let original = reader.snapshot().unwrap();
         let history = reader
             .history_range(0, original.head.history_len.get())
@@ -5931,43 +5628,44 @@ fn unchanged_archive_preserved_fork_request_allocation_is_bounded() {
         let records = reader
             .transcript_range(0, original.head.transcript_record_count.get())
             .unwrap();
-        let pending = hot_path_user("preserved fork pending suffix");
-        app.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
-        app.session_append_history(pending.clone());
-        app.save_session_and_flush();
-        assert!(app.session_is_read_only());
-        assert!(app.session_document_has_unflushed_work());
-        assert_eq!(reader.snapshot().unwrap(), original);
+        let pending = preserve_pending.then(|| hot_path_user("preserved fork pending suffix"));
+        if let Some(pending) = &pending {
+            app.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+            app.session_append_history(pending.clone());
+            app.save_session_and_flush();
+            assert!(app.session_is_read_only());
+            assert!(app.session_document_has_unflushed_work());
+            assert_eq!(reader.snapshot().unwrap(), original);
+        } else {
+            assert!(app.resume_session(&address.session_id));
+            assert!(!app.session_is_read_only());
+            assert!(!app.session_document_has_unflushed_work());
+        }
 
-        let (sample, _) = capture_hot_path_sample("preserved_fork_request", checkpoints, || {
-            assert!(app.run_lua("smelt.session.fork()"));
+        let (sample, perf) = capture_hot_path_sample(operation, checkpoints, || {
+            assert!(app.run_lua(if preserve_pending {
+                "smelt.session.fork()"
+            } else {
+                r#"smelt.cmd.run("fork")"#
+            }));
         });
         app.wait_for_session_lifecycle();
-        let fork_id = app.session_snapshot().id.clone();
-        assert_ne!(fork_id, source_id);
+        let fork_id = app.session_snapshot().id;
+        assert_ne!(fork_id, address.session_id);
         assert!(!app.session_is_read_only());
         assert!(!app.session_document_has_unflushed_work());
-        let fork = smelt_store::LineageSessionReader::open_existing(&root, &fork_id).unwrap();
+        let fork =
+            smelt_store::LineageSessionReader::open_existing(&address.sessions_root, &fork_id)
+                .unwrap();
         let saved = fork.snapshot().unwrap();
         assert_eq!(
             saved.identity.parent_id.as_deref(),
-            Some(source_id.as_str())
+            Some(address.session_id.as_str())
         );
-        assert_eq!(
-            saved.metadata.checkpoint_events_json,
-            original.metadata.checkpoint_events_json
-        );
-        assert_eq!(
-            saved.metadata.checkpoint_json,
-            original.metadata.checkpoint_json
-        );
-        assert_eq!(
-            saved.metadata.first_user_message,
-            original.metadata.first_user_message
-        );
+        assert_archive_retained(&original, &saved);
         assert_eq!(
             saved.head.history_len.get(),
-            original.head.history_len.get() + 1
+            original.head.history_len.get() + u64::from(preserve_pending)
         );
         assert_eq!(
             fork.history_range(0, original.head.history_len.get())
@@ -5980,7 +5678,7 @@ fn unchanged_archive_preserved_fork_request_allocation_is_bounded() {
                 saved.head.history_len.get()
             )
             .unwrap(),
-            vec![pending]
+            pending.into_iter().collect::<Vec<_>>()
         );
         assert_eq!(
             fork.transcript_range(0, saved.head.transcript_record_count.get())
@@ -5988,39 +5686,55 @@ fn unchanged_archive_preserved_fork_request_allocation_is_bounded() {
             records
         );
         assert_eq!(reader.snapshot().unwrap(), original);
-        eprintln!(
-            "PRESERVED_FORK_UI checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}",
-            sample.thread_bytes_allocated, sample.process_bytes_allocated,
-        );
+        if !preserve_pending {
+            assert_eq!(saved.head.revision, smelt_store::Revision::new(2));
+            assert_eq!(saved.history_root_id, original.history_root_id);
+            assert_eq!(saved.transcript_root_id, original.transcript_root_id);
+            assert_eq!(
+                saved.head.transcript_record_count,
+                original.head.transcript_record_count
+            );
+            assert_eq!(saved.metadata.title, original.metadata.title);
+            assert_eq!(saved.metadata.slug, original.metadata.slug);
+            assert_eq!(saved.side_tables, original.side_tables);
+        }
+        eprintln!("ARCHIVE_FORK operation={operation} checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}", sample.thread_bytes_allocated, sample.process_bytes_allocated);
+        print_hot_path_perf(operation, &perf);
         samples.push((checkpoints, sample.thread_bytes_allocated));
     }
     let baseline = samples[0].1;
     for (checkpoints, allocated) in samples {
         assert!(allocated <= baseline + 256 * 1024,
-            "{checkpoints} retained checkpoints inflate the preserved fork UI request to {allocated} allocated bytes, baseline {baseline}");
+            "{operation}: {checkpoints} retained checkpoints inflate capture to {allocated} UI-thread bytes, baseline {baseline}");
     }
+}
+
+fn assert_archive_retained(
+    original: &smelt_store::LineageSessionState,
+    saved: &smelt_store::LineageSessionState,
+) {
+    assert_eq!(
+        saved.metadata.checkpoint_events_json,
+        original.metadata.checkpoint_events_json
+    );
+    assert_eq!(
+        saved.metadata.checkpoint_json,
+        original.metadata.checkpoint_json
+    );
+    assert_eq!(
+        saved.metadata.first_user_message,
+        original.metadata.first_user_message
+    );
 }
 
 /// Measures actual Lua title changes through canonical settlement with an unchanged
 /// archive. Cold fixture construction and historical verification stay outside the sample.
 #[test]
-#[ignore = "compact owner acceptance; run optimized and process-isolated"]
-fn unchanged_archive_title_save_hot_work_is_bounded() {
+#[ignore = "manual resource acceptance; see TESTING.md"]
+fn session_storage_title_save_allocations_are_bounded() {
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
-        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let address = app
-            .app
-            .conversation
-            .transcript()
-            .store_address()
-            .expect("archive fixture address");
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &address.sessions_root,
-            &address.lineage_id,
-            &address.session_id,
-        )
-        .expect("open title hot-work fixture reader");
+        let (mut app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
         let original = reader.snapshot().expect("original archived state");
         let mut receipt = None;
         let (sample, perf) = capture_hot_path_sample("archive_title_hot_work", checkpoints, || {
@@ -6042,15 +5756,12 @@ fn unchanged_archive_title_save_hot_work_is_bounded() {
             saved.metadata.title.as_deref(),
             Some("bounded archive title")
         );
-        assert_eq!(
-            saved.metadata.checkpoint_events_json,
-            original.metadata.checkpoint_events_json
-        );
+        assert_archive_retained(&original, &saved);
         let preparation = perf
             .allocs
             .iter()
-            .find(|row| row.label == "session:prepare_save_batch")
-            .expect("actual title-save preparation must be instrumented");
+            .find(|row| row.label == "session:capture_save_batch")
+            .expect("actual title-save capture must be instrumented");
         assert!(preparation.count > 0);
         eprintln!(
             "ARCHIVE_TITLE_HOT_WORK checkpoints={checkpoints} archive_bytes={archive_bytes} preparation_samples={} preparation_bytes_max={} preparation_bytes_total={} ui_alloc_bytes={} process_alloc_bytes={}",
@@ -6079,27 +5790,15 @@ fn unchanged_archive_title_save_hot_work_is_bounded() {
 /// Exercises real title changes with fixed history, checkpoint archive and
 /// provider context. Retaining titles must not retain another archive per save.
 #[test]
-#[ignore = "storage scaling acceptance; run optimized and process-isolated"]
-fn unchanged_archive_repeated_title_save_storage_growth() {
+#[ignore = "manual resource acceptance; see TESTING.md"]
+fn session_storage_title_saves_reuse_checkpoint_archives() {
     const SAVES: u64 = 20;
     // Allows command receipts, index paths and small unique metadata, but not
     // another compressed archive on every revision.
     const MAX_PHYSICAL_BYTES_PER_SAVE: u64 = 64 * 1024;
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
-        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let address = app
-            .app
-            .conversation
-            .transcript()
-            .store_address()
-            .expect("archive fixture store address");
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &address.sessions_root,
-            &address.lineage_id,
-            &address.session_id,
-        )
-        .expect("open archive fixture reader");
+        let (mut app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
         let before = reader.storage_stats().expect("initial storage accounting");
         let initial = reader.snapshot().expect("initial archived snapshot");
         let mut head = initial.head;
@@ -6118,10 +5817,7 @@ fn unchanged_archive_repeated_title_save_storage_growth() {
             let snapshot = reader.snapshot().expect("saved archived snapshot");
             assert_eq!(snapshot.head, receipt.current);
             assert_eq!(snapshot.metadata.title.as_deref(), Some(title.as_str()));
-            assert_eq!(
-                snapshot.metadata.checkpoint_events_json, initial.metadata.checkpoint_events_json,
-                "title saves must retain the exact checkpoint archive"
-            );
+            assert_archive_retained(&initial, &snapshot);
             head = receipt.current;
         }
         let after = reader.storage_stats().expect("final storage accounting");
@@ -6149,8 +5845,8 @@ fn unchanged_archive_repeated_title_save_storage_growth() {
 
 /// A retained initial paste must not be stored again when only the title changes.
 #[test]
-#[ignore = "storage scaling acceptance; run optimized and process-isolated"]
-fn large_initial_message_repeated_title_save_storage_growth() {
+#[ignore = "manual resource acceptance; see TESTING.md"]
+fn session_storage_title_saves_reuse_initial_message() {
     const SAVES: u64 = 10;
     const MAX_PHYSICAL_BYTES_PER_SAVE: u64 = 64 * 1024;
     let mut samples = Vec::new();
@@ -6265,257 +5961,6 @@ fn large_initial_message_repeated_title_save_storage_growth() {
     }
 }
 
-/// Exercises real Enter/continuation/queued-handoff dispatch with a bounded
-/// model context and an increasing archive of compaction summaries.
-#[test]
-#[ignore = "timed large-session investigation; run optimized and single-threaded"]
-fn large_session_turn_start_benchmark() {
-    for checkpoint_count in [0, 16, 64, 128] {
-        let (mut app, archive_bytes) = saved_archive_bench_app(checkpoint_count);
-        let history_len = app.app.session_history_len();
-        for operation in ["submit_enter", "continue_enter", "queued_handoff"] {
-            match operation {
-                "submit_enter" => app.type_text("benchmark next request"),
-                "continue_enter" => {
-                    app.app.discard_turn(crate::app::TurnEnd::Complete);
-                    app.wait_for_turn_persistence();
-                }
-                "queued_handoff" => {
-                    app.type_text("benchmark queued request");
-                    app.press(KeyCode::Enter);
-                    assert_eq!(app.state().queued_inputs.len(), 1);
-                }
-                _ => unreachable!(),
-            }
-            app.clear_actions();
-            let mut ui_return_ms = 0.0;
-            let (sample, snapshot) = capture_hot_path_sample(operation, history_len, || {
-                let started = std::time::Instant::now();
-                if operation == "queued_handoff" {
-                    let turn_id = app.app.conversation.active().expect("active turn").turn_id;
-                    app.feed_one(SourceEvent::Engine {
-                        event: Box::new(protocol::EngineEvent::TurnComplete {
-                            turn_id,
-                            history: None,
-                            meta: None,
-                        }),
-                    });
-                } else {
-                    app.press(KeyCode::Enter);
-                }
-                ui_return_ms = started.elapsed().as_secs_f64() * 1000.0;
-                app.wait_for_turn_persistence();
-                app.feed_one(SourceEvent::Tick(0));
-            });
-            let dispatched = app
-                .actions()
-                .iter()
-                .filter(|action| {
-                    matches!(action, Action::EngineSend(command)
-                        if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_)))
-                })
-                .count();
-            assert_eq!(dispatched, 1, "{operation} must dispatch exactly one turn");
-            eprintln!(
-                "LARGE_SESSION_TURN_START operation={operation} checkpoints={checkpoint_count} archive_bytes={archive_bytes} ui_return_ms={ui_return_ms:.3} durable_dispatch_ms={:.3} ui_alloc_bytes={} process_alloc_bytes={}",
-                sample.ms, sample.thread_bytes_allocated, sample.process_bytes_allocated,
-            );
-            print_hot_path_perf(operation, &snapshot);
-            let (render, _) = capture_hot_path_sample("first_frame", history_len, || {
-                app.render_unsettled_silent();
-            });
-            eprintln!(
-                "LARGE_SESSION_TURN_FRAME operation={operation} checkpoints={checkpoint_count} ms={:.3} ui_alloc_bytes={}",
-                render.ms, render.thread_bytes_allocated,
-            );
-            app.app.flush_persist();
-        }
-        measure_archive_interaction_edges(&mut app, checkpoint_count, archive_bytes);
-    }
-}
-
-fn measure_archive_interaction_edges(app: &mut TestApp, checkpoints: usize, archive_bytes: usize) {
-    app.app.discard_turn(crate::app::TurnEnd::Complete);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    app.wait_for_turn_persistence_until(deadline);
-    save_bench_fixture(app, "archive interaction edges");
-    let history_len = app.app.session_history_len();
-    let release = app.app.conversation.pause_persistence();
-    for operation in [
-        "typing_32_busy_actor",
-        "cursor_32_busy_actor",
-        "paste_64k_busy_actor",
-        "title_busy_actor",
-        "idle_100_busy_actor",
-    ] {
-        let (sample, snapshot) =
-            capture_hot_path_sample(operation, history_len, || match operation {
-                "typing_32_busy_actor" => {
-                    for _ in 0..32 {
-                        app.press(KeyCode::Char('a'));
-                        app.render_unsettled_silent();
-                    }
-                }
-                "cursor_32_busy_actor" => {
-                    for _ in 0..32 {
-                        app.press(KeyCode::Left);
-                        app.render_unsettled_silent();
-                    }
-                }
-                "paste_64k_busy_actor" => {
-                    app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
-                        "paste m\n".repeat(8192),
-                    )));
-                    app.render_unsettled_silent();
-                }
-                "title_busy_actor" => {
-                    assert!(app.run_lua(r#"smelt.session.title.set("archive edge benchmark")"#));
-                    app.render_unsettled_silent();
-                }
-                "idle_100_busy_actor" => {
-                    for _ in 0..100 {
-                        app.render_unsettled_silent();
-                    }
-                }
-                _ => unreachable!(),
-            });
-        eprintln!("ARCHIVE_INTERACTION_EDGE operation={operation} checkpoints={checkpoints} archive_bytes={archive_bytes} ms={:.3} ui_alloc_bytes={}", sample.ms, sample.thread_bytes_allocated);
-        print_hot_path_perf(operation, &snapshot);
-    }
-    release.send(()).expect("resume edge fixture persistence");
-    assert!(app.run_lua(r#"smelt.prompt.set_text("")"#));
-    save_bench_fixture(app, "archive edge title");
-
-    let session_id = app.app.conversation.session().id.clone();
-    for operation in ["resume_request_frame", "fork_request_frame"] {
-        let ready_start = std::time::Instant::now();
-        let (request, snapshot) = capture_hot_path_sample(operation, history_len, || {
-            if operation == "resume_request_frame" {
-                assert!(app.run_lua(&format!("smelt.session.load({session_id:?})")));
-            } else {
-                assert!(app.run_lua(r#"smelt.cmd.run("fork")"#));
-            }
-            app.render_unsettled_silent();
-        });
-        app.wait_for_session_lifecycle();
-        app.render_to_frame();
-        eprintln!("ARCHIVE_INTERACTION_EDGE operation={operation} checkpoints={checkpoints} archive_bytes={archive_bytes} ms={:.3} ready_ms={:.3} ui_alloc_bytes={}", request.ms, ready_start.elapsed().as_secs_f64() * 1000.0, request.thread_bytes_allocated);
-        print_hot_path_perf(operation, &snapshot);
-        if operation == "resume_request_frame" {
-            assert_eq!(app.app.conversation.session().id, session_id);
-        } else {
-            assert_ne!(
-                app.app.conversation.session().id,
-                session_id,
-                "fork must switch branches"
-            );
-        }
-    }
-}
-
-/// Measures completion-to-visible-feedback for canonical turns, including a
-/// controlled slow persistence actor in a small session or an isolated fixture.
-#[test]
-#[ignore = "timed canonical completion investigation; run optimized and single-threaded"]
-fn canonical_turn_completion_benchmark() {
-    let fixture =
-        std::env::var_os("SMELT_TRANSCRIPT_HOT_PATH_FIXTURE").map(std::path::PathBuf::from);
-    let delays: &[u64] = if fixture.is_some() {
-        &[0]
-    } else {
-        &[0, 2000, 6000]
-    };
-    for &delay_ms in delays {
-        let mut app = fixture.as_deref().map_or_else(
-            || saved_hot_path_app("canonical-completion", 8, None),
-            copied_hot_path_fixture_app,
-        );
-        assert!(app.run_lua(r#"smelt.settings.auto_continue = "off""#));
-        app.app.handle_resize(100, 32);
-        app.type_text("completion investigation request");
-        app.press(KeyCode::Enter);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        app.wait_for_turn_persistence_until(deadline);
-        let active = app
-            .app
-            .conversation
-            .active()
-            .expect("canonical turn is active");
-        assert!(active.canonical);
-        let turn_id = active.turn_id;
-        while !matches!(
-            app.flush_persist(),
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "turn setup did not become durable"
-            );
-        }
-        let before = app.render_to_frame();
-        assert!(app.working_state().animating);
-        assert!(
-            before.text().contains('●'),
-            "active prompt must show its working dot"
-        );
-
-        let release = (delay_ms > 0).then(|| {
-            let resume = app.app.conversation.pause_persistence();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                resume.send(()).expect("resume persistence actor");
-            })
-        });
-        let history_len = app.app.session_history_len();
-        let feedback_start = std::time::Instant::now();
-        let (completion, snapshot) =
-            capture_hot_path_sample("canonical_turn_complete", history_len, || {
-                app.feed_one(SourceEvent::engine(protocol::EngineEvent::TurnComplete {
-                    turn_id,
-                    history: None,
-                    meta: None,
-                }));
-            });
-        let (render, render_snapshot) =
-            capture_hot_path_sample("completion_first_render", history_len, || {
-                let after = app.render_to_frame();
-                if fixture.is_none() {
-                    assert!(
-                        after.text().contains("done"),
-                        "completed prompt must settle to done"
-                    );
-                }
-            });
-        let feedback_ms = feedback_start.elapsed().as_secs_f64() * 1000.0;
-        assert!(
-            !app.working_state().animating,
-            "completed prompt must stop animating"
-        );
-        assert!(!app.agent_running());
-        let durable_start = std::time::Instant::now();
-        if let Some(release) = release {
-            release.join().expect("persistence release thread");
-        }
-        let deadline = durable_start + std::time::Duration::from_secs(60);
-        while !matches!(
-            app.flush_persist(),
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "completion did not become durable"
-            );
-        }
-        print_hot_path_perf(completion.operation, &snapshot);
-        print_hot_path_perf(render.operation, &render_snapshot);
-        print_hot_path_perf("completion_after_feedback", &smelt_perf::perf::snapshot());
-        eprintln!(
-            "CANONICAL_TURN_COMPLETION fixture={} history_len={history_len} actor_delay_ms={delay_ms} event_ms={:.3} first_render_ms={:.3} feedback_ms={feedback_ms:.3} remaining_durable_ms={:.3}",
-            fixture.is_some(), completion.ms, render.ms, durable_start.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-}
-
 fn active_memory_bench_bytes() -> usize {
     env_positive_usize("SMELT_TRANSCRIPT_ACTIVE_MEMORY_BYTES", 50 * 1024 * 1024)
 }
@@ -6533,10 +5978,8 @@ fn linux_memory_bytes(field: &str) -> Option<u64> {
 }
 
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_active_memory_benchmark_suite() {
-    if !benchmark_target_enabled() {
-        return;
-    }
     const BLOCK_BYTES: usize = 32 * 1024;
     const SAVE_BATCH_BLOCKS: usize = 256;
     const SEARCH_TARGET: &str = "active-memory-unique-search-target";
@@ -6807,21 +6250,13 @@ fn transcript_active_memory_benchmark_suite() {
     smelt_perf::perf::set_enabled(false);
 }
 
-fn scaling_bench_enabled() -> bool {
-    std::env::var("SMELT_TRANSCRIPT_SCALING_BENCH").as_deref() == Ok("1")
-}
-
 fn scaling_bench_block_counts() -> Vec<usize> {
     std::env::var("SMELT_TRANSCRIPT_SCALING_BLOCKS")
         .ok()
         .map(|value| {
-            value
-                .split(',')
-                .filter_map(|count| count.trim().parse::<usize>().ok())
-                .filter(|count| *count >= 64)
-                .collect::<Vec<_>>()
+            crate::benchmark_config::scaling_block_counts(&value)
+                .expect("SMELT_TRANSCRIPT_SCALING_BLOCKS")
         })
-        .filter(|counts| !counts.is_empty())
         .unwrap_or_else(|| vec![2_000, 8_000, 32_000])
 }
 
@@ -6830,7 +6265,7 @@ fn scaling_bench_compacted() -> bool {
 }
 
 fn scaling_bench_reps() -> usize {
-    env_positive_usize("SMELT_TRANSCRIPT_SCALING_REPS", 24)
+    env_positive_usize("SMELT_TRANSCRIPT_BENCH_RUNS", 24)
 }
 
 /// One block of a repeating user/thinking/tool/answer agent turn.
@@ -7215,10 +6650,8 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
 /// depend on session size actually scale. The exponent column is the fitted
 /// power between the smallest and largest session: ~0 is constant, ~1 linear.
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_scaling_benchmark_suite() {
-    if !benchmark_target_enabled() || !scaling_bench_enabled() {
-        return;
-    }
     let counts = scaling_bench_block_counts();
     let compacted = scaling_bench_compacted();
     let reps = scaling_bench_reps();
@@ -7265,10 +6698,6 @@ fn transcript_scaling_benchmark_suite() {
                 .collect::<String>()
         );
     }
-}
-
-fn keys_bench_enabled() -> bool {
-    std::env::var("SMELT_TRANSCRIPT_KEYS_BENCH").as_deref() == Ok("1")
 }
 
 /// A scaling block whose answers also carry inline code, quotes and a fenced
@@ -7414,10 +6843,8 @@ const KEYS_BENCH_OPS: &[(&str, &str, &str)] = &[
 /// ones scale with it. A key whose time grows with the session or passes a
 /// frame budget is flagged.
 #[test]
+#[ignore = "run with cargo xtask bench-transcript-layout"]
 fn transcript_keys_benchmark_suite() {
-    if !benchmark_target_enabled() || !keys_bench_enabled() {
-        return;
-    }
     const SLOW_MS: f64 = 4.0;
     let counts = scaling_bench_block_counts();
     let compacted = scaling_bench_compacted();

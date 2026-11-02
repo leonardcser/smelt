@@ -116,7 +116,7 @@ async fn wait_for_unlock(exe: &Path) {
                 .write(true)
                 .open(lock_path)
                 .unwrap();
-            fs4::FileExt::lock(&file).unwrap();
+            file.lock().unwrap();
         }),
     )
     .await

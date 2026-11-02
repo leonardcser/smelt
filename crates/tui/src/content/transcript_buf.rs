@@ -8228,49 +8228,7 @@ pub(crate) mod tests {
         no_cache_counters: TranscriptProjectionCounters,
     }
 
-    #[derive(Clone, Copy, Debug)]
-    struct MetricStats {
-        mean: f64,
-        stddev: f64,
-        min: f64,
-        max: f64,
-    }
-
-    impl MetricStats {
-        fn from(values: &[f64]) -> Self {
-            let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance = if values.len() > 1 {
-                values
-                    .iter()
-                    .map(|value| {
-                        let delta = value - mean;
-                        delta * delta
-                    })
-                    .sum::<f64>()
-                    / (values.len() - 1) as f64
-            } else {
-                0.0
-            };
-            let min = values
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, |acc, value| acc.min(value));
-            let max = values
-                .iter()
-                .copied()
-                .fold(f64::NEG_INFINITY, |acc, value| acc.max(value));
-            Self {
-                mean,
-                stddev: variance.sqrt(),
-                min,
-                max,
-            }
-        }
-
-        fn display(self) -> String {
-            format!("{:.1}±{:.1}", self.mean, self.stddev)
-        }
-    }
+    use smelt_test_support::bench::Stats as MetricStats;
 
     fn elapsed_ms(elapsed: std::time::Duration) -> f64 {
         elapsed.as_secs_f64() * 1_000.0
@@ -8489,52 +8447,25 @@ pub(crate) mod tests {
     }
 
     fn transcript_bench_workloads() -> Vec<TranscriptBenchWorkload> {
-        let all = vec![
-            TranscriptBenchWorkload {
-                name: "mixed_10mib",
-                target_bytes: 10 * 1024 * 1024,
-                build: push_large_mixed_transcript_fixture,
-            },
-            TranscriptBenchWorkload {
-                name: "mixed_50mib",
-                target_bytes: 50 * 1024 * 1024,
-                build: push_large_mixed_transcript_fixture,
-            },
-            TranscriptBenchWorkload {
-                name: "markdown_4mib",
-                target_bytes: 4 * 1024 * 1024,
-                build: push_markdown_heavy_transcript_fixture,
-            },
-            TranscriptBenchWorkload {
-                name: "tool_output_4mib",
-                target_bytes: 4 * 1024 * 1024,
-                build: push_tool_output_heavy_transcript_fixture,
-            },
-            TranscriptBenchWorkload {
-                name: "tiny_blocks_1mib",
-                target_bytes: 1024 * 1024,
-                build: push_many_tiny_blocks_transcript_fixture,
-            },
-            TranscriptBenchWorkload {
-                name: "huge_blocks_4mib",
-                target_bytes: 4 * 1024 * 1024,
-                build: push_few_huge_blocks_transcript_fixture,
-            },
-        ];
-        let Some(filter) = std::env::var("SMELT_TRANSCRIPT_BENCH_WORKLOADS")
-            .ok()
-            .filter(|filter| !filter.trim().is_empty())
-        else {
-            return all;
-        };
-        let names: std::collections::HashSet<_> = filter
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .collect();
-        all.into_iter()
-            .filter(|workload| names.contains(workload.name))
-            .collect()
+        use crate::benchmark_config::{named_list, LayoutKind, LAYOUT_WORKLOADS};
+        let filter = std::env::var("SMELT_TRANSCRIPT_BENCH_WORKLOADS").ok();
+        let names = filter.as_deref().map(|value| {
+            named_list(value, LAYOUT_WORKLOADS.iter().map(|entry| entry.0))
+                .expect("SMELT_TRANSCRIPT_BENCH_WORKLOADS")
+        });
+        LAYOUT_WORKLOADS.iter()
+            .filter(|entry| names.as_ref().is_none_or(|names| names.contains(&entry.0)))
+            .map(|&(name, target_bytes, kind)| TranscriptBenchWorkload {
+                name,
+                target_bytes,
+                build: match kind {
+                    LayoutKind::Mixed => push_large_mixed_transcript_fixture,
+                    LayoutKind::Markdown => push_markdown_heavy_transcript_fixture,
+                    LayoutKind::ToolOutput => push_tool_output_heavy_transcript_fixture,
+                    LayoutKind::TinyBlocks => push_many_tiny_blocks_transcript_fixture,
+                    LayoutKind::HugeBlocks => push_few_huge_blocks_transcript_fixture,
+                },
+            }).collect()
     }
 
     const RESUME_RECORD_BLOCK_TEXT_BYTES: usize = 4 * 1024;

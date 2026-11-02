@@ -216,10 +216,10 @@ pub(super) fn read(exe: &Path) -> Result<Option<Status>, String> {
     };
     // Hold a successful shared probe through the read, so a new writer cannot
     // publish between the liveness check and the snapshot and appear interrupted.
-    let active = match fs4::FileExt::try_lock_shared(&lock) {
+    let active = match lock.try_lock_shared() {
         Ok(()) => false,
-        Err(fs4::TryLockError::WouldBlock) => true,
-        Err(fs4::TryLockError::Error(e)) => return Err(format!("inspect upgrade lock: {e}")),
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(e)) => return Err(format!("inspect upgrade lock: {e}")),
     };
     let mut status: Option<Status> = match fs::read(&path) {
         Ok(data) => {

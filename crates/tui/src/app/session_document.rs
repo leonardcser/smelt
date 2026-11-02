@@ -211,6 +211,19 @@ impl PartialEq for SessionBatch {
 }
 
 impl SessionBatch {
+    #[cfg(test)]
+    pub(super) fn shares_storage_with(&self, other: &Self) -> bool {
+        match (&self.content, &other.content) {
+            (SessionBatchContent::Captured(left), SessionBatchContent::Captured(right)) => {
+                std::sync::Arc::ptr_eq(left, right)
+            }
+            (SessionBatchContent::Prepared(left), SessionBatchContent::Prepared(right)) => {
+                std::sync::Arc::ptr_eq(left, right)
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn session_id(&self) -> &str {
         match &self.content {
             SessionBatchContent::Captured(capture) => capture.archives.session_id(),

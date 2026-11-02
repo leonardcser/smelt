@@ -63,7 +63,9 @@ fn run(scenario: Scenario) -> io::Result<()> {
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
 
-    let result = drive(&scenario, term_w, term_h);
+    let result = smelt_fuzz::runtime::with_current_thread_runtime("visual replay", || {
+        drive(&scenario, term_w, term_h)
+    });
 
     // Always restore, even on error.
     let _ = io::stdout().execute(LeaveAlternateScreen);

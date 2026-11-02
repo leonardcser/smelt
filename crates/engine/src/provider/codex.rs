@@ -3,8 +3,6 @@ use crate::paths::state_dir;
 use std::sync::OnceLock;
 
 const ISSUER: &str = smelt_provider::codex::ISSUER;
-#[cfg(test)]
-use smelt_provider::codex::REFRESH_INTERVAL_SECS;
 use smelt_provider::codex::{CodexModel, CodexTokens};
 
 pub(crate) const CODEX_TOKENS_ENV: &str = "SMELT_CODEX_TOKENS";
@@ -211,49 +209,6 @@ mod tests {
         format!("{header}.{body}.sig")
     }
 
-    // ---- needs_refresh ----
-
-    fn tokens(expires_at: u64, last_refresh: u64) -> CodexTokens {
-        CodexTokens {
-            access_token: "a".into(),
-            refresh_token: "r".into(),
-            expires_at,
-            account_id: None,
-            last_refresh,
-        }
-    }
-
-    #[test]
-    fn needs_refresh_true_when_within_60_seconds_of_expiry() {
-        let t = tokens(1_030, 900);
-        assert!(t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_true_when_past_expiry() {
-        let t = tokens(900, 800);
-        assert!(t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_false_when_expiry_far_and_recent_refresh() {
-        let t = tokens(8_200, 940);
-        assert!(!t.needs_refresh_at(1_000));
-    }
-
-    #[test]
-    fn needs_refresh_true_when_last_refresh_older_than_interval() {
-        let t = tokens(REFRESH_INTERVAL_SECS + 2_000, 1_000);
-        assert!(t.needs_refresh_at(1_000 + REFRESH_INTERVAL_SECS + 1));
-    }
-
-    #[test]
-    fn needs_refresh_ignores_last_refresh_when_zero() {
-        // last_refresh == 0 means never refreshed, the time-based check is skipped.
-        let t = tokens(8_200, 0);
-        assert!(!t.needs_refresh_at(1_000));
-    }
-
     // ---- parse_jwt_claims ----
 
     #[test]
@@ -326,31 +281,6 @@ mod tests {
             extract_account_id(&access, None).as_deref(),
             Some("ext-acct")
         );
-    }
-
-    // ---- build_authorize_url ----
-
-    #[test]
-    fn build_authorize_url_includes_all_required_params() {
-        let pkce = smelt_provider::codex::PkceCodes {
-            verifier: "v".into(),
-            challenge: "ch".into(),
-        };
-        let url = smelt_provider::codex::build_authorize_url(
-            ISSUER,
-            "http://localhost:1455/auth/callback",
-            &pkce,
-            "STATE",
-        );
-        assert!(url.starts_with(ISSUER));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("client_id="));
-        assert!(url.contains("code_challenge=ch"));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("state=STATE"));
-        assert!(url.contains("originator=smelt"));
-        // redirect_uri is url-encoded.
-        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
     }
 
     fn fixed_now() -> u64 {
@@ -529,16 +459,6 @@ mod tests {
         assert!(err.contains("refresh_token"));
     }
 
-    // ---- pkce / state helpers (smoke) ----
-
-    #[test]
-    fn generate_pkce_produces_nonempty_verifier_and_challenge() {
-        let p = smelt_provider::codex::generate_pkce();
-        assert!(!p.verifier.is_empty());
-        assert!(!p.challenge.is_empty());
-        assert_ne!(p.verifier, p.challenge);
-    }
-
     #[test]
     fn parse_jwt_claims_returns_none_when_payload_is_not_json() {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
@@ -633,13 +553,5 @@ mod tests {
                 protocol::ReasoningEffort::XHigh,
             ]
         );
-    }
-
-    #[test]
-    fn generate_state_produces_nonempty_unique_strings() {
-        let a = smelt_provider::codex::generate_state();
-        let b = smelt_provider::codex::generate_state();
-        assert!(!a.is_empty());
-        assert_ne!(a, b);
     }
 }

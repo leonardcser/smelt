@@ -847,34 +847,29 @@ pub fn checked_edit_file(
 /// is locked by another process (EWOULDBLOCK) or on I/O error. Released on drop.
 #[cfg(unix)]
 pub fn try_flock(path: &str) -> Result<FlockGuard, String> {
-    use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    let fd = file.as_raw_fd();
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.kind() == std::io::ErrorKind::WouldBlock {
-            return Err("file is currently being edited by another agent, try again later".into());
+    match file.try_lock() {
+        Ok(()) => Ok(FlockGuard { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err("file is currently being edited by another agent, try again later".into())
         }
-        return Err(format!("flock error: {err}"));
+        Err(std::fs::TryLockError::Error(error)) => Err(format!("file lock error: {error}")),
     }
-    Ok(FlockGuard { _file: file })
 }
 
+// Windows locks also deny I/O through our separate editing handles.
 #[cfg(not(unix))]
 pub fn try_flock(_path: &str) -> Result<FlockGuard, String> {
-    Ok(FlockGuard { _file: None })
+    Ok(FlockGuard {})
 }
 
 pub struct FlockGuard {
     #[cfg(unix)]
     _file: std::fs::File,
-    #[cfg(not(unix))]
-    _file: Option<()>,
 }
 
 #[cfg(test)]
@@ -882,6 +877,24 @@ mod edit_file_tests {
     use super::*;
 
     const CONTENT: &str = "alpha\nbeta\nalpha\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_edit_rejects_existing_owner_and_succeeds_after_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.txt");
+        std::fs::write(&path, "old").unwrap();
+        let path = path.to_str().unwrap();
+        let cache = FileStateCache::new();
+        cache.record_read(path, "old".into(), (0, 1));
+        let owner = try_flock(path).unwrap();
+        let error = checked_edit_file(path, "old", "new", false, &cache, None).unwrap_err();
+        assert!(error.contains("currently being edited"), "{error}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "old");
+        drop(owner);
+        checked_edit_file(path, "old", "new", false, &cache, None).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "new");
+    }
 
     #[test]
     fn prepared_edit_rejects_a_newer_read_snapshot() {

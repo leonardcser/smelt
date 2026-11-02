@@ -947,7 +947,7 @@ impl Drop for InstallLock {
     fn drop(&mut self) {
         // A concurrent fork can briefly inherit this descriptor before exec.
         // Releasing ownership must not wait for that unrelated child to exec.
-        let _ = fs4::FileExt::unlock(&self._file);
+        let _ = self._file.unlock();
     }
 }
 
@@ -970,10 +970,10 @@ impl InstallLock {
             })?;
         // Follow instead of waiting: a waiter runs the old image and could
         // install the same version again after the owner finishes.
-        match fs4::FileExt::try_lock(&file) {
+        match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
-            Err(fs4::TryLockError::WouldBlock) => Ok(None),
-            Err(fs4::TryLockError::Error(e)) => {
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
                 Err(format!("lock upgrade {}: {e}", path.display()))
             }
         }

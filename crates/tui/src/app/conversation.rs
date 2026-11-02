@@ -3733,57 +3733,59 @@ mod tests {
             app.press(KeyCode::Enter);
             assert!(app.app.turn_submission_is_pending());
             assert!(!app.agent_running());
-            let generation = app
+            let prepared = app
                 .app
                 .conversation
                 .canonical_operations
                 .front()
                 .unwrap()
                 .prepared
-                .as_ref()
-                .unwrap()
-                .generation;
+                .clone()
+                .unwrap();
             if change_title {
                 app.app
                     .set_session_title("new title".into(), "new-title".into(), None);
                 app.app.drive_canonical_operations();
-                assert_ne!(
-                    app.app
-                        .conversation
-                        .canonical_operations
-                        .front()
-                        .unwrap()
-                        .prepared
-                        .as_ref()
-                        .unwrap()
-                        .generation,
-                    generation
-                );
+                let changed = app
+                    .app
+                    .conversation
+                    .canonical_operations
+                    .front()
+                    .unwrap()
+                    .prepared
+                    .as_ref()
+                    .unwrap();
+                assert_ne!(changed.generation, prepared.generation);
+                assert!(!changed.shares_storage_with(&prepared));
             }
-            smelt_perf::perf::set_enabled(true);
-            smelt_perf::perf::clear();
-            app.type_text("new draft");
-            for _ in 0..20 {
-                app.app.drive_canonical_operations();
-                app.render_unsettled_silent();
-            }
-            let snapshot = smelt_perf::perf::snapshot();
-            smelt_perf::perf::set_enabled(false);
-            assert!(
-                !snapshot
-                    .durations
-                    .iter()
-                    .any(|row| row.label == "session:prepare_save_batch"),
-                "unchanged backpressure rebuilt a batch"
-            );
-            assert!(app
+            let prepared = app
                 .app
                 .conversation
                 .canonical_operations
                 .front()
                 .unwrap()
                 .prepared
-                .is_some());
+                .clone()
+                .unwrap();
+            app.type_text("new draft");
+            for _ in 0..20 {
+                app.app.drive_canonical_operations();
+                app.render_unsettled_silent();
+                let retained = app
+                    .app
+                    .conversation
+                    .canonical_operations
+                    .front()
+                    .unwrap()
+                    .prepared
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(retained.generation, prepared.generation);
+                assert!(
+                    retained.shares_storage_with(&prepared),
+                    "unchanged backpressure replaced the captured batch"
+                );
+            }
             assert_eq!(app.state().prompt_text, "new draft");
             assert!(app
                 .drain_engine_sends()

@@ -5,7 +5,6 @@ static ALLOCATOR: smelt_core::allocator::Allocator = smelt_core::allocator::ALLO
 
 mod bench_file_search;
 mod bench_lineage_search;
-mod bench_store_compression;
 mod bench_support;
 mod bench_transcript_layout;
 mod fuzz;
@@ -41,7 +40,6 @@ fn main() {
                     release: true,
                     env: Vec::new(),
                     bench_name: test_filter,
-                    ignored: true,
                 });
             }
         }
@@ -53,12 +51,10 @@ fn main() {
                 release: true,
                 env: Vec::new(),
                 bench_name: "viewer_search_benchmark",
-                ignored: true,
             });
         }
         Some("bench-file-search") => bench_file_search::run(args.collect()),
         Some("bench-lineage-search") => bench_lineage_search::run(args.collect()),
-        Some("bench-store-compression") => bench_store_compression::run(args.collect()),
         Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
         Some("gen-file-icons") => gen_file_icons::run(args.collect()),
         Some("gen-lua-docs") => gen_lua_docs::run(),
@@ -91,9 +87,6 @@ fn print_usage() {
     );
     eprintln!(
         "  bench-lineage-search --state-dir PATH [--session ID] [--runs N] [--allow-debug] benchmark production derived search"
-    );
-    eprintln!(
-        "  bench-store-compression STATE_DIR [--max-samples N] [--max-bytes N] sample store compression"
     );
     eprintln!(
         "  bench-transcript-layout [--runs N] [--workloads CSV] [--scale-500mb] run transcript layout benches"

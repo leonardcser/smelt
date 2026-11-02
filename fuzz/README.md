@@ -210,6 +210,11 @@ SMELT_SIM_ARTIFACT=/path/to/crash cargo test --manifest-path fuzz/Cargo.toml --l
 cargo run --manifest-path fuzz/Cargo.toml --features scenario-tools --bin play_scenario -- /path/to/shrunk.json
 ```
 
+For `smelt_loop`, `replay_scenario --trace` observes the same driver as normal
+replay: runtime isolation, render scheduling, operation limits, and final leak
+checks all remain active. Visual replay uses the same isolated runtime and app
+builder, but lets you choose when to render and step backward.
+
 ## Regression seeds
 
 Every fuzz-found bug gets a committed seed under

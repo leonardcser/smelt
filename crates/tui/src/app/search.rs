@@ -190,7 +190,7 @@ impl SearchState {
     fn cancel_worker(&mut self) -> u64 {
         let generation = self.advance_generation();
         if let Some(worker) = &self.worker {
-            worker.cancel(generation);
+            worker.cancel();
         }
         generation
     }

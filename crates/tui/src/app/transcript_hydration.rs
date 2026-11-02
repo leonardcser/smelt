@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
 use std::thread;
 use std::time::Instant;
 
@@ -9,6 +10,7 @@ use smelt_core::transcript_model::{
     BlockId, StoredBlockRef, StoredBlockWithId, TranscriptBlockRecordWithId,
 };
 
+use super::latest_worker::{LatestWorker, Mailbox};
 use super::transcript::TranscriptStoreAddress;
 
 type MaterializedBlockRecords =
@@ -304,152 +306,87 @@ pub struct TranscriptHydrationWorkerResult {
     pub(super) duration_us: u64,
 }
 
+#[cfg(test)]
 #[derive(Default)]
-struct TranscriptHydrationWorkerState {
-    pending: Option<TranscriptHydrationRequest>,
-    shutdown: bool,
-}
-
-struct TranscriptHydrationWorkerShared {
-    state: Mutex<TranscriptHydrationWorkerState>,
-    changed: Condvar,
-    context_id: AtomicU64,
-    latest_generation: AtomicU64,
-    #[cfg(test)]
-    delay_ms: AtomicU64,
-    #[cfg(test)]
+struct HydrationWorkerMetrics {
     retained_reader_count: AtomicU64,
-    #[cfg(test)]
     open_attempt_count: AtomicU64,
 }
 
 pub(super) struct TranscriptHydrationWorker {
-    shared: Arc<TranscriptHydrationWorkerShared>,
-    thread: Option<thread::JoinHandle<()>>,
+    worker: LatestWorker<TranscriptHydrationRequest>,
+    context_id: AtomicU64,
+    #[cfg(test)]
+    metrics: Arc<HydrationWorkerMetrics>,
 }
 
 impl TranscriptHydrationWorker {
     pub(super) fn spawn(
         event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
     ) -> Self {
-        let shared = Arc::new(TranscriptHydrationWorkerShared {
-            state: Mutex::new(TranscriptHydrationWorkerState::default()),
-            changed: Condvar::new(),
-            context_id: AtomicU64::new(0),
-            latest_generation: AtomicU64::new(0),
-            #[cfg(test)]
-            delay_ms: AtomicU64::new(0),
-            #[cfg(test)]
-            retained_reader_count: AtomicU64::new(0),
-            #[cfg(test)]
-            open_attempt_count: AtomicU64::new(0),
+        #[cfg(test)]
+        let metrics = Arc::new(HydrationWorkerMetrics::default());
+        #[cfg(test)]
+        let worker_metrics = Arc::clone(&metrics);
+        let worker = LatestWorker::start("smelt-transcript-hydration", move |mailbox| {
+            transcript_hydration_worker_loop(
+                mailbox,
+                event_tx,
+                #[cfg(test)]
+                worker_metrics,
+            )
         });
-        let worker_shared = Arc::clone(&shared);
-        let thread = thread::Builder::new()
-            .name("smelt-transcript-hydration".into())
-            .spawn(move || transcript_hydration_worker_loop(worker_shared, event_tx))
-            .expect("failed to spawn transcript hydration worker");
         Self {
-            shared,
-            thread: Some(thread),
+            worker,
+            context_id: AtomicU64::new(0),
+            #[cfg(test)]
+            metrics,
         }
     }
 
     pub(super) fn set_context(&self, context_id: u64) {
-        if self.shared.context_id.swap(context_id, Ordering::AcqRel) == context_id {
-            return;
+        if self.context_id.swap(context_id, Ordering::AcqRel) != context_id {
+            self.worker.cancel();
         }
-        self.shared.latest_generation.fetch_add(1, Ordering::AcqRel);
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.pending = None;
-        self.shared.changed.notify_one();
     }
 
-    pub(super) fn request(&self, mut request: TranscriptHydrationRequest) {
+    pub(super) fn request(&self, request: TranscriptHydrationRequest) {
         self.set_context(request.context_id);
-        let generation = self.shared.latest_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        request.worker_generation = generation;
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.pending = Some(request);
-        self.shared.changed.notify_one();
+        self.worker.request(request);
     }
 
     pub(super) fn is_current(&self, result: &TranscriptHydrationWorkerResult) -> bool {
-        self.shared.context_id.load(Ordering::Acquire) == result.context_id
-            && self.shared.latest_generation.load(Ordering::Acquire) == result.worker_generation
+        self.context_id.load(Ordering::Acquire) == result.context_id
+            && self.worker.is_current(result.worker_generation)
     }
 
     #[cfg(test)]
     pub(super) fn set_delay(&self, delay: std::time::Duration) {
-        self.shared.delay_ms.store(
-            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-            Ordering::Release,
-        );
+        self.worker.set_delay(delay);
     }
 
     #[cfg(test)]
     pub(super) fn retained_reader_count(&self) -> usize {
-        usize::try_from(self.shared.retained_reader_count.load(Ordering::Acquire))
+        usize::try_from(self.metrics.retained_reader_count.load(Ordering::Acquire))
             .unwrap_or(usize::MAX)
     }
 
     #[cfg(test)]
     pub(super) fn open_attempt_count(&self) -> usize {
-        usize::try_from(self.shared.open_attempt_count.load(Ordering::Acquire))
+        usize::try_from(self.metrics.open_attempt_count.load(Ordering::Acquire))
             .unwrap_or(usize::MAX)
     }
 }
 
-impl Drop for TranscriptHydrationWorker {
-    fn drop(&mut self) {
-        self.shared.latest_generation.fetch_add(1, Ordering::AcqRel);
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.shutdown = true;
-        state.pending = None;
-        self.shared.changed.notify_one();
-        drop(state);
-        if let Some(thread) = self.thread.take() {
-            super::join_background_worker(thread);
-        }
-    }
-}
-
 fn transcript_hydration_worker_loop(
-    shared: Arc<TranscriptHydrationWorkerShared>,
+    mailbox: Arc<Mailbox<TranscriptHydrationRequest>>,
     event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
+    #[cfg(test)] metrics: Arc<HydrationWorkerMetrics>,
 ) {
     let mut retained_store: Option<(TranscriptStoreAddress, smelt_store::LineageSessionReader)> =
         None;
-    loop {
-        let request = {
-            let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            while state.pending.is_none() && !state.shutdown {
-                state = shared
-                    .changed
-                    .wait(state)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-            if state.shutdown {
-                break;
-            }
-            state.pending.take().expect("pending hydration request")
-        };
-
-        #[cfg(test)]
-        {
-            let mut remaining = shared.delay_ms.load(Ordering::Acquire);
-            while remaining > 0 {
-                if hydration_cancelled(&shared, &request) {
-                    break;
-                }
-                let sleep_ms = remaining.min(5);
-                thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                remaining -= sleep_ms;
-            }
-        }
-        if hydration_cancelled(&shared, &request) {
-            continue;
-        }
+    while let Some((token, mut request)) = mailbox.recv() {
+        request.worker_generation = token.generation;
 
         let needs_open = retained_store
             .as_ref()
@@ -457,9 +394,9 @@ fn transcript_hydration_worker_loop(
         if needs_open {
             drop(retained_store.take());
             #[cfg(test)]
-            shared.retained_reader_count.store(0, Ordering::Release);
+            metrics.retained_reader_count.store(0, Ordering::Release);
             #[cfg(test)]
-            shared.open_attempt_count.fetch_add(1, Ordering::AcqRel);
+            metrics.open_attempt_count.fetch_add(1, Ordering::AcqRel);
             let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
                 &request.store_address.sessions_root,
                 &request.store_address.lineage_id,
@@ -469,7 +406,7 @@ fn transcript_hydration_worker_loop(
                 Ok(reader) => {
                     retained_store = Some((request.store_address.clone(), reader));
                     #[cfg(test)]
-                    shared.retained_reader_count.store(1, Ordering::Release);
+                    metrics.retained_reader_count.store(1, Ordering::Release);
                 }
                 Err(_) => {
                     if send_result(
@@ -485,12 +422,7 @@ fn transcript_hydration_worker_loop(
             }
         }
         let reader = &retained_store.as_ref().expect("opened hydration reader").1;
-        let worker_generation = request.worker_generation;
-        let context_id = request.context_id;
-        let result = execute_hydration_request(reader, request, || {
-            shared.latest_generation.load(Ordering::Acquire) != worker_generation
-                || shared.context_id.load(Ordering::Acquire) != context_id
-        });
+        let result = execute_hydration_request(reader, request, || token.cancelled());
         let Some(result) = result else {
             continue;
         };
@@ -500,15 +432,7 @@ fn transcript_hydration_worker_loop(
     }
     drop(retained_store);
     #[cfg(test)]
-    shared.retained_reader_count.store(0, Ordering::Release);
-}
-
-fn hydration_cancelled(
-    shared: &TranscriptHydrationWorkerShared,
-    request: &TranscriptHydrationRequest,
-) -> bool {
-    shared.latest_generation.load(Ordering::Acquire) != request.worker_generation
-        || shared.context_id.load(Ordering::Acquire) != request.context_id
+    metrics.retained_reader_count.store(0, Ordering::Release);
 }
 
 pub(super) fn execute_hydration_request(

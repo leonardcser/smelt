@@ -2442,42 +2442,34 @@ impl LuaRuntime {
             self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
         };
 
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool preview_output: build args: {e}"));
-                return None;
-            }
-        };
-
-        let _perf = smelt_perf::perf::begin("lua:tool");
-        let result: mlua::Value = match preview_output_fn.call((
-            args_table,
-            Self::tool_preparation(&self.shared, invocation_id),
-        )) {
-            Ok(v) => v,
-            Err(e) => {
-                self.record_error(format!("tool preview_output `{tool_name}`: {e}"));
-                return None;
-            }
-        };
-
-        match result {
-            mlua::Value::Nil => None,
-            mlua::Value::Table(table) => match Self::tool_output_from_lua_table(&self.lua, table) {
-                Ok(output) => Some(Box::new(output)),
-                Err(error) => {
-                    self.record_error(format!(
-                        "tool preview_output `{tool_name}`: invalid result: {error}"
-                    ));
-                    None
-                }
-            },
-            other => {
-                self.record_error(format!(
+        let result = (|| {
+            let args_table = self
+                .args_to_lua_table(args)
+                .map_err(|error| format!("tool preview_output: build args: {error}"))?;
+            let _perf = smelt_perf::perf::begin("lua:tool");
+            let value = preview_output_fn
+                .call((
+                    args_table,
+                    Self::tool_preparation(&self.shared, invocation_id),
+                ))
+                .map_err(|error| format!("tool preview_output `{tool_name}`: {error}"))?;
+            match value {
+                mlua::Value::Nil => Ok(None),
+                mlua::Value::Table(table) => Self::tool_output_from_lua_table(&self.lua, table)
+                    .map(|output| Some(Box::new(output)))
+                    .map_err(|error| {
+                        format!("tool preview_output `{tool_name}`: invalid result: {error}")
+                    }),
+                other => Err(format!(
                     "tool preview_output `{tool_name}`: expected result table or nil, got {}",
                     other.type_name()
-                ));
+                )),
+            }
+        })();
+        match result {
+            Ok(output) => output,
+            Err(error) => {
+                self.record_error(error);
                 None
             }
         }
@@ -2523,37 +2515,26 @@ impl LuaRuntime {
             Ok(func) => func,
             Err(_) => return protocol::StyledLines::empty(),
         };
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool summary: build args: {e}"));
-                return protocol::StyledLines::empty();
-            }
-        };
-        let ctx_table = match self.lua.create_table() {
-            Ok(t) => {
-                if let Err(e) = t.set("final", final_args) {
-                    self.record_error(format!("tool summary: build context: {e}"));
-                    return protocol::StyledLines::empty();
-                }
-                t
-            }
-            Err(e) => {
-                self.record_error(format!("tool summary: build context: {e}"));
-                return protocol::StyledLines::empty();
-            }
-        };
-        let _perf = smelt_perf::perf::begin("lua:tool");
-        match func.call::<mlua::Value>((args_table, ctx_table)) {
-            Ok(v) => match crate::lua::styled_lines_from_lua(v, "tool summary") {
-                Ok(lines) => lines,
-                Err(e) => {
-                    self.record_error(format!("tool summary `{tool_name}`: {e}"));
-                    protocol::StyledLines::empty()
-                }
-            },
-            Err(e) => {
-                self.record_error(format!("tool summary `{tool_name}`: {e}"));
+        let result = (|| {
+            let args_table = self
+                .args_to_lua_table(args)
+                .map_err(|error| format!("tool summary: build args: {error}"))?;
+            let ctx_table = self
+                .lua
+                .create_table()
+                .map_err(|error| format!("tool summary: build context: {error}"))?;
+            ctx_table
+                .set("final", final_args)
+                .map_err(|error| format!("tool summary: build context: {error}"))?;
+            let _perf = smelt_perf::perf::begin("lua:tool");
+            func.call::<mlua::Value>((args_table, ctx_table))
+                .and_then(|value| crate::lua::styled_lines_from_lua(value, "tool summary"))
+                .map_err(|error| format!("tool summary `{tool_name}`: {error}"))
+        })();
+        match result {
+            Ok(lines) => lines,
+            Err(error) => {
+                self.record_error(error);
                 protocol::StyledLines::empty()
             }
         }

@@ -1,3 +1,5 @@
+pub mod bench;
+
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

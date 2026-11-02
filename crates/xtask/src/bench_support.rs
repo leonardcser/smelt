@@ -16,7 +16,6 @@ pub(crate) struct CargoTestBenchmark {
     pub(crate) features: &'static [&'static str],
     pub(crate) env: Vec<(String, String)>,
     pub(crate) bench_name: &'static str,
-    pub(crate) ignored: bool,
 }
 
 pub(crate) fn run_cargo_test_benchmark(bench: CargoTestBenchmark) {
@@ -122,92 +121,81 @@ fn compile_test_binary(bench: &CargoTestBenchmark) -> Result<PathBuf, String> {
         })
 }
 
+fn resolve_benchmark(executable: &std::path::Path, filter: &str) -> Result<String, String> {
+    let output = Command::new(executable)
+        .args([filter, "--ignored", "--list", "--format=terse"])
+        .output()
+        .map_err(|error| format!("list benchmarks in {}: {error}", executable.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "list benchmarks failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let listing = String::from_utf8(output.stdout)
+        .map_err(|error| format!("invalid benchmark listing: {error}"))?;
+    let matches: Vec<_> = listing
+        .lines()
+        .filter_map(|line| line.strip_suffix(": test"))
+        .collect();
+    match matches.as_slice() {
+        [name] => Ok((*name).to_owned()),
+        _ => Err(format!(
+            "benchmark filter `{filter}` matched {} ignored tests; expected exactly one",
+            matches.len()
+        )),
+    }
+}
+
 fn run_test_binary(
     bench: &CargoTestBenchmark,
     executable: PathBuf,
 ) -> Result<std::process::ExitStatus, String> {
+    let test_name = resolve_benchmark(&executable, bench.test_filter)?;
     eprintln!(
         "running {} benchmark binary: {}",
         bench.bench_name,
         executable.display()
     );
-    if std::path::Path::new("/usr/bin/time").is_file() {
-        run_test_binary_with_time(bench, executable)
+    // macOS ships BSD time, which does not accept GNU's -v/-o options.
+    let time_output = (cfg!(target_os = "linux")
+        && std::path::Path::new("/usr/bin/time").is_file())
+    .then(tempfile::NamedTempFile::new)
+    .transpose()
+    .map_err(|err| format!("create benchmark memory report: {err}"))?;
+    let mut cmd = if let Some(output) = &time_output {
+        let mut cmd = Command::new("/usr/bin/time");
+        cmd.args(["-v", "-o"]).arg(output.path()).arg(&executable);
+        cmd
     } else {
-        run_test_binary_with_proc_sampler(bench, executable)
-    }
-}
-
-fn run_test_binary_with_time(
-    bench: &CargoTestBenchmark,
-    executable: PathBuf,
-) -> Result<std::process::ExitStatus, String> {
-    let time_output = unique_time_output_path(bench.bench_name);
-    let mut cmd = Command::new("/usr/bin/time");
-    cmd.args(["-v", "-o"])
-        .arg(&time_output)
-        .arg(&executable)
-        .arg(bench.test_filter);
-    if bench.ignored {
-        cmd.arg("--ignored");
-    }
-    cmd.args(["--nocapture", "--test-threads=1"]);
-    for (key, value) in &bench.env {
-        cmd.env(key, value);
-    }
-
-    let status = cmd
-        .status()
-        .map_err(|err| format!("spawn /usr/bin/time for {}: {err}", executable.display()))?;
-    let memory = read_time_memory_summary(&time_output).unwrap_or_default();
-    let _ = std::fs::remove_file(&time_output);
-    print_memory_summary(bench.bench_name, &memory);
-    Ok(status)
-}
-
-fn run_test_binary_with_proc_sampler(
-    bench: &CargoTestBenchmark,
-    executable: PathBuf,
-) -> Result<std::process::ExitStatus, String> {
-    let mut cmd = Command::new(&executable);
-    cmd.arg(bench.test_filter);
-    if bench.ignored {
-        cmd.arg("--ignored");
-    }
-    cmd.args(["--nocapture", "--test-threads=1"]);
-    for (key, value) in &bench.env {
-        cmd.env(key, value);
-    }
-
+        Command::new(&executable)
+    };
+    cmd.arg(test_name)
+        .args(["--exact", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("LC_ALL", "C")
+        .envs(bench.env.iter().map(|(key, value)| (key, value)));
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("spawn {}: {err}", executable.display()))?;
-    let pid = child.id();
     let mut memory = MemorySummary::default();
     loop {
-        if let Some(sample) = read_memory_sample(pid) {
-            memory.observe(sample);
+        if time_output.is_none() {
+            if let Some(sample) = read_memory_sample(child.id()) {
+                memory.observe(sample);
+            }
         }
         if let Some(status) = child
             .try_wait()
             .map_err(|err| format!("wait for {}: {err}", executable.display()))?
         {
+            if let Some(output) = &time_output {
+                memory = read_time_memory_summary(output.path()).unwrap_or_default();
+            }
             print_memory_summary(bench.bench_name, &memory);
             return Ok(status);
         }
         thread::sleep(Duration::from_millis(10));
     }
-}
-
-fn unique_time_output_path(bench_name: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "smelt-{bench_name}-time-{}-{nanos}.txt",
-        std::process::id()
-    ))
 }
 
 fn read_time_memory_summary(path: &std::path::Path) -> Option<MemorySummary> {
@@ -289,4 +277,36 @@ fn print_memory_summary(bench_name: &str, memory: &MemorySummary) {
         memory.peak_anon_kb,
         memory.samples
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn benchmark_selection_requires_one_ignored_test() {
+        let executable = std::env::current_exe().unwrap();
+        assert_eq!(
+            resolve_benchmark(&executable, "selection_fixture_one").unwrap(),
+            "bench_support::tests::selection_fixture_one"
+        );
+        for filter in [
+            "missing_benchmark",
+            "selection_fixture_",
+            "benchmark_selection_requires_one_ignored_test",
+        ] {
+            assert!(
+                resolve_benchmark(&executable, filter).is_err(),
+                "accepted {filter}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark selection fixture, not a workload"]
+    fn selection_fixture_one() {}
+
+    #[test]
+    #[ignore = "benchmark selection fixture, not a workload"]
+    fn selection_fixture_two() {}
 }

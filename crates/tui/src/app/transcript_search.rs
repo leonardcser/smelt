@@ -6,9 +6,9 @@ use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::smelt_edit::{DocPosition, RowIndex, SearchPattern};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::sync::Arc;
+
+use super::latest_worker::{LatestWorker, Mailbox};
 
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
 const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
@@ -97,125 +97,25 @@ pub(super) struct TranscriptSearchWorkerRequest {
     pub(super) direction: SearchDirection,
 }
 
-#[derive(Default)]
-struct TranscriptSearchWorkerState {
-    pending: Option<TranscriptSearchWorkerRequest>,
-    shutdown: bool,
-}
-
-struct TranscriptSearchWorkerShared {
-    state: Mutex<TranscriptSearchWorkerState>,
-    changed: Condvar,
-    latest_generation: AtomicU64,
-    #[cfg(test)]
-    delay_ms: AtomicU64,
-}
-
-pub(super) struct TranscriptSearchWorker {
-    shared: Arc<TranscriptSearchWorkerShared>,
-    thread: Option<thread::JoinHandle<()>>,
-}
+pub(super) type TranscriptSearchWorker = LatestWorker<TranscriptSearchWorkerRequest>;
 
 impl TranscriptSearchWorker {
     pub(super) fn spawn(
         event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
     ) -> Self {
-        let shared = Arc::new(TranscriptSearchWorkerShared {
-            state: Mutex::new(TranscriptSearchWorkerState::default()),
-            changed: Condvar::new(),
-            latest_generation: AtomicU64::new(0),
-            #[cfg(test)]
-            delay_ms: AtomicU64::new(0),
-        });
-        let worker_shared = Arc::clone(&shared);
-        let thread = thread::Builder::new()
-            .name("smelt-transcript-search".into())
-            .spawn(move || transcript_search_worker_loop(worker_shared, event_tx))
-            .expect("failed to spawn transcript search worker");
-        Self {
-            shared,
-            thread: Some(thread),
-        }
-    }
-
-    pub(super) fn request(&self, request: TranscriptSearchWorkerRequest) {
-        self.shared
-            .latest_generation
-            .store(request.generation, Ordering::Release);
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.pending = Some(request);
-        self.shared.changed.notify_one();
-    }
-
-    pub(super) fn cancel(&self, generation: u64) {
-        self.shared
-            .latest_generation
-            .store(generation, Ordering::Release);
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.pending = None;
-        self.shared.changed.notify_one();
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_delay(&self, delay: std::time::Duration) {
-        self.shared.delay_ms.store(
-            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-            Ordering::Release,
-        );
-    }
-}
-
-impl Drop for TranscriptSearchWorker {
-    fn drop(&mut self) {
-        self.shared.latest_generation.fetch_add(1, Ordering::AcqRel);
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.shutdown = true;
-        state.pending = None;
-        self.shared.changed.notify_one();
-        drop(state);
-        if let Some(thread) = self.thread.take() {
-            super::join_background_worker(thread);
-        }
+        Self::start("smelt-transcript-search", move |mailbox| {
+            transcript_search_worker_loop(mailbox, event_tx)
+        })
     }
 }
 
 fn transcript_search_worker_loop(
-    shared: Arc<TranscriptSearchWorkerShared>,
+    mailbox: Arc<Mailbox<TranscriptSearchWorkerRequest>>,
     event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
 ) {
     let mut store: Option<TranscriptSearchStore> = None;
-    loop {
-        let request = {
-            let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            while state.pending.is_none() && !state.shutdown {
-                state = shared
-                    .changed
-                    .wait(state)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-            if state.shutdown {
-                return;
-            }
-            state.pending.take().expect("pending search request")
-        };
-
-        #[cfg(test)]
-        {
-            let mut remaining = shared.delay_ms.load(Ordering::Acquire);
-            while remaining > 0 {
-                if shared.latest_generation.load(Ordering::Acquire) != request.generation {
-                    break;
-                }
-                let sleep_ms = remaining.min(5);
-                thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                remaining -= sleep_ms;
-            }
-        }
-        if shared.latest_generation.load(Ordering::Acquire) != request.generation {
-            continue;
-        }
-
-        let cancelled = || shared.latest_generation.load(Ordering::Acquire) != request.generation;
+    while let Some((token, request)) = mailbox.recv() {
+        let cancelled = || token.cancelled();
         if store
             .as_ref()
             .is_none_or(|store| store.store_address != request.store_address)

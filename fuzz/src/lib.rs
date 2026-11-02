@@ -2605,18 +2605,22 @@ pub fn apply_n(app: &mut TestApp, scenario: &Scenario, n: usize) {
 /// Used by the fuzz target itself and by any external replay code that
 /// just wants to re-run a scenario to confirm a crash.
 pub fn run_scenario(scenario: Scenario) {
+    run_scenario_observed(scenario, |_, _| {});
+}
+
+/// Replay with the same runtime isolation, render scheduling, and invariants as
+/// fuzzing. Observers can inspect each applied operation without a second driver.
+pub fn run_scenario_observed(scenario: Scenario, mut observe: impl FnMut(usize, &TestApp)) {
     runtime::with_current_thread_runtime("fuzz harness", || {
-        let mut app = TestApp::builder()
-            .with_vim(scenario.vim)
-            .with_mode(scenario.mode.into())
-            .build();
+        let mut app = build_app(&scenario);
         let theme_baseline = smelt_style::theme::registry_len();
         let ns_baseline = smelt_buffer::buffer::namespace_count();
 
         let take = scenario.ops.len().min(MAX_OPS);
-        for op in scenario.ops.into_iter().take(take) {
+        for (index, op) in scenario.ops.into_iter().take(take).enumerate() {
             let render_after = render_trigger(&op);
             apply(&mut app, op);
+            observe(index, &app);
             if app.quit_requested() {
                 break;
             }

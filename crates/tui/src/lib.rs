@@ -7,6 +7,8 @@ static ALLOCATOR: smelt_core::allocator::Allocator = smelt_core::allocator::ALLO
 
 pub mod app;
 pub mod auto_reload;
+#[cfg(any(test, feature = "transcript-fixture"))]
+pub mod benchmark_config;
 pub(crate) mod commands;
 pub(crate) mod content;
 pub mod event_source;

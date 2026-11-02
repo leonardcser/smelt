@@ -20,6 +20,7 @@ pub mod diff;
 pub mod engine_client;
 pub mod file_ref;
 pub mod fs;
+pub mod fs_watch;
 pub mod fuzzy;
 pub mod git;
 pub mod grep;

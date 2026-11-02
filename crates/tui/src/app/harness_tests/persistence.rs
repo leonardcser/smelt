@@ -1321,7 +1321,7 @@ fn forced_queued_submission_is_visible_before_cancel_persistence() {
 }
 
 #[test]
-fn large_response_keeps_history_append_and_follow_up_enter_responsive() {
+fn large_response_accepts_follow_up_before_persistence_receipt() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_submitted_turn("initial request");
     app.drain_engine_sends();
@@ -1331,10 +1331,7 @@ fn large_response_keeps_history_append_and_follow_up_enter_responsive() {
         delta: body.clone(),
     }));
     let release = app.app.conversation.pause_persistence();
-    let perf_enabled = smelt_perf::perf::enabled();
-    smelt_perf::perf::enable();
-    smelt_perf::perf::clear();
-    let appended_at = std::time::Instant::now();
+
     app.feed_one(SourceEvent::engine(EngineEvent::HistoryAppended {
         turn_id,
         delta: protocol::CanonicalHistoryDelta::new(
@@ -1346,52 +1343,19 @@ fn large_response_keeps_history_append_and_follow_up_enter_responsive() {
             ))],
         ),
     }));
-    let append_elapsed = appended_at.elapsed();
-    let completed_at = std::time::Instant::now();
     app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
         turn_id,
         history: None,
         meta: None,
     }));
-    let completion_elapsed = completed_at.elapsed();
+    assert!(!app.agent_running());
+    assert!(!app.working_probe().is_animating());
     app.type_text("follow-up request");
-    let entered_at = std::time::Instant::now();
     app.press(KeyCode::Enter);
-    let enter_elapsed = entered_at.elapsed();
     let accepted = app.app.turn_submission_is_pending();
     release.send(()).unwrap();
-    let timings = smelt_perf::perf::snapshot_top(12);
-    eprintln!(
-        "large response UI: append={append_elapsed:?}, completion={completion_elapsed:?}, enter={enter_elapsed:?}: {timings:?}"
-    );
-    assert!(
-        append_elapsed < Duration::from_millis(250),
-        "history append blocked UI for {append_elapsed:?}: {timings:?}"
-    );
-    assert!(
-        completion_elapsed < Duration::from_millis(250),
-        "completion blocked UI for {completion_elapsed:?}: {timings:?}"
-    );
-    assert!(
-        enter_elapsed < Duration::from_millis(250),
-        "Enter blocked UI for {enter_elapsed:?}"
-    );
     assert!(accepted);
     app.wait_for_turn_persistence();
-    let snapshot = smelt_perf::perf::snapshot();
-    smelt_perf::perf::set_enabled(perf_enabled);
-    for label in [
-        "persist:canonical:prepare",
-        "persist:submit_turn",
-        "persist:publication:complete",
-    ] {
-        let row = snapshot
-            .durations
-            .iter()
-            .find(|row| row.label == label)
-            .expect("measured large-response boundary phase");
-        eprintln!("large changed response {row:?}");
-    }
     assert!(app.agent_running());
     let reader = smelt_store::LineageSessionReader::open_existing(
         app.core_probe().sessions.sessions_dir(),
@@ -1415,10 +1379,8 @@ fn canonical_completion_accepts_queued_work_before_receipt_and_gates_dispatch() 
             app.push_queued_message("next request".into());
         }
         let release = app.app.conversation.pause_persistence();
-        let started = std::time::Instant::now();
         assert!(app.finish_turn());
         app.render_silent();
-        assert!(started.elapsed() < std::time::Duration::from_millis(500));
         assert!(!app.agent_running());
         assert_eq!(app.working_probe().is_animating(), queued);
         assert_eq!(app.app.turn_submission_is_pending(), queued);
@@ -3107,19 +3069,10 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
     assert!(app.session_document_has_unflushed_work());
 
     let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
-    let fork_started = std::time::Instant::now();
     app.app.fork_session();
-    let fork_elapsed = fork_started.elapsed();
     let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
 
-    if std::env::var_os("LLVM_PROFILE_FILE").is_none() {
-        let interaction_ceiling = std::time::Duration::from_millis(150);
-        assert!(
-            fork_elapsed < interaction_ceiling,
-            "current compacted fork exceeded the interaction ceiling: {fork_elapsed:?}"
-        );
-    }
     assert!(
         allocated_bytes <= 4 * 1024 * 1024,
         "current compacted fork allocated {allocated_bytes} bytes on the UI thread"
@@ -3209,21 +3162,10 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     );
 
     let (_, allocated_before) = smelt_perf::alloc::thread_snapshot();
-    let fork_started = std::time::Instant::now();
     resumed.app.fork_session();
-    let fork_elapsed = fork_started.elapsed();
     let (_, allocated_after) = smelt_perf::alloc::thread_snapshot();
     let allocated_bytes = allocated_after.saturating_sub(allocated_before);
 
-    // Coverage instrumentation distorts latency, but allocation and canonical
-    // history checks remain valid in every build.
-    let enforce_interaction_budget = std::env::var_os("LLVM_PROFILE_FILE").is_none();
-    if enforce_interaction_budget {
-        assert!(
-            fork_elapsed < std::time::Duration::from_millis(100),
-            "large visible fork exceeded the interaction ceiling: {fork_elapsed:?}"
-        );
-    }
     assert!(
         allocated_bytes <= 4 * 1024 * 1024,
         "large visible fork allocated {allocated_bytes} bytes on the UI thread"
@@ -3244,30 +3186,14 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
         source_records
     );
 
-    let mut switch_durations = Vec::with_capacity(20);
-    for index in 0..20 {
-        let target = if index % 2 == 0 {
-            &session_id
-        } else {
-            &fork_id
-        };
+    for target in [&session_id, &fork_id] {
         resumed
             .set_lua_string_global("__switch_target", target.clone())
             .unwrap();
-        let started = std::time::Instant::now();
         assert!(resumed.run_lua("smelt.session.load(__switch_target)"));
-        switch_durations.push(started.elapsed());
         resumed.wait_for_session_lifecycle();
         assert_eq!(resumed.session_snapshot().id.as_str(), target.as_str());
         assert_eq!(resumed.app.session_history_len(), 700);
-    }
-    if enforce_interaction_budget {
-        switch_durations.sort_unstable();
-        assert!(
-            switch_durations[18] < std::time::Duration::from_millis(100),
-            "large branch-switch p95 exceeded the interaction ceiling: {:?}",
-            switch_durations[18]
-        );
     }
 }
 

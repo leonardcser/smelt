@@ -76,19 +76,14 @@ fn replay_smelt(text: &str, path: &Path, trace: bool) {
     let scenario: Scenario = serde_json::from_str(text).expect("parse scenario");
 
     if trace {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _g = runtime.enter();
-        let mut app = tui::app::test_harness::TestApp::builder()
-            .with_vim(scenario.vim)
-            .with_mode(scenario.mode.into())
-            .build();
-        let take = scenario.ops.len().min(smelt_fuzz::MAX_OPS);
-        for (i, op) in scenario.ops.into_iter().take(take).enumerate() {
-            eprintln!("--- op{i} {op:?} ---");
-            smelt_fuzz::apply(&mut app, op);
+        let labels = scenario
+            .ops
+            .iter()
+            .take(smelt_fuzz::MAX_OPS)
+            .map(|op| format!("{op:?}"))
+            .collect::<Vec<_>>();
+        smelt_fuzz::run_scenario_observed(scenario, |index, app| {
+            eprintln!("--- op{index} {} ---", labels[index]);
             for wid in [tui::app::PROMPT_WIN, tui::app::TRANSCRIPT_WIN] {
                 let Some(win) = app.window_snapshot(wid) else {
                     continue;
@@ -98,15 +93,10 @@ fn replay_smelt(text: &str, path: &Path, trace: bool) {
                     wid, win.cpos, win.source_len, win.vim_mode, win.selection_anchor
                 );
             }
-            if app.quit_requested() {
-                break;
-            }
-        }
-        eprintln!("ok: {}", path.display());
-        return;
+        });
+    } else {
+        smelt_fuzz::run_scenario(scenario);
     }
-
-    smelt_fuzz::run_scenario(scenario);
     eprintln!("ok: {}", path.display());
 }
 

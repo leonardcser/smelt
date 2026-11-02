@@ -810,28 +810,28 @@ impl FileLock {
         loop {
             attempts = attempts.saturating_add(1);
             let result = match mode {
-                FileLockMode::Shared => fs4::FileExt::try_lock_shared(file),
-                FileLockMode::Exclusive => fs4::FileExt::try_lock(file),
+                FileLockMode::Shared => file.try_lock_shared(),
+                FileLockMode::Exclusive => file.try_lock(),
             };
             match result {
                 Ok(()) => return Ok(()),
-                Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                Err(fs4::TryLockError::WouldBlock) => {
+                Err(std::fs::TryLockError::WouldBlock) => {
                     return Err(StoreError::Busy {
                         operation,
                         attempts,
                         waited_ms: started.elapsed().as_millis() as u64,
                     });
                 }
-                Err(fs4::TryLockError::Error(error)) => return Err(error.into()),
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
     }
 
     fn downgrade(self, operation: &'static str, timeout: Duration) -> Result<Self> {
-        fs4::FileExt::unlock(&self.file)?;
+        self.file.unlock()?;
         Self::lock(&self.file, operation, timeout, FileLockMode::Shared)?;
         Ok(self)
     }
@@ -839,7 +839,7 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        let _ = fs4::FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
     }
 }
 
@@ -1863,10 +1863,6 @@ mod tests {
     #[test]
     #[ignore = "manual catalog query benchmark"]
     fn catalog_query_benchmark_suite() {
-        if std::env::var("SMELT_CATALOG_BENCH").ok().as_deref() != Some("1") {
-            eprintln!("CATALOG_BENCH_SKIPPED");
-            return;
-        }
         let row_count = std::env::var("SMELT_CATALOG_BENCH_ROWS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())

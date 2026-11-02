@@ -1,598 +1,483 @@
 use crate::bench_support::{run_cargo_test_benchmark, CargoTestBenchmark};
 
-fn take_required_arg(iter: &mut impl Iterator<Item = String>, name: &str) -> String {
-    iter.next().unwrap_or_else(|| {
-        eprintln!("bench-transcript-layout: {name} requires a value");
-        std::process::exit(2);
-    })
+use std::collections::BTreeMap;
+
+// One mapping for argument parsing, environment forwarding, and help output.
+const VALUES: &[(&str, &str)] = &[
+    ("runs", "SMELT_TRANSCRIPT_BENCH_RUNS"),
+    ("workloads", "SMELT_TRANSCRIPT_BENCH_WORKLOADS"),
+    ("search-bytes", "SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES"),
+    ("resume-bytes", "SMELT_TRANSCRIPT_RESUME_BENCH_BYTES"),
+    (
+        "resumed-wheel-frames",
+        "SMELT_TRANSCRIPT_RESUMED_WHEEL_FRAMES",
+    ),
+    (
+        "resumed-wheel-ticks",
+        "SMELT_TRANSCRIPT_RESUMED_WHEEL_TICKS",
+    ),
+    (
+        "active-memory-bytes",
+        "SMELT_TRANSCRIPT_ACTIVE_MEMORY_BYTES",
+    ),
+    ("save-request-history", "SMELT_TRANSCRIPT_HOT_PATH_HISTORY"),
+    (
+        "save-request-item-bytes",
+        "SMELT_TRANSCRIPT_HOT_PATH_ITEM_BYTES",
+    ),
+    (
+        "save-request-operations",
+        "SMELT_TRANSCRIPT_HOT_PATH_OPERATIONS",
+    ),
+    ("save-request-fixture", "SMELT_TRANSCRIPT_HOT_PATH_FIXTURE"),
+    (
+        "save-request-session-id",
+        "SMELT_TRANSCRIPT_HOT_PATH_SESSION_ID",
+    ),
+    ("stream-history", "SMELT_TRANSCRIPT_STREAM_HISTORY"),
+    (
+        "stream-resumed-bytes",
+        "SMELT_TRANSCRIPT_STREAM_RESUMED_BYTES",
+    ),
+    (
+        "stream-resumed-position",
+        "SMELT_TRANSCRIPT_STREAM_RESUMED_POSITION",
+    ),
+    (
+        "stream-boundary-record-bytes",
+        "SMELT_TRANSCRIPT_STREAM_BOUNDARY_RECORD_BYTES",
+    ),
+    ("stream-chunks", "SMELT_TRANSCRIPT_STREAM_CHUNKS"),
+    ("stream-bytes", "SMELT_TRANSCRIPT_STREAM_BYTES"),
+    ("stream-width", "SMELT_TRANSCRIPT_STREAM_WIDTH"),
+    ("stream-height", "SMELT_TRANSCRIPT_STREAM_HEIGHT"),
+    (
+        "stream-parallel-tools",
+        "SMELT_TRANSCRIPT_STREAM_PARALLEL_TOOLS",
+    ),
+    ("stream-workload", "SMELT_TRANSCRIPT_STREAM_WORKLOAD"),
+    ("stream-idle-frames", "SMELT_TRANSCRIPT_STREAM_IDLE_FRAMES"),
+    ("tall-write-lines", "SMELT_TRANSCRIPT_TALL_WRITE_LINES"),
+    ("tall-diff-lines", "SMELT_TRANSCRIPT_TALL_DIFF_LINES"),
+    ("scaling-blocks", "SMELT_TRANSCRIPT_SCALING_BLOCKS"),
+];
+const SWITCHES: &[(&str, &str)] = &[
+    (
+        "save-request-heterogeneous",
+        "SMELT_TRANSCRIPT_HOT_PATH_HETEROGENEOUS",
+    ),
+    ("stream-scheduled", "SMELT_TRANSCRIPT_STREAM_SCHEDULED"),
+    ("stream-scroll", "SMELT_TRANSCRIPT_STREAM_SCROLL"),
+    ("no-warmup", "SMELT_TRANSCRIPT_BENCH_NO_WARMUP"),
+    ("scaling-compacted", "SMELT_TRANSCRIPT_SCALING_COMPACTED"),
+];
+const SELECTORS: &[&str] = &[
+    "skip-nav",
+    "search",
+    "save-request",
+    "stream",
+    "scaling",
+    "resume",
+    "resumed-wheel",
+    "active-memory",
+    "save-request-only",
+    "stream-only",
+    "tall-write-only",
+    "tall-diff-only",
+    "scale-500mb",
+    "keys",
+    "debug",
+];
+
+const SUITES: &[(&str, &str)] = &[
+    ("layout", "transcript_layout_projection_benchmark_suite"),
+    ("navigation", "transcript_layout_navigation_benchmark_suite"),
+    (
+        "tall-write",
+        "transcript_layout_tall_write_file_benchmark_suite",
+    ),
+    (
+        "tall-diff",
+        "transcript_layout_tall_retained_diff_benchmark_suite",
+    ),
+    ("search", "transcript_layout_search_benchmark_suite"),
+    ("save-request", "transcript_layout_hot_path_benchmark_suite"),
+    ("stream", "transcript_stream_benchmark_suite"),
+    ("scaling", "transcript_scaling_benchmark_suite"),
+    ("resume", "transcript_true_resume_benchmark_suite"),
+    ("wheel", "transcript_resumed_wheel_scroll_benchmark_suite"),
+    ("memory", "transcript_active_memory_benchmark_suite"),
+    ("keys", "transcript_keys_benchmark_suite"),
+    ("ui", "default_ui_frame_benchmark_suite"),
+    ("resume-dialog", "resume_dialog_open_benchmark_suite"),
+    ("sparse-watch", "transcript_sparse_watcher_benchmark_suite"),
+    (
+        "sparse-idle",
+        "transcript_sparse_autonomous_frame_benchmark_suite",
+    ),
+];
+
+#[derive(Debug)]
+struct Plan {
+    options: BTreeMap<&'static str, String>,
+    suites: Vec<&'static str>,
 }
 
-fn take_positive_usize_arg(iter: &mut impl Iterator<Item = String>, name: &str) -> String {
-    let value = take_required_arg(iter, name);
-    if value.parse::<usize>().ok().filter(|n| *n > 0).is_none() {
-        eprintln!("bench-transcript-layout: {name} must be a positive integer");
-        std::process::exit(2);
+impl Plan {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        let mut options = BTreeMap::from([("runs", "5".to_string())]);
+        let mut iter = args.into_iter();
+        while let Some(arg) = iter.next() {
+            let name = arg
+                .strip_prefix("--")
+                .ok_or_else(|| format!("unknown argument `{arg}`"))?;
+            if name == "suite" {
+                let value = iter.next().ok_or("--suite requires a name")?;
+                if !SUITES.iter().any(|(key, _)| *key == value) {
+                    return Err(format!("unknown suite `{value}`"));
+                }
+                options.insert("suite", value);
+            } else if let Some(&(key, _)) = VALUES.iter().find(|(key, _)| *key == name) {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| format!("--{key} requires a value"))?;
+                match key {
+                    "stream-resumed-position" => {
+                        if !["top", "middle", "tail"].contains(&value.as_str()) {
+                            return Err(format!("--{key} must be top, middle, or tail"));
+                        }
+                    }
+                    "stream-workload" => {
+                        if ![
+                            "text",
+                            "bash",
+                            "mixed",
+                            "exec",
+                            "write-draft",
+                            "explore-group",
+                        ]
+                        .contains(&value.as_str())
+                        {
+                            return Err(format!("unknown --{key}: {value}"));
+                        }
+                    }
+                    "scaling-blocks" => {
+                        tui::benchmark_config::scaling_block_counts(&value)
+                            .map_err(|error| format!("--{key}: {error}"))?;
+                    }
+                    "workloads" | "save-request-operations" => {
+                        use tui::benchmark_config::{
+                            named_list, HOT_PATH_OPERATIONS, LAYOUT_WORKLOADS,
+                        };
+                        let allowed = if key == "workloads" {
+                            LAYOUT_WORKLOADS
+                                .iter()
+                                .map(|entry| entry.0)
+                                .collect::<Vec<_>>()
+                        } else {
+                            HOT_PATH_OPERATIONS.to_vec()
+                        };
+                        named_list(&value, allowed).map_err(|error| format!("--{key}: {error}"))?;
+                    }
+                    "save-request-fixture" | "save-request-session-id" => {
+                        if value.is_empty() || value.starts_with("--") {
+                            return Err(format!("--{key} requires a value"));
+                        }
+                    }
+                    _ => {
+                        let min = if key == "save-request-history" { 4 } else { 1 };
+                        if value.parse::<usize>().ok().filter(|n| *n >= min).is_none() {
+                            return Err(format!("--{key} must be an integer >= {min}"));
+                        }
+                    }
+                }
+                options.insert(key, value);
+            } else if let Some(key) = SWITCHES
+                .iter()
+                .map(|(key, _)| *key)
+                .chain(SELECTORS.iter().copied())
+                .find(|key| *key == name)
+            {
+                options.insert(key, "1".into());
+            } else {
+                return Err(format!("unknown argument `{arg}`"));
+            }
+        }
+        if options.contains_key("save-request-fixture")
+            != options.contains_key("save-request-session-id")
+        {
+            return Err(
+                "--save-request-fixture and --save-request-session-id must be provided together"
+                    .into(),
+            );
+        }
+        if options.contains_key("scale-500mb") {
+            for key in [
+                "search",
+                "resume",
+                "resumed-wheel",
+                "active-memory",
+                "no-warmup",
+            ] {
+                options.insert(key, "1".into());
+            }
+            for key in ["search-bytes", "resume-bytes", "active-memory-bytes"] {
+                options.insert(key, (500usize * 1024 * 1024).to_string());
+            }
+        }
+        for (prefix, enable) in [
+            ("stream-", "stream"),
+            ("save-request-", "save-request"),
+            ("scaling-", "scaling"),
+            ("resumed-wheel-", "resumed-wheel"),
+            ("active-memory-", "active-memory"),
+            ("tall-diff-", "tall-diff-only"),
+        ] {
+            if options.keys().any(|key| key.starts_with(prefix)) {
+                options.insert(enable, "1".into());
+            }
+        }
+        if options.contains_key("stream-idle-frames") {
+            options.insert("stream-scheduled", "1".into());
+        }
+        if options.contains_key("save-request-fixture") {
+            options.insert("save-request-only", "1".into());
+        }
+        let exclusive = [
+            "keys",
+            "save-request-only",
+            "stream-only",
+            "tall-write-only",
+            "tall-diff-only",
+        ];
+        if exclusive
+            .iter()
+            .filter(|key| options.contains_key(**key))
+            .count()
+            > 1
+        {
+            return Err(format!(
+                "choose only one of {}",
+                exclusive.map(|key| format!("--{key}")).join(", ")
+            ));
+        }
+        let mut names = if let Some(name) = options.get("suite") {
+            vec![name.as_str()]
+        } else if let Some(key) = exclusive.iter().find(|key| options.contains_key(**key)) {
+            vec![key.strip_suffix("-only").unwrap_or(key)]
+        } else {
+            let mut names = vec!["layout", "tall-write"];
+            if !options.contains_key("skip-nav") {
+                names.push("navigation");
+            }
+            for key in ["search", "save-request", "stream"] {
+                if options.contains_key(key) {
+                    names.push(key);
+                }
+            }
+            names
+        };
+        if !options.contains_key("suite") && !options.contains_key("keys") {
+            for (key, name) in [
+                ("scaling", "scaling"),
+                ("resume", "resume"),
+                ("resumed-wheel", "wheel"),
+                ("active-memory", "memory"),
+            ] {
+                if options.contains_key(key) {
+                    names.push(name);
+                }
+            }
+        }
+        let suites = names
+            .into_iter()
+            .map(|name| SUITES.iter().find(|(key, _)| *key == name).unwrap().1)
+            .collect();
+        Ok(Self { options, suites })
     }
-    value
-}
 
-fn transcript_bench_env(env: Vec<(&'static str, String)>) -> Vec<(String, String)> {
-    let mut env = env
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .collect::<Vec<_>>();
-    env.push(("SMELT_TRANSCRIPT_BENCH_TARGET".into(), "1".into()));
-    env
-}
-
-fn run_tui_bench(
-    bench_name: &'static str,
-    test_filter: &'static str,
-    release: bool,
-    env: Vec<(&'static str, String)>,
-) {
-    run_cargo_test_benchmark(CargoTestBenchmark {
-        package: "smelt-tui",
-        test_filter,
-        release,
-        features: &["harness", "transcript-bench"],
-        env: transcript_bench_env(env),
-        bench_name,
-        ignored: false,
-    });
+    fn env(&self) -> Vec<(String, String)> {
+        let mut env = Vec::new();
+        for (key, var) in VALUES.iter().chain(SWITCHES) {
+            if let Some(value) = self.options.get(key) {
+                env.push(((*var).into(), value.clone()));
+            }
+        }
+        if let Some(bytes) = self
+            .options
+            .get("resume-bytes")
+            .or_else(|| self.options.get("search-bytes"))
+        {
+            env.push(("SMELT_TRANSCRIPT_RESUMED_WHEEL_BYTES".into(), bytes.clone()));
+        }
+        env
+    }
 }
 
 pub fn run(args: Vec<String>) {
-    let mut runs = String::from("5");
-    let mut workloads: Option<String> = None;
-    let mut release = true;
-    let mut skip_nav = false;
-    let mut search = false;
-    let mut search_bytes: Option<String> = None;
-    let mut resume = false;
-    let mut resume_bytes: Option<String> = None;
-    let mut resumed_wheel = false;
-    let mut resumed_wheel_frames: Option<String> = None;
-    let mut resumed_wheel_ticks: Option<String> = None;
-    let mut hot_path = false;
-    let mut active_memory = false;
-    let mut active_memory_bytes: Option<String> = None;
-    let mut hot_path_history: Option<String> = None;
-    let mut hot_path_item_bytes: Option<String> = None;
-    let mut hot_path_operations: Option<String> = None;
-    let mut hot_path_fixture: Option<String> = None;
-    let mut hot_path_fixture_session_id: Option<String> = None;
-    let mut hot_path_heterogeneous = false;
-    let mut save_request_only = false;
-    let mut stream = false;
-    let mut stream_only = false;
-    let mut stream_history: Option<String> = None;
-    let mut stream_resumed_bytes: Option<String> = None;
-    let mut stream_resumed_position: Option<String> = None;
-    let mut stream_boundary_record_bytes: Option<String> = None;
-    let mut stream_chunks: Option<String> = None;
-    let mut stream_bytes: Option<String> = None;
-    let mut stream_width: Option<String> = None;
-    let mut stream_height: Option<String> = None;
-    let mut stream_parallel_tools: Option<String> = None;
-    let mut stream_workload: Option<String> = None;
-    let mut stream_scheduled = false;
-    let mut stream_scroll = false;
-    let mut stream_idle_frames: Option<String> = None;
-    let mut tall_write_only = false;
-    let mut tall_write_lines: Option<String> = None;
-    let mut tall_diff_only = false;
-    let mut tall_diff_lines: Option<String> = None;
-    let mut no_warmup = false;
-    let mut scaling = false;
-    let mut scaling_blocks: Option<String> = None;
-    let mut scaling_compacted = false;
-    let mut keys = false;
-
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--runs" => {
-                runs = take_positive_usize_arg(&mut iter, "--runs");
-            }
-            "--workloads" => {
-                workloads = Some(take_required_arg(&mut iter, "--workloads"));
-            }
-            "--skip-nav" => skip_nav = true,
-            "--search" => search = true,
-            "--search-bytes" => {
-                search_bytes = Some(take_required_arg(&mut iter, "--search-bytes"));
-            }
-            "--resume" => resume = true,
-            "--resume-bytes" => {
-                resume_bytes = Some(take_required_arg(&mut iter, "--resume-bytes"));
-            }
-            "--resumed-wheel" => resumed_wheel = true,
-            "--resumed-wheel-frames" => {
-                resumed_wheel = true;
-                resumed_wheel_frames =
-                    Some(take_positive_usize_arg(&mut iter, "--resumed-wheel-frames"));
-            }
-            "--resumed-wheel-ticks" => {
-                resumed_wheel = true;
-                resumed_wheel_ticks =
-                    Some(take_positive_usize_arg(&mut iter, "--resumed-wheel-ticks"));
-            }
-            "--save-request" => hot_path = true,
-            "--save-request-only" => {
-                hot_path = true;
-                save_request_only = true;
-            }
-            "--stream" => stream = true,
-            "--stream-only" => {
-                stream = true;
-                stream_only = true;
-            }
-            "--stream-history" => {
-                stream = true;
-                stream_history = Some(take_positive_usize_arg(&mut iter, "--stream-history"));
-            }
-            "--stream-resumed-bytes" => {
-                stream = true;
-                stream_resumed_bytes =
-                    Some(take_positive_usize_arg(&mut iter, "--stream-resumed-bytes"));
-            }
-            "--stream-resumed-position" => {
-                stream = true;
-                let position = take_required_arg(&mut iter, "--stream-resumed-position");
-                if !matches!(position.as_str(), "top" | "middle" | "tail") {
-                    eprintln!(
-                        "bench-transcript-layout: --stream-resumed-position must be top, middle, or tail"
-                    );
-                    std::process::exit(2);
-                }
-                stream_resumed_position = Some(position);
-            }
-            "--stream-boundary-record-bytes" => {
-                stream = true;
-                stream_boundary_record_bytes = Some(take_positive_usize_arg(
-                    &mut iter,
-                    "--stream-boundary-record-bytes",
-                ));
-            }
-            "--stream-chunks" => {
-                stream = true;
-                stream_chunks = Some(take_positive_usize_arg(&mut iter, "--stream-chunks"));
-            }
-            "--stream-bytes" => {
-                stream = true;
-                stream_bytes = Some(take_positive_usize_arg(&mut iter, "--stream-bytes"));
-            }
-            "--stream-width" => {
-                stream = true;
-                stream_width = Some(take_positive_usize_arg(&mut iter, "--stream-width"));
-            }
-            "--stream-height" => {
-                stream = true;
-                stream_height = Some(take_positive_usize_arg(&mut iter, "--stream-height"));
-            }
-            "--stream-parallel-tools" => {
-                stream = true;
-                stream_parallel_tools = Some(take_positive_usize_arg(
-                    &mut iter,
-                    "--stream-parallel-tools",
-                ));
-            }
-            "--stream-workload" => {
-                stream = true;
-                let workload = take_required_arg(&mut iter, "--stream-workload");
-                if !matches!(
-                    workload.as_str(),
-                    "text" | "bash" | "mixed" | "exec" | "write-draft" | "explore-group"
-                ) {
-                    eprintln!(
-                        "bench-transcript-layout: --stream-workload must be text, bash, mixed, exec, write-draft, or explore-group"
-                    );
-                    std::process::exit(2);
-                }
-                stream_workload = Some(workload);
-            }
-            "--stream-scheduled" => {
-                stream = true;
-                stream_scheduled = true;
-            }
-            "--stream-scroll" => {
-                stream = true;
-                stream_scroll = true;
-            }
-            "--stream-idle-frames" => {
-                stream = true;
-                stream_scheduled = true;
-                stream_idle_frames =
-                    Some(take_positive_usize_arg(&mut iter, "--stream-idle-frames"));
-            }
-            "--save-request-operations" => {
-                hot_path = true;
-                hot_path_operations =
-                    Some(take_required_arg(&mut iter, "--save-request-operations"));
-            }
-            "--save-request-fixture" => {
-                hot_path = true;
-                save_request_only = true;
-                hot_path_fixture = Some(take_required_arg(&mut iter, "--save-request-fixture"));
-            }
-            "--save-request-session-id" => {
-                hot_path = true;
-                save_request_only = true;
-                hot_path_fixture_session_id =
-                    Some(take_required_arg(&mut iter, "--save-request-session-id"));
-            }
-            "--save-request-heterogeneous" => {
-                hot_path = true;
-                hot_path_heterogeneous = true;
-            }
-            "--active-memory" => active_memory = true,
-            "--active-memory-bytes" => {
-                active_memory = true;
-                active_memory_bytes =
-                    Some(take_positive_usize_arg(&mut iter, "--active-memory-bytes"));
-            }
-            "--tall-write-only" => tall_write_only = true,
-            "--tall-write-lines" => {
-                tall_write_lines = Some(take_positive_usize_arg(&mut iter, "--tall-write-lines"));
-            }
-            "--tall-diff-only" => tall_diff_only = true,
-            "--tall-diff-lines" => {
-                tall_diff_only = true;
-                tall_diff_lines = Some(take_positive_usize_arg(&mut iter, "--tall-diff-lines"));
-            }
-            "--scale-500mb" => {
-                resumed_wheel = true;
-                search = true;
-                resume = true;
-                active_memory = true;
-                no_warmup = true;
-                let bytes = (500usize * 1024 * 1024).to_string();
-                search_bytes = Some(bytes.clone());
-                resume_bytes = Some(bytes.clone());
-                active_memory_bytes = Some(bytes);
-            }
-            "--no-warmup" => no_warmup = true,
-            "--scaling" => scaling = true,
-            "--scaling-blocks" => {
-                scaling = true;
-                scaling_blocks = Some(take_required_arg(&mut iter, "--scaling-blocks"));
-            }
-            "--keys" => keys = true,
-            "--scaling-compacted" => {
-                scaling = true;
-                scaling_compacted = true;
-            }
-            "--save-request-history" => {
-                let value = iter.next().unwrap_or_else(|| {
-                    eprintln!("bench-transcript-layout: --save-request-history requires a value");
-                    std::process::exit(2);
-                });
-                if value.parse::<usize>().ok().filter(|n| *n >= 4).is_none() {
-                    eprintln!(
-                        "bench-transcript-layout: --save-request-history must be an integer >= 4"
-                    );
-                    std::process::exit(2);
-                }
-                hot_path = true;
-                hot_path_history = Some(value);
-            }
-            "--save-request-item-bytes" => {
-                hot_path = true;
-                hot_path_item_bytes = Some(take_positive_usize_arg(
-                    &mut iter,
-                    "--save-request-item-bytes",
-                ));
-            }
-            "--debug" => release = false,
-            "-h" | "--help" => {
-                print_usage();
-                return;
-            }
-            other => {
-                eprintln!("bench-transcript-layout: unknown argument `{other}`");
-                print_usage();
-                std::process::exit(2);
-            }
-        }
-    }
-
-    if hot_path_fixture.is_some() != hot_path_fixture_session_id.is_some() {
-        eprintln!(
-            "bench-transcript-layout: --save-request-fixture and --save-request-session-id must be provided together"
-        );
-        std::process::exit(2);
-    }
-    if save_request_only && stream_only {
-        eprintln!(
-            "bench-transcript-layout: --save-request-only and --stream-only are mutually exclusive"
-        );
-        std::process::exit(2);
-    }
-    if tall_write_only && tall_diff_only {
-        eprintln!(
-            "bench-transcript-layout: --tall-write-only and --tall-diff-only are mutually exclusive"
-        );
-        std::process::exit(2);
-    }
-
-    if keys {
-        let mut env = vec![
-            ("SMELT_TRANSCRIPT_KEYS_BENCH", "1".to_string()),
-            ("SMELT_TRANSCRIPT_SCALING_REPS", runs.clone()),
-        ];
-        if let Some(blocks) = scaling_blocks {
-            env.push(("SMELT_TRANSCRIPT_SCALING_BLOCKS", blocks));
-        }
-        if scaling_compacted {
-            env.push(("SMELT_TRANSCRIPT_SCALING_COMPACTED", "1".to_string()));
-        }
-        eprintln!(
-            "running transcript keys benchmark: profile={}",
-            if release { "release" } else { "test/debug" },
-        );
-        run_tui_bench(
-            "bench-transcript-keys",
-            "transcript_keys_benchmark_suite",
-            release,
-            env,
-        );
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_usage();
         return;
     }
+    let plan = Plan::parse(args).unwrap_or_else(|error| {
+        eprintln!("bench-transcript-layout: {error}");
+        std::process::exit(2);
+    });
 
-    let mut env = vec![("SMELT_TRANSCRIPT_BENCH_RUNS", runs.clone())];
-    if let Some(workloads) = workloads {
-        env.push(("SMELT_TRANSCRIPT_BENCH_WORKLOADS", workloads));
-    }
-    if skip_nav {
-        env.push(("SMELT_TRANSCRIPT_BENCH_SKIP_NAV", "1".to_string()));
-    }
-    if search {
-        env.push(("SMELT_TRANSCRIPT_BENCH_SEARCH", "1".to_string()));
-    }
-    if let Some(bytes) = &search_bytes {
-        env.push(("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", bytes.clone()));
-    }
-    if no_warmup {
-        env.push(("SMELT_TRANSCRIPT_BENCH_NO_WARMUP", "1".to_string()));
-    }
-    if let Some(lines) = tall_write_lines {
-        env.push(("SMELT_TRANSCRIPT_TALL_WRITE_LINES", lines));
-    }
-    if tall_diff_only {
-        env.push(("SMELT_TRANSCRIPT_TALL_DIFF", "1".into()));
-    }
-    if let Some(lines) = tall_diff_lines {
-        env.push(("SMELT_TRANSCRIPT_TALL_DIFF_LINES", lines));
-    }
-    if hot_path {
-        env.push(("SMELT_TRANSCRIPT_HOT_PATH", "1".to_string()));
-    }
-    if let Some(history_len) = hot_path_history {
-        env.push(("SMELT_TRANSCRIPT_HOT_PATH_HISTORY", history_len));
-    }
-    if let Some(item_bytes) = hot_path_item_bytes {
-        env.push(("SMELT_TRANSCRIPT_HOT_PATH_ITEM_BYTES", item_bytes));
-    }
-    if let Some(operations) = hot_path_operations {
-        env.push(("SMELT_TRANSCRIPT_HOT_PATH_OPERATIONS", operations));
-    }
-    if let Some(fixture) = hot_path_fixture {
-        env.push(("SMELT_TRANSCRIPT_HOT_PATH_FIXTURE", fixture));
-    }
-    if let Some(session_id) = hot_path_fixture_session_id {
-        env.push(("SMELT_TRANSCRIPT_HOT_PATH_SESSION_ID", session_id));
-    }
-    if hot_path_heterogeneous {
-        env.push(("SMELT_TRANSCRIPT_HOT_PATH_HETEROGENEOUS", "1".into()));
-    }
-    if stream {
-        env.push(("SMELT_TRANSCRIPT_STREAM_BENCH", "1".into()));
-    }
-    if let Some(history) = stream_history {
-        env.push(("SMELT_TRANSCRIPT_STREAM_HISTORY", history));
-    }
-    if let Some(bytes) = stream_resumed_bytes {
-        env.push(("SMELT_TRANSCRIPT_STREAM_RESUMED_BYTES", bytes));
-    }
-    if let Some(position) = stream_resumed_position {
-        env.push(("SMELT_TRANSCRIPT_STREAM_RESUMED_POSITION", position));
-    }
-    if let Some(bytes) = stream_boundary_record_bytes {
-        env.push(("SMELT_TRANSCRIPT_STREAM_BOUNDARY_RECORD_BYTES", bytes));
-    }
-    if let Some(chunks) = stream_chunks {
-        env.push(("SMELT_TRANSCRIPT_STREAM_CHUNKS", chunks));
-    }
-    if let Some(bytes) = stream_bytes {
-        env.push(("SMELT_TRANSCRIPT_STREAM_BYTES", bytes));
-    }
-    if let Some(width) = stream_width {
-        env.push(("SMELT_TRANSCRIPT_STREAM_WIDTH", width));
-    }
-    if let Some(height) = stream_height {
-        env.push(("SMELT_TRANSCRIPT_STREAM_HEIGHT", height));
-    }
-    if let Some(parallel_tools) = stream_parallel_tools {
-        env.push(("SMELT_TRANSCRIPT_STREAM_PARALLEL_TOOLS", parallel_tools));
-    }
-    if let Some(workload) = stream_workload {
-        env.push(("SMELT_TRANSCRIPT_STREAM_WORKLOAD", workload));
-    }
-    if stream_scheduled {
-        env.push(("SMELT_TRANSCRIPT_STREAM_SCHEDULED", "1".into()));
-    }
-    if stream_scroll {
-        env.push(("SMELT_TRANSCRIPT_STREAM_SCROLL", "1".into()));
-    }
-    if let Some(frames) = stream_idle_frames {
-        env.push(("SMELT_TRANSCRIPT_STREAM_IDLE_FRAMES", frames));
-    }
-
-    eprintln!(
-        "running transcript layout benchmark: profile={} runs={}",
-        if release { "release" } else { "test/debug" },
-        runs
-    );
-    run_tui_bench(
-        "bench-transcript-layout",
-        if save_request_only {
-            "transcript_layout_hot_path_benchmark_suite"
-        } else if stream_only {
-            "transcript_stream_benchmark_suite"
-        } else if tall_write_only {
-            "transcript_layout_tall_write_file_benchmark_suite"
-        } else if tall_diff_only {
-            "transcript_layout_tall_retained_diff_benchmark_suite"
-        } else {
-            "transcript_layout_"
-        },
-        release,
-        env,
-    );
-
-    if scaling {
-        let mut env = vec![("SMELT_TRANSCRIPT_SCALING_BENCH", "1".to_string())];
-        if let Some(blocks) = scaling_blocks {
-            env.push(("SMELT_TRANSCRIPT_SCALING_BLOCKS", blocks));
-        }
-        if scaling_compacted {
-            env.push(("SMELT_TRANSCRIPT_SCALING_COMPACTED", "1".to_string()));
-        }
-        env.push(("SMELT_TRANSCRIPT_SCALING_REPS", runs.clone()));
-        eprintln!(
-            "running transcript scaling benchmark: profile={}",
-            if release { "release" } else { "test/debug" },
-        );
-        run_tui_bench(
-            "bench-transcript-scaling",
-            "transcript_scaling_benchmark_suite",
-            release,
-            env,
-        );
-    }
-    if resume {
-        let mut env = Vec::new();
-        if let Some(bytes) = &resume_bytes {
-            env.push(("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES", bytes.clone()));
-        }
-        eprintln!(
-            "running transcript resume benchmark: profile={}",
-            if release { "release" } else { "test/debug" },
-        );
-        run_tui_bench(
-            "bench-transcript-resume",
-            "transcript_true_resume_benchmark_suite",
-            release,
-            env,
-        );
-    }
-    if resumed_wheel {
-        let mut env = Vec::new();
-        let wheel_bytes = resume_bytes.clone().or(search_bytes.clone());
-        if let Some(bytes) = wheel_bytes {
-            env.push(("SMELT_TRANSCRIPT_RESUMED_WHEEL_BYTES", bytes));
-        }
-        if let Some(frames) = resumed_wheel_frames {
-            env.push(("SMELT_TRANSCRIPT_RESUMED_WHEEL_FRAMES", frames));
-        }
-        if let Some(ticks) = resumed_wheel_ticks {
-            env.push(("SMELT_TRANSCRIPT_RESUMED_WHEEL_TICKS", ticks));
-        }
-        eprintln!(
-            "running transcript resumed wheel benchmark: profile={}",
-            if release { "release" } else { "test/debug" },
-        );
-        run_tui_bench(
-            "bench-transcript-resumed-wheel",
-            "transcript_resumed_wheel_scroll_benchmark_suite",
-            release,
-            env,
-        );
-    }
-    if active_memory {
-        let mut env = Vec::new();
-        if let Some(bytes) = active_memory_bytes {
-            env.push(("SMELT_TRANSCRIPT_ACTIVE_MEMORY_BYTES", bytes));
-        }
-        eprintln!(
-            "running active transcript memory benchmark: profile={}",
-            if release { "release" } else { "test/debug" },
-        );
-        run_tui_bench(
-            "bench-transcript-active-memory",
-            "transcript_active_memory_benchmark_suite",
-            release,
-            env,
-        );
+    for test_filter in &plan.suites {
+        run_cargo_test_benchmark(CargoTestBenchmark {
+            package: "smelt-tui",
+            test_filter,
+            release: !plan.options.contains_key("debug"),
+            features: &["harness", "transcript-bench"],
+            env: plan.env(),
+            bench_name: test_filter,
+        });
     }
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--tall-write-only] [--tall-write-lines N] [--tall-diff-only] [--tall-diff-lines N] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--resumed-wheel] [--resumed-wheel-frames N] [--resumed-wheel-ticks N] [--active-memory] [--active-memory-bytes N] [--stream] [--stream-only] [--stream-history N] [--stream-resumed-bytes N] [--stream-resumed-position top|middle|tail] [--stream-boundary-record-bytes N] [--stream-chunks N] [--stream-bytes N] [--stream-width N] [--stream-height N] [--stream-parallel-tools N] [--stream-workload text|bash|mixed|exec|write-draft|explore-group] [--stream-scheduled] [--stream-scroll] [--stream-idle-frames N] [--save-request] [--save-request-only] [--save-request-operations CSV] [--save-request-fixture PATH --save-request-session-id ID] [--save-request-heterogeneous] [--save-request-history N] [--save-request-item-bytes N] [--scale-500mb] [--no-warmup] [--scaling] [--scaling-blocks CSV] [--scaling-compacted] [--keys] [--debug]");
-    eprintln!();
-    eprintln!("Runs the dedicated transcript benchmark target and prints mean±stddev tables.");
-    eprintln!("Default profile is --release and default runs is 5.");
-    eprintln!();
-    eprintln!("workloads: mixed_10mib, mixed_50mib, markdown_4mib, tool_output_4mib, tiny_blocks_1mib, huge_blocks_4mib");
-    eprintln!("--skip-nav omits the app-level navigation/search suite for projection-only runs.");
-    eprintln!("--tall-write-only runs only the expanded write_file interaction benchmark.");
-    eprintln!("--tall-write-lines N sets generated source lines; default is 20000.");
-    eprintln!("--tall-diff-only runs only the retained edit diff rendering benchmark.");
-    eprintln!("--tall-diff-lines N sets generated before/after source lines; default is 20000.");
-    eprintln!("--search enables the large app-level transcript search benchmark.");
-    eprintln!("--search-bytes N sets its generated transcript size; default is 50 MiB.");
-    eprintln!("--resume runs the true session resume benchmark after layout/search.");
-    eprintln!("--resume-bytes N sets its generated resume session size; default is 10 MiB.");
-    eprintln!("--resumed-wheel runs a sparse resumed-session wheel-scroll benchmark.");
-    eprintln!("--resumed-wheel-frames N sets rendered wheel frames; default is 240.");
+    eprintln!("usage: cargo xtask bench-transcript-layout [options]");
+    eprintln!("Default: release profile, 5 runs, layout, navigation and tall-write suites.");
+    eprintln!("Workloads, defaults, metrics and examples: docs/transcript-layout-benchmarks.md");
     eprintln!(
-        "--resumed-wheel-ticks N sets wheel events queued per rendered frame; default is 24."
+        "--suite NAME runs only that suite: {}",
+        SUITES
+            .iter()
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
-    eprintln!(
-        "--active-memory runs the receipt-compacted active-session retained-memory benchmark."
-    );
-    eprintln!("--active-memory-bytes N sets its generated transcript size; default is 50 MiB.");
-    eprintln!("--stream enables real engine-delta plus full-render streaming samples.");
-    eprintln!("--stream-only skips unrelated transcript benchmark suites.");
-    eprintln!("--stream-history N sets prior transcript blocks; default is 100.");
-    eprintln!(
-        "--stream-resumed-bytes N persists and sparsely resumes a heterogeneous transcript before streaming."
-    );
-    eprintln!("--stream-resumed-position selects top, middle, or tail; default is tail.");
-    eprintln!(
-        "--stream-boundary-record-bytes N creates large persisted records at an extent boundary."
-    );
-    eprintln!("--stream-chunks N sets streamed delta count; default is 512.");
-    eprintln!("--stream-bytes N sets total streamed payload bytes; default is 16384.");
-    eprintln!("--stream-width N sets terminal columns; default is 100.");
-    eprintln!("--stream-height N sets terminal rows; default is 32.");
-    eprintln!("--stream-parallel-tools N sets explore-group child count; default is 4.");
-    eprintln!(
-        "--stream-workload selects text, provider bash, mixed, local shell-escape, streamed write_file draft, or grouped explore tools."
-    );
-    eprintln!(
-        "--stream-scheduled uses deterministic production frame coalescing without navigation."
-    );
-    eprintln!("--stream-scroll adds transcript navigation to the scheduled workload.");
-    eprintln!(
-        "--stream-idle-frames N renders animation frames after events stop while the turn remains active."
-    );
-    eprintln!("--save-request enables end-to-end Enter dispatch/redraw, save/append, rewind, and checkpointed/uncheckpointed provider-history samples.");
-    eprintln!("--save-request-only skips unrelated transcript layout and navigation suites.");
-    eprintln!("--save-request-operations CSV runs only named hot-path operations.");
-    eprintln!("--save-request-fixture PATH copies a complete lineage sessions root; pair it with --save-request-session-id ID.");
-    eprintln!("--save-request-heterogeneous generates mixed text, reasoning, notes, tools, and large object-backed metadata.");
-    eprintln!(
-        "--save-request-history N sets its generated hot-path history length; default is 1024."
-    );
-    eprintln!("--save-request-item-bytes N pads each generated history item to at least N bytes for byte-heavy latency and memory tests.");
-    eprintln!("--scale-500mb enables 500 MiB search/resume benchmark targets and disables warmup.");
-    eprintln!("--no-warmup skips benchmark warmup samples for large-session runs.");
-    eprintln!("--scaling sweeps block count and fits how size-independent interactions scale; --runs sets repetitions per operation.");
-    eprintln!("--scaling-blocks CSV sets swept block counts; default is 2000,8000,32000.");
-    eprintln!("--scaling-compacted persists and dematerializes the fixture before measuring.");
-    eprintln!(
-        "--keys times every transcript key at each --scaling-blocks size and runs nothing else."
-    );
+    eprintln!("Value options:");
+    for (key, _) in VALUES {
+        eprintln!("  --{key} VALUE");
+    }
+    eprintln!("Switches:");
+    for key in SWITCHES
+        .iter()
+        .map(|(key, _)| *key)
+        .chain(SELECTORS.iter().copied())
+    {
+        eprintln!("  --{key}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Plan, String> {
+        Plan::parse(args.iter().map(|arg| (*arg).into()).collect())
+    }
+
+    #[test]
+    fn streaming_options_enable_the_selected_workload_and_scheduler() {
+        let plan = parse(&[
+            "--stream-only",
+            "--stream-workload",
+            "bash",
+            "--stream-idle-frames",
+            "12",
+            "--runs",
+            "3",
+        ])
+        .unwrap();
+        assert_eq!(plan.suites, ["transcript_stream_benchmark_suite"]);
+        let env: BTreeMap<_, _> = plan.env().into_iter().collect();
+        for (key, value) in [
+            ("SMELT_TRANSCRIPT_STREAM_WORKLOAD", "bash"),
+            ("SMELT_TRANSCRIPT_STREAM_SCHEDULED", "1"),
+            ("SMELT_TRANSCRIPT_STREAM_IDLE_FRAMES", "12"),
+            ("SMELT_TRANSCRIPT_BENCH_RUNS", "3"),
+        ] {
+            assert_eq!(env.get(key).map(String::as_str), Some(value));
+        }
+    }
+
+    #[test]
+    fn large_session_preset_shares_sizes_and_run_count_across_suites() {
+        let plan = parse(&["--scale-500mb", "--runs", "2"]).unwrap();
+        assert_eq!(plan.suites.len(), 7);
+        let env: BTreeMap<_, _> = plan.env().into_iter().collect();
+        for key in [
+            "SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES",
+            "SMELT_TRANSCRIPT_RESUME_BENCH_BYTES",
+            "SMELT_TRANSCRIPT_RESUMED_WHEEL_BYTES",
+            "SMELT_TRANSCRIPT_ACTIVE_MEMORY_BYTES",
+        ] {
+            assert_eq!(env[key], (500usize * 1024 * 1024).to_string());
+        }
+        assert_eq!(env["SMELT_TRANSCRIPT_BENCH_RUNS"], "2");
+        assert_eq!(env["SMELT_TRANSCRIPT_BENCH_NO_WARMUP"], "1");
+    }
+
+    #[test]
+    fn named_suite_excludes_default_and_inferred_suites() {
+        let plan = parse(&["--suite", "stream", "--stream-history", "4", "--resume"]).unwrap();
+        assert_eq!(plan.suites, ["transcript_stream_benchmark_suite"]);
+        let combined = parse(&["--stream"]).unwrap();
+        assert!(combined
+            .suites
+            .contains(&"transcript_stream_benchmark_suite"));
+    }
+
+    #[test]
+    fn list_options_preserve_selected_workloads_and_sizes() {
+        let plan = parse(&[
+            "--suite",
+            "scaling",
+            "--scaling-blocks",
+            "64, 128",
+            "--workloads",
+            "mixed_10mib, markdown_4mib",
+            "--save-request-operations",
+            "submit_enter, noop_save",
+        ])
+        .unwrap();
+        let env: BTreeMap<_, _> = plan.env().into_iter().collect();
+        assert_eq!(env["SMELT_TRANSCRIPT_SCALING_BLOCKS"], "64, 128");
+        assert_eq!(
+            env["SMELT_TRANSCRIPT_BENCH_WORKLOADS"],
+            "mixed_10mib, markdown_4mib"
+        );
+        assert_eq!(
+            env["SMELT_TRANSCRIPT_HOT_PATH_OPERATIONS"],
+            "submit_enter, noop_save"
+        );
+        assert_eq!(
+            tui::benchmark_config::scaling_block_counts("64, 128").unwrap(),
+            [64, 128]
+        );
+    }
+
+    #[test]
+    fn invalid_arguments_fail_before_building_fixtures() {
+        for args in [
+            vec!["--runs"],
+            vec!["--runs", "0"],
+            vec!["runs", "2"],
+            vec!["--search-bytes", "invalid"],
+            vec!["--scaling-blocks", "invalid"],
+            vec!["--scaling-blocks", "64,invalid"],
+            vec!["--scaling-blocks", "63,128"],
+            vec!["--scaling-blocks", "64,"],
+            vec!["--workloads", "mixed_10mib,unknown"],
+            vec!["--workloads", ""],
+            vec!["--workloads", "mixed_10mib,"],
+            vec!["--save-request-operations", "submit_enter,unknown"],
+            vec!["--save-request-operations", "submit_enter,,noop_save"],
+            vec!["--stream-workload", "unknown"],
+            vec!["--save-request-fixture", "/tmp/fixture"],
+            vec!["--stream-only", "--tall-diff-lines", "10"],
+            vec![
+                "--stream-only",
+                "--save-request-fixture",
+                "/tmp/fixture",
+                "--save-request-session-id",
+                "id",
+            ],
+        ] {
+            assert!(parse(&args).is_err(), "accepted {args:?}");
+        }
+    }
 }

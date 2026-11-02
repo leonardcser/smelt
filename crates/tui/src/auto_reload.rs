@@ -7,11 +7,12 @@
 //! drop guard tears down the `notify::RecommendedWatcher` on shutdown.
 
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use smelt_core::fs_watch::{wait_for_change, Signal as AutoReloadMsg};
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver as StdReceiver, RecvTimeoutError, Sender as StdSender};
+use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -118,12 +119,6 @@ impl AutoReloadController {
             self.last_error.clone(),
         )
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum AutoReloadMsg {
-    Event,
-    Shutdown,
 }
 
 /// Roots the auto-reloader watches. This intentionally covers Lua config
@@ -342,7 +337,7 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
             if !callback_watch_set.event_may_affect_config(&event) {
                 return;
             }
-            let _ = callback_tx.send(AutoReloadMsg::Event);
+            let _ = callback_tx.send(AutoReloadMsg::Changed);
         },
         Config::default(),
     ) {
@@ -440,19 +435,7 @@ fn debounce_loop_inner(
     mut filter: AutoReloadFilter,
     mut watch_project_config: impl FnMut(&Path) -> bool,
 ) {
-    loop {
-        match raw_rx.recv() {
-            Ok(AutoReloadMsg::Event) => {}
-            Ok(AutoReloadMsg::Shutdown) | Err(_) => return,
-        }
-        loop {
-            match raw_rx.recv_timeout(DEBOUNCE) {
-                Ok(AutoReloadMsg::Event) => continue,
-                Ok(AutoReloadMsg::Shutdown) => return,
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        }
+    while wait_for_change(&raw_rx, DEBOUNCE) {
         filter.refresh_project_config_watch(&mut watch_project_config);
         if !filter.changed_since_last_scan() {
             continue;
@@ -706,8 +689,8 @@ mod tests {
         });
 
         std::fs::write(&init, "after\n").unwrap();
-        raw_tx.send(AutoReloadMsg::Event).unwrap();
-        raw_tx.send(AutoReloadMsg::Event).unwrap();
+        raw_tx.send(AutoReloadMsg::Changed).unwrap();
+        raw_tx.send(AutoReloadMsg::Changed).unwrap();
         assert!(tokio::time::timeout(DEBOUNCE / 2, signal_rx.recv())
             .await
             .is_err());

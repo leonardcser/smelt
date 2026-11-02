@@ -927,31 +927,48 @@ fn render_retained_code_spec(
         );
     }
 
+    render_with_gutter(
+        out,
+        width,
+        gutter.expect("guttered retained code render requires gutter"),
+        None,
+        |col| {
+            smelt_core::content::highlight::print_retained_code_block(
+                col,
+                &spec.content,
+                cache,
+                lang,
+                width,
+                row_start,
+                row_count,
+            );
+        },
+    )
+}
+
+fn render_with_gutter(
+    out: &mut LineBuilder,
+    width: u16,
+    gutter: &GutterSpec,
+    style_overlay: Option<(bool, bool)>,
+    render: impl FnOnce(&mut LineBuilder),
+) -> u16 {
     let inherited_style = out.current_style();
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let outcome = {
         let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
         col.push(None, inherited_style);
-        smelt_core::content::highlight::print_retained_code_block(
-            &mut col,
-            &spec.content,
-            cache,
-            lang,
-            width,
-            row_start,
-            row_count,
-        );
+        render(&mut col);
         col.finish()
     };
     if outcome.was_wrapped {
         out.mark_wrapped();
     }
-    let gutter = gutter.expect("guttered retained code render requires gutter");
     let rows = outcome.line_count.min(u16::MAX as usize) as u16;
     for row in 0..rows {
         print_row_gutter(out, gutter);
         apply_temp_decoration(out, &buf, row as usize, true);
-        emit_buffer_row_clipped(&buf, row, width, out, None);
+        emit_buffer_row_clipped(&buf, row, width, out, style_overlay);
         out.newline();
     }
     rows
@@ -1012,43 +1029,32 @@ fn render_retained_markdown_spec(
     }
 
     let gutter = gutter.expect("guttered retained Markdown render requires gutter");
-    let inherited_style = out.current_style();
-    let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-    let outcome = {
-        let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
-        col.push(None, inherited_style);
-        if italic {
-            col.save_style();
-            col.set_italic();
-        }
-        render_retained_markdown_inner_range_with_options(
-            &mut col,
-            &spec.content,
-            width as usize,
-            "",
-            dim,
-            None,
-            inline_options,
-            row_start,
-            row_count,
-        );
-        if italic {
-            col.pop_style();
-        }
-        col.finish()
-    };
-    if outcome.was_wrapped {
-        out.mark_wrapped();
-    }
-    let style_overlay = gutter.styled.then_some((dim, italic));
-    let rows = outcome.line_count.min(u16::MAX as usize) as u16;
-    for row in 0..rows {
-        print_row_gutter(out, gutter);
-        apply_temp_decoration(out, &buf, row as usize, true);
-        emit_buffer_row_clipped(&buf, row, width, out, style_overlay);
-        out.newline();
-    }
-    rows
+    render_with_gutter(
+        out,
+        width,
+        gutter,
+        gutter.styled.then_some((dim, italic)),
+        |col| {
+            if italic {
+                col.save_style();
+                col.set_italic();
+            }
+            render_retained_markdown_inner_range_with_options(
+                col,
+                &spec.content,
+                width as usize,
+                "",
+                dim,
+                None,
+                inline_options,
+                row_start,
+                row_count,
+            );
+            if italic {
+                col.pop_style();
+            }
+        },
+    )
 }
 
 fn measure_retained_markdown_spec(
@@ -1647,46 +1653,32 @@ fn render_markdown_spec_with_gutter(
     gutter: &GutterSpec,
     inline_options: &InlineOptions,
 ) -> u16 {
-    let inherited_style = out.current_style();
-    let mut buf = smelt_core::buffer::Buffer::new(
-        smelt_core::buffer::BufId(0),
-        smelt_core::buffer::BufCreateOpts::default(),
-    );
-    let outcome = {
-        let mut col = LineBuilder::new(&mut buf, out.theme(), width.max(1));
-        col.push(None, inherited_style);
-        if spec.italic {
-            col.save_style();
-            col.set_italic();
-        }
-        render_markdown_inner_range_with_options(
-            &mut col,
-            &spec.content,
-            width as usize,
-            "",
-            spec.dim,
-            None,
-            inline_options,
-            row_start,
-            row_count,
-        );
-        if spec.italic {
-            col.pop_style();
-        }
-        col.finish()
-    };
-    if outcome.was_wrapped {
-        out.mark_wrapped();
-    }
-    let style_overlay = gutter.styled.then_some((spec.dim, spec.italic));
-    let rows = outcome.line_count.min(u16::MAX as usize) as u16;
-    for row in 0..rows {
-        print_row_gutter(out, gutter);
-        apply_temp_decoration(out, &buf, row as usize, true);
-        emit_buffer_row_clipped(&buf, row, width, out, style_overlay);
-        out.newline();
-    }
-    rows
+    render_with_gutter(
+        out,
+        width,
+        gutter,
+        gutter.styled.then_some((spec.dim, spec.italic)),
+        |col| {
+            if spec.italic {
+                col.save_style();
+                col.set_italic();
+            }
+            render_markdown_inner_range_with_options(
+                col,
+                &spec.content,
+                width as usize,
+                "",
+                spec.dim,
+                None,
+                inline_options,
+                row_start,
+                row_count,
+            );
+            if spec.italic {
+                col.pop_style();
+            }
+        },
+    )
 }
 
 fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &InlineOptions) -> usize {

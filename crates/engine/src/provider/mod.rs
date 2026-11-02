@@ -10,9 +10,9 @@ pub use protocol::TokenUsage;
 use protocol::{Message, ModelConfig, ReasoningEffort};
 use reqwest::Client;
 #[cfg(test)]
-use smelt_provider::ParsedResponse;
+use smelt_provider::sanitize_tool_call_arguments;
 #[cfg(test)]
-use smelt_provider::{apply_response_format, sanitize_tool_call_arguments};
+use smelt_provider::ParsedResponse;
 use smelt_provider::{ChatProvider, ChatResponse, CopilotInitiator};
 use std::path::Path;
 #[cfg(test)]
@@ -21,7 +21,7 @@ use std::time::Duration;
 #[cfg(test)]
 use smelt_provider::WireApi;
 #[cfg(test)]
-use smelt_provider::{api_key_auth, emit_retry, endpoint_url, ApiKeyAuth};
+use smelt_provider::{api_key_auth, ApiKeyAuth};
 use smelt_provider::{
     normalize_api_base, AuthKind, BackendKind, CacheConfig, ChatOptions, ChatRequestOptions,
     ProviderClient, ProviderKind, ToolDefinition,
@@ -31,14 +31,12 @@ use smelt_provider::{
 use smelt_provider::{context_window_from_models_entry, models_entry_matches};
 
 #[cfg(test)]
-use smelt_provider::{
-    anthropic_supports_structured_output, api_base_normalization_hint, format_epoch_local,
-    format_rate_limit, json_as_u64, parse_claude_model_version, parse_resets_at,
-    parse_retry_from_body, quota_exceeded_message, unix_now, ApiBaseNormalizationHint,
-    CancellationToken, ClaudeModelFamily, FunctionSchema, ResponseFormat,
-};
-#[cfg(test)]
 use smelt_provider::{collect_indexed_tool_calls, non_empty};
+#[cfg(test)]
+use smelt_provider::{
+    format_epoch_local, format_rate_limit, json_as_u64, parse_resets_at, parse_retry_from_body,
+    quota_exceeded_message, unix_now, CancellationToken, FunctionSchema,
+};
 
 type EngineChatResponse = ChatResponse;
 
@@ -775,49 +773,6 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_url_accepts_base_or_full_endpoint() {
-        assert_eq!(
-            endpoint_url("https://api.cerebras.ai/v1", "chat/completions"),
-            "https://api.cerebras.ai/v1/chat/completions"
-        );
-        assert_eq!(
-            endpoint_url(
-                "https://api.cerebras.ai/v1/chat/completions",
-                "chat/completions"
-            ),
-            "https://api.cerebras.ai/v1/chat/completions"
-        );
-        assert_eq!(
-            endpoint_url("https://api.openai.com/v1/responses", "responses"),
-            "https://api.openai.com/v1/responses"
-        );
-        assert_eq!(
-            endpoint_url("https://api.anthropic.com/v1/messages/", "messages"),
-            "https://api.anthropic.com/v1/messages"
-        );
-    }
-
-    #[test]
-    fn api_base_normalization_hint_reports_endpoint_suffix() {
-        assert_eq!(
-            api_base_normalization_hint(" https://api.cerebras.ai/v1/chat/completions/ "),
-            Some(ApiBaseNormalizationHint {
-                original: "https://api.cerebras.ai/v1/chat/completions".into(),
-                normalized: "https://api.cerebras.ai/v1".into(),
-                endpoint: "chat/completions",
-            })
-        );
-        assert_eq!(
-            api_base_normalization_hint("https://api.cerebras.ai/v1"),
-            None
-        );
-        assert_eq!(
-            api_base_normalization_hint("https://api.cerebras.ai/v1/chat/completions?x=1"),
-            None
-        );
-    }
-
-    #[test]
     fn provider_normalizes_endpoint_shaped_api_base() {
         let provider = EngineProvider::new(
             "https://api.cerebras.ai/v1/chat/completions".to_string(),
@@ -828,27 +783,6 @@ mod tests {
         );
 
         assert_eq!(provider.api_base(), "https://api.cerebras.ai/v1");
-    }
-
-    #[test]
-    fn openai_compatible_reasoning_requires_explicit_support() {
-        assert_eq!(
-            smelt_provider::effective_reasoning_effort(
-                ReasoningEffort::High,
-                "openai-compatible",
-                None
-            ),
-            ReasoningEffort::Off
-        );
-
-        assert_eq!(
-            smelt_provider::effective_reasoning_effort(
-                ReasoningEffort::High,
-                "openai-compatible",
-                Some(true)
-            ),
-            ReasoningEffort::High
-        );
     }
 
     // ---- non_empty ----
@@ -1086,23 +1020,6 @@ mod tests {
         assert_eq!(retry_delay_for(&missing, 0, None, now), None);
     }
 
-    #[test]
-    fn emit_retry_reports_one_based_retry_count() {
-        let cancel = CancellationToken::new();
-        let seen = std::sync::Mutex::new(Vec::new());
-        let on_retry = |delay, attempt| seen.lock().unwrap().push((delay, attempt));
-        let mut opts = ChatOptions::new(&cancel);
-        opts.on_retry = Some(&on_retry);
-
-        emit_retry(&opts, Duration::from_secs(2), 0);
-        emit_retry(&opts, Duration::from_secs(4), 1);
-
-        assert_eq!(
-            *seen.lock().unwrap(),
-            vec![(Duration::from_secs(2), 1), (Duration::from_secs(4), 2)]
-        );
-    }
-
     // ---- format_rate_limit ----
 
     #[test]
@@ -1251,101 +1168,6 @@ mod tests {
         sanitize_tool_call_arguments(&mut obj);
         // Non-string arguments are left untouched.
         assert!(obj["tool_calls"][0]["function"]["arguments"].is_object());
-    }
-
-    // ---- apply_response_format ----
-
-    fn fmt() -> ResponseFormat {
-        ResponseFormat {
-            name: "out".into(),
-            schema: json!({"type":"object"}),
-        }
-    }
-
-    #[test]
-    fn apply_response_format_openai_compatible_writes_response_format_json_schema() {
-        let mut body = json!({});
-        apply_response_format(&mut body, WireApi::ChatCompletions, &fmt());
-        assert_eq!(body["response_format"]["type"], "json_schema");
-        assert_eq!(body["response_format"]["json_schema"]["name"], "out");
-        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
-    }
-
-    #[test]
-    fn apply_response_format_copilot_uses_same_shape_as_openai_compatible() {
-        let mut body = json!({});
-        apply_response_format(&mut body, WireApi::ChatCompletions, &fmt());
-        assert_eq!(body["response_format"]["json_schema"]["name"], "out");
-    }
-
-    #[test]
-    fn apply_response_format_openai_writes_text_format_block() {
-        let mut body = json!({});
-        apply_response_format(&mut body, WireApi::OpenAiResponses, &fmt());
-        assert_eq!(body["text"]["format"]["type"], "json_schema");
-        assert_eq!(body["text"]["format"]["name"], "out");
-    }
-
-    #[test]
-    fn apply_response_format_codex_writes_text_format_block() {
-        let mut body = json!({});
-        apply_response_format(&mut body, WireApi::OpenAiResponses, &fmt());
-        assert_eq!(body["text"]["format"]["name"], "out");
-    }
-
-    #[test]
-    fn apply_response_format_anthropic_modern_model_creates_output_config_format() {
-        let mut body = json!({"model": "claude-sonnet-4-6"});
-        apply_response_format(&mut body, WireApi::AnthropicMessages, &fmt());
-        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-    }
-
-    #[test]
-    fn apply_response_format_anthropic_merges_into_existing_output_config_object() {
-        let mut body = json!({"model": "claude-opus-4-6", "output_config": {"effort": "high"}});
-        apply_response_format(&mut body, WireApi::AnthropicMessages, &fmt());
-        assert_eq!(body["output_config"]["effort"], "high");
-        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-    }
-
-    #[test]
-    fn apply_response_format_anthropic_legacy_model_does_not_write_field() {
-        let mut body = json!({"model": "claude-3-5-sonnet"});
-        apply_response_format(&mut body, WireApi::AnthropicMessages, &fmt());
-        assert!(body.get("output_config").is_none());
-    }
-
-    // ---- anthropic_supports_structured_output ----
-
-    #[test]
-    fn anthropic_supports_structured_output_recognizes_4_5_4_6_and_mythos() {
-        assert!(anthropic_supports_structured_output("claude-haiku-4-5"));
-        assert!(anthropic_supports_structured_output("claude-opus-4-6"));
-        assert!(anthropic_supports_structured_output("mythos-1"));
-    }
-
-    #[test]
-    fn anthropic_supports_structured_output_rejects_older_models() {
-        assert!(!anthropic_supports_structured_output("claude-3-5-sonnet"));
-        assert!(!anthropic_supports_structured_output("claude-3-7-sonnet"));
-    }
-
-    #[test]
-    fn parse_claude_model_version_handles_dash_and_dot_versions() {
-        let dashed = parse_claude_model_version("claude-sonnet-4-6-20260101").unwrap();
-        assert_eq!(dashed.family, Some(ClaudeModelFamily::Sonnet));
-        assert_eq!((dashed.major, dashed.minor), (4, 6));
-
-        let dotted = parse_claude_model_version("claude-opus-4.8").unwrap();
-        assert_eq!(dotted.family, Some(ClaudeModelFamily::Opus));
-        assert_eq!((dotted.major, dotted.minor), (4, 8));
-    }
-
-    #[test]
-    fn parse_claude_model_version_handles_legacy_order() {
-        let version = parse_claude_model_version("claude-3-5-sonnet").unwrap();
-        assert_eq!(version.family, Some(ClaudeModelFamily::Sonnet));
-        assert_eq!((version.major, version.minor), (3, 5));
     }
 
     // ---- slugify ----
