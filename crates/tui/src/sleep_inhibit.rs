@@ -140,7 +140,10 @@ fn inhibitor_command() -> std::process::Command {
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn inhibitor_command() -> std::process::Command {
     let mut command = std::process::Command::new("systemd-inhibit");
+    // Without a graphical polkit agent, authorization would prompt for a
+    // password on smelt's terminal. Fail instead; inhibition is best-effort.
     command.args([
+        "--no-ask-password",
         "--what=idle:sleep",
         "--who=agent",
         "--why=Agent working",
