@@ -1065,6 +1065,7 @@ impl TuiApp {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.prompt
             .restore_from_rewind(&mut pctx, input.text, input.images, input.placement);
+        let _ = self.queue_prompt_text_changed_if_dirty();
         while self.core.engine.try_recv().is_ok() {}
         self.finish_rewind(restore_vim_insert);
     }

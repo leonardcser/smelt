@@ -2364,3 +2364,32 @@ fn statusline_built_ins_are_separate_sources() {
     let row = status(&mut app);
     assert_eq!(row.trim(), "only-item", "{row}");
 }
+
+#[test]
+fn rewind_to_slash_text_then_enter_closes_picker() {
+    let mut app = TestApp::builder().build();
+    assert!(app
+        .run_lua(r#"smelt.cmd.register("rwcmd", function() end, { desc = "rewind regression" })"#));
+    app.start_submitted_turn("/rwcmd");
+    app.cancel();
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+    app.press(KeyCode::Up);
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+    app.render();
+    assert_eq!(app.state().prompt_text, "/rwcmd");
+    assert!(
+        app.overlays_probe().has_pickers(),
+        "restored slash text should open the picker"
+    );
+
+    app.press(KeyCode::Enter);
+    app.feed_one(SourceEvent::LuaWakeup);
+    app.render();
+    assert!(
+        !app.overlays_probe().has_pickers(),
+        "Enter must close the picker"
+    );
+}
