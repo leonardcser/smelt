@@ -3673,9 +3673,14 @@ mod tests {
 
     /// Load the upgrade plugin against a fake `smelt upgrade`. `_G.cli.status`
     /// and `_G.cli.install` are what `smelt.process.run` returns for each
-    /// subcommand; `_G.cli_calls` records every call. Spawned work runs inline,
-    /// the tick is `_G.upgrade_tick`, the banner source `_G.upgrade_banner`
-    /// (rebuilt `_G.banner_refreshes` times), and the persistent state `_G.seen`.
+    /// subcommand; `_G.cli_calls` records every call after loading. Spawned
+    /// work runs inline unless `_G.after_load` swaps `smelt.spawn` once the
+    /// startup status read is done. The armed check timer is `_G.upgrade_check`
+    /// (`_G.check_armed`), the progress poll `_G.upgrade_progress_tick`
+    /// (`_G.progress_armed`), the `autoupgrade` listener `_G.settings_changed`,
+    /// the status-file watcher `_G.upgrade_watch`, the banner source
+    /// `_G.upgrade_banner` (rebuilt `_G.banner_refreshes` times), and the
+    /// persistent state `_G.seen`.
     fn load_upgrade_plugin(rt: &LuaRuntime, setup: &str) {
         install_test_notify(rt);
         rt.lua
@@ -3696,7 +3701,22 @@ mod tests {
                     _G.banner_refreshes = 0
                     smelt.banner.refresh = function() _G.banner_refreshes = _G.banner_refreshes + 1 end
                     smelt.tick.every = function(seconds, fn)
-                      if seconds == 1 then _G.upgrade_progress_tick = fn else _G.upgrade_tick = fn end
+                      assert(seconds == 1, seconds)
+                      _G.upgrade_progress_tick, _G.progress_armed = fn, true
+                      return {{ remove = function() _G.progress_armed = false end }}
+                    end
+                    _G.check_armed = false
+                    smelt.timer.set = function(ms, fn)
+                      _G.upgrade_check, _G.check_delay_ms, _G.check_armed = fn, ms, true
+                      return {{ remove = function() _G.check_armed = false end }}
+                    end
+                    smelt.signal.subscribe = function(name, fn)
+                      assert(name == "settings_autoupgrade", name)
+                      _G.settings_changed = fn
+                    end
+                    smelt.fs.watch = function(path, fn, opts)
+                      assert(path == "/opt/smelt/bin" and opts.recursive == false, path)
+                      _G.upgrade_watch = fn
                     end
                     smelt.spawn = function(fn) fn() end
                     _G.cli_calls = {{}}
@@ -3720,10 +3740,12 @@ mod tests {
                     function _G.failure(stderr) return {{ exit_code = 1, stdout = "", stderr = stderr }} end
                     function _G.tick()
                       smelt.state.get("upgrade").last_check = 0
-                      _G.upgrade_tick()
+                      _G.upgrade_check()
                     end
                     {setup}
                     require("smelt.plugins.upgrade")
+                    if _G.after_load then _G.after_load() end
+                    _G.cli_calls = {{}}
                 "#
             ))
             .exec()
@@ -3784,7 +3806,10 @@ mod tests {
                 &rt,
                 &format!("_G.cli.check = check_report({update}, {auto_install})"),
             );
-            rt.lua.load("_G.tick(); _G.upgrade_progress_tick(); assert(smelt.state.get('upgrade').snapshot == nil)").exec().unwrap();
+            rt.lua
+                .load("_G.tick(); assert(not _G.progress_armed)")
+                .exec()
+                .unwrap();
             assert_eq!(cli_calls(&rt), [CHECK]);
             assert!(drain_notifications(&rt).is_empty());
             assert!(drain_warnings(&rt).is_empty());
@@ -3859,10 +3884,86 @@ mod tests {
         );
 
         rt.lua
-            .load(r#"smelt.settings.autoupgrade = "off"; _G.tick()"#)
+            .load(r#"smelt.settings.autoupgrade = "off"; _G.settings_changed()"#)
             .exec()
             .unwrap();
+        assert!(!lua_eval::<bool>(&rt, "return _G.check_armed"));
+        assert!(cli_calls(&rt).is_empty());
+    }
+
+    #[test]
+    fn upgrade_idle_session_only_waits_for_the_next_hourly_check() {
+        let rt = LuaRuntime::new();
+        load_upgrade_plugin(&rt, "_G.cli.check = check_report(false, false)");
+        assert_eq!(lua_eval::<i64>(&rt, "return _G.check_delay_ms"), 0);
+        assert!(!lua_eval::<bool>(&rt, "return _G.progress_armed or false"));
+
+        rt.lua.load("_G.tick()").exec().unwrap();
+        assert_eq!(cli_calls(&rt), [CHECK]);
+        assert!(lua_eval::<bool>(&rt, "return _G.check_armed"));
+        assert_eq!(lua_eval::<i64>(&rt, "return _G.check_delay_ms"), 3_600_000);
+
+        rt.lua
+            .load(r#"smelt.settings.autoupgrade = "off"; _G.settings_changed()"#)
+            .exec()
+            .unwrap();
+        assert!(!lua_eval::<bool>(&rt, "return _G.check_armed"));
+        rt.lua
+            .load(r#"smelt.settings.autoupgrade = "notify"; _G.settings_changed()"#)
+            .exec()
+            .unwrap();
+        assert!(lua_eval::<bool>(&rt, "return _G.check_armed"));
+        assert!(lua_eval::<i64>(&rt, "return _G.check_delay_ms") > 3_500_000);
+        assert!(cli_calls(&rt).is_empty());
+    }
+
+    #[test]
+    fn upgrade_follows_installations_announced_by_the_status_file() {
+        let rt = LuaRuntime::new();
+        load_upgrade_plugin(&rt, r#"smelt.settings.autoupgrade = "off""#);
+        assert!(!lua_eval::<bool>(&rt, "return _G.check_armed"));
+
+        rt.lua
+            .load(r#"_G.upgrade_watch({ kind = "modify", paths = { "/opt/smelt/bin/smelt" } })"#)
+            .exec()
+            .unwrap();
+        assert!(cli_calls(&rt).is_empty());
+
+        rt.lua.load(r#"
+            _G.cli.status = status_report('{"operation_id":"shell","running":true,"stage":"downloading","channel":"stable","target":"v0.6.3"}')
+            _G.upgrade_watch({ kind = "create", paths = { "/opt/smelt/bin/.smelt-upgrade.status.json" } })
+        "#).exec().unwrap();
         assert_eq!(cli_calls(&rt), [UPGRADE_STATUS]);
+        assert!(lua_eval::<bool>(&rt, "return _G.progress_armed"));
+        assert_eq!(
+            upgrade_banner(&rt).as_deref(),
+            Some("v0.6.3 (stable): downloading 0.0 MiB  →  /upgrade status")
+        );
+
+        rt.lua.load(r#"
+            _G.cli.status = status_report('{"operation_id":"shell","running":false,"stage":"installed","channel":"stable","target":"v0.6.3"}', 'v0.6.3')
+            _G.upgrade_progress_tick()
+        "#).exec().unwrap();
+        assert_eq!(cli_calls(&rt), [UPGRADE_STATUS]);
+        assert!(!lua_eval::<bool>(&rt, "return _G.progress_armed"));
+        assert_eq!(
+            upgrade_banner(&rt).as_deref(),
+            Some("v0.6.3 installed, restart smelt to use it")
+        );
+    }
+
+    #[test]
+    fn upgrade_startup_shows_shared_status_without_waiting_for_a_poll() {
+        let rt = LuaRuntime::new();
+        load_upgrade_plugin(
+            &rt,
+            r#"_G.cli.status = status_report('{"operation_id":"other","running":false,"stage":"failed","error":"boom"}')"#,
+        );
+        assert_eq!(
+            upgrade_banner(&rt).as_deref(),
+            Some("upgrade failed  →  /upgrade status")
+        );
+        assert!(!lua_eval::<bool>(&rt, "return _G.progress_armed or false"));
     }
 
     #[test]
@@ -3912,10 +4013,13 @@ mod tests {
             smelt.settings.autoupgrade = "off"
             _G.cli.install = status_report('{"operation_id":"new-worker","stage":"checking","running":true}')
             _G.pending = {}
-            smelt.spawn = function(fn) table.insert(_G.pending, fn) end
+            function _G.after_load() smelt.spawn = function(fn) table.insert(_G.pending, fn) end end
         "#,
         );
-        rt.lua.load("_G.tick()").exec().unwrap();
+        rt.lua
+            .load(r#"_G.upgrade_watch({ kind = "modify", paths = { "/opt/smelt/bin/.smelt-upgrade.status.json" } })"#)
+            .exec()
+            .unwrap();
         assert!(rt.run_command("upgrade", None));
         assert!(drain_notifications(&rt).is_empty());
         rt.lua
@@ -3972,7 +4076,7 @@ mod tests {
             r#"
             _G.cli.install = status_report('{"operation_id":"installer","stage":"checking","running":true}')
             _G.pending = {}
-            smelt.spawn = function(fn) table.insert(_G.pending, fn) end
+            function _G.after_load() smelt.spawn = function(fn) table.insert(_G.pending, fn) end end
         "#,
         );
         assert!(rt.run_command("upgrade", Some("check".into())));
@@ -4026,7 +4130,12 @@ mod tests {
         load_upgrade_plugin(&rt, "");
         assert!(rt.run_command("upgrade", Some("check".into())));
         assert_eq!(drain_notifications(&rt).len(), 1);
-        rt.lua.load("_G.upgrade_progress_tick(); assert(smelt.state.get('upgrade').snapshot == nil); assert(smelt.state.get('upgrade').observed == nil)").exec().unwrap();
+        rt.lua
+            .load(
+                "assert(not _G.progress_armed); assert(smelt.state.get('upgrade').observed == nil)",
+            )
+            .exec()
+            .unwrap();
         assert_eq!(cli_calls(&rt), [CHECK]);
         assert!(drain_notifications(&rt).is_empty());
         assert!(drain_warnings(&rt).is_empty());

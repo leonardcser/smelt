@@ -136,6 +136,8 @@ end
 smelt.banner.source("upgrade", banner_text)
 
 local status_view
+-- Timer control, defined with the timers below.
+local follow_progress, schedule_check
 
 local function update_view(status, err)
   if not status_view then return end
@@ -197,6 +199,7 @@ local function apply_shared(snapshot, observe)
   end
   if previous_banner ~= banner_text() then smelt.banner.refresh() end
   update_view(status)
+  follow_progress()
   return notified
 end
 
@@ -234,6 +237,7 @@ local function request(action, verbose)
       local snapshot, read_err = run_cli(args)
       if not snapshot then
         session.last_check = os.time() - CHECK_EVERY_SECS + RETRY_SECS
+        schedule_check()
         update_view(nil, read_err)
         if verbose then notify.warn("upgrade request failed: " .. read_err) end
         return
@@ -277,26 +281,66 @@ local function check_updates(automatic, verbose)
       end
     end)
     checking, check_verbose = false, false
+    schedule_check()
     if not ok then error(err, 0) end
   end)
 end
 
-smelt.tick.every(1, function()
+-- Polls shared status every second only while an installation runs or the
+-- status view is open: lock release, which ends an installation, writes no file.
+local progress
+local function wants_progress()
   local status = session.snapshot and session.snapshot.status
-  if (status and status.running) or status_view then request("status", false) end
-end)
+  return (status and status.running) or status_view ~= nil
+end
 
--- Ticks every minute so that switching `autoupgrade` on takes effect soon.
-smelt.tick.every(60, function()
-  local m = mode()
-  if m ~= "off" and not checking and os.time() - session.last_check >= CHECK_EVERY_SECS then
-    session.last_check = os.time()
-    check_updates(m == "auto", false)
-  else
-    local status = session.snapshot and session.snapshot.status
-    if not (status and status.running) then request("status", false) end
+function follow_progress()
+  local wanted = wants_progress()
+  if wanted and not progress then
+    progress = smelt.tick.every(1, function()
+      if wants_progress() then request("status", false) end
+    end)
+  elseif not wanted and progress then
+    progress:remove()
+    progress = nil
   end
-end)
+end
+
+-- One timer per pending check, so an idle session sleeps until it is due.
+local next_check
+function schedule_check()
+  if next_check then next_check:remove() end
+  next_check = nil
+  if mode() == "off" then return end
+  local delay = math.max(0, session.last_check + CHECK_EVERY_SECS - os.time())
+  next_check = smelt.timer.set(delay * 1000, function()
+    next_check = nil
+    if mode() == "off" or checking then return end
+    session.last_check = os.time()
+    check_updates(mode() == "auto", false)
+  end)
+end
+
+smelt.signal.subscribe("settings_autoupgrade", schedule_check)
+
+-- Installations started elsewhere (another session, `smelt upgrade` in a
+-- shell) announce themselves by writing the shared status file.
+if session.exe then
+  local ok, err = pcall(smelt.fs.watch, session.exe:match("^(.*)[/\\]") or ".", function(event)
+    if progress then return end
+    for _, path in ipairs(event.paths) do
+      if path:match("[/\\]%.smelt%-upgrade%.status%.json$") then
+        request("status", false)
+        return
+      end
+    end
+  end, { recursive = false })
+  if not ok then smelt.log.warn("upgrade.watch_failed", { exe = session.exe, error = tostring(err) }) end
+end
+
+if session.snapshot == nil then request("status", false) end
+follow_progress()
+schedule_check()
 
 smelt.cmd.register("upgrade", function(args)
   local action = (args or ""):match("^%s*(.-)%s*$")
@@ -309,7 +353,11 @@ smelt.cmd.register("upgrade", function(args)
       })
       local view = { buf = buf }
       status_view = view
-      handle.win:on("close", function() if status_view == view then status_view = nil end end)
+      handle.win:on("close", function()
+        if status_view == view then status_view = nil end
+        follow_progress()
+      end)
+      follow_progress()
     end
     request("status", true)
     return

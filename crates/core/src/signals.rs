@@ -626,6 +626,7 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("session_slug"),
     state("session_title"),
     state("settings_auto_continue"),
+    state("settings_autoupgrade"),
     state("settings_terminal_title"),
     event("shutdown"),
     event("stream_delta"),
@@ -933,6 +934,7 @@ pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
     signals.declare("session_slug", String::new());
     signals.declare("session_title", seeds.session_title);
     signals.declare("settings_auto_continue", String::from("goal"));
+    signals.declare("settings_autoupgrade", String::from("auto"));
     signals.declare("settings_terminal_title", true);
     signals.declare("branch", seeds.branch);
     signals.declare("history_epoch", 0u64);

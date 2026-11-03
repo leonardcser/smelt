@@ -674,6 +674,11 @@ impl TuiApp {
                 .signals
                 .publish_if_changed("settings_auto_continue", settings.auto_continue);
         }
+        if settings.autoupgrade != old.autoupgrade {
+            self.core
+                .signals
+                .publish_if_changed("settings_autoupgrade", settings.autoupgrade);
+        }
     }
 
     fn committed_watch_paths(&self) -> crate::auto_reload::WatchPaths {

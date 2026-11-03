@@ -657,6 +657,8 @@ async fn diff_snapshot_updates_only_on_explicit_refresh() {
     assert!(git(&["commit", "-qm", "base"]).status.success());
     std::fs::write(dir.path().join("a.rs"), "first edit\n").unwrap();
     let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    let watcher_count = |app: &TestApp| app.app.lua.core_shared().watchers.lock().unwrap().len();
+    let watchers_before = watcher_count(&app);
     app.set_terminal_size(120, 35);
     app.type_text("/diff");
     app.press(KeyCode::Enter);
@@ -689,14 +691,7 @@ async fn diff_snapshot_updates_only_on_explicit_refresh() {
             .row_source()
             .unwrap()
     ));
-    assert!(app
-        .app
-        .lua
-        .core_shared()
-        .watchers
-        .lock()
-        .unwrap()
-        .is_empty());
+    assert_eq!(watcher_count(&app), watchers_before);
     app.type_char('r');
     wait_for_diff(&mut app, |app| {
         app.render_to_frame().text().contains("second edit")
@@ -732,14 +727,7 @@ async fn diff_snapshot_updates_only_on_explicit_refresh() {
     assert!(git(&["ls-files", "src/extra.rs"]).stdout.is_empty());
     assert!(app.render_to_frame().text().contains("extra.rs"));
     app.press(KeyCode::Esc);
-    assert!(app
-        .app
-        .lua
-        .core_shared()
-        .watchers
-        .lock()
-        .unwrap()
-        .is_empty());
+    assert_eq!(watcher_count(&app), watchers_before);
 }
 
 #[tokio::test]
