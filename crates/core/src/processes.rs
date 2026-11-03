@@ -18,6 +18,25 @@ impl Core {
         processes
     }
 
+    /// Whether the native session runs work of its own, such as a monitor or
+    /// a background agent.
+    pub fn native_session_has_background_work(&self) -> bool {
+        let Some(session) = self.native_session.as_deref() else {
+            return false;
+        };
+        !self.native_processes.is_empty()
+            || self
+                .agents
+                .runs(session)
+                .any(|agent| !agent.info.status.is_terminal())
+    }
+
+    /// Whether finished work will still wake the agent: a notifying
+    /// background job, or the native session's own background work.
+    pub fn has_pending_continuation(&self) -> bool {
+        self.jobs.has_pending_continuation() || self.native_session_has_background_work()
+    }
+
     /// How many processes `processes` lists.
     pub fn running_process_count(&self) -> usize {
         self.jobs.running_count() + self.native_processes.len()

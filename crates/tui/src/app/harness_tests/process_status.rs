@@ -1,7 +1,7 @@
 use super::*;
 
 #[cfg(unix)]
-async fn request_session_completion(app: &TestApp, turn: u64) {
+pub(super) async fn request_session_completion(app: &TestApp, turn: u64) {
     use smelt_core::session_control::{request_completion, SOCKET_ENV};
     let control = &app.app.core.session_control;
     control.initialize().unwrap();

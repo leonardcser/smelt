@@ -2601,7 +2601,7 @@ impl TuiApp {
             WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
                 (PublicState::Busy, None)
             }
-            WorkState::Done | WorkState::Idle if self.core.jobs.has_pending_continuation() => {
+            WorkState::Done | WorkState::Idle if self.core.has_pending_continuation() => {
                 (PublicState::Waiting, None)
             }
             WorkState::Done | WorkState::Idle

@@ -351,6 +351,30 @@ fn sent(app: &mut TestApp, expected: impl Fn(&protocol::UiCommand) -> bool) -> b
     app.drain_engine_sends().iter().any(expected)
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn public_status_waits_on_native_background_shells_instead_of_completing() {
+    use smelt_core::public_status::PublicState;
+
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    native_session(&mut app, true, false);
+    let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+    app.feed_one(SourceEvent::engine(native_shell(now, true)));
+    super::process_status::request_session_completion(&app, 1).await;
+    assert!(app.finish_turn());
+    assert_eq!(app.app.public_status_state_reason().0, PublicState::Waiting);
+
+    app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
+        processes: Vec::new(),
+    }));
+    assert_ne!(
+        app.app.public_status_state_reason().0,
+        PublicState::Completed,
+        "the turn ended while the shell still owed a wake-up"
+    );
+}
+
 #[test]
 fn native_shells_join_the_process_list_and_stop_through_their_agent() {
     let mut app = TestApp::builder().build();

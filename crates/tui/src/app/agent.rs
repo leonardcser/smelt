@@ -2088,7 +2088,7 @@ impl TuiApp {
                 &self.conversation.session().id,
                 turn_id,
                 matches!(end, TurnEnd::Complete)
-                    && !self.core.jobs.has_pending_continuation()
+                    && !self.core.has_pending_continuation()
                     && self.prompt.queue_is_empty()
                     && !self.busy_stack.is_busy()
                     && !self.continuation_is_scheduled()
