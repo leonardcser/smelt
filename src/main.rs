@@ -851,7 +851,9 @@ async fn run_session_command(args: SessionArgs) {
             smelt_core::session_control::complete_from_env()
                 .await
                 .map(|()| {
-                    println!("session completion requested; applies after this turn succeeds");
+                    println!(
+                        "session completion requested; applies when the current work succeeds"
+                    );
                 })
         }
         SessionCommand::Doctor(args) => run_session_doctor(args).and_then(|healthy| {

@@ -1,6 +1,6 @@
-//! Explicit workflow completion, scoped to the session and turn that spawned a
-//! shell. Shells of an agent process that outlives turns, such as Claude Code,
-//! are scoped to the session only.
+//! Explicit workflow completion. A request applies when the work it belongs to
+//! ends: the turn that spawned a smelt shell, or whatever an agent process that
+//! outlives turns, such as Claude Code, works on, including a wake between turns.
 
 use std::collections::HashMap;
 use std::io;
@@ -14,20 +14,36 @@ const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(unix)]
 const MAX_REQUEST_BYTES: u64 = 4096;
 
+/// The work a completion request applies to once it ends.
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    Turn(u64),
+    /// An agent process working between turns.
+    Native,
+}
+
 #[derive(Default)]
 struct State {
     session: String,
-    turn: Option<u64>,
+    scope: Option<Scope>,
     requested: bool,
     completed: bool,
 }
 
-#[cfg(unix)]
 impl State {
+    fn begin(session: &str, scope: Scope) -> Self {
+        Self {
+            session: session.into(),
+            scope: Some(scope),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(unix)]
     fn request(&mut self, session: &str, turn: Option<u64>) -> Result<(), String> {
         if self.session != session
-            || self.turn.is_none()
-            || turn.is_some_and(|turn| self.turn != Some(turn))
+            || self.scope.is_none()
+            || turn.is_some_and(|turn| self.scope != Some(Scope::Turn(turn)))
         {
             return Err("completion request belongs to an inactive session or turn".into());
         }
@@ -69,26 +85,36 @@ impl SessionControl {
     }
 
     pub fn begin_turn(&self, session: &str, turn: u64) {
-        let mut state = self.state.lock().unwrap();
-        *state = State {
-            session: session.into(),
-            turn: Some(turn),
-            ..State::default()
-        };
+        *self.state.lock().unwrap() = State::begin(session, Scope::Turn(turn));
     }
 
     pub fn finish_turn(&self, session: &str, turn: u64, eligible: bool) -> Option<&'static str> {
+        self.finish(session, Scope::Turn(turn), eligible)
+    }
+
+    /// The agent process works between turns; work already under way continues.
+    pub fn begin_native_work(&self, session: &str) {
         let mut state = self.state.lock().unwrap();
-        if state.session != session || state.turn != Some(turn) {
+        if state.session != session || state.scope.is_none() {
+            *state = State::begin(session, Scope::Native);
+        }
+    }
+
+    pub fn finish_native_work(&self, session: &str, eligible: bool) -> Option<&'static str> {
+        self.finish(session, Scope::Native, eligible)
+    }
+
+    fn finish(&self, session: &str, scope: Scope, eligible: bool) -> Option<&'static str> {
+        let mut state = self.state.lock().unwrap();
+        if state.session != session || state.scope != Some(scope) {
             return None;
         }
         let rejected = state.requested && !eligible;
         state.completed = eligible && state.requested;
         state.requested = false;
-        state.turn = None;
-        rejected.then_some(
-            "session completion not applied: the turn did not succeed or still has pending work",
-        )
+        state.scope = None;
+        rejected
+            .then_some("session completion not applied: the work failed or more work is pending")
     }
 
     pub fn is_completed(&self, session: &str) -> bool {
@@ -117,7 +143,8 @@ impl SessionControl {
         #[cfg(unix)]
         {
             let state = self.state.lock().unwrap();
-            if let (Some(turn), Some(Some(server))) = (state.turn, self.server.get()) {
+            if let (Some(Scope::Turn(turn)), Some(Some(server))) = (state.scope, self.server.get())
+            {
                 let env = HashMap::from([
                     (
                         CONTROL_SOCKET_ENV.into(),

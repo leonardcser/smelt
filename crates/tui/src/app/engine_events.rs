@@ -474,23 +474,8 @@ impl TuiApp {
                     self.core.engine.send(protocol::UiCommand::EndNativeSession);
                     return true;
                 }
-                self.core.native_session = Some(session_id);
-                if !working {
-                    if let Some(busy) = self.native_ui.busy.take() {
-                        busy.release();
-                    }
-                    self.start_next_queued_input_if_idle();
-                } else if self.native_ui.busy.is_none() {
-                    // Claude Code works outside a turn too, such as when it wakes
-                    // to report a background task; the indicator continues the
-                    // turn's timer.
-                    let elapsed = self.working.elapsed().unwrap_or_default();
-                    let since = std::time::Instant::now()
-                        .checked_sub(elapsed)
-                        .unwrap_or_else(std::time::Instant::now);
-                    self.native_ui.busy =
-                        Some(self.busy_stack.push_token_since("working".into(), since));
-                }
+                self.core.native_session = Some(session_id.clone());
+                self.set_native_working(&session_id, working);
                 return true;
             }
             EngineEvent::NativeProcesses { processes } => {
@@ -569,9 +554,53 @@ impl TuiApp {
         self.native_ui.busy = None;
     }
 
+    /// Claude Code works between turns too, such as when it wakes to report a
+    /// background task. That work shows as busy and can complete the session
+    /// like a turn.
+    fn set_native_working(&mut self, session_id: &str, working: bool) {
+        let between_turns = !self.agent_is_running();
+        if working {
+            if between_turns {
+                self.core.session_control.begin_native_work(session_id);
+            }
+            if self.native_ui.busy.is_none() {
+                // The indicator continues the turn's timer.
+                let elapsed = self.working.elapsed().unwrap_or_default();
+                let since = std::time::Instant::now()
+                    .checked_sub(elapsed)
+                    .unwrap_or_else(std::time::Instant::now);
+                self.native_ui.busy =
+                    Some(self.busy_stack.push_token_since("working".into(), since));
+            }
+            return;
+        }
+        if let Some(busy) = self.native_ui.busy.take() {
+            busy.release();
+        }
+        if between_turns {
+            let applies = self.completion_can_apply();
+            if let Some(warning) = self
+                .core
+                .session_control
+                .finish_native_work(session_id, applies)
+            {
+                self.notify_warn(warning.into());
+            }
+        }
+        self.start_next_queued_input_if_idle();
+    }
+
     /// Forgets the retained native session and releases everything scoped to it.
     pub(super) fn end_native_session(&mut self) {
-        self.core.native_session = None;
+        if let Some(session) = self.core.native_session.take() {
+            if let Some(warning) = self
+                .core
+                .session_control
+                .finish_native_work(&session, false)
+            {
+                self.notify_warn(warning.into());
+            }
+        }
         if let Some(busy) = self.native_ui.busy.take() {
             busy.release();
         }

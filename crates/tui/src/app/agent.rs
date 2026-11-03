@@ -2088,17 +2088,22 @@ impl TuiApp {
             if let Some(warning) = self.core.session_control.finish_turn(
                 &self.conversation.session().id,
                 turn_id,
-                matches!(end, TurnEnd::Complete)
-                    && !self.core.has_pending_continuation()
-                    && self.prompt.queue_is_empty()
-                    && !self.busy_stack.is_busy()
-                    && !self.continuation_is_scheduled()
-                    && self.public_attention_reason().is_none(),
+                matches!(end, TurnEnd::Complete) && self.completion_can_apply(),
             ) {
                 self.notify_warn(warning.into());
             }
         }
         start_queued
+    }
+
+    /// Whether nothing continues the work that just ended, so a session
+    /// completion it requested can apply. Background work does not count: it
+    /// clears the completion once it wakes the agent.
+    pub(super) fn completion_can_apply(&self) -> bool {
+        self.prompt.queue_is_empty()
+            && !self.busy_stack.is_busy()
+            && !self.continuation_is_scheduled()
+            && self.public_attention_reason().is_none()
     }
 
     /// Invokes the Lua handler for a plugin-defined tool; synchronous handlers resolve immediately, async ones park until `drive_tasks` completes them.

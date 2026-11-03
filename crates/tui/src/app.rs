@@ -2601,9 +2601,6 @@ impl TuiApp {
             WorkState::Working | WorkState::Retrying | WorkState::Paused | WorkState::Busy => {
                 (PublicState::Busy, None)
             }
-            WorkState::Done | WorkState::Idle if self.core.has_pending_continuation() => {
-                (PublicState::Waiting, None)
-            }
             WorkState::Done | WorkState::Idle
                 if self
                     .core
@@ -2611,6 +2608,9 @@ impl TuiApp {
                     .is_completed(&self.conversation.session().id) =>
             {
                 (PublicState::Completed, None)
+            }
+            WorkState::Done | WorkState::Idle if self.core.has_pending_continuation() => {
+                (PublicState::Waiting, None)
             }
             WorkState::Done if !self.platform.terminal_is_focused() => (
                 PublicState::NeedsAttention,

@@ -901,7 +901,7 @@ impl HeadlessApp {
         if let Some(warning) = self.core.session_control.finish_turn(
             &self.session.id,
             turn_id,
-            matches!(outcome, HeadlessExit::Success) && !self.core.has_pending_continuation(),
+            matches!(outcome, HeadlessExit::Success),
         ) {
             eprintln!("warning: {warning}");
         }

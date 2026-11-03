@@ -35,8 +35,6 @@ async fn public_status_waits_for_notifying_background_jobs() {
     assert_eq!(app.public_status_state_reason().0, PublicState::Waiting);
     app.start_turn(1);
     assert_eq!(app.public_status_state_reason().0, PublicState::Busy);
-    #[cfg(unix)]
-    request_session_completion(&app, 1).await;
     app.discard_turn(crate::app::TurnEnd::Complete);
     assert_eq!(app.public_status_state_reason().0, PublicState::Waiting);
     let completion = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())

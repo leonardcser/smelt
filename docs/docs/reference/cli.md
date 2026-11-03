@@ -101,17 +101,17 @@ you want to.
 
 ### Workflow completion
 
-Run `smelt session complete` from the bash tool, or from the Claude Code
-agent's own bash tool, after a workflow's validation
-and cleanup succeed. It targets the current session regardless of cwd and
-requests `completed` after a successful turn with no pending work. Rejected
-requests produce a warning; the command does not validate the work itself.
+Run `smelt session complete` from a bash tool, smelt's or Claude Code's, once a
+workflow's validation and cleanup succeed. The session becomes `completed` when
+the current work ends successfully with nothing queued or awaiting an answer;
+otherwise smelt warns. Background processes do not block it. The command works
+from any cwd and does not validate the work itself.
 
-Completion survives focus changes, but not a new turn, rewind, session
-replacement, or restart. The command requires Unix and a shell started by an active session.
-A smelt shell completes only the turn that started it. Claude Code keeps one
-process across turns, so its shells complete whichever turn is active when the
-command runs.
+Any new work clears `completed`: a turn, a background process waking the agent,
+a rewind, a session switch, or a restart. The command requires Unix and a shell
+started by an active session. A smelt shell completes only its own turn. A
+Claude Code shell completes whatever Claude Code is working on, including a
+wake between turns.
 
 ### Public runtime status
 
@@ -143,7 +143,8 @@ JSON records contain:
 | `updated_at_ms` | Unix timestamp of the latest status change |
 
 Scheduled continuations remain `busy`. Pending background work or result delivery
-reports `waiting`; permissions, questions, and turn errors report `needs_attention`.
+reports `waiting`, unless the session is `completed`. Permissions, questions, and
+turn errors report `needs_attention`.
 
 For servers or watchers, use `background=true` with `notify_on_completion=false`
 to skip waiting and completion-triggered turns.

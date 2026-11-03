@@ -351,27 +351,45 @@ fn sent(app: &mut TestApp, expected: impl Fn(&protocol::UiCommand) -> bool) -> b
     app.drain_engine_sends().iter().any(expected)
 }
 
+/// A native background shell keeps the session waiting but does not block an
+/// explicit completion. Its wake clears that, and the wake can complete again.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
-async fn public_status_waits_on_native_background_shells_instead_of_completing() {
+async fn native_background_shells_wait_without_blocking_completion() {
+    use protocol::event::CONTROL_SOCKET_ENV;
     use smelt_core::public_status::PublicState;
+    use smelt_core::session_control::request_completion;
 
     let mut app = TestApp::builder().build();
-    app.start_turn(1);
-    native_session(&mut app, true, false);
+    app.app.core.session_control.initialize().unwrap();
     let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
+    app.start_turn(1);
+    let socket = app.app.core.session_control.agent_env()[CONTROL_SOCKET_ENV].clone();
+    let session = native_session(&mut app, true, true);
     app.feed_one(SourceEvent::engine(native_shell(now, true)));
-    super::process_status::request_session_completion(&app, 1).await;
+    native_session(&mut app, true, false);
     assert!(app.finish_turn());
     assert_eq!(app.app.public_status_state_reason().0, PublicState::Waiting);
 
-    app.feed_one(SourceEvent::engine(EngineEvent::NativeProcesses {
-        processes: Vec::new(),
-    }));
-    assert_ne!(
+    app.start_turn(2);
+    request_completion(&socket, &session, None).await.unwrap();
+    assert!(app.finish_turn());
+    assert_eq!(
         app.app.public_status_state_reason().0,
-        PublicState::Completed,
-        "the turn ended while the shell still owed a wake-up"
+        PublicState::Completed
+    );
+
+    native_session(&mut app, true, true);
+    assert_eq!(app.app.public_status_state_reason().0, PublicState::Busy);
+    request_completion(&socket, &session, None).await.unwrap();
+    native_session(&mut app, true, false);
+    assert_eq!(
+        app.app.public_status_state_reason().0,
+        PublicState::Completed
+    );
+    assert!(
+        request_completion(&socket, &session, None).await.is_err(),
+        "nothing works once the wake ends"
     );
 }
 
