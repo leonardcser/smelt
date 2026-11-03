@@ -4,6 +4,8 @@ use std::time::Duration;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const ISSUER: &str = "https://auth.openai.com";
+/// Client identity OpenAI's auth server and Codex backend attribute requests to.
+pub const ORIGINATOR: &str = "smelt";
 pub const CHATGPT_BACKEND_API_BASE: &str = "https://chatgpt.com/backend-api";
 pub const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 pub const FAST_SERVICE_TIER: &str = "priority";
@@ -166,7 +168,7 @@ pub fn build_authorize_url(
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("state", state)
-        .append_pair("originator", "smelt")
+        .append_pair("originator", ORIGINATOR)
         .finish();
     format!("{issuer}/oauth/authorize?{params}")
 }
@@ -364,6 +366,7 @@ pub async fn device_code_login(
 
     let resp = client
         .post(format!("{issuer}/api/accounts/deviceauth/usercode"))
+        .header("originator", ORIGINATOR)
         .json(&body)
         .send()
         .await
@@ -405,6 +408,7 @@ pub async fn device_code_login(
 
         let resp = client
             .post(format!("{issuer}/api/accounts/deviceauth/token"))
+            .header("originator", ORIGINATOR)
             .json(&poll_body)
             .send()
             .await
@@ -713,6 +717,52 @@ pub fn parse_jwt_expiration(token: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves one request with a 404 and returns its lowercased request head.
+    async fn capture_request_head(
+        listener: tokio::net::TcpListener,
+    ) -> tokio::task::JoinHandle<String> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line.to_ascii_lowercase());
+            }
+            reader
+                .get_mut()
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            head
+        })
+    }
+
+    #[tokio::test]
+    async fn device_code_request_identifies_originator() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let head = capture_request_head(listener).await;
+        let progress = CodexLoginProgress {
+            on_prompt: &|_, _| {},
+            on_progress: &|_| {},
+        };
+
+        let result = device_code_login(&crate::http_client(), &progress, &issuer, || 0).await;
+
+        assert!(result.is_err());
+        let head = head.await.unwrap();
+        assert!(head.starts_with("post /api/accounts/deviceauth/usercode "));
+        assert!(head.contains(&format!("\r\noriginator: {ORIGINATOR}\r\n")));
+    }
 
     #[test]
     fn release_redirect_extracts_stable_version() {

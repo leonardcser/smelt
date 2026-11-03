@@ -602,7 +602,7 @@ fn codex_request_headers(
             "Authorization".to_string(),
             format!("Bearer {}", tokens.access_token),
         ));
-        headers.push(("originator".to_string(), "smelt".to_string()));
+        headers.push(("originator".to_string(), codex::ORIGINATOR.to_string()));
         if let Some(account_id) = tokens.account_id.as_deref() {
             headers.push(("ChatGPT-Account-ID".to_string(), account_id.to_string()));
         }
