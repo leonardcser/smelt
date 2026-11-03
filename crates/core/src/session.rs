@@ -2007,8 +2007,8 @@ impl SessionStorage {
         };
         let id_string = id.into_string();
         let catalog_path = self.layout().catalog_path();
-        let read_catalog_once = || {
-            if let Some(catalog) = self.initialized_catalog() {
+        let read_catalog = || {
+            let result = if let Some(catalog) = self.initialized_catalog() {
                 catalog.session(&id_string)
             } else {
                 match smelt_store::CatalogReader::open_existing(&catalog_path) {
@@ -2016,30 +2016,10 @@ impl SessionStorage {
                     Ok(None) => Ok(None),
                     Err(error) => Err(error),
                 }
-            }
-        };
-        // Catalog readers give up quickly so interactive paths stay responsive;
-        // a point lookup for a known id can wait out a concurrent catalog write.
-        let read_catalog = || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                match read_catalog_once() {
-                    Err(error)
-                        if error.is_sqlite_busy() && std::time::Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    }
-                    result => {
-                        return result.map_err(|error| {
-                            crate::session_store::store_error(
-                                "read session catalog",
-                                &catalog_path,
-                                error,
-                            )
-                        });
-                    }
-                }
-            }
+            };
+            result.map_err(|error| {
+                crate::session_store::store_error("read session catalog", &catalog_path, error)
+            })
         };
         let mut session = read_catalog()?;
         if session.is_none() {

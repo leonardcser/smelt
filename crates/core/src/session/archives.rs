@@ -2651,6 +2651,7 @@ mod tests {
                 original.checkpoint = Some(event.to_checkpoint());
             }
             storage.save_result(&original).unwrap();
+            assert!(storage.wait_for_session_catalog(std::time::Duration::from_secs(5)));
             let mut writer =
                 OwnedLineageWriter::open(storage.sessions_dir(), &original.id).unwrap();
             let before = writer.snapshot().unwrap();
