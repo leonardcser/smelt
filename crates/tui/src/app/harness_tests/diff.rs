@@ -2250,7 +2250,10 @@ fn diff_closing_reopening_and_reload_release_native_documents() {
     let scratch = app.ui_probe().win(preview(&app)).unwrap().buf;
     app.type_char('q');
     assert!(app.run_lua("smelt.git.diff = nil; collectgarbage('collect')"));
-    assert!(source.upgrade().is_none(), "closed document retained");
+    assert!(
+        source.upgrade().is_some(),
+        "closed snapshot not retained for reopen"
+    );
     assert!(
         app.ui_probe().buf(scratch).is_none(),
         "closed projection retained"
@@ -2273,6 +2276,22 @@ fn diff_closing_reopening_and_reload_release_native_documents() {
         "reloaded projection retained"
     );
     open_fixture(&mut app, 10);
+}
+
+#[test]
+fn diff_reopen_shows_previous_snapshot_while_refreshing() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    open_fixture(&mut app, 10);
+    app.type_char('q');
+    assert!(app.run_lua("smelt.cmd.run('diff')"));
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("first.rs"), "{frame}");
+    assert!(frame.contains("refreshing"), "{frame}");
+    drive_lua_tasks(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("first.rs"), "{frame}");
+    assert!(!frame.contains("refreshing"), "{frame}");
 }
 
 #[test]

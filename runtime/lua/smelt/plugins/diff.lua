@@ -4,6 +4,10 @@
 
 local M = {}
 local active
+-- The last snapshot is shown immediately on reopen while a fresh one loads,
+-- then released if the viewer stays closed.
+local RETAIN_MS = 5 * 60 * 1000
+local retained
 
 local function display(text)
   return (text or ""):gsub("%c", function(c) return string.format("\\x%02x", c:byte()) end)
@@ -82,6 +86,11 @@ function M.open()
     if loading then loading:remove(); loading = nil end
     if changing then changing:remove(); changing = nil end
     active = nil
+    if diff and file_count > 0 then
+      if retained then retained.timer:remove() end
+      retained = { cwd = cwd, diff = diff }
+      retained.timer = smelt.timer.set(RETAIN_MS, function() retained = nil end)
+    end
     diff, tree, selected, folder_press = nil, nil, nil, nil
     file_count = 0
   end
@@ -397,6 +406,12 @@ function M.open()
   active = { close = close }
   preview_buf:lines({ "", "loading" })
   preview:focus()
+  if retained then
+    local previous = retained
+    retained = nil
+    previous.timer:remove()
+    if previous.cwd == cwd then install({ diff = previous.diff }) end
+  end
   refresh()
 end
 
