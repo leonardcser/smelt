@@ -17,6 +17,7 @@ mod session_commit;
 mod session_compact;
 mod session_writer;
 mod snapshot;
+mod sql;
 mod write_transaction;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

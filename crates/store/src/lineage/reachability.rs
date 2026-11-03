@@ -71,7 +71,7 @@ pub(crate) fn inspect_reachability(
         reachable_roots.insert(revision.transcript_root.id.as_str().to_owned());
         let owner = revision.state_payload_id.as_str().to_owned();
         let roots = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT root_id FROM lineage_revision_state_roots
                  WHERE lineage_id = ?1 AND state_payload_id = ?2",
             )?
@@ -109,7 +109,7 @@ pub(crate) fn inspect_reachability(
     for payload_id in &reachable_payloads {
         let payload = load_payload_ref(conn, lineage, &PayloadId::from_db(payload_id.clone())?)?;
         reachable_objects.insert(payload.object_hash);
-        let mut statement = conn.prepare(
+        let mut statement = conn.prepare_cached(
             "SELECT object_hash FROM lineage_payload_nested_object_refs
              WHERE lineage_id = ?1 AND payload_id = ?2",
         )?;

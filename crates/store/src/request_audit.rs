@@ -1,3 +1,4 @@
+use crate::sql::CachedSql;
 use protocol::request_log::RequestLogEntry;
 use protocol::TokenUsage;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
@@ -350,7 +351,7 @@ fn insert_request_record(
         .map(serde_json::to_string)
         .transpose()?;
 
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO request_attempts (
             request_id, turn_id, ask_id, started_at, completed_at, provider, model,
             history_len, kind, error_summary, background, raw_body_size, api_base, url,
@@ -408,7 +409,7 @@ fn insert_request_record(
     }
     if record.usage.is_some() || cost_micros.is_some() || record.tokens_per_sec.is_some() {
         let usage = record.usage.as_ref();
-        conn.execute(
+        conn.execute_cached(
             "INSERT OR REPLACE INTO request_stats (
                 request_attempt_id, input_tokens, output_tokens, cached_input_tokens,
                 reasoning_tokens, total_cost_micros, stats_json, context_tokens,
@@ -637,7 +638,7 @@ pub(crate) fn lineage_request_stats(
     session_id: &str,
 ) -> Result<RequestAuditStats> {
     let branch = params![lineage_id, session_id];
-    let mut stats = conn.query_row(
+    let mut stats = conn.query_row_cached(
         "SELECT COUNT(a.id),
                 COALESCE(SUM(CASE WHEN a.error_summary IS NOT NULL THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN a.stream != 0 THEN 1 ELSE 0 END), 0),
@@ -668,7 +669,7 @@ pub(crate) fn lineage_request_stats(
     )?;
 
     if let Some((provider, model)) = conn
-        .query_row(
+        .query_row_cached(
             "SELECT a.provider, a.model
              FROM request_attempts a
              JOIN lineage_request_attempts branch
@@ -685,7 +686,7 @@ pub(crate) fn lineage_request_stats(
         stats.latest_model = model;
     }
     stats.latest_context_tokens = conn
-        .query_row(
+        .query_row_cached(
             "SELECT s.context_tokens
              FROM request_attempts a
              JOIN lineage_request_attempts branch
@@ -712,7 +713,7 @@ pub(crate) fn request_payloads(
     request_attempt_id: i64,
 ) -> Result<Option<RequestAuditPayloads>> {
     let exists = conn
-        .query_row(
+        .query_row_cached(
             "SELECT 1 FROM request_attempts WHERE id = ?1",
             [request_attempt_id],
             |_| Ok(()),
@@ -773,7 +774,7 @@ struct RequestPayloadRefs {
 }
 
 fn request_payload_refs(conn: &Connection, request_attempt_id: i64) -> Result<RequestPayloadRefs> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT object_hash, role
          FROM request_object_refs
          WHERE request_attempt_id = ?1
@@ -867,7 +868,7 @@ fn insert_request_ref(
     hash: &str,
     role: RequestObjectRole,
 ) -> Result<()> {
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
          VALUES (?1, ?2, ?3)",
         params![request_id, hash, role.as_str()],
@@ -998,7 +999,7 @@ struct ExpandedManifest {
 
 fn previous_body_manifest(conn: &Connection) -> Result<Option<ExpandedManifest>> {
     let root = conn
-        .query_row(
+        .query_row_cached(
             "SELECT request_attempt_id, object_hash
              FROM request_object_refs
              WHERE role = 'body_manifest'
@@ -1256,7 +1257,7 @@ fn validate_body_refs(
     request_id: i64,
     expected: &BTreeSet<(RequestObjectRole, String)>,
 ) -> Result<()> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT role, object_hash
          FROM request_object_refs
          WHERE request_attempt_id = ?1

@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PersistedLineageSessionReceipt {
@@ -16,7 +17,7 @@ pub(crate) fn load_session_receipt(
     command_kind: &str,
 ) -> Result<Option<PersistedLineageSessionReceipt>> {
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT command_kind, save_receipt_json, turn_id, turn_state, turn_payload_json
              FROM lineage_session_receipts
              WHERE lineage_id = ?1 AND session_id = ?2 AND fingerprint = ?3",
@@ -101,7 +102,7 @@ pub(crate) fn insert_session_receipt(
     turn_payload: Option<&serde_json::Value>,
     created_at: u64,
 ) -> Result<()> {
-    let inserted = conn.execute(
+    let inserted = conn.execute_cached(
         "INSERT OR IGNORE INTO lineage_session_receipts (
              lineage_id, session_id, fingerprint, command_kind, save_receipt_json,
              turn_id, turn_state, turn_payload_json, created_at
@@ -841,7 +842,7 @@ pub(crate) fn stored_lineage_turn(
     branch: &BranchId,
     turn_id: TurnId,
 ) -> Result<Option<StoredTurn>> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT turn_id, submitted_history_idx, submitted_history_hash,
                 submitted_sequence, turn_kind, turn_state, continuation_of,
                 created_at_ms, started_at_ms, finished_at_ms, terminal_reason
@@ -863,7 +864,7 @@ pub(crate) fn lineage_latest_terminal_turn_id(
     lineage: &LineageId,
     branch: &BranchId,
 ) -> Result<Option<TurnId>> {
-    let value = conn.query_row(
+    let value = conn.query_row_cached(
         "SELECT MAX(turn_id) FROM lineage_turns
          WHERE lineage_id = ?1 AND session_id = ?2
            AND turn_state IN ('completed', 'interrupted', 'failed', 'cancelled')",
@@ -881,7 +882,7 @@ pub(crate) fn lineage_last_session_receipt(
     branch: &BranchId,
 ) -> Result<Option<(String, SaveReceipt)>> {
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT fingerprint, save_receipt_json
              FROM lineage_session_receipts
              WHERE lineage_id = ?1 AND session_id = ?2
@@ -958,7 +959,7 @@ fn publish_turn_submission_in(
         .map_err(store_failure)?;
     let revision = load_revision(conn, lineage, &id).map_err(store_failure)?;
     let turn_id = conn
-        .query_row(
+        .query_row_cached(
             "UPDATE lineage_branches
              SET next_turn_id = next_turn_id + 1
              WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL
@@ -986,7 +987,7 @@ fn publish_turn_submission_in(
         .map_err(store_failure)?;
     let history_hash = crate::history::item_hash(&submitted_item).map_err(store_failure)?;
     let inserted = conn
-        .execute(
+        .execute_cached(
             "INSERT INTO lineage_turns (
                  lineage_id, session_id, turn_id, submitted_history_idx,
                  submitted_history_hash, submitted_revision_id, submitted_sequence,
@@ -1166,7 +1167,7 @@ fn publish_turn_transition_in(
     } = transition;
     let turn_id = current.turn_id;
     let updated = if state == TurnState::Running {
-        conn.execute(
+        conn.execute_cached(
             "UPDATE lineage_turns
              SET turn_state = 'running', started_at_ms = ?1
              WHERE lineage_id = ?2 AND session_id = ?3 AND turn_id = ?4
@@ -1179,7 +1180,7 @@ fn publish_turn_transition_in(
             ],
         )
     } else {
-        conn.execute(
+        conn.execute_cached(
             "UPDATE lineage_turns
              SET turn_state = ?1, finished_at_ms = ?2, terminal_reason = ?3
              WHERE lineage_id = ?4 AND session_id = ?5 AND turn_id = ?6
@@ -1214,7 +1215,7 @@ fn publish_turn_transition_in(
         at_ms,
     )
     .map_err(store_failure)?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_turn_transitions (
              lineage_id, session_id, fingerprint, turn_id, from_state, to_state,
              transitioned_at_ms, terminal_reason
@@ -1424,7 +1425,7 @@ pub(crate) fn lineage_has_nonterminal_turns(
     lineage: &LineageId,
     branch: &BranchId,
 ) -> Result<bool> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT EXISTS(
              SELECT 1 FROM lineage_turns
              WHERE lineage_id = ?1 AND session_id = ?2
@@ -1443,7 +1444,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
     at_ms: u64,
 ) -> Result<Option<StartupRecoveryResult>> {
     let tx = crate::write_transaction::begin_write(conn, "recover interrupted turns")?;
-    let mut statement = tx.prepare(
+    let mut statement = tx.prepare_cached(
         "SELECT turn_id, turn_state, created_at_ms, started_at_ms
          FROM lineage_turns
          WHERE lineage_id = ?1 AND session_id = ?2
@@ -1466,7 +1467,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
     }
     let previous = load_branch_record(&tx, lineage, branch, false)?;
     let at_ms_sql = checked_i64(at_ms, "startup recovery timestamp")?;
-    let updated = tx.execute(
+    let updated = tx.execute_cached(
         "UPDATE lineage_turns
          SET turn_state = 'interrupted',
              finished_at_ms = MAX(?1, created_at_ms, COALESCE(started_at_ms, created_at_ms)),
@@ -1485,7 +1486,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
         .revision
         .checked_add(1)
         .ok_or_else(|| StoreError::Integrity("branch sequence overflow".into()))?;
-    tx.execute(
+    tx.execute_cached(
         "UPDATE lineage_branches
          SET head_sequence = ?1, updated_at = MAX(updated_at, ?2)
          WHERE lineage_id = ?3 AND session_id = ?4 AND head_revision_id = ?5
@@ -1498,7 +1499,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
             previous.revision.id.as_str(),
         ],
     )?;
-    tx.execute(
+    tx.execute_cached(
         "INSERT INTO lineage_branch_revisions (
              lineage_id, session_id, branch_sequence, revision_id
          ) VALUES (?1, ?2, ?3, ?4)",
@@ -1550,7 +1551,7 @@ pub(crate) fn recover_lineage_nonterminal_turns(
             at_ms,
         )?;
         retain_session_receipt_result(&tx, lineage, branch, &fingerprint, save.clone())?;
-        tx.execute(
+        tx.execute_cached(
             "INSERT INTO lineage_turn_transitions (
                  lineage_id, session_id, fingerprint, turn_id, from_state, to_state,
                  transitioned_at_ms, terminal_reason
@@ -1626,7 +1627,7 @@ pub(crate) fn rewind_branch(
     }
     require_revision_ancestor(&tx, lineage, expected, target)?;
     let branch_sequence = tx
-        .query_row(
+        .query_row_cached(
             "UPDATE lineage_branches
              SET head_revision_id = ?1, head_sequence = head_sequence + 1, updated_at = ?2
              WHERE lineage_id = ?3 AND session_id = ?4
@@ -1643,7 +1644,7 @@ pub(crate) fn rewind_branch(
         )
         .optional()?
         .ok_or_else(|| StoreError::Integrity("branch rewind compare-and-swap failed".into()))?;
-    tx.execute(
+    tx.execute_cached(
         "INSERT INTO lineage_branch_revisions (
              lineage_id, session_id, branch_sequence, revision_id
          ) VALUES (?1, ?2, ?3, ?4)",
@@ -1676,7 +1677,7 @@ pub(crate) fn fork_branch<C: LineageSavepoint>(
 ) -> Result<(LineageCommitReceipt, ForkStats)> {
     let tx = conn.lineage_savepoint()?;
     let existing_creation = tx
-        .query_row(
+        .query_row_cached(
             "SELECT fork_parent_session_id, initial_revision_id
              FROM lineage_branches
              WHERE lineage_id = ?1 AND session_id = ?2",
@@ -1727,7 +1728,7 @@ pub(crate) fn fork_branch<C: LineageSavepoint>(
         result_revision_id: captured.clone(),
         coordinates: ReceiptCoordinates::default(),
     };
-    let inserted = tx.execute(
+    let inserted = tx.execute_cached(
         "INSERT INTO lineage_branches (
              lineage_id, session_id, fork_parent_session_id, parent_session_id,
              initial_revision_id, head_revision_id, head_sequence, next_turn_id,
@@ -1756,7 +1757,7 @@ pub(crate) fn fork_branch<C: LineageSavepoint>(
             source.as_str()
         )));
     }
-    tx.execute(
+    tx.execute_cached(
         "INSERT INTO lineage_branch_revisions (
              lineage_id, session_id, branch_sequence, revision_id
          ) VALUES (?1, ?2, 1, ?3)",
@@ -1780,7 +1781,7 @@ pub(crate) fn delete_branch(
     branch: &BranchId,
     deleted_at: u64,
 ) -> Result<()> {
-    let updated = conn.execute(
+    let updated = conn.execute_cached(
         "UPDATE lineage_branches
          SET head_revision_id = NULL, deleted_at = ?1, updated_at = ?1
          WHERE lineage_id = ?2 AND session_id = ?3 AND deleted_at IS NULL",

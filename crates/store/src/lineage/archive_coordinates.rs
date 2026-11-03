@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ArchiveHeaderKind {
@@ -90,7 +91,7 @@ fn load_archive_coordinates(
         ));
     }
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT header_kind, coordinates_json, coordinate_id FROM lineage_archive_coordinates
          WHERE lineage_id = ?1 AND header_payload_id = ?2",
             (lineage.as_str(), payload.id.as_str()),
@@ -150,7 +151,7 @@ pub(super) fn publish_archive_coordinates(
         return Ok(stored);
     }
     let json = serde_json::to_string(&derived)?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_archive_coordinates
          (lineage_id, header_payload_id, header_kind, coordinates_json, coordinate_id)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -203,7 +204,7 @@ fn load_checkpoint_summary_presence(
         ));
     }
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT has_summary, presence_id FROM lineage_checkpoint_summary_presence
          WHERE lineage_id = ?1 AND header_payload_id = ?2",
             (lineage.as_str(), payload.id.as_str()),
@@ -246,7 +247,7 @@ pub(super) fn publish_checkpoint_summary_presence(
         }
         return Ok(stored);
     }
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_checkpoint_summary_presence
          (lineage_id, header_payload_id, has_summary, presence_id) VALUES (?1, ?2, ?3, ?4)",
         (
@@ -277,7 +278,7 @@ pub(crate) fn verify_archive_coordinates(conn: &Connection, lineage: &LineageId)
         .is_autocommit()
         .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
         .transpose()?;
-    let headers = conn.prepare(
+    let headers = conn.prepare_cached(
         "SELECT header_payload_id, header_kind FROM lineage_archive_coordinates WHERE lineage_id = ?1",
     )?.query_map([lineage.as_str()], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -300,7 +301,7 @@ pub(crate) fn verify_archive_coordinates(conn: &Connection, lineage: &LineageId)
             ));
         }
     }
-    let headers = conn.prepare(
+    let headers = conn.prepare_cached(
         "SELECT header_payload_id FROM lineage_checkpoint_summary_presence WHERE lineage_id = ?1",
     )?.query_map([lineage.as_str()], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -1,3 +1,4 @@
+use crate::sql::CachedSql;
 use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::Write;
@@ -783,7 +784,7 @@ impl OwnedLineageWriter {
         if !self.lineage_lease.try_exclusive()? {
             return self.release();
         }
-        let live_branches: bool = self.conn.query_row(
+        let live_branches: bool = self.conn.query_row_cached(
             "SELECT EXISTS(
                  SELECT 1 FROM lineage_branches
                  WHERE lineage_id = ?1 AND deleted_at IS NULL
@@ -925,7 +926,7 @@ impl OwnedLineageWriter {
         self.conn.execute_batch("PRAGMA optimize")?;
         let checkpoint_busy: i64 =
             self.conn
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+                .query_row_cached("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
         let free_pages_after = self
             .conn
             .pragma_query_value(None, "freelist_count", |row| row.get::<_, i64>(0))?;
@@ -960,7 +961,7 @@ impl OwnedLineageWriter {
             ObjectCompression::default(),
             payload_mode,
         )?;
-        transaction.execute(
+        transaction.execute_cached(
             "INSERT INTO lineage_request_attempts
              (lineage_id, session_id, request_attempt_id)
              VALUES (?1, ?2, ?3)",
@@ -1068,7 +1069,7 @@ pub fn cleanup_abandoned_lineages(root: impl AsRef<Path>, limit: usize) -> Resul
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        let live_branches: bool = conn.query_row(
+        let live_branches: bool = conn.query_row_cached(
             "SELECT EXISTS(
                  SELECT 1 FROM lineage_branches
                  WHERE lineage_id = ?1 AND deleted_at IS NULL
@@ -1124,7 +1125,7 @@ pub fn lineage_session_locations(root: impl AsRef<Path>) -> Result<Vec<LineageSe
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        let mut statement = conn.prepare(
+        let mut statement = conn.prepare_cached(
             "SELECT session_id FROM lineage_branches
              WHERE lineage_id = ?1 AND deleted_at IS NULL
              ORDER BY session_id",
@@ -1834,7 +1835,7 @@ impl LineageSessionReader {
     ) -> Result<Option<crate::RequestAuditPayloads>> {
         let belongs_to_branch = self
             .conn
-            .query_row(
+            .query_row_cached(
                 "SELECT 1 FROM lineage_request_attempts
                  WHERE lineage_id = ?1 AND session_id = ?2 AND request_attempt_id = ?3",
                 (

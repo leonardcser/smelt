@@ -1,3 +1,4 @@
+use crate::sql::CachedSql;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -46,7 +47,8 @@ pub(crate) fn backup_connection_to(source: &Connection, destination: &Path) -> R
         let backup = rusqlite::backup::Backup::new(source, &mut destination_db)?;
         backup.run_to_completion(128, std::time::Duration::from_millis(10), None)?;
         drop(backup);
-        let check: String = destination_db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        let check: String =
+            destination_db.query_row_cached("PRAGMA quick_check", [], |row| row.get(0))?;
         if check != "ok" {
             return Err(StoreError::Integrity(format!(
                 "backup quick_check failed: {check}"

@@ -1,3 +1,4 @@
+use crate::sql::CachedSql;
 use std::sync::OnceLock;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -88,11 +89,11 @@ pub(crate) fn validate_lineage_schema(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn user_version(conn: &Connection) -> Result<i32> {
-    Ok(conn.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+    Ok(conn.query_row_cached("PRAGMA user_version", [], |row| row.get(0))?)
 }
 
 fn write_store_meta(conn: &Connection) -> Result<()> {
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO store_meta (key, value, updated_at)
          VALUES ('schema_version', ?1, unixepoch()), ('app_version', ?2, unixepoch())
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
@@ -236,7 +237,7 @@ fn load_schema_shape(conn: &Connection) -> std::result::Result<SchemaShape, Stri
 }
 
 fn schema_object_names(conn: &Connection, kind: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT name FROM sqlite_master
          WHERE type = ?1 AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
          ORDER BY name",
@@ -248,7 +249,7 @@ fn schema_object_names(conn: &Connection, kind: &str) -> Result<Vec<String>> {
 
 fn schema_object_sql(conn: &Connection, kind: &str, name: &str) -> Result<Option<String>> {
     Ok(conn
-        .query_row(
+        .query_row_cached(
             "SELECT sql FROM sqlite_master
              WHERE type = ?1 AND name = ?2 AND sql IS NOT NULL
              LIMIT 1",
@@ -472,7 +473,7 @@ pub(crate) mod tests {
         let definitions = schema_definitions(&conn);
         // Rebuild the v7 surface: no queue and immutable history indexes.
         let added = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT type, name FROM sqlite_schema
                  WHERE name IN ('lineage_reclamation_queue', 'lineage_session_receipts_turn_idx',
                                 'lineage_revision_release')
@@ -517,7 +518,7 @@ pub(crate) mod tests {
             .complete
         {}
         assert_eq!(
-            conn.query_row(
+            conn.query_row_cached(
                 "SELECT count(*) FROM objects WHERE hash = ?1",
                 [leaked.hash()],
                 |row| row.get::<_, i64>(0),

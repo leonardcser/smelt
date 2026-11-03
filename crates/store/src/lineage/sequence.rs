@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 pub(super) const SEQUENCE_FANOUT: usize = 32;
 pub(super) const LEAF_TARGET_BYTES: u64 = 2 * 1024 * 1024;
@@ -347,7 +348,7 @@ pub(crate) fn create_lineage(
     lineage: &LineageId,
     created_at: u64,
 ) -> Result<()> {
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_identity (singleton, lineage_id, created_at)
          VALUES (1, ?1, ?2)",
         (
@@ -453,7 +454,7 @@ pub(crate) fn put_payload_nested_object_refs(
                 object.raw_size
             )));
         }
-        conn.execute(
+        conn.execute_cached(
             "INSERT OR IGNORE INTO lineage_payload_nested_object_refs (
                  lineage_id, payload_id, object_hash, object_role, raw_size
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -465,7 +466,7 @@ pub(crate) fn put_payload_nested_object_refs(
                 checked_i64(raw_size, "nested payload object raw_size")?
             ],
         )?;
-        let stored_size = conn.query_row(
+        let stored_size = conn.query_row_cached(
             "SELECT raw_size FROM lineage_payload_nested_object_refs
              WHERE lineage_id = ?1 AND payload_id = ?2
                AND object_hash = ?3 AND object_role = ?4",
@@ -492,7 +493,7 @@ pub(crate) fn put_payload(
     let object = put_object(conn, bytes, compression)?;
     let byte_count = bytes.len() as u64;
     let id = payload_id(lineage, kind, object.hash(), byte_count);
-    let inserted = conn.execute(
+    let inserted = conn.execute_cached(
         "INSERT OR IGNORE INTO lineage_payload_object_refs (
              lineage_id, payload_id, payload_kind, object_hash, byte_count
          ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -690,7 +691,7 @@ pub(crate) fn create_node(
     let id = node_id(lineage, kind, level, &entries, item_count, byte_count);
     // BEFORE INSERT immutability triggers run before SQLite handles conflicts.
     // Reused content-addressed nodes must not reach the insert at all.
-    let inserted = conn.execute(
+    let inserted = conn.execute_cached(
         "INSERT INTO lineage_sequence_nodes (
              lineage_id, node_id, sequence_kind, node_kind, level,
              entry_count, item_count, byte_count
@@ -713,7 +714,7 @@ pub(crate) fn create_node(
         stats.nodes_written += 1;
     }
     let needs_repair = inserted == 0
-        && !conn.query_row(
+        && !conn.query_row_cached(
             "SELECT EXISTS (SELECT 1 FROM lineage_completed_sequence_nodes
                             WHERE lineage_id = ?1 AND node_id = ?2)",
             (lineage.as_str(), id.as_str()),
@@ -725,7 +726,7 @@ pub(crate) fn create_node(
                 EntryTarget::Item(id) => ("item", Some(id.as_str()), None),
                 EntryTarget::Child(id) => ("child", None, Some(id.as_str())),
             };
-            conn.execute(
+            conn.execute_cached(
                 "INSERT OR IGNORE INTO lineage_sequence_entries (
                  lineage_id, node_id, entry_index, entry_kind, payload_id, child_node_id,
                  item_count, byte_count, cumulative_item_count, cumulative_byte_count
@@ -763,7 +764,7 @@ pub(crate) fn create_node(
     if needs_repair {
         // Bounded GC can leave an unreachable node unsealed with surviving entries.
         // Restore its proof only after verifying the exact content-addressed node.
-        conn.execute(
+        conn.execute_cached(
             "INSERT INTO lineage_completed_sequence_nodes (lineage_id, node_id)
              SELECT ?1, ?2 WHERE NOT EXISTS (
                  SELECT 1 FROM lineage_completed_sequence_nodes
@@ -798,7 +799,7 @@ pub(crate) fn load_node_shallow(
     mut stats: Option<&mut OperationStats>,
 ) -> Result<SequenceNode> {
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT sequence_kind, node_kind, level, entry_count, item_count, byte_count
              FROM lineage_sequence_nodes
              WHERE lineage_id = ?1 AND node_id = ?2",
@@ -832,7 +833,7 @@ pub(crate) fn load_node_shallow(
             id.as_str()
         )));
     }
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT entry_index, entry_kind, payload_id, child_node_id,
                 item_count, byte_count, cumulative_item_count, cumulative_byte_count
          FROM lineage_sequence_entries
@@ -976,7 +977,7 @@ pub(crate) fn insert_root(
     stats: &mut OperationStats,
 ) -> Result<()> {
     let _perf = smelt_perf::perf::begin("store:lineage:insert_sequence_root");
-    let inserted = conn.execute(
+    let inserted = conn.execute_cached(
         "INSERT OR IGNORE INTO lineage_sequence_roots (
              lineage_id, root_id, root_kind, root_node_id, depth, item_count, byte_count
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1009,7 +1010,7 @@ pub(crate) fn load_root(
     id: &RootId,
 ) -> Result<SequenceRoot> {
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT root_kind, root_node_id, depth, item_count, byte_count
              FROM lineage_sequence_roots
              WHERE lineage_id = ?1 AND root_id = ?2",

@@ -12,7 +12,7 @@ pub(crate) fn export_lineage_requests_jsonl(
     session_id: &str,
     mut out: impl Write,
 ) -> Result<()> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT a.id, request_id, kind, turn_id, ask_id, started_at, completed_at, provider,
                 model, history_len, error_summary, background, api_base, url, http_status,
                 prompt_cache_key, stream, attempt, s.stats_json, s.total_cost_micros,

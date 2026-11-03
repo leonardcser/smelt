@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 use serde_json::Value;
 
 pub(super) const SHARED_REVISION_STATE_VERSION: u32 = 2;
@@ -1064,7 +1065,7 @@ pub(super) fn register_revision_archive_roots(
         .chain(message.as_deref().map(|id| ("first_user_message", id)))
     {
         archive_root(conn, lineage, role, id)?;
-        conn.execute(
+        conn.execute_cached(
             "INSERT OR IGNORE INTO lineage_revision_state_roots
              (lineage_id, state_payload_id, role, root_id) VALUES (?1, ?2, ?3, ?4)",
             (lineage.as_str(), payload.as_str(), role, id),
@@ -1138,7 +1139,7 @@ fn verify_archive_ownership(
     message: Option<&str>,
 ) -> Result<()> {
     let rows = conn
-        .prepare(
+        .prepare_cached(
             "SELECT role, root_id FROM lineage_revision_state_roots
          WHERE lineage_id = ?1 AND state_payload_id = ?2",
         )?

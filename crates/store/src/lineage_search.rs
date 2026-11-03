@@ -1,3 +1,4 @@
+use crate::sql::CachedSql;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -698,11 +699,11 @@ fn publish_search_manifest(
         StoreError::Integrity("derived search manifest source count exceeds u64".into())
     })?;
     let tx = search.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute(
+    tx.execute_cached(
         "DELETE FROM search_root_manifests WHERE transcript_root_id = ?1",
         [transcript_root_id],
     )?;
-    tx.execute(
+    tx.execute_cached(
         "INSERT INTO search_root_manifests (
              transcript_root_id, source_count, item_count
          ) VALUES (?1, ?2, ?3)",
@@ -713,7 +714,7 @@ fn publish_search_manifest(
         ],
     )?;
     {
-        let mut insert = tx.prepare(
+        let mut insert = tx.prepare_cached(
             "INSERT INTO search_root_sources (
                  transcript_root_id, source_ordinal, source_node_id
              ) VALUES (?1, ?2, ?3)",
@@ -754,7 +755,7 @@ fn reachable_search_state(
     canonical: &Connection,
     lineage: &LineageId,
 ) -> Result<(HashSet<String>, HashSet<String>)> {
-    let mut branches = canonical.prepare(
+    let mut branches = canonical.prepare_cached(
         "SELECT session_id FROM lineage_branches
          WHERE lineage_id = ?1 AND deleted_at IS NULL
          ORDER BY session_id",
@@ -784,7 +785,7 @@ fn prune_stale_search_manifests(
 ) -> Result<()> {
     let stale = {
         let mut manifests =
-            search.prepare("SELECT transcript_root_id FROM search_root_manifests")?;
+            search.prepare_cached("SELECT transcript_root_id FROM search_root_manifests")?;
         let root_ids = manifests
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -798,7 +799,7 @@ fn prune_stale_search_manifests(
     }
     let tx = search.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for root_id in stale {
-        tx.execute(
+        tx.execute_cached(
             "DELETE FROM search_root_manifests WHERE transcript_root_id = ?1",
             [root_id],
         )?;
@@ -825,7 +826,7 @@ pub(crate) fn prune_search_projection(
     let result = (|| -> Result<()> {
         let mut search = open_search_writer(search_path, lineage)?;
         prune_stale_search_manifests(&mut search, &live_roots)?;
-        let last: i64 = search.query_row(
+        let last: i64 = search.query_row_cached(
             "SELECT COALESCE(MAX(segment_id), 0) FROM search_segments",
             [],
             |row| row.get(0),
@@ -833,7 +834,7 @@ pub(crate) fn prune_search_projection(
         let mut cursor = 0;
         loop {
             let target = search
-                .query_row(
+                .query_row_cached(
                     "SELECT segment_id, source_node_id, source_item_count, source_byte_count,
                         min_block_idx, max_block_idx, doc_count, first_doc_id, last_doc_id
                  FROM search_segments
@@ -851,7 +852,7 @@ pub(crate) fn prune_search_projection(
             }
             let source = search_segment_source(&search, &target)?;
             for leaf in &source.leaves {
-                let retained: bool = canonical.query_row(
+                let retained: bool = canonical.query_row_cached(
                     "SELECT EXISTS(SELECT 1 FROM lineage_sequence_nodes
                      WHERE lineage_id = ?1 AND node_id = ?2)",
                     params![lineage.as_str(), leaf.node_id],
@@ -871,7 +872,7 @@ pub(crate) fn prune_search_projection(
             let source_documents = search_document_inputs(&source_records)?;
             let tx = search.transaction_with_behavior(TransactionBehavior::Immediate)?;
             {
-                let mut docs = tx.prepare(
+                let mut docs = tx.prepare_cached(
                     "SELECT doc_id, first_record_ordinal, last_record_ordinal,
                         min_block_idx, max_block_idx
                  FROM search_docs
@@ -889,7 +890,7 @@ pub(crate) fn prune_search_projection(
                         "derived search document count does not match its source".into(),
                     ));
                 }
-                let mut delete_fts = tx.prepare(
+                let mut delete_fts = tx.prepare_cached(
                     "INSERT INTO search_fts(search_fts, rowid, text)
                  VALUES ('delete', ?1, ?2)",
                 )?;
@@ -908,7 +909,7 @@ pub(crate) fn prune_search_projection(
                     ])?;
                 }
             }
-            let deleted_segments = tx.execute(
+            let deleted_segments = tx.execute_cached(
                 "DELETE FROM search_segments WHERE segment_id = ?1",
                 [sql_i64(target.segment_id, "search segment ID")?],
             )?;
@@ -921,7 +922,7 @@ pub(crate) fn prune_search_projection(
             deleted += deleted_segments;
         }
         if deleted > 0 {
-            let mut vacuum = search.prepare("PRAGMA incremental_vacuum(256)")?;
+            let mut vacuum = search.prepare_cached("PRAGMA incremental_vacuum(256)")?;
             let mut rows = vacuum.query([])?;
             while rows.next()?.is_some() {}
         }
@@ -978,7 +979,7 @@ fn configure_search_writer(conn: &Connection, path: &Path) -> Result<()> {
 
 fn create_search_schema(conn: &Connection, lineage: &LineageId) -> Result<()> {
     conn.execute_batch(SEARCH_SCHEMA)?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO search_meta (
              singleton, format_version, lineage_id, segment_bytes, segment_leaves,
              document_bytes, overlap_bytes, anchor_bytes, anchor_grams
@@ -1019,7 +1020,7 @@ fn validate_search_meta(conn: &Connection, lineage: &LineageId) -> Result<()> {
         "search_fts",
         "search_short_postings",
     ] {
-        let present: bool = conn.query_row(
+        let present: bool = conn.query_row_cached(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
             [table],
             |row| row.get(0),
@@ -1031,7 +1032,7 @@ fn validate_search_meta(conn: &Connection, lineage: &LineageId) -> Result<()> {
         }
     }
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT format_version, lineage_id, segment_bytes, segment_leaves,
                     document_bytes, overlap_bytes, anchor_bytes, anchor_grams
              FROM search_meta WHERE singleton = 1",
@@ -1069,7 +1070,7 @@ fn validate_search_meta(conn: &Connection, lineage: &LineageId) -> Result<()> {
 }
 
 fn search_quick_check(conn: &Connection) -> Result<()> {
-    let result: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    let result: String = conn.query_row_cached("PRAGMA quick_check", [], |row| row.get(0))?;
     if result != "ok" {
         return Err(StoreError::Integrity(format!(
             "derived search quick_check failed: {result}"
@@ -1090,7 +1091,7 @@ fn open_search_writer(path: &Path, lineage: &LineageId) -> Result<Connection> {
                 configure_search_writer(&conn, path)?;
                 validate_search_meta(&conn, lineage)?;
                 search_quick_check(&conn)?;
-                let incomplete: bool = conn.query_row(
+                let incomplete: bool = conn.query_row_cached(
                     "SELECT EXISTS(
                          SELECT 1 FROM search_segments segment
                          WHERE segment.complete != 1
@@ -1154,7 +1155,7 @@ fn build_search_segment(
     let documents = search_document_inputs(records)?;
 
     let tx = conn.transaction()?;
-    tx.execute(
+    tx.execute_cached(
         "INSERT INTO search_segments (
              source_node_id, source_item_count, source_byte_count,
              min_block_idx, max_block_idx, logical_text_bytes, doc_count,
@@ -1169,7 +1170,7 @@ fn build_search_segment(
     let segment_id = u64::try_from(tx.last_insert_rowid())
         .map_err(|_| StoreError::Integrity("search segment ID is negative".into()))?;
     {
-        let mut insert_leaf = tx.prepare(
+        let mut insert_leaf = tx.prepare_cached(
             "INSERT INTO search_source_leaves (
                  segment_id, leaf_ordinal, node_id, start_index, item_count, byte_count
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1185,7 +1186,7 @@ fn build_search_segment(
             ])?;
         }
     }
-    let mut next_doc_id = tx.query_row(
+    let mut next_doc_id = tx.query_row_cached(
         "SELECT coalesce(max(doc_id), 0) + 1 FROM search_docs",
         [],
         |row| row.get::<_, i64>(0),
@@ -1199,13 +1200,14 @@ fn build_search_segment(
     let mut postings: BTreeMap<(u8, u64), Vec<u64>> = BTreeMap::new();
 
     {
-        let mut insert_doc = tx.prepare(
+        let mut insert_doc = tx.prepare_cached(
             "INSERT INTO search_docs (
                  doc_id, segment_id, first_record_ordinal, last_record_ordinal,
                  min_block_idx, max_block_idx
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        let mut insert_fts = tx.prepare("INSERT INTO search_fts(rowid, text) VALUES (?1, ?2)")?;
+        let mut insert_fts =
+            tx.prepare_cached("INSERT INTO search_fts(rowid, text) VALUES (?1, ?2)")?;
         for document in documents {
             if cancelled() {
                 return Ok(false);
@@ -1238,7 +1240,7 @@ fn build_search_segment(
     }
 
     {
-        let mut insert_posting = tx.prepare(
+        let mut insert_posting = tx.prepare_cached(
             "INSERT INTO search_short_postings (
                  segment_id, kind, gram_hash, docs
              ) VALUES (?1, ?2, ?3, ?4)",
@@ -1275,7 +1277,7 @@ fn build_search_segment(
     let last_doc_id_sql = last_doc_id
         .map(|id| sql_i64(id, "search last document ID"))
         .transpose()?;
-    tx.execute(
+    tx.execute_cached(
         "UPDATE search_segments
          SET min_block_idx = ?2, max_block_idx = ?3,
              logical_text_bytes = ?4, doc_count = ?5,
@@ -1302,7 +1304,7 @@ fn search_segment_matches_source(row: &SearchSegmentRow, source: &SearchSourceSe
 }
 
 fn search_segment_row(conn: &Connection, node_id: &str) -> Result<Option<SearchSegmentRow>> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT segment_id, source_node_id, source_item_count, source_byte_count,
                 min_block_idx, max_block_idx, doc_count, first_doc_id, last_doc_id
          FROM search_segments
@@ -1367,7 +1369,7 @@ fn search_segment_source(
     conn: &Connection,
     segment: &SearchSegmentRow,
 ) -> Result<SearchSourceSegment> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT leaf_ordinal, node_id, start_index, item_count, byte_count
          FROM search_source_leaves
          WHERE segment_id = ?1
@@ -1414,7 +1416,7 @@ fn search_manifest_segments(
     item_count: u64,
 ) -> Result<Option<Vec<SearchSegmentRow>>> {
     let manifest = conn
-        .query_row(
+        .query_row_cached(
             "SELECT source_count, item_count
              FROM search_root_manifests WHERE transcript_root_id = ?1",
             [transcript_root_id],
@@ -1428,7 +1430,7 @@ fn search_manifest_segments(
         return Ok(None);
     }
 
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT s.segment_id, s.source_node_id, s.source_item_count,
                 s.source_byte_count, s.min_block_idx, s.max_block_idx,
                 s.doc_count, s.first_doc_id, s.last_doc_id, b.source_ordinal
@@ -1469,7 +1471,7 @@ fn search_manifest_segments(
 
 fn validate_search_segment_structure(conn: &Connection, segment: &SearchSegmentRow) -> Result<()> {
     search_segment_source(conn, segment)?;
-    let (doc_count, first_doc_id, last_doc_id, max_ordinal) = conn.query_row(
+    let (doc_count, first_doc_id, last_doc_id, max_ordinal) = conn.query_row_cached(
         "SELECT COUNT(*), MIN(doc_id), MAX(doc_id), MAX(last_record_ordinal)
          FROM search_docs WHERE segment_id = ?1",
         [sql_i64(segment.segment_id, "search segment ID")?],
@@ -1497,7 +1499,7 @@ fn validate_search_segment_structure(conn: &Connection, segment: &SearchSegmentR
     }
 
     let mut postings =
-        conn.prepare("SELECT docs FROM search_short_postings WHERE segment_id = ?1")?;
+        conn.prepare_cached("SELECT docs FROM search_short_postings WHERE segment_id = ?1")?;
     let rows = postings.query_map([sql_i64(segment.segment_id, "search segment ID")?], |row| {
         row.get::<_, Vec<u8>>(0)
     })?;

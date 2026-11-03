@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LineageSessionSnapshot {
@@ -346,7 +347,7 @@ pub(crate) fn lineage_session_head(
     branch: &BranchId,
 ) -> Result<LineageSessionHead> {
     let (sequence, revision_id) = conn
-        .query_row(
+        .query_row_cached(
             "SELECT head_sequence, head_revision_id FROM lineage_branches
              WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
             (lineage.as_str(), branch.as_str()),
@@ -806,7 +807,7 @@ pub(crate) fn branch_revision_at_sequence(
 ) -> Result<RevisionId> {
     let sequence = checked_i64(sequence, "branch sequence")?;
     let value = conn
-        .query_row(
+        .query_row_cached(
             "SELECT revision_id FROM lineage_branch_revisions
              WHERE lineage_id = ?1 AND session_id = ?2 AND branch_sequence = ?3",
             (lineage.as_str(), branch.as_str(), sequence),
@@ -823,7 +824,7 @@ pub(crate) fn update_branch_metadata(
     branch: &BranchId,
     metadata: &BranchMetadata,
 ) -> Result<()> {
-    let updated = conn.execute(
+    let updated = conn.execute_cached(
         "UPDATE lineage_branches
          SET cwd = ?1, mode = ?2, reasoning_effort = ?3, model = ?4,
              fast_mode = ?5, session_cost_usd = ?6, input_tokens = ?7,

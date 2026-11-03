@@ -1,3 +1,4 @@
+use crate::sql::CachedSql;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -519,7 +520,7 @@ impl Catalog {
         )?;
         if changed != 0 {
             let stored_id = tx
-                .query_row(
+                .query_row_cached(
                     "SELECT source_id FROM session_messages WHERE session_id = ?1",
                     [&session.id],
                     |row| row.get::<_, Option<String>>(0),
@@ -531,7 +532,7 @@ impl Catalog {
                 || session.first_user_message_id.is_none()
                 || stored_id != session.first_user_message_id
             {
-                tx.execute(
+                tx.execute_cached(
                     "INSERT INTO session_messages (session_id, source_id, body)
                      VALUES (?1, ?2, ?3)
                      ON CONFLICT(session_id) DO UPDATE SET source_id = excluded.source_id,
@@ -568,7 +569,7 @@ impl Catalog {
         scan_id: u64,
     ) -> Result<()> {
         let scan_id = sql_u64(scan_id, "last_seen_scan")?;
-        self.conn.execute(
+        self.conn.execute_cached(
             "INSERT INTO sessions (
                 id, created_at, updated_at, source_revision, status,
                 error_kind, error_summary, last_seen_scan
@@ -586,13 +587,13 @@ impl Catalog {
     pub fn remove(&mut self, id: &str) -> Result<bool> {
         Ok(self
             .conn
-            .execute("DELETE FROM sessions WHERE id = ?1", [id])?
+            .execute_cached("DELETE FROM sessions WHERE id = ?1", [id])?
             != 0)
     }
 
     pub fn allocate_scan(&mut self) -> Result<u64> {
         let tx = self.conn.transaction()?;
-        let next: i64 = tx.query_row(
+        let next: i64 = tx.query_row_cached(
             "SELECT next_scan_id FROM catalog_meta WHERE singleton = 1",
             [],
             |row| row.get(0),
@@ -601,7 +602,7 @@ impl Catalog {
         let following = scan_id
             .checked_add(1)
             .ok_or_else(|| StoreError::Integrity("catalog scan id overflow".into()))?;
-        tx.execute(
+        tx.execute_cached(
             "UPDATE catalog_meta SET next_scan_id = ?1 WHERE singleton = 1",
             [sql_u64(following, "next_scan_id")?],
         )?;
@@ -612,7 +613,7 @@ impl Catalog {
     pub fn complete_scan(&mut self, scan_id: u64, reconciled_at: i64) -> Result<usize> {
         let scan_id_sql = sql_u64(scan_id, "scan_id")?;
         let tx = self.conn.transaction()?;
-        let completed: i64 = tx.query_row(
+        let completed: i64 = tx.query_row_cached(
             "SELECT completed_scan_id FROM catalog_meta WHERE singleton = 1",
             [],
             |row| row.get(0),
@@ -622,11 +623,11 @@ impl Catalog {
                 "catalog scan {scan_id} completed after a newer scan"
             )));
         }
-        let deleted = tx.execute(
+        let deleted = tx.execute_cached(
             "DELETE FROM sessions WHERE last_seen_scan < ?1",
             [scan_id_sql],
         )?;
-        tx.execute(
+        tx.execute_cached(
             "UPDATE catalog_meta
              SET completed_scan_id = ?1, reconciled_at = ?2
              WHERE singleton = 1",
@@ -721,7 +722,7 @@ impl CatalogReader {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(CATALOG_READ_BUSY_TIMEOUT)?;
-        let schema_tables = conn.query_row(
+        let schema_tables = conn.query_row_cached(
             "SELECT COUNT(*) FROM sqlite_schema
              WHERE type = 'table' AND name IN ('catalog_meta', 'sessions', 'session_messages')",
             [],
@@ -899,7 +900,7 @@ fn open_catalog_connection(path: &Path) -> Result<Connection> {
     // Avoid a deferred read-to-write upgrade, which SQLite cannot safely wait on.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(CATALOG_SCHEMA)?;
-    tx.execute(
+    tx.execute_cached(
         "INSERT OR IGNORE INTO catalog_meta
          (singleton, schema_version, next_scan_id, completed_scan_id, reconciled_at)
          VALUES (1, ?1, 1, 0, NULL)",
@@ -936,7 +937,7 @@ fn rebuild_catalog(path: impl AsRef<Path>) -> Result<()> {
 
 fn validate_schema(conn: &Connection) -> Result<()> {
     let version = conn
-        .query_row(
+        .query_row_cached(
             "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
             [],
             |row| row.get::<_, i32>(0),
@@ -956,7 +957,7 @@ fn validate_schema(conn: &Connection) -> Result<()> {
 
 fn catalog_metadata(conn: &Connection) -> Result<CatalogMetadata> {
     let (next_scan_id, completed_scan_id, reconciled_at): (i64, i64, Option<i64>) = conn
-        .query_row(
+        .query_row_cached(
             "SELECT next_scan_id, completed_scan_id, reconciled_at
              FROM catalog_meta WHERE singleton = 1",
             [],
@@ -970,7 +971,7 @@ fn catalog_metadata(conn: &Connection) -> Result<CatalogMetadata> {
 }
 
 fn query_session(conn: &Connection, id: &str) -> Result<Option<CatalogSession>> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT id, lineage_id, title, slug, session_messages.body, cwd, mode, reasoning_effort, model,
                 fast_mode, parent_id, context_tokens, history_len, text_bytes, created_at,
                 updated_at, source_revision, status, error_kind, error_summary, last_seen_scan,
@@ -993,7 +994,7 @@ fn query_session_ids_with_prefix(
         )));
     }
     let pattern = format!("{prefix}%");
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT id FROM sessions
          WHERE id LIKE ?1 AND status = 'available'
          ORDER BY id LIMIT ?2",

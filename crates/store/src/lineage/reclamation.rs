@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReclamationStep {
@@ -115,7 +116,7 @@ impl SuspendedGuards {
             return Ok(());
         }
         for name in IMMUTABLE_RECORDS {
-            let definition = tx.query_row(
+            let definition = tx.query_row_cached(
                 "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?1",
                 [name],
                 |row| row.get::<_, String>(0),

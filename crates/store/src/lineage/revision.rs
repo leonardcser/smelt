@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RevisionRecord {
@@ -120,7 +121,7 @@ pub(crate) fn insert_revision(
         &revision.history_root,
         parent.as_ref().map(|parent| &parent.history_root),
     )?;
-    let inserted = conn.execute(
+    let inserted = conn.execute_cached(
         "INSERT OR IGNORE INTO lineage_revisions (
              lineage_id, revision_id, parent_revision_id, created_by_session_id,
              operation_kind, history_root_id, transcript_root_id, state_payload_id,
@@ -168,7 +169,7 @@ pub(crate) fn load_revision(
     id: &RevisionId,
 ) -> Result<RevisionRecord> {
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT parent_revision_id, created_by_session_id, operation_kind,
                     history_root_id, transcript_root_id, state_payload_id,
                     history_len, transcript_record_count, transcript_byte_count,
@@ -465,7 +466,7 @@ pub(crate) fn validate_receipt_against_canonical(
         .map(|id| load_revision(conn, lineage, id))
         .transpose()?;
     let (fork_parent, initial_revision_id) = conn
-        .query_row(
+        .query_row_cached(
             "SELECT fork_parent_session_id, initial_revision_id
              FROM lineage_branches
              WHERE lineage_id = ?1 AND session_id = ?2",
@@ -479,7 +480,7 @@ pub(crate) fn validate_receipt_against_canonical(
         let source = fork_parent.map(BranchId::new).transpose()?.ok_or_else(|| {
             StoreError::Integrity("lineage fork receipt has no source branch".into())
         })?;
-        let source_exists = conn.query_row(
+        let source_exists = conn.query_row_cached(
             "SELECT EXISTS(
                  SELECT 1 FROM lineage_branches
                  WHERE lineage_id = ?1 AND session_id = ?2
@@ -580,7 +581,7 @@ pub(crate) fn insert_receipt(
     created_at: u64,
 ) -> Result<()> {
     receipt.validate()?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_commit_receipts (
              lineage_id, session_id, fingerprint, operation_kind,
              prior_revision_id, result_revision_id,
@@ -626,7 +627,7 @@ pub(crate) fn load_receipt(
     branch: &BranchId,
     fingerprint: &str,
 ) -> Result<Option<LineageCommitReceipt>> {
-    conn.query_row(
+    conn.query_row_cached(
         "SELECT operation_kind, prior_revision_id, result_revision_id,
                 history_start_idx, history_item_count,
                 transcript_start_idx, transcript_record_count
@@ -694,7 +695,7 @@ pub(crate) fn branch_head_in(
          WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL"
     };
     let value = conn
-        .query_row(sql, (lineage.as_str(), branch.as_str()), |row| {
+        .query_row_cached(sql, (lineage.as_str(), branch.as_str()), |row| {
             row.get::<_, String>(0)
         })
         .optional()?
@@ -770,7 +771,7 @@ pub(crate) fn create_initial_branch_in(
         state_payload.id,
         revision_created_at,
     )?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_branches (
              lineage_id, session_id, fork_parent_session_id, parent_session_id,
              initial_revision_id, head_revision_id, head_sequence, next_turn_id,
@@ -803,7 +804,7 @@ pub(crate) fn create_initial_branch_in(
         ],
     )?;
     insert_revision(conn, lineage, &revision)?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_branch_revisions (
              lineage_id, session_id, branch_sequence, revision_id
          ) VALUES (?1, ?2, 1, ?3)",
@@ -946,7 +947,7 @@ pub(crate) fn commit_revision_in(
     }
     insert_revision(conn, lineage, &revision)?;
     let branch_sequence = conn
-        .query_row(
+        .query_row_cached(
             "UPDATE lineage_branches
              SET head_revision_id = ?1, head_sequence = head_sequence + 1, updated_at = ?2
              WHERE lineage_id = ?3 AND session_id = ?4
@@ -963,7 +964,7 @@ pub(crate) fn commit_revision_in(
         )
         .optional()?
         .ok_or_else(|| StoreError::Integrity("branch head compare-and-swap failed".into()))?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_branch_revisions (
              lineage_id, session_id, branch_sequence, revision_id
          ) VALUES (?1, ?2, ?3, ?4)",

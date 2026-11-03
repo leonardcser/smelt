@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 fn receipt_result_id(
     lineage: &LineageId,
@@ -51,7 +52,7 @@ pub(crate) fn load_session_receipt_result(
         .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
         .transpose()?;
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT receipt.command_kind, receipt.save_receipt_json,
                 result.result_revision_id, result.result_id
          FROM lineage_session_receipt_results result
@@ -115,7 +116,7 @@ pub(crate) fn retain_session_receipt_result(
         }
         return Ok(stored);
     }
-    let (kind, save_json) = conn.query_row(
+    let (kind, save_json) = conn.query_row_cached(
         "SELECT command_kind, save_receipt_json FROM lineage_session_receipts
          WHERE lineage_id = ?1 AND session_id = ?2 AND fingerprint = ?3",
         (lineage.as_str(), branch.as_str(), fingerprint),
@@ -130,7 +131,7 @@ pub(crate) fn retain_session_receipt_result(
     let revision = load_revision(conn, lineage, &id)?;
     validate_receipt_result(conn, lineage, branch, &receipt, &revision)?;
     load_revision_envelope(conn, lineage, &revision, &mut OperationStats::default())?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_session_receipt_results
          (lineage_id, session_id, fingerprint, result_revision_id, result_id)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -153,7 +154,7 @@ pub(crate) fn verify_session_receipt_results(conn: &Connection, lineage: &Lineag
         .is_autocommit()
         .then(|| Transaction::new_unchecked(conn, TransactionBehavior::Deferred))
         .transpose()?;
-    let owners = conn.prepare(
+    let owners = conn.prepare_cached(
         "SELECT session_id, fingerprint FROM lineage_session_receipt_results WHERE lineage_id = ?1",
     )?.query_map([lineage.as_str()], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

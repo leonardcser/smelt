@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 pub(super) fn validate_storage_root(root: &Path) -> Result<()> {
     if root.exists() {
@@ -115,7 +116,7 @@ pub(super) fn locate_lineage(root: &Path, branch: &BranchId) -> Result<Option<Li
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let present = conn
-            .query_row(
+            .query_row_cached(
                 "SELECT 1 FROM lineage_branches
                  WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
                 (lineage.as_str(), branch.as_str()),
@@ -148,6 +149,7 @@ pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<
         ensure_private_directory_all(parent)?;
     }
     let mut conn = Connection::open(path)?;
+    conn.set_prepared_statement_cache_capacity(crate::sql::STATEMENT_CACHE_CAPACITY);
     // Branch writers share a WAL database. Reserve the write transaction before
     // reading so another branch cannot invalidate a deferred write snapshot.
     conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
@@ -167,6 +169,9 @@ pub(super) fn open_write_connection(path: &Path, lineage: &LineageId) -> Result<
         conn.pragma_update(None, "journal_mode", "WAL")?;
     }
     conn.pragma_update(None, "synchronous", "FULL")?;
+    // Commits run statements that each need a statement journal. Keep those
+    // journals in memory instead of spilling them to an unlinked temp file.
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     let actual: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     if !actual.eq_ignore_ascii_case("wal") {
         return Err(StoreError::Integrity(format!(
@@ -185,7 +190,7 @@ pub(super) fn branch_exists(
     branch: &BranchId,
 ) -> Result<bool> {
     Ok(conn
-        .query_row(
+        .query_row_cached(
             "SELECT 1 FROM lineage_branches
              WHERE lineage_id = ?1 AND session_id = ?2 AND deleted_at IS NULL",
             (lineage.as_str(), branch.as_str()),
@@ -197,7 +202,7 @@ pub(super) fn branch_exists(
 
 pub(super) fn lineage_exists(conn: &Connection, lineage: &LineageId) -> Result<bool> {
     Ok(conn
-        .query_row(
+        .query_row_cached(
             "SELECT 1 FROM lineage_identity WHERE lineage_id = ?1",
             [lineage.as_str()],
             |_| Ok(()),

@@ -1,3 +1,4 @@
+use crate::sql::CachedSql;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use smelt_perf::perf;
@@ -94,7 +95,7 @@ pub(crate) fn put_object(
     let (codec, stored_bytes) = encode_object(bytes, compression)?;
     let raw_size = checked_i64(bytes.len() as u64, "raw_size")?;
     let stored_size = checked_i64(stored_bytes.len() as u64, "stored_size")?;
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         (&hash, codec.as_str(), raw_size, stored_size, &stored_bytes),

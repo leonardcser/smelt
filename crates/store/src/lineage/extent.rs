@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 
 use crate::history::{
     transcript_record_extent_profile, TranscriptExtentProfile, TranscriptNavigationRecord,
@@ -133,7 +134,7 @@ pub(crate) fn install_transcript_record_profile(
     let record = serde_json::from_slice::<StoredTranscriptBlock>(bytes)?;
     let expected = record_profile(&record)?;
     let rows = expected.extent.rows();
-    conn.execute(
+    conn.execute_cached(
         "INSERT OR IGNORE INTO lineage_transcript_record_profiles (
              lineage_id, payload_id, block_idx, history_idx, kind, role, first_line,
              estimated_text_bytes, rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
@@ -177,7 +178,7 @@ fn load_record_profile(
     payload: &PayloadId,
 ) -> Result<TranscriptRecordProfile> {
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT block_idx, history_idx, kind, role, first_line, estimated_text_bytes,
                     rows_20, rows_40, rows_80, rows_120, rows_160, rows_240
              FROM lineage_transcript_record_profiles
@@ -228,7 +229,7 @@ fn load_node_profile(
     node: &NodeId,
 ) -> Result<TranscriptNodeProfile> {
     let row = conn
-        .query_row(
+        .query_row_cached(
             "SELECT record_count, first_block_idx, last_block_idx, kind_mask, role_mask,
                     rows_20, rows_40, rows_80, rows_120, rows_160, rows_240,
                     min_history_idx, max_history_idx
@@ -366,7 +367,7 @@ pub(crate) fn install_transcript_node_profile(
     }
     let expected = profile_sequence_node(conn, lineage, node)?;
     let rows = expected.extent.rows();
-    conn.execute(
+    conn.execute_cached(
         "INSERT OR IGNORE INTO lineage_transcript_extent_nodes (
              lineage_id, node_id, record_count, first_block_idx, last_block_idx,
              kind_mask, role_mask, rows_20, rows_40, rows_80, rows_120, rows_160, rows_240,
@@ -1298,13 +1299,13 @@ mod benchmark_tests {
         crate::schema::initialize_lineage_schema(&mut conn)
             .expect("initialize sparse index benchmark schema");
         let lineage = LineageId::from_hex("1".repeat(32)).expect("benchmark lineage id");
-        conn.execute(
+        conn.execute_cached(
             "INSERT INTO lineage_identity (singleton, lineage_id, created_at)
              VALUES (1, ?1, 1)",
             [lineage.as_str()],
         )
         .expect("insert sparse index benchmark lineage");
-        conn.execute(
+        conn.execute_cached(
             "INSERT INTO objects (hash, codec, raw_size, stored_size, bytes)
              VALUES (?1, 'none', 0, 0, X'')",
             [BENCHMARK_OBJECT_HASH],
@@ -1364,7 +1365,7 @@ mod benchmark_tests {
 
         let root = {
             let mut node_statement = tx
-                .prepare(
+                .prepare_cached(
                     "INSERT INTO lineage_sequence_nodes (
                          lineage_id, node_id, sequence_kind, node_kind, level,
                          entry_count, item_count, byte_count
@@ -1372,7 +1373,7 @@ mod benchmark_tests {
                 )
                 .expect("prepare benchmark node insert");
             let mut entry_statement = tx
-                .prepare(
+                .prepare_cached(
                     "INSERT INTO lineage_sequence_entries (
                          lineage_id, node_id, entry_index, entry_kind, payload_id, child_node_id,
                          item_count, byte_count, cumulative_item_count, cumulative_byte_count
@@ -1380,7 +1381,7 @@ mod benchmark_tests {
                 )
                 .expect("prepare benchmark entry insert");
             let mut extent_statement = tx
-                .prepare(
+                .prepare_cached(
                     "INSERT INTO lineage_transcript_extent_nodes (
                          lineage_id, node_id, record_count, first_block_idx, last_block_idx,
                          kind_mask, role_mask, rows_20, rows_40, rows_80,
@@ -1470,7 +1471,7 @@ mod benchmark_tests {
                 item_count: node.item_count,
                 byte_count: node.byte_count,
             };
-            tx.execute(
+            tx.execute_cached(
                 "INSERT INTO lineage_sequence_roots (
                      lineage_id, root_id, root_kind, root_node_id, depth, item_count, byte_count
                  ) VALUES (?1, ?2, 'transcript', ?3, ?4, ?5, ?6)",

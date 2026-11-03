@@ -1,11 +1,12 @@
 use super::*;
+use crate::sql::CachedSql;
 
 pub(super) fn lineage_turns(
     conn: &Connection,
     lineage: &LineageId,
     branch: &BranchId,
 ) -> Result<Vec<crate::StoredTurn>> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT turn_id, submitted_history_idx, submitted_history_hash,
                 submitted_sequence, turn_kind, turn_state, continuation_of,
                 created_at_ms, started_at_ms, finished_at_ms, terminal_reason
@@ -94,12 +95,13 @@ pub(super) fn lineage_storage_stats(
         [],
         "transcript payload rows",
     )?;
-    let (object_rows, object_raw_bytes, object_stored_bytes): (i64, i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(raw_size), 0), COALESCE(SUM(stored_size), 0)
+    let (object_rows, object_raw_bytes, object_stored_bytes): (i64, i64, i64) = conn
+        .query_row_cached(
+            "SELECT COUNT(*), COALESCE(SUM(raw_size), 0), COALESCE(SUM(stored_size), 0)
              FROM objects",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
     let request_rows = match branch {
         Some(branch) => count_query(
             conn,
@@ -146,7 +148,7 @@ pub(super) fn lineage_doctor_report(
     if let Err(error) = crate::schema::validate_lineage_schema(conn) {
         issues.push(format!("schema: {error}"));
     }
-    let mut quick_check = conn.prepare("PRAGMA quick_check")?;
+    let mut quick_check = conn.prepare_cached("PRAGMA quick_check")?;
     for result in quick_check
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?
@@ -155,7 +157,7 @@ pub(super) fn lineage_doctor_report(
             issues.push(format!("quick_check: {result}"));
         }
     }
-    let mut foreign_key_check = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut foreign_key_check = conn.prepare_cached("PRAGMA foreign_key_check")?;
     for (table, rowid, parent, constraint) in foreign_key_check
         .query_map([], |row| {
             Ok((
@@ -177,7 +179,7 @@ pub(super) fn lineage_doctor_report(
     if let Err(error) = lineage::verify_session_receipt_results(conn, lineage) {
         issues.push(format!("session receipt result: {error}"));
     }
-    let mut branches = conn.prepare(
+    let mut branches = conn.prepare_cached(
         "SELECT session_id FROM lineage_branches
          WHERE lineage_id = ?1 AND deleted_at IS NULL
          ORDER BY session_id",
@@ -372,7 +374,7 @@ fn maintain_idle_lineage(
         seen = data_version(&conn)?;
         std::thread::sleep(started.elapsed());
     }
-    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    conn.query_row_cached("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(true)
 }
 

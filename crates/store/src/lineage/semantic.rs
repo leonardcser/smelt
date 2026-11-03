@@ -1,4 +1,5 @@
 use super::*;
+use crate::sql::CachedSql;
 use sha2::{Digest, Sha256};
 
 // SHA-256 semantic discriminator followed by a big-endian history position.
@@ -320,7 +321,7 @@ fn build_delta_index(
     stats: &mut OperationStats,
 ) -> Result<Option<IndexNode>> {
     let mut statement =
-        conn.prepare("SELECT key, value FROM smelt_new_history_keys ORDER BY key")?;
+        conn.prepare_cached("SELECT key, value FROM smelt_new_history_keys ORDER BY key")?;
     let keys = statement.query_map([], |row| {
         Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -545,7 +546,7 @@ pub(crate) fn ensure_history_index(
     }
     if start < root.item_count {
         let delta = build_delta_index(conn, lineage, &mut stats)?;
-        conn.execute("DELETE FROM smelt_new_history_keys", [])?;
+        conn.execute_cached("DELETE FROM smelt_new_history_keys", [])?;
         index = match (index, delta) {
             (Some(index), Some(delta)) => {
                 Some(merge_indexes(conn, lineage, index, delta, &mut stats)?)
@@ -553,7 +554,7 @@ pub(crate) fn ensure_history_index(
             (index, None) | (None, index) => index,
         };
     }
-    conn.execute(
+    conn.execute_cached(
         "INSERT INTO lineage_history_semantic_roots (lineage_id, history_root_id, index_node_id) VALUES (?1, ?2, ?3)",
         rusqlite::params![lineage.as_str(), root.id.as_str(), index.as_ref().map(|node| node.id.as_str())],
     )?;
