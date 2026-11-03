@@ -114,7 +114,7 @@ impl PlatformRuntime {
             input_pause: None,
             sessions,
             inspect_server: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            sleep_inhibitor: crate::sleep_inhibit::SleepInhibitor::new(env.cwd()),
+            sleep_inhibitor: crate::sleep_inhibit::SleepInhibitor::new(),
             job_completion_rx,
             app_event_tx,
             app_event_rx,
@@ -231,10 +231,6 @@ impl PlatformRuntime {
             Err(error) => return Some(Err(error)),
         };
         Some(terminal.suspended(operation))
-    }
-
-    pub(super) fn install_cwd(&mut self, cwd: std::path::PathBuf) {
-        self.sleep_inhibitor.set_cwd(cwd);
     }
 
     pub(super) fn set_sleep_inhibited(&mut self, inhibited: bool) {

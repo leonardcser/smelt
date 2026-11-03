@@ -1,40 +1,50 @@
 //! Prevent the system from sleeping while the agent is working.
 //!
-//! - macOS: spawns `caffeinate -i -w <pid>` (prevent idle sleep, auto-release on exit)
-//! - Linux: spawns `systemd-inhibit` (prevent idle and suspend)
+//! - macOS: runs `caffeinate -i` (prevent idle sleep)
+//! - Linux: runs `systemd-inhibit` (prevent idle and suspend)
 //! - Windows: calls `SetThreadExecutionState`
+//!
+//! On Unix the inhibitor wraps `cat` reading a pipe smelt holds open. Closing
+//! the pipe ends `cat` and with it the inhibition, so it is released even when
+//! smelt exits without cleaning up. A waiter thread spawns and reaps each
+//! inhibitor, which keeps process creation off the UI thread.
+
+#[cfg(not(target_os = "windows"))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_os = "windows"))]
+use std::sync::Arc;
 
 pub(crate) struct SleepInhibitor {
-    cwd: std::path::PathBuf,
     #[cfg(not(target_os = "windows"))]
-    child: Option<std::process::Child>,
+    hold: Option<Hold>,
+    /// Set once an inhibitor fails on its own, for example when the session
+    /// may not inhibit sleep. Later turns then skip spawning one.
+    #[cfg(not(target_os = "windows"))]
+    unavailable: Arc<AtomicBool>,
     #[cfg(target_os = "windows")]
     active: bool,
 }
 
 impl SleepInhibitor {
-    pub(crate) fn new(cwd: std::path::PathBuf) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            cwd,
             #[cfg(not(target_os = "windows"))]
-            child: None,
+            hold: None,
+            #[cfg(not(target_os = "windows"))]
+            unavailable: Arc::default(),
             #[cfg(target_os = "windows")]
             active: false,
         }
-    }
-
-    pub(crate) fn set_cwd(&mut self, cwd: std::path::PathBuf) {
-        self.cwd = cwd;
     }
 
     /// Prevent the system from idle-sleeping. Idempotent.
     pub(crate) fn acquire(&mut self) {
         #[cfg(not(target_os = "windows"))]
         {
-            if self.child.is_some() {
+            if self.hold.is_some() || self.unavailable.load(Ordering::Acquire) {
                 return;
             }
-            self.child = spawn_inhibitor(&self.cwd);
+            self.hold = hold_inhibitor(inhibitor_command(), Arc::clone(&self.unavailable));
         }
         #[cfg(target_os = "windows")]
         {
@@ -50,10 +60,7 @@ impl SleepInhibitor {
     pub(crate) fn release(&mut self) {
         #[cfg(not(target_os = "windows"))]
         {
-            if let Some(mut child) = self.child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            self.hold = None;
         }
         #[cfg(target_os = "windows")]
         {
@@ -71,41 +78,75 @@ impl Drop for SleepInhibitor {
     }
 }
 
-// ── Platform: macOS ──────────────────────────────────────────────────────────
+// ── Platform: Unix ───────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
-fn spawn_inhibitor(cwd: &std::path::Path) -> Option<std::process::Child> {
-    let pid = std::process::id().to_string();
-    std::process::Command::new("caffeinate")
-        .args(["-i", "-w", &pid])
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
+/// Keeps an inhibitor running. Dropping it closes the inhibitor's input.
+#[cfg(not(target_os = "windows"))]
+struct Hold {
+    _input: std::io::PipeWriter,
+    released: Arc<AtomicBool>,
 }
 
-// ── Platform: Linux / other Unix ─────────────────────────────────────────────
+#[cfg(not(target_os = "windows"))]
+impl Drop for Hold {
+    fn drop(&mut self) {
+        // Runs before `_input` closes, so the waiter sees a deliberate release.
+        self.released.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hold_inhibitor(
+    mut command: std::process::Command,
+    unavailable: Arc<AtomicBool>,
+) -> Option<Hold> {
+    // Both ends are close-on-exec, so only the inhibitor's stdin keeps the
+    // read end open in the child.
+    let (output, input) = std::io::pipe().ok()?;
+    let released = Arc::new(AtomicBool::new(false));
+    command
+        .stdin(output)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .current_dir("/");
+    // Keep terminal job-control signals away from the inhibitor.
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    std::thread::Builder::new()
+        .name("smelt-sleep-inhibit".into())
+        .spawn({
+            let released = Arc::clone(&released);
+            move || {
+                let status = command.spawn().and_then(|mut child| child.wait());
+                if !status.is_ok_and(|status| status.success()) && !released.load(Ordering::Acquire)
+                {
+                    unavailable.store(true, Ordering::Release);
+                }
+            }
+        })
+        .ok()?;
+    Some(Hold {
+        _input: input,
+        released,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn inhibitor_command() -> std::process::Command {
+    let mut command = std::process::Command::new("caffeinate");
+    command.args(["-i", "cat"]);
+    command
+}
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn spawn_inhibitor(cwd: &std::path::Path) -> Option<std::process::Child> {
-    let mut cmd = std::process::Command::new("systemd-inhibit");
-    cmd.args([
+fn inhibitor_command() -> std::process::Command {
+    let mut command = std::process::Command::new("systemd-inhibit");
+    command.args([
         "--what=idle:sleep",
         "--who=agent",
         "--why=Agent working",
-        "sleep",
-        "infinity",
-    ])
-    .current_dir(cwd)
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null());
-
-    smelt_core::process::without_controlling_terminal(&mut cmd);
-
-    cmd.spawn().ok()
+        "cat",
+    ]);
+    command
 }
 
 // ── Platform: Windows ────────────────────────────────────────────────────────
@@ -126,5 +167,50 @@ fn set_execution_state(prevent_sleep: bool) {
     };
     unsafe {
         SetThreadExecutionState(flags);
+    }
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod tests {
+    use super::*;
+
+    fn eventually(condition: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn sh(script: &str) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    fn inhibitor_that_fails_on_its_own_marks_inhibition_unavailable() {
+        let unavailable = Arc::new(AtomicBool::new(false));
+        let _hold = hold_inhibitor(sh("exit 1"), Arc::clone(&unavailable)).unwrap();
+        assert!(eventually(|| unavailable.load(Ordering::Acquire)));
+    }
+
+    #[test]
+    fn release_ends_the_inhibitor_without_marking_it_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let ended = dir.path().join("ended");
+        let unavailable = Arc::new(AtomicBool::new(false));
+        let script = format!("cat; touch '{}'; exit 3", ended.display());
+        let hold = hold_inhibitor(sh(&script), Arc::clone(&unavailable)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!ended.exists(), "the inhibitor runs until released");
+
+        drop(hold);
+        assert!(eventually(|| ended.exists()));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!unavailable.load(Ordering::Acquire));
     }
 }
