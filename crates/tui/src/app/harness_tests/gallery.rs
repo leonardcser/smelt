@@ -109,15 +109,10 @@ fn smoke(path: &Path) -> Result<(), String> {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
     app.animate_with_virtual_clock();
-    // Chunks named after their files, so an error points into the plugin.
-    let fx = std::fs::read_to_string(gallery_dir().join("fx.lua")).unwrap();
-    app.set_lua_string_global("__gallery_fx", fx).unwrap();
-    app.run_lua_result(
-        r#"package.preload.fx = function() return assert(load(__gallery_fx, "@fx.lua"))() end"#,
-    )?;
     let before = command_names(&mut app);
     let errors = error_messages(&app).len();
 
+    // Chunks named after their files, so an error points into the plugin.
     let name = path.file_name().unwrap().to_string_lossy();
     let source = std::fs::read_to_string(path).unwrap();
     app.set_lua_string_global("__gallery_plugin", source)
@@ -271,7 +266,6 @@ fn every_gallery_plugin_runs_without_errors() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "lua"))
-        .filter(|path| path.file_stem().is_some_and(|stem| stem != "fx"))
         .collect();
     plugins.sort();
     assert!(

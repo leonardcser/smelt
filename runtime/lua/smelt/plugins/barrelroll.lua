@@ -1,6 +1,6 @@
 -- Barrel roll: `/barrelroll` spins the whole screen one full turn, pulling back as it goes so it
 -- spins clear of the edges. Letters stay upright; lines, corners and half blocks turn with it.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local SPIN = 1.4
 local start, paint = nil, nil
@@ -20,7 +20,7 @@ local function source(x, y, w, h, a, zoom)
   return math.floor(cx + px * cos + py * sin + 0.5), math.floor(cy + (py * cos - px * sin) / 2 + 0.5)
 end
 
-paint = smelt.paint.frame(function(s)
+local function frame(s)
   if not start then return end
   local a, zoom, p = pose()
   local snap, w, h = s:snapshot(), s:width(), s:height()
@@ -46,18 +46,24 @@ paint = smelt.paint.frame(function(s)
   else
     paint:invalidate_after(16)
   end
-end, {
-  name = "barrelroll",
-  order = 100,
-  map_pointer = function(x, y, w, h)
-    if not start then return nil end
-    local a, zoom = pose()
-    return source(x, y, w, h, a, zoom)
-  end,
-})
+end
+
+--- The paint is made on the first roll, since it needs the running app.
+local function ensure_paint()
+  paint = paint or smelt.paint.frame(frame, {
+    name = "barrelroll",
+    order = 100,
+    map_pointer = function(x, y, w, h)
+      if not start then return nil end
+      local a, zoom = pose()
+      return source(x, y, w, h, a, zoom)
+    end,
+  })
+end
 
 smelt.cmd.register("barrelroll", function()
   if start then return end
+  ensure_paint()
   start = fx.now()
   paint:invalidate()
 end, { desc = "spin the screen one full turn" })

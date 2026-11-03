@@ -1,5 +1,5 @@
 -- Fresh ink: the text the model writes lands bright and dries into its own color.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local LIFE = 1.2
 local INK = { 255, 236, 170 }

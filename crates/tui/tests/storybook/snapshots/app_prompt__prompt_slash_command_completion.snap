@@ -4,7 +4,6 @@ expression: frame.text()
 ---
 
 
- /context      show context usage as a colored gr…
  /compact      compact conversation history
  /color        set session color
  /clear        start new conversation
@@ -12,6 +11,7 @@ expression: frame.text()
  /btw          ask a side question
  /brief        summarize planned or completed cha…
  /branch       fork current session
+ /barrelroll   spin the screen one full turn
 ──────────────────────────────────────────────────
  /
 ──────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 -- X-ray: point at a word and every other place it shows on screen lights up with it, fading out
 -- for a moment after the mouse moves on.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local GLOW = { 255, 196, 70 }
 local FADE = 0.6

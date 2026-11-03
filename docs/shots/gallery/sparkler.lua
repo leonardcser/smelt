@@ -1,5 +1,5 @@
 -- Sparkler: sparks fly from wherever the model is writing, arcing down and cooling as they fall.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local HEAT = { { 255, 250, 210 }, { 255, 215, 120 }, { 255, 160, 60 }, { 230, 90, 30 }, { 150, 40, 20 } }
 local GLYPHS = { "✦", "*", "+", "·", "." }

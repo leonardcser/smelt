@@ -2,7 +2,7 @@
 -- drifting through the spectrum as it goes, then a new figure starts. It comes on after two minutes
 -- without input, or with /screensaver, and any key puts it away. One quiet line says what the agent
 -- is doing, and how long the turn took once it is done.
-local fx = require("fx")
+local fx = require("smelt.fx")
 local IDLE_MS = 2 * 60 * 1000
 -- Seconds a figure takes to draw, and how long it stays before the next.
 local DRAW, HOLD = 9, 2.5

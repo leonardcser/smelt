@@ -1,6 +1,6 @@
 -- Focus: the message or tool under the mouse stays sharp and the rest of the conversation fades
 -- back. `/focus` turns it off and on.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local DIM = 0.68
 local on = true

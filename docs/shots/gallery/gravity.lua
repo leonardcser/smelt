@@ -1,5 +1,5 @@
 -- Gravity: `/clear` and `/new` let go of the conversation, and its letters fall off the screen.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local G = 90
 -- `armed` waits for the conversation to go; `falling` holds its letters once it has.

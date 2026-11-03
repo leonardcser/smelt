@@ -1,5 +1,5 @@
 -- Bloom: vivid colored text glows, its light spilling softly onto the background around it.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 -- Mostly sideways: a cell is twice as tall as it is wide, so light spilling up and down reads as blocks.
 local KERNEL = {

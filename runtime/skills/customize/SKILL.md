@@ -492,11 +492,11 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.agent_view` | Read-only agent observation. |
 | `smelt.plugins.auto_continue` | Recover paused turns and apply the configured idle continuation policy. |
 | `smelt.plugins.banner` | Empty-state logo decoration + shutdown logo/resume-hint banner. |
+| `smelt.plugins.barrelroll` | Barrel roll: `/barrelroll` spins the whole screen one full turn, pulling back as it goes so it spins clear of the edges. |
 | `smelt.plugins.block_nav` | Transcript block navigation. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.diff` | /diff: working changes, branch review and commit history. |
-| `smelt.plugins.donut` | /donut - Andy Sloane's donut.c, spinning over everything on screen. |
 | `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
 | `smelt.plugins.file_finder` | /files (all or git): fuzzy workspace or Git-tracked file search with source preview. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
@@ -517,6 +517,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 
 | Plugin | Summary |
 | --- | --- |
+| `smelt.plugins.donut` | /donut - Andy Sloane's donut.c, spinning over everything on screen. |
 | `smelt.plugins.goal` | Goal lifecycle plugin. |
 | `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
 | `smelt.plugins.lsp` | Optional LSP tool facade for agent code navigation. |

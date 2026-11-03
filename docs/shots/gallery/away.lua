@@ -1,6 +1,6 @@
 -- Away: when the terminal loses focus, smelt fades to a dim gray, the way a dimmed window shows it is
 -- in the background, and its colors come back as soon as you return.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local OUT, BACK = 0.9, 0.25
 local DIM = 0.45

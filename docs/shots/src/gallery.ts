@@ -118,8 +118,8 @@ const PLUGINS: Plugin[] = [
   { slug: "bounce", category: "Commands", poster: 0.43, title: "DVD", cmd: "dvd" },
   { slug: "rainbow", category: "Commands", poster: 0.43, cmd: "rainbow" },
   { slug: "flashlight", category: "Commands", poster: 0.71, cmd: "flashlight", then: "hover" },
-  { slug: "donut", category: "Commands", poster: 0.71, file: "runtime/lua/smelt/plugins/donut.lua", bundled: true, cmd: "donut", summary: "Andy Sloane's donut.c, spinning over everything on screen." },
-  { slug: "barrelroll", category: "Commands", wide: true, poster: 0.42, title: "Barrel roll", cmd: "barrelroll", repeat: 3 },
+  { slug: "donut", category: "Commands", poster: 0.71, file: "runtime/lua/smelt/plugins/donut.lua", cmd: "donut", summary: "Andy Sloane's donut.c, spinning over everything on screen." },
+  { slug: "barrelroll", category: "Commands", wide: true, poster: 0.42, title: "Barrel roll", file: "runtime/lua/smelt/plugins/barrelroll.lua", bundled: true, cmd: "barrelroll", repeat: 3 },
   { slug: "flip", category: "Commands", poster: 0.25, cmd: "flip", repeat: 4 },
   { slug: "bigclock", category: "Commands", poster: 0.57, title: "Big clock", cmd: "bigclock" },
 
@@ -213,7 +213,6 @@ const plain = (ansi: string) => ansi.replace(/\x1b\[[0-9;:]*m/g, "");
 async function record(p: Plugin, { cols, rows } = { cols: COLS, rows: ROWS }): Promise<Replay> {
   const source = readFileSync(path.join(repo, sourceOf(p)), "utf8");
   const files: Record<string, string> = p.bundled ? {} : { [`plugins/${p.slug}.lua`]: source };
-  if (/require\("fx"\)/.test(source)) files["lua/fx.lua"] = readFileSync(path.join(plugins, "fx.lua"), "utf8");
   const opts: RunOptions = {
     scheme: "dark", cols, rows, typeDelay: 55, wordDelay: p.live ? 45 : 10, live: false, vim: false, tps: false,
     recordEvery: RECORD_EVERY_MS, ready: p.ready, args: ["--mode", "yolo", "--model", "ollama/qwen3.8:27b"], init, home: true, files,

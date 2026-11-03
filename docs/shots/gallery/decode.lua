@@ -1,5 +1,5 @@
 -- Decode: the text the model writes arrives scrambled and green, and resolves glyph by glyph.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local SETTLE = 0.45
 local FLASH = 0.25

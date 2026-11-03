@@ -1,7 +1,7 @@
 -- /weather <rain|snow|autumn|spring|off>: weather over the conversation that knows where the text
 -- is. Rain splashes on words, snow piles up on them, leaves and petals land on them for a while.
 -- It eases in, and when you turn it off it eases out and what lies on the text melts away.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local KINDS = {
   rain = {

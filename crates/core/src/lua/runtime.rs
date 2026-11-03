@@ -169,6 +169,7 @@ const EARLY_DIRS: &[&str] = &["early"];
 /// `customize` skill.
 pub const OPTIONAL_PLUGINS: &[&str] = &[
     "smelt.plugins.which_key",
+    "smelt.plugins.donut",
     "smelt.plugins.inspect",
     "smelt.plugins.lsp",
     "smelt.plugins.goal",

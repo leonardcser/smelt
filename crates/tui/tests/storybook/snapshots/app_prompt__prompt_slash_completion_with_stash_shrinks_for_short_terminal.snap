@@ -2,9 +2,9 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- /btw          ask a side question
  /brief        summarize planned or completed cha…
  /branch       fork current session
+ /barrelroll   spin the screen one full turn
   ◌ Stashed (ctrl+s to unstash)
 ──────────────────────────────────────────────────
  /

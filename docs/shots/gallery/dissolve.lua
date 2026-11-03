@@ -1,6 +1,6 @@
 -- Dissolve: when most of the screen changes at once (a theme, `/clear`, a resumed session), the old
 -- screen breaks up into the new one grain by grain instead of cutting. Scrolling doesn't count.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local LIFE = 0.45
 local SHARE = 0.3

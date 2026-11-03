@@ -1,7 +1,7 @@
 -- Flip: `/flip` turns the whole screen over like a card, around its middle row, and smelt keeps
 -- working upside down until the next `/flip`: typing, clicks and scrolling land where they show. On
 -- April 1 it turns over by itself at startup.
-local fx = require("fx")
+local fx = require("smelt.fx")
 
 local TURN = 0.9
 local flipped, anim, paint = false, nil, nil

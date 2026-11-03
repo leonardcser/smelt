@@ -2,8 +2,8 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- /brief        summarize planned or completed cha…
  /branch       fork current session
+ /barrelroll   spin the screen one full turn
 ──────────────────────────────────────────────────
  /
 ──────────────────────────────────────────────────
