@@ -12,16 +12,6 @@ local function prepare_edit(args)
   end)
 end
 
-local function diff_from_content(path, old_content, new_content, anchor)
-  return smelt.layout.diff({
-    old = old_content,
-    new = new_content,
-    path = path,
-    anchor = anchor,
-    full_file = true,
-  })
-end
-
 local function argument_field(block, name)
   for _, field in ipairs(block.argument_fields or {}) do
     if field.name == name then return field end
@@ -41,11 +31,21 @@ local function retained_diff(old_content, new_content, path, anchor, full_file)
 end
 
 local function planned_diff(args, plan)
-  local path, old_string = edit_fields(args)
-  if not plan or plan.err then
+  local path, old_string, new_string = edit_fields(args)
+  if not plan then
+    -- smelt never prepares calls the provider runs itself; show the replacement alone.
+    return smelt.layout.diff({ old = old_string, new = new_string, path = path })
+  end
+  if plan.err then
     return nil
   end
-  return diff_from_content(path, plan.old_content, plan.new_content, old_string)
+  return smelt.layout.diff({
+    old = plan.old_content,
+    new = plan.new_content,
+    path = path,
+    anchor = old_string,
+    full_file = true,
+  })
 end
 
 local function planned_output(args, plan)

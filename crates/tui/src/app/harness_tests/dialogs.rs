@@ -4315,3 +4315,39 @@ fn transparent_overlay_is_not_modal_and_rejects_mouse_capture() {
         );
     }
 }
+
+#[test]
+fn unprepared_edit_file_permission_previews_the_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("native.rs");
+    std::fs::write(&file, "const NATIVE_BEFORE: i32 = 1;\n").unwrap();
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 30);
+    app.start_submitted_turn("edit");
+    // Claude Code runs its native Edit itself, so smelt never prepared it.
+    app.feed_one(SourceEvent::engine(
+        protocol::EngineEvent::RequestPermission {
+            invocation_id: protocol::InvocationId::new(7),
+            request_id: 7,
+            call_id: "call-7".into(),
+            tool_name: "edit_file".into(),
+            provider: None,
+            args: std::collections::HashMap::from([
+                (
+                    "file_path".into(),
+                    serde_json::json!(file.to_string_lossy()),
+                ),
+                ("old_string".into(), serde_json::json!("NATIVE_BEFORE")),
+                ("new_string".into(), serde_json::json!("NATIVE_AFTER")),
+            ]),
+            approval_patterns: Vec::new(),
+            called_at_ms: 0,
+            summary: protocol::StyledLines::from_plain("native.rs"),
+        },
+    ));
+    let frame = app.render_to_frame().text();
+    assert!(
+        frame.contains("NATIVE_BEFORE") && frame.contains("NATIVE_AFTER"),
+        "permission dialog previews the replacement:\n{frame}"
+    );
+}
