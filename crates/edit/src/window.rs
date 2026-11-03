@@ -807,6 +807,10 @@ pub struct Window {
     /// Vertical scroll policy. `scroll_top` is the resolved viewport row used for paint;
     /// this records whether the next frame should preserve that row or resolve to tail.
     scroll_state: VerticalScroll,
+    /// Set once a caller explicitly requests tail-follow. Only opted-in windows
+    /// re-engage tail-follow implicitly when the viewport reaches the bottom;
+    /// cursor-driven windows such as the prompt stay pinned.
+    tail_follow_opted_in: bool,
     /// Leftmost visible cell column. `0` means the row starts at its first
     /// character; non-zero values pan the viewport rightward. Wrapped rows
     /// stay at `0` (wrapping moves overflow to the next visual row); pre-
@@ -854,6 +858,7 @@ impl Window {
             scroll_top: 0,
             scroll_anchor: None,
             scroll_state: VerticalScroll::Pinned,
+            tail_follow_opted_in: false,
             scroll_left: 0,
             pending_recenter: false,
             pending_scroll_to_cursor: false,
@@ -1495,7 +1500,7 @@ impl Window {
         if let Some(viewport) = self.viewport.as_mut() {
             viewport.scroll_top = row;
         }
-        self.scroll_state = VerticalScroll::Tail;
+        self.follow_tail();
     }
 
     /// Reserved cells for the gutter column for this buffer; `0` when no provider attached.
@@ -1814,7 +1819,7 @@ impl Window {
         if self.selection_active() {
             self.pin_current_scroll();
         } else if self.is_at_tail(buf, viewport_rows) {
-            self.scroll_state = VerticalScroll::Tail;
+            self.reengage_tail();
         } else {
             self.pin_current_scroll();
         }
@@ -2760,7 +2765,18 @@ impl Window {
     /// the viewport does not jump until the next render / content append.
     /// For an explicit "jump to bottom now" action, use `jump_to_bottom`.
     pub fn follow_tail(&mut self) {
+        self.tail_follow_opted_in = true;
         self.scroll_state = VerticalScroll::Tail;
+    }
+
+    /// Resume tail-follow after the viewport reaches the bottom, for windows
+    /// that opted in. Other windows stay pinned.
+    fn reengage_tail(&mut self) {
+        self.scroll_state = if self.tail_follow_opted_in {
+            VerticalScroll::Tail
+        } else {
+            VerticalScroll::Pinned
+        };
     }
 
     /// Jump the viewport to the bottom of the buffer while keeping the cursor
@@ -2783,7 +2799,7 @@ impl Window {
             return;
         }
         self.preserve_cursor_screen_row(max_scroll, buf, viewport_rows);
-        self.scroll_state = VerticalScroll::Tail;
+        self.follow_tail();
     }
 
     // ── Navigation ─────────────────────────────────────────────────────
@@ -3471,7 +3487,7 @@ impl Window {
         let new_scroll = add_signed_row(self.scroll_top, delta).min(max_scroll);
         self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);
         if new_scroll >= max_scroll && delta > 0 && !self.selection_active() {
-            self.scroll_state = VerticalScroll::Tail;
+            self.reengage_tail();
         }
     }
 
@@ -4963,6 +4979,7 @@ mod tests {
         let buf = make_buf(rows.clone());
         let viewport = 10;
         let max_scroll = (30 - viewport) as RowIndex;
+        w.follow_tail();
         w.jump_to_line_col(&buf, 15, 0, viewport);
         w.pin_scroll(max_scroll - 5);
         assert!(!w.is_following_tail());
@@ -4974,6 +4991,21 @@ mod tests {
             w.is_following_tail(),
             "normal scroll to the bottom re-engages tail follow"
         );
+    }
+
+    #[test]
+    fn pan_by_lines_to_bottom_stays_pinned_without_tail_opt_in() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(30));
+        let viewport = 10;
+        let max_scroll = (30 - viewport) as RowIndex;
+        w.jump_to_line_col(&buf, 15, 0, viewport);
+        w.pin_scroll(max_scroll - 5);
+
+        w.pan_by_lines(&buf, 5, viewport);
+
+        assert_eq!(w.scroll_top, max_scroll);
+        assert!(!w.is_following_tail());
     }
 
     #[test]

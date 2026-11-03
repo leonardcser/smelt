@@ -2393,3 +2393,29 @@ fn rewind_to_slash_text_then_enter_closes_picker() {
         "Enter must close the picker"
     );
 }
+
+#[test]
+fn vim_gg_reveals_top_of_prompt_scrolled_to_bottom() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.set_terminal_size(80, 24);
+    app.render_silent();
+    let text = (0..60)
+        .map(|i| format!("line {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(text)));
+    app.render_silent();
+    let last_line = app.screen_position("line 59").expect("last line painted");
+    app.mouse(crossterm::event::MouseEventKind::ScrollDown, last_line);
+    app.render_silent();
+    assert!(!app.app.prompt_win().is_following_tail());
+
+    app.press(KeyCode::Esc);
+    app.press(KeyCode::Char('g'));
+    app.press(KeyCode::Char('g'));
+    app.render_silent();
+
+    assert_eq!(app.app.prompt_win().scroll_top(), 0);
+    assert!(app.screen_position("line 00").is_some());
+    assert!(app.screen_position("line 59").is_none());
+}
