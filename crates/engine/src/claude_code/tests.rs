@@ -102,6 +102,7 @@ fn payload(root: &Path, turn: u64, history: Vec<HistoryItem>) -> UiCommand {
         request_config: Default::default(),
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
+        control_env: Default::default(),
         history: protocol::ModelHistorySource::items(history),
         session_id: "test-session".into(),
         sessions_root: root.join("sessions"),
@@ -378,6 +379,36 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
     );
     let prompt = calls.iter().rfind(|call| call["type"] == "user").unwrap();
     assert_eq!(prompt["message"]["content"][0]["text"], "turn 2");
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn the_native_process_receives_the_session_control_identity() {
+    let fixture = Fixture::new("text");
+    std::env::set_var(protocol::event::CONTROL_TURN_ENV, "stale-outer-turn");
+    let mut history = Vec::new();
+    let mut handle = fixture.handle();
+    let UiCommand::StartTurn(mut turn) = payload(fixture.root.path(), 1, history.clone()) else {
+        unreachable!()
+    };
+    turn.control_env = HashMap::from([(
+        protocol::event::CONTROL_SESSION_ENV.to_string(),
+        "test-session".to_string(),
+    )]);
+    handle.send(UiCommand::StartTurn(turn));
+    finish(&mut handle, &mut history).await;
+    std::env::remove_var(protocol::event::CONTROL_TURN_ENV);
+
+    let calls = fixture.calls();
+    let launch = calls
+        .iter()
+        .find(|call| call.get("argv").is_some())
+        .unwrap();
+    assert_eq!(
+        launch["control"],
+        json!({"SMELT_SESSION_ID": "test-session"}),
+        "the outer instance's turn must not leak"
+    );
 }
 
 #[tokio::test]
@@ -1173,6 +1204,7 @@ async fn cancelled_reads_preserve_fragmented_utf8_frames() {
         tools: false,
         persist_session: false,
         fast_mode: false,
+        env: &HashMap::new(),
         schema: None,
     })
     .unwrap();

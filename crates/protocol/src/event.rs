@@ -889,6 +889,13 @@ pub struct NativeSystemPrompt {
     pub append: String,
 }
 
+/// Environment variables that tie a shell to the session and turn that
+/// spawned it, so `smelt session complete` reaches the right control socket.
+pub const CONTROL_SOCKET_ENV: &str = "SMELT_CONTROL_SOCKET";
+pub const CONTROL_SESSION_ENV: &str = "SMELT_SESSION_ID";
+pub const CONTROL_TURN_ENV: &str = "SMELT_TURN_ID";
+pub const CONTROL_ENV_KEYS: [&str; 3] = [CONTROL_SOCKET_ENV, CONTROL_SESSION_ENV, CONTROL_TURN_ENV];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTurnPayload {
     pub turn_id: u64,
@@ -902,6 +909,10 @@ pub struct StartTurnPayload {
     /// Accelerated-inference preference; the provider filters it against the target capability.
     #[serde(default)]
     pub fast_mode: bool,
+    /// Session-control identity for the agent process, so shells it runs can
+    /// call `smelt session complete`. Captured at dispatch like a smelt shell's.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub control_env: HashMap<String, String>,
     pub history: ModelHistorySource,
     /// Stable identity for storage and provider cache routing.
     pub session_id: String,
@@ -1308,6 +1319,7 @@ mod tests {
             request_config,
             reasoning_effort: ReasoningEffort::Off,
             fast_mode: false,
+            control_env: Default::default(),
             history: ModelHistorySource::default(),
             session_id: "s".into(),
             sessions_root: std::path::PathBuf::from("/tmp"),

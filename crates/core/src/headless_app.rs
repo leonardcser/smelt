@@ -622,6 +622,7 @@ impl HeadlessApp {
                 request_config: self.core.config.request_runtime_config(),
                 reasoning_effort: self.core.config.reasoning_effort.clone(),
                 fast_mode,
+                control_env: self.core.session_control.agent_env(),
                 history: protocol::ModelHistorySource::items(history),
                 session_id: self.session.id.clone(),
                 sessions_root: self.core.sessions.sessions_dir(),

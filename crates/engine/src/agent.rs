@@ -190,6 +190,7 @@ pub(crate) async fn engine_task(
                     request_config,
                     reasoning_effort,
                     fast_mode,
+                    control_env: _,
                     history,
                     session_id,
                     sessions_root,
@@ -3788,6 +3789,7 @@ mod tests {
                 request_config: RequestRuntimeConfig::default(),
                 reasoning_effort: ReasoningEffort::Off,
                 fast_mode: false,
+                control_env: Default::default(),
                 history,
                 session_id: "preparation-fixture".into(),
                 sessions_root: root.path().to_path_buf(),
@@ -4528,6 +4530,7 @@ mod tests {
             request_config: RequestRuntimeConfig::default(),
             reasoning_effort: ReasoningEffort::Off,
             fast_mode: false,
+            control_env: Default::default(),
             history: protocol::ModelHistorySource::projected_items(
                 vec![
                     HistoryItem::user(Content::text("SUMMARY:\ncheckpoint")),

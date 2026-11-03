@@ -97,7 +97,7 @@ def tool_result(call_id, content, is_error=False):
     send({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call_id, "content": content, "is_error": is_error}]}})
 
 
-log({"argv": sys.argv[1:], "cwd": os.getcwd(), "pid": os.getpid()})
+log({"argv": sys.argv[1:], "cwd": os.getcwd(), "pid": os.getpid(), "control": {key: os.environ[key] for key in ("SMELT_CONTROL_SOCKET", "SMELT_SESSION_ID", "SMELT_TURN_ID") if key in os.environ}})
 assert "--input-format" in sys.argv and "stream-json" in sys.argv
 assert "--permission-prompt-tool" in sys.argv and "stdio" in sys.argv
 assert "--dangerously-skip-permissions" not in sys.argv

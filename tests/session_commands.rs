@@ -13,18 +13,20 @@ fn smelt(state_home: &std::path::Path, args: &[&str]) -> std::process::Output {
 #[cfg(unix)]
 #[tokio::test]
 async fn session_complete_targets_owning_turn_after_cwd_changes() {
-    use smelt_core::session_control::{SessionControl, SESSION_ENV, SOCKET_ENV, TURN_ENV};
+    use protocol::event::{CONTROL_ENV_KEYS, CONTROL_SESSION_ENV};
+    use smelt_core::session_control::SessionControl;
     let control = SessionControl::default();
     control.initialize().unwrap();
     control.begin_turn("session-a", 7);
     let env = control.shell_env();
     let run = |env: std::collections::HashMap<String, String>| async move {
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_smelt"));
+        for key in CONTROL_ENV_KEYS {
+            command.env_remove(key);
+        }
+        command
             .args(["session", "complete"])
             .current_dir("/")
-            .env_remove(SOCKET_ENV)
-            .env_remove(SESSION_ENV)
-            .env_remove(TURN_ENV)
             .envs(env)
             .output()
             .await
@@ -38,7 +40,7 @@ async fn session_complete_targets_owning_turn_after_cwd_changes() {
         String::from_utf8_lossy(&missing.stderr)
     );
     let mut wrong = env.clone();
-    wrong.insert(SESSION_ENV.into(), "other-session".into());
+    wrong.insert(CONTROL_SESSION_ENV.into(), "other-session".into());
     assert!(!run(wrong).await.status.success());
     let output = run(env.clone()).await;
     assert!(

@@ -2,6 +2,7 @@
 
 use protocol::{AgentMode, ModelTarget, ReasoningEffort};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,8 @@ pub(super) struct LaunchOptions<'a> {
     pub tools: bool,
     pub persist_session: bool,
     pub fast_mode: bool,
+    /// Set on the process and inherited by the shells it runs.
+    pub env: &'a HashMap<String, String>,
     pub schema: Option<&'a Value>,
 }
 
@@ -106,6 +109,7 @@ impl Process {
             tools,
             persist_session,
             fast_mode,
+            env,
             schema,
         } = options;
         if !target.api_base.is_empty() || !target.api_key.is_empty() {
@@ -144,6 +148,11 @@ impl Process {
             .current_dir(cwd)
             .kill_on_drop(true)
             .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1");
+        // Never inherit an outer smelt instance's control identity.
+        for key in protocol::event::CONTROL_ENV_KEYS {
+            command.env_remove(key);
+        }
+        command.envs(env);
         if !persist_session {
             command.arg("--no-session-persistence");
         }
@@ -276,6 +285,7 @@ impl Process {
             tools: false,
             persist_session: false,
             fast_mode: false,
+            env: &HashMap::new(),
             schema: None,
         })
     }

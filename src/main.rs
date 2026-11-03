@@ -202,7 +202,7 @@ struct SessionArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 enum SessionCommand {
-    /// Mark the current bash-tool session complete after its turn succeeds
+    /// Mark the current session complete after its turn succeeds
     Complete,
     /// Check schema, integrity, references, indexes, and storage sizes without changing data
     Doctor(SessionDoctorArgs),

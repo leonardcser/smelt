@@ -382,11 +382,7 @@ fn spawn_shell_job(
         .stderr(Stdio::piped());
     apply_default_noninteractive_env(cmd.as_std_mut());
     // Never inherit an outer smelt instance's control identity.
-    for key in [
-        crate::session_control::SOCKET_ENV,
-        crate::session_control::SESSION_ENV,
-        crate::session_control::TURN_ENV,
-    ] {
+    for key in protocol::event::CONTROL_ENV_KEYS {
         cmd.env_remove(key);
     }
     cmd.envs(&shell.env);

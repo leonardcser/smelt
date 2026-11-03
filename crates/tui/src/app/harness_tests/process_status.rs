@@ -2,13 +2,14 @@ use super::*;
 
 #[cfg(unix)]
 pub(super) async fn request_session_completion(app: &TestApp, turn: u64) {
-    use smelt_core::session_control::{request_completion, SOCKET_ENV};
+    use protocol::event::CONTROL_SOCKET_ENV;
+    use smelt_core::session_control::request_completion;
     let control = &app.app.core.session_control;
     control.initialize().unwrap();
     request_completion(
-        &control.shell_env()[SOCKET_ENV],
+        &control.shell_env()[CONTROL_SOCKET_ENV],
         &app.app.conversation.session().id,
-        turn,
+        Some(turn),
     )
     .await
     .unwrap();

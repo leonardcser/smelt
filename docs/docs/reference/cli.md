@@ -101,13 +101,17 @@ you want to.
 
 ### Workflow completion
 
-Run `smelt session complete` through the bash tool after a workflow's validation
+Run `smelt session complete` from the bash tool, or from the Claude Code
+agent's own bash tool, after a workflow's validation
 and cleanup succeed. It targets the current session regardless of cwd and
 requests `completed` after a successful turn with no pending work. Rejected
 requests produce a warning; the command does not validate the work itself.
 
 Completion survives focus changes, but not a new turn, rewind, session
-replacement, or restart. The command requires Unix and an active bash-tool session.
+replacement, or restart. The command requires Unix and a shell started by an active session.
+A smelt shell completes only the turn that started it. Claude Code keeps one
+process across turns, so its shells complete whichever turn is active when the
+command runs.
 
 ### Public runtime status
 

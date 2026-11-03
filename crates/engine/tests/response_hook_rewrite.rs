@@ -128,6 +128,7 @@ async fn run_responses(
         },
         reasoning_effort: ReasoningEffort::Off,
         fast_mode: false,
+        control_env: Default::default(),
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),

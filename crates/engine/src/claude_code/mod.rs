@@ -467,6 +467,7 @@ impl Runtime<'_> {
                 tools: target.config.tool_calling(),
                 persist_session: !self.payload.ephemeral,
                 fast_mode: self.payload.fast_mode,
+                env: &self.payload.control_env,
                 schema: None,
             })?);
             self.native.plans = plans::Plans::new(
@@ -2412,6 +2413,7 @@ async fn auxiliary(
         tools: false,
         persist_session: false,
         fast_mode: task.fast_mode,
+        env: &HashMap::new(),
         schema: task.response_format.as_ref().map(|fmt| &fmt.schema),
     })?;
     let result = async {

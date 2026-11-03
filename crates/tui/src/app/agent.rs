@@ -1151,6 +1151,7 @@ impl TuiApp {
             request_config: turn.request_config,
             reasoning_effort: turn.reasoning_effort,
             fast_mode,
+            control_env: self.core.session_control.agent_env(),
             history,
             session_id: self.conversation.session().id.clone(),
             sessions_root: self.core.sessions.sessions_dir(),
