@@ -1,11 +1,11 @@
 ---
 title: "Design decisions"
-description: "Why smelt stays fast in long sessions, uses Lua for plugins, stores sessions in SQLite and has its own terminal renderer, and what each choice costs."
+description: "Why smelt stays fast in long sessions, uses Lua for plugins, stores sessions in SQLite, has its own terminal renderer and no subagents, and what each choice costs."
 ---
 
 # Design decisions
 
-Four choices set smelt apart from other coding agents. For each one: what we
+Five choices set smelt apart from other coding agents. For each one: what we
 chose, why, and what it costs. Numbers come from the [benchmarks](benchmarks.md)
 and from performance tests in the smelt repository.
 
@@ -15,6 +15,7 @@ and from performance tests in the smelt repository.
 | Lua for config and plugins        | Change smelt by saving a file                      | Plugins are not sandboxed             |
 | Sessions in SQLite                | Fast search, resume and rewind                     | Sessions are not plain files          |
 | Our own terminal renderer         | Windows, layers and vim motions everywhere         | We maintain a renderer ourselves      |
+| No built-in subagents             | One agent loop that is simple and predictable      | You build orchestration yourself      |
 
 ## Fast in long sessions
 
@@ -94,6 +95,22 @@ the terminal.
 
 **Cost.** We maintain a renderer that most projects get from a library. Terminal
 quirks, such as wide characters and resize signals, are ours to fix.
+
+## No built-in subagents
+
+**Choice.** smelt has no subagents. A subagent is another smelt instance with
+its own context, tools and permissions.
+
+**Why.** Subagents add a lot of behavior to decide: what context they inherit,
+which permissions they get, how results return, how they are cancelled and how
+they appear in the transcript. We do not yet know the right answers, and
+orchestration has many valid shapes: fan-out, pipelines, reviewers, planners.
+We would rather keep one agent loop that is simple and predictable than impose
+one shape on everyone.
+
+**Cost.** You get no ready-made orchestration. Build the shape you need as a
+[plugin](../extend/index.md), or run more than one smelt in
+[headless mode](headless.md).
 
 ## Related
 
