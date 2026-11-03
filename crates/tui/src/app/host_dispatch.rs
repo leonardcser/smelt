@@ -2,6 +2,7 @@
 //! on the TUI main thread. Each `HostCall` carries its own
 //! `oneshot::Sender` for the reply; we send back at most once.
 
+use crate::app::cwd::PreparedWorkspace;
 use crate::app::TuiApp;
 use engine::{HostCall, HostRequestDecision, PreparedRequestMessages};
 use protocol::Message;
@@ -39,15 +40,20 @@ pub(super) struct HostWorkState {
     handoff_turn: Option<u64>,
 }
 
-struct ProjectRequest {
-    target_cwd: std::path::PathBuf,
+/// A provider request waiting for the engine's go-ahead.
+struct PendingRequest {
     turn_id: u64,
-    cancel_generation: u64,
-    lua_generation: u64,
-    runtime_revision: u64,
     messages: PreparedRequestMessages,
     estimated_tokens: u32,
     reply: MessageReply,
+}
+
+struct ProjectRequest {
+    target_cwd: std::path::PathBuf,
+    cancel_generation: u64,
+    lua_generation: u64,
+    runtime_revision: u64,
+    request: PendingRequest,
     preparation: super::cwd::ProjectPreparation,
 }
 
@@ -242,8 +248,8 @@ impl TuiApp {
     }
 
     pub(super) fn cancel_request_hook(&mut self) {
-        if let Some(request) = self.host_work.project_request.take() {
-            let _ = request.reply.send(HostRequestDecision::Stop);
+        if let Some(project) = self.host_work.project_request.take() {
+            let _ = project.request.reply.send(HostRequestDecision::Stop);
         }
         if let Some(owner) = self.host_work.pending.clone() {
             let decision = self.resolve_request_hook(&owner, DeferredRequestDecision::Stop);
@@ -417,38 +423,48 @@ impl TuiApp {
                     let _ = reply.send(HostRequestDecision::Stop);
                     return;
                 }
-                self.prepare_project_request(turn_id, messages, estimated_tokens, reply);
+                self.prepare_project_request(PendingRequest {
+                    turn_id,
+                    messages,
+                    estimated_tokens,
+                    reply,
+                });
             }
         }
     }
 
-    fn prepare_project_request(
-        &mut self,
-        turn_id: u64,
-        messages: PreparedRequestMessages,
-        estimated_tokens: u32,
-        reply: MessageReply,
-    ) {
+    fn prepare_project_request(&mut self, request: PendingRequest) {
         if let Some(previous) = self.host_work.project_request.take() {
-            let _ = previous.reply.send(HostRequestDecision::Stop);
+            let _ = previous.request.reply.send(HostRequestDecision::Stop);
         }
         let target_cwd = self.current_project_cwd();
+        let cancel_generation = self.conversation.cancel_generation();
+        // Only the session cwd prepares a plain context. A renamed process cwd
+        // prepares a cwd change, which always loads its inputs again.
+        if target_cwd == self.core.env.cwd() {
+            let root = std::path::Path::new(&self.core.config.settings.worktree_root);
+            if let Some(prepared) = self.workspace.reusable_preparation(&target_cwd, root) {
+                self.finish_project_request(
+                    request,
+                    cancel_generation,
+                    Ok(PreparedWorkspace::Context(Box::new(prepared))),
+                );
+                return;
+            }
+        }
         match self.prepare_project_context(target_cwd.clone()) {
             Ok(preparation) => {
                 self.host_work.project_request = Some(ProjectRequest {
                     target_cwd,
-                    turn_id,
-                    cancel_generation: self.conversation.cancel_generation(),
+                    cancel_generation,
                     lua_generation: self.lua.id,
                     runtime_revision: self.core.config.revision,
-                    messages,
-                    estimated_tokens,
-                    reply,
+                    request,
                     preparation,
                 })
             }
             Err(error) => {
-                let _ = reply.send(HostRequestDecision::Abort(error));
+                let _ = request.reply.send(HostRequestDecision::Abort(error));
             }
         }
     }
@@ -461,60 +477,58 @@ impl TuiApp {
     /// Refresh before every provider request, including those following tools.
     /// The engine waits for the snapshot, while the terminal keeps processing input.
     pub(super) fn poll_project_request(&mut self) -> bool {
-        let Some(request) = self.host_work.project_request.as_ref() else {
+        let Some(project) = self.host_work.project_request.as_ref() else {
             return false;
         };
-        if self.active_agent_turn_id() != Some(request.turn_id)
-            || self.conversation.cancel_generation() != request.cancel_generation
+        if self.active_agent_turn_id() != Some(project.request.turn_id)
+            || self.conversation.cancel_generation() != project.cancel_generation
         {
-            let request = self.host_work.project_request.take().unwrap();
-            let _ = request.reply.send(HostRequestDecision::Stop);
+            let project = self.host_work.project_request.take().unwrap();
+            let _ = project.request.reply.send(HostRequestDecision::Stop);
             return true;
         }
-        let prepared = match request.preparation.try_recv() {
+        let prepared = match project.preparation.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 Err("project preparation worker stopped".into())
             }
         };
-        let request = self.host_work.project_request.take().unwrap();
-        if request.lua_generation != self.lua.id
-            || request.runtime_revision != self.core.config.revision
-            || request.target_cwd != self.current_project_cwd()
+        let project = self.host_work.project_request.take().unwrap();
+        if project.lua_generation != self.lua.id
+            || project.runtime_revision != self.core.config.revision
+            || project.target_cwd != self.current_project_cwd()
             || prepared
                 .as_ref()
                 .is_ok_and(|prepared| !prepared.permissions().is_current())
         {
-            self.prepare_project_request(
-                request.turn_id,
-                request.messages,
-                request.estimated_tokens,
-                request.reply,
-            );
+            self.prepare_project_request(project.request);
             return true;
         }
+        self.finish_project_request(project.request, project.cancel_generation, prepared);
+        true
+    }
+
+    fn finish_project_request(
+        &mut self,
+        request: PendingRequest,
+        cancel_generation: u64,
+        prepared: Result<PreparedWorkspace, String>,
+    ) {
         match prepared.and_then(|prepared| self.install_prepared_project_context(prepared)) {
             Ok(context_changed) => {
                 if self.active_agent_turn_id() != Some(request.turn_id)
-                    || self.conversation.cancel_generation() != request.cancel_generation
+                    || self.conversation.cancel_generation() != cancel_generation
                 {
                     let _ = request.reply.send(HostRequestDecision::Stop);
-                    return true;
+                    return;
                 }
-                self.dispatch_prepare_request(
-                    request.turn_id,
-                    request.messages,
-                    request.estimated_tokens,
-                    request.reply,
-                    context_changed,
-                );
+                self.dispatch_prepare_request(request, context_changed);
             }
             Err(error) => {
                 let _ = request.reply.send(HostRequestDecision::Abort(error));
             }
         }
-        true
     }
 
     /// Hand the first registered `smelt.engine.on_context_limit` hook the
@@ -550,14 +564,13 @@ impl TuiApp {
     /// hook the request metadata immediately. The `messages` field is built
     /// lazily if the hook reads it, so metadata-only hooks do not pay to
     /// serialize large histories into Lua.
-    fn dispatch_prepare_request(
-        &mut self,
-        turn_id: u64,
-        messages: PreparedRequestMessages,
-        estimated_tokens: u32,
-        reply: MessageReply,
-        context_changed: bool,
-    ) {
+    fn dispatch_prepare_request(&mut self, request: PendingRequest, context_changed: bool) {
+        let PendingRequest {
+            turn_id,
+            messages,
+            estimated_tokens,
+            reply,
+        } = request;
         let lua = self.lua.lua().clone();
         let funcs = self
             .lua
@@ -753,6 +766,49 @@ mod tests {
             ));
             assert_eq!(app.core_probe().env.cwd(), renamed);
         }
+    }
+
+    #[test]
+    fn project_request_reuses_workspace_inputs_until_they_change() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(42);
+        app.app.lua.core_shared().hooks.prepare_request.clear();
+        let request = |app: &mut crate::app::test_harness::TestApp| {
+            let (reply, response) = oneshot::channel();
+            app.app.dispatch_host_call(HostCall::PrepareRequest {
+                turn_id: 42,
+                messages: PreparedRequestMessages::model_only(Vec::new()),
+                estimated_tokens: 0,
+                reply,
+            });
+            let preparing = app.app.project_context_pending();
+            app.wait_for_project_context();
+            let mut response = response;
+            assert!(matches!(
+                response.try_recv().unwrap(),
+                HostRequestDecision::Continue
+            ));
+            preparing
+        };
+
+        assert!(
+            request(&mut app),
+            "the first request prepares the workspace"
+        );
+        assert!(!request(&mut app), "an unchanged workspace is reused");
+
+        let cwd = app.core_probe().env.cwd();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&cwd)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(request(&mut app), "a new repository is discovered again");
+        assert!(
+            app.app.workspace.project_context().repository_key.is_some(),
+            "the request installed the new repository"
+        );
     }
 
     #[test]

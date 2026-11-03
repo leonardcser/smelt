@@ -188,7 +188,11 @@ pub fn enter_or_create(cwd: &Path, spec: WorktreeSpec<'_>) -> Result<WorktreeInf
 
         let branch_exists = git_success(
             &root,
-            ["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+            [
+                "rev-parse",
+                "--verify",
+                format!("refs/heads/{branch}").as_str(),
+            ],
         );
         if spec.name.is_none() && branch_exists {
             continue;
@@ -276,7 +280,66 @@ pub fn managed_context(cwd: &Path, root: Option<&Path>) -> Option<ManagedWorktre
     })
 }
 
+/// A [`ProjectContext`] with stamps of every file its discovery read, so it can
+/// be reused until Git metadata changes instead of running Git again.
+#[derive(Debug, Clone)]
+pub struct ProjectSnapshot {
+    pub context: ProjectContext,
+    inputs: crate::file_stamp::FileStamps,
+}
+
+impl ProjectSnapshot {
+    pub fn discover(cwd: &Path, root: Option<&Path>) -> Self {
+        let mut inputs = crate::file_stamp::FileStamps::default();
+        // A repository or worktree link appearing in any ancestor changes
+        // which repository owns `cwd`.
+        for dir in cwd.ancestors() {
+            inputs.track_kind(dir.join(".git"));
+        }
+        let repository_key = git_common_dir(cwd);
+        if let Some(common) = &repository_key {
+            track_git_metadata(&mut inputs, common);
+        }
+        Self {
+            context: discover_project_context(cwd, root, repository_key),
+            inputs,
+        }
+    }
+
+    /// Whether discovery would still produce this context, so it can be used
+    /// instead of running Git again.
+    pub fn is_reusable(&self) -> bool {
+        self.inputs.is_reusable()
+    }
+}
+
+/// The repository files project discovery reads: checked-out branches, the
+/// default base refs, and the worktree list.
+fn track_git_metadata(inputs: &mut crate::file_stamp::FileStamps, common: &Path) {
+    for file in ["HEAD", "config", "packed-refs"] {
+        inputs.track(common.join(file));
+    }
+    for branch in DEFAULT_BASE_BRANCHES {
+        inputs.track(common.join("refs/heads").join(branch));
+    }
+    let worktrees = common.join("worktrees");
+    inputs.track(worktrees.clone());
+    for entry in fs::read_dir(&worktrees).into_iter().flatten().flatten() {
+        let dir = entry.path();
+        inputs.track(dir.join("HEAD"));
+        inputs.track(dir.join("gitdir"));
+    }
+}
+
 pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
+    ProjectSnapshot::discover(cwd, root).context
+}
+
+fn discover_project_context(
+    cwd: &Path,
+    root: Option<&Path>,
+    repository_key: Option<PathBuf>,
+) -> ProjectContext {
     let git_root = worktree_root(cwd).ok();
     let active_root = git_root
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
@@ -284,7 +347,6 @@ pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
     let branch = current_branch(&active_root).unwrap_or_default();
     let base = default_base_ref(&active_root);
     let worktrees = git_worktrees(&active_root).unwrap_or_default();
-    let repository_key = git_common_dir(&active_root);
     let default_base_path =
         find_branch_worktree(&worktrees, &base).map(|p| std::fs::canonicalize(&p).unwrap_or(p));
     let base_path = default_base_path
@@ -406,14 +468,25 @@ fn worktree_root(cwd: &Path) -> Result<PathBuf, String> {
     git_stdout(cwd, ["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
+/// Branches tried in order as the default base. Project snapshots track their
+/// refs, so a change here changes what invalidates a snapshot.
+const DEFAULT_BASE_BRANCHES: [&str; 2] = ["main", "master"];
+
 fn default_base_ref(root: &Path) -> String {
-    if git_success(root, ["rev-parse", "--verify", "refs/heads/main"]) {
-        "main".into()
-    } else if git_success(root, ["rev-parse", "--verify", "refs/heads/master"]) {
-        "master".into()
-    } else {
-        "HEAD".into()
-    }
+    DEFAULT_BASE_BRANCHES
+        .into_iter()
+        .find(|branch| {
+            git_success(
+                root,
+                [
+                    "rev-parse",
+                    "--verify",
+                    format!("refs/heads/{branch}").as_str(),
+                ],
+            )
+        })
+        .unwrap_or("HEAD")
+        .into()
 }
 
 fn resolve_worktree_root(root: Option<&Path>) -> Result<ResolvedWorktreeRoot, String> {
@@ -780,6 +853,71 @@ mod tests {
         assert_eq!(ctx.base_path.as_deref(), Some(repo_path.as_path()));
         assert!(ctx.path.ends_with(".worktrees/feature"));
         assert!(managed_context(repo.path(), None).is_none());
+    }
+
+    /// Backdate every file under `dir`, as if the repository had been idle.
+    fn settle(dir: &Path) {
+        let old = SystemTime::now() - std::time::Duration::from_secs(60);
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            }
+            fs::File::open(&path).unwrap().set_modified(old).unwrap();
+        }
+    }
+
+    #[test]
+    fn project_snapshot_is_reused_until_git_metadata_changes() {
+        let repo = repo();
+        settle(&repo.path().join(".git"));
+        let snapshot = ProjectSnapshot::discover(repo.path(), None);
+        assert!(snapshot.is_reusable());
+
+        fs::write(repo.path().join("notes.txt"), "untracked\n").unwrap();
+        git(repo.path(), &["status", "--short"]);
+        assert!(snapshot.is_reusable(), "work in the tree keeps the context");
+
+        git(repo.path(), &["checkout", "-q", "-b", "feature"]);
+        assert!(
+            !snapshot.is_reusable(),
+            "a branch switch changes the context"
+        );
+
+        settle(&repo.path().join(".git"));
+        let snapshot = ProjectSnapshot::discover(repo.path(), None);
+        assert_eq!(snapshot.context.branch, "feature");
+        assert!(snapshot.is_reusable());
+
+        let sibling = tempfile::tempdir().unwrap();
+        let worktree = sibling.path().join("other");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "other",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            !snapshot.is_reusable(),
+            "a new worktree changes the context"
+        );
+    }
+
+    #[test]
+    fn project_snapshot_notices_repository_created_in_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        let snapshot = ProjectSnapshot::discover(&nested, None);
+        assert!(snapshot.is_reusable());
+
+        git(dir.path(), &["init", "-q"]);
+        assert!(!snapshot.is_reusable());
     }
 
     #[test]

@@ -609,12 +609,15 @@ pub fn resolve_permissions(
 
 /// Filesystem-backed permission inputs. Load on a worker, then resolve Lua
 /// declarations without rediscovering Git or loading persisted grants.
+#[derive(Clone)]
 pub struct PermissionContext {
     project: crate::worktree::ProjectContext,
     workspace_approvals: store::CompiledApprovals,
     repository_approvals: store::CompiledApprovals,
     permission_store: store::PermissionStore,
     store_generation: u64,
+    /// The persisted grant files, which other smelt processes may rewrite.
+    approval_files: crate::file_stamp::FileStamps,
     workspace: PathBuf,
 }
 
@@ -625,13 +628,26 @@ impl PermissionContext {
         permission_store: &store::PermissionStore,
     ) -> std::io::Result<Self> {
         let store_generation = permission_store.generation();
-        let workspace_approvals = permission_store
-            .load_approvals(&cwd.to_string_lossy(), store::PersistenceScope::Workspace)?;
-        let repository_approvals = if let Some(key) = project.repository_key.as_deref() {
-            permission_store
-                .load_approvals(&key.to_string_lossy(), store::PersistenceScope::Repository)?
-        } else {
-            store::CompiledApprovals::default()
+        let mut approval_files = crate::file_stamp::FileStamps::default();
+        let workspace_key = cwd.to_string_lossy();
+        approval_files.track(
+            permission_store.permissions_path(&workspace_key, store::PersistenceScope::Workspace),
+        );
+        let repository_key = project
+            .repository_key
+            .as_deref()
+            .map(|key| key.to_string_lossy());
+        if let Some(key) = &repository_key {
+            approval_files
+                .track(permission_store.permissions_path(key, store::PersistenceScope::Repository));
+        }
+        let workspace_approvals =
+            permission_store.load_approvals(&workspace_key, store::PersistenceScope::Workspace)?;
+        let repository_approvals = match &repository_key {
+            Some(key) => {
+                permission_store.load_approvals(key, store::PersistenceScope::Repository)?
+            }
+            None => store::CompiledApprovals::default(),
         };
         Ok(Self {
             project,
@@ -639,13 +655,23 @@ impl PermissionContext {
             repository_approvals,
             permission_store: permission_store.clone(),
             store_generation,
+            approval_files,
             workspace: cwd.to_path_buf(),
         })
     }
 
-    /// Reject prepared grants after a local grant or revocation changed the store.
+    /// Reject prepared grants after this process or another one changed the
+    /// persisted grants they were loaded from.
     pub fn is_current(&self) -> bool {
         self.store_generation == self.permission_store.generation()
+            && self.approval_files.is_unchanged()
+    }
+
+    /// Whether these grants can be used for a later request instead of being
+    /// loaded again.
+    pub fn is_reusable(&self) -> bool {
+        self.store_generation == self.permission_store.generation()
+            && self.approval_files.is_reusable()
     }
 
     pub fn resolve(

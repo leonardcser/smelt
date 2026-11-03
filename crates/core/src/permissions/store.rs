@@ -61,7 +61,7 @@ pub struct Replacement {
     pub rules: Vec<Rule>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CompiledApprovals {
     pub(crate) tools: HashMap<String, Vec<glob::Pattern>>,
     pub(crate) dirs: Vec<PathBuf>,
@@ -136,7 +136,7 @@ impl PermissionStore {
         self.state_root.join("workspaces").join(encode_path(root))
     }
 
-    fn permissions_path(&self, root: &str, scope: PersistenceScope) -> PathBuf {
+    pub(crate) fn permissions_path(&self, root: &str, scope: PersistenceScope) -> PathBuf {
         self.scope_dir(root).join(scope.filename())
     }
 

@@ -19,6 +19,7 @@ pub mod custom_commands;
 pub mod diff;
 pub mod engine_client;
 pub mod file_ref;
+pub mod file_stamp;
 pub mod fs;
 pub mod fs_watch;
 pub mod fuzzy;

@@ -38,9 +38,12 @@ impl PreparedWorkspace {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct PreparedProjectContext {
+    target: std::path::PathBuf,
+    root: std::path::PathBuf,
     pub(super) cwd: std::path::PathBuf,
-    pub(super) project: smelt_core::worktree::ProjectContext,
+    pub(super) project: smelt_core::worktree::ProjectSnapshot,
     pub(super) permissions: smelt_core::permissions::PermissionContext,
 }
 
@@ -55,15 +58,26 @@ impl PreparedProjectContext {
         if !cwd.is_dir() {
             return Err(format!("cwd is not a directory: {}", cwd.display()));
         }
-        let project = smelt_core::worktree::project_context(&cwd, Some(&root));
+        let project = smelt_core::worktree::ProjectSnapshot::discover(&cwd, Some(&root));
         let permissions =
-            smelt_core::permissions::PermissionContext::load(&cwd, project.clone(), &store)
+            smelt_core::permissions::PermissionContext::load(&cwd, project.context.clone(), &store)
                 .map_err(|error| format!("load persisted permissions: {error}"))?;
         Ok(Self {
+            target,
+            root,
             cwd,
             project,
             permissions,
         })
+    }
+
+    /// Whether loading `target` again would produce these inputs.
+    fn is_reusable_for(&self, target: &std::path::Path, root: &std::path::Path) -> bool {
+        self.target == target
+            && self.root == root
+            && std::fs::canonicalize(target).is_ok_and(|cwd| cwd == self.cwd)
+            && self.project.is_reusable()
+            && self.permissions.is_reusable()
     }
 
     fn with_lua_inputs(
@@ -79,7 +93,7 @@ impl PreparedProjectContext {
         };
         PreparedLuaInputs {
             cwd: self.cwd,
-            project: self.project,
+            project: self.project.context,
             prompt_inputs,
             skills,
             system_prompt_read_error,
@@ -167,6 +181,9 @@ pub(crate) struct WorkspaceState {
     cwd_directory: Option<std::fs::File>,
     home: std::path::PathBuf,
     context: smelt_core::worktree::ProjectContext,
+    /// The inputs the installed context was prepared from, reused for later
+    /// requests while the files they were read from are unchanged.
+    prepared: Option<PreparedProjectContext>,
     worktree_path: String,
     pending_change: Option<PendingCwdChange>,
 }
@@ -186,6 +203,7 @@ impl WorkspaceState {
             cwd,
             home,
             context,
+            prepared: None,
             worktree_path,
             pending_change: None,
         }
@@ -237,6 +255,7 @@ impl WorkspaceState {
     }
 
     pub(crate) fn install_cwd(&mut self, cwd: std::path::PathBuf) {
+        self.prepared = None;
         #[cfg(unix)]
         {
             self.cwd_directory = std::fs::File::open(&cwd).ok();
@@ -275,8 +294,27 @@ impl WorkspaceState {
     }
 
     pub(super) fn install_context(&mut self, context: smelt_core::worktree::ProjectContext) {
+        self.prepared = None;
         self.worktree_path = worktree_display_path(&context, &self.home);
         self.context = context;
+    }
+
+    fn install_prepared(&mut self, prepared: PreparedProjectContext) {
+        self.install_context(prepared.project.context.clone());
+        self.prepared = Some(prepared);
+    }
+
+    /// The prepared inputs of the installed context, when preparing `target`
+    /// again would produce the same ones.
+    pub(super) fn reusable_preparation(
+        &self,
+        target: &std::path::Path,
+        root: &std::path::Path,
+    ) -> Option<PreparedProjectContext> {
+        self.prepared
+            .as_ref()
+            .filter(|prepared| prepared.is_reusable_for(target, root))
+            .cloned()
     }
 
     fn schedule(
@@ -410,7 +448,7 @@ impl TuiApp {
             }
             PreparedWorkspace::Context(prepared) => {
                 let desired = self.lua.desired();
-                let permissions = prepared.permissions.resolve(
+                let permissions = prepared.permissions.clone().resolve(
                     &desired.permissions.rules,
                     &desired.permissions.tool_defaults,
                     desired.modes.behaviors.clone(),
@@ -419,7 +457,7 @@ impl TuiApp {
                     self.core.permissions.paths_fn(),
                 );
                 self.core.permissions.apply_resolution(permissions);
-                self.workspace.install_context(prepared.project);
+                self.workspace.install_prepared(*prepared);
                 self.publish_workspace_signals();
             }
         }
@@ -585,7 +623,6 @@ impl TuiApp {
 
     fn install_runtime_cwd(&mut self, cwd: std::path::PathBuf, mark_session_dirty: bool) {
         self.core.env.set_cwd(cwd.clone());
-        self.platform.install_cwd(cwd.clone());
         self.prompt.set_cwd(cwd.clone());
         self.workspace.install_cwd(cwd.clone());
         if mark_session_dirty && !self.session_is_read_only() {
