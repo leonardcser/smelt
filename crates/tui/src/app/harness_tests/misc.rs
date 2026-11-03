@@ -32,6 +32,7 @@ fn response_draft_rejection_removes_only_attempt_output() {
         stream_id: "draft".into(),
         call_id: Some("bad-call".into()),
         tool_name: Some("read_file".into()),
+        native: false,
     }));
     // Background factual output must survive rejection of a model response.
     app.feed_one(SourceEvent::engine(EngineEvent::ToolOutput {
@@ -644,6 +645,7 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
             stream_id: stream_id.clone(),
             call_id: Some(call_id.clone()),
             tool_name: Some(tool_name.into()),
+            native: false,
         }));
         app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
             stream_id: stream_id.clone(),
@@ -2511,6 +2513,7 @@ fn prepared_edit_file_diff_survives_promotion_until_tool_finish() {
         stream_id: stream_id.clone(),
         call_id: Some(call_id.clone()),
         tool_name: Some("edit_file".into()),
+        native: false,
     }));
     app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
         stream_id,
@@ -2745,6 +2748,7 @@ fn assert_invalid_edit_file_lifecycle(case: &InvalidEditFileCase, request_id: u6
         stream_id: stream_id.clone(),
         call_id: Some(call_id.clone()),
         tool_name: Some("edit_file".into()),
+        native: false,
     }));
     app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
         stream_id,
@@ -2836,6 +2840,7 @@ fn unread_edit_notebook_draft_shows_the_error_instead_of_the_source() {
         stream_id: "unread-notebook".into(),
         call_id: Some("unread-notebook".into()),
         tool_name: Some("edit_notebook".into()),
+        native: false,
     }));
     app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
         stream_id: "unread-notebook".into(),
@@ -2850,6 +2855,42 @@ fn unread_edit_notebook_draft_shows_the_error_instead_of_the_source() {
         "frame: {frame}"
     );
     assert!(!frame.contains("UNREAD_NOTEBOOK_SOURCE"), "frame: {frame}");
+}
+
+#[test]
+fn native_edit_file_draft_shows_the_edit_for_a_file_smelt_never_read() {
+    let dir = tempfile::tempdir().expect("create edit fixture directory");
+    let file = dir.path().join("native.rs");
+    std::fs::write(&file, "const NATIVE_BEFORE: i32 = 1;\n").expect("write edit fixture");
+    let arguments = serde_json::json!({
+        "file_path": file.to_string_lossy(),
+        "old_string": "NATIVE_BEFORE",
+        "new_string": "NATIVE_AFTER",
+    })
+    .to_string();
+
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(100, 24);
+    app.start_turn(7);
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftStarted {
+        stream_id: "native-edit".into(),
+        call_id: Some("native-edit".into()),
+        tool_name: Some("edit_file".into()),
+        native: true,
+    }));
+    app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
+        stream_id: "native-edit".into(),
+        call_id: "native-edit".into(),
+        tool_name: "edit_file".into(),
+        arguments,
+    }));
+
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("before editing"), "frame: {frame}");
+    assert!(
+        frame.contains("NATIVE_BEFORE") && frame.contains("NATIVE_AFTER"),
+        "frame: {frame}"
+    );
 }
 
 #[test]

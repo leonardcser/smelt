@@ -180,6 +180,7 @@ impl StreamParser {
         stream_id: String,
         call_id: Option<String>,
         name: Option<String>,
+        native: bool,
     ) -> ToolDraftChange {
         if let Some(block_id) = self.tool_drafts.get(&stream_id).copied() {
             return ToolDraftChange {
@@ -192,11 +193,9 @@ impl StreamParser {
         let name = name
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "tool".into());
-        let block_id = history.push(Block::ToolDraft(ToolDraft::new(
-            stream_id.clone(),
-            call_id,
-            name,
-        )));
+        let mut draft = ToolDraft::new(stream_id.clone(), call_id, name);
+        draft.native = native;
+        let block_id = history.push(Block::ToolDraft(draft));
         history.set_status(block_id, Status::Streaming);
         self.tool_drafts.insert(stream_id, block_id);
         ToolDraftChange {
@@ -213,8 +212,13 @@ impl StreamParser {
         name: Option<String>,
         delta: String,
     ) -> ToolDraftChange {
-        let change =
-            self.start_tool_draft(history, stream_id.clone(), call_id.clone(), name.clone());
+        let change = self.start_tool_draft(
+            history,
+            stream_id.clone(),
+            call_id.clone(),
+            name.clone(),
+            false,
+        );
         let presentation_changed = history
             .append_tool_draft(change.block_id, call_id, name, delta)
             .is_some_and(|append| append.presentation_changed);
@@ -237,6 +241,7 @@ impl StreamParser {
             stream_id,
             Some(call_id.clone()),
             Some(name.clone()),
+            false,
         );
         let presentation_changed = history
             .finish_tool_draft(change.block_id, call_id, name, arguments)
@@ -1503,8 +1508,8 @@ mod tests {
     #[test]
     fn clear_tool_drafts_removes_draft_blocks() {
         let (mut parser, mut history) = setup();
-        parser.start_tool_draft(&mut history, "s1".into(), None, Some("bash".into()));
-        parser.start_tool_draft(&mut history, "s2".into(), None, Some("bash".into()));
+        parser.start_tool_draft(&mut history, "s1".into(), None, Some("bash".into()), false);
+        parser.start_tool_draft(&mut history, "s2".into(), None, Some("bash".into()), false);
 
         parser.clear_tool_drafts(&mut history);
 

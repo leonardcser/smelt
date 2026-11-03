@@ -579,6 +579,7 @@ mod tests {
             stream_id: "write".into(),
             call_id: Some("write-call".into()),
             tool_name: Some("write_file".into()),
+            native: false,
         }));
         app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
             stream_id: "write".into(),
@@ -752,6 +753,7 @@ mod tests {
                 stream_id: name.into(),
                 call_id: Some(name.into()),
                 tool_name: Some(name.into()),
+                native: false,
             }));
             app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
                 stream_id: name.into(),
@@ -784,6 +786,7 @@ mod tests {
                 stream_id: id.into(),
                 call_id: Some(id.into()),
                 tool_name: Some("write_file".into()),
+                native: false,
             }));
             app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftDelta {
                 stream_id: id.into(),
@@ -817,6 +820,7 @@ mod tests {
             stream_id: "write".into(),
             call_id: Some("write".into()),
             tool_name: Some("write_file".into()),
+            native: false,
         }));
         app.feed_one(SourceEvent::engine(EngineEvent::TextDelta {
             delta: "Independent streaming answer".into(),

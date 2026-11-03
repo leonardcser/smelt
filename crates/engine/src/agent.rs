@@ -3147,6 +3147,7 @@ impl ProviderStreamState {
                         stream_id: stream_id.to_string(),
                         call_id: call_id.map(str::to_string),
                         tool_name: tool_name.map(str::to_string),
+                        native: false,
                     });
                 }
                 ToolCallStreamEvent::ArgsDelta {

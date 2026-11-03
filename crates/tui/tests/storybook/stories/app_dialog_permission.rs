@@ -366,6 +366,7 @@ fn open_edit_file_permission_after_draft(ctx: &mut AppStoryCtx) {
         stream_id: "draft-1".into(),
         call_id: Some("call-1".into()),
         tool_name: Some("edit_file".into()),
+        native: false,
     });
     ctx.engine(EngineEvent::ToolCallDraftFinished {
         stream_id: "draft-1".into(),
@@ -415,6 +416,7 @@ app_story!(
             stream_id: "draft-1".into(),
             call_id: Some("call-1".into()),
             tool_name: Some("write_file".into()),
+            native: false,
         });
         ctx.engine(EngineEvent::ToolCallDraftFinished {
             stream_id: "draft-1".into(),

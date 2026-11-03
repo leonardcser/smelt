@@ -906,9 +906,10 @@ impl TuiApp {
                 stream_id,
                 call_id,
                 tool_name,
+                native,
             } => {
                 assistant_output_started = true;
-                self.handle_tool_draft_started(stream_id, call_id, tool_name);
+                self.handle_tool_draft_started(stream_id, call_id, tool_name, native);
                 SessionControl::Continue
             }
             EngineEvent::ToolCallDraftDelta {

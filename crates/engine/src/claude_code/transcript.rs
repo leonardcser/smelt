@@ -76,9 +76,9 @@ impl Transcript {
         self.next_index = next_index;
     }
 
-    /// The provider a tool call ran on, when it is one of its native tools.
-    fn native_provider(&self, native: bool) -> Option<&str> {
-        native.then_some(self.provider.as_str())
+    /// The provider namespace a presented call is shown under, if any.
+    fn namespace(&self, call: &Presented) -> Option<&str> {
+        call.namespaced.then_some(self.provider.as_str())
     }
 
     pub(super) fn emit(&self, event: EngineEvent) {
@@ -190,13 +190,13 @@ impl Transcript {
                 match block["type"].as_str() {
                     Some("tool_use") => {
                         let id = block["id"].as_str().unwrap_or("").to_owned();
-                        let (name, _, native) =
-                            presented(block["name"].as_str().unwrap_or(""), HashMap::new());
-                        let name = displayed_tool_name(self.native_provider(native), &name);
+                        let call = presented(block["name"].as_str().unwrap_or(""), HashMap::new());
+                        let name = displayed_tool_name(self.namespace(&call), &call.name);
                         self.emit(EngineEvent::ToolCallDraftStarted {
                             stream_id: id.clone(),
                             call_id: Some(id.clone()),
                             tool_name: Some(name.clone()),
+                            native: call.native,
                         });
                         self.drafts.insert(index, (id, name, String::new()));
                     }
@@ -322,20 +322,20 @@ impl Transcript {
                         .unwrap_or_default()
                         .into_iter()
                         .collect();
-                    let (name, args, native) = presented(raw_name, input);
-                    let provider = self.native_provider(native).map(str::to_owned);
-                    let arguments = serde_json::to_string(&args).unwrap_or_default();
+                    let call = presented(raw_name, input);
+                    let provider = self.namespace(&call).map(str::to_owned);
+                    let arguments = serde_json::to_string(&call.args).unwrap_or_default();
                     self.emit(EngineEvent::ToolStarted {
                         invocation_id,
                         call_id: id.into(),
-                        tool_name: displayed_tool_name(provider.as_deref(), &name),
-                        args,
+                        tool_name: displayed_tool_name(provider.as_deref(), &call.name),
+                        args: call.args,
                         called_at_ms: now_ms,
                     });
                     remaining.insert(id.to_owned());
                     tools.push(ToolInvocation {
                         call_id: id.into(),
-                        name,
+                        name: call.name,
                         arguments,
                         result: ToolOutcome::new(
                             "Claude Code did not return a tool result".into(),
@@ -594,19 +594,41 @@ pub(super) fn apply_patch(original: &str, hunks: &[Value]) -> Option<String> {
     Some(edited)
 }
 
-/// How a native tool call is presented: smelt's own tools under their smelt
-/// name, native tools as the smelt tool sharing their capability, and the
-/// rest under their native name, flagged as Claude Code's own.
-pub(super) fn presented(
-    raw_name: &str,
-    input: HashMap<String, Value>,
-) -> (String, HashMap<String, Value>, bool) {
-    if let Some(name) = raw_name.strip_prefix("mcp__smelt__") {
-        return (name.to_owned(), input, false);
+/// A Claude Code tool call as smelt presents it.
+pub(super) struct Presented {
+    pub name: String,
+    pub args: HashMap<String, Value>,
+    /// Claude Code runs the call itself rather than through smelt's MCP server.
+    pub native: bool,
+    /// No smelt tool shares the capability, so the call keeps its native name
+    /// under the provider's namespace.
+    pub namespaced: bool,
+}
+
+/// smelt's own tools keep their smelt name, native tools take the name of the
+/// smelt tool sharing their capability, and the rest keep their native name.
+pub(super) fn presented(raw_name: &str, input: HashMap<String, Value>) -> Presented {
+    if let Some(name) = raw_name.strip_prefix(super::SMELT_MCP_PREFIX) {
+        return Presented {
+            name: name.to_owned(),
+            args: input,
+            native: false,
+            namespaced: false,
+        };
     }
     match super::catalog::smelt_tool(raw_name, &input) {
-        Some((name, args)) => (name.to_owned(), args, false),
-        None => (raw_name.to_owned(), input, true),
+        Some((name, args)) => Presented {
+            name: name.to_owned(),
+            args,
+            native: true,
+            namespaced: false,
+        },
+        None => Presented {
+            name: raw_name.to_owned(),
+            args: input,
+            native: true,
+            namespaced: true,
+        },
     }
 }
 

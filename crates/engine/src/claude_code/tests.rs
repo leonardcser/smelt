@@ -1339,7 +1339,7 @@ fn native_tools_start_as_their_smelt_counterpart_and_report_execution_time() {
         .iter()
         .any(|event| matches!(event, EngineEvent::ToolCallDraftFinished { .. })));
     assert!(events.iter().any(|event| matches!(event,
-        EngineEvent::ToolCallDraftStarted { tool_name: Some(name), .. } if name == "bash")));
+        EngineEvent::ToolCallDraftStarted { tool_name: Some(name), native: true, .. } if name == "bash")));
     let args = events
         .iter()
         .find_map(|event| match event {
@@ -1392,7 +1392,7 @@ fn untranslated_native_tools_are_shown_under_their_provider() {
         events.push(event);
     }
     assert!(events.iter().any(|event| matches!(event,
-        EngineEvent::ToolCallDraftStarted { tool_name: Some(name), .. } if name == "claude/ToolSearch")));
+        EngineEvent::ToolCallDraftStarted { tool_name: Some(name), native: true, .. } if name == "claude/ToolSearch")));
     assert!(events.iter().any(|event| matches!(event,
         EngineEvent::ToolStarted { tool_name, .. } if tool_name == "claude/ToolSearch")));
     let [HistoryItem::Assistant(step)] = transcript.committed.as_slice() else {
@@ -1631,6 +1631,74 @@ async fn workspace_change_moves_claude_code_and_continues_the_turn() {
         .filter(|call| call.get("argv").is_some())
         .count();
     assert_eq!(launches, 1, "the moved process serves the next turn");
+}
+
+#[tokio::test]
+#[serial(claude_code)]
+async fn smelt_tool_approval_keeps_its_smelt_identity() {
+    let fixture = Fixture::new("mcp");
+    let mut handle = fixture.handle();
+    let UiCommand::StartTurn(mut request) = payload(fixture.root.path(), 1, Vec::new()) else {
+        unreachable!()
+    };
+    request.tools.push(
+        serde_json::from_value(
+            json!({"name":"fixture_tool", "description":"fixture", "parameters":{"type":"object"}}),
+        )
+        .unwrap(),
+    );
+    handle.send(UiCommand::StartTurn(request));
+    let mut history = Vec::new();
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::HistoryAppended { delta, .. }) => {
+                history.extend(delta.items)
+            }
+            EngineOutput::Event(EngineEvent::ToolEvaluationRequest { request_id, .. }) => handle
+                .send(UiCommand::ToolEvaluationResponse {
+                    request_id,
+                    evaluation: ToolEvaluation {
+                        decision: Decision::Ask,
+                        metadata: Default::default(),
+                    },
+                }),
+            EngineOutput::Event(EngineEvent::RequestPermission {
+                request_id,
+                tool_name,
+                provider,
+                ..
+            }) => {
+                assert_eq!(tool_name, "fixture_tool");
+                assert_eq!(provider, None);
+                handle.send(UiCommand::PermissionDecision {
+                    request_id,
+                    approved: true,
+                    message: None,
+                });
+            }
+            EngineOutput::Event(EngineEvent::ToolDispatch {
+                request_id,
+                invocation_id,
+                call_id,
+                ..
+            }) => {
+                handle.send(UiCommand::ToolResult {
+                    request_id,
+                    invocation_id,
+                    call_id,
+                    content: "fixture-mcp-ok".into(),
+                    is_error: false,
+                    metadata: None,
+                    display_content: Vec::new(),
+                    attachment: None,
+                });
+                break;
+            }
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
+    finish(&mut handle, &mut history).await;
 }
 
 #[tokio::test]

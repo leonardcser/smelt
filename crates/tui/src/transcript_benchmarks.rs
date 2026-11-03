@@ -3497,6 +3497,7 @@ fn stream_benchmark_events(
                     stream_id: stream_id.clone(),
                     call_id: Some(call_id.clone()),
                     tool_name: Some("write_file".into()),
+                    native: false,
                 },
             ));
             let argument_lengths = stream_benchmark_chunk_lengths(chunks, arguments.len());

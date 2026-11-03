@@ -1056,7 +1056,10 @@
 ---@field summary? any Tool styled summary lines or compacted summary text. Header parts receive the resolved presentation title here; other parts keep the original summary.
 ---@field summary_text? string Original tool summary flattened to plain text.
 ---@field kept? smelt.transcript.Block[] Compacted marker: user, assistant, and tool entries the model still receives verbatim, oldest first.
----@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
+---@field status? "drafting"|"pending"|"confirm"|"ok"|"err"|"denied" Tool status. `"drafting"` while the model still streams the call.
+---@field draft? boolean True while the model still streams the tool call.
+---@field draft_finished? boolean Draft whose arguments finished streaming.
+---@field native? boolean Draft the provider runs itself, outside smelt's tool preflight.
 ---@field called_at_ms? integer Invocation start as Unix epoch milliseconds.
 ---@field elapsed_ms? integer Best-known execution duration in milliseconds.
 ---@field elapsed_active? boolean True only while elapsed time can continue advancing.
@@ -1255,7 +1258,7 @@
 ---@field title? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.transcript.StyledSpan[][]|nil Semantic title after the status marker. Return nil to use the tool summary.
 ---@field body? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Expanded body renderer. Return nil to suppress the body.
 ---@field draft? fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node|nil Draft body renderer. Return nil to suppress the body.
----@field draft_error? fun(draft: smelt.transcript.Block): string|nil Reason the streamed call will be rejected. When it returns a string the draft shows that error instead of the `draft` body.
+---@field draft_error? fun(draft: smelt.transcript.Block): string|nil Reason smelt's tool preflight will reject the streamed call. When it returns a string the draft shows that error instead of the `draft` body. Not consulted for `native` drafts.
 ---@field compact? fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string|smelt.layout.Node|nil Collapsed detail renderer. Return nil to suppress the detail.
 
 --- Immutable committed transcript view delivered to `watch_view`. Navigation methods resolve from this exact semantic viewport anchor.

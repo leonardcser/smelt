@@ -212,6 +212,10 @@ pub struct ToolDraft {
     pub arguments: ToolArguments,
     pub raw_arguments: TranscriptContent,
     pub finished: bool,
+    /// The provider runs the call itself, so smelt's tool preflight never
+    /// sees it.
+    #[serde(default)]
+    pub native: bool,
     #[serde(skip)]
     parser: DraftJsonParser,
 }
@@ -226,6 +230,7 @@ impl ToolDraft {
             arguments: ToolArguments::default(),
             raw_arguments: TranscriptContent::new(),
             finished: false,
+            native: false,
             parser: DraftJsonParser::default(),
         }
     }
@@ -313,6 +318,7 @@ impl ToolDraft {
             self.raw_arguments.len(),
             self.raw_arguments.content_hash(),
             self.finished,
+            self.native,
         ))
     }
 

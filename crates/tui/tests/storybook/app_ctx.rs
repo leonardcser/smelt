@@ -316,6 +316,7 @@ impl AppStoryCtx {
             stream_id: stream_id.clone(),
             call_id: Some(call_id.clone()),
             tool_name: Some(tool_name.into()),
+            native: false,
         });
         self.engine(EngineEvent::ToolCallDraftDelta {
             stream_id: stream_id.clone(),
@@ -342,6 +343,7 @@ impl AppStoryCtx {
             stream_id: stream_id.clone(),
             call_id: Some(call_id.clone()),
             tool_name: Some(tool_name.into()),
+            native: false,
         });
         self.engine(EngineEvent::ToolCallDraftDelta {
             stream_id,

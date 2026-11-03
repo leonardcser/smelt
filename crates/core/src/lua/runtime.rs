@@ -2363,27 +2363,6 @@ impl LuaRuntime {
             .map_err(|error| self.tool_workspace_paths_error(tool_name, error))
     }
 
-    pub fn tool_has_preview(&self, tool_name: &str) -> bool {
-        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-        handlers.get(tool_name).is_some_and(|h| h.preview.is_some())
-    }
-
-    /// Run a tool's `preview(args)` callback and return the composed `BlockLayout` tree.
-    /// `None` means the tool registered no preview or returned nil.
-    pub fn render_tool_preview(
-        &self,
-        tool_name: &str,
-        args: &HashMap<String, serde_json::Value>,
-    ) -> Option<crate::content::block_layout::BlockLayout> {
-        match Self::call_tool_preview(&self.lua, &self.shared, tool_name, args, None) {
-            Ok(layout) => layout,
-            Err(error) => {
-                self.record_error(error);
-                None
-            }
-        }
-    }
-
     /// Invoke a preview callback using explicit Lua state rather than ambient host access.
     /// UI bindings use this after releasing their mutable app borrow so preview code may
     /// call host APIs safely.
@@ -3451,6 +3430,7 @@ fn transcript_render_node_to_lua_table(
             argument_fields,
             raw_arguments,
             draft_finished,
+            native,
         } => {
             table.set("stream_id", stream_id.as_str())?;
             if let Some(call_id) = call_id {
@@ -3475,6 +3455,7 @@ fn transcript_render_node_to_lua_table(
             table.set("status", "drafting")?;
             table.set("draft", true)?;
             table.set("draft_finished", *draft_finished)?;
+            table.set("native", *native)?;
         }
         TranscriptRenderFields::ToolCall {
             call_id,
@@ -3731,6 +3712,7 @@ enum TranscriptRenderFields {
         argument_fields: Vec<TranscriptArgumentFieldMetadata>,
         raw_arguments: TranscriptContentMetadata,
         draft_finished: bool,
+        native: bool,
     },
     ToolCall {
         call_id: String,
@@ -3879,6 +3861,7 @@ pub fn transcript_block_render_node(
             argument_fields: transcript_argument_field_metadata(draft.string_fields()),
             raw_arguments: transcript_content_metadata(&draft.raw_arguments),
             draft_finished: draft.finished,
+            native: draft.native,
         },
         Block::ToolCall {
             call_id,

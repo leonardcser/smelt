@@ -9,10 +9,11 @@ impl TuiApp {
         stream_id: String,
         call_id: Option<String>,
         tool_name: Option<String>,
+        native: bool,
     ) {
         if let Some(block_id) = self
             .conversation
-            .start_tool_draft(stream_id, call_id, tool_name)
+            .start_tool_draft(stream_id, call_id, tool_name, native)
         {
             self.refresh_tool_draft_summary(block_id);
         }

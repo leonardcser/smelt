@@ -1563,7 +1563,10 @@ Bounded semantic transcript metadata passed to the root renderer.
 | `summary` | `any` |  | Tool styled summary lines or compacted summary text. Header parts receive the resolved presentation title here; other parts keep the original summary. |
 | `summary_text` | `string` |  | Original tool summary flattened to plain text. |
 | `kept` | [smelt.transcript.Block[]](types.md#smelttranscriptblock) |  | Compacted marker: user, assistant, and tool entries the model still receives verbatim, oldest first. |
-| `status` | `"pending"\|"confirm"\|"ok"\|"err"\|"denied"` |  | Tool status. |
+| `status` | `"drafting"\|"pending"\|"confirm"\|"ok"\|"err"\|"denied"` |  | Tool status. `"drafting"` while the model still streams the call. |
+| `draft` | `boolean` |  | True while the model still streams the tool call. |
+| `draft_finished` | `boolean` |  | Draft whose arguments finished streaming. |
+| `native` | `boolean` |  | Draft the provider runs itself, outside smelt's tool preflight. |
 | `called_at_ms` | `integer` |  | Invocation start as Unix epoch milliseconds. |
 | `elapsed_ms` | `integer` |  | Best-known execution duration in milliseconds. |
 | `elapsed_active` | `boolean` |  | True only while elapsed time can continue advancing. |
@@ -1857,7 +1860,7 @@ Registrations are copied and immutable.
 | `title` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.transcript.StyledSpan[][]\|nil` |  | Semantic title after the status marker. Return nil to use the tool summary. |
 | `body` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Expanded body renderer. Return nil to suppress the body. |
 | `draft` | `fun(draft: smelt.transcript.Block, ctx: smelt.transcript.Context, opts?: smelt.transcript.ToolBodyOptions): smelt.layout.Node\|nil` |  | Draft body renderer. Return nil to suppress the body. |
-| `draft_error` | `fun(draft: smelt.transcript.Block): string\|nil` |  | Reason the streamed call will be rejected. When it returns a string the draft shows that error instead of the `draft` body. |
+| `draft_error` | `fun(draft: smelt.transcript.Block): string\|nil` |  | Reason smelt's tool preflight will reject the streamed call. When it returns a string the draft shows that error instead of the `draft` body. Not consulted for `native` drafts. |
 | `compact` | `fun(tool: smelt.transcript.Block, ctx: smelt.transcript.Context): string\|smelt.layout.Node\|nil` |  | Collapsed detail renderer. Return nil to suppress the detail. |
 
 ### `smelt.transcript.View`

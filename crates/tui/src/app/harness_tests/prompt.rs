@@ -1120,6 +1120,7 @@ fn steering_during_streamed_tool_call_leaves_one_completed_transcript_row() {
         stream_id: "stream-1".into(),
         call_id: Some("read-1".into()),
         tool_name: Some("read_file".into()),
+        native: false,
     }));
     app.feed_one(SourceEvent::engine(EngineEvent::ToolCallDraftFinished {
         stream_id: "stream-1".into(),

@@ -1928,6 +1928,7 @@ impl ConversationRuntime {
         stream_id: String,
         call_id: Option<String>,
         name: Option<String>,
+        native: bool,
     ) -> Option<smelt_core::transcript_model::BlockId> {
         self.finish_stream_animation();
         self.tool_draft_animations
@@ -1941,6 +1942,7 @@ impl ConversationRuntime {
             stream_id,
             call_id,
             name,
+            native,
         })
         .block_id
     }

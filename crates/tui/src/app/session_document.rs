@@ -1022,6 +1022,7 @@ pub(crate) enum StreamMutation {
         stream_id: String,
         call_id: Option<String>,
         name: Option<String>,
+        native: bool,
     },
     AppendToolDraft {
         stream_id: String,
@@ -1677,9 +1678,15 @@ impl SessionDocument {
                 stream_id,
                 call_id,
                 name,
+                native,
             } => {
-                let change =
-                    parser.start_tool_draft(transcript.history_mut(), stream_id, call_id, name);
+                let change = parser.start_tool_draft(
+                    transcript.history_mut(),
+                    stream_id,
+                    call_id,
+                    name,
+                    native,
+                );
                 block_id = Some(change.block_id);
                 presentation_changed = change.presentation_changed;
                 applied = true;

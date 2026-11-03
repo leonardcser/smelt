@@ -51,11 +51,15 @@ async fn until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+/// Prefix Claude Code gives the tools it calls through smelt's MCP server.
+const SMELT_MCP_PREFIX: &str = "mcp__smelt__";
+
 struct Gate {
     policy_revision: u64,
     control_id: String,
     hook: bool,
     call_id: String,
+    /// The name Claude Code calls the tool by.
     tool_name: String,
     args: HashMap<String, Value>,
     in_workspace_root: bool,
@@ -1346,7 +1350,7 @@ impl Runtime<'_> {
                                 control_id: call.control_id.clone(),
                                 hook: false,
                                 call_id: call.call_id.clone(),
-                                tool_name: call.tool_name.clone(),
+                                tool_name: format!("{SMELT_MCP_PREFIX}{}", call.tool_name),
                                 args: call.args.clone(),
                                 in_workspace_root: true,
                             };
@@ -1464,7 +1468,7 @@ impl Runtime<'_> {
                 let name = input["tool_name"]
                     .as_str()
                     .ok_or("Claude Code permission hook has no tool name")?;
-                if name.starts_with("mcp__smelt__")
+                if name.starts_with(SMELT_MCP_PREFIX)
                     || (matches!(name, "AskUserQuestion" | "ExitPlanMode")
                         && !self.catalog.owns(name))
                 {
@@ -1489,7 +1493,7 @@ impl Runtime<'_> {
                 let name = request["tool_name"]
                     .as_str()
                     .ok_or("Claude Code permission request has no tool name")?;
-                if name.starts_with("mcp__smelt__") {
+                if name.starts_with(SMELT_MCP_PREFIX) {
                     self.write(reply(
                         id,
                         json!({"behavior":"allow", "updatedInput":request["input"]}),
@@ -1787,18 +1791,25 @@ impl Runtime<'_> {
             .insert(gate.control_id.clone(), Some(invocation_id));
         // Hosts recheck a request against their own workspace root, so it is
         // presented as a smelt tool only when Claude Code resolved it there.
-        let (tool_name, args, native) = if gate.in_workspace_root {
+        let call = if gate.in_workspace_root {
             transcript::presented(&gate.tool_name, gate.args.clone())
         } else {
-            (gate.tool_name.clone(), gate.args.clone(), true)
+            transcript::Presented {
+                name: gate.tool_name.clone(),
+                args: gate.args.clone(),
+                native: true,
+                namespaced: true,
+            }
         };
         let _ = self.session_tx().send(EngineEvent::RequestPermission {
             request_id: id,
             invocation_id,
             call_id: gate.call_id.clone(),
-            tool_name,
-            provider: native.then(|| self.payload.model_target.provider.clone()),
-            args,
+            tool_name: call.name,
+            provider: call
+                .namespaced
+                .then(|| self.payload.model_target.provider.clone()),
+            args: call.args,
             approval_patterns: metadata.approval_patterns,
             called_at_ms: crate::clock::unix_time_ms(self.config.clock.as_ref()),
             summary: metadata.summary,

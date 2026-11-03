@@ -473,7 +473,8 @@ function M.render_tool_body(block, ctx, opts, presentation)
   local renderer = presentation.body
   local draft_renderer = presentation.draft
   if block.draft and draft_renderer then
-    local draft_error = presentation.draft_error and presentation.draft_error(block)
+    -- Native calls skip smelt's preflight, so its errors never apply to them.
+    local draft_error = not block.native and presentation.draft_error and presentation.draft_error(block)
     if draft_error then
       return layout.gutter(
         layout.text(draft_error, { hl_group = "ErrorMsg" }),

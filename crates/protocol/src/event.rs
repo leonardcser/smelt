@@ -456,6 +456,9 @@ pub enum EngineEvent {
         stream_id: String,
         call_id: Option<String>,
         tool_name: Option<String>,
+        /// The provider runs the call itself, so smelt's tool preflight never
+        /// sees it.
+        native: bool,
     },
 
     /// Incremental argument fragment for a speculative tool call.

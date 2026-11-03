@@ -2064,6 +2064,7 @@ mod tests {
                 stream_id: "draft".into(),
                 call_id: None,
                 tool_name: Some("read_file".into()),
+                native: false,
             },
             &mut sink,
             |_| {},
