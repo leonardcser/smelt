@@ -413,6 +413,30 @@ async fn the_native_process_receives_the_session_control_identity() {
 
 #[tokio::test]
 #[serial(claude_code)]
+async fn an_interactive_turn_completes_once_claude_code_is_idle() {
+    let fixture = Fixture::new("text");
+    let mut handle = fixture.handle();
+    handle.send(payload(fixture.root.path(), 1, Vec::new()));
+    let mut working = None;
+    loop {
+        match output(&mut handle).await {
+            EngineOutput::Event(EngineEvent::NativeSessionState { working: now, .. }) => {
+                working = Some(now);
+            }
+            EngineOutput::Event(EngineEvent::TurnComplete { .. }) => break,
+            EngineOutput::Event(EngineEvent::TurnError { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        working,
+        Some(false),
+        "the host must see the session idle when the turn ends"
+    );
+}
+
+#[tokio::test]
+#[serial(claude_code)]
 async fn an_empty_turn_continues_without_a_user_message_in_history() {
     let fixture = Fixture::new("text");
     let mut history = Vec::new();
@@ -487,12 +511,8 @@ async fn resumed_native_plan_uses_the_saved_acknowledged_write() {
     let mut history = Vec::new();
     let mut handle = fixture.handle();
     handle.send(payload(fixture.root.path(), 1, history.clone()));
+    // The turn ends once Claude Code is idle, so stopping it keeps the session.
     finish(&mut handle, &mut history).await;
-    // A process stopped while Claude Code still works unlinks its session.
-    while !matches!(
-        output(&mut handle).await,
-        EngineOutput::Event(EngineEvent::NativeSessionState { working: false, .. })
-    ) {}
     drop(handle);
     let directory = plan_directory(&fixture.root.path().join("sessions"), "test-session").unwrap();
     std::fs::write(directory.join("unrelated.md"), "# Unrelated plan").unwrap();

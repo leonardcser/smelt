@@ -818,6 +818,8 @@ impl Runtime<'_> {
             return;
         };
         self.commit();
+        // The host judges the finished turn by the session's work state.
+        self.report();
         emit_complete(self.tx, turn.id, turn.started.elapsed(), false);
         self.transcript.route(self.session_tx());
     }
@@ -885,10 +887,19 @@ impl Runtime<'_> {
         loop {
             self.advance_move().await?;
             self.send_steers().await?;
-            let interactive = self.payload.tool_visibility == protocol::ToolVisibility::Interactive;
-            if self.turn.as_ref().is_some_and(|turn| {
-                matches!(turn.stage, Stage::Answered) && (interactive || self.settled())
-            }) {
+            // A turn ends once Claude Code is idle, which it reports after its
+            // result. Only a non-interactive turn also waits for background tasks.
+            let done = if self.payload.tool_visibility == protocol::ToolVisibility::Interactive {
+                self.quiet()
+            } else {
+                self.settled()
+            };
+            if done
+                && self
+                    .turn
+                    .as_ref()
+                    .is_some_and(|turn| matches!(turn.stage, Stage::Answered))
+            {
                 self.complete();
             }
             if self.native.process.is_none() {
