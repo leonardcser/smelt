@@ -3640,9 +3640,6 @@ impl TuiApp {
             crate::app::platform_runtime::PlatformEvent::JobCompleted(completion) => {
                 self.handle_job_completed(completion);
             }
-            crate::app::platform_runtime::PlatformEvent::PublicStatusHeartbeat => {
-                self.publish_public_status();
-            }
         }
     }
 

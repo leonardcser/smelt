@@ -7,7 +7,6 @@ pub(super) enum PlatformEvent {
     App(AppEvent),
     ContextWindow(Box<ContextWindowUpdate>),
     JobCompleted(smelt_core::process::JobCompletion),
-    PublicStatusHeartbeat,
 }
 
 pub(crate) struct ContextWindowRefresh {
@@ -72,7 +71,6 @@ pub(super) struct PlatformRuntime {
     public_status: Option<smelt_core::public_status::StatusPublisher>,
     #[cfg(test)]
     pub(super) status_updates: Option<Vec<smelt_core::public_status::StatusUpdate>>,
-    public_status_heartbeat: Option<tokio::time::Interval>,
     http_client: Option<engine::HttpClient>,
     context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<ContextWindowUpdate>>,
     context_window_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ContextWindowUpdate>>,
@@ -123,7 +121,6 @@ impl PlatformRuntime {
             public_status,
             #[cfg(test)]
             status_updates: None,
-            public_status_heartbeat: None,
             http_client: None,
             context_window_tx: None,
             context_window_rx: None,
@@ -138,10 +135,6 @@ impl PlatformRuntime {
         let (context_window_tx, context_window_rx) = tokio::sync::mpsc::unbounded_channel();
         self.context_window_tx = Some(context_window_tx);
         self.context_window_rx = Some(context_window_rx);
-        let mut heartbeat =
-            tokio::time::interval(smelt_core::public_status::StatusPublisher::heartbeat_interval());
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        self.public_status_heartbeat = Some(heartbeat);
         self.terminal = crate::term_setup::TuiTerminal::claim().ok();
     }
 
@@ -160,7 +153,6 @@ impl PlatformRuntime {
         if let Some(receiver) = self.app_event_rx.as_mut() {
             receiver.close();
         }
-        self.public_status_heartbeat = None;
         self.public_status = None;
         self.http_client = None;
         let server = self
@@ -353,12 +345,6 @@ impl PlatformRuntime {
                     None => std::future::pending().await,
                 }
             } => PlatformEvent::ContextWindow(Box::new(update)),
-            _ = async {
-                match self.public_status_heartbeat.as_mut() {
-                    Some(heartbeat) => heartbeat.tick().await,
-                    None => std::future::pending().await,
-                }
-            } => PlatformEvent::PublicStatusHeartbeat,
             else => std::future::pending().await,
         }
     }
@@ -596,7 +582,6 @@ mod tests {
 
         assert!(platform.shutdown);
         assert!(platform.public_status.is_none());
-        assert!(platform.public_status_heartbeat.is_none());
         assert!(platform.context_window_tx.is_none());
         assert!(platform.context_window_rx.is_none());
         assert!(platform.http_client.is_none());

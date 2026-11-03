@@ -136,8 +136,7 @@ JSON records contain:
 | `focus` | `focused`, `unfocused`, or `unknown` |
 | `cwd`, `session_id`, `mode` | Optional current session context |
 | `headless` | Whether the process has no TUI |
-| `boot_id`, `process_start_time_ticks` | Optional process-identity guards, available on Linux |
-| `updated_at_ms`, `expires_at_ms` | Unix timestamps for the latest heartbeat and expiry |
+| `updated_at_ms` | Unix timestamp of the latest status change |
 
 Scheduled continuations remain `busy`. Pending background work or result delivery
 reports `waiting`; permissions, questions, and turn errors report `needs_attention`.
@@ -145,9 +144,10 @@ reports `waiting`; permissions, questions, and turn errors report `needs_attenti
 For servers or watchers, use `background=true` with `notify_on_completion=false`
 to skip waiting and completion-triggered turns.
 
-Status is refreshed on every state change and at least every 5 seconds; stale or
-dead-process records are ignored. Files live under `$XDG_RUNTIME_DIR/smelt/status`
-(the temporary directory if unset), readable only by you on Unix.
+Status is written only when it changes, so an idle process stays asleep. Each
+process holds a lock on `<pid>.lock` while it runs; records of exited processes
+are ignored and removed. Files live under `$XDG_RUNTIME_DIR/smelt/status` (the
+temporary directory if unset), readable only by you on Unix.
 
 ### Upgrades
 

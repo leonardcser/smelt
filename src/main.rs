@@ -422,7 +422,6 @@ fn print_status_text(status: &smelt_core::public_status::PublicStatus) {
         println!("mode: {mode}");
     }
     println!("updated_at_ms: {}", status.updated_at_ms);
-    println!("expires_at_ms: {}", status.expires_at_ms);
 }
 
 fn print_statuses_text(statuses: &[smelt_core::public_status::PublicStatus]) {
