@@ -3010,61 +3010,44 @@ fn session_meta_from_stored_session(
 }
 
 impl SessionStorage {
-    /// Read searchable text from canonical SQLite without refreshing derived files.
-    pub fn load_search_blob(&self, id_or_prefix: &str) -> Option<String> {
-        self.load_search_blob_result(id_or_prefix).ok().flatten()
-    }
-
-    pub fn load_search_blob_result(
-        &self,
-        id_or_prefix: &str,
-    ) -> SessionStoreResult<Option<String>> {
-        let _perf = smelt_perf::perf::begin("session:load_search_blob");
-        let resolved = self.resolve_session_for_read_result(id_or_prefix)?;
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
+    /// Read the conversation text of a session (see
+    /// `LineageSessionReader::conversation_text`) from canonical SQLite
+    /// without refreshing derived files.
+    pub fn load_conversation_text(&self, id_or_prefix: &str) -> Option<String> {
+        let _perf = smelt_perf::perf::begin("session:load_conversation_text");
+        let resolved = self.resolve_session_for_read_result(id_or_prefix).ok()?;
+        smelt_store::LineageSessionReader::open_existing_in_lineage(
             &resolved.sessions_root,
             &resolved.lineage_id,
             &resolved.id,
         )
-        .map_err(|error| {
-            crate::session_store::store_error(
-                "open lineage search source",
-                &resolved.sessions_root,
-                error,
-            )
-        })?;
-        reader.search_blob().map(Some).map_err(|error| {
-            crate::session_store::store_error(
-                "read lineage search text",
-                &resolved.sessions_root,
-                error,
-            )
-        })
+        .and_then(|reader| reader.conversation_text())
+        .ok()
     }
 
-    /// Parallel batch read of search blobs. Missing or unavailable sessions are omitted.
-    pub fn load_search_blobs(&self, ids: Vec<String>) -> Vec<(String, String)> {
-        let _perf = smelt_perf::perf::begin("session:load_search_blobs");
+    /// Read the conversation text of many sessions in parallel. Missing and
+    /// unavailable sessions are omitted, and output order is not stable.
+    /// Sessions not yet started when `cancel` fires are skipped.
+    pub fn load_conversation_texts(
+        &self,
+        ids: Vec<String>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Vec<(String, String)> {
+        let _perf = smelt_perf::perf::begin("session:load_conversation_texts");
         let storage = self.clone();
         crate::utils::parallel_filter_map(ids, move |id| {
-            storage.load_search_blob(&id).map(|blob| (id, blob))
+            if cancel.is_cancelled() {
+                return None;
+            }
+            storage.load_conversation_text(&id).map(|text| (id, text))
         })
     }
 }
 
-/// Read searchable text from canonical SQLite without refreshing derived files.
-pub fn load_search_blob(id_or_prefix: &str) -> Option<String> {
-    process_storage().load_search_blob(id_or_prefix)
-}
-
-pub fn load_search_blob_result(id_or_prefix: &str) -> SessionStoreResult<Option<String>> {
-    process_storage().load_search_blob_result(id_or_prefix)
-}
-
-/// Parallel batch read of search blobs. Returns `(id, blob)` pairs; missing
-/// or unavailable sessions are omitted. Output order is not stable.
-pub fn load_search_blobs(ids: Vec<String>) -> Vec<(String, String)> {
-    process_storage().load_search_blobs(ids)
+/// Read the conversation text of a session from canonical SQLite without
+/// refreshing derived files.
+pub fn load_conversation_text(id_or_prefix: &str) -> Option<String> {
+    process_storage().load_conversation_text(id_or_prefix)
 }
 
 #[cfg(test)]
@@ -3629,7 +3612,7 @@ mod tests {
 
         assert!(load_store_header(&session.id).is_some());
         assert!(load_meta(&session.id).is_some());
-        assert!(load_search_blob(&session.id).is_some_and(|text| text.contains("read only")));
+        assert!(load_conversation_text(&session.id).is_some_and(|text| text.contains("read only")));
         assert_eq!(list_sessions().len(), 1);
 
         assert_eq!(
@@ -3795,14 +3778,14 @@ mod tests {
     }
 
     #[test]
-    fn load_search_blob_ignores_non_lineage_directory() {
+    fn load_conversation_text_ignores_non_lineage_directory() {
         let state = tempfile::tempdir().expect("state dir");
         let _g = crate::test_util::isolate_xdg_state(state.path());
 
         let id = numbered_session_id(103);
         let dir = non_lineage_fixture_dir(&id);
 
-        assert!(load_search_blob(&id).is_none());
+        assert!(load_conversation_text(&id).is_none());
         assert!(dir.join("data.json").exists());
     }
 

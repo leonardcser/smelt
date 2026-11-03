@@ -272,17 +272,17 @@ fun(id: string): string?
 
 **Advanced:** Low-level building block for plugins that need full control. It may change more freely than the rest of the API.
 
-Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
+Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
 
 ## `smelt.session.texts`
 
 ```lua
-fun(ids: string[]): table
+fun(ids: string[]): table<string, string>
 ```
 
-**Advanced:** Low-level building block for plugins that need full control. It may change more freely than the rest of the API.
-
-Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions. The heavy IO happens on a worker pool rather than serializing on the Lua thread.
+Read `smelt.session.text(id)` for many ids in parallel off the UI
+thread. Must run in a yieldable task. Returns a table keyed by id;
+missing and unavailable sessions are omitted.
 
 ## `smelt.session.tokens`
 

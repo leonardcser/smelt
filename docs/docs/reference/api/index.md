@@ -52,7 +52,7 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.permissions`](permissions.md) (some UI only): Inspect, revoke, and extend permission policy state, or synchronize live session and persisted grants.
 - [`smelt.provider`](provider.md): List built-in model providers and register custom ones.
 - [`smelt.reasoning`](reasoning.md) (some UI only): Reasoning-effort selector.
-- [`smelt.session`](session.md) (UI only): Current session metadata, turn list, message snapshots, rewind, and persisted session management. 9 advanced function(s).
+- [`smelt.session`](session.md) (UI only): Current session metadata, turn list, message snapshots, rewind, and persisted session management. 8 advanced function(s).
 - [`smelt.session.messages`](session_messages.md) (UI only): Session messages.
 - [`smelt.session.slug`](session_slug.md) (UI only): Session slug.
 - [`smelt.session.title`](session_title.md) (UI only): Session title.

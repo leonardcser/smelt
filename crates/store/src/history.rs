@@ -3,7 +3,7 @@ use std::ops::Range;
 use protocol::HistoryItem;
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use smelt_buffer::{cell_width, text};
+use smelt_buffer::cell_width;
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -321,8 +321,78 @@ pub(crate) fn history_object_bytes(value: &Value) -> usize {
     }
 }
 
-pub(crate) fn history_search_text(item: &HistoryItem) -> Result<String> {
-    Ok(collect_text(&serde_json::to_value(item)?, 64 * 1024))
+/// Transcript record kinds that make up a session's search text: what the
+/// user and assistant said, plus compaction summaries standing in for both.
+/// Tool output, reasoning and status rows are left out.
+const CONVERSATION_KINDS: [&str; 3] = ["user", "assistant", "compacted"];
+
+/// Search text of one stored transcript record: its indexed text when the
+/// record is conversation, else `None`. Decodes without allocating the text
+/// of other kinds, which is almost all stored bytes in tool-heavy sessions.
+pub(crate) struct ConversationText(pub(crate) Option<String>);
+
+impl<'de> serde::Deserialize<'de> for ConversationText {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Kind,
+            IndexedText,
+            #[serde(other)]
+            Other,
+        }
+
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = ConversationText;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a stored transcript record")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut kind: Option<String> = None;
+                let mut text: Option<String> = None;
+                while let Some(field) = map.next_key()? {
+                    match field {
+                        Field::Kind => kind = Some(map.next_value()?),
+                        // Records serialize `kind` first; keep the text only
+                        // while the kind is unknown or conversation.
+                        Field::IndexedText if kind.as_deref().is_none_or(is_conversation_kind) => {
+                            text = Some(map.next_value()?)
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(ConversationText(text.filter(|_| {
+                    kind.as_deref().is_some_and(is_conversation_kind)
+                })))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
+fn is_conversation_kind(kind: &str) -> bool {
+    CONVERSATION_KINDS.contains(&kind)
+}
+
+/// Conversation text of a history item: user input and assistant replies.
+pub(crate) fn history_conversation_text(item: &HistoryItem) -> Option<std::borrow::Cow<'_, str>> {
+    match item {
+        HistoryItem::User { content, .. } => Some(content.text_content()),
+        HistoryItem::Assistant(step) => step.content.as_ref().map(|content| content.text_content()),
+        HistoryItem::System { .. } | HistoryItem::Note(_) => None,
+    }
 }
 
 struct NormalizedHistoryItem {
@@ -442,48 +512,6 @@ fn object_ref_json(hash: &str, raw_size: u64) -> Value {
     json!({ OBJECT_REF_KEY: { "hash": hash, "raw_size": raw_size } })
 }
 
-pub(crate) fn collect_text(value: &Value, max_bytes: usize) -> String {
-    let mut out = String::new();
-    let mut truncated = false;
-    collect_text_inner(value, &mut out, max_bytes, &mut truncated);
-    out
-}
-
-fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize, truncated: &mut bool) {
-    if *truncated || out.len() >= max_bytes {
-        return;
-    }
-    match value {
-        Value::String(value) => {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(value);
-            if out.len() > max_bytes {
-                let keep = text::grapheme_prefix(out, max_bytes).len();
-                text::replace_range(out, keep..out.len(), "");
-                *truncated = true;
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_text_inner(value, out, max_bytes, truncated);
-            }
-        }
-        Value::Object(map) => {
-            if map.contains_key(OBJECT_REF_KEY) {
-                return;
-            }
-            let mut keys = map.keys().collect::<Vec<_>>();
-            keys.sort_unstable();
-            for key in keys {
-                collect_text_inner(&map[key], out, max_bytes, truncated);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub(crate) fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Result<()> {
     match value {
         Value::Object(map) => {
@@ -537,21 +565,6 @@ pub(crate) fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn collect_text_truncates_at_grapheme_boundaries() {
-        let value = json!({"text": "ab🙂cd"});
-        assert_eq!(collect_text(&value, 5), "ab");
-        assert_eq!(collect_text(&value, 6), "ab🙂");
-
-        for grapheme in ["e\u{301}", "👩\u{200d}💻", "9\u{fe0f}", "🇨🇦"] {
-            let value = json!({"text": format!("a{grapheme}b")});
-            assert_eq!(collect_text(&value, grapheme.len()), "a", "{grapheme:?}");
-        }
-
-        let values = json!(["abce\u{301}", "later"]);
-        assert_eq!(collect_text(&values, 4), "abc");
-    }
 
     #[test]
     fn extent_profile_interpolates_monotonically() {

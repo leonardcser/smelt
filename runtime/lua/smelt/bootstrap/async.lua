@@ -49,6 +49,16 @@ if smelt.session then
     return result
   end
 
+  --- Read `smelt.session.text(id)` for many ids in parallel off the UI
+  --- thread. Must run in a yieldable task. Returns a table keyed by id;
+  --- missing and unavailable sessions are omitted.
+  ---@tier ui_host
+  ---@type fun(ids: string[]): table<string, string>
+  function smelt.session.texts(ids)
+    local result = smelt.task.external(function(id) internal.session.__start_texts(id, ids) end)
+    return result.texts
+  end
+
   --- List managed worktrees off the UI thread. Must run in `smelt.spawn`, a
   --- command, or a tool. Returns sorted `{ name, branch, path, base, current }` rows.
   ---@tier ui_host

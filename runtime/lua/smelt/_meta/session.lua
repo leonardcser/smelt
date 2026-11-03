@@ -143,13 +143,14 @@ session.switch_cwd = nil
 session.system = nil
 
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
+--- Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.
 ---@type fun(id: string): string?
 session.text = nil
 
---- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions. The heavy IO happens on a worker pool rather than serializing on the Lua thread.
----@type fun(ids: string[]): table
+--- Read `smelt.session.text(id)` for many ids in parallel off the UI
+--- thread. Must run in a yieldable task. Returns a table keyed by id;
+--- missing and unavailable sessions are omitted.
+---@type fun(ids: string[]): table<string, string>
 session.texts = nil
 
 --- Cumulative token usage across every turn this session has made. Returns a table with `input` (non-cached input), `output`, `cache_read`, `cache_write`, `cached_input`, `input_total`, `reasoning` (output detail), `standard_total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).

@@ -1055,23 +1055,30 @@ pub(super) fn register(
     })?;
     m.advanced_fn(
         "text",
-        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.",
+        "Return the searchable conversation text of session `id`: user input, assistant replies and compaction summaries. Tool output, reasoning and status rows are excluded. Returns `nil` when the session is missing. Reads canonical SQLite without writing derived sidecars.",
         &["id"],
         |_, id: String| -> LuaResult<Option<String>> {
-            Ok(crate::lua::with_session_host(|host| host.session_search_blob(&id)))
+            Ok(crate::lua::with_session_host(|host| host.session_conversation_text(&id)))
         },
     )?;
-    m.advanced_fn(
-        "texts",
-        "Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions. The heavy IO happens on a worker pool rather than serializing on the Lua thread.",
-        &["ids"],
-        |lua, ids: Vec<String>| -> LuaResult<mlua::Table> {
-            let pairs = crate::lua::with_session_host(|host| host.session_search_blobs(ids));
-            let out = lua.create_table()?;
-            for (id, blob) in pairs {
-                out.set(id, blob)?;
-            }
-            Ok(out)
+    let texts_sink = shared.core.resume_sink();
+    m.private_live_only_fn(
+        "__start_texts",
+        &["task_id", "ids"],
+        move |_, (task_id, ids): (u64, Vec<String>)| -> LuaResult<()> {
+            let cancel = smelt_core::lua::current_task_cancel().ok_or_else(|| {
+                mlua::Error::RuntimeError("session texts require a Lua task".into())
+            })?;
+            let storage = crate::lua::with_session_host(|host| host.session_storage());
+            texts_sink.clone().spawn_blocking_resolve(task_id, move || {
+                let texts: serde_json::Map<String, serde_json::Value> = storage
+                    .load_conversation_texts(ids, cancel)
+                    .into_iter()
+                    .map(|(id, text)| (id, serde_json::Value::String(text)))
+                    .collect();
+                serde_json::json!({ "texts": texts })
+            });
+            Ok(())
         },
     )?;
     m.advanced_fn(

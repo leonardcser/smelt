@@ -1852,25 +1852,35 @@ impl LineageSessionReader {
         crate::request_audit::request_payloads(&self.conn, request_attempt_id)
     }
 
-    pub fn search_blob(&self) -> Result<String> {
+    /// Conversation text of the session for cross-session search: user
+    /// input, assistant replies and compaction summaries, one block per line
+    /// group. Tool output, reasoning and status rows are left out.
+    pub fn conversation_text(&self) -> Result<String> {
+        self.read_snapshot(Self::read_conversation_text)?
+    }
+
+    fn read_conversation_text(&self) -> Result<String> {
         const CHUNK_RECORDS: u64 = 256;
 
-        let state = self.snapshot()?;
-        let transcript_len = state.transcript_len;
+        let snapshot = lineage::lineage_session_head(&self.conn, &self.lineage, &self.branch)?;
+        let transcript_len = snapshot.transcript_root.item_count();
         let mut output = String::new();
+        let mut push = |text: &str| {
+            if !text.is_empty() {
+                output.push_str(text);
+                if !text.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
+        };
         if transcript_len == 0 {
+            let history_len = snapshot.head.history_len.get();
             let mut start = 0;
-            while start < state.head.history_len.get() {
-                let end = start
-                    .saturating_add(CHUNK_RECORDS)
-                    .min(state.head.history_len.get());
+            while start < history_len {
+                let end = start.saturating_add(CHUNK_RECORDS).min(history_len);
                 for item in self.history_range(start, end)? {
-                    let text = crate::history::history_search_text(&item)?;
-                    if !text.is_empty() {
-                        output.push_str(&text);
-                        if !text.ends_with('\n') {
-                            output.push('\n');
-                        }
+                    if let Some(text) = crate::history::history_conversation_text(&item) {
+                        push(&text);
                     }
                 }
                 start = end;
@@ -1880,14 +1890,16 @@ impl LineageSessionReader {
         let mut start = 0;
         while start < transcript_len {
             let end = start.saturating_add(CHUNK_RECORDS).min(transcript_len);
-            for record in self.transcript_object_backed_range(start, end)? {
-                if record.indexed_text.is_empty() {
-                    continue;
-                }
-                output.push_str(&record.indexed_text);
-                if !record.indexed_text.ends_with('\n') {
-                    output.push('\n');
-                }
+            let records: Vec<crate::history::ConversationText> =
+                lineage::deserialize_sequence_range(
+                    &self.conn,
+                    &self.lineage,
+                    &snapshot.transcript_root,
+                    start,
+                    end,
+                )?;
+            for text in records.into_iter().filter_map(|record| record.0) {
+                push(&text);
             }
             start = end;
         }
@@ -3237,6 +3249,43 @@ mod tests {
             assert_eq!(stats.wal_bytes, 0);
             assert_eq!(writer.snapshot().unwrap(), snapshot);
         }
+    }
+
+    #[test]
+    fn conversation_text_keeps_conversation_only() {
+        let root = tempfile::tempdir().unwrap();
+        let id = session_id('1');
+        let mut writer = OwnedLineageWriter::open(root.path(), &id).unwrap();
+        let mut command = initial_commit(&id);
+        let records = [
+            ("user", "ask about the dialog"),
+            ("thinking", "private reasoning"),
+            ("tool", "huge tool output"),
+            ("process_status", "status row"),
+            ("assistant", "reply\n"),
+            ("compacted", "earlier summary"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, text))| {
+            let mut record = transcript_record(index as u64, text.into());
+            record.kind = kind.into();
+            record
+        })
+        .collect();
+        command.transcript_records = Some(crate::TranscriptRecordSuffix {
+            start: crate::TranscriptRecordIndex::ZERO,
+            records,
+        });
+        writer.commit_session(&command).unwrap();
+        let reader =
+            LineageSessionReader::open_existing_in_lineage(root.path(), writer.lineage_id(), &id)
+                .unwrap();
+
+        assert_eq!(
+            reader.conversation_text().unwrap(),
+            "ask about the dialog\nreply\nearlier summary\n"
+        );
     }
 
     #[test]

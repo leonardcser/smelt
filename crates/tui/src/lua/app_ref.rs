@@ -1897,12 +1897,12 @@ impl SessionLuaHost<'_> {
             .list_session_page_result(query)
     }
 
-    pub(crate) fn session_search_blob(&self, id: &str) -> Option<String> {
-        self.app.conversation.sessions().load_search_blob(id)
+    pub(crate) fn session_conversation_text(&self, id: &str) -> Option<String> {
+        self.app.conversation.sessions().load_conversation_text(id)
     }
 
-    pub(crate) fn session_search_blobs(&self, ids: Vec<String>) -> Vec<(String, String)> {
-        self.app.conversation.sessions().load_search_blobs(ids)
+    pub(crate) fn session_storage(&self) -> smelt_core::session::SessionStorage {
+        self.app.conversation.sessions().clone()
     }
 
     pub(crate) fn delete_session(&self, id: &str) -> Result<(), String> {

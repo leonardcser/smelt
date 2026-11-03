@@ -5,12 +5,12 @@
 -- workspace" (default) and "all sessions".
 --
 -- Matching is two-tier:
---   * Title + first-user-message: fuzzy match (`smelt.fuzzy`), instant - runs
---     against cheap meta loaded up front.
---   * Full message text: substring match against canonical SQLite search text,
---     loaded in parallel on the first non-empty query and cached for the dialog
---     lifetime. Opening the dialog stays instant; the first keystroke pays the
---     IO cost once.
+--   * Title + first-user-message: fuzzy match (`smelt.fuzzy`) against cheap
+--     meta loaded up front.
+--   * Conversation text: case-insensitive substring match against each
+--     session's user and assistant text. Loads off the UI thread as soon as the
+--     dialog opens and is cached for the dialog lifetime; until it arrives,
+--     only title matches show, and content matches merge in when it lands.
 
 local NS_STATE = smelt.ns("smelt.resume.state")
 
@@ -173,47 +173,36 @@ smelt.cmd.register("resume", function()
     local workspace_only = true
     local query          = ""
 
-    -- Pre-build title haystacks once. Hot path runs `smelt.fuzzy.score` against
-    -- these per refilter; rebuilding per call would re-concatenate strings.
+    -- Title haystacks by session id, built once and ranked in one call per query.
     local title_hays = {}
     for _, e in ipairs(entries) do
-      title_hays[e.id] = table.concat({
-        display_title(e),
-        e.subtitle or "",
-        e.error or "",
-      }, " ")
+      title_hays[e.id] = table.concat({ display_title(e), e.subtitle or "", e.error or "" }, " ")
     end
 
-    -- Lowercased content blobs, lazy-loaded in parallel on the first non-empty
-    -- query. Stays `nil` while the user is just toggling the workspace filter.
+    -- Lowercased conversation text by session id; `nil` until the background
+    -- load started below finishes.
     local texts = nil
 
-    local function ensure_texts()
-      if texts ~= nil then return end
-      local ids = {}
-      for _, e in ipairs(entries) do
-        if e.available ~= false then table.insert(ids, e.id) end
-      end
-      local raw = smelt.session.texts(ids)
-      local lowered = {}
-      for k, v in pairs(raw) do lowered[k] = v:lower() end
-      texts = lowered
-    end
-
-    local function entry_matches(entry)
-      if entry.available ~= false and workspace_only and entry.cwd ~= current_cwd then return false end
-      if query == "" then return true end
-      if smelt.fuzzy.score(title_hays[entry.id] or "", query) ~= nil then
-        return true
-      end
-      local blob = texts and texts[entry.id]
-      return blob ~= nil and blob:find(query:lower(), 1, true) ~= nil
-    end
-
     local function visible_tree()
-      local visible = {}
+      local candidates = {}
       for _, e in ipairs(entries) do
-        if entry_matches(e) then table.insert(visible, e) end
+        if e.available == false or not workspace_only or e.cwd == current_cwd then
+          table.insert(candidates, e)
+        end
+      end
+      if query == "" then return smelt.session.tree(candidates, { order = "asc" }) end
+
+      local hays = {}
+      for i, e in ipairs(candidates) do hays[i] = title_hays[e.id] end
+      local matched = {}
+      for _, i in ipairs(smelt.fuzzy.rank(hays, query)) do matched[i] = true end
+      local needle = query:lower()
+      local visible = {}
+      for i, e in ipairs(candidates) do
+        local blob = texts and texts[e.id]
+        if matched[i] or (blob ~= nil and blob:find(needle, 1, true) ~= nil) then
+          table.insert(visible, e)
+        end
       end
       return smelt.session.tree(visible, { order = "asc" })
     end
@@ -319,15 +308,38 @@ smelt.cmd.register("resume", function()
       end)
     end
 
+    -- Session the last refilter selected. Late content matches keep a row the
+    -- user moved to instead of jumping back to the newest match.
+    local auto_selected_id = nil
+
     local function refilter()
       list:set_items(visible_tree())
       select_bottom()
+      local e = list:selected()
+      auto_selected_id = e and e.id
       schedule_preview()
     end
+
+    local function merge_texts(raw)
+      local lowered = {}
+      for id, text in pairs(raw) do lowered[id] = text:lower() end
+      texts = lowered
+      if resolved or query == "" then return end
+      local e = list:selected()
+      if e and e.id ~= auto_selected_id then
+        list:set_items_preserve(visible_tree(), function(e) return e.id end)
+        schedule_preview()
+      else
+        refilter()
+      end
+    end
+
+    local texts_load
 
     local function close(value)
       if resolved then return end
       resolved = true
+      if texts_load then texts_load:remove() end
       if preview_timer then
         preview_timer:remove()
         preview_timer = nil
@@ -350,7 +362,6 @@ smelt.cmd.register("resume", function()
 
     input_leaf:on("text_changed", function(raw)
       query = (raw and raw.text) or ""
-      if query ~= "" then ensure_texts() end
       refilter()
     end)
     list_leaf:on("selection_changed", function() schedule_preview() end)
@@ -454,6 +465,12 @@ smelt.cmd.register("resume", function()
     select_bottom()
     render_preview()
     input_leaf:focus()
+
+    local text_ids = {}
+    for _, e in ipairs(entries) do
+      if e.available ~= false then table.insert(text_ids, e.id) end
+    end
+    texts_load = smelt.spawn(function() merge_texts(smelt.session.texts(text_ids)) end)
 
     local picked = smelt.task.wait(task_id)
     if picked then smelt.session.load(picked.id) end
