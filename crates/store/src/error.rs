@@ -42,6 +42,15 @@ pub enum StoreError {
 }
 
 impl StoreError {
+    /// True when SQLite gave up waiting for a lock held by another connection.
+    pub fn is_sqlite_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy
+        )
+    }
+
     pub fn is_recoverable_derived_corruption(&self) -> bool {
         matches!(self, Self::UnsupportedSchema { .. } | Self::Integrity(_))
             || matches!(
