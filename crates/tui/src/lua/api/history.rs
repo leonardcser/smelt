@@ -1,8 +1,6 @@
 //! `smelt.history` bindings - past submitted prompts.
 //!   entries()      → array of strings (oldest first)
-//!   search(query)  → [{index, score}] ranked by the
-//!                    history-specific scorer (word-match boosts,
-//!                    recency bonus). 1-based index into entries().
+//!   search(query, limit?) → 1-based indices into entries(), best first.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
@@ -32,37 +30,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "search",
-        "Rank prompt history against `query` using the history-specific scorer (word-match boost, recency bonus, dedupe). Returns `{ index, score }` rows where `index` is 1-based into `entries()`.",
-        &["query"],
-        |lua, query: String| -> LuaResult<mlua::Table> {
-            let entries =
-                crate::lua::try_with_conversation_host(|host| host.prompt_history()).unwrap_or_default();
-            // Entries are oldest-first; iterate reversed and dedupe so recent ranks highest.
-            let mut seen = std::collections::HashSet::new();
-            let mut scored: Vec<(u32, usize, usize)> = Vec::new();
-            for (rank, (orig_idx, entry)) in entries.iter().enumerate().rev().enumerate() {
-                if !seen.insert(entry.as_str()) {
-                    continue;
-                }
-                let label = entry
-                    .trim_start()
-                    .lines()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty())
-                    .unwrap_or("");
-                if let Some(s) = smelt_core::fuzzy::history::history_score(label, &query, rank) {
-                    scored.push((s, rank, orig_idx));
-                }
-            }
-            scored.sort_by_key(|(s, rank, _)| (*s, *rank));
-            let out = lua.create_table()?;
-            for (i, (score, _rank, orig_idx)) in scored.into_iter().enumerate() {
-                let entry = lua.create_table()?;
-                entry.set("index", orig_idx + 1)?;
-                entry.set("score", score)?;
-                out.set(i + 1, entry)?;
-            }
-            Ok(out)
+        "Search prompt history for `query`. Every query word must appear in the entry; whole-entry, prefix and word-start matches rank above substring matches, then fuzzy matches on the first line. Within a tier, matches near the start of the first line rank above matches further along it, then on later lines; newer entries break ties. Duplicates are dropped, and an empty query lists the newest entries. Returns up to `limit` (default: all) 1-based indices into `entries()`, best first.",
+        &["query", "limit"],
+        |_, (query, limit): (String, Option<usize>)| -> LuaResult<Vec<usize>> {
+            let limit = limit.unwrap_or(usize::MAX);
+            let matches = crate::lua::try_with_conversation_host(|host| {
+                host.search_prompt_history(&query, limit)
+            })
+            .unwrap_or_default();
+            Ok(matches.into_iter().map(|index| index + 1).collect())
         },
     )?;
     Ok(())

@@ -591,6 +591,10 @@ impl ConversationLuaHost<'_> {
             .map(String::from)
             .collect()
     }
+
+    pub(crate) fn search_prompt_history(&mut self, query: &str, limit: usize) -> Vec<usize> {
+        self.app.prompt.search_history(query, limit)
+    }
 }
 
 pub(crate) struct AgentLuaHost<'a> {

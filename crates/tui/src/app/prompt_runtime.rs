@@ -257,6 +257,10 @@ impl PromptRuntime {
         self.history.entries()
     }
 
+    pub(crate) fn search_history(&mut self, query: &str, limit: usize) -> Vec<usize> {
+        self.history.search(query, limit)
+    }
+
     pub(crate) fn try_queue_turn(&mut self, queued: QueuedInput) -> bool {
         let queued = self.queues.try_push_turn(queued);
         if queued {

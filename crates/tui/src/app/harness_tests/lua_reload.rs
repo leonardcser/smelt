@@ -2928,12 +2928,12 @@ fn lua_history_entries_and_search_return_sequences() {
             assert(#entries >= 2)
             assert(entries[#entries] == "second search target")
             local matches = smelt.history.search("target")
-            assert(#matches >= 1)
-            assert(type(matches[1].index) == "number")
-            assert(type(matches[1].score) == "number")
+            assert(#matches == 1)
+            assert(entries[matches[1]] == "second search target")
             local bun_matches = smelt.history.search("bun")
-            assert(#bun_matches >= 2)
-            assert(entries[bun_matches[1].index] == "newer bun prompt")
+            assert(#bun_matches == 2)
+            assert(entries[bun_matches[1]] == "newer bun prompt")
+            assert(#smelt.history.search("", 2) == 2)
         "#,
     ));
 }

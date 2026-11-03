@@ -1,158 +1,344 @@
-//! History reverse-search scoring used by `smelt.history.search(query)`.
+//! Prompt-history search behind `smelt.history.search`.
+//!
+//! Each query word must appear in the entry. Matches rank by tier, best
+//! first: the whole entry, an entry prefix, every word at a word start, every
+//! word as a substring, then a fuzzy match on the first line. Within a tier,
+//! matches visible in the picker row beat matches further along the first
+//! line, which beat matches on later lines; then newer entries beat older
+//! ones. Case is smart: an uppercase query letter makes the search
+//! case-sensitive.
 
-use crate::fuzzy::score::{recency_bonus, split_words};
+use std::collections::HashSet;
 
-pub fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
-    // Normalize the frizbee score into a small range so the
-    // word/exact/prefix bonuses below dominate the relative ordering.
-    let base =
-        (crate::fuzzy::fuzzy_score(text, query, crate::fuzzy::CaseMatching::Smart)? / 100) as i64;
-    let text_norm = smelt_buffer::text::trim_whitespace(text).to_lowercase();
-    let query_norm = smelt_buffer::text::trim_whitespace(query).to_lowercase();
+use smelt_buffer::text;
 
-    if query_norm.is_empty() {
-        return Some(recency_rank as u32);
-    }
+use super::{matcher, respects_case, CaseMatching};
 
-    let text_words = split_words(&text_norm);
-    let query_words = split_words(&query_norm);
-    let query_has_multiple_words = query_words.len() > 1;
+/// Leading characters of the first line that a picker row shows.
+const VISIBLE_CHARS: usize = 80;
 
-    let mut score = base;
+/// Deduplicated, case-folded history entries, newest first. Built once per
+/// history revision so a keystroke only scans.
+pub struct HistoryIndex {
+    entries: Vec<IndexedEntry>,
+}
 
-    if text_norm == query_norm {
-        score -= 2_000;
-    } else if text_norm.starts_with(&query_norm) {
-        score -= 200;
-    }
+struct IndexedEntry {
+    /// Position in the oldest-first history.
+    index: usize,
+    /// Entry with surrounding whitespace trimmed; its first line is the label.
+    text: Box<str>,
+    folded: Box<str>,
+}
 
-    if !query_has_multiple_words && text_words.len() > 1 {
-        score += ((text_words.len() - 1) as i64) * 60;
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Tier {
+    Exact,
+    Prefix,
+    WordStart,
+    Substring,
+    Fuzzy,
+}
 
-    let mut saw_exact_word_match = false;
-    let mut saw_prefix_word_match = false;
-    let mut saw_substring_match = false;
+/// Where the furthest matched text of an entry ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Placement {
+    /// Within the leading characters a picker row shows.
+    Visible,
+    /// Further along the first line.
+    Label,
+    /// On a later line.
+    Body,
+}
 
-    for word in &query_words {
-        if text_words.iter().any(|candidate| candidate == word) {
-            saw_exact_word_match = true;
-            score -= 400;
-        } else if text_words
-            .iter()
-            .any(|candidate| candidate.starts_with(word))
-        {
-            saw_prefix_word_match = true;
-            score -= 140;
-        } else if text_norm.contains(word) {
-            saw_substring_match = true;
-            score -= 40;
+/// Sort key of one match; lower is better.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Rank {
+    tier: Tier,
+    placement: Placement,
+    /// Inverted fuzzy score; zero for literal tiers.
+    fuzzy: u16,
+    /// Position in the newest-first index.
+    recency: usize,
+}
+
+impl HistoryIndex {
+    /// Index `entries`, given oldest first.
+    pub fn build<'a>(
+        entries: impl DoubleEndedIterator<Item = &'a str> + ExactSizeIterator,
+    ) -> Self {
+        let total = entries.len();
+        let mut seen = HashSet::with_capacity(total);
+        let mut indexed = Vec::with_capacity(total);
+        for (index, entry) in entries.enumerate().rev() {
+            let trimmed = text::trim_whitespace(entry);
+            if trimmed.is_empty() || !seen.insert(trimmed) {
+                continue;
+            }
+            indexed.push(IndexedEntry {
+                index,
+                text: trimmed.into(),
+                folded: trimmed.to_lowercase().into(),
+            });
         }
+        Self { entries: indexed }
     }
 
-    if !query_has_multiple_words {
-        if let Some(first_word) = query_words.first() {
-            let boundary_prefix_matches = text_words
-                .iter()
-                .filter(|candidate| candidate.starts_with(first_word))
-                .count();
-            if boundary_prefix_matches > 0 {
-                score -= 80;
+    /// Up to `limit` history positions (oldest-first indices) matching
+    /// `query`, best first. An empty query lists the newest entries.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<usize> {
+        let _perf = smelt_perf::perf::begin("fuzzy:history_search");
+        let query = text::trim_whitespace(query);
+        if query.is_empty() {
+            return self.entries.iter().take(limit).map(|e| e.index).collect();
+        }
+        let case_sensitive = respects_case(CaseMatching::Smart, query);
+        let folded_query;
+        let needle = if case_sensitive {
+            query
+        } else {
+            folded_query = query.to_lowercase();
+            folded_query.as_str()
+        };
+        let words: Vec<&str> = needle.split_whitespace().collect();
+
+        let mut ranked = Vec::new();
+        let mut unmatched = Vec::new();
+        for (recency, entry) in self.entries.iter().enumerate() {
+            let haystack = if case_sensitive {
+                &entry.text
+            } else {
+                &entry.folded
+            };
+            match literal_rank(haystack, needle, &words) {
+                Some((tier, placement)) => ranked.push(Rank {
+                    tier,
+                    placement,
+                    fuzzy: 0,
+                    recency,
+                }),
+                None => unmatched.push(recency),
             }
         }
+
+        // Fuzzy hits rank below every literal hit, so skip them once the
+        // literal hits fill the page.
+        if ranked.len() < limit && !unmatched.is_empty() {
+            let labels: Vec<&str> = unmatched
+                .iter()
+                .map(|&recency| first_line(&self.entries[recency].text))
+                .collect();
+            for m in matcher(query, CaseMatching::Smart).match_list(&labels) {
+                ranked.push(Rank {
+                    tier: Tier::Fuzzy,
+                    placement: Placement::Label,
+                    fuzzy: u16::MAX - m.score,
+                    recency: unmatched[m.index as usize],
+                });
+            }
+        }
+
+        ranked.sort_unstable();
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|rank| self.entries[rank.recency].index)
+            .collect()
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
+}
+
+/// Byte offsets where the visible part and the whole of the first line end.
+struct Label {
+    visible_end: usize,
+    end: usize,
+}
+
+impl Label {
+    fn of(haystack: &str) -> Self {
+        let end = haystack.find('\n').unwrap_or(haystack.len());
+        let visible_end = text::slice(haystack, 0..end)
+            .char_indices()
+            .nth(VISIBLE_CHARS)
+            .map_or(end, |(pos, _)| pos);
+        Self { visible_end, end }
     }
 
-    if !query_has_multiple_words {
-        // Penalize pure fuzzy-subsequence matches so word hits rank above them.
-        if !saw_exact_word_match && !saw_prefix_word_match && !saw_substring_match {
-            score += 900;
+    fn placement(&self, match_end: usize) -> Placement {
+        if match_end <= self.visible_end {
+            Placement::Visible
+        } else if match_end <= self.end {
+            Placement::Label
+        } else {
+            Placement::Body
         }
     }
+}
 
-    score -= recency_bonus(recency_rank);
+/// Literal tier of `haystack` against the whole `needle` and its `words`,
+/// plus where the furthest matched word ends.
+fn literal_rank(haystack: &str, needle: &str, words: &[&str]) -> Option<(Tier, Placement)> {
+    let label = Label::of(haystack);
+    if haystack == needle {
+        return Some((Tier::Exact, label.placement(needle.len())));
+    }
+    if haystack.starts_with(needle) {
+        return Some((Tier::Prefix, label.placement(needle.len())));
+    }
+    let mut tier = Tier::WordStart;
+    let mut placement = Placement::Visible;
+    for word in words {
+        let (word_tier, word_placement) = word_rank(haystack, word, &label)?;
+        tier = tier.max(word_tier);
+        placement = placement.max(word_placement);
+    }
+    Some((tier, placement))
+}
 
-    Some(score.max(0) as u32)
+/// Best occurrence of `word` in `haystack`: word starts beat mid-word hits,
+/// then earlier placements beat later ones.
+fn word_rank(haystack: &str, word: &str, label: &Label) -> Option<(Tier, Placement)> {
+    let mut best: Option<(Tier, Placement)> = None;
+    for (pos, _) in haystack.match_indices(word) {
+        let tier = if is_word_start(haystack, pos, word) {
+            Tier::WordStart
+        } else {
+            Tier::Substring
+        };
+        let candidate = (tier, label.placement(pos + word.len()));
+        if best.is_none_or(|best| candidate < best) {
+            best = Some(candidate);
+        }
+        if candidate == (Tier::WordStart, Placement::Visible) {
+            break;
+        }
+    }
+    best
+}
+
+fn is_word_start(haystack: &str, pos: usize, word: &str) -> bool {
+    !word.starts_with(char::is_alphanumeric)
+        || text::slice(haystack, 0..pos)
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::history_score;
+    use super::HistoryIndex;
 
-    /// Rank `entries` (oldest first, like the live history vec) against `query`.
-    /// Returns the original labels in best-first order, matching what Ctrl+R
-    /// displays at the bottom of the picker.
-    fn ranked(entries: &[&str], query: &str) -> Vec<String> {
-        // Oldest-first → iterate reversed so the rank index marks recency.
-        let mut scored: Vec<(u32, usize, String)> = entries
-            .iter()
-            .rev()
-            .enumerate()
-            .filter_map(|(rank, text)| {
-                history_score(text, query, rank).map(|s| (s, rank, (*text).to_string()))
-            })
-            .collect();
-        scored.sort_by_key(|(s, rank, _)| (*s, *rank));
-        scored.into_iter().map(|(_, _, t)| t).collect()
+    /// Search `entries` (oldest first, like the live history) and return the
+    /// matching entries best first.
+    fn search<'a>(entries: &[&'a str], query: &str) -> Vec<&'a str> {
+        HistoryIndex::build(entries.iter().copied())
+            .search(query, usize::MAX)
+            .into_iter()
+            .map(|index| entries[index])
+            .collect()
     }
 
     #[test]
-    fn prefers_exact_single_word_prompt() {
-        let labels = ranked(&["hot dog bun", "bundle assets", "bun"], "bun");
-        assert_eq!(labels.first().map(String::as_str), Some("bun"));
+    fn empty_query_lists_newest_first_without_duplicates() {
+        assert_eq!(search(&["a", "b", "a", "  "], ""), ["a", "b"]);
     }
 
     #[test]
-    fn prefers_whole_word_over_embedded_match() {
-        let labels = ranked(&["bundle assets", "hot dog bun"], "bun");
-        let bun_pos = labels
-            .iter()
-            .position(|label| label == "hot dog bun")
-            .unwrap();
-        let bundle_pos = labels
-            .iter()
-            .position(|label| label == "bundle assets")
-            .unwrap();
-        assert!(bun_pos < bundle_pos, "whole-word bun should beat bundle");
-    }
-
-    #[test]
-    fn prefers_more_recent_history_for_similar_matches() {
-        let labels = ranked(&["older bun prompt", "newer bun prompt"], "bun");
-        assert_eq!(labels.first().map(String::as_str), Some("newer bun prompt"));
-    }
-
-    #[test]
-    fn prefers_real_word_match_over_fuzzy_letters() {
-        let labels = ranked(
-            &[
-                "use the gh cli search for issue in the llama.cpp repo",
-                "don't cat into a file, just tell me here",
-                "create a full stack application fully with bun and typscript for recepies.",
-                "add them with default allow",
-                "full",
-            ],
-            "full",
+    fn exact_entry_beats_prefix_beats_word() {
+        let entries = ["please commit", "commit amend", "commit"];
+        assert_eq!(
+            search(&entries, "commit"),
+            ["commit", "commit amend", "please commit"]
         );
-        let exact_pos = labels.iter().position(|label| label == "full").unwrap();
-        let word_pos = labels
-            .iter()
-            .position(|label| {
-                label
-                    == "create a full stack application fully with bun and typscript for recepies."
-            })
-            .unwrap();
-        let fuzzy_pos = labels
-            .iter()
-            .position(|label| label == "add them with default allow")
-            .unwrap();
+    }
 
-        assert!(
-            exact_pos < word_pos,
-            "exact match should beat longer word hit"
+    #[test]
+    fn word_start_beats_mid_word() {
+        assert_eq!(
+            search(&["recommit later", "run commit hooks"], "commit"),
+            ["run commit hooks", "recommit later"]
         );
-        assert!(
-            word_pos < fuzzy_pos,
-            "word hit should beat fuzzy-only subsequence"
+    }
+
+    #[test]
+    fn word_prefix_counts_as_word_start() {
+        assert_eq!(
+            search(&["the fuzz/README.md", "rerun fuzzing"], "fuzz"),
+            ["rerun fuzzing", "the fuzz/README.md"]
         );
+    }
+
+    #[test]
+    fn newer_entry_wins_within_a_tier() {
+        assert_eq!(
+            search(&["older bun prompt", "newer bun prompt"], "bun"),
+            ["newer bun prompt", "older bun prompt"]
+        );
+    }
+
+    #[test]
+    fn every_query_word_must_match_in_any_order() {
+        assert_eq!(
+            search(
+                &["open the resume dialog", "dialog for resume", "resume only"],
+                "resume dialog"
+            ),
+            ["dialog for resume", "open the resume dialog"]
+        );
+    }
+
+    #[test]
+    fn matches_visible_in_the_row_beat_later_first_line_matches() {
+        let long = format!("{} fuzz", "word ".repeat(20));
+        let entries = ["rerun fuzz", long.as_str()];
+        assert_eq!(search(&entries, "fuzz"), [entries[0], entries[1]]);
+    }
+
+    #[test]
+    fn later_lines_match_after_first_line_hits() {
+        let entries = ["fix this:\n\nthe resume dialog lags", "resume dialog lags"];
+        assert_eq!(
+            search(&entries, "dialog"),
+            ["resume dialog lags", "fix this:\n\nthe resume dialog lags"]
+        );
+    }
+
+    #[test]
+    fn fuzzy_first_line_matches_rank_last() {
+        assert_eq!(
+            search(&["comet", "commit it", "explain commit"], "cmit"),
+            ["commit it", "explain commit"]
+        );
+        assert_eq!(
+            search(&["xcmit", "commit it"], "cmit"),
+            ["xcmit", "commit it"]
+        );
+    }
+
+    #[test]
+    fn fuzzy_ignores_text_past_the_first_line() {
+        assert!(search(&["hello\nc o m m i t"], "cmit").is_empty());
+    }
+
+    #[test]
+    fn smart_case_turns_sensitive_with_uppercase() {
+        let entries = ["readme fix", "README fix"];
+        assert_eq!(search(&entries, "readme"), ["README fix", "readme fix"]);
+        assert_eq!(search(&entries, "README"), ["README fix"]);
+    }
+
+    #[test]
+    fn limit_caps_results() {
+        let index = HistoryIndex::build(["a1", "a2", "a3"].into_iter());
+        assert_eq!(index.search("a", 2), [2, 1]);
+    }
+
+    #[test]
+    fn non_ascii_text_matches_without_panicking() {
+        assert_eq!(search(&["café crème", "naïve"], "crème"), ["café crème"]);
+        assert_eq!(search(&["ÉTÉ chaud"], "été"), ["ÉTÉ chaud"]);
     }
 }

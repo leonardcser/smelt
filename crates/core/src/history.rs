@@ -1,4 +1,5 @@
 use crate::config;
+use crate::fuzzy::history::HistoryIndex;
 use std::path::PathBuf;
 
 /// Input-history recall buffer. Entries share a single backing `String`;
@@ -10,6 +11,8 @@ pub struct History {
     cursor: usize,
     draft: String,
     path: PathBuf,
+    /// Search index over `entries`, built on first search after a change.
+    search_index: Option<HistoryIndex>,
 }
 
 const RECORD_SEP: char = '\x1e';
@@ -34,6 +37,7 @@ impl History {
             cursor,
             draft: String::new(),
             path,
+            search_index: None,
         }
     }
 
@@ -45,6 +49,7 @@ impl History {
             let end = self.buffer.len() as u32;
             self.buffer.push(RECORD_SEP);
             self.ranges.push((start, end));
+            self.search_index = None;
         }
         self.reset();
     }
@@ -116,6 +121,18 @@ impl History {
             .map(|&(s, e)| &self.buffer[s as usize..e as usize])
     }
 
+    /// Up to `limit` entry indices (oldest first) matching `query`, best
+    /// first. See [`HistoryIndex::search`].
+    pub fn search(&mut self, query: &str, limit: usize) -> Vec<usize> {
+        let ranges = &self.ranges;
+        let buffer = &self.buffer;
+        self.search_index
+            .get_or_insert_with(|| {
+                HistoryIndex::build(ranges.iter().map(|&(s, e)| &buffer[s as usize..e as usize]))
+            })
+            .search(query, limit)
+    }
+
     pub fn len(&self) -> usize {
         self.ranges.len()
     }
@@ -155,6 +172,7 @@ mod tests {
             cursor: 0,
             draft: String::new(),
             path,
+            search_index: None,
         }
     }
 
@@ -168,6 +186,7 @@ mod tests {
             cursor,
             draft: String::new(),
             path,
+            search_index: None,
         }
     }
 
@@ -338,6 +357,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let h = loaded(dir.path().join("does_not_exist"));
         assert!(h.is_empty());
+    }
+
+    #[test]
+    fn search_sees_entries_pushed_after_a_previous_search() {
+        let dir = tempdir().unwrap();
+        let mut h = fresh(dir.path().join("history"));
+        h.push("deploy staging".into());
+        assert_eq!(h.search("deploy", 10), vec![0]);
+        h.push("deploy prod".into());
+        assert_eq!(h.search("deploy", 10), vec![1, 0]);
     }
 
     #[test]

@@ -12,8 +12,8 @@ local history = {}
 ---@type fun(): table
 history.entries = nil
 
---- Rank prompt history against `query` using the history-specific scorer (word-match boost, recency bonus, dedupe). Returns `{ index, score }` rows where `index` is 1-based into `entries()`.
----@type fun(query: string): table
+--- Search prompt history for `query`. Every query word must appear in the entry; whole-entry, prefix and word-start matches rank above substring matches, then fuzzy matches on the first line. Within a tier, matches near the start of the first line rank above matches further along it, then on later lines; newer entries break ties. Duplicates are dropped, and an empty query lists the newest entries. Returns up to `limit` (default: all) 1-based indices into `entries()`, best first.
+---@type fun(query: string, limit: integer?): integer[]
 history.search = nil
 
 return history

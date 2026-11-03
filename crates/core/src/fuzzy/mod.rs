@@ -1,5 +1,4 @@
 pub mod history;
-pub mod score;
 
 pub use neo_frizbee::CaseMatching;
 

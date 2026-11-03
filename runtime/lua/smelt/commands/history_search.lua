@@ -1,6 +1,10 @@
 -- Ctrl+R reverse history search. Filterable picker over past prompts;
 -- Enter commits to prompt, Esc restores previous text.
 
+-- Rows requested per keystroke. Ranking runs over the whole history in Rust;
+-- only the best matches cross into Lua and the picker.
+local RESULT_LIMIT = 500
+
 local function entry_label(entry)
   for line in (entry or ""):gmatch("[^\r\n]+") do
     local trimmed = line:match("^%s*(.-)%s*$")
@@ -9,36 +13,17 @@ local function entry_label(entry)
   return ""
 end
 
-local function build_items()
-  local entries = smelt.history.entries()
-  if #entries == 0 then return {} end
+-- Items in history order, so a 1-based history index is also an item index.
+local function build_items(entries)
   local items = {}
-  for i = #entries, 1, -1 do
-    local entry = entries[i]
-    local label = entry_label(entry)
-    items[#items + 1] = {
-      label        = label,
-      search_terms = entry,
-      _entry         = entry,
-      _history_index = i,
-      _hay           = label .. " " .. entry,
-    }
+  for i, entry in ipairs(entries) do
+    items[i] = { label = entry_label(entry), _entry = entry }
   end
   return items
 end
 
-local function rank_history(items, query)
-  local by_history_index = {}
-  for pos, item in ipairs(items) do
-    if item._history_index then by_history_index[item._history_index] = pos end
-  end
-
-  local out = {}
-  for _, match in ipairs(smelt.history.search(query or "")) do
-    local pos = by_history_index[match.index]
-    if pos then out[#out + 1] = pos end
-  end
-  return out
+local function rank_history(_, query)
+  return smelt.history.search(query or "", RESULT_LIMIT)
 end
 
 local saved_text
@@ -46,16 +31,14 @@ local is_open = false
 
 local function open()
   if is_open then return end
+  local entries = smelt.history.entries()
+  if #entries == 0 then return end
   is_open = true
   saved_text = smelt.prompt.text()
-  if #smelt.history.entries() == 0 then
-    is_open = false
-    return
-  end
   smelt.spawn(function()
     local ok, r = pcall(function()
       return smelt.picker.open({
-        items = build_items(),
+        items = build_items(entries),
         placement = "prompt_docked",
         rank = rank_history,
       })
