@@ -513,6 +513,7 @@ fn file_expansion_accepts_input_before_reading_and_keeps_the_ui_responsive() {
     app.ensure_writer_ready();
     let (input_started, release) = app.app.conversation.submissions.pause_input();
     app.type_text("summarize @missing-responsive-fixture.txt");
+    app.press(KeyCode::Esc);
     let started = std::time::Instant::now();
     app.press(KeyCode::Enter);
     assert!(
@@ -573,6 +574,7 @@ fn file_expansion_includes_turn_start_context_changes() {
     ));
     let (input_started, release) = app.app.conversation.submissions.pause_input();
     app.type_text("summarize @missing-context-fixture.txt");
+    app.press(KeyCode::Esc);
     app.press(KeyCode::Enter);
     input_started.recv_timeout(Duration::from_secs(5)).unwrap();
     release.send(()).unwrap();
@@ -631,6 +633,7 @@ fn file_preparation_failure_keeps_older_cancelled_receipts_pending() {
     app.press(KeyCode::Enter);
     let (input_started, input_release) = app.app.conversation.submissions.pause_input();
     app.type_text("replacement @missing-receipt-fixture.txt");
+    app.press(KeyCode::Esc);
     for _ in 0..3 {
         app.press(KeyCode::Enter);
     }
@@ -755,6 +758,7 @@ fn file_expansion_failure_preserves_callback_history_and_display() {
         ));
         let (input_started, release) = app.app.conversation.submissions.pause_input();
         app.type_text("summarize @missing-failure-fixture.txt");
+        app.press(KeyCode::Esc);
         app.press(KeyCode::Enter);
         input_started.recv_timeout(Duration::from_secs(5)).unwrap();
         app.app.push_block(Block::Text {
@@ -809,6 +813,7 @@ fn file_expansion_display_is_not_saved_until_promoted_in_place() {
     let baseline = reader.store_head().unwrap();
     let (input_started, release) = app.app.conversation.submissions.pause_input();
     app.type_text("summarize @fixture.txt");
+    app.press(KeyCode::Esc);
     app.press(KeyCode::Enter);
     input_started.recv_timeout(Duration::from_secs(5)).unwrap();
     let block_id = app
@@ -882,6 +887,7 @@ fn file_expansion_cancellation_and_force_ignore_stale_results() {
         app.ensure_writer_ready();
         let (input_started, release) = app.app.conversation.submissions.pause_input();
         app.type_text("summarize @old.txt");
+        app.press(KeyCode::Esc);
         app.press(KeyCode::Enter);
         input_started.recv_timeout(Duration::from_secs(5)).unwrap();
         if force {

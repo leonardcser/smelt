@@ -10,7 +10,10 @@ use ignore::WalkBuilder;
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 const RESCAN_DEBOUNCE: Duration = Duration::from_millis(150);
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(35);
+/// How long a new interactive search may block the caller. Typical indexes
+/// rank well inside this, so results land in the same frame; larger ones
+/// answer later through the worker.
+const INLINE_SEARCH_BUDGET: Duration = Duration::from_millis(8);
 const GIT_LS_FILES_TIMEOUT: Duration = Duration::from_secs(5);
 const PARTIAL_PUBLISH_START: usize = 2_000;
 
@@ -106,6 +109,10 @@ pub enum SearchSource {
 struct SearchWorker {
     tx: mpsc::Sender<SearchJob>,
     rx: mpsc::Receiver<SearchCompletion>,
+    inline_budget: Duration,
+    /// Set when the last search outran the budget, so waiting would only
+    /// stall the caller.
+    slow: bool,
     next_id: u64,
     pending: Option<PendingSearch>,
     completed: Option<SearchCompletion>,
@@ -129,6 +136,7 @@ struct SearchCompletion {
     id: u64,
     key: SearchKey,
     response: SearchResponse,
+    elapsed: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,11 +310,13 @@ impl ProjectState {
 }
 
 impl SearchWorker {
-    fn new() -> Self {
+    fn new(inline_budget: Duration) -> Self {
         let (tx, rx) = spawn_search_worker();
         Self {
             tx,
             rx,
+            inline_budget,
+            slow: false,
             next_id: 0,
             pending: None,
             completed: None,
@@ -340,6 +350,14 @@ impl SearchWorker {
                     id,
                     key: key.clone(),
                 });
+                if !self.slow {
+                    self.wait_pending(self.inline_budget);
+                }
+                if let Some(completed) = &self.completed {
+                    if completed.key == key {
+                        return completed.response.clone();
+                    }
+                }
             }
         }
 
@@ -358,16 +376,33 @@ impl SearchWorker {
 
     fn drain_completed(&mut self) {
         while let Ok(completed) = self.rx.try_recv() {
-            if self
-                .pending
-                .as_ref()
-                .map(|pending| pending.id == completed.id)
-                .unwrap_or(false)
-            {
-                self.pending = None;
-            }
-            self.completed = Some(completed);
+            self.complete(completed);
         }
+    }
+
+    fn wait_pending(&mut self, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        while self.pending.is_some() {
+            match self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(completed) => self.complete(completed),
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn complete(&mut self, completed: SearchCompletion) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.id == completed.id)
+        {
+            self.pending = None;
+        }
+        self.slow = completed.elapsed > self.inline_budget;
+        self.completed = Some(completed);
     }
 }
 
@@ -413,7 +448,7 @@ impl WorkspaceFiles {
         };
         Ok(self
             .search_worker
-            .get_or_insert_with(SearchWorker::new)
+            .get_or_insert_with(|| SearchWorker::new(INLINE_SEARCH_BUDGET))
             .request(key, snapshot))
     }
 
@@ -688,13 +723,7 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchJob>, mpsc::Receiver<SearchCompl
     let (completion_tx, completion_rx) = mpsc::channel::<SearchCompletion>();
     std::thread::spawn(move || {
         while let Ok(mut job) = job_rx.recv() {
-            loop {
-                match job_rx.recv_timeout(SEARCH_DEBOUNCE) {
-                    Ok(next) => job = next,
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                }
-            }
+            // Only the newest query matters; skip any superseded while ranking.
             while let Ok(next) = job_rx.try_recv() {
                 job = next;
             }
@@ -706,12 +735,14 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchJob>, mpsc::Receiver<SearchCompl
                 include_dirs: job.key.include_dirs,
                 source: job.key.source,
             };
+            let started = Instant::now();
             let response = search_snapshot_response(&job.key.root, &job.snapshot, &request);
             if completion_tx
                 .send(SearchCompletion {
                     id: job.id,
                     key: job.key,
                     response,
+                    elapsed: started.elapsed(),
                 })
                 .is_err()
             {
@@ -2292,6 +2323,32 @@ mod tests {
     }
 
     #[test]
+    fn search_interactive_answers_within_the_inline_budget() {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("main.rs"), "").unwrap();
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        files.search_worker = Some(SearchWorker::new(Duration::from_secs(5)));
+        let response = files
+            .search_interactive(SearchRequest {
+                query: "main".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+                source: SearchSource::Workspace,
+            })
+            .unwrap();
+        assert!(!response.searching, "response: {response:#?}");
+        assert!(
+            response.items.iter().any(|item| item.path == "main.rs"),
+            "response: {response:#?}"
+        );
+    }
+
+    #[test]
     fn search_interactive_returns_pending_then_result() {
         let project = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -2300,6 +2357,7 @@ mod tests {
 
         let mut files = WorkspaceFiles::new(state.path().to_path_buf());
         wait_until_ready(&mut files, project.path());
+        files.search_worker = Some(SearchWorker::new(Duration::ZERO));
 
         let request = SearchRequest {
             query: "main".to_string(),

@@ -82,9 +82,11 @@ local function open(tracked)
     end
   end
 
+  -- The first preview renders immediately; later cursor movement is debounced.
   local function schedule_preview()
     if not preview then return end
-    if preview_timer then preview_timer:remove() end
+    if preview_timer then preview_timer:remove(); preview_timer = nil end
+    if not preview_path then return render_preview() end
     preview_timer = smelt.timer.set(40, function()
       preview_timer = nil
       if not closed then render_preview() end

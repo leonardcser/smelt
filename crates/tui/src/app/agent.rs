@@ -5391,6 +5391,7 @@ mod tests {
             .with_cwd(tmp.path())
             .build();
         app.type_text("summarize @note.txt");
+        app.press(crossterm::event::KeyCode::Esc);
         app.press(crossterm::event::KeyCode::Enter);
         app.wait_for_turn_persistence();
         let expanded = app
@@ -5427,6 +5428,7 @@ mod tests {
             .with_cwd(tmp.path())
             .build();
         app.type_text("summarize @nb.ipynb");
+        app.press(crossterm::event::KeyCode::Esc);
         app.press(crossterm::event::KeyCode::Enter);
         app.wait_for_turn_persistence();
         let expanded = app
