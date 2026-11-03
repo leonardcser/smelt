@@ -219,7 +219,7 @@ fn native_turn_keeps_working_until_its_background_agents_settle() {
 }
 
 #[test]
-fn a_prompt_starts_a_turn_while_the_native_session_works_on_its_own() {
+fn a_prompt_queues_until_the_native_session_finishes_its_own_work() {
     let mut app = TestApp::builder().build();
     native_background_session(&mut app);
     assert_eq!(work_label(&mut app), "working");
@@ -227,11 +227,17 @@ fn a_prompt_starts_a_turn_while_the_native_session_works_on_its_own() {
     app.press(KeyCode::Enter);
     app.wait_for_turn_persistence();
     app.feed_one(SourceEvent::Tick(0));
-    assert!(app.app.prompt.queued_texts().is_empty());
-    assert!(
-        started_turn(&app),
-        "Claude Code queues the prompt and takes it next"
+    assert_eq!(
+        app.app.prompt.queued_texts(),
+        vec!["next question".to_owned()]
     );
+    assert!(!started_turn(&app));
+
+    native_session(&mut app, true, false);
+    app.wait_for_turn_persistence();
+    app.feed_one(SourceEvent::Tick(0));
+    assert!(app.app.prompt.queued_texts().is_empty());
+    assert!(started_turn(&app));
 }
 
 #[test]
@@ -240,6 +246,7 @@ fn esc_esc_on_a_clean_turn_interrupts_and_spares_native_background_work() {
     let session_id = native_background_session(&mut app);
     let now = engine::clock::unix_time_ms(app.app.core.clock.as_ref());
     app.feed_one(SourceEvent::engine(native_shell(now, true)));
+    native_session(&mut app, true, false);
     app.type_text("next question");
     app.press(KeyCode::Enter);
     app.wait_for_turn_persistence();

@@ -629,9 +629,8 @@ impl NotificationLifetime {
 pub(crate) enum PromptWorkState {
     Idle,
     Paused,
-    /// Only the native session works, outside a turn, such as when Claude Code
-    /// answers a monitor event. A prompt starts a turn, which it takes next.
-    NativeBusy,
+    /// Work outside a turn holds input, such as a background plugin or Claude
+    /// Code answering a monitor event. Prompts queue until it ends.
     BackgroundBusy,
     TurnActive,
 }
@@ -852,11 +851,6 @@ impl BusyStack {
 
     pub(crate) fn is_busy(&self) -> bool {
         !self.state.borrow().entries.is_empty()
-    }
-
-    /// Whether `token` is all that is busy.
-    pub(crate) fn is_only(&self, token: &BusyToken) -> bool {
-        matches!(self.state.borrow().entries.as_slice(), [entry] if entry.id == token.id)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -1382,8 +1376,6 @@ impl TuiApp {
         let turn_active = self.turn_lifecycle_is_active() || self.working.is_compacting();
         if turn_active {
             PromptWorkState::TurnActive
-        } else if self.only_native_session_busy() {
-            PromptWorkState::NativeBusy
         } else if self.busy_stack.is_busy() {
             PromptWorkState::BackgroundBusy
         } else if self
