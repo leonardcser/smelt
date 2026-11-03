@@ -810,9 +810,24 @@ mod tests {
         thread::sleep(std::time::Duration::from_millis(10));
         worker.request(record_request(7, address, 20..22));
 
-        let result = receive_hydration_event(&mut event_rx);
+        // A loaded scheduler can let the first read finish before the second
+        // request lands; that result must then be stale.
+        let result = loop {
+            let result = receive_hydration_event(&mut event_rx);
+            if worker.is_current(&result) {
+                break result;
+            }
+            assert_eq!(
+                result
+                    .record
+                    .expect("stale record")
+                    .projection_range
+                    .start
+                    .get(),
+                0
+            );
+        };
 
-        assert!(worker.is_current(&result));
         let record = result.record.expect("record hydration result");
         assert_eq!(record.projection_range.start.get(), 20);
         assert_eq!(record.projection_range.end.get(), 22);
