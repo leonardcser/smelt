@@ -9,7 +9,7 @@ description: "Reference for every namespace of the smelt Lua API: commands, keym
 
 Reference for every namespace exposed under the global `smelt` table. Rust-registered signatures come from the closure's argument and return types; bundled Lua signatures come from LuaCATS annotations beside the implementation.
 
-**Coverage:** 92 namespace(s), 476 function(s), 129 class(es), 15 alias(es).
+**Coverage:** 92 namespace(s), 477 function(s), 129 class(es), 15 alias(es).
 
 Namespaces marked *UI only* need the terminal UI and raise in headless mode. *Advanced* namespaces are low-level building blocks that may change more freely. For a guided introduction, see [Extend smelt](../../extend/index.md).
 
@@ -98,7 +98,7 @@ smelt mirrors type stubs for every namespace to `builtins/lua/smelt/_meta/` in i
 - [`smelt.files`](files.md): Workspace file search.
 - [`smelt.fs`](fs.md): Sync filesystem primitives.
 - [`smelt.fs.file_state`](fs_file_state.md): Cached file-state tracker used by tools to detect external modifications between reads and writes. Advanced.
-- [`smelt.git`](git.md): Asynchronous Git snapshots and explicit file or range staging. Advanced.
+- [`smelt.git`](git.md): Asynchronous Git history, read-only revision comparisons, and explicit file or range staging. Advanced.
 - [`smelt.grep`](grep.md): Ripgrep wrapper for searching files.
 - [`smelt.http`](http.md): Asynchronous HTTP get/post.
 - [`smelt.http.cache`](http_cache.md): Runtime-owned HTTP response cache.

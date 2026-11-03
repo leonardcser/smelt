@@ -341,6 +341,19 @@ impl TuiApp {
         if self.update_prompt_resize_drag(me) {
             return EventOutcome::Redraw;
         }
+        // Border-title spans with an id act as buttons for the window they frame.
+        if is_left_down(me.kind) {
+            if let Some((win, title)) = self.ui.title_target_at(me.column, me.row) {
+                self.fire_mouse_event(
+                    win,
+                    crate::smelt_edit::WinEvent::Press,
+                    me,
+                    Some(crate::smelt_edit::MouseButton::Left),
+                    Some(title),
+                );
+                return EventOutcome::Redraw;
+            }
+        }
 
         // `Ui::dispatch_event` handles wheel-over-overlay, modal click-outside absorb,
         // and scrollbar drag. Virtualized transcript wheels become semantic intent
@@ -662,6 +675,17 @@ impl TuiApp {
         me: MouseEvent,
         button: Option<crate::smelt_edit::MouseButton>,
     ) {
+        self.fire_mouse_event(leaf, event, me, button, None);
+    }
+
+    fn fire_mouse_event(
+        &mut self,
+        leaf: WinId,
+        event: crate::smelt_edit::WinEvent,
+        me: MouseEvent,
+        button: Option<crate::smelt_edit::MouseButton>,
+        title: Option<std::sync::Arc<str>>,
+    ) {
         let rect = self
             .ui
             .win(leaf)
@@ -682,6 +706,7 @@ impl TuiApp {
                 x: i32::from(me.column) - i32::from(origin.0),
                 y: i32::from(me.row) - i32::from(origin.1),
                 button,
+                title,
             },
             &mut lua_invoke,
         );

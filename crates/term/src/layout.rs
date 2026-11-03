@@ -73,6 +73,82 @@ pub enum Justify {
     SpaceBetween,
 }
 
+/// Styled border title. Spans with an `id` are press targets.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Title {
+    pub spans: Vec<TitleSpan>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TitleSpan {
+    pub span: crate::line::Span<'static>,
+    pub id: Option<std::sync::Arc<str>>,
+}
+
+impl Title {
+    /// Visit each grapheme the title paints on the top row of `area`, with its
+    /// span and column. The title is inset one cell from each end so it reads
+    /// as `─title──`, and stops at the first grapheme that does not fit.
+    fn place(&self, area: Rect, mut visit: impl FnMut(&TitleSpan, u16, &str)) {
+        let limit = (area.x + area.width).saturating_sub(1);
+        let mut col = area.x + 1;
+        for span in &self.spans {
+            for grapheme in smelt_style::cell_width::graphemes(span.span.text.as_ref()) {
+                let width = smelt_style::cell_width::text_width_u16(grapheme);
+                if col + width > limit {
+                    return;
+                }
+                visit(span, col, grapheme);
+                col += width;
+            }
+        }
+    }
+
+    /// Plain text of every span.
+    pub fn text(&self) -> String {
+        self.spans
+            .iter()
+            .map(|span| span.span.text.as_ref())
+            .collect()
+    }
+
+    /// Id of the span painted at column `x` of `area`'s top row.
+    pub fn target_at(&self, area: Rect, x: u16) -> Option<std::sync::Arc<str>> {
+        let mut hit = None;
+        self.place(area, |span, col, grapheme| {
+            let width = smelt_style::cell_width::text_width_u16(grapheme);
+            if hit.is_none() && (col..col + width).contains(&x) {
+                hit = Some(span.id.clone());
+            }
+        });
+        hit.flatten()
+    }
+}
+
+impl From<crate::line::Line<'static>> for Title {
+    fn from(line: crate::line::Line<'static>) -> Self {
+        Self {
+            spans: line
+                .spans
+                .into_iter()
+                .map(|span| TitleSpan { span, id: None })
+                .collect(),
+        }
+    }
+}
+
+impl From<&str> for Title {
+    fn from(text: &str) -> Self {
+        crate::line::Line::raw(text.to_owned()).into()
+    }
+}
+
+impl From<String> for Title {
+    fn from(text: String) -> Self {
+        crate::line::Line::raw(text).into()
+    }
+}
+
 /// Chrome (gap, border, title, padding) shared by all layout nodes.
 #[derive(Clone, Debug, Default)]
 pub struct Chrome {
@@ -82,9 +158,8 @@ pub struct Chrome {
     pub justify: Justify,
     /// Frame around the container; each enabled side reserves one row/col. `None` = no inset.
     pub border: Option<Border>,
-    /// Title in the top border row. Requires `border = Some(_)`; renders as a styled
-    /// [`Line`](crate::line::Line).
-    pub title: Option<crate::line::Line<'static>>,
+    /// Title in the top border row. Requires `border = Some(_)`.
+    pub title: Option<Title>,
     /// Uniform inner padding (cells) on all four sides, *inside* any
     /// border. Increases the container's natural size by `2 * padding` on
     /// each axis; children are laid out in the padded-inset rect.
@@ -303,7 +378,7 @@ impl LayoutTree {
         self
     }
 
-    pub fn with_title(mut self, t: impl Into<crate::line::Line<'static>>) -> Self {
+    pub fn with_title(mut self, t: impl Into<Title>) -> Self {
         self.chrome_mut().title = Some(t.into());
         self
     }
@@ -315,7 +390,7 @@ impl LayoutTree {
     }
 
     /// Replace the root chrome's title in place.
-    pub fn set_title(&mut self, t: Option<crate::line::Line<'static>>) {
+    pub fn set_title(&mut self, t: Option<Title>) {
         self.chrome_mut().title = t;
     }
 
@@ -872,33 +947,10 @@ pub fn paint_chrome(
 
     if border.top.is_some() {
         if let Some(title) = chrome.title.as_ref() {
-            // Inset title by one cell from each end so it reads as `─title──`
-            // regardless of whether the left/right sides are enabled.
-            let title_left = area.x + 1;
-            let title_right_excl = right;
-            if title_right_excl > title_left {
-                let limit = title_right_excl;
-                let mut col = title_left;
-                for span in &title.spans {
-                    if col >= limit {
-                        break;
-                    }
-                    let span_style = merge_title_span_style(title_style, span.style);
-                    let mut written = false;
-                    for grapheme in smelt_style::cell_width::graphemes(span.text.as_ref()) {
-                        let width = smelt_style::cell_width::text_width_u16(grapheme);
-                        if col + width > limit {
-                            break;
-                        }
-                        slice.set_symbol(col, area.y, grapheme, span_style);
-                        col += width;
-                        written = true;
-                    }
-                    if !written {
-                        break;
-                    }
-                }
-            }
+            title.place(area, |span, col, grapheme| {
+                let style = merge_title_span_style(title_style, span.span.style);
+                slice.set_symbol(col, area.y, grapheme, style);
+            });
         }
     }
 }
@@ -1916,10 +1968,7 @@ mod tests {
         let red = crate::grid::Style::new().fg(Color::Red);
         let chrome = Chrome {
             border: Some(Border::ROUNDED),
-            title: Some(Line::from_spans([
-                Span::raw("ok "),
-                Span::styled("FAIL", red),
-            ])),
+            title: Some(Line::from_spans([Span::raw("ok "), Span::styled("FAIL", red)]).into()),
             ..Chrome::default()
         };
         paint_chrome(
@@ -1954,6 +2003,48 @@ mod tests {
         assert_eq!(grid.cell(1, 0).symbol, 'h');
         assert_eq!(grid.cell(5, 0).symbol, 'o');
         assert_eq!(grid.cell(6, 0).symbol, '─');
+    }
+
+    #[test]
+    fn title_press_targets_match_painted_cells() {
+        let tab = |text: &str, id: Option<&str>| TitleSpan {
+            span: crate::line::Span::raw(text.to_owned()),
+            id: id.map(Into::into),
+        };
+        let title = Title {
+            spans: vec![
+                tab("界a", Some("one")),
+                tab(" ", None),
+                tab("bcdef", Some("two")),
+            ],
+        };
+        let tree = LayoutTree::leaf(PaintId(7))
+            .with_border(Border::SINGLE)
+            .with_title(title.clone());
+        let area = Rect::new(2, 1, 8, 3);
+        let resolved = tree.resolve(area, &NoopSizer);
+        let mut grid = crate::grid::Grid::new(12, 5);
+        resolved.paint(
+            &mut grid,
+            &crate::Theme::default(),
+            LayoutStyle::default(),
+            None,
+            &mut |_, _, _| {},
+        );
+        let at = |x| {
+            resolved
+                .title_target_at(x, 1)
+                .map(|(id, target)| (id.0, target.to_string()))
+        };
+        // `┌界a bc┐`: the wide grapheme covers two cells, `def` is truncated.
+        assert_eq!(grid.cell(5, 1).symbol, 'a');
+        assert_eq!(grid.cell(8, 1).symbol, 'c');
+        assert_eq!(at(3), Some((7, "one".into())));
+        assert_eq!(at(4), Some((7, "one".into())));
+        assert_eq!(at(6), None);
+        assert_eq!(at(8), Some((7, "two".into())));
+        assert_eq!(at(9), None);
+        assert_eq!(resolved.title_target_at(3, 2), None);
     }
 
     #[test]

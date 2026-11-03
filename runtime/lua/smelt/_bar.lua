@@ -66,6 +66,7 @@ local RULE_MIN_CELLS = 4
 ---@field text string Text to show.
 ---@field style? smelt.Style|string Highlight applied to the text.
 ---@field selectable? boolean Include the text in drag-copy. Defaults to the item's setting.
+---@field id? string Layout-leaf border titles only: pressing the span fires the framed window's `press` event with `title = id`.
 
 -- ── rows ────────────────────────────────────────────────────────────
 

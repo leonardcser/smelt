@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 
-  ┌ files ────────────────┬─ snapshot - r refresh ───────┐
+  ┌ Changes  B  H ────────┬──────────────────────────────┐
   │ unstaged (1) +1 -1    │             M  界 .lua  unst  │
   │ M 界 .lua +1 -1        │             @@ -1 +1 @@      │
   │                       │    1        - old            │

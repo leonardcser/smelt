@@ -116,7 +116,7 @@ pub struct TreeNode {
 pub struct TreeIndex {
     nodes: Vec<Node>,
     files: Vec<usize>,
-    groups: [usize; 2],
+    groups: [usize; 3],
     directories: Vec<usize>,
     counts: Vec<Counts>,
     visible: Arc<Vec<usize>>,
@@ -126,13 +126,14 @@ impl TreeIndex {
     pub fn new(diff: &Diff) -> Self {
         let mut nodes: Vec<Node> = Vec::new();
         let mut files = Vec::with_capacity(diff.files.len());
-        let mut groups = [0; 2];
+        let mut groups = [0; 3];
         let mut counts: Vec<_> = diff
             .files
             .iter()
             .map(|file| Counts::new(file.additions, file.deletions))
             .collect();
-        for section in [Section::Unstaged, Section::Staged] {
+        counts.extend((0..3).map(|_| Counts::new(0, 0)));
+        for &section in diff.sections() {
             let start = diff.files.partition_point(|file| file.section < section);
             let end = diff.files.partition_point(|file| file.section <= section);
             if section == Section::Staged {
@@ -227,7 +228,7 @@ impl TreeIndex {
                 }
             }
             nodes[group].end = nodes.len();
-            counts.push(Counts::new(added, deleted));
+            counts[diff.files.len() + section as usize] = Counts::new(added, deleted);
         }
         let mut directories: Vec<_> = (0..nodes.len())
             .filter(|index| nodes[*index].is_directory())

@@ -52,7 +52,7 @@ impl LuaType for LuaOverlayNewOpts {
             fields: vec![
                 LuaClassField { name: "layout", ty: "smelt.ui.layout".into(), optional: false, doc: "Layout tree to render inside the overlay." },
                 LuaClassField { name: "name", ty: "string".into(), optional: true, doc: "Stable name used to hot-reload this overlay in place." },
-                LuaClassField { name: "title", ty: "string | table".into(), optional: true, doc: "Optional title rendered in the overlay border." },
+                LuaClassField { name: "title", ty: "string | smelt.Span | (string | smelt.Span)[]".into(), optional: true, doc: "Optional title rendered in the overlay border." },
                 LuaClassField { name: "border", ty: "table".into(), optional: true, doc: "Border style override; parsed with the shared border vocabulary." },
                 LuaClassField { name: "anchor", ty: "\"dock_bottom\"|\"dock_top\"|\"dock_left\"|\"dock_right\"|\"center\"|\"screen_at\"|\"win\"".into(), optional: true, doc: "Where to place the overlay. Defaults to `dock_bottom`." },
                 LuaClassField { name: "above_rows", ty: "integer".into(), optional: true, doc: "Rows to keep clear above the bottom dock, typically the statusline height." },

@@ -20,6 +20,7 @@
 ---@field text string Text to show.
 ---@field style? smelt.Style|string Highlight applied to the text.
 ---@field selectable? boolean Include the text in drag-copy. Defaults to the item's setting.
+---@field id? string Layout-leaf border titles only: pressing the span fires the framed window's `press` event with `title = id`.
 
 --- Shared style fields for Paint, spans, marks, bars and window chrome. A string theme-group name is shorthand for { hl_group = name }.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -290,10 +291,11 @@
 ---@field tree fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width.
 ---@field restore fun(self: smelt.diff.Diff, previous: smelt.diff.Diff, cursor: integer, top: integer): integer?, integer? Restore expanded context and return cursor/top rows for a refreshed snapshot, matching section, raw path and source line numbers rather than display offsets. A missing file returns nil for its anchor. Does not change the previous view.
 ---@field files fun(self: smelt.diff.Diff): smelt.diff.File[] All file metadata, grouped by section and directory-first within each section. Prefer file(index) for bounded UI-thread allocation.
+---@field totals fun(self: smelt.diff.Diff): integer, integer, boolean Added and deleted line totals, plus whether any file is binary. Linear in changed files, not patch lines. Working snapshots count each section separately.
 ---@field file_count fun(self: smelt.diff.Diff): integer Number of section-local file entries. A partial file counts twice.
 ---@field file fun(self: smelt.diff.Diff, index: integer): smelt.diff.File? Metadata for one file entry. Constant-time lookup.
----@field find_file fun(self: smelt.diff.Diff, section: 'unstaged'|'staged', key: string): integer? Find a file by section and raw path bytes when restoring selection in a new snapshot.
----@field section_range fun(self: smelt.diff.Diff, section: 'unstaged'|'staged'): integer, integer Inclusive first and last file indices for a section. First exceeds last when the section is empty.
+---@field find_file fun(self: smelt.diff.Diff, section: 'unstaged'|'staged'|'changes', key: string): integer? Find a file by section and raw path bytes when restoring selection in a new snapshot.
+---@field section_range fun(self: smelt.diff.Diff, section: 'unstaged'|'staged'|'changes'): integer, integer Inclusive first and last file indices for a section. First exceeds last when the section is empty.
 ---@field file_row fun(self: smelt.diff.Diff, index: integer): integer? Current display row of a file header. Accounts for expanded folds.
 ---@field file_at fun(self: smelt.diff.Diff, row: integer): integer? File containing a display row. Logarithmic lookup.
 ---@field hunk fun(self: smelt.diff.Diff, row: integer, forward: boolean): integer? Next/previous change group, strictly after/before row. Full-context Git patches retain navigation between edits separated by unchanged lines.
@@ -309,7 +311,7 @@
 ---@field deletions integer Removed lines.
 ---@field hl_group string Theme foreground group for the file's change kind.
 ---@field key string Raw path bytes, for stable section-local identity across snapshots. Use path for display.
----@field section 'unstaged'|'staged' Patch section. Untracked files belong to unstaged with status ?.
+---@field section 'unstaged'|'staged'|'changes' Patch section. Untracked files belong to unstaged with status ?.
 ---@field binary boolean Whether Git reports a binary patch instead of line changes.
 
 --- Independent virtual file sidebar sharing immutable file metadata and ordering. Each tree owns its collapsed directories; each attached window supplies its own width. Only requested rows are formatted; folder toggles rebuild compact visible-node indices, not offscreen strings or spans.
@@ -321,7 +323,7 @@
 ---@field file_row fun(self: smelt.diff.Tree, index: integer, reveal: boolean?): integer? Visible row of a file, or nil when hidden. With reveal=true, expand its ancestors first. Logarithmic lookup when no folders change.
 ---@field toggle fun(self: smelt.diff.Tree, row: integer): integer? Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil.
 ---@field collapsed fun(self: smelt.diff.Tree): string[] Opaque collapsed directory keys for restoring a new snapshot.
----@field section_row fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'): integer Visible row of a section header, including an empty section.
+---@field section_row fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'|'changes'): integer Visible row of a section header, including an empty section.
 ---@field restore_group fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer? Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic.
 
 --- Metadata for one visible file-tree row. File indices are one-based and tree rows are zero-based.
@@ -332,7 +334,7 @@
 ---@field last integer Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section.
 ---@field parent? integer Visible parent directory row.
 ---@field children boolean Whether this row is an expandable directory. Section headings are fixed.
----@field section 'unstaged'|'staged' Section containing this row.
+---@field section 'unstaged'|'staged'|'changes' Section containing this row.
 ---@field group boolean Whether this is a section header.
 ---@field expanded boolean Whether the directory is expanded. Always true for section headings.
 
@@ -554,7 +556,7 @@
 ---@class smelt.overlay.NewOpts
 ---@field layout smelt.ui.layout Layout tree to render inside the overlay.
 ---@field name? string Stable name used to hot-reload this overlay in place.
----@field title? string | table Optional title rendered in the overlay border.
+---@field title? string | smelt.Span | (string | smelt.Span)[] Optional title rendered in the overlay border.
 ---@field border? table Border style override; parsed with the shared border vocabulary.
 ---@field anchor? "dock_bottom"|"dock_top"|"dock_left"|"dock_right"|"center"|"screen_at"|"win" Where to place the overlay. Defaults to `dock_bottom`.
 ---@field above_rows? integer Rows to keep clear above the bottom dock, typically the statusline height.
@@ -1309,7 +1311,7 @@
 ---@field min_second? integer Minimum second-pane size in cells; defaults to 1.
 ---@field divider? {normal: table, active?: table} Explicit divider styles, using fg, bg, bold, dim, italic, underline, crossedout, and reverse. normal is required; active defaults to normal. Omit to follow the renderer's theme.
 ---@field border? string | table Outer border for hsplit/vsplit. With a retained split, pass chrome to handle:layout instead.
----@field title? string | table Outer-border title for hsplit/vsplit; pass to handle:layout when using a retained split.
+---@field title? string | smelt.Span | (string | smelt.Span)[] Outer-border title for hsplit/vsplit; pass to handle:layout when using a retained split.
 ---@field padding? integer Outer padding for hsplit/vsplit; pass to handle:layout when using a retained split.
 
 --- Handle returned by `Win:decorate(opts)` for a window-owned decoration.

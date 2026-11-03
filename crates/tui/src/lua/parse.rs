@@ -2,9 +2,9 @@
 //! groups come in through a [`Groups`] lookup).
 //! Errors are returned as `String`; call sites wrap them in `LuaError::RuntimeError`.
 
-use crate::smelt_edit::layout::{Border, BorderStyle, Constraint, EdgeStyle};
+use crate::smelt_edit::layout::{Border, BorderStyle, Constraint, EdgeStyle, Title, TitleSpan};
 use crate::smelt_edit::Corner;
-use crate::smelt_edit::{Line, Span, Style};
+use crate::smelt_edit::{Span, Style};
 use mlua::prelude::*;
 use smelt_core::style::Color;
 
@@ -450,53 +450,50 @@ fn span(t: &mlua::Table, groups: Groups) -> Result<Span<'static>, String> {
     Ok(Span::styled(text, resolved))
 }
 
-/// Parse a Lua-side title spec into a styled [`Line`]. Surface:
+/// Parse a Lua-side border title. Surface:
 ///
-/// - omitted / `nil` → `None`
-/// - string → single-span Line with default style
-/// - single-span table `{ text = "...", style = { fg = "red", bold = true } }` →
-///   single-span Line
-/// - sequence of span tables `{ {text=..,style=..}, " ", {text=..} }` →
-///   multi-span Line. List items can be plain strings (default style)
-///   or span tables.
-pub(crate) fn title(
-    v: Option<mlua::Value>,
-    groups: Groups,
-) -> Result<Option<Line<'static>>, String> {
-    match v {
-        None | Some(mlua::Value::Nil) => Ok(None),
-        Some(mlua::Value::String(s)) => Ok(Some(Line::raw(s.to_string_lossy().to_string()))),
-        Some(mlua::Value::Table(t)) => {
-            // Table with `text` key → single-span Line.
-            if t.contains_key("text").unwrap_or(false) {
-                return Ok(Some(Line::from_spans([span(&t, groups)?])));
-            }
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for v in t.sequence_values::<mlua::Value>() {
-                let v = v.map_err(|e| format!("title span: {e}"))?;
-                match v {
-                    mlua::Value::String(s) => {
-                        spans.push(Span::raw(s.to_string_lossy().to_string()));
-                    }
-                    mlua::Value::Table(st) => spans.push(span(&st, groups)?),
-                    other => {
-                        return Err(format!(
-                            "title span: expected string or table, got {}",
-                            other.type_name()
-                        ))
-                    }
-                }
-            }
-            if spans.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(Line::from_spans(spans)))
+/// - omitted / `nil` / `{}` → `None`
+/// - string → one unstyled span
+/// - span table `{ text = "...", style = ..., id = "..." }` → one span
+/// - sequence of strings and span tables → one span each
+///
+/// A span's `id` makes it a press target: pressing it fires the framed
+/// window's `press` event with `title = id`.
+pub(crate) fn title(v: Option<mlua::Value>, groups: Groups) -> Result<Option<Title>, String> {
+    let title_span = |v: mlua::Value| -> Result<TitleSpan, String> {
+        match v {
+            mlua::Value::String(s) => Ok(TitleSpan {
+                span: Span::raw(s.to_string_lossy().to_string()),
+                id: None,
+            }),
+            mlua::Value::Table(t) => Ok(TitleSpan {
+                span: span(&t, groups)?,
+                id: t
+                    .get::<Option<String>>("id")
+                    .map_err(|e| format!("title span id: {e}"))?
+                    .map(Into::into),
+            }),
+            other => Err(format!(
+                "title span: expected string or table, got {}",
+                other.type_name()
+            )),
         }
-        Some(other) => Err(format!(
-            "expected string | table | nil, got {}",
-            other.type_name()
-        )),
-    }
+    };
+    let spans = match v {
+        None | Some(mlua::Value::Nil) => return Ok(None),
+        Some(mlua::Value::Table(t)) if !t.contains_key("text").unwrap_or(false) => t
+            .sequence_values::<mlua::Value>()
+            .map(|v| title_span(v.map_err(|e| format!("title span: {e}"))?))
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(v @ (mlua::Value::String(_) | mlua::Value::Table(_))) => vec![title_span(v)?],
+        Some(other) => {
+            return Err(format!(
+                "expected string | table | nil, got {}",
+                other.type_name()
+            ))
+        }
+    };
+    Ok((!spans.is_empty()).then_some(Title { spans }))
 }
 
 // ── constraint ─────────────────────────────────────────────────────────
@@ -898,9 +895,9 @@ mod tests {
     fn title_string_becomes_single_span_line() {
         let lua = lua();
         let v = eval_value(&lua, r#"return "hello""#);
-        let line = title(Some(v), &groups).unwrap().expect("some line");
-        assert_eq!(line.spans.len(), 1);
-        assert_eq!(line.spans[0].text, "hello");
+        let title = title(Some(v), &groups).unwrap().expect("some title");
+        assert_eq!(title.spans.len(), 1);
+        assert_eq!(title.spans[0].span.text, "hello");
     }
 
     #[test]
@@ -910,11 +907,11 @@ mod tests {
             &lua,
             r#"return { text = "warn", style = { fg = "yellow", bold = true } }"#,
         );
-        let line = title(Some(v), &groups).unwrap().expect("some line");
-        assert_eq!(line.spans.len(), 1);
-        assert_eq!(line.spans[0].text, "warn");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
-        assert!(line.spans[0].style.bold);
+        let title = title(Some(v), &groups).unwrap().expect("some title");
+        assert_eq!(title.spans.len(), 1);
+        assert_eq!(title.spans[0].span.text, "warn");
+        assert_eq!(title.spans[0].span.style.fg, Some(Color::Yellow));
+        assert!(title.spans[0].span.style.bold);
     }
 
     #[test]
@@ -922,12 +919,14 @@ mod tests {
         let lua = lua();
         let v = eval_value(
             &lua,
-            r#"return { { text = "[", style = { fg = "grey" } }, "info", { text = "]", style = { fg = "grey" } } }"#,
+            r#"return { { text = "[", style = { fg = "grey" } }, "info", { text = "]", id = "close" } }"#,
         );
-        let line = title(Some(v), &groups).unwrap().expect("some line");
-        assert_eq!(line.spans.len(), 3);
-        assert_eq!(line.spans[1].text, "info");
-        assert_eq!(line.spans[1].style.fg, None);
+        let title = title(Some(v), &groups).unwrap().expect("some title");
+        assert_eq!(title.spans.len(), 3);
+        assert_eq!(title.spans[1].span.text, "info");
+        assert_eq!(title.spans[1].span.style.fg, None);
+        assert_eq!(title.spans[1].id, None);
+        assert_eq!(title.spans[2].id.as_deref(), Some("close"));
     }
 
     #[test]

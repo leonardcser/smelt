@@ -1,6 +1,6 @@
 ---
 title: "smelt.git: Lua API reference"
-description: "Asynchronous Git snapshots and explicit file or range staging. Lua API reference for smelt.git in smelt, the Lua-scriptable terminal coding agent."
+description: "Asynchronous Git history, read-only revision comparisons, and explicit file or range staging. Lua API reference for smelt.git in smelt, the Lua-scriptable terminal coding agent."
 ---
 
 # `smelt.git`
@@ -11,12 +11,12 @@ description: "Asynchronous Git snapshots and explicit file or range staging. Lua
 
 **Advanced:** Low-level building block for plugins that need full control. It may change more freely than the rest of the API.
 
-Asynchronous Git snapshots and explicit file or range staging. `git.diff(opts?)` yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.
+Asynchronous Git history, read-only revision comparisons, and explicit file or range staging. `git.history(opts?)` loads bounded commit pages with first-parent statistics. `git.diff({revision, base?})` compares a commit to its first parent or a branch to its merge base; historical snapshots cannot be staged. `git.diff(opts?)` without a revision yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.
 
 ## `smelt.git.diff`
 
 ```lua
-fun(opts: { cwd: string?, context: integer? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
+fun(opts: { cwd: string?, context: integer?, revision: string?, base: string? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
 ```
 
 Types: [`smelt.diff.Diff`](types.md#smeltdiffdiff)
@@ -25,6 +25,19 @@ Load separate unstaged (index to worktree) and staged (HEAD to index) changes
 without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
 defaults to the runtime workspace and `context` to 3. The snapshot is stable
 until explicitly refreshed; a clean repository returns an empty diff.
+With `revision`, load a read-only first-parent commit patch. With `base` too,
+compare the merge base of base/revision to revision. Revisions resolve to immutable IDs.
+
+## `smelt.git.history`
+
+```lua
+fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer? }?): { commits: { id: string, author: string, age: string, subject: string, message: string, additions: integer, deletions: integer, binary: boolean }[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
+```
+
+Load up to 50 commits with first-parent line statistics, including merge commits.
+`branch` restricts history to base..HEAD; base defaults to main, then master.
+Pass returned `head`, `base_id` as `base`, and an accumulated `skip` for stable pagination.
+`more` indicates another page. No network operations are performed.
 
 ## `smelt.git.index`
 

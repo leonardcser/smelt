@@ -43,6 +43,7 @@ Styled text for buffer lines, titles and bar runs.
 | `text` | `string` | yes | Text to show. |
 | `style` | `smelt.Style\|string` |  | Highlight applied to the text. |
 | `selectable` | `boolean` |  | Include the text in drag-copy. Defaults to the item's setting. |
+| `id` | `string` |  | Layout-leaf border titles only: pressing the span fires the framed window's `press` event with `title = id`. |
 
 ### `smelt.Style`
 
@@ -418,10 +419,11 @@ Indexed unified patch with a continuous foldable row projection. File indices ar
 | `tree` | `fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree` | yes | Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width. |
 | `restore` | `fun(self: smelt.diff.Diff, previous: smelt.diff.Diff, cursor: integer, top: integer): integer?, integer?` | yes | Restore expanded context and return cursor/top rows for a refreshed snapshot, matching section, raw path and source line numbers rather than display offsets. A missing file returns nil for its anchor. Does not change the previous view. |
 | `files` | `fun(self: smelt.diff.Diff): smelt.diff.File[]` | yes | All file metadata, grouped by section and directory-first within each section. Prefer file(index) for bounded UI-thread allocation. |
+| `totals` | `fun(self: smelt.diff.Diff): integer, integer, boolean` | yes | Added and deleted line totals, plus whether any file is binary. Linear in changed files, not patch lines. Working snapshots count each section separately. |
 | `file_count` | `fun(self: smelt.diff.Diff): integer` | yes | Number of section-local file entries. A partial file counts twice. |
 | `file` | `fun(self: smelt.diff.Diff, index: integer): smelt.diff.File?` | yes | Metadata for one file entry. Constant-time lookup. |
-| `find_file` | `fun(self: smelt.diff.Diff, section: 'unstaged'\|'staged', key: string): integer?` | yes | Find a file by section and raw path bytes when restoring selection in a new snapshot. |
-| `section_range` | `fun(self: smelt.diff.Diff, section: 'unstaged'\|'staged'): integer, integer` | yes | Inclusive first and last file indices for a section. First exceeds last when the section is empty. |
+| `find_file` | `fun(self: smelt.diff.Diff, section: 'unstaged'\|'staged'\|'changes', key: string): integer?` | yes | Find a file by section and raw path bytes when restoring selection in a new snapshot. |
+| `section_range` | `fun(self: smelt.diff.Diff, section: 'unstaged'\|'staged'\|'changes'): integer, integer` | yes | Inclusive first and last file indices for a section. First exceeds last when the section is empty. |
 | `file_row` | `fun(self: smelt.diff.Diff, index: integer): integer?` | yes | Current display row of a file header. Accounts for expanded folds. |
 | `file_at` | `fun(self: smelt.diff.Diff, row: integer): integer?` | yes | File containing a display row. Logarithmic lookup. |
 | `hunk` | `fun(self: smelt.diff.Diff, row: integer, forward: boolean): integer?` | yes | Next/previous change group, strictly after/before row. Full-context Git patches retain navigation between edits separated by unchanged lines. |
@@ -442,7 +444,7 @@ One section's changed file metadata. Paths are repository-relative; partially st
 | `deletions` | `integer` | yes | Removed lines. |
 | `hl_group` | `string` | yes | Theme foreground group for the file's change kind. |
 | `key` | `string` | yes | Raw path bytes, for stable section-local identity across snapshots. Use path for display. |
-| `section` | `'unstaged'\|'staged'` | yes | Patch section. Untracked files belong to unstaged with status ?. |
+| `section` | `'unstaged'\|'staged'\|'changes'` | yes | Patch section. Untracked files belong to unstaged with status ?. |
 | `binary` | `boolean` | yes | Whether Git reports a binary patch instead of line changes. |
 
 ### `smelt.diff.Tree`
@@ -459,7 +461,7 @@ Independent virtual file sidebar sharing immutable file metadata and ordering. E
 | `file_row` | `fun(self: smelt.diff.Tree, index: integer, reveal: boolean?): integer?` | yes | Visible row of a file, or nil when hidden. With reveal=true, expand its ancestors first. Logarithmic lookup when no folders change. |
 | `toggle` | `fun(self: smelt.diff.Tree, row: integer): integer?` | yes | Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil. |
 | `collapsed` | `fun(self: smelt.diff.Tree): string[]` | yes | Opaque collapsed directory keys for restoring a new snapshot. |
-| `section_row` | `fun(self: smelt.diff.Tree, section: 'unstaged'\|'staged'): integer` | yes | Visible row of a section header, including an empty section. |
+| `section_row` | `fun(self: smelt.diff.Tree, section: 'unstaged'\|'staged'\|'changes'): integer` | yes | Visible row of a section header, including an empty section. |
 | `restore_group` | `fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer?` | yes | Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic. |
 
 ### `smelt.diff.TreeNode`
@@ -475,7 +477,7 @@ Metadata for one visible file-tree row. File indices are one-based and tree rows
 | `last` | `integer` | yes | Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section. |
 | `parent` | `integer` |  | Visible parent directory row. |
 | `children` | `boolean` | yes | Whether this row is an expandable directory. Section headings are fixed. |
-| `section` | `'unstaged'\|'staged'` | yes | Section containing this row. |
+| `section` | `'unstaged'\|'staged'\|'changes'` | yes | Section containing this row. |
 | `group` | `boolean` | yes | Whether this is a section header. |
 | `expanded` | `boolean` | yes | Whether the directory is expanded. Always true for section headings. |
 
@@ -821,7 +823,7 @@ Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.l
 | --- | --- | --- | --- |
 | `layout` | `smelt.ui.layout` | yes | Layout tree to render inside the overlay. |
 | `name` | `string` |  | Stable name used to hot-reload this overlay in place. |
-| `title` | `string \| table` |  | Optional title rendered in the overlay border. |
+| `title` | `string \| smelt.Span \| (string \| smelt.Span)[]` |  | Optional title rendered in the overlay border. |
 | `border` | `table` |  | Border style override; parsed with the shared border vocabulary. |
 | `anchor` | `"dock_bottom"\|"dock_top"\|"dock_left"\|"dock_right"\|"center"\|"screen_at"\|"win"` |  | Where to place the overlay. Defaults to `dock_bottom`. |
 | `above_rows` | `integer` |  | Rows to keep clear above the bottom dock, typically the statusline height. |
@@ -1941,7 +1943,7 @@ Options for a two-pane resizable layout. Sizes include each child's border and p
 | `min_second` | `integer` |  | Minimum second-pane size in cells; defaults to 1. |
 | `divider` | `{normal: table, active?: table}` |  | Explicit divider styles, using fg, bg, bold, dim, italic, underline, crossedout, and reverse. normal is required; active defaults to normal. Omit to follow the renderer's theme. |
 | `border` | `string \| table` |  | Outer border for hsplit/vsplit. With a retained split, pass chrome to handle:layout instead. |
-| `title` | `string \| table` |  | Outer-border title for hsplit/vsplit; pass to handle:layout when using a retained split. |
+| `title` | `string \| smelt.Span \| (string \| smelt.Span)[]` |  | Outer-border title for hsplit/vsplit; pass to handle:layout when using a retained split. |
 | `padding` | `integer` |  | Outer padding for hsplit/vsplit; pass to handle:layout when using a retained split. |
 
 ### `smelt.win.Decoration`

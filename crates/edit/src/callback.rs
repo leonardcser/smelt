@@ -118,11 +118,13 @@ pub enum Payload {
         content: String,
     },
     /// Mouse event on a leaf. `x`/`y` are leaf-relative cell coordinates and
-    /// may be negative for `PointerLeave`. `button` is `None` for pointer motion.
+    /// may be negative for `PointerLeave` or a title press. `button` is `None`
+    /// for pointer motion. `title` is the id of the pressed border-title span.
     Mouse {
         x: i32,
         y: i32,
         button: Option<MouseButton>,
+        title: Option<std::sync::Arc<str>>,
     },
     /// Scroll state changed. `top` is the new `scroll_top`; `follow` is tail mode.
     Scroll {

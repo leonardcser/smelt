@@ -74,6 +74,250 @@ fn open_fixture(app: &mut TestApp, lines: usize) {
     );
 }
 
+#[tokio::test]
+async fn git_tabs_switch_by_title_click_and_tab_and_branch_is_up_to_date_on_main() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    };
+    git(&["init", "-qb", "main"]);
+    git(&["config", "user.name", "review tester"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    std::fs::write(dir.path().join("file.rs"), "base\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial version"]);
+    let mut app = TestApp::builder().with_cwd(dir.path()).build();
+    app.set_terminal_size(140, 40);
+    app.type_text("/diff branch");
+    app.press(KeyCode::Enter);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame()
+            .text()
+            .contains("Up to date with main")
+    })
+    .await;
+    click_title(&mut app, "History");
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("initial version")
+    })
+    .await;
+    app.press(KeyCode::Tab);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame()
+            .text()
+            .contains("Working tree clean  r refresh")
+    })
+    .await;
+    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    paint_diff(&mut app);
+    assert!(app.render_to_frame().text().contains("initial version"));
+    click_title(&mut app, "Branch");
+    paint_diff(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("Up to date with main"), "{frame}");
+    assert!(!frame.contains("initial version"), "{frame}");
+}
+
+/// Left-click the border-title span labelled `label` on the view switcher row.
+fn click_title(app: &mut TestApp, label: &str) {
+    let frame = app.render_to_frame().text();
+    let (row, line) = frame
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains(" Changes  Branch  History "))
+        .expect("view switcher");
+    let column = line[..line.find(label).unwrap()].chars().count();
+    let at = (column as u16 + 1, row as u16);
+    use crossterm::event::{MouseButton, MouseEventKind};
+    app.mouse(MouseEventKind::Down(MouseButton::Left), at);
+    app.mouse(MouseEventKind::Up(MouseButton::Left), at);
+}
+
+#[tokio::test]
+async fn git_workspace_reviews_branch_history_and_preserves_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(&["init", "-qb", "main"]);
+    git(&["config", "user.name", "review tester"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    std::fs::write(dir.path().join("file.rs"), "base\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial version"]);
+    git(&["checkout", "-qb", "feature"]);
+    std::fs::write(dir.path().join("file.rs"), "committed version\nextra\n").unwrap();
+    git(&["commit", "-qam", "feature revision"]);
+    let linked = dir.path().join("linked");
+    git(&[
+        "worktree",
+        "add",
+        "--detach",
+        linked.to_str().unwrap(),
+        "HEAD",
+    ]);
+    std::fs::write(linked.join("file.rs"), "working version\n").unwrap();
+    let mut app = TestApp::builder().with_cwd(&linked).build();
+    app.set_terminal_size(140, 40);
+    app.type_text("/diff");
+    app.press(KeyCode::Enter);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("working version")
+    })
+    .await;
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("snapshot"), "{frame}");
+    assert!(!frame.contains("Alt-1/2/3"), "{frame}");
+    assert!(!frame.contains("Commit ID or revision"), "{frame}");
+    app.press_mod(KeyCode::Char('2'), KeyModifiers::ALT);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame()
+            .text()
+            .contains("Combined changes vs main")
+            && app.render_to_frame().text().contains("committed version")
+    })
+    .await;
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains(" Changes  Branch  History "), "{frame}");
+    assert!(!frame.contains("working version"), "{frame}");
+    let id = git(&["rev-parse", "HEAD"]);
+    assert!(
+        frame
+            .lines()
+            .find(|line| line.contains(&id[..7]))
+            .unwrap()
+            .contains("+2 -1"),
+        "{frame}"
+    );
+    insta::assert_snapshot!(
+        "git_workspace_branch",
+        frame
+            .replace(&id[..8], "abcdef01")
+            .replace(&id[..7], "abcdef0")
+    );
+    app.set_terminal_size(88, 28);
+    paint_diff(&mut app);
+    let narrow = app.render_to_frame().text();
+    assert!(
+        narrow
+            .lines()
+            .find(|line| line.contains(&id[..7]))
+            .unwrap()
+            .contains("+2 -1"),
+        "{narrow}"
+    );
+    app.set_terminal_size(140, 40);
+    paint_diff(&mut app);
+    app.type_char('j');
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("review tester")
+            && app.render_to_frame().text().contains("committed version")
+    })
+    .await;
+    app.press(KeyCode::Enter);
+    paint_diff(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(frame.contains("changes (1)"), "{frame}");
+    assert!(!frame.contains("unstaged"), "{frame}");
+    app.type_char('s');
+    assert!(git(&[
+        "-C",
+        linked.to_str().unwrap(),
+        "diff",
+        "--cached",
+        "--name-only"
+    ])
+    .is_empty());
+    app.press(KeyCode::Backspace);
+    paint_diff(&mut app);
+    assert!(app.render_to_frame().text().contains("feature revision"));
+    app.press_mod(KeyCode::Char('3'), KeyModifiers::ALT);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("initial version")
+    })
+    .await;
+    app.press_mod(KeyCode::Char('1'), KeyModifiers::ALT);
+    paint_diff(&mut app);
+    assert!(app.render_to_frame().text().contains("working version"));
+    app.press_mod(KeyCode::Char('r'), KeyModifiers::ALT);
+    paint_diff(&mut app);
+    let input = app.ui_probe().named_win("smelt.diff.revision").unwrap();
+    assert_eq!(
+        app.ui_probe().focus(),
+        Some(input),
+        "revision field must receive focus"
+    );
+    assert!(app.render_to_frame().text().contains("revision"));
+    app.press(KeyCode::Esc);
+    paint_diff(&mut app);
+    assert!(app.ui_probe().named_win("smelt.diff.preview").is_some());
+    assert!(app
+        .ui_probe()
+        .win(input)
+        .unwrap()
+        .viewport
+        .is_none_or(|viewport| viewport.rect.height == 0));
+    app.press_mod(KeyCode::Char('r'), KeyModifiers::ALT);
+    paint_diff(&mut app);
+    app.type_text("feature");
+    assert_eq!(
+        app.ui_probe()
+            .buf(app.ui_probe().win(input).unwrap().buf)
+            .unwrap()
+            .lines(),
+        vec!["feature"],
+        "revision field must accept text without triggering review shortcuts"
+    );
+    app.press(KeyCode::Enter);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame().text().contains("first parent")
+            && app.render_to_frame().text().contains("base")
+    })
+    .await;
+    assert!(app
+        .ui_probe()
+        .win(input)
+        .unwrap()
+        .viewport
+        .is_none_or(|viewport| viewport.rect.height == 0));
+    assert!(git(&[
+        "-C",
+        linked.to_str().unwrap(),
+        "diff",
+        "--cached",
+        "--name-only"
+    ])
+    .is_empty());
+    app.press_mod(KeyCode::Char('b'), KeyModifiers::ALT);
+    paint_diff(&mut app);
+    assert_eq!(app.ui_probe().focus(), Some(input));
+    app.press(KeyCode::Enter);
+    wait_for_diff(&mut app, |app| {
+        app.render_to_frame()
+            .text()
+            .contains("Combined changes vs main")
+            && app.render_to_frame().text().contains("committed version")
+    })
+    .await;
+    app.type_char('q');
+    assert!(app.ui_probe().named_win("smelt.diff.preview").is_none());
+}
+
 #[test]
 fn diff_plugin_continuous_navigation_horizontal_scroll_sidebar_and_close() {
     let mut app = TestApp::builder().build();
@@ -109,7 +353,7 @@ fn diff_plugin_continuous_navigation_horizontal_scroll_sidebar_and_close() {
     app.type_char('H');
     app.render_silent();
     assert_eq!(app.ui_probe().win(win).unwrap().scroll_left, 0);
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     app.type_char('j');
     let frame = app.render_to_frame().text();
     assert!(frame.contains("last change"), "{frame}");
@@ -204,7 +448,7 @@ fn diff_split_drag_preserves_selection_and_scroll() {
     );
     for focus in [sidebar, win] {
         if app.ui_probe().focus() != Some(focus) {
-            app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+            switch_pane(&mut app);
         }
         let before = app
             .ui_probe()
@@ -302,7 +546,7 @@ fn diff_file_click_jumps_from_preview_and_repeated_click_returns_to_header() {
     click_diff_row(&mut app, sidebar, 2);
     assert_eq!(app.ui_probe().win(win).unwrap().cursor_abs_row(), 104);
     assert!(app.render_to_frame().text().contains("last change"));
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     app.type_char('G');
     app.render_silent();
     app.dispatch_ui_window_events(false);
@@ -360,7 +604,7 @@ fn diff_ctrl_j_k_select_files_from_either_pane_without_changing_focus() {
     let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
     for focus in [win, sidebar] {
         if app.ui_probe().focus() != Some(focus) {
-            app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+            switch_pane(&mut app);
         }
         for (key, expected) in [('j', 1), ('j', 1), ('k', 0), ('k', 0)] {
             app.press_mod(KeyCode::Char(key), KeyModifiers::CONTROL);
@@ -393,7 +637,7 @@ fn open_sidebar_motion_fixture(app: &mut TestApp) -> WinId {
     "#).unwrap();
     drive_lua_tasks(app);
     paint_diff(app);
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(app);
     paint_diff(app);
     app.ui_probe().named_win("smelt.diff.files").unwrap()
 }
@@ -470,8 +714,8 @@ fn diff_sidebar_motion_counts_apply_to_j_and_k() {
         total - 1
     );
     app.type_text("gg12");
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
+    switch_pane(&mut app);
     let row = app.ui_probe().win(sidebar).unwrap().cursor_abs_row();
     app.type_char('j');
     paint_diff(&mut app);
@@ -496,7 +740,7 @@ fn diff_sidebar_wheel_keeps_selection_attached_to_the_file() {
     "#).unwrap();
     drive_lua_tasks(&mut app);
     paint_diff(&mut app);
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
     let selected = app.ui_probe().win(sidebar).unwrap().cursor_abs_row();
     let preview_row = app.ui_probe().win(preview(&app)).unwrap().cursor_abs_row();
@@ -905,7 +1149,7 @@ fn diff_sidebar_has_neutral_names_colored_status_and_green_red_counts() {
 }
 
 #[test]
-fn diff_sidebar_keeps_tree_layout_and_tab_switches_panes() {
+fn diff_sidebar_keeps_tree_layout_and_ctrl_w_switches_panes() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(120, 30);
     app.run_lua_result(r#"
@@ -921,20 +1165,21 @@ fn diff_sidebar_keeps_tree_layout_and_tab_switches_panes() {
     let rows = source.rows(0..100, app.ui_probe().theme());
     let snapshot = source.snapshot();
     let win = preview(&app);
-    for key in [KeyCode::Tab, KeyCode::BackTab] {
+    for key in ['w', 'h', 'l'] {
         for focus in [sidebar, win] {
-            app.press_mod(
-                key,
-                if key == KeyCode::BackTab {
-                    KeyModifiers::SHIFT
-                } else {
-                    KeyModifiers::NONE
-                },
-            );
+            if key == 'w' {
+                switch_pane(&mut app);
+            } else {
+                app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
+                app.type_char(if focus == sidebar { 'h' } else { 'l' });
+            }
             paint_diff(&mut app);
             assert_eq!(app.ui_probe().focus(), Some(focus));
             assert_eq!(source.snapshot(), snapshot);
-            assert!(app.render_to_frame().text().contains(" files ─"));
+            assert!(app
+                .render_to_frame()
+                .text()
+                .contains(" Changes  Branch  History ─"));
         }
     }
     let staged = rows
@@ -1057,11 +1302,14 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
         "old snapshots remain immutable"
     );
 
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     app.type_char('s');
     wait_for_diff_section(&mut app, "unstaged (0)").await;
     assert_eq!(git(&["show", ":c.rs"]), "new\n");
-    assert!(app.render_to_frame().text().contains("all staged"));
+    assert!(app
+        .render_to_frame()
+        .text()
+        .contains("Everything is staged"));
     assert!(app.ui_probe().win(win).unwrap().row_source().is_none());
     let index = git(&["diff", "--cached"]);
     app.type_text("--s");
@@ -1090,7 +1338,7 @@ async fn diff_fugitive_keys_move_entries_advance_in_section_and_preserve_worktre
     app.type_char('-');
     wait_for_diff_section(&mut app, "staged (0)").await;
     assert!(git(&["diff", "--cached", "--name-only"]).is_empty());
-    assert!(app.render_to_frame().text().contains("nothing staged"));
+    assert!(app.render_to_frame().text().contains("Nothing staged"));
     app.type_char('-');
     drive_lua_tasks(&mut app);
     assert!(git(&["diff", "--cached", "--name-only"]).is_empty());
@@ -1151,7 +1399,7 @@ async fn diff_refresh_preserves_folder_and_section_stage_targets() {
     app.press(KeyCode::Enter);
     wait_for_diff_section(&mut app, "unstaged (3)").await;
     let sidebar = app.ui_probe().named_win("smelt.diff.files").unwrap();
-    app.press(KeyCode::Tab);
+    switch_pane(&mut app);
     app.type_text("gjh");
     paint_diff(&mut app);
     let selected_label = |app: &TestApp| {
@@ -1237,7 +1485,7 @@ async fn diff_tree_groups_toggle_index_entries() {
     app.type_text("/diff");
     app.press(KeyCode::Enter);
     wait_for_diff_section(&mut app, "unstaged (4)").await;
-    app.press(KeyCode::Tab);
+    switch_pane(&mut app);
     // Select and collapse src, then stage all descendants, not outside.rs.
     app.type_text("gjh-");
     wait_for_diff_section(&mut app, "unstaged (1)").await;
@@ -1330,7 +1578,7 @@ async fn diff_tree_staging_keeps_sidebar_scroll() {
                 .text
                 .clone();
             if pass > 0 {
-                app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+                switch_pane(&mut app);
             }
             app.type_char(key);
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1440,7 +1688,7 @@ async fn diff_tree_staging_reveals_offscreen_sidebar_selection() {
             let screen_row = show_tree_row(&mut app, sidebar, row);
             click_diff_row(&mut app, sidebar, screen_row);
             if preview_focused {
-                app.press(KeyCode::Tab);
+                switch_pane(&mut app);
                 paint_diff(&mut app);
             }
             for _ in 0..10 {
@@ -1527,7 +1775,7 @@ fn diff_tree_passive_preview_sync_keeps_folders_collapsed() {
     let source = Arc::clone(app.ui_probe().win(sidebar).unwrap().row_source().unwrap());
     click_diff_row(&mut app, sidebar, 1);
     let collapsed = source.snapshot().total_rows;
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     paint_diff(&mut app);
     assert_eq!(source.snapshot().total_rows, collapsed);
     assert_eq!(app.ui_probe().win(sidebar).unwrap().cursor_abs_row(), 1);
@@ -1611,7 +1859,7 @@ fn diff_tree_folder_click_selects_on_press_and_toggles_on_release() {
         }
     }
     click_diff_row(&mut app, sidebar, 1);
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     paint_diff(&mut app);
     assert_eq!(app.ui_probe().focus(), Some(win));
     assert_eq!(position(&app), before);
@@ -1755,7 +2003,7 @@ fn diff_tree_folder_click_cancels_when_its_target_changes() {
                 drive_lua_tasks(&mut app);
             }
             "resize" => app.set_terminal_size(120, 30),
-            "focus" => app.press(KeyCode::Tab),
+            "focus" => switch_pane(&mut app),
             "keyboard" => app.type_char('h'),
             _ => unreachable!(),
         }
@@ -1819,7 +2067,7 @@ fn diff_tree_mouse_folders_keyboard_navigation_and_explicit_file_reveal() {
     click_diff_row(&mut app, sidebar, 3);
     click_diff_row(&mut app, sidebar, 1);
     assert!(!tree(&app).contains("z.rs"));
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     assert_eq!(app.ui_probe().focus(), Some(win));
     app.type_char('G');
     app.render_silent();
@@ -1844,7 +2092,7 @@ fn diff_tree_mouse_folders_keyboard_navigation_and_explicit_file_reveal() {
     );
     assert!(!tree(&app).contains("a.lua"), "unrelated folder reopened");
     assert_eq!(app.ui_probe().win(sidebar).unwrap().cursor_row(), 3);
-    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+    switch_pane(&mut app);
     app.type_text("hh");
     app.render_silent();
     assert!(!tree(&app).contains("z.rs"));
@@ -3065,6 +3313,13 @@ fn diff_many_file_tree_keeps_folder_frames_bounded() {
     }
 }
 
+/// `Ctrl-W w`: move focus to the other diff pane.
+fn switch_pane(app: &mut TestApp) {
+    app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
+    app.type_char('w');
+    paint_diff(app);
+}
+
 fn paint_diff(app: &mut TestApp) {
     app.render_silent();
     app.dispatch_ui_window_events(false);
@@ -3317,7 +3572,7 @@ fn diff_viewer_benchmark() {
         ] {
             if operation == "highlighted_wheel" {
                 if app.ui_probe().focus() != Some(win) {
-                    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+                    switch_pane(&mut app);
                 }
                 app.type_text("gg");
                 paint_diff(&mut app);

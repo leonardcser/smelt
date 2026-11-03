@@ -180,7 +180,11 @@ app_story!(diff_overlay_grouped, |ctx| {
     }
     ctx.wait_for_document("smelt.diff.preview");
     ctx.assert_snapshot();
-    ctx.press_tab();
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('w'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    ctx.press_char('w');
     for _ in 0..3 {
         ctx.press_key(
             crossterm::event::KeyCode::Char('w'),
@@ -204,7 +208,11 @@ app_story!(diff_overlay_refresh, |ctx| {
     "#);
     ctx.run_command("diff");
     ctx.wait_for_document("smelt.diff.preview");
-    ctx.press_tab();
+    ctx.press_key(
+        crossterm::event::KeyCode::Char('w'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    ctx.press_char('w');
     ctx.run_lua("refresh_blocked = true");
     ctx.press_char('r');
     ctx.assert_snapshot_named("refreshing");

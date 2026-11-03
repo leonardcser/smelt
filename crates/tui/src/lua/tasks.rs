@@ -105,9 +105,17 @@ fn populate_payload_table(
         crate::smelt_edit::Payload::Paste { content } => table.set("text", content.clone()),
         crate::smelt_edit::Payload::Selection { index } => table.set("index", *index + 1),
         crate::smelt_edit::Payload::Text { content } => table.set("text", content.clone()),
-        crate::smelt_edit::Payload::Mouse { x, y, button } => {
+        crate::smelt_edit::Payload::Mouse {
+            x,
+            y,
+            button,
+            title,
+        } => {
             table.set("x", *x)?;
             table.set("y", *y)?;
+            if let Some(title) = title {
+                table.set("title", title.as_ref())?;
+            }
             if let Some(button) = button {
                 table.set(
                     "button",

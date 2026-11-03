@@ -497,16 +497,7 @@ async fn compaction_prepare_probe_compacts_after_lua_reload() {
 fn read_overlay_title(app: &TestApp, name: &str) -> Option<String> {
     let id = app.ui_probe().named_overlay(name)?;
     let ov = app.ui_probe().overlay(id)?;
-    Some(
-        ov.layout
-            .chrome()
-            .title
-            .as_ref()?
-            .spans
-            .iter()
-            .map(|s| s.text.as_ref())
-            .collect::<String>(),
-    )
+    Some(ov.layout.chrome().title.as_ref()?.text())
 }
 
 // Editing `init.lua` to change the overlay title and calling

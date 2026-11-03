@@ -44,7 +44,9 @@ pub enum LuaWinEvent {
     Tick,
     /// Mouse-down landed on the window. Payload: `{ x, y, button }`
     /// (leaf-relative cell coords, `button` ∈ `"left"|"right"|"middle"`).
-    /// Non-focusable, non-selectable windows still receive it.
+    /// Non-focusable, non-selectable windows still receive it. A press on a
+    /// border-title span with an `id` also arrives here with `title = id`.
+    /// It has no matching `release`.
     Press,
     /// Mouse-up after a `Press` on this window. Fires on the leaf that owned
     /// the press, even if the pointer drifted out (capture). Same payload as

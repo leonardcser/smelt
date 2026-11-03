@@ -174,11 +174,26 @@ end
 --- without passing patch bodies through Lua. Yields inside `smelt.spawn`; cancellation terminates Git. `cwd`
 --- defaults to the runtime workspace and `context` to 3. The snapshot is stable
 --- until explicitly refreshed; a clean repository returns an empty diff.
----@type fun(opts: { cwd: string?, context: integer? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
+--- With `revision`, load a read-only first-parent commit patch. With `base` too,
+--- compare the merge base of base/revision to revision. Revisions resolve to immutable IDs.
+---@type fun(opts: { cwd: string?, context: integer?, revision: string?, base: string? }?): { root: string, branch: string, diff: smelt.diff.Diff }?, string?
 function smelt.git.diff(opts)
   require_yieldable("smelt.git.diff")
   local id = smelt.task.alloc()
   local job = internal.git.__start_diff(id, opts)
+  smelt.task.wait(id)
+  return job:take()
+end
+
+--- Load up to 50 commits with first-parent line statistics, including merge commits.
+--- `branch` restricts history to base..HEAD; base defaults to main, then master.
+--- Pass returned `head`, `base_id` as `base`, and an accumulated `skip` for stable pagination.
+--- `more` indicates another page. No network operations are performed.
+---@type fun(opts: { cwd: string?, base: string?, branch: boolean?, head: string?, skip: integer? }?): { commits: { id: string, author: string, age: string, subject: string, message: string, additions: integer, deletions: integer, binary: boolean }[], base: string?, base_id: string?, head: string?, more: boolean }?, string?
+function smelt.git.history(opts)
+  require_yieldable("smelt.git.history")
+  local id = smelt.task.alloc()
+  local job = internal.git.__start_history(id, opts or {})
   smelt.task.wait(id)
   return job:take()
 end

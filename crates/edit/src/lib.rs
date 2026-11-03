@@ -70,6 +70,17 @@ use callback::{Callbacks, KeymapScope};
 pub use event::{Event, Status};
 pub use modal::{ModalId, ModalOwner};
 pub use motions::{FindKind, LineTo, Motion, WordTo};
+/// Focus step within the focused overlay or modal, for [`Ui::focus_move`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusMove {
+    Next,
+    Prev,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 pub use overlay::{
     Align, Anchor, BodyDrag, ChromeAction, ChromeOwner, Corner, Decoration, DecorationId,
     DragConfig, HitTarget, Overlay, OverlayId, ResizeConfig, ResizeEdges,
@@ -1754,6 +1765,30 @@ impl Ui {
         self.hit_test_in(&self.resolve_scene(None), x, y)
     }
 
+    /// Window whose border title span with an id lies at `(x, y)`, and that id.
+    /// Only the topmost layout at the point is considered, as in [`Self::hit_test`].
+    pub fn title_target_at(&self, x: u16, y: u16) -> Option<(WinId, std::sync::Arc<str>)> {
+        let scene = self.resolve_scene(None);
+        let layout = match self.overlay_hit_test_in(&scene, x, y) {
+            Some((id, _)) => {
+                &scene
+                    .overlays
+                    .iter()
+                    .find(|overlay| overlay.id == id)?
+                    .layout
+            }
+            None => scene
+                .decorations
+                .iter()
+                .rev()
+                .find(|decoration| self.layout_hit_test(&decoration.layout, x, y).is_some())
+                .map_or(&scene.root, |decoration| &decoration.layout),
+        };
+        let (id, target) = layout.title_target_at(x, y)?;
+        let win = WinId(id.0);
+        self.wins.contains_key(&win).then_some((win, target))
+    }
+
     fn hit_test_in(&self, scene: &ResolvedUiLayout, x: u16, y: u16) -> Option<HitTarget> {
         if let Some((_, target)) = self.overlay_hit_test_in(scene, x, y) {
             return Some(target);
@@ -2258,45 +2293,88 @@ impl Ui {
         &self.focus_history
     }
 
-    #[cfg(test)]
-    fn focus_next(&mut self) -> bool {
-        self.focus_step(1)
-    }
-
-    #[cfg(test)]
-    fn focus_prev(&mut self) -> bool {
-        self.focus_step(-1)
-    }
-
-    #[cfg(test)]
-    fn focus_step(&mut self, dir: i32) -> bool {
-        let Some(modal_id) = self.active_modal() else {
-            return false;
+    /// Move focus to another focusable window in the focused overlay, or in
+    /// the active modal. `Next`/`Prev` cycle in layout order; directions pick
+    /// the nearest window on that side. Returns `false` when there is none.
+    pub fn focus_move(&mut self, step: FocusMove) -> bool {
+        let scene = self.resolve_scene(None);
+        let group: Vec<WinId> = match self.active_modal().and_then(|id| self.modal(id)) {
+            Some(modal) => modal.leaves.clone(),
+            None => {
+                let Some(overlay) = self.focused_overlay() else {
+                    return false;
+                };
+                let Some(resolved) = scene.overlays.iter().find(|o| o.id == overlay) else {
+                    return false;
+                };
+                resolved
+                    .layout
+                    .leaves()
+                    .map(|(id, _)| WinId(id.0))
+                    .collect()
+            }
         };
-        let Some(modal) = self.modal(modal_id) else {
-            return false;
+        let rect = |win: WinId| {
+            scene
+                .layouts()
+                .rev()
+                .find_map(|layout| layout.leaf_rect(win.into()))
+                .filter(|rect| rect.width > 0 && rect.height > 0)
         };
-        let leaves: Vec<WinId> = modal
-            .leaves
-            .iter()
-            .copied()
-            .filter(|win| self.wins.contains_key(win))
+        let windows: Vec<(WinId, Rect)> = group
+            .into_iter()
+            .filter(|win| self.wins.get(win).is_some_and(|w| w.accepts_focus()))
+            .filter_map(|win| Some((win, rect(win)?)))
             .collect();
-        if leaves.is_empty() {
-            return false;
-        }
         let current = self.focus();
-        let current_idx = current
-            .and_then(|w| leaves.iter().position(|x| *x == w))
-            .map(|i| i as i32)
-            .unwrap_or(-1);
-        let len = leaves.len() as i32;
-        let next_idx = (current_idx + dir).rem_euclid(len) as usize;
-        let target = leaves[next_idx];
-        if Some(target) == current {
-            return false;
+        let index = windows.iter().position(|(win, _)| Some(*win) == current);
+        let target = match (step, index) {
+            (FocusMove::Next | FocusMove::Prev, _) if windows.is_empty() => None,
+            (FocusMove::Next, index) => {
+                Some(windows[index.map_or(0, |i| (i + 1) % windows.len())].0)
+            }
+            (FocusMove::Prev, index) => {
+                let len = windows.len();
+                Some(windows[index.map_or(len - 1, |i| (i + len - 1) % len)].0)
+            }
+            (_, None) => None,
+            (direction, Some(index)) => {
+                let from = windows[index].1;
+                let center = |r: Rect, horizontal: bool| {
+                    if horizontal {
+                        i32::from(r.y) * 2 + i32::from(r.height)
+                    } else {
+                        i32::from(r.x) * 2 + i32::from(r.width)
+                    }
+                };
+                windows
+                    .iter()
+                    .filter_map(|&(win, r)| {
+                        let (gap, horizontal) = match direction {
+                            FocusMove::Left => (i32::from(from.x) - i32::from(r.x + r.width), true),
+                            FocusMove::Right => {
+                                (i32::from(r.x) - i32::from(from.x + from.width), true)
+                            }
+                            FocusMove::Up => (i32::from(from.y) - i32::from(r.y + r.height), false),
+                            FocusMove::Down => {
+                                (i32::from(r.y) - i32::from(from.y + from.height), false)
+                            }
+                            FocusMove::Next | FocusMove::Prev => unreachable!(),
+                        };
+                        // Adjacent panes share a border cell, so allow one cell of overlap.
+                        (win != windows[index].0 && gap >= -1).then(|| {
+                            let offset = (center(r, horizontal) - center(from, horizontal)).abs();
+                            ((gap, offset), win)
+                        })
+                    })
+                    .min_by_key(|(score, _)| *score)
+                    .map(|(_, win)| win)
+            }
+        };
+        match target {
+            Some(win) if Some(win) != current => self.set_focus(win),
+            _ => false,
         }
-        self.set_focus(target)
     }
 
     // ── Capture ──────────────────────────────────────────────────
@@ -5992,18 +6070,18 @@ mod tests {
     }
 
     #[test]
-    fn focus_next_returns_false_outside_modal() {
+    fn focus_move_is_a_no_op_outside_overlays() {
         let mut ui = make_ui();
         let win = WinId(50);
         make_split(&mut ui, win);
         ui.set_focus(win);
         // No modal open → focus cycling is a no-op.
-        assert!(!ui.focus_next());
+        assert!(!ui.focus_move(FocusMove::Next));
         assert_eq!(ui.focus(), Some(win));
     }
 
     #[test]
-    fn focus_next_cycles_modal_leaves() {
+    fn focus_move_next_cycles_modal_leaves() {
         let mut ui = make_ui();
         let a = WinId(100);
         let b = WinId(101);
@@ -6013,17 +6091,17 @@ mod tests {
         }
         ui.overlay_open(modal_overlay_with_leaves(a, b, c));
         ui.set_focus(a);
-        assert!(ui.focus_next());
+        assert!(ui.focus_move(FocusMove::Next));
         assert_eq!(ui.focus(), Some(b));
-        assert!(ui.focus_next());
+        assert!(ui.focus_move(FocusMove::Next));
         assert_eq!(ui.focus(), Some(c));
         // Wrap.
-        assert!(ui.focus_next());
+        assert!(ui.focus_move(FocusMove::Next));
         assert_eq!(ui.focus(), Some(a));
     }
 
     #[test]
-    fn focus_prev_walks_backwards_with_wrap() {
+    fn focus_move_prev_walks_backwards_with_wrap() {
         let mut ui = make_ui();
         let a = WinId(100);
         let b = WinId(101);
@@ -6033,14 +6111,35 @@ mod tests {
         }
         ui.overlay_open(modal_overlay_with_leaves(a, b, c));
         ui.set_focus(a);
-        assert!(ui.focus_prev());
+        assert!(ui.focus_move(FocusMove::Prev));
         assert_eq!(ui.focus(), Some(c));
-        assert!(ui.focus_prev());
+        assert!(ui.focus_move(FocusMove::Prev));
         assert_eq!(ui.focus(), Some(b));
     }
 
     #[test]
-    fn focus_next_skips_unregistered_leaves() {
+    fn focus_move_directions_pick_the_nearest_window_on_that_side() {
+        let mut ui = make_ui();
+        let (a, b, c) = (WinId(100), WinId(101), WinId(102));
+        for w in [a, b, c] {
+            make_split(&mut ui, w);
+        }
+        // `a` spans the top row; `b` and `c` sit side by side below it.
+        ui.overlay_open(modal_overlay_with_leaves(a, b, c).with_size((40, 6)));
+        ui.set_focus(b);
+        assert!(ui.focus_move(FocusMove::Right));
+        assert_eq!(ui.focus(), Some(c));
+        assert!(!ui.focus_move(FocusMove::Right));
+        assert!(ui.focus_move(FocusMove::Left));
+        assert_eq!(ui.focus(), Some(b));
+        assert!(ui.focus_move(FocusMove::Up));
+        assert_eq!(ui.focus(), Some(a));
+        assert!(ui.focus_move(FocusMove::Down));
+        assert_eq!(ui.focus(), Some(b));
+    }
+
+    #[test]
+    fn focus_move_skips_unregistered_leaves() {
         let mut ui = make_ui();
         let a = WinId(100);
         let c = WinId(102);
@@ -6049,7 +6148,7 @@ mod tests {
         make_split(&mut ui, c);
         ui.overlay_open(modal_overlay_with_leaves(a, WinId(101), c));
         ui.set_focus(a);
-        assert!(ui.focus_next());
+        assert!(ui.focus_move(FocusMove::Next));
         assert_eq!(ui.focus(), Some(c));
     }
 

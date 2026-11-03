@@ -49,7 +49,10 @@ fn section(name: &str) -> LuaResult<crate::diff::Section> {
     match name {
         "unstaged" => Ok(crate::diff::Section::Unstaged),
         "staged" => Ok(crate::diff::Section::Staged),
-        _ => Err(LuaError::external("section must be unstaged or staged")),
+        "changes" => Ok(crate::diff::Section::Changes),
+        _ => Err(LuaError::external(
+            "section must be unstaged, staged, or changes",
+        )),
     }
 }
 
@@ -126,6 +129,14 @@ impl mlua::UserData for LuaDiff {
             }
             Ok(files)
         });
+        methods.add_method("totals", |_, this, ()| {
+            let files = &this.0.diff.files;
+            Ok((
+                files.iter().map(|file| file.additions).sum::<u64>(),
+                files.iter().map(|file| file.deletions).sum::<u64>(),
+                files.iter().any(|file| file.binary),
+            ))
+        });
         methods.add_method("file_count", |_, this, ()| Ok(this.0.diff.files.len()));
         methods.add_method("file", |lua, this, index: usize| {
             index
@@ -182,6 +193,7 @@ impl mlua::UserData for LuaDiff {
 
 enum GitResult {
     Snapshot(crate::git::DiffSnapshot),
+    History(crate::git::review::Page),
     IndexUpdated {
         root: std::path::PathBuf,
         refresh: Result<crate::git::DiffSnapshot, String>,
@@ -212,6 +224,27 @@ impl mlua::UserData for LuaDiffJob {
                     Ok(value) => {
                         let result = lua.create_table()?;
                         let snapshot = match value {
+                            GitResult::History(page) => {
+                                result.set("base", page.base)?;
+                                result.set("base_id", page.base_id)?;
+                                result.set("head", page.head)?;
+                                result.set("more", page.more)?;
+                                let commits = lua.create_table()?;
+                                for (index, commit) in page.commits.into_iter().enumerate() {
+                                    let row = lua.create_table()?;
+                                    row.set("id", commit.id)?;
+                                    row.set("author", commit.author)?;
+                                    row.set("age", commit.age)?;
+                                    row.set("subject", commit.subject)?;
+                                    row.set("message", commit.message)?;
+                                    row.set("additions", commit.additions)?;
+                                    row.set("deletions", commit.deletions)?;
+                                    row.set("binary", commit.binary)?;
+                                    commits.set(index + 1, row)?;
+                                }
+                                result.set("commits", commits)?;
+                                return Ok((Some(result), None));
+                            }
                             GitResult::Snapshot(snapshot) => Some(snapshot),
                             GitResult::IndexUpdated { root, refresh } => {
                                 result.set("index_updated", true)?;
@@ -231,10 +264,12 @@ impl mlua::UserData for LuaDiffJob {
                             result.set(
                                 "diff",
                                 LuaDiff(
-                                    snapshot.view,
-                                    Some(Arc::new(Repository {
-                                        root: snapshot.root,
-                                    })),
+                                    snapshot.view.clone(),
+                                    (!snapshot.view.diff.is_comparison()).then(|| {
+                                        Arc::new(Repository {
+                                            root: snapshot.root,
+                                        })
+                                    }),
                                 ),
                             )?;
                         }
@@ -298,7 +333,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             },
             LuaClassField {
                 name: "section",
-                ty: "'unstaged'|'staged'".into(),
+                ty: "'unstaged'|'staged'|'changes'".into(),
                 optional: false,
                 doc: "Patch section. Untracked files belong to unstaged with status ?.",
             },
@@ -320,7 +355,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             LuaClassField { name: "last", ty: "integer".into(), optional: false, doc: "Inclusive last descendant file index, including collapsed descendants. Less than first for an empty section." },
             LuaClassField { name: "parent", ty: "integer".into(), optional: true, doc: "Visible parent directory row." },
             LuaClassField { name: "children", ty: "boolean".into(), optional: false, doc: "Whether this row is an expandable directory. Section headings are fixed." },
-            LuaClassField { name: "section", ty: "'unstaged'|'staged'".into(), optional: false, doc: "Section containing this row." },
+            LuaClassField { name: "section", ty: "'unstaged'|'staged'|'changes'".into(), optional: false, doc: "Section containing this row." },
             LuaClassField { name: "group", ty: "boolean".into(), optional: false, doc: "Whether this is a section header." },
             LuaClassField { name: "expanded", ty: "boolean".into(), optional: false, doc: "Whether the directory is expanded. Always true for section headings." },
         ],
@@ -336,7 +371,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             LuaClassField { name: "file_row", ty: "fun(self: smelt.diff.Tree, index: integer, reveal: boolean?): integer?".into(), optional: false, doc: "Visible row of a file, or nil when hidden. With reveal=true, expand its ancestors first. Logarithmic lookup when no folders change." },
             LuaClassField { name: "toggle", ty: "fun(self: smelt.diff.Tree, row: integer): integer?".into(), optional: false, doc: "Toggle a directory and return its row. Files, section headings, the blank separator and invalid rows return nil." },
             LuaClassField { name: "collapsed", ty: "fun(self: smelt.diff.Tree): string[]".into(), optional: false, doc: "Opaque collapsed directory keys for restoring a new snapshot." },
-            LuaClassField { name: "section_row", ty: "fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'): integer".into(), optional: false, doc: "Visible row of a section header, including an empty section." },
+            LuaClassField { name: "section_row", ty: "fun(self: smelt.diff.Tree, section: 'unstaged'|'staged'|'changes'): integer".into(), optional: false, doc: "Visible row of a section header, including an empty section." },
             LuaClassField { name: "restore_group", ty: "fun(self: smelt.diff.Tree, previous: smelt.diff.Tree, row: integer): integer?".into(), optional: false, doc: "Restore a folder or section selection across snapshots by section and raw directory identity. Never expands folders. Returns the nearest visible ancestor if hidden, or its section header if the directory disappeared. Returns nil for a file, separator or invalid row. Directory lookup is logarithmic." },
         ],
     });
@@ -350,10 +385,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             LuaClassField { name: "tree", ty: "fun(self: smelt.diff.Diff, collapsed: string[]?): smelt.diff.Tree".into(), optional: false, doc: "Create an independent virtual file tree. Optionally restore opaque collapsed keys from an earlier tree. Section headers include file counts and section-local line totals; attached windows provide their own width." },
             LuaClassField { name: "restore", ty: "fun(self: smelt.diff.Diff, previous: smelt.diff.Diff, cursor: integer, top: integer): integer?, integer?".into(), optional: false, doc: "Restore expanded context and return cursor/top rows for a refreshed snapshot, matching section, raw path and source line numbers rather than display offsets. A missing file returns nil for its anchor. Does not change the previous view." },
             LuaClassField { name: "files", ty: "fun(self: smelt.diff.Diff): smelt.diff.File[]".into(), optional: false, doc: "All file metadata, grouped by section and directory-first within each section. Prefer file(index) for bounded UI-thread allocation." },
+            LuaClassField { name: "totals", ty: "fun(self: smelt.diff.Diff): integer, integer, boolean".into(), optional: false, doc: "Added and deleted line totals, plus whether any file is binary. Linear in changed files, not patch lines. Working snapshots count each section separately." },
             LuaClassField { name: "file_count", ty: "fun(self: smelt.diff.Diff): integer".into(), optional: false, doc: "Number of section-local file entries. A partial file counts twice." },
             LuaClassField { name: "file", ty: "fun(self: smelt.diff.Diff, index: integer): smelt.diff.File?".into(), optional: false, doc: "Metadata for one file entry. Constant-time lookup." },
-            LuaClassField { name: "find_file", ty: "fun(self: smelt.diff.Diff, section: 'unstaged'|'staged', key: string): integer?".into(), optional: false, doc: "Find a file by section and raw path bytes when restoring selection in a new snapshot." },
-            LuaClassField { name: "section_range", ty: "fun(self: smelt.diff.Diff, section: 'unstaged'|'staged'): integer, integer".into(), optional: false, doc: "Inclusive first and last file indices for a section. First exceeds last when the section is empty." },
+            LuaClassField { name: "find_file", ty: "fun(self: smelt.diff.Diff, section: 'unstaged'|'staged'|'changes', key: string): integer?".into(), optional: false, doc: "Find a file by section and raw path bytes when restoring selection in a new snapshot." },
+            LuaClassField { name: "section_range", ty: "fun(self: smelt.diff.Diff, section: 'unstaged'|'staged'|'changes'): integer, integer".into(), optional: false, doc: "Inclusive first and last file indices for a section. First exceeds last when the section is empty." },
             LuaClassField { name: "file_row", ty: "fun(self: smelt.diff.Diff, index: integer): integer?".into(), optional: false, doc: "Current display row of a file header. Accounts for expanded folds." },
             LuaClassField { name: "file_at", ty: "fun(self: smelt.diff.Diff, row: integer): integer?".into(), optional: false, doc: "File containing a display row. Logarithmic lookup." },
             LuaClassField { name: "hunk", ty: "fun(self: smelt.diff.Diff, row: integer, forward: boolean): integer?".into(), optional: false, doc: "Next/previous change group, strictly after/before row. Full-context Git patches retain navigation between edits separated by unchanged lines." },
@@ -367,33 +403,65 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             view.set_wakeup(parse_shared.wakeup_tx.get().cloned());
             Ok(LuaDiff(view, None))
         })?;
-    let git = LuaMod::advanced(lua, smelt, "git", "Asynchronous Git snapshots and explicit file or range staging. `git.diff(opts?)` yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.", Tier::Host)?;
+    let git = LuaMod::advanced(lua, smelt, "git", "Asynchronous Git history, read-only revision comparisons, and explicit file or range staging. `git.history(opts?)` loads bounded commit pages with first-parent statistics. `git.diff({revision, base?})` compares a commit to its first parent or a branch to its merge base; historical snapshots cannot be staged. `git.diff(opts?)` without a revision yields separate unstaged (index to worktree, including untracked files) and staged (HEAD to index) patches. Unborn repositories use the empty tree for HEAD. `git.index(diff, file, action, last?)` updates the selected file or inclusive range's real index entries within one section, then acquires and indexes a fresh grouped snapshot off-thread. Mutation success is explicit (`index_updated=true`); if only the refresh fails, the result contains `refresh_error` and no `diff`. Retain the old snapshot as stale and refresh before another mutation. The original snapshot remains immutable.", Tier::Host)?;
+    let history_shared = Arc::clone(shared);
+    git.private_live_only_fn(
+        "__start_history",
+        &["task_id", "opts"],
+        move |_, (id, opts): (u64, mlua::Table)| -> LuaResult<LuaDiffJob> {
+            let cwd = opts
+                .get::<Option<String>>("cwd")?
+                .map(|path| history_shared.resolve_project_path(path))
+                .unwrap_or_else(|| history_shared.evaluation_cwd());
+            let base = opts.get::<Option<String>>("base")?;
+            let branch = opts.get::<Option<bool>>("branch")?.unwrap_or(false);
+            let head = opts.get::<Option<String>>("head")?;
+            let skip = opts.get::<Option<usize>>("skip")?.unwrap_or(0);
+            let result: DiffResult = Arc::new(Mutex::new(None));
+            let output = result.clone();
+            let cancel = crate::lua::current_task_cancel().unwrap_or_default();
+            let sink = history_shared.resume_sink();
+            tokio::spawn(async move {
+                let value =
+                    crate::git::review::history(cwd, base, branch, head, skip, cancel).await;
+                *output.lock().unwrap() = Some(value.map(GitResult::History));
+                sink.resolve_json(id, serde_json::Value::Null);
+            });
+            Ok(LuaDiffJob(result))
+        },
+    )?;
     let index_shared = Arc::clone(shared);
     let shared = Arc::clone(shared);
     git.private_live_only_fn(
         "__start_diff",
         &["task_id", "opts"],
-        move |_, (id, opts): (u64, Option<mlua::Table>)| -> LuaResult<LuaDiffJob> {
+        move |lua, (id, opts): (u64, Option<mlua::Table>)| -> LuaResult<LuaDiffJob> {
+            let opts = match opts {
+                Some(opts) => opts,
+                None => lua.create_table()?,
+            };
             let cwd = opts
-                .as_ref()
-                .map(|opts| opts.get::<Option<String>>("cwd"))
-                .transpose()?
-                .flatten()
+                .get::<Option<String>>("cwd")?
                 .map(|path| shared.resolve_project_path(path))
                 .unwrap_or_else(|| shared.evaluation_cwd());
-            let context = opts
-                .as_ref()
-                .map(|opts| opts.get::<Option<usize>>("context"))
-                .transpose()?
-                .flatten()
-                .unwrap_or(3);
+            let context = opts.get::<Option<usize>>("context")?.unwrap_or(3);
+            let revision = opts.get::<Option<String>>("revision")?;
+            let base = opts.get::<Option<String>>("base")?;
+            if base.is_some() && revision.is_none() {
+                return Err(LuaError::external("base requires revision"));
+            }
             let result: DiffResult = Arc::new(Mutex::new(None));
             let output = Arc::clone(&result);
             let cancel = crate::lua::current_task_cancel().unwrap_or_default();
             let sink = shared.resume_sink();
             let wakeup = shared.wakeup_tx.get().cloned();
             tokio::spawn(async move {
-                let value = crate::git::working_diff(cwd, context, cancel).await;
+                let value = match revision {
+                    Some(revision) => {
+                        crate::git::review::comparison(cwd, revision, base, context, cancel).await
+                    }
+                    None => crate::git::working_diff(cwd, context, cancel).await,
+                };
                 if let Ok(snapshot) = &value {
                     snapshot.view.set_wakeup(wakeup);
                 }

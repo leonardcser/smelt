@@ -16,7 +16,7 @@ Type `/` to open the command picker with fuzzy search. Add your own with
 | `/clear`, `/new`                         | Start a new conversation |
 | `/rewind`                                | Rewind to a previous turn (same as `Esc Esc`) |
 | `/resume`                                | Resume a saved session |
-| `/diff`                                  | View staged, unstaged, and untracked local Git changes |
+| `/diff [branch [base]\|history\|revision]` | Review working changes, branch commits, history, or one revision |
 | `/session`                               | Show session, worktree, model, usage, and history metadata |
 | `/compact [instructions]`                | Summarize older history now and choose what to keep (smelt also does this automatically) |
 | `/fork`, `/branch`                       | Fork the current session |
@@ -101,9 +101,39 @@ Enable `/goal` with `require("smelt.plugins.goal")` in `init.lua`.
 turns. The sub-commands and the auto-continue setting are described under
 [Goals and Auto-Continue](../guide/workflows.md#goals-and-auto-continue).
 
-### Local diff viewer
+### Diff viewer
 
-`/diff` shows your uncommitted Git changes in two panes: a file tree on the left
+`/diff` opens one floating viewer with three views: **Changes**, **Branch**,
+and **History**. The view names sit in the file pane's top border. Click one,
+press `Tab` / `Shift-Tab` to cycle, or press `Alt-1`, `Alt-2`, or `Alt-3`. In a
+narrow pane, the other views shorten to their initials.
+
+- **Changes** shows staged, unstaged, and untracked files, with staging controls.
+- **Branch** lists commits reachable from `HEAD` but not from the comparison
+  base (`base..HEAD`). The base defaults to `main`, then `master`. Use `Alt-b`
+  to enter a different base, or `/diff branch <base>`. The upstream/push target
+  is not used. No fetch runs in the background. With no such commits, Branch
+  shows **Up to date with &lt;base&gt;**.
+- **History** lists commits reachable from `HEAD` (`/diff history`). Select
+  **Load older commits** and press `Enter` to load another page. Pages stay
+  pinned to the loaded HEAD until refresh.
+
+Selecting a commit previews its patch, subject, author, and date. Commit rows
+show green additions and red deletions; binary changes have a `binary` marker.
+Press `Enter` in the commit list to open its file tree, and `Backspace` to return
+to the list. Branch also has **Combined changes**, which compares the
+merge base to HEAD (`base...HEAD`). Its totals come from the combined patch,
+not the sum of commit statistics. Uncommitted files are excluded.
+
+Press `Alt-r` to open revision entry and enter a commit ID, tag, or revision,
+or open it directly with `/diff <revision>`. `Alt-b` opens comparison-base entry.
+These bordered input rows appear only while editing; `Enter` submits and `Esc`
+cancels without closing the viewer. Commit patches compare against the
+first parent, including merge commits. Root commits compare against the empty
+tree. Historical comparisons are read-only; staging shortcuts cannot modify
+the index there.
+
+Changes uses two panes: a file tree on the left
 and one continuous, syntax-highlighted diff on the right. The tree has two
 sections: `unstaged` (including untracked files, marked `?`) and `staged`. A file
 with both kinds of changes appears in both. Status letters are colored: green for
@@ -124,7 +154,8 @@ If a refresh fails, the previous view stays with a `stale - r refresh` marker.
 
 | Key | Action |
 | --- | ------ |
-| `Tab` / `Shift-Tab` | Switch between files and diff |
+| `Tab` / `Shift-Tab` | Next/previous view |
+| `Ctrl-W w`, `Ctrl-W h` / `l` | Switch between files and diff |
 | `[` / `]` | Previous/next file |
 | `{` / `}` | Previous/next hunk |
 | `s` / `u`, `-` | Stage/unstage the selected file, folder, or section; `-` toggles by section |

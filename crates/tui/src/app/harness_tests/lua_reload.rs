@@ -3492,13 +3492,7 @@ fn named_overlay_open_refreshes_title_in_place() {
     let title1 = app
         .ui_probe()
         .overlay(id1)
-        .and_then(|ov| {
-            ov.layout
-                .chrome()
-                .title
-                .as_ref()
-                .map(|l| l.spans.iter().map(|s| s.text.as_ref()).collect::<String>())
-        })
+        .and_then(|ov| ov.layout.chrome().title.as_ref().map(|title| title.text()))
         .unwrap_or_default();
     assert_eq!(title1, "old title");
 
@@ -3527,13 +3521,7 @@ fn named_overlay_open_refreshes_title_in_place() {
     let title2 = app
         .ui_probe()
         .overlay(id2)
-        .and_then(|ov| {
-            ov.layout
-                .chrome()
-                .title
-                .as_ref()
-                .map(|l| l.spans.iter().map(|s| s.text.as_ref()).collect::<String>())
-        })
+        .and_then(|ov| ov.layout.chrome().title.as_ref().map(|title| title.text()))
         .unwrap_or_default();
     assert_eq!(title2, "new title", "title should refresh in place");
 }

@@ -495,7 +495,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.block_nav` | Transcript block navigation. |
 | `smelt.plugins.compact` | Compacts older history while preserving a live recent suffix. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
-| `smelt.plugins.diff` | /diff: snapshot-based, virtualized Git diff viewer. |
+| `smelt.plugins.diff` | /diff: working changes, branch review and commit history. |
 | `smelt.plugins.donut` | /donut - Andy Sloane's donut.c, spinning over everything on screen. |
 | `smelt.plugins.esc_chord` | Esc-Esc: restore queued input first, otherwise cancel in-flight work or rewind to the previous turn when idle. |
 | `smelt.plugins.file_finder` | /files (all or git): fuzzy workspace or Git-tracked file search with source preview. |
@@ -631,7 +631,7 @@ Use the generated Lua API reference for complete signatures and types.
 - `smelt.fs` - Sync filesystem primitives.
 - `smelt.fs.file_state` - Cached file-state tracker used by tools to detect external modifications between reads and writes.
 - `smelt.fuzzy` - Fuzzy-match scoring backed by neo_frizbee (SIMD Smith-Waterman).
-- `smelt.git` - Asynchronous Git snapshots and explicit file or range staging.
+- `smelt.git` - Asynchronous Git history, read-only revision comparisons, and explicit file or range staging.
 - `smelt.grep` - Ripgrep wrapper for searching files.
 - `smelt.html` - HTML parsing: title extraction, link scraping, to_text, to_markdown, DDG results.
 - `smelt.http` - Asynchronous HTTP get/post.

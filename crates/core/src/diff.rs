@@ -40,6 +40,7 @@ pub enum Section {
     #[default]
     Unstaged,
     Staged,
+    Changes,
 }
 
 impl Section {
@@ -47,6 +48,7 @@ impl Section {
         match self {
             Self::Unstaged => "unstaged",
             Self::Staged => "staged",
+            Self::Changes => "changes",
         }
     }
 }
@@ -91,6 +93,7 @@ fn foreground(color: Color) -> HlGroup {
 
 #[derive(Debug)]
 pub struct Diff {
+    comparison: bool,
     patch: String,
     lines: Vec<Line>,
     pub files: Vec<File>,
@@ -108,6 +111,28 @@ impl Diff {
     pub(crate) fn parse_cancellable(patch: String, cancelled: impl Fn() -> bool) -> Option<Self> {
         let boundary = patch.len();
         Self::parse_sections(patch, boundary, cancelled, |_, _| true)
+    }
+
+    pub(crate) fn parse_comparison(patch: String, cancelled: impl Fn() -> bool) -> Option<Self> {
+        let mut diff = Self::parse_cancellable(patch, cancelled)?;
+        diff.comparison = true;
+        for file in &mut diff.files {
+            file.section = Section::Changes;
+        }
+        Some(diff)
+    }
+
+    /// A read-only comparison between two revisions, with no index to stage.
+    pub(crate) fn is_comparison(&self) -> bool {
+        self.comparison
+    }
+
+    pub(crate) fn sections(&self) -> &[Section] {
+        if self.comparison {
+            &[Section::Changes]
+        } else {
+            &[Section::Unstaged, Section::Staged]
+        }
     }
 
     pub(crate) fn parse_sections(
@@ -280,6 +305,7 @@ impl Diff {
             }
         }
         let mut diff = Self {
+            comparison: false,
             patch,
             lines,
             files,

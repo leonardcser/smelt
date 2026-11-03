@@ -262,6 +262,21 @@ impl ResolvedLayout {
             .find_map(|(id, rect)| rect.contains(x, y).then_some(id))
     }
 
+    /// Leaf whose title span with an id is painted at `(x, y)`, and that id.
+    pub fn title_target_at(&self, x: u16, y: u16) -> Option<(PaintId, std::sync::Arc<str>)> {
+        // A leaf's chrome is recorded immediately before the leaf itself.
+        self.operations.windows(2).rev().find_map(|ops| match ops {
+            [LayoutPaintOp::Chrome { area, chrome, .. }, LayoutPaintOp::Leaf { id, .. }]
+                if area.y == y
+                    && area.contains(x, y)
+                    && chrome.border.is_some_and(|b| b.top.is_some()) =>
+            {
+                Some((*id, chrome.title.as_ref()?.target_at(*area, x)?))
+            }
+            _ => None,
+        })
+    }
+
     pub fn splits(&self) -> impl DoubleEndedIterator<Item = &ResolvedSplit> {
         self.splits.iter()
     }

@@ -53,7 +53,7 @@ Invalidate the retained main layout so its composer runs during the next frame. 
 fun(win_or_paint: any, opts: table?): smelt.ui.layout
 ```
 
-Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).
+Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title` (title spans with an `id` fire the window's `press` event with `title = id`), `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).
 
 ## `smelt.ui.layout.leaves`
 

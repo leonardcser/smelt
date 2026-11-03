@@ -13,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::diff::{Diff, DiffView};
 
+pub mod review;
+
 pub struct DiffSnapshot {
     pub root: PathBuf,
     pub branch: String,
@@ -116,6 +118,9 @@ pub(crate) async fn update_index(
     let Some(first) = files.first() else {
         return Ok(());
     };
+    if first.section == crate::diff::Section::Changes {
+        return Err("historical comparisons are read-only".into());
+    }
     if files.iter().any(|file| file.section != first.section) {
         return Err("index selection must belong to one section".into());
     }
@@ -200,24 +205,30 @@ pub(crate) async fn update_index(
         )
         .await?;
         let base = if head.status.success() {
-            head.stdout
+            String::from_utf8_lossy(&head.stdout).trim().to_string()
         } else {
-            checked(
-                git(
-                    &root,
-                    &args(&["hash-object", "-t", "tree", "--stdin"]),
-                    &cancel,
-                )
-                .await?,
-            )?
+            empty_tree(&root, &cancel).await?
         };
         let mut argv = args(&["reset", "--quiet"]);
-        argv.push(OsString::from(String::from_utf8_lossy(&base).trim()));
+        argv.push(OsString::from(base));
         argv.extend(args(&["--pathspec-from-file=-", "--pathspec-file-nul"]));
         argv
     };
     checked(git_input(&root, &argv, Some(&input), None, &cancel).await?)?;
     Ok(())
+}
+
+/// The empty tree, which an unborn branch and a root commit compare against.
+async fn empty_tree(root: &Path, cancel: &CancellationToken) -> Result<String, String> {
+    let id = checked(
+        git(
+            root,
+            &args(&["hash-object", "-t", "tree", "--stdin"]),
+            cancel,
+        )
+        .await?,
+    )?;
+    Ok(String::from_utf8_lossy(&id).trim().to_string())
 }
 
 async fn git(
@@ -406,16 +417,7 @@ async fn load_working_diff(
     let base = if head.status.success() {
         "HEAD".to_string()
     } else {
-        String::from_utf8_lossy(&checked(
-            git(
-                &root,
-                &args(&["hash-object", "-t", "tree", "--stdin"]),
-                &cancel,
-            )
-            .await?,
-        )?)
-        .trim()
-        .to_string()
+        empty_tree(&root, &cancel).await?
     };
     let branch = git(
         &root,

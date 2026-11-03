@@ -51,15 +51,24 @@ impl TuiApp {
                         }
                     }
                 }
-                let navigated = matches!(
-                    (k.code, k.modifiers),
-                    (KeyCode::Char('w'), _) | (KeyCode::Char('j' | 'k' | 'h' | 'l' | 'p'), M::NONE)
-                );
-                if navigated {
-                    // From a floating window, go back to the pane under it,
-                    // the one that had focus before the window took it.
+                use crate::smelt_edit::FocusMove;
+                let step = match (k.code, k.modifiers) {
+                    (KeyCode::Char('w'), _) => Some(FocusMove::Next),
+                    (KeyCode::Char('W' | 'p'), _) => Some(FocusMove::Prev),
+                    (KeyCode::Char('h'), M::NONE) => Some(FocusMove::Left),
+                    (KeyCode::Char('l'), M::NONE) => Some(FocusMove::Right),
+                    (KeyCode::Char('k'), M::NONE) => Some(FocusMove::Up),
+                    (KeyCode::Char('j'), M::NONE) => Some(FocusMove::Down),
+                    _ => None,
+                };
+                if let Some(step) = step {
+                    // A floating window moves between its own windows. With no
+                    // window that way, go back to the pane under it, the one
+                    // that had focus before the window took it.
                     if self.ui.focused_overlay().is_some() {
-                        self.focus_pane(self.app_focus);
+                        if !self.ui.focus_move(step) {
+                            self.focus_pane(self.app_focus);
+                        }
                     } else {
                         self.toggle_pane_focus();
                     }

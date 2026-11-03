@@ -19,7 +19,6 @@ use crate::smelt_edit::{Constraint, Natural, NaturalRef, StaticNatural};
 use mlua::prelude::*;
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
-use smelt_term::Line;
 use std::sync::{Arc, Mutex};
 
 /// Mutable cell shared between Lua (`measure_handle:set(w, h)`) and the
@@ -175,7 +174,7 @@ pub(crate) enum ContainerKind {
 #[derive(Clone, Default)]
 pub(crate) struct NodeChrome {
     pub border: Option<Border>,
-    pub title: Option<Line<'static>>,
+    pub title: Option<crate::smelt_edit::layout::Title>,
     pub padding: u16,
     pub justify: Justify,
 }
@@ -430,7 +429,7 @@ impl LuaType for SplitOpts {
                 LuaClassField { name: "min_second", ty: "integer".into(), optional: true, doc: "Minimum second-pane size in cells; defaults to 1." },
                 LuaClassField { name: "divider", ty: "{normal: table, active?: table}".into(), optional: true, doc: "Explicit divider styles, using fg, bg, bold, dim, italic, underline, crossedout, and reverse. normal is required; active defaults to normal. Omit to follow the renderer's theme." },
                 LuaClassField { name: "border", ty: "string | table".into(), optional: true, doc: "Outer border for hsplit/vsplit. With a retained split, pass chrome to handle:layout instead." },
-                LuaClassField { name: "title", ty: "string | table".into(), optional: true, doc: "Outer-border title for hsplit/vsplit; pass to handle:layout when using a retained split." },
+                LuaClassField { name: "title", ty: "string | smelt.Span | (string | smelt.Span)[]".into(), optional: true, doc: "Outer-border title for hsplit/vsplit; pass to handle:layout when using a retained split." },
                 LuaClassField { name: "padding", ty: "integer".into(), optional: true, doc: "Outer padding for hsplit/vsplit; pass to handle:layout when using a retained split." },
             ],
         });
@@ -571,7 +570,7 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
     const CTX: &str = "smelt.ui.layout";
     m.fn_(
         "leaf",
-        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`, `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).",
+        "Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title` (title spans with an `id` fire the window's `press` event with `title = id`), `collapse_when_empty` (force the slot to zero size when the wrapped window's buffer is empty), `measure` (a `{w, h}` table for a static natural size or a `smelt.ui.layout.measure(...)` handle for one the plugin can live-update).",
         &["win_or_paint", "opts"],
         |_, (target, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let raw_id = resolve_leaf_target(&target)?;

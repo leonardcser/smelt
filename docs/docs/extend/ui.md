@@ -154,7 +154,23 @@ chrome around any subtree.
 
 `win:resize("width", 4)` and `win:resize("height", -1)` resize the nearest split
 (or the containing overlay), and `win:equalize()` balances splits. The built-in
-keys are `Ctrl-W >`, `<`, `+`, `-` and `=`.
+keys are `Ctrl-W >`, `<`, `+`, `-` and `=`. In an overlay with several focusable
+windows, `Ctrl-W w` / `W` (or `p`) cycle focus and `Ctrl-W h`/`j`/`k`/`l` move
+to the nearest window on that side. With no window that way, focus returns to
+the pane under the overlay.
+
+A layout-leaf title span with an `id` is a button: pressing it fires the framed
+window's `press` event with `title = id`, so tabs can live in the border:
+
+```lua
+local leaf = smelt.ui.layout.leaf(list, {
+  border = { all = "Comment" },
+  title = { { text = " Files ", id = "files" }, { text = " Log ", id = "log" } },
+})
+list:on("press", function(event)
+  if event.title then show(event.title) end
+end)
+```
 
 `smelt.dialog.new` and `smelt.dialog.open` accept either a composed `layout` or
 the simpler `panels` / `bottom_panels` recipe, not both.
