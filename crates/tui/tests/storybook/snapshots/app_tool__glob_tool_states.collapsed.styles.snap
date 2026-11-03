@@ -10,7 +10,7 @@ dim: 72 18
   0  61  10 attrs=dim
   3   2  13 fg=AnsiValue(9)
  14   0   1 fg=AnsiValue(237)
- 14   2   1 fg=Rgb { r: 39, g: 27, b: 27 } attrs=bold
+ 14   2   1 fg=Rgb { r: 44, g: 34, b: 29 } attrs=bold
  14   4   1 fg=Rgb { r: 150, g: 150, b: 150 } attrs=bold
  14   6  66 fg=AnsiValue(237)
  15   1   1 fg=Black bg=White

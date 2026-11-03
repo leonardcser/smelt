@@ -413,6 +413,9 @@ impl TuiApp {
         arrived_at: std::time::Instant,
     ) -> bool {
         let _perf = smelt_perf::perf::begin("tui:dispatch_engine_event");
+        if super::render_loop::is_engine_continuation(&ev) {
+            self.frame_scheduler.request_stream();
+        }
         if let EngineEvent::EngineAskDraftRejected { id }
         | EngineEvent::EngineAskResponse { id, .. } = &ev
         {

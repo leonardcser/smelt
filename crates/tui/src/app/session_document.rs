@@ -3854,6 +3854,7 @@ mod tests {
             PersistenceGeneration::ZERO,
             target_head,
             None,
+            std::sync::Arc::default(),
         )
         .expect("persistence actor");
         persistence.submit(intent).expect("submit sparse save");

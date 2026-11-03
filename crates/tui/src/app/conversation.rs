@@ -143,6 +143,9 @@ pub(crate) struct ConversationRuntime {
     turn: TurnLifecycle,
     pub(super) submissions: super::agent::TurnSubmissions,
     persistence: Option<crate::persist::SessionPersistence>,
+    /// Raised by every persistence actor this conversation spawns, so the
+    /// event loop wakes to apply their acknowledgements.
+    persistence_wake: Arc<tokio::sync::Notify>,
     persistence_epoch: crate::persist::SessionEpoch,
     observed_persistence_status: Option<crate::persist::SessionPersistenceStatus>,
     persistence_preparation_block: Option<PersistencePreparationBlock>,
@@ -188,6 +191,7 @@ impl ConversationRuntime {
             turn,
             submissions: Default::default(),
             persistence: None,
+            persistence_wake: Arc::default(),
             persistence_epoch: crate::persist::SessionEpoch::ZERO,
             observed_persistence_status: None,
             persistence_preparation_block: None,
@@ -2871,6 +2875,7 @@ impl ConversationRuntime {
             self.document.durable_generation(),
             self.document.published_head(),
             writer,
+            Arc::clone(&self.persistence_wake),
         )?;
         self.persistence_epoch = epoch;
         self.observed_persistence_status = None;
@@ -2912,6 +2917,10 @@ impl ConversationRuntime {
         Ok(())
     }
 
+    pub(crate) fn persistence_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.persistence_wake)
+    }
+
     pub(crate) fn drain_persistence_report(&mut self) -> Option<PersistenceReport> {
         let startup = if self.writer_is_opening() {
             let startup = self.persistence.as_mut()?.take_startup()?;
@@ -2924,9 +2933,9 @@ impl ConversationRuntime {
             None
         };
         let persistence = self.persistence.as_ref()?;
-        let status_woke = persistence.drain_status_wake();
+        let status_changed = persistence.take_status_changed();
         if startup.is_none()
-            && !status_woke
+            && !status_changed
             && !persistence.is_finished()
             && persistence.status().canonical_completions.is_empty()
         {

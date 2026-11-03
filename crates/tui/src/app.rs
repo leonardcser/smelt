@@ -3630,8 +3630,8 @@ impl TuiApp {
                 let hydration_completed =
                     matches!(&event, AppEvent::TranscriptHydrationCompleted(_));
                 self.handle_app_event(event);
-                if !hydration_completed || self.frame_scheduler.has_pending() {
-                    self.render_normal();
+                if !hydration_completed {
+                    self.request_continuation_render();
                 }
             }
             crate::app::platform_runtime::PlatformEvent::ContextWindow(update) => {
@@ -3822,11 +3822,7 @@ impl TuiApp {
 
             let mut drained_idle_work = self.drain_idle_work();
             if drained_idle_work {
-                self.render_normal_after_startup_work(
-                    &mut workspace_warmup_pending,
-                    &mut pre_first_frame_startup,
-                    &mut first_frame_pending,
-                );
+                self.request_continuation_render();
             }
 
             self.drain_ready_engine_outputs_for_frame();
@@ -3837,11 +3833,7 @@ impl TuiApp {
 
             let drained_more_idle_work = self.drain_idle_work();
             if drained_more_idle_work {
-                self.render_normal_after_startup_work(
-                    &mut workspace_warmup_pending,
-                    &mut pre_first_frame_startup,
-                    &mut first_frame_pending,
-                );
+                self.request_continuation_render();
             }
             drained_idle_work |= drained_more_idle_work;
 
@@ -3939,6 +3931,7 @@ impl TuiApp {
             }
             animating_last_tick = has_animation;
             let next_scheduled_frame_delay = self.scheduled_frame_delay();
+            let persistence_wake = self.conversation.persistence_wake();
 
             tokio::select! {
                 biased;
@@ -4032,6 +4025,10 @@ impl TuiApp {
                     self.handle_platform_event(event);
                 }
 
+                _ = persistence_wake.notified() => {
+                    self.drain_persist_reports();
+                }
+
                 Some(output) = self.core.engine.recv_output() => {
                     self.dispatch_engine_output_in_render_loop(output);
                 }
@@ -4040,7 +4037,7 @@ impl TuiApp {
                     self.lua.drain_wakeups();
                     self.flush_lua_callbacks();
                     self.drive_lua_tasks();
-                    self.render_normal();
+                    self.request_continuation_render();
                 }
 
                 setup = async {
@@ -4109,7 +4106,7 @@ impl TuiApp {
                     self.drive_lua_tasks();
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
-                    self.render_normal();
+                    self.request_continuation_render();
                 }
 
                 reply = term_replies.recv(kitty_probe_pending) => {

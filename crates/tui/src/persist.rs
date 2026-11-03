@@ -1,7 +1,7 @@
 //! Fixed-session event-oriented persistence actor.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -659,7 +659,7 @@ pub(crate) struct SessionPersistence {
     latest: Arc<Mutex<PendingBatchState>>,
     control: Option<SyncSender<PersistenceControl>>,
     status: Arc<Mutex<SessionPersistenceStatus>>,
-    status_wake: Mutex<Receiver<()>>,
+    status_signal: StatusSignal,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
     thread: Option<thread::JoinHandle<()>>,
@@ -676,6 +676,7 @@ impl SessionPersistence {
         generation: PersistenceGeneration,
         acknowledged_head: smelt_store::StoreHead,
         writer: Option<SessionWriterHandoff>,
+        wake: Arc<tokio::sync::Notify>,
     ) -> Result<Self, PersistenceCause> {
         let latest = Arc::new(Mutex::new(PendingBatchState {
             accepting: true,
@@ -695,7 +696,10 @@ impl SessionPersistence {
         let pending_audits = Arc::new(AtomicUsize::new(0));
         let pending_full_audit_bytes = Arc::new(AtomicUsize::new(0));
         let (control, controls) = mpsc::sync_channel(CONTROL_CAPACITY);
-        let (status_wake_tx, status_wake) = mpsc::sync_channel(1);
+        let status_signal = StatusSignal {
+            changed: Arc::new(AtomicBool::new(false)),
+            wake,
+        };
         let (started_tx, started_rx) = mpsc::channel();
         let worker_session_id = session_id.clone();
         let worker_latest = Arc::clone(&latest);
@@ -704,7 +708,8 @@ impl SessionPersistence {
         let worker_pending_full_audit_bytes = Arc::clone(&pending_full_audit_bytes);
         let panic_latest = Arc::clone(&latest);
         let panic_status = Arc::clone(&status);
-        let panic_status_wake = status_wake_tx.clone();
+        let panic_status_signal = status_signal.clone();
+        let worker_status_signal = status_signal.clone();
         let panic_pending_audits = Arc::clone(&pending_audits);
         let panic_pending_full_audit_bytes = Arc::clone(&pending_full_audit_bytes);
         let thread = thread::Builder::new()
@@ -720,7 +725,7 @@ impl SessionPersistence {
                         worker_latest,
                         controls,
                         worker_status,
-                        status_wake_tx,
+                        worker_status_signal,
                         worker_pending_audits,
                         worker_pending_full_audit_bytes,
                         started_tx,
@@ -744,7 +749,7 @@ impl SessionPersistence {
                         cause: Some(PersistenceCause::unavailable("persistence actor panicked")),
                     };
                     drop(status);
-                    let _ = panic_status_wake.try_send(());
+                    panic_status_signal.raise();
                 }
             })
             .map_err(|error| {
@@ -756,7 +761,7 @@ impl SessionPersistence {
             latest,
             control: Some(control),
             status,
-            status_wake: Mutex::new(status_wake),
+            status_signal,
             pending_audits,
             pending_full_audit_bytes,
             thread: Some(thread),
@@ -1323,16 +1328,9 @@ impl SessionPersistence {
             .retain(|completion| completion.command_id() != command_id);
     }
 
-    pub(crate) fn drain_status_wake(&self) -> bool {
-        let status_wake = self
-            .status_wake
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let mut changed = false;
-        while status_wake.try_recv().is_ok() {
-            changed = true;
-        }
-        changed
+    /// Whether the actor published status since the last call.
+    pub(crate) fn take_status_changed(&self) -> bool {
+        self.status_signal.changed.swap(false, Ordering::AcqRel)
     }
 
     pub(crate) fn is_finished(&self) -> bool {
@@ -1886,10 +1884,25 @@ enum CanonicalCommandReceipt {
     },
 }
 
+/// Tells the UI loop that persistence status changed. Bursts coalesce into
+/// one wake-up, and raising never blocks the actor.
+#[derive(Clone)]
+struct StatusSignal {
+    changed: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl StatusSignal {
+    fn raise(&self) {
+        self.changed.store(true, Ordering::Release);
+        self.wake.notify_one();
+    }
+}
+
 #[derive(Clone)]
 struct StatusPublisher {
     status: Arc<Mutex<SessionPersistenceStatus>>,
-    wake: SyncSender<()>,
+    signal: StatusSignal,
 }
 
 impl StatusPublisher {
@@ -1906,7 +1919,7 @@ impl StatusPublisher {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .state = state;
-        let _ = self.wake.try_send(());
+        self.signal.raise();
     }
 
     fn publish_durable(
@@ -1967,7 +1980,7 @@ impl StatusPublisher {
             receipt,
         };
         drop(status);
-        let _ = self.wake.try_send(());
+        self.signal.raise();
         acknowledgement
     }
 
@@ -1986,7 +1999,7 @@ impl StatusPublisher {
                 generation,
                 cause,
             });
-        let _ = self.wake.try_send(());
+        self.signal.raise();
     }
 
     fn publish_audit_warning(&self, warning: Option<PersistenceCause>) {
@@ -2002,7 +2015,7 @@ impl StatusPublisher {
         }
         status.latest_audit_warning = warning;
         drop(status);
-        let _ = self.wake.try_send(());
+        self.signal.raise();
     }
 }
 
@@ -2116,7 +2129,7 @@ fn persistence_actor(
     latest: Arc<Mutex<PendingBatchState>>,
     controls: Receiver<PersistenceControl>,
     status: Arc<Mutex<SessionPersistenceStatus>>,
-    status_wake: SyncSender<()>,
+    status_signal: StatusSignal,
     pending_audits: Arc<AtomicUsize>,
     pending_full_audit_bytes: Arc<AtomicUsize>,
     started: mpsc::Sender<Result<SessionPersistenceStartup, PersistenceCause>>,
@@ -2124,7 +2137,7 @@ fn persistence_actor(
 ) {
     let publisher = StatusPublisher {
         status,
-        wake: status_wake,
+        signal: status_signal,
     };
     let sessions_root = sessions.sessions_dir();
     let mut writer = match writer.map_or_else(
@@ -2245,7 +2258,7 @@ fn persistence_actor(
         recovery: startup_recovery,
         latest_terminal_turn_id,
     }));
-    let _ = actor.publisher.wake.try_send(());
+    actor.publisher.signal.raise();
     actor.run(controls);
 }
 
@@ -2283,7 +2296,7 @@ impl PersistenceActor {
                 }
             };
             // Consuming a control releases capacity for deferred UI commands.
-            let _ = self.publisher.wake.try_send(());
+            self.publisher.signal.raise();
             match control {
                 PersistenceControl::WakeDesired => {
                     self.latest
@@ -3681,6 +3694,10 @@ mod tests {
     }
 
     fn actor() -> ActorFixture {
+        actor_with_wake(Arc::default())
+    }
+
+    fn actor_with_wake(wake: Arc<tokio::sync::Notify>) -> ActorFixture {
         let mut actor = SessionPersistence::spawn(
             smelt_core::session::SessionStorage::new(smelt_core::config::state_dir()),
             smelt_core::session_id::SessionId::parse(SESSION_ID).unwrap(),
@@ -3688,6 +3705,7 @@ mod tests {
             PersistenceGeneration::ZERO,
             smelt_store::StoreHead::default(),
             None,
+            wake,
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3845,6 +3863,7 @@ mod tests {
             PersistenceGeneration::ZERO,
             expected.head,
             None,
+            std::sync::Arc::default(),
         )
         .unwrap();
         let startup_deadline = Instant::now() + Duration::from_secs(5);
@@ -3931,6 +3950,7 @@ mod tests {
             PersistenceGeneration::ZERO,
             expected.head,
             None,
+            std::sync::Arc::default(),
         )
         .unwrap();
         let startup_deadline = deadline();
@@ -4121,6 +4141,7 @@ mod tests {
                 PersistenceGeneration::ZERO,
                 head,
                 None,
+                std::sync::Arc::default(),
             )
             .unwrap();
             let deadline = deadline();
@@ -4190,6 +4211,7 @@ mod tests {
             PersistenceGeneration::ZERO,
             head,
             None,
+            std::sync::Arc::default(),
         )
         .unwrap();
         let deadline = deadline();
@@ -6106,21 +6128,42 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_status_wake_does_not_block_commit() {
+    fn durable_save_wakes_the_event_loop() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
-        let mut actor = actor();
-        let (_replacement_tx, replacement_rx) = mpsc::sync_channel(1);
-        drop(std::mem::replace(
-            &mut actor.status_wake,
-            Mutex::new(replacement_rx),
-        ));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut actor = actor_with_wake(Arc::clone(&wake));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let woke = || {
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), wake.notified())
+                    .await
+                    .is_ok()
+            })
+        };
+        assert!(woke(), "startup must wake the event loop");
+
         actor.submit(actor.prepare_save(1, &["saved"])).unwrap();
 
-        assert!(matches!(
-            actor.flush(PersistenceGeneration::new(1), deadline()),
-            PersistenceFlushOutcome::Durable { durable, .. }
-                if durable == PersistenceGeneration::new(1)
-        ));
+        // Only wake-ups drive this loop, as in the UI: the durable state must
+        // become observable without any other event.
+        loop {
+            assert!(
+                woke(),
+                "the actor stopped waking before the save was durable"
+            );
+            if actor.take_status_changed()
+                && matches!(
+                    actor.status().state,
+                    PersistenceState::Durable { generation, .. }
+                        if generation == PersistenceGeneration::new(1)
+                )
+            {
+                break;
+            }
+        }
         let _ = actor.close(
             PersistenceGeneration::new(1),
             deadline(),

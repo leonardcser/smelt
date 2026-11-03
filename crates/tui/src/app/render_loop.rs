@@ -5,7 +5,7 @@
 use crate::app::TuiApp;
 use crate::content::{layout, prompt_buf};
 
-fn is_engine_continuation(event: &protocol::EngineEvent) -> bool {
+pub(super) fn is_engine_continuation(event: &protocol::EngineEvent) -> bool {
     matches!(
         event,
         protocol::EngineEvent::ReasoningPartDelta { .. }
@@ -16,7 +16,8 @@ fn is_engine_continuation(event: &protocol::EngineEvent) -> bool {
     )
 }
 
-const CONTINUATION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+pub(crate) const CONTINUATION_FRAME_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameUrgency {
@@ -52,6 +53,8 @@ struct PendingFrameTrace {
     id: u64,
     requested_at_us: u64,
     urgency: FrameUrgency,
+    /// Streamed output is waiting to be painted.
+    streamed: bool,
 }
 
 #[derive(Debug)]
@@ -73,8 +76,20 @@ impl Default for FrameScheduler {
 
 impl FrameScheduler {
     pub(crate) fn request(&mut self, urgency: FrameUrgency) {
+        self.request_pending(urgency, false);
+    }
+
+    /// Request a frame that paints streamed output: engine deltas, queued
+    /// transcript work, or a stream reveal in progress. Such a frame is painted
+    /// before the next engine event, which may finish or replace that output.
+    pub(crate) fn request_stream(&mut self) {
+        self.request_pending(FrameUrgency::Continuation, true);
+    }
+
+    fn request_pending(&mut self, urgency: FrameUrgency, streamed: bool) {
         if let Some(pending) = &mut self.pending {
             pending.urgency = pending.urgency.merge(urgency);
+            pending.streamed |= streamed;
             return;
         }
         let id = self.next_id;
@@ -84,6 +99,7 @@ impl FrameScheduler {
             id,
             requested_at_us,
             urgency,
+            streamed,
         });
         smelt_perf::perf::record_value("frame:requested:id", id);
         smelt_perf::perf::record_value("frame:requested:at_us", requested_at_us);
@@ -91,6 +107,10 @@ impl FrameScheduler {
 
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    pub(crate) fn has_pending_stream(&self) -> bool {
+        self.pending.is_some_and(|pending| pending.streamed)
     }
 
     pub(crate) fn is_due(&self, now: std::time::Instant) -> bool {
@@ -901,20 +921,24 @@ impl TuiApp {
         };
         if is_engine_continuation(&ev) && continuation_started {
             self.queue_engine_continuation_at(ev, arrived_at);
-            self.request_continuation_render();
+            self.frame_scheduler.request_stream();
             return true;
         }
         let keep_streaming = self.dispatch_engine_event_at(ev, arrived_at);
-        self.request_urgent_render();
+        // Engine output is machine-paced: coalesce it with streaming frames
+        // instead of painting once per event.
+        self.request_continuation_render();
         keep_streaming
     }
 
+    /// Paint streamed output that has not reached the screen before an event
+    /// that may finish or replace it, so every streamed state is shown.
     pub(crate) fn render_transient_frame_before_engine_event_to<W: std::io::Write>(
         &mut self,
         ev: &protocol::EngineEvent,
         out: &mut W,
     ) -> bool {
-        if is_engine_continuation(ev) {
+        if is_engine_continuation(ev) || !self.frame_scheduler.has_pending_stream() {
             return false;
         }
         self.render_pending_transient_frame_to(out)
@@ -1054,26 +1078,26 @@ impl TuiApp {
             pending
         });
         if pending {
-            self.request_continuation_render();
+            self.frame_scheduler.request_stream();
         }
         if self
             .conversation
             .advance_stream_animation(self.core.clock.instant_now())
         {
-            self.request_continuation_render();
+            self.frame_scheduler.request_stream();
         }
         if self.conversation.advance_compaction_animation(now) {
-            self.request_continuation_render();
+            self.frame_scheduler.request_stream();
         }
         for block_id in self.conversation.advance_tool_draft_animations(now) {
             self.transcript_work.request_tool_draft_summary(block_id);
         }
         if self.conversation.has_pending_tool_draft_animation() {
-            self.request_continuation_render();
+            self.frame_scheduler.request_stream();
         }
         self.refresh_pending_tool_draft_summaries();
         if !self.transcript_work.is_empty() && !self.transcript_work.front_waits_for_hydration() {
-            self.request_continuation_render();
+            self.frame_scheduler.request_stream();
         }
         // Signal subscribers drive retained window and layout invalidation. Drain
         // them before querying dirty state so each frame observes one coherent

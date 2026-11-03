@@ -1293,6 +1293,9 @@ async fn real_engine_responses_compaction_streams_preview_before_response() {
                 .recv_output()
                 .await
                 .expect("engine stopped while compaction streamed");
+            // Provider output arrives over the network, spaced like real streaming.
+            app.clock
+                .advance(crate::app::render_loop::CONTINUATION_FRAME_INTERVAL);
             let is_delta = matches!(
                 output,
                 engine::EngineOutput::Event(protocol::EngineEvent::EngineAskDelta { .. })
