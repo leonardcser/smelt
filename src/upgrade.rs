@@ -1640,14 +1640,26 @@ echo done > "$SMELT_BUILD_WORKER_FIXTURE/done"
             let lock = InstallLock::try_acquire(&exe)
                 .unwrap()
                 .expect("dead worker released lock");
-            fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&control)
-                .unwrap()
-                .write_all(b"go\n")
-                .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // Cargo announces itself before it opens the FIFO for reading, and
+            // a non-blocking writer fails with ENXIO until a reader exists.
+            let mut writer = loop {
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&control)
+                {
+                    Ok(writer) => break writer,
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ENXIO)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("orphan Cargo never opened its control FIFO: {error}"),
+                }
+            };
+            writer.write_all(b"go\n").unwrap();
             while !dir.path().join("done").exists() {
                 if std::time::Instant::now() > deadline {
                     unsafe {
