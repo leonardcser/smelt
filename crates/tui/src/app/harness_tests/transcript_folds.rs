@@ -65,6 +65,8 @@ fn compaction_draft_rejection_clears_queued_preview() {
 async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 30);
+    app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u0")));
+    app.push_assistant_text("a0");
     app.session_append_history(protocol::HistoryItem::user(protocol::Content::text("u1")));
     app.start_turn(1);
     finish_tool(&mut app, "read-1", "read_file", "first\nsecond\nthird");
@@ -72,6 +74,10 @@ async fn collapsing_group_while_compacting_keeps_cursor_on_group() {
     assert!(app.finish_turn());
     app.set_context_token_baseline_for_harness(Some(500));
     assert!(app.run_lua(r#"smelt.cmd.run("compact")"#));
+    assert!(app
+        .conversation_probe()
+        .transcript_compaction_preview_id()
+        .is_some());
     let ask_id = app
         .pending_ask_id()
         .expect("/compact registered ask callback");

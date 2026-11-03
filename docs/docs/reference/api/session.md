@@ -64,10 +64,16 @@ Configured context-window size in tokens for the active model. `nil` when the mo
 ## `smelt.session.conversation`
 
 ```lua
-fun(opts: table?): table
+fun(opts?: { limit?: integer, since_index?: integer, all?: boolean }): table
 ```
 
-Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. By default reads the latest bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`, or `{ all = true }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.
+Return user and assistant text from semantic history, excluding system
+messages, internal notes, and tool results. Rows are
+`{ role = 'user'|'assistant', content }`. By default reads the latest
+bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`,
+or `{ all = true }`. Reads stored rows off the UI thread. Must run in a
+yieldable task. Intended for lightweight auxiliary prompts such as input
+prediction.
 
 ## `smelt.session.cost`
 

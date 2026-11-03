@@ -26,6 +26,24 @@ if smelt.session then
     return result.page
   end
 
+  --- Return user and assistant text from semantic history, excluding system
+  --- messages, internal notes, and tool results. Rows are
+  --- `{ role = 'user'|'assistant', content }`. By default reads the latest
+  --- bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`,
+  --- or `{ all = true }`. Reads stored rows off the UI thread. Must run in a
+  --- yieldable task. Intended for lightweight auxiliary prompts such as input
+  --- prediction.
+  ---@tier ui_host
+  ---@type fun(opts?: { limit?: integer, since_index?: integer, all?: boolean }): table
+  function smelt.session.conversation(opts)
+    require_yieldable("smelt.session.conversation")
+    local request = internal.session.__prepare_conversation(opts)
+    if type(request) == "table" then return request end
+    local result = smelt.task.external(function(id) internal.session.__start_conversation(id, request) end)
+    if result.err then error(result.err, 2) end
+    return result.rows
+  end
+
   --- Create or open a managed git worktree off the UI thread, then request a
   --- coherent cwd transition. Must run in `smelt.spawn`, a command, or a tool.
   --- `opts.name` is required and is normalized to a safe folder/branch name;

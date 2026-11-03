@@ -35,8 +35,14 @@ session.context_tokens = nil
 ---@type fun(): integer?
 session.context_window = nil
 
---- Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. By default reads the latest bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`, or `{ all = true }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.
----@type fun(opts: table?): table
+--- Return user and assistant text from semantic history, excluding system
+--- messages, internal notes, and tool results. Rows are
+--- `{ role = 'user'|'assistant', content }`. By default reads the latest
+--- bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`,
+--- or `{ all = true }`. Reads stored rows off the UI thread. Must run in a
+--- yieldable task. Intended for lightweight auxiliary prompts such as input
+--- prediction.
+---@type fun(opts?: { limit?: integer, since_index?: integer, all?: boolean }): table
 session.conversation = nil
 
 --- Cumulative session cost in USD across every model call this session has made.

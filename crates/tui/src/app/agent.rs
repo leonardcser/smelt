@@ -3146,19 +3146,6 @@ mod tests {
             .collect()
     }
 
-    fn title_request_from_actions(app: &crate::app::test_harness::TestApp) -> u64 {
-        app.actions()
-            .iter()
-            .find_map(|action| match action {
-                crate::app::test_harness::Action::EngineSend(command) => match command.as_ref() {
-                    protocol::UiCommand::EngineAsk { id, .. } => Some(*id),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .expect("submission should request a title")
-    }
-
     fn complete_active_turn_with_assistant(
         app: &mut crate::app::test_harness::TestApp,
         text: &str,
@@ -4734,6 +4721,7 @@ mod tests {
             .unwrap_or_default();
 
         app.press(crossterm::event::KeyCode::Enter);
+        app.drive_lua_tasks();
         app.app.flush_persist();
         assert_eq!(
             app.app.core.signals.get::<u64>("history_epoch"),
@@ -4776,7 +4764,7 @@ mod tests {
         app.wait_for_turn_persistence();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.agent_running(), "the preserved prompt should resubmit");
-        let retry_title_request = title_request_from_actions(&app);
+        let retry_title_request = app.wait_for_engine_ask("session_title");
         complete_active_turn_with_assistant(&mut app, "retry completed");
         app.respond_ask_with_text(
             retry_title_request,
@@ -4794,7 +4782,7 @@ mod tests {
         app.wait_for_turn_persistence();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.agent_running(), "a subsequent turn should start");
-        let follow_up_title_request = title_request_from_actions(&app);
+        let follow_up_title_request = app.wait_for_engine_ask("session_title");
         complete_active_turn_with_assistant(&mut app, "follow-up completed");
         app.respond_ask_with_text(
             follow_up_title_request,
@@ -5656,9 +5644,9 @@ mod tests {
                     && event.as_ref().and_then(|event| event.exit_code()) == Some(1)
         ));
 
-        let (count, first_content, contains_marker): (i64, String, bool) = app
-            .eval_lua(
-                r#"
+        app.run_lua_result(
+            r#"
+                smelt.spawn(function()
                     local rows = smelt.session.conversation()
                     local contains_marker = false
                     for _, row in ipairs(rows) do
@@ -5666,10 +5654,15 @@ mod tests {
                             contains_marker = true
                         end
                     end
-                    return #rows, rows[1] and rows[1].content or "", contains_marker
-                    "#,
-            )
-            .expect("conversation query succeeds");
+                    read = { #rows, rows[1] and rows[1].content or "", contains_marker }
+                end)
+                "#,
+        )
+        .expect("conversation query succeeds");
+        app.drive_lua_tasks();
+        let (count, first_content, contains_marker): (i64, String, bool) = app
+            .eval_lua("return read[1], read[2], read[3]")
+            .expect("conversation query returns");
 
         assert_eq!(count, 1);
         assert_eq!(first_content, "previous user message");
@@ -5695,14 +5688,19 @@ mod tests {
             )),
         ]);
 
-        let (count, first, second): (i64, String, String) = app
-            .eval_lua(
-                r#"
+        app.run_lua_result(
+            r#"
+                smelt.spawn(function()
                     local rows = smelt.session.conversation({ limit = 2 })
-                    return #rows, rows[1] and rows[1].content or "", rows[2] and rows[2].content or ""
-                    "#,
-            )
-            .expect("conversation limit query succeeds");
+                    read = { #rows, rows[1] and rows[1].content or "", rows[2] and rows[2].content or "" }
+                end)
+                "#,
+        )
+        .expect("conversation limit query succeeds");
+        app.drive_lua_tasks();
+        let (count, first, second): (i64, String, String) = app
+            .eval_lua("return read[1], read[2], read[3]")
+            .expect("conversation limit query returns");
 
         assert_eq!(count, 2);
         assert_eq!(first, "second user");

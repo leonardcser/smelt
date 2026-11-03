@@ -1,7 +1,8 @@
 -- Session title plugin. Generates a short session title + slug from the
 -- accumulated user messages. Fires on `input_submit` so the title is set
--- immediately when the user sends a message. Re-evaluates each turn so the
--- title tracks the current high-level task even when the user changes direction.
+-- as soon as the user sends a message, reading history off the UI thread.
+-- Re-evaluates each turn so the title tracks the current high-level task even
+-- when the user changes direction.
 --
 -- The system prompt carries the stable instruction; user messages are appended
 -- in the messages array. Consecutive calls share the KV cache prefix up to the
@@ -74,11 +75,13 @@ local function update_title(new_text)
     if submitted == "" or submitted:sub(1, 1) == "!" then return end
   end
 
+  local guard = smelt.lifecycle.guard({ "session", "history" }):latest("title")
+  local target_history_len = smelt.session.history_len()
   -- Gather recent user messages without materializing the full session history.
   -- The conversation view leaves out smelt's context and mode notes, which
   -- describe the environment rather than the user's task.
   local history = smelt.session.conversation()
-  local target_history_len = smelt.session.history_len()
+  if not guard:alive() then return end
   local user_msgs = {}
   for _, m in ipairs(history) do
     if m.role == "user" and m.content and m.content ~= "" then
@@ -116,7 +119,6 @@ local function update_title(new_text)
   end
   if not changed then return end
 
-  local guard = smelt.lifecycle.guard({ "session", "history" }):latest("title")
   sent_messages = messages
 
   smelt.engine.ask({
@@ -154,5 +156,5 @@ local function update_title(new_text)
 end
 
 smelt.events.on("input_submit", function(text)
-  update_title(text)
+  smelt.spawn(function() update_title(text) end)
 end)

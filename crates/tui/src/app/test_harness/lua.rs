@@ -67,6 +67,30 @@ impl TestApp {
         }
     }
 
+    /// Waits for a Lua task to send an engine ask with response format `format`.
+    pub(crate) fn wait_for_engine_ask(&mut self, format: &str) -> u64 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ask = self.actions.iter().find_map(|action| match action {
+                Action::EngineSend(command) => match command.as_ref() {
+                    protocol::UiCommand::EngineAsk {
+                        id,
+                        response_format: Some(response_format),
+                        ..
+                    } if response_format.name == format => Some(*id),
+                    _ => None,
+                },
+                _ => None,
+            });
+            if let Some(id) = ask {
+                return id;
+            }
+            assert!(std::time::Instant::now() < deadline, "{format} ask stalled");
+            self.feed_one(SourceEvent::LuaWakeup);
+            std::thread::sleep(super::POLL_INTERVAL);
+        }
+    }
+
     pub fn wait_for_tool_evaluation(&mut self, request_id: u64) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !self.actions.iter().any(|action| {

@@ -39,18 +39,10 @@ smelt.signal.subscribe("history_epoch", function()
   sent_conversation = nil
 end)
 
-smelt.events.on("turn_end", function(payload)
-  if payload.cancelled or not smelt.settings.show_prediction then
-    return
-  end
-
-  prompt:clear_placeholder()
-
-  if has_queued_messages() then
-    return
-  end
-
+local function predict()
+  local guard = smelt.lifecycle.guard({ "session", "history", "input" }):latest("predict")
   local history = smelt.session.conversation({ limit = 16 })
+  if not guard:alive() then return end
 
   local user_msgs = {}
   local last_assistant = nil
@@ -84,8 +76,6 @@ smelt.events.on("turn_end", function(payload)
   if conversation == sent_conversation then return end
   sent_conversation = conversation
 
-  local guard = smelt.lifecycle.guard({ "session", "history", "input" }):latest("predict")
-
   smelt.engine.ask({
     system = SYSTEM,
     messages = {
@@ -107,4 +97,18 @@ smelt.events.on("turn_end", function(payload)
       end
     end,
   })
+end
+
+smelt.events.on("turn_end", function(payload)
+  if payload.cancelled or not smelt.settings.show_prediction then
+    return
+  end
+
+  prompt:clear_placeholder()
+
+  if has_queued_messages() then
+    return
+  end
+
+  smelt.spawn(predict)
 end)

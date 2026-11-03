@@ -2590,6 +2590,34 @@ impl ConversationRuntime {
         Ok(())
     }
 
+    pub(crate) fn history_range_read(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> smelt_core::session_runtime::HistoryRead {
+        if let Some(live) = &self.document.live_session {
+            return live.history_range_read(range);
+        }
+        let end = range.end.min(self.session.history.len());
+        let start = range.start.min(end);
+        smelt_core::session_runtime::HistoryRead::loaded(self.session.history[start..end].to_vec())
+    }
+
+    pub(crate) fn history_tail_read(
+        &self,
+        max_items: usize,
+        max_bytes: Option<usize>,
+    ) -> Result<smelt_core::session_runtime::HistoryRead, String> {
+        if let Some(live) = &self.document.live_session {
+            return live.history_tail_read(max_items, max_bytes);
+        }
+        smelt_core::session_runtime::bounded_history_tail(
+            &self.session.history,
+            max_items,
+            max_bytes,
+        )
+        .map(smelt_core::session_runtime::HistoryRead::loaded)
+    }
+
     pub(crate) fn history_tail(
         &self,
         max_items: usize,

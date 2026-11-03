@@ -225,6 +225,7 @@ impl TestApp {
             }),
         );
         self.app.pump_lua();
+        self.app.drive_lua_tasks();
     }
 
     fn bump_input_epoch_for_probe(&mut self) {

@@ -1821,6 +1821,23 @@ impl SessionLuaHost<'_> {
         result
     }
 
+    pub(crate) fn session_history_range_read(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> smelt_core::session_runtime::HistoryRead {
+        self.app.conversation.history_range_read(range)
+    }
+
+    pub(crate) fn session_history_tail_read(
+        &self,
+        max_items: usize,
+        max_bytes: Option<usize>,
+    ) -> Result<smelt_core::session_runtime::HistoryRead, String> {
+        self.app
+            .conversation
+            .history_tail_read(max_items, max_bytes)
+    }
+
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
         self.app.model_history_messages()
     }

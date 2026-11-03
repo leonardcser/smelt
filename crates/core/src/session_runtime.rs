@@ -423,11 +423,7 @@ impl LiveSession {
     }
 
     pub fn history_range(&self, range: Range<usize>) -> Result<Vec<HistoryItem>, String> {
-        let mut out = Vec::new();
-        self.scan_history(range, usize::MAX, |_, items| {
-            out.extend_from_slice(items);
-        })?;
-        Ok(out)
+        self.history_range_read(range).read()
     }
 
     pub fn scan_history(
@@ -485,24 +481,48 @@ impl LiveSession {
         max_items: usize,
         max_bytes: Option<usize>,
     ) -> Result<Vec<HistoryItem>, String> {
+        self.history_tail_read(max_items, max_bytes)?.read()
+    }
+
+    /// Captures `history_range(range)`, to finish where storage reads may block.
+    pub fn history_range_read(&self, range: Range<usize>) -> HistoryRead {
+        let end = range.end.min(self.history_len());
+        let start = range.start.min(end);
+        let stored_end = end.min(self.live_start);
+        let live_start = start.max(self.live_start);
+        let live = if live_start < end {
+            self.live_history[live_start - self.live_start..end - self.live_start].to_vec()
+        } else {
+            Vec::new()
+        };
+        HistoryRead {
+            stored: (start < stored_end)
+                .then(|| self.stored_read(StoredHistory::Range(start..stored_end))),
+            live,
+        }
+    }
+
+    /// Captures `history_tail(max_items, max_bytes)`, to finish where storage
+    /// reads may block.
+    pub fn history_tail_read(
+        &self,
+        max_items: usize,
+        max_bytes: Option<usize>,
+    ) -> Result<HistoryRead, String> {
+        let mut read = HistoryRead::loaded(Vec::new());
         if max_items == 0 {
-            return Ok(Vec::new());
+            return Ok(read);
         }
-
         let live = select_history_tail(&self.live_history, max_items, max_bytes)?;
-        let mut live_rows = self.live_history[live.start..].to_vec();
-        if live.budget.limit_reached() || live_rows.len() == max_items || self.live_start == 0 {
-            return Ok(live_rows);
+        read.live = self.live_history[live.start..].to_vec();
+        if !live.budget.limit_reached() && read.live.len() < max_items && self.live_start > 0 {
+            read.stored = Some(self.stored_read(StoredHistory::Tail {
+                end: self.live_start,
+                max_items: max_items - read.live.len(),
+                max_bytes: live.budget.remaining_bytes(),
+            }));
         }
-
-        let remaining_items = max_items.saturating_sub(live_rows.len());
-        let remaining_bytes = live.budget.remaining_bytes();
-        let db = self.open_store()?;
-        let mut stored_rows = db
-            .read_history_items_tail(self.live_start, remaining_items, remaining_bytes)
-            .map_err(|err| format!("read session history tail: {err}"))?;
-        stored_rows.append(&mut live_rows);
-        Ok(stored_rows)
+        Ok(read)
     }
 
     pub fn plan_history_append(
@@ -679,25 +699,103 @@ impl LiveSession {
     }
 
     fn open_store(&self) -> Result<LiveStoreReader, String> {
-        let _perf = smelt_perf::perf::begin("session:live_store:open");
-        let store = self
-            .store_address
-            .as_ref()
-            .ok_or_else(|| format!("session {} has no storage root", self.id()))?;
-        let root = store.sessions_root.as_path();
-        let session_id = store.session_id.as_str();
-        smelt_store::LineageSessionReader::open_existing_in_lineage(
-            root,
-            store.lineage_id.as_str(),
-            session_id,
+        open_store(self.store_address.as_ref(), self.id())
+    }
+
+    fn stored_read(&self, part: StoredHistory) -> StoredRead {
+        StoredRead {
+            session_id: self.id().to_owned(),
+            store: self.store_address.clone(),
+            part,
+        }
+    }
+}
+
+fn open_store(store: Option<&SessionStoreAddress>, id: &str) -> Result<LiveStoreReader, String> {
+    let _perf = smelt_perf::perf::begin("session:live_store:open");
+    let store = store.ok_or_else(|| format!("session {id} has no storage root"))?;
+    let root = store.sessions_root.as_path();
+    let session_id = store.session_id.as_str();
+    smelt_store::LineageSessionReader::open_existing_in_lineage(
+        root,
+        store.lineage_id.as_str(),
+        session_id,
+    )
+    .map(LiveStoreReader)
+    .map_err(|error| {
+        format!(
+            "open lineage session {session_id} in {}: {error}",
+            root.display()
         )
-        .map(LiveStoreReader)
-        .map_err(|error| {
-            format!(
-                "open lineage session {session_id} in {}: {error}",
-                root.display()
-            )
-        })
+    })
+}
+
+/// A history read captured from a live session. Rows still in memory are
+/// copied, so the rest can be read from storage on any thread.
+pub struct HistoryRead {
+    stored: Option<StoredRead>,
+    live: Vec<HistoryItem>,
+}
+
+/// The part of a `HistoryRead` that precedes the rows in memory.
+struct StoredRead {
+    session_id: String,
+    store: Option<SessionStoreAddress>,
+    part: StoredHistory,
+}
+
+enum StoredHistory {
+    Range(Range<usize>),
+    Tail {
+        end: usize,
+        max_items: usize,
+        max_bytes: Option<usize>,
+    },
+}
+
+impl HistoryRead {
+    pub fn loaded(items: Vec<HistoryItem>) -> Self {
+        Self {
+            stored: None,
+            live: items,
+        }
+    }
+
+    pub fn needs_storage(&self) -> bool {
+        self.stored.is_some()
+    }
+
+    pub fn read(self) -> Result<Vec<HistoryItem>, String> {
+        let Some(stored) = self.stored else {
+            return Ok(self.live);
+        };
+        let db = open_store(stored.store.as_ref(), &stored.session_id)?;
+        let mut items = match stored.part {
+            StoredHistory::Range(range) => {
+                let items = db
+                    .read_history_items_range(range.clone())
+                    .map_err(|err| format!("read session history range: {err}"))?;
+                if items.len() != range.len() {
+                    return Err(format!(
+                        "read session history range {}..{}: expected {} items, found {}",
+                        range.start,
+                        range.end,
+                        range.len(),
+                        items.len()
+                    ));
+                }
+                items
+            }
+            StoredHistory::Tail {
+                end,
+                max_items,
+                max_bytes,
+            } => db
+                .read_history_items_tail(end, max_items, max_bytes)
+                .map_err(|err| format!("read session history tail: {err}"))?,
+        };
+        items.extend(self.live);
+        Ok(items)
     }
 }
 

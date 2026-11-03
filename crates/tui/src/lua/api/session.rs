@@ -254,90 +254,71 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
     Ok(tbl)
 }
 
-fn push_conversation_history_item(
-    lua: &Lua,
-    out: &mlua::Table,
-    idx: &mut usize,
-    item: &protocol::HistoryItem,
-) -> LuaResult<bool> {
-    match item {
-        protocol::HistoryItem::User { content, .. } => {
-            let row = lua.create_table()?;
-            row.set("role", "user")?;
-            row.set("content", content.text_content())?;
-            out.set(*idx, row)?;
-            *idx += 1;
-            Ok(true)
-        }
-        protocol::HistoryItem::Assistant(step) => {
-            let Some(content) = &step.content else {
-                return Ok(false);
-            };
-            let row = lua.create_table()?;
-            row.set("role", "assistant")?;
-            row.set("content", content.text_content())?;
-            out.set(*idx, row)?;
-            *idx += 1;
-            Ok(true)
-        }
-        protocol::HistoryItem::System { .. } | protocol::HistoryItem::Note(_) => Ok(false),
-    }
+#[derive(serde::Serialize)]
+struct ConversationRow {
+    role: &'static str,
+    content: String,
 }
 
-fn conversation_to_lua(
-    lua: &Lua,
+fn conversation_row(item: &protocol::HistoryItem) -> Option<ConversationRow> {
+    let (role, content) = match item {
+        protocol::HistoryItem::User { content, .. } => ("user", content),
+        protocol::HistoryItem::Assistant(step) => ("assistant", step.content.as_ref()?),
+        protocol::HistoryItem::System { .. } | protocol::HistoryItem::Note(_) => return None,
+    };
+    Some(ConversationRow {
+        role,
+        content: content.text_content().into_owned(),
+    })
+}
+
+/// Conversation rows of `history`, the last `limit` of them when set.
+fn conversation_rows(
     history: &[protocol::HistoryItem],
     limit: Option<usize>,
-) -> LuaResult<mlua::Table> {
+) -> Vec<ConversationRow> {
     let _perf = smelt_perf::perf::begin("lua:session:conversation");
-    let out = lua.create_table()?;
-    let mut idx = 1;
-    let Some(limit) = limit.filter(|limit| *limit > 0) else {
-        for item in history {
-            push_conversation_history_item(lua, &out, &mut idx, item)?;
-        }
-        smelt_perf::perf::record_value(
-            "lua:session:conversation_rows_scanned",
-            history.len() as u64,
-        );
-        smelt_perf::perf::record_value(
-            "lua:session:conversation_rows_returned",
-            idx.saturating_sub(1) as u64,
-        );
-        return Ok(out);
+    let start = match limit.filter(|limit| *limit > 0) {
+        Some(limit) => history
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, item)| conversation_row_kept(item))
+            .nth(limit - 1)
+            .map_or(0, |(index, _)| index),
+        None => 0,
     };
-
-    let mut start = history.len();
-    let mut kept = 0usize;
-    for (item_idx, item) in history.iter().enumerate().rev() {
-        if matches!(
-            item,
-            protocol::HistoryItem::User { .. }
-                | protocol::HistoryItem::Assistant(protocol::AssistantStep {
-                    content: Some(_),
-                    ..
-                })
-        ) {
-            kept += 1;
-            start = item_idx;
-            if kept >= limit {
-                break;
-            }
-        }
-    }
+    let rows: Vec<_> = history[start..]
+        .iter()
+        .filter_map(conversation_row)
+        .collect();
     smelt_perf::perf::record_value(
         "lua:session:conversation_rows_scanned",
-        history.len().saturating_sub(start) as u64,
+        (history.len() - start) as u64,
     );
-    for item in &history[start..] {
-        push_conversation_history_item(lua, &out, &mut idx, item)?;
-    }
-    smelt_perf::perf::record_value(
-        "lua:session:conversation_rows_returned",
-        idx.saturating_sub(1) as u64,
-    );
-    Ok(out)
+    smelt_perf::perf::record_value("lua:session:conversation_rows_returned", rows.len() as u64);
+    rows
 }
+
+fn conversation_row_kept(item: &protocol::HistoryItem) -> bool {
+    matches!(
+        item,
+        protocol::HistoryItem::User { .. }
+            | protocol::HistoryItem::Assistant(protocol::AssistantStep {
+                content: Some(_),
+                ..
+            })
+    )
+}
+
+/// A `smelt.session.conversation` read waiting for storage.
+struct ConversationRead {
+    history: smelt_core::session_runtime::HistoryRead,
+    limit: Option<usize>,
+}
+
+struct ConversationTask(Option<ConversationRead>);
+impl mlua::UserData for ConversationTask {}
 
 pub(super) fn register(
     lua: &Lua,
@@ -831,34 +812,63 @@ pub(super) fn register(
             history_items_to_lua(lua, &history)
         },
     )?;
-    m.fn_(
-        "conversation",
-        "Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. By default reads the latest bounded conversation tail; pass `{ limit = n }`, `{ since_index = n }`, or `{ all = true }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.",
+    m.private_live_only_fn(
+        "__prepare_conversation",
         &["opts"],
-        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
+        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Value> {
             let all = opt_field::<bool>(&opts, "all")?.unwrap_or(false);
             let since_index = opt_field::<usize>(&opts, "since_index")?;
             let limit = opt_field::<usize>(&opts, "limit")?;
-            let history = crate::lua::try_with_session_host(|host| {
+            let history = crate::lua::with_session_host(|host| {
                 let len = host.session_history_len();
                 if all {
-                    host.session_history_range(0..len)
+                    Ok(host.session_history_range_read(0..len))
                 } else if let Some(since_index) = since_index {
                     let limit = limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1);
                     let start = since_index.saturating_sub(1).min(len);
                     let end = start.saturating_add(limit).min(len);
-                    host.session_history_range(start..end)
+                    Ok(host.session_history_range_read(start..end))
                 } else {
-                    host.session_history_tail(
+                    host.session_history_tail_read(
                         limit.unwrap_or(DEFAULT_LUA_SESSION_LIMIT).max(1),
                         Some(DEFAULT_LUA_SESSION_MAX_BYTES),
                     )
                 }
             })
-            .transpose()
-            .map_err(mlua::Error::RuntimeError)?
-            .unwrap_or_default();
-            conversation_to_lua(lua, &history, limit)
+            .map_err(mlua::Error::RuntimeError)?;
+            if history.needs_storage() {
+                let read = ConversationRead { history, limit };
+                return Ok(mlua::Value::UserData(
+                    lua.create_userdata(ConversationTask(Some(read)))?,
+                ));
+            }
+            let history = history.read().map_err(mlua::Error::RuntimeError)?;
+            smelt_core::lua::serde_to_lua(lua, &conversation_rows(&history, limit))
+        },
+    )?;
+    let conversation_sink = shared.core.resume_sink();
+    m.private_live_only_fn(
+        "__start_conversation",
+        &["task_id", "request"],
+        move |_, (task_id, request): (u64, mlua::Value)| -> LuaResult<()> {
+            let read = request
+                .as_userdata()
+                .ok_or_else(|| mlua::Error::RuntimeError("expected conversation request".into()))?
+                .borrow_mut::<ConversationTask>()?
+                .0
+                .take()
+                .ok_or_else(|| {
+                    mlua::Error::RuntimeError("conversation request already started".into())
+                })?;
+            conversation_sink
+                .clone()
+                .spawn_blocking_resolve(task_id, move || match read.history.read() {
+                    Ok(history) => {
+                        serde_json::json!({ "rows": conversation_rows(&history, read.limit) })
+                    }
+                    Err(err) => serde_json::json!({ "err": err }),
+                });
+            Ok(())
         },
     )?;
     struct RewindPageTask(Option<crate::app::history::RewindPageRequest>);
@@ -1366,5 +1376,53 @@ mod tests {
             "first user"
         );
         app.assert_invariants();
+    }
+
+    #[tokio::test]
+    async fn stored_lua_conversation_reads_in_a_task() {
+        let mut app = crate::app::test_harness::TestApp::builder()
+            .with_vim(false)
+            .build();
+        app.ensure_writer_ready();
+        for text in ["first user", "second user"] {
+            app.app.stage_request_history_item(
+                protocol::HistoryItem::user(protocol::Content::text(text)),
+                Some(smelt_core::Block::User {
+                    text: text.into(),
+                    image_labels: Vec::new(),
+                    command: false,
+                    sent_at_ms: None,
+                }),
+            );
+        }
+        app.save_session_and_flush();
+        let id = app.session_snapshot().id.clone();
+        assert!(app.load_session_by_id(&id));
+        app.run_lua_result(
+            r#"
+            smelt.spawn(function()
+                local tail = smelt.session.conversation()
+                local since = smelt.session.conversation({ since_index = 2 })
+                read = tail[1].content .. "," .. tail[2].content .. "|" .. since[1].content
+            end)
+        "#,
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while app
+                .eval_lua::<Option<String>>("return read")
+                .unwrap()
+                .is_none()
+            {
+                app.feed_one(crate::event_source::SourceEvent::LuaWakeup);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            app.eval_lua::<String>("return read").unwrap(),
+            "first user,second user|second user"
+        );
     }
 }
