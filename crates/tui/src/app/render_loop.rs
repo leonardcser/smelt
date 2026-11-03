@@ -1594,9 +1594,13 @@ impl TuiApp {
     /// Each callback owns retained backing-buffer content and runs after
     /// registration, invalidation, or a change in resolved content size. Unmounted
     /// windows stay dirty; destroyed windows release their renderer callbacks.
+    /// Dispatching every window answers the pending repaint request.
     fn dispatch_lua_renderers(&mut self, windows: Option<&[crate::smelt_edit::WinId]>) {
         let lua = self.lua.lua();
         let shared = self.lua.shared();
+        if windows.is_none() {
+            shared.take_win_repaint();
+        }
         // Snapshot dirty callbacks so the registry mutex is not held across Lua
         // calls. Mark them clean first so a callback can invalidate itself for a
         // later frame without that request being overwritten.
@@ -2199,6 +2203,35 @@ mod tests {
             Some(initial_renderer_calls + 3),
             "animation frames must repaint the retained prompt bar"
         );
+    }
+
+    #[test]
+    fn invalidated_renderer_schedules_its_repaint_once() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.run_lua_result(
+            r#"
+            smelt.prompt.top.win:set_renderer(function(win)
+              smelt.timer.set(16, function() win:invalidate() end)
+            end)
+            "#,
+        )
+        .expect("install animated renderer");
+        app.app.schedule_win_repaint();
+        app.render_normal_to(&mut std::io::sink());
+        app.app.schedule_win_repaint();
+        assert_eq!(app.app.scheduled_frame_delay(), None);
+
+        app.clock.advance(std::time::Duration::from_millis(16));
+        app.app.tick_runtime();
+        app.app.schedule_win_repaint();
+        assert!(
+            app.app.scheduled_frame_delay().is_some(),
+            "a renderer invalidated outside a frame must schedule its repaint"
+        );
+
+        app.render_normal_to(&mut std::io::sink());
+        app.app.schedule_win_repaint();
+        assert_eq!(app.app.scheduled_frame_delay(), None);
     }
 
     #[test]

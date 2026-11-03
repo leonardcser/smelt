@@ -477,14 +477,6 @@ impl LuaShared {
         self.layout_refresh_pending.store(true, Ordering::Release);
     }
 
-    pub(crate) fn invalidate_win_renderers(&self) {
-        if let Ok(mut renderers) = self.win_renderers.lock() {
-            for renderer in renderers.values_mut() {
-                renderer.dirty = true;
-            }
-        }
-    }
-
     pub(crate) fn take_layout_refresh(&self) -> bool {
         self.layout_refresh_pending.swap(false, Ordering::AcqRel)
     }

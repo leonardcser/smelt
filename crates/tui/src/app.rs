@@ -1361,6 +1361,14 @@ impl TuiApp {
             .request(crate::app::render_loop::FrameUrgency::Animation(interval));
     }
 
+    /// Schedules the frame that repaints invalidated Lua renderers, whatever
+    /// timer, task, signal or command invalidated them.
+    pub(crate) fn schedule_win_repaint(&mut self) {
+        if self.lua.shared().take_win_repaint() {
+            self.request_continuation_render();
+        }
+    }
+
     pub(crate) fn scheduled_frame_delay(&self) -> Option<Duration> {
         self.frame_scheduler
             .next_delay(self.core.clock.instant_now())
@@ -3930,6 +3938,7 @@ impl TuiApp {
                 self.request_urgent_render();
             }
             animating_last_tick = has_animation;
+            self.schedule_win_repaint();
             let next_scheduled_frame_delay = self.scheduled_frame_delay();
             let persistence_wake = self.conversation.persistence_wake();
 

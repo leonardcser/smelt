@@ -220,6 +220,9 @@ pub struct LuaShared {
     /// runs after registration, explicit invalidation, or a resolved size change;
     /// its backing buffer remains authoritative between runs.
     pub win_renderers: Mutex<HashMap<u64, RegisteredWinRenderer>>,
+    /// Set when a renderer is invalidated, until the host schedules the frame
+    /// that repaints it.
+    win_repaint_requested: AtomicBool,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub(crate) tool_preparations:
         Mutex<HashMap<protocol::InvocationId, (super::task::TaskScope, mlua::Table)>>,
@@ -428,6 +431,7 @@ impl Default for LuaShared {
             keymap_leader: Mutex::new("\\".to_string()),
             main_layout_composer: Mutex::new(None),
             win_renderers: Mutex::new(HashMap::new()),
+            win_repaint_requested: AtomicBool::new(false),
             tools: Mutex::new(HashMap::new()),
             tool_preparations: Mutex::new(HashMap::new()),
             transcript_renderer: Mutex::new(None),
@@ -485,6 +489,42 @@ impl Default for LuaShared {
 }
 
 impl LuaShared {
+    /// Marks the renderer of window `win` dirty and requests the frame that
+    /// repaints it. Returns `false` when the window has no renderer.
+    pub fn invalidate_win_renderer(&self, win: u64) -> bool {
+        let found = self.win_renderers.lock().is_ok_and(|mut renderers| {
+            renderers
+                .get_mut(&win)
+                .map(|renderer| renderer.dirty = true)
+                .is_some()
+        });
+        if found {
+            self.request_win_repaint();
+        }
+        found
+    }
+
+    /// Marks every renderer dirty and requests the frame that repaints them.
+    pub fn invalidate_win_renderers(&self) {
+        if let Ok(mut renderers) = self.win_renderers.lock() {
+            for renderer in renderers.values_mut() {
+                renderer.dirty = true;
+            }
+        }
+        self.request_win_repaint();
+    }
+
+    pub fn request_win_repaint(&self) {
+        self.win_repaint_requested.store(true, Ordering::Release);
+    }
+
+    /// Takes the pending repaint request, so each invalidation schedules one
+    /// frame. A renderer of an unmounted window stays dirty without asking
+    /// for more.
+    pub fn take_win_repaint(&self) -> bool {
+        self.win_repaint_requested.swap(false, Ordering::AcqRel)
+    }
+
     pub fn begin_work(self: &Arc<Self>) -> LuaWorkGuard {
         let mut quota = self
             .work_quota

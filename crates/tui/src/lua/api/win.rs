@@ -701,6 +701,9 @@ impl mlua::UserData for LuaWin {
                         }
                     }
                 }
+                if installed {
+                    shared.request_win_repaint();
+                }
                 if installed && smelt_core::lua::reg::RegistrationScope::owns("window", this.id.0) {
                     let weak = Arc::downgrade(&shared.core);
                     let win = this.id;
@@ -729,11 +732,7 @@ impl mlua::UserData for LuaWin {
                 let win = this.id;
                 let callback = lua.create_function(move |_, ()| {
                     if let Some(shared) = weak.upgrade() {
-                        if let Ok(mut renderers) = shared.win_renderers.lock() {
-                            if let Some(renderer) = renderers.get_mut(&win.0) {
-                                renderer.dirty = true;
-                            }
-                        }
+                        shared.invalidate_win_renderer(win.0);
                     }
                     Ok(())
                 })?;
@@ -746,12 +745,7 @@ impl mlua::UserData for LuaWin {
             "invalidate",
             |lua, this_ud: mlua::AnyUserData| -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
-                let shared = current_shared(lua)?;
-                if let Ok(mut map) = shared.win_renderers.lock() {
-                    if let Some(renderer) = map.get_mut(&this.id.0) {
-                        renderer.dirty = true;
-                    }
-                }
+                current_shared(lua)?.invalidate_win_renderer(this.id.0);
                 Ok(this_ud)
             },
         );
