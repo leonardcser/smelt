@@ -109,8 +109,9 @@ fn hold_inhibitor(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .current_dir("/");
-    // Keep terminal job-control signals away from the inhibitor.
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    // Without a controlling terminal, helpers such as the polkit agent cannot
+    // prompt on smelt's tty, and job-control signals stay away.
+    smelt_core::process::without_controlling_terminal(&mut command);
     std::thread::Builder::new()
         .name("smelt-sleep-inhibit".into())
         .spawn({
@@ -199,6 +200,18 @@ mod tests {
         let unavailable = Arc::new(AtomicBool::new(false));
         let _hold = hold_inhibitor(sh("exit 1"), Arc::clone(&unavailable)).unwrap();
         assert!(eventually(|| unavailable.load(Ordering::Acquire)));
+    }
+
+    #[test]
+    fn inhibitor_runs_in_its_own_session_without_a_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let leader = dir.path().join("leader");
+        let script = format!(
+            r#"[ "$(ps -o sid= -p $$ | tr -d ' ')" = "$$" ] && touch '{}'"#,
+            leader.display()
+        );
+        let _hold = hold_inhibitor(sh(&script), Arc::default()).unwrap();
+        assert!(eventually(|| leader.exists()));
     }
 
     #[test]
