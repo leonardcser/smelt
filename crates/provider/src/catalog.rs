@@ -404,9 +404,15 @@ pub fn init(cache_dir: Option<PathBuf>, client: reqwest::Client) {
 
 /// Resolve a model from local provider blocks, registering this exact request
 /// for future refreshes. New models require no catalog reinitialization.
+/// A provider with no catalog key can never resolve, so it neither opens the
+/// catalog nor schedules a download.
 pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelEntry> {
+    let providers = catalog_keys(provider_type, api_base);
+    if providers.is_empty() {
+        return None;
+    }
     SERVICE.get()?.lookup(Request {
-        providers: catalog_keys(provider_type, api_base),
+        providers,
         model: model.to_string(),
     })
 }
@@ -512,12 +518,33 @@ pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Opti
     }
 }
 
+/// models.dev lists public endpoints only, so a base on this machine or a
+/// private network has no alias.
 fn api_key(api_base: &str) -> Option<String> {
     let normalized = normalize_api_url(api_base);
-    if normalized.is_empty() {
+    if normalized.is_empty() || is_private_endpoint(&normalized) {
         None
     } else {
         Some(format!("api:{normalized}"))
+    }
+}
+
+fn is_private_endpoint(api_base: &str) -> bool {
+    let Ok(url) = url::Url::parse(api_base) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost" || domain.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+        None => false,
     }
 }
 
@@ -766,6 +793,25 @@ mod tests {
         assert_eq!(
             catalog_keys("openai-compatible", "https://OpenRouter.ai/api/v1/"),
             vec!["api:https://openrouter.ai/api/v1".to_string()]
+        );
+    }
+
+    #[test]
+    fn private_api_bases_have_no_catalog_alias() {
+        for base in [
+            "http://localhost:11434/v1",
+            "http://LOCALHOST:1234/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://192.168.1.20:8000/v1",
+            "http://10.0.0.5/v1",
+            "http://[::1]:8080/v1",
+            "http://[fd00::1]/v1",
+        ] {
+            assert!(catalog_keys("openai-compatible", base).is_empty(), "{base}");
+        }
+        assert_eq!(
+            catalog_keys("anthropic-compatible", "http://127.0.0.1:9/v1"),
+            vec!["anthropic".to_string()]
         );
     }
 
