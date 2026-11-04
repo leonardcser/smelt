@@ -12,9 +12,10 @@ pub const ALLOCATOR: Allocator = smelt_perf::alloc::Counting::new(mimalloc::MiMa
 /// export it.
 const MI_OPTION_PURGE_DELAY: mi_option_t = 15;
 
-/// Milliseconds before mimalloc returns freed pages to the OS. Its 1 s default
-/// keeps bursts resident long after an interactive session goes idle.
-const PURGE_DELAY_MS: i64 = 100;
+/// Milliseconds before mimalloc returns freed pages to the OS. Any delay keeps
+/// each turn's transient peaks resident and grows memory with the session, so
+/// freed pages go back at once.
+const PURGE_DELAY_MS: i64 = 0;
 
 /// Tunes the allocator for a long-lived interactive process. mimalloc maps 1
 /// GiB-aligned arenas, which transparent huge pages back with 2 MiB pages and
