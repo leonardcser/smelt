@@ -289,7 +289,27 @@ pub struct ProjectSnapshot {
 }
 
 impl ProjectSnapshot {
+    /// The project around `cwd`. Startup and refreshes ask repeatedly, so the
+    /// last snapshot is returned while its Git metadata is unchanged.
     pub fn discover(cwd: &Path, root: Option<&Path>) -> Self {
+        type Last = Option<(PathBuf, Option<PathBuf>, ProjectSnapshot)>;
+        static LAST: std::sync::Mutex<Last> = std::sync::Mutex::new(None);
+        let mut last = LAST.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some((last_cwd, last_root, snapshot)) = last.as_ref() {
+            if last_cwd == cwd && last_root.as_deref() == root && snapshot.is_reusable() {
+                return snapshot.clone();
+            }
+        }
+        let snapshot = Self::run_git(cwd, root);
+        *last = Some((
+            cwd.to_path_buf(),
+            root.map(Path::to_path_buf),
+            snapshot.clone(),
+        ));
+        snapshot
+    }
+
+    fn run_git(cwd: &Path, root: Option<&Path>) -> Self {
         let mut inputs = crate::file_stamp::FileStamps::default();
         // A repository or worktree link appearing in any ancestor changes
         // which repository owns `cwd`.
@@ -314,9 +334,10 @@ impl ProjectSnapshot {
 }
 
 /// The repository files project discovery reads: checked-out branches, the
-/// default base refs, and the worktree list.
+/// default base refs, and the worktree list. Reftable repositories keep refs
+/// in table lists instead of ref files.
 fn track_git_metadata(inputs: &mut crate::file_stamp::FileStamps, common: &Path) {
-    for file in ["HEAD", "config", "packed-refs"] {
+    for file in ["HEAD", "config", "packed-refs", "reftable/tables.list"] {
         inputs.track(common.join(file));
     }
     for branch in DEFAULT_BASE_BRANCHES {
@@ -326,8 +347,9 @@ fn track_git_metadata(inputs: &mut crate::file_stamp::FileStamps, common: &Path)
     inputs.track(worktrees.clone());
     for entry in fs::read_dir(&worktrees).into_iter().flatten().flatten() {
         let dir = entry.path();
-        inputs.track(dir.join("HEAD"));
-        inputs.track(dir.join("gitdir"));
+        for file in ["HEAD", "gitdir", "reftable/tables.list"] {
+            inputs.track(dir.join(file));
+        }
     }
 }
 
@@ -905,6 +927,44 @@ mod tests {
         assert!(
             !snapshot.is_reusable(),
             "a new worktree changes the context"
+        );
+    }
+
+    #[test]
+    fn project_snapshot_notices_branch_switch_in_reftable_repository() {
+        let repo = tempfile::tempdir().unwrap();
+        let reftable = Command::new("git")
+            .args(["init", "-q", "--ref-format=reftable", "-b", "main"])
+            .current_dir(repo.path())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !reftable {
+            // Git before 2.45 has no reftable backend.
+            return;
+        }
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        settle(&repo.path().join(".git"));
+        let snapshot = ProjectSnapshot::discover(repo.path(), None);
+        assert!(snapshot.is_reusable());
+
+        git(repo.path(), &["checkout", "-q", "-b", "feature"]);
+        assert!(!snapshot.is_reusable());
+        assert_eq!(
+            ProjectSnapshot::discover(repo.path(), None).context.branch,
+            "feature"
         );
     }
 
