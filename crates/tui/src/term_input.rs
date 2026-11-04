@@ -113,16 +113,22 @@ pub(crate) enum TerminalReply {
 }
 
 impl TerminalInput {
-    pub(crate) fn spawn() -> io::Result<(Self, TerminalReplies)> {
+    /// Start reading terminal input. `pending` holds bytes already read from
+    /// the terminal (for example during the startup color probe); they are
+    /// parsed before any new input, so keys typed early are not lost.
+    pub(crate) fn spawn(pending: Vec<u8>) -> io::Result<(Self, TerminalReplies)> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(unix)]
         let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(unix)]
         let (geometry_tx, geometry_rx) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(unix)]
-        let shutdown = platform::spawn_reader(tx, probe_tx, geometry_tx)?;
+        let shutdown = platform::spawn_reader(pending, tx, probe_tx, geometry_tx)?;
         #[cfg(not(unix))]
-        let shutdown = platform::spawn_reader(tx)?;
+        let shutdown = {
+            drop(pending);
+            platform::spawn_reader(tx)?
+        };
         let input = Self {
             rx,
             shutdown: Some(shutdown),
@@ -141,7 +147,7 @@ impl TerminalInput {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
         let (geometry_tx, geometry_rx) = tokio::sync::mpsc::unbounded_channel();
-        let shutdown = platform::spawn_reader_from_fd(fd, tx, probe_tx, geometry_tx)?;
+        let shutdown = platform::spawn_reader_from_fd(fd, Vec::new(), tx, probe_tx, geometry_tx)?;
         let input = Self {
             rx,
             shutdown: Some(shutdown),
@@ -281,15 +287,17 @@ mod platform {
     }
 
     pub(super) fn spawn_reader(
+        pending: Vec<u8>,
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
         probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
         geometry_tx: tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
     ) -> io::Result<Shutdown> {
-        spawn_reader_from_fd(open_input_fd()?, tx, probe_tx, geometry_tx)
+        spawn_reader_from_fd(open_input_fd()?, pending, tx, probe_tx, geometry_tx)
     }
 
     pub(super) fn spawn_reader_from_fd(
         fd: RawFd,
+        pending: Vec<u8>,
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
         probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
         geometry_tx: tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
@@ -308,8 +316,17 @@ mod platform {
         }));
         let thread = match std::thread::Builder::new()
             .name("smelt-terminal-input".into())
-            .spawn(move || reader_loop(fd, shutdown_read_fd, command_rx, tx, probe_tx, geometry_tx))
-        {
+            .spawn(move || {
+                reader_loop(
+                    fd,
+                    shutdown_read_fd,
+                    pending,
+                    command_rx,
+                    tx,
+                    probe_tx,
+                    geometry_tx,
+                )
+            }) {
             Ok(thread) => thread,
             Err(e) => {
                 unsafe {
@@ -378,15 +395,21 @@ mod platform {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn reader_loop(
         fd: RawFd,
         shutdown_fd: RawFd,
+        pending: Vec<u8>,
         commands: std::sync::mpsc::Receiver<ReaderCommand>,
         tx: tokio::sync::mpsc::UnboundedSender<Event>,
         probe_tx: tokio::sync::mpsc::UnboundedSender<bool>,
         geometry_tx: tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
     ) {
         let mut parser = Parser::new();
+        if !forward(&mut parser, &pending, &tx, &probe_tx, &geometry_tx) {
+            close_reader_fds(fd, shutdown_fd);
+            return;
+        }
         let mut buf = [0u8; 1024];
         loop {
             let timeout_ms = if parser.awaiting_escape_tail() {
@@ -471,21 +494,37 @@ mod platform {
             if n == 0 {
                 break;
             }
-            let events = parser.advance(&buf[..n as usize]);
-            if let Some(supported) = parser.probe_response.take() {
-                let _ = probe_tx.send(supported);
-            }
-            if let Some(geometry) = parser.cell_geometry.take() {
-                let _ = geometry_tx.send(geometry);
-            }
-            for ev in events {
-                if tx.send(ev).is_err() {
-                    close_reader_fds(fd, shutdown_fd);
-                    return;
-                }
+            if !forward(
+                &mut parser,
+                &buf[..n as usize],
+                &tx,
+                &probe_tx,
+                &geometry_tx,
+            ) {
+                close_reader_fds(fd, shutdown_fd);
+                return;
             }
         }
         close_reader_fds(fd, shutdown_fd);
+    }
+
+    /// Parse `bytes` and send the results. Returns `false` once the event
+    /// receiver is gone.
+    fn forward(
+        parser: &mut Parser,
+        bytes: &[u8],
+        tx: &tokio::sync::mpsc::UnboundedSender<Event>,
+        probe_tx: &tokio::sync::mpsc::UnboundedSender<bool>,
+        geometry_tx: &tokio::sync::mpsc::UnboundedSender<(u32, u32)>,
+    ) -> bool {
+        let events = parser.advance(bytes);
+        if let Some(supported) = parser.probe_response.take() {
+            let _ = probe_tx.send(supported);
+        }
+        if let Some(geometry) = parser.cell_geometry.take() {
+            let _ = geometry_tx.send(geometry);
+        }
+        events.into_iter().all(|ev| tx.send(ev).is_ok())
     }
 
     fn close_reader_fds(fd: RawFd, shutdown_fd: RawFd) {
@@ -1459,6 +1498,17 @@ mod tests {
         assert_eq!(p.probe_response, Some(false));
         assert!(p.advance(b"\x1b_Gi=22;OK\x1b\\").is_empty());
         assert_eq!(p.probe_response, Some(false));
+    }
+
+    #[test]
+    fn color_probe_replies_keep_keys_typed_around_them() {
+        let mut p = Parser::new();
+        let events = p.advance(
+            b"ab\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:0000/0000/0000\x07\
+              \x1b]4;1;rgb:cd/00/00\x07\x1b[0ncd",
+        );
+        assert_eq!(keys_text(&events), "abcd");
+        assert_eq!(events.len(), 4);
     }
 
     #[test]

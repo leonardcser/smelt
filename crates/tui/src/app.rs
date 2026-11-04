@@ -3667,7 +3667,7 @@ impl TuiApp {
     pub async fn run(&mut self, http_client: engine::HttpClient, initial_message: Option<String>) {
         crate::content::display_layout::set_kitty_probe_result(false);
         let platform_startup = smelt_perf::perf::begin("startup:platform");
-        crate::theme::detect_background(self.ui.theme_mut());
+        let probe_input = crate::theme::detect_background(self.ui.theme_mut());
         // Install the background-aware baked theme before Lua loads so a
         // configured colorscheme remains authoritative for the first frame.
         let is_light = self.ui.theme().is_light();
@@ -3726,15 +3726,16 @@ impl TuiApp {
 
         let mut workspace_warmup_pending = true;
 
-        let (mut term_events, mut term_replies) = match crate::term_input::TerminalInput::spawn() {
-            Ok(input) => input,
-            Err(e) => {
-                self.notify_error(format!("terminal input: {e}"));
-                self.platform.claim_failed_terminal();
-                self.platform.shutdown();
-                return;
-            }
-        };
+        let (mut term_events, mut term_replies) =
+            match crate::term_input::TerminalInput::spawn(probe_input) {
+                Ok(input) => input,
+                Err(e) => {
+                    self.notify_error(format!("terminal input: {e}"));
+                    self.platform.claim_failed_terminal();
+                    self.platform.shutdown();
+                    return;
+                }
+            };
         self.platform.set_input_pause(term_events.pause_handle());
         // The kitty graphics answer arrives through `term_replies` while the
         // loop runs, so the first frame never waits for it. Inside tmux an

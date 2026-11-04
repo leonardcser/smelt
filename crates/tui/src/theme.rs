@@ -460,8 +460,13 @@ fn resolve_group(
 /// Probe the terminal's colors, record them as the process palette, and set
 /// the light flag on `theme`. Must be called before entering raw mode /
 /// alternate screen.
-pub(crate) fn detect_background(theme: &mut Theme) {
-    let replies = query_terminal_colors();
+///
+/// Returns every byte read from the terminal, replies included. Keys typed
+/// while the probe waits arrive in the same stream, so the caller hands the
+/// bytes to the input reader instead of dropping them.
+pub(crate) fn detect_background(theme: &mut Theme) -> Vec<u8> {
+    let response = query_terminal_colors();
+    let replies = parse_color_replies(&String::from_utf8_lossy(&response));
     let light = match replies.bg {
         Some(_) => Some(replies.palette(false).is_light()),
         None => colorfgbg_is_light(),
@@ -470,6 +475,7 @@ pub(crate) fn detect_background(theme: &mut Theme) {
     if let Some(light) = light {
         theme.set_light(light);
     }
+    response
 }
 
 /// Parse `$COLORFGBG` (`"fg;bg"` or `"fg;default;bg"`).
@@ -508,24 +514,32 @@ impl ColorReplies {
 
 /// Ask for the default foreground (OSC 10), background (OSC 11) and the 16
 /// ANSI colors (OSC 4) in one round trip, fenced by a status report so
-/// terminals that ignore some queries still end the wait.
+/// terminals that ignore some queries still end the wait. Returns the raw
+/// bytes read, which can include keys typed during the wait.
 #[cfg(unix)]
-fn query_terminal_colors() -> ColorReplies {
+fn query_terminal_colors() -> Vec<u8> {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    /// Longest wait for the next reply byte.
+    const IDLE_TIMEOUT: Duration = Duration::from_millis(100);
+    /// Longest total wait, so continuous typing cannot extend the probe.
+    const TOTAL_TIMEOUT: Duration = Duration::from_millis(200);
 
     if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
-        return ColorReplies::default();
+        return Vec::new();
     }
 
     let switch_raw = !is_raw_mode_enabled().unwrap_or(false);
     if switch_raw && enable_raw_mode().is_err() {
-        return ColorReplies::default();
+        return Vec::new();
     }
 
-    let response = (|| -> Option<Vec<u8>> {
+    let mut response = Vec::new();
+    (|| -> Option<()> {
         let mut query = String::from("\x1b]10;?\x07\x1b]11;?\x07");
         for index in 0..16 {
             query.push_str(&format!("\x1b]4;{index};?\x07"));
@@ -536,51 +550,50 @@ fn query_terminal_colors() -> ColorReplies {
         stdout.flush().ok()?;
 
         let mut tty = File::open("/dev/tty").ok()?;
-        let mut buf = vec![0u8; 2048];
-        let mut written = 0;
-        while written < buf.len() {
-            if !wait_for_input(tty.as_raw_fd(), 100) {
+        let deadline = Instant::now() + TOTAL_TIMEOUT;
+        let mut chunk = [0u8; 1024];
+        while !contains_status_report(&response) {
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(IDLE_TIMEOUT);
+            if wait.is_zero() || !wait_for_input(tty.as_raw_fd(), wait.as_millis() as u64) {
                 break;
             }
-            let n = tty.read(&mut buf[written..]).ok()?;
+            let n = tty.read(&mut chunk).ok()?;
             if n == 0 {
                 break;
             }
-            written += n;
-            if ends_with_status_report(&buf[..written]) {
-                break;
-            }
+            response.extend_from_slice(&chunk[..n]);
         }
-        buf.truncate(written);
-        Some(buf)
+        Some(())
     })();
 
     if switch_raw {
         let _ = disable_raw_mode();
     }
-
     response
-        .map(|bytes| parse_color_replies(&String::from_utf8_lossy(&bytes)))
-        .unwrap_or_default()
 }
 
 #[cfg(not(unix))]
-fn query_terminal_colors() -> ColorReplies {
-    ColorReplies::default()
+fn query_terminal_colors() -> Vec<u8> {
+    Vec::new()
 }
 
-/// Whether `bytes` ends with the device status report (`ESC [ <n> n`) that fences the queries.
+/// Whether `bytes` contains the device status report (`ESC [ <n> n`) that
+/// fences the queries. Typed keys can follow it in the same read.
 #[cfg(any(unix, test))]
-fn ends_with_status_report(bytes: &[u8]) -> bool {
-    let Some(rest) = bytes.strip_suffix(b"n") else {
-        return false;
-    };
-    let digits = rest.iter().rev().take_while(|b| b.is_ascii_digit()).count();
-    digits > 0 && rest[..rest.len() - digits].ends_with(b"\x1b[")
+fn contains_status_report(bytes: &[u8]) -> bool {
+    bytes.windows(2).enumerate().any(|(start, window)| {
+        if window != b"\x1b[" {
+            return false;
+        }
+        let rest = &bytes[start + 2..];
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        digits > 0 && rest.get(digits) == Some(&b'n')
+    })
 }
 
 /// Parse OSC 10, 11 and 4 color replies such as `ESC ] 4;1;rgb:cd/00/00 ST`.
-#[cfg(any(unix, test))]
 fn parse_color_replies(response: &str) -> ColorReplies {
     let mut replies = ColorReplies::default();
     for reply in response.split("\x1b]").skip(1) {
@@ -608,7 +621,6 @@ fn parse_color_replies(response: &str) -> ColorReplies {
 }
 
 /// Parse an X11 `rgb:R/G/B` color with 1 to 4 hex digits per channel.
-#[cfg(any(unix, test))]
 fn parse_xparse_color(text: &str) -> Option<smelt_core::palette::Rgb> {
     let text = text.split(['\x07', '\x1b']).next()?;
     let mut channels = text.strip_prefix("rgb:")?.split('/').map(|channel| {
@@ -880,10 +892,16 @@ mod tests {
 
     #[test]
     fn status_report_fences_the_replies() {
-        assert!(ends_with_status_report(b"\x1b]11;rgb:0/0/0\x07\x1b[0n"));
-        assert!(ends_with_status_report(b"\x1b[3n"));
-        assert!(!ends_with_status_report(b"\x1b]11;rgb:0/0/0\x07"));
-        assert!(!ends_with_status_report(b"[n"));
+        assert!(contains_status_report(b"\x1b]11;rgb:0/0/0\x07\x1b[0n"));
+        assert!(contains_status_report(b"\x1b[3n"));
+        assert!(!contains_status_report(b"\x1b]11;rgb:0/0/0\x07"));
+        assert!(!contains_status_report(b"[n"));
+        assert!(!contains_status_report(b"\x1b[n"));
+    }
+
+    #[test]
+    fn typed_keys_after_the_status_report_still_end_the_wait() {
+        assert!(contains_status_report(b"ab\x1b]11;rgb:0/0/0\x07\x1b[0ncd"));
     }
 
     #[test]
