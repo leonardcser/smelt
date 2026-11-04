@@ -7,11 +7,15 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
-/// Double-buffered terminal renderer. Diffs `current` against `previous`
+/// Most grids a frame holds at once: the composed frame and its presented copy.
+const MAX_SPARE_GRIDS: usize = 2;
+
+/// Double-buffered terminal renderer. Diffs each frame against `previous`
 /// and flushes only changed cells; `force_redraw` triggers a full repaint.
 #[derive(Clone)]
 pub struct Compositor {
-    current: Grid,
+    /// Grids handed back after a frame, reused so frames do not allocate.
+    spare: Vec<Grid>,
     previous: Grid,
     width: u16,
     height: u16,
@@ -22,7 +26,7 @@ pub struct Compositor {
 impl Compositor {
     pub fn new(width: u16, height: u16) -> Self {
         Self {
-            current: Grid::new(width, height),
+            spare: Vec::new(),
             previous: Grid::new(width, height),
             width,
             height,
@@ -34,7 +38,6 @@ impl Compositor {
     pub fn resize(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
-        self.current.resize(width, height);
         self.previous.resize(width, height);
         self.force_redraw = true;
     }
@@ -44,13 +47,31 @@ impl Compositor {
     /// The caller owns the grid while painting, so paint phases can release and
     /// reacquire other borrows freely. Pass it back to [`Self::flush_frame`].
     pub fn begin_frame(&mut self) -> Grid {
-        let mut frame = std::mem::replace(&mut self.current, Grid::new(0, 0));
+        let mut frame = self.take_spare();
         if frame.width() != self.width || frame.height() != self.height {
             frame.resize(self.width, self.height);
         } else {
             frame.clear_all();
         }
         frame
+    }
+
+    /// Hand out a copy of `source` for the next frame, in a reused grid.
+    pub fn begin_copy(&mut self, source: &Grid) -> Grid {
+        let mut frame = self.take_spare();
+        frame.copy_from(source);
+        frame
+    }
+
+    /// Return a grid from [`Self::begin_frame`] that will not be flushed.
+    pub fn recycle(&mut self, grid: Grid) {
+        if self.spare.len() < MAX_SPARE_GRIDS {
+            self.spare.push(grid);
+        }
+    }
+
+    fn take_spare(&mut self) -> Grid {
+        self.spare.pop().unwrap_or_else(|| Grid::new(0, 0))
     }
 
     /// Flush a frame from [`Self::begin_frame`] and recycle its grid.
@@ -104,7 +125,7 @@ impl Compositor {
         } else {
             self.force_redraw = true;
         }
-        self.current = frame;
+        self.recycle(frame);
         result
     }
 

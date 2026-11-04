@@ -1273,7 +1273,9 @@ impl TuiApp {
         } else {
             self.paint_timeline.drop_history();
         }
-        self.composed = Some(composed);
+        if let Some(previous) = self.composed.replace(composed) {
+            self.ui.recycle_frame(previous);
+        }
         clock
     }
 

@@ -2994,9 +2994,12 @@ impl Ui {
     /// A grid for presenting a frame composed earlier: a copy of `composed`
     /// in the compositor's next buffer. Pass it to [`Self::flush_frame`].
     pub fn begin_present(&mut self, composed: &Grid) -> Grid {
-        let mut grid = self.surface.compositor_mut().begin_frame();
-        grid.copy_from(composed);
-        grid
+        self.surface.compositor_mut().begin_copy(composed)
+    }
+
+    /// Hand a composed frame's grid back for reuse once it is replaced.
+    pub fn recycle_frame(&mut self, frame: ComposedFrame) {
+        self.surface.compositor_mut().recycle(frame.grid);
     }
 
     /// Paint a prepared frame, calling `paint` for each host-owned leaf in painter order.
