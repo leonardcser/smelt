@@ -1049,15 +1049,20 @@ async fn async_main() {
 
     // Mirror the embedded runtime tree to the user data directory's `builtins/` tree
     // on first launch / after a version bump, so the `customize` skill
-    // can point the agent at on-disk source for inspection. Best-effort:
+    // can point the agent at on-disk source for inspection. Nothing reads the
+    // mirror during startup, so it is written off the startup path. Best-effort:
     // a failure here just means the skill's example links won't resolve,
     // not that smelt can't run.
-    let builtins_startup = smelt_perf::perf::begin("startup:extract_builtins");
     let data_dir = env.data_dir().clone();
-    if let Err(e) = smelt_core::lua::ensure_builtins_extracted(&data_dir) {
-        eprintln!("smelt: failed to extract built-in runtime: {e}");
-    }
-    drop(builtins_startup);
+    std::thread::spawn(move || {
+        if let Err(e) = smelt_core::lua::ensure_builtins_extracted(&data_dir) {
+            engine::log::entry(
+                engine::log::Level::Warn,
+                "builtins_extract_failed",
+                &serde_json::json!({ "error": e.to_string() }),
+            );
+        }
+    });
 
     // Two-pass startup so `early.lua` can declare extra CLI flags
     // before argv is parsed:
