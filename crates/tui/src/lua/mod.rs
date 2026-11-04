@@ -545,10 +545,20 @@ pub struct LuaLaunch {
 
 impl LuaLaunch {
     pub(crate) fn load(&mut self, cwd: &std::path::Path) -> smelt_core::trust::TrustState {
-        self.core.load_full_bootstrap();
-        self.core.load_autoload();
-        self.core.load_user_config();
-        self.core.load_global_plugins();
+        {
+            let _perf = smelt_perf::perf::begin("lua:launch:bootstrap");
+            self.core.load_full_bootstrap();
+        }
+        {
+            let _perf = smelt_perf::perf::begin("lua:launch:autoload");
+            self.core.load_autoload();
+        }
+        {
+            let _perf = smelt_perf::perf::begin("lua:launch:user_config");
+            self.core.load_user_config();
+            self.core.load_global_plugins();
+        }
+        let _perf = smelt_perf::perf::begin("lua:launch:project_config");
         self.core.load_project_config(cwd)
     }
 

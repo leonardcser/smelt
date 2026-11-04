@@ -453,6 +453,7 @@ impl TuiApp {
             ),
         });
 
+        let resolve_perf = smelt_perf::perf::begin("lua:launch:resolve_runtime");
         let runtime_failure =
             match self.resolve_lua_runtime_config_with(self.lua.desired(), &selections, None) {
                 Ok((mut next_runtime, next_managed_models)) => {
@@ -528,12 +529,14 @@ impl TuiApp {
                 }
                 Err(error) => Some(bring_up_error("runtime_resolution", None, error)),
             };
+        drop(resolve_perf);
         for warning in self.lua.warnings().to_vec() {
             self.notify_warn(warning);
         }
 
         self.refresh_main_layout();
         if load_failure.is_none() && runtime_failure.is_none() && run_ready_hooks {
+            let _perf = smelt_perf::perf::begin("lua:launch:ready_hooks");
             self.run_lua_ready_hooks("launch");
         }
 
