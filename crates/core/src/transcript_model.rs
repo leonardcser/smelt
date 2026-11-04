@@ -3329,6 +3329,9 @@ impl BlockHistory {
             .iter()
             .map(|(id, _)| *id)
             .collect::<HashSet<BlockId>>();
+        let dirty_block = self
+            .record_dirty_from
+            .map(|index| self.order.get(index).copied());
         let preserved_live = self
             .order
             .iter()
@@ -3389,6 +3392,12 @@ impl BlockHistory {
             self.bump_navigation_generation();
             self.record_patch(vec![TranscriptPatchOperation::Reset], true, true, false);
         }
+        // The dirty position follows its block. A pending tail truncation stays at
+        // the end, and a dirty block that left the projection dirties everything.
+        self.record_dirty_from = dirty_block.map(|block| match block {
+            Some(id) => self.order_index(id).unwrap_or(0),
+            None => self.order.len(),
+        });
         self.recount_persisted_blocks();
         self.recount_hydrated_entries();
         self.gc_tool_states();

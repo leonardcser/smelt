@@ -9,7 +9,8 @@ use smelt_core::session_runtime::LiveSession;
 use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
 
 use crate::app::transcript::{
-    TranscriptDocument, TranscriptRecordSaveBounds, TranscriptSaveHydrationError,
+    RecordSaveBoundsError, TranscriptDocument, TranscriptRecordSaveBounds,
+    TranscriptSaveHydrationError,
 };
 use crate::persist::SessionEpoch;
 
@@ -632,12 +633,13 @@ impl TuiSessionDocument {
             .history_len
             .as_usize()
             .ok_or_else(|| "acknowledged history length exceeds platform limits".to_string())?;
-        let acknowledged_record_len = self
+        // Records are validated against the head this commit is based on.
+        let base_record_len = self
             .changes
-            .acknowledged_head
+            .published_head
             .transcript_record_count
             .as_usize()
-            .ok_or_else(|| "acknowledged record length exceeds platform limits".to_string())?;
+            .ok_or_else(|| "published record length exceeds platform limits".to_string())?;
         let history_start = self
             .changes
             .history_dirty_from
@@ -651,14 +653,20 @@ impl TuiSessionDocument {
             final_len: smelt_store::HistoryLen::new(history_len as u64),
             items: history_items,
         };
-        let record_bounds = self.transcript.record_save_bounds_at_or_before(
-            self.changes.history_dirty_from,
-            acknowledged_record_len,
-        )?;
+        let record_bounds = self
+            .transcript
+            .record_save_bounds_at_or_before(self.changes.history_dirty_from, base_record_len)
+            .map_err(|error| match error {
+                RecordSaveBoundsError::DetachedTail => {
+                    SessionBatchPreparationError::HydrationPending
+                }
+                RecordSaveBoundsError::Invalid(message) => {
+                    SessionBatchPreparationError::Invalid(message)
+                }
+            })?;
         let record_projection = SessionRecordSaveProjection {
             bounds: record_bounds,
-            final_len: record_bounds
-                .map_or(acknowledged_record_len, |bounds| bounds.record_end_idx),
+            final_len: record_bounds.map_or(base_record_len, |bounds| bounds.record_end_idx),
         };
         self.transcript
             .pin_record_suffix_for_save(record_bounds)
@@ -3885,6 +3893,120 @@ mod tests {
         .expect("saved transcript tail");
         assert_eq!(saved.records.len(), 20);
         assert_eq!(saved.records[18].block_idx, 318);
+    }
+
+    #[test]
+    fn scrolled_back_save_appends_live_tail_without_truncating_store() {
+        use crate::app::transcript::{
+            seed_test_transcript_rows, LoadedTranscript, TEST_LINEAGE_SESSION_ID,
+        };
+
+        let root = tempfile::tempdir().expect("state root");
+        let sessions_root = root.path().join("sessions");
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        for index in 0..300 {
+            transcript.push(Block::Text {
+                content: format!("block {index}").into(),
+            });
+        }
+        let records = transcript
+            .history
+            .block_records()
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                smelt_core::transcript_model::transcript_block_row_with_block_idx(
+                    index,
+                    index as u64,
+                    record,
+                )
+                .expect("transcript row")
+            })
+            .collect::<Vec<_>>();
+        let session_dir = seed_test_transcript_rows(&sessions_root, records);
+        let reader = smelt_store::LineageSessionReader::open_existing(
+            &sessions_root,
+            TEST_LINEAGE_SESSION_ID,
+        )
+        .expect("reader");
+        let head = reader.snapshot().expect("snapshot").head;
+        let tail = reader
+            .transcript_record_slice_with_total((280..300).into(), 300)
+            .expect("sparse tail");
+        drop(reader);
+
+        let mut session = smelt_core::session::SessionStorage::new(root.path().to_path_buf())
+            .load_store_resume_result(TEST_LINEAGE_SESSION_ID, 80, 24)
+            .unwrap()
+            .unwrap()
+            .session;
+        let loaded = LoadedTranscript::from_record_slice(tail, session_dir).expect("loaded tail");
+        let mut document =
+            TuiSessionDocument::new(TranscriptDocument::from_loaded_transcript(loaded));
+        document.changes.install_head(head);
+        for index in 300..302 {
+            document.transcript.push(Block::Text {
+                content: format!("streamed {index}").into(),
+            });
+        }
+        document.changes.force_dirty();
+        let earlier = document
+            .transcript
+            .load_record_window((100..120).into())
+            .expect("earlier window");
+        assert!(document.transcript.merge_record_window(earlier));
+
+        let mut metadata = runtime_metadata();
+        metadata.updated_at_ms = session.created_at_ms.saturating_add(1);
+        let intent = document
+            .prepare_event_batch(&mut session, metadata)
+            .expect("prepare scrolled-back save")
+            .expect("dirty live tail");
+        let generation = intent.generation;
+        let mut persistence = crate::persist::SessionPersistence::spawn(
+            smelt_core::session::SessionStorage::new(root.path().to_path_buf()),
+            smelt_core::session_id::SessionId::parse(TEST_LINEAGE_SESSION_ID).expect("session id"),
+            SessionEpoch::new(1),
+            PersistenceGeneration::ZERO,
+            head,
+            None,
+            std::sync::Arc::default(),
+        )
+        .expect("persistence actor");
+        persistence.submit(intent).expect("submit save");
+        let close = persistence.close(
+            generation,
+            Instant::now() + Duration::from_secs(5),
+            crate::persist::ClosePolicy::RequireDurable,
+        );
+        assert!(close.cause.is_none(), "save failed: {:?}", close.cause);
+
+        let reader = smelt_store::LineageSessionReader::open_existing(
+            &sessions_root,
+            TEST_LINEAGE_SESSION_ID,
+        )
+        .expect("saved reader");
+        assert_eq!(
+            reader
+                .snapshot()
+                .expect("saved snapshot")
+                .head
+                .transcript_record_count
+                .get(),
+            302
+        );
+        let saved = reader
+            .transcript_record_slice_with_total((298..302).into(), 302)
+            .expect("saved tail");
+        let texts = saved
+            .records
+            .iter()
+            .map(|record| record.preview_text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            ["block 298", "block 299", "streamed 300", "streamed 301"]
+        );
     }
 
     #[test]

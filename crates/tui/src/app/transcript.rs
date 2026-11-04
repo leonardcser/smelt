@@ -238,6 +238,8 @@ struct TranscriptRecordState {
     sparse: SparseTranscriptRecords,
     // Global record index for local block zero, even when no records remain loaded.
     projection_start: usize,
+    // Global record index of the live tail kept after a window that ends before it.
+    detached_tail_start: Option<usize>,
     active_range: Option<Range<smelt_store::TranscriptRecordOffset>>,
     store_address: Option<TranscriptStoreAddress>,
 }
@@ -252,6 +254,7 @@ impl TranscriptRecordState {
         Self {
             sparse: SparseTranscriptRecords::from_loaded(loaded.record_window.as_ref()),
             projection_start,
+            detached_tail_start: None,
             active_range: loaded
                 .record_window
                 .as_ref()
@@ -307,8 +310,49 @@ impl TranscriptRecordState {
         self.sparse.records_for_range(self.active_range())
     }
 
-    fn global_record_index(&self, local_record_index: usize) -> usize {
-        self.projection_start.saturating_add(local_record_index)
+    /// Order index and global record index where the detached live tail begins.
+    /// The tail follows the last window block, so blocks inserted inside the
+    /// window stay in the window.
+    fn detached_tail(&self, history: &BlockHistory) -> Option<(usize, usize)> {
+        let tail_start = self.detached_tail_start?;
+        let tail_order = history
+            .order
+            .iter()
+            .rposition(|id| {
+                history
+                    .stored_ref(*id)
+                    .is_some_and(|stored| stored.record_index < tail_start)
+            })
+            .map_or(0, |last_window_block| last_window_block + 1);
+        Some((tail_order, tail_start))
+    }
+
+    /// Global record index of the persisted block at or after `order_index`.
+    fn record_index_for_order(&self, history: &BlockHistory, order_index: usize) -> usize {
+        self.record_index_with_tail(history, self.detached_tail(history), order_index)
+    }
+
+    fn record_index_with_tail(
+        &self,
+        history: &BlockHistory,
+        detached_tail: Option<(usize, usize)>,
+        order_index: usize,
+    ) -> usize {
+        let local = history.record_index_for_order_index(order_index);
+        match detached_tail {
+            Some((tail_order, tail_start)) if order_index >= tail_order => {
+                let tail_local = history.record_index_for_order_index(tail_order);
+                tail_start.saturating_add(local.saturating_sub(tail_local))
+            }
+            _ => self.projection_start.saturating_add(local),
+        }
+    }
+
+    /// Whether a suffix from `order_start` would span records missing between the
+    /// window and the detached live tail.
+    fn save_spans_detached_gap(&self, history: &BlockHistory, order_start: usize) -> bool {
+        self.detached_tail(history)
+            .is_some_and(|(tail_order, _)| order_start < tail_order)
     }
 
     fn save_bounds(
@@ -318,18 +362,17 @@ impl TranscriptRecordState {
     ) -> TranscriptRecordSaveBounds {
         TranscriptRecordSaveBounds {
             order_start,
-            record_start_idx: self
-                .projection_start
-                .saturating_add(history.record_index_for_order_index(order_start)),
-            record_end_idx: self
-                .projection_start
-                .saturating_add(history.persisted_block_count()),
+            record_start_idx: self.record_index_for_order(history, order_start),
+            record_end_idx: self.record_index_for_order(history, history.len()),
         }
     }
 
     fn truncate(&mut self, total_count: usize) {
         let total_count = self.sparse.truncate(total_count);
         self.projection_start = self.projection_start.min(total_count);
+        self.detached_tail_start = self
+            .detached_tail_start
+            .filter(|tail_start| *tail_start <= total_count);
         self.active_range = self.active_range.take().and_then(|mut range| {
             range.end = range
                 .end
@@ -352,6 +395,14 @@ pub(crate) struct TranscriptRecordSaveBounds {
     pub(crate) order_start: usize,
     pub(crate) record_start_idx: usize,
     pub(crate) record_end_idx: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RecordSaveBoundsError {
+    /// The dirty suffix reaches records between the scrolled-back window and the
+    /// live tail, which are not loaded. Saving resumes once the tail is projected.
+    DetachedTail,
+    Invalid(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1126,18 +1177,15 @@ impl TranscriptDocument {
                 .sparse
                 .range_is_loaded(&record.projection_range)
             {
-                let active_changed = self.records.active_range() != Some(&record.projection_range);
-                self.records
-                    .set_active_range(record.projection_range.clone());
+                if self.records.active_range() != Some(&record.projection_range) {
+                    self.switch_active_record_range(record.projection_range.clone());
+                    projection_changed = true;
+                }
                 self.records.sparse.touch_range(&record.projection_range);
                 self.records.sparse.enforce_byte_budget(
                     &record.projection_range,
                     self.memory_budget.record_windows,
                 );
-                if active_changed {
-                    self.install_active_record_projection();
-                    projection_changed = true;
-                }
             }
         }
 
@@ -1458,9 +1506,12 @@ impl TranscriptDocument {
             self.records.sparse.total_count = Some(total_count);
             if let Some(active) = self.records.active_range.as_ref() {
                 let start = active.start.get().min(total_count);
-                let end = start
-                    .saturating_add(self.content.transcript.history.persisted_block_count())
-                    .min(total_count);
+                let end = if self.records.detached_tail_start.is_some() {
+                    active.end.get()
+                } else {
+                    start.saturating_add(self.content.transcript.history.persisted_block_count())
+                }
+                .min(total_count);
                 self.records.set_active_range(
                     smelt_store::TranscriptRecordOffset::new(start)
                         ..smelt_store::TranscriptRecordOffset::new(end),
@@ -1764,6 +1815,8 @@ impl TranscriptDocument {
         let mut visited = 0;
         let mut released_bytes = 0;
         let mut progressed = false;
+        // Compaction keeps tail blocks at or past the tail start, so this holds for the slice.
+        let detached_tail = self.records.detached_tail(&self.content.transcript.history);
         while visited < TRANSCRIPT_IDLE_COMPACTION_BLOCKS
             && released_bytes < TRANSCRIPT_IDLE_COMPACTION_BYTES
         {
@@ -1803,6 +1856,11 @@ impl TranscriptDocument {
                 && released_bytes.saturating_add(candidate_bytes) > TRANSCRIPT_IDLE_COMPACTION_BYTES
             {
                 break;
+            }
+            if let Some((_, tail_start)) =
+                detached_tail.filter(|(tail_order, _)| *tail_order == pending.next_order_index)
+            {
+                pending.next_record_index = tail_start;
             }
             let stored = history.stored_ref_for_materialized(id, pending.next_record_index);
             let Some(stored) = stored else {
@@ -1877,8 +1935,7 @@ impl TranscriptDocument {
         if !self.merge_record_cache_window(&window) {
             return false;
         }
-        self.records.set_active_range(active_range);
-        self.install_active_record_projection();
+        self.switch_active_record_range(active_range);
         true
     }
 
@@ -2674,6 +2731,43 @@ impl TranscriptDocument {
             .collect()
     }
 
+    /// Project `range` in place of the active window. Live blocks outside it stay
+    /// after the window, so their global position is captured before the swap.
+    fn switch_active_record_range(&mut self, range: Range<smelt_store::TranscriptRecordOffset>) {
+        let history = &self.content.transcript.history;
+        let projected_ids = self
+            .records
+            .sparse
+            .records_for_range(Some(&range))
+            .into_iter()
+            .map(|record| record.block_id)
+            .collect::<HashSet<_>>();
+        let kept_tail_order = history
+            .order
+            .iter()
+            .position(|id| history.stored_ref(*id).is_none() && !projected_ids.contains(id))
+            .unwrap_or(history.len());
+        let tail_start = self
+            .records
+            .record_index_for_order(history, kept_tail_order);
+        let window_end = range.end.get();
+        self.records.set_active_range(range);
+        self.install_active_record_projection();
+        self.records.detached_tail_start = (tail_start > window_end).then_some(tail_start);
+        self.restart_compaction_scan();
+    }
+
+    /// Order indexes shift when the projection changes, so compaction rescans it.
+    fn restart_compaction_scan(&mut self) {
+        let record_start = self.records.projection_start;
+        self.compaction_order_index = 0;
+        self.compacted_record_len = record_start;
+        if let Some(pending) = self.pending_compaction.as_mut() {
+            pending.next_order_index = 0;
+            pending.next_record_index = record_start;
+        }
+    }
+
     fn install_active_record_projection(&mut self) {
         if let Some((width, ..)) = self.row_hints_key {
             self.sync_row_hints(width);
@@ -3120,8 +3214,7 @@ impl TranscriptDocument {
             if !history.is_persisted_block(block_id) {
                 return None;
             }
-            let local_record_index = history.record_index_for_order_index(order_index);
-            return Some(self.records.global_record_index(local_record_index));
+            return Some(self.records.record_index_for_order(history, order_index));
         }
         self.stored_record_index_for_block_idx(block_id.get())
     }
@@ -4188,12 +4281,11 @@ impl TranscriptDocument {
         if !active_changed {
             return false;
         }
-        self.records.set_active_range(projection_range.clone());
+        self.switch_active_record_range(projection_range.clone());
         self.records.sparse.touch_range(&cache_range);
         self.records
             .sparse
             .enforce_byte_budget(&projection_range, self.memory_budget.record_windows);
-        self.install_active_record_projection();
         true
     }
 
@@ -6528,23 +6620,27 @@ impl TranscriptDocument {
     pub(crate) fn record_save_bounds_at_or_before(
         &self,
         dirty_history_from: Option<usize>,
-        acknowledged_record_count: usize,
-    ) -> Result<Option<TranscriptRecordSaveBounds>, String> {
+        base_record_count: usize,
+    ) -> Result<Option<TranscriptRecordSaveBounds>, RecordSaveBoundsError> {
         let Some(mut bounds) = self.record_save_bounds(dirty_history_from) else {
             return Ok(None);
         };
-        if bounds.record_start_idx <= acknowledged_record_count {
-            return Ok(Some(bounds));
+        if bounds.record_start_idx > base_record_count {
+            let record_base_idx = self.records.projection_start;
+            if record_base_idx > base_record_count {
+                return Err(RecordSaveBoundsError::Invalid(format!(
+                    "loaded transcript starts at record {record_base_idx}, beyond persisted length {base_record_count}"
+                )));
+            }
+            bounds.order_start = 0;
+            bounds.record_start_idx = record_base_idx;
         }
-
-        let record_base_idx = self.records.projection_start;
-        if record_base_idx > acknowledged_record_count {
-            return Err(format!(
-                "loaded transcript starts at record {record_base_idx}, beyond persisted length {acknowledged_record_count}"
-            ));
+        if self
+            .records
+            .save_spans_detached_gap(self.history(), bounds.order_start)
+        {
+            return Err(RecordSaveBoundsError::DetachedTail);
         }
-        bounds.order_start = 0;
-        bounds.record_start_idx = record_base_idx;
         Ok(Some(bounds))
     }
 
@@ -6715,10 +6811,10 @@ impl TranscriptDocument {
         if block_idx >= history.len() {
             return;
         }
-        let record_len = self.records.total_count().map(|_| {
-            self.records
-                .global_record_index(history.record_index_for_order_index(block_idx))
-        });
+        let record_len = self
+            .records
+            .total_count()
+            .map(|_| self.records.record_index_for_order(history, block_idx));
         self.content.transcript.truncate_to(block_idx);
         self.invalidate_hydration_requests();
         if let Some(record_len) = record_len {
@@ -11752,6 +11848,111 @@ mod tests {
     }
 
     #[test]
+    fn record_save_bounds_keep_live_tail_position_while_scrolled_back() {
+        let tail = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(280),
+            300,
+            smelt_store::TranscriptRecordHydration::Hydrated,
+            (280..300).map(test_record_record).collect(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = super::LoadedTranscript::from_record_slice(
+            tail,
+            super::TranscriptStoreAddress::new(
+                dir.path().to_path_buf(),
+                TEST_LINEAGE_SESSION_ID.into(),
+                TEST_LINEAGE_SESSION_ID.into(),
+            ),
+        )
+        .expect("loaded sparse tail");
+        let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
+        document.push(smelt_core::Block::Text {
+            content: "streamed 300".into(),
+        });
+        document.push(smelt_core::Block::Text {
+            content: "streamed 301".into(),
+        });
+        let at_tail = document.record_save_bounds(None).expect("dirty live tail");
+        assert_eq!(
+            (at_tail.record_start_idx, at_tail.record_end_idx),
+            (300, 302)
+        );
+
+        let earlier = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(100),
+            300,
+            smelt_store::TranscriptRecordHydration::Hydrated,
+            (100..120).map(test_record_record).collect(),
+        );
+        assert!(document.merge_record_window(
+            super::LoadedRecordWindow::from_slice(earlier).expect("earlier window")
+        ));
+
+        let scrolled_back = document
+            .record_save_bounds(None)
+            .expect("dirty live tail while scrolled back");
+        assert_eq!(
+            (scrolled_back.record_start_idx, scrolled_back.record_end_idx),
+            (300, 302)
+        );
+        let records = document
+            .history()
+            .block_records_with_ids_from(scrolled_back.order_start);
+        assert_eq!(records.len(), 2);
+
+        document.push(smelt_core::Block::Text {
+            content: "streamed 302".into(),
+        });
+        let streamed = document
+            .record_save_bounds_at_or_before(None, 300)
+            .expect("live tail suffix")
+            .expect("dirty live tail");
+        assert_eq!(
+            (streamed.record_start_idx, streamed.record_end_idx),
+            (300, 303)
+        );
+
+        let tail = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(280),
+            300,
+            smelt_store::TranscriptRecordHydration::Hydrated,
+            (280..300).map(test_record_record).collect(),
+        );
+        assert!(document.merge_record_window(
+            super::LoadedRecordWindow::from_slice(tail).expect("tail window")
+        ));
+        let back_at_tail = document
+            .record_save_bounds(None)
+            .expect("dirty live tail at tail");
+        assert_eq!(
+            (back_at_tail.record_start_idx, back_at_tail.record_end_idx),
+            (300, 303)
+        );
+        assert_eq!(
+            document
+                .history()
+                .block_records_with_ids_from(back_at_tail.order_start)
+                .len(),
+            3
+        );
+
+        let earlier = smelt_store::TranscriptRecordSlice::new(
+            smelt_store::TranscriptRecordOffset::new(100),
+            300,
+            smelt_store::TranscriptRecordHydration::Hydrated,
+            (100..120).map(test_record_record).collect(),
+        );
+        assert!(document.merge_record_window(
+            super::LoadedRecordWindow::from_slice(earlier).expect("earlier window")
+        ));
+        document.history_mut().require_record_resave_from(0);
+        assert_eq!(
+            document.record_save_bounds_at_or_before(None, 300),
+            Err(super::RecordSaveBoundsError::DetachedTail)
+        );
+    }
+
+    #[test]
     fn record_save_bounds_reject_gap_before_sparse_window() {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(98),
@@ -11774,7 +11975,9 @@ mod tests {
             document
                 .record_save_bounds_at_or_before(None, 97)
                 .expect_err("missing record gap must not be skipped"),
-            "loaded transcript starts at record 98, beyond persisted length 97"
+            super::RecordSaveBoundsError::Invalid(
+                "loaded transcript starts at record 98, beyond persisted length 97".into()
+            )
         );
     }
 
