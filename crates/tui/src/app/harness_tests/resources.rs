@@ -691,6 +691,40 @@ fn bundled_title_ask_on_claude_code_uses_the_latest_haiku() {
 }
 
 #[test]
+fn bundled_btw_ask_on_claude_code_uses_the_active_model_unless_preferred() {
+    for (preferred, expected) in [(None, "opus"), (Some("claude-code/haiku"), "haiku")] {
+        let mut app = TestApp::builder().with_vim(false).build();
+        stub_btw_ui(&mut app);
+        let mut opus = app.core_probe().config.available_models[0].clone();
+        opus.key = "claude-code/opus".into();
+        opus.provider_name = "claude-code".into();
+        opus.model_name = "opus".into();
+        opus.provider_type = "claude-code".into();
+        opus.api_base = String::new();
+        opus.api_key_env = String::new();
+        let mut haiku = opus.clone();
+        haiku.key = "claude-code/haiku".into();
+        haiku.model_name = "haiku".into();
+        app.set_available_models(vec![opus, haiku]);
+        app.apply_model("claude-code/opus", false);
+        let _ = app.drain_engine_sends();
+        if let Some(key) = preferred {
+            assert!(app.run_lua(&format!("smelt.model.preferred(\"btw\", {key:?})")));
+        }
+
+        app.apply_lua_command("btw what changed?");
+        app.drive_lua_tasks();
+
+        let models: Vec<_> = engine_ask_models_and_efforts(app.drain_engine_sends())
+            .into_iter()
+            .map(|(model, _)| model)
+            .collect();
+        assert_eq!(models, [expected]);
+        app.clear_timers();
+    }
+}
+
+#[test]
 fn bundled_title_ask_on_codex_uses_latest_luna_or_the_selected_model() {
     for (model_name, use_luna) in [
         ("gpt-5.6-sol", false),

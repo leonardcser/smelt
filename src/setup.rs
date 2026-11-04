@@ -516,7 +516,10 @@ fn default_config_lua() -> String {
     lua.push_str("}\n\n");
 
     lua.push_str("-- Per-plugin helper model preferences\n");
-    lua.push_str("-- Defaults are nil, which means each helper uses the active model.\n");
+    lua.push_str(
+        "-- Defaults are nil: title, predict and web_fetch use a cheaper provider model\n",
+    );
+    lua.push_str("-- when one is known; compact and btw use the active model.\n");
     lua.push_str("-- Names used by bundled plugins: title, compact, predict, btw, web_fetch.\n");
     lua.push_str("-- smelt.model.preferred(\"title\", \"openai/gpt-5-mini\")\n");
     lua.push_str("-- smelt.model.preferred(\"compact\", \"anthropic/claude-haiku-4-5\")\n\n");

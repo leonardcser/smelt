@@ -140,8 +140,8 @@ model in that provider's catalog (for example, `gpt-6-luna` over `gpt-5.6-luna`)
 Claude Code uses the same selection logic for Haiku, comparing versioned IDs
 and the resolved IDs of aliases, then requesting the newest full model ID.
 If no version is known, Claude Code falls back to `haiku`; if no Luna model is
-listed, Codex uses the main model. Compaction always defaults to the main model,
-since its summary carries the whole conversation forward.
+listed, Codex uses the main model. `compact` and `btw` always default to the
+main model, since they send the whole conversation.
 
 ```lua
 smelt.model.preferred("title", "openai/gpt-5-mini")

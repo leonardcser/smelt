@@ -1,6 +1,7 @@
 -- Built-in /btw command. Asks a side question and renders the answer in
 -- a docked dialog. The auxiliary request inherits the live session so it
--- can reuse the same cached prefix as the main conversation.
+-- can reuse the same cached prefix as the main conversation. It defaults to
+-- the active model, since a cheaper model may not fit the whole history.
 
 local MAX_TOOL_CALL_RESTARTS = 2
 local TOOL_DENIED_MESSAGE = "Tool use is not allowed for /btw. Respond with text only."
@@ -94,7 +95,7 @@ smelt.cmd.register("btw", function(args)
       start_waiting()
       smelt.engine.ask_inherited({
         messages = messages,
-        model = smelt.model.preferred("btw"),
+        model = smelt.model.preferred("btw") or smelt.model.current(),
         on_draft_rejected = function()
           if closed then return end
           stream:reset()
