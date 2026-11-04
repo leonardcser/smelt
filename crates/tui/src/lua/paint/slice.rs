@@ -212,7 +212,7 @@ fn with_window(
             win,
             rect: Rect::new(text.x + x, text.y + y, width, height),
         };
-        scope_canvas(&mut view, || f.call::<()>(PaintSliceUd))?;
+        scope_canvas(&mut view, |slice| f.call::<()>(slice))?;
         Ok(true)
     })
 }
@@ -384,18 +384,41 @@ fn recolor(canvas: &mut dyn Canvas, f: &mlua::Function, defaults: bool) -> LuaRe
 
 scoped_thread_local!(static mut CURRENT_CANVAS: for<'a> &'a mut dyn Canvas);
 
-fn scope_canvas<R>(canvas: &mut dyn Canvas, body: impl FnOnce() -> R) -> R {
-    CURRENT_CANVAS.set(canvas, body)
+thread_local! {
+    /// The id of the slice lent with [`CURRENT_CANVAS`], so a slice kept from
+    /// an earlier lend cannot draw into a later canvas.
+    static LENT_SLICE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static NEXT_SLICE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Restores the outer lend's slice id when a nested lend ends.
+struct LentSlice(u64);
+
+impl Drop for LentSlice {
+    fn drop(&mut self) {
+        LENT_SLICE.set(self.0);
+    }
+}
+
+/// Lend `canvas` while `body` runs, with the only slice that can draw into it.
+fn scope_canvas<R>(canvas: &mut dyn Canvas, body: impl FnOnce(PaintSliceUd) -> R) -> R {
+    let id = NEXT_SLICE.replace(NEXT_SLICE.get() + 1);
+    let _outer = LentSlice(LENT_SLICE.replace(id));
+    CURRENT_CANVAS.set(canvas, || body(PaintSliceUd(id)))
 }
 
 /// Lend `slice` to the `smelt.paint.Slice` methods while `body` runs.
-pub(super) fn scope_slice<R>(slice: &mut GridSlice<'_>, body: impl FnOnce() -> R) -> R {
+pub(super) fn scope_slice<R>(slice: &mut GridSlice<'_>, body: impl FnOnce(PaintSliceUd) -> R) -> R {
     scope_canvas(slice, body)
 }
 
-/// Run `f` against the active paint canvas, or return a Lua error if not in a paint callback.
-fn with_canvas<R>(f: impl FnOnce(&mut dyn Canvas) -> LuaResult<R>) -> LuaResult<R> {
-    if !CURRENT_CANVAS.is_set() {
+/// Run `f` against the canvas lent with `slice`, or return a Lua error if that
+/// lend has ended.
+fn with_canvas<R>(
+    slice: &PaintSliceUd,
+    f: impl FnOnce(&mut dyn Canvas) -> LuaResult<R>,
+) -> LuaResult<R> {
+    if !CURRENT_CANVAS.is_set() || LENT_SLICE.get() != slice.0 {
         return Err(LuaError::RuntimeError(
             "smelt.paint: slice not in scope (call from a paint callback)".into(),
         ));
@@ -483,14 +506,16 @@ impl mlua::UserData for PaintSnapshot {
 
 /// Marker userdata enabling idiomatic `slice:set(...)` call syntax.
 /// Methods delegate to [`with_canvas`] at call time rather than carrying the borrow.
-pub(crate) struct PaintSliceUd;
+pub(crate) struct PaintSliceUd(u64);
 
 impl mlua::UserData for PaintSliceUd {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("width", |_, _, ()| with_canvas(|c| Ok(c.width())));
-        methods.add_method("height", |_, _, ()| with_canvas(|c| Ok(c.height())));
-        methods.add_method("get", |lua, _, (x, y): (i32, i32)| {
-            with_canvas(|c| {
+        methods.add_method("width", |_, this, ()| with_canvas(this, |c| Ok(c.width())));
+        methods.add_method("height", |_, this, ()| {
+            with_canvas(this, |c| Ok(c.height()))
+        });
+        methods.add_method("get", |lua, this, (x, y): (i32, i32)| {
+            with_canvas(this, |c| {
                 inside(c, x, y)
                     .and_then(|(x, y)| c.cell(x, y))
                     .map(|cell| cell_to_lua(lua, cell))
@@ -500,7 +525,7 @@ impl mlua::UserData for PaintSliceUd {
         methods.add_method(
             "set",
             |_,
-             _,
+             this,
              (x, y, ch, style): (
                 i32,
                 i32,
@@ -509,7 +534,7 @@ impl mlua::UserData for PaintSliceUd {
             )| {
                 let symbol = one_grapheme_or_space(ch.as_deref())?;
                 let style = style_arg(style)?;
-                with_canvas(|c| {
+                with_canvas(this, |c| {
                     if let Some((x, y)) = inside(c, x, y) {
                         let style = over(c, x, y, style);
                         c.set_symbol(x, y, symbol, style);
@@ -520,15 +545,15 @@ impl mlua::UserData for PaintSliceUd {
         );
         methods.add_method(
             "put_str",
-            |_, _, (x, y, text, style): (i32, i32, String, Option<crate::lua::parse::LuaStyle>)| {
+            |_, this, (x, y, text, style): (i32, i32, String, Option<crate::lua::parse::LuaStyle>)| {
                 let style = style_arg(style)?;
-                with_canvas(|c| Ok(put_str(c, x, y, &text, style)))
+                with_canvas(this, |c| Ok(put_str(c, x, y, &text, style)))
             },
         );
         methods.add_method(
             "fill",
             |_,
-             _,
+             this,
              (x, y, w, h, ch, style): (
                 i32,
                 i32,
@@ -539,7 +564,7 @@ impl mlua::UserData for PaintSliceUd {
             )| {
                 let symbol = one_grapheme_or_space(ch.as_deref())?;
                 let style = style_arg(style)?;
-                with_canvas(|c| {
+                with_canvas(this, |c| {
                     let rect = clip(c, x, y, w, h);
                     fill(c, rect, symbol, style);
                     Ok(())
@@ -548,9 +573,9 @@ impl mlua::UserData for PaintSliceUd {
         );
         methods.add_method(
             "patch_style",
-            |_, _, (x, y, w, h, patch): (i32, i32, i32, i32, crate::lua::parse::LuaStyle)| {
+            |_, this, (x, y, w, h, patch): (i32, i32, i32, i32, crate::lua::parse::LuaStyle)| {
                 let patch = patch.resolved_patch()?;
-                with_canvas(|c| {
+                with_canvas(this, |c| {
                     let rect = clip(c, x, y, w, h);
                     for y in rect.y..rect.bottom() {
                         for x in rect.x..rect.right() {
@@ -565,8 +590,8 @@ impl mlua::UserData for PaintSliceUd {
                 })
             },
         );
-        methods.add_method("map", |lua, _, f: mlua::Function| {
-            with_canvas(|c| {
+        methods.add_method("map", |lua, this, f: mlua::Function| {
+            with_canvas(this, |c| {
                 for y in 0..c.height() {
                     let mut x = 0;
                     while x < c.width() {
@@ -600,16 +625,16 @@ impl mlua::UserData for PaintSliceUd {
         });
         methods.add_method(
             "recolor",
-            |_, _, (f, opts): (mlua::Function, Option<LuaRecolorOpts>)| {
+            |_, this, (f, opts): (mlua::Function, Option<LuaRecolorOpts>)| {
                 let defaults = opts.and_then(|opts| opts.defaults).unwrap_or(false);
-                with_canvas(|c| recolor(c, &f, defaults))
+                with_canvas(this, |c| recolor(c, &f, defaults))
             },
         );
-        methods.add_method("snapshot", |_, _, ()| {
-            with_canvas(|c| Ok(PaintSnapshot(Arc::new(c.snapshot()))))
+        methods.add_method("snapshot", |_, this, ()| {
+            with_canvas(this, |c| Ok(PaintSnapshot(Arc::new(c.snapshot()))))
         });
-        methods.add_method("set_cursor", |_, _, (x, y): (i32, i32)| {
-            with_canvas(|c| {
+        methods.add_method("set_cursor", |_, this, (x, y): (i32, i32)| {
+            with_canvas(this, |c| {
                 if let Some((x, y)) = inside(c, x, y) {
                     c.set_cursor(x, y);
                 }
@@ -619,19 +644,21 @@ impl mlua::UserData for PaintSliceUd {
         methods.add_method(
             "window",
             |_,
-             _,
+             this,
              (win, f, area): (
                 crate::lua::api::win::LuaWin,
                 mlua::Function,
                 Option<LuaWindowArea>,
             )| {
-                with_canvas(|c| with_window(c, win.id, area.unwrap_or_default(), &f))
+                with_canvas(this, |c| {
+                    with_window(c, win.id, area.unwrap_or_default(), &f)
+                })
             },
         );
         methods.add_method(
             "blit",
-            |_, _, (snapshot, x, y): (PaintSnapshot, Option<i32>, Option<i32>)| {
-                with_canvas(|c| {
+            |_, this, (snapshot, x, y): (PaintSnapshot, Option<i32>, Option<i32>)| {
+                with_canvas(this, |c| {
                     blit(c, &snapshot.0, x.unwrap_or(0), y.unwrap_or(0));
                     Ok(())
                 })
@@ -768,10 +795,11 @@ mod tests {
     /// Run `script` with `slice` bound to the whole of `grid`.
     fn run_on_grid(grid: &mut Grid, script: &str) -> LuaResult<()> {
         let lua = Lua::new();
-        lua.globals()
-            .set("slice", lua.create_userdata(PaintSliceUd)?)?;
         let mut slice = grid.as_mut_slice();
-        scope_canvas(&mut slice, || lua.load(script).exec())
+        scope_canvas(&mut slice, |slice| {
+            lua.globals().set("slice", slice)?;
+            lua.load(script).exec()
+        })
     }
 
     fn row(grid: &Grid, y: u16) -> String {
@@ -819,7 +847,7 @@ mod tests {
 
     #[test]
     fn canvas_errors_outside_paint() {
-        let r: LuaResult<()> = with_canvas(|_| Ok(()));
+        let r: LuaResult<()> = with_canvas(&PaintSliceUd(0), |_| Ok(()));
         assert!(r.is_err());
     }
 
@@ -1056,27 +1084,32 @@ mod tests {
     }
 
     #[test]
-    fn scoped_canvas_rejects_aliases_and_restores_nested_scope() {
+    fn scoped_canvas_rejects_aliases_ended_lends_and_restores_nested_scope() {
         let mut outer_grid = Grid::new(3, 1);
         let mut outer = outer_grid.as_mut_slice();
         let mut inner_grid = Grid::new(2, 1);
         let mut inner = inner_grid.as_mut_slice();
 
-        scope_canvas(&mut outer, || {
-            assert_eq!(with_canvas(|c| Ok(c.width())).unwrap(), 3);
-            with_canvas(|c| {
-                assert!(with_canvas(|_| Ok(())).is_err());
+        let kept = scope_canvas(&mut outer, |slice| {
+            assert_eq!(with_canvas(&slice, |c| Ok(c.width())).unwrap(), 3);
+            with_canvas(&slice, |c| {
+                assert!(with_canvas(&slice, |_| Ok(())).is_err());
                 put_str(c, 0, 0, "a", Style::new());
                 Ok(())
             })
             .unwrap();
 
-            scope_canvas(&mut inner, || {
-                assert_eq!(with_canvas(|c| Ok(c.width())).unwrap(), 2);
+            scope_canvas(&mut inner, |inner_slice| {
+                assert_eq!(with_canvas(&inner_slice, |c| Ok(c.width())).unwrap(), 2);
+                assert!(with_canvas(&slice, |_| Ok(())).is_err(), "outer slice");
             });
-            assert_eq!(with_canvas(|c| Ok(c.width())).unwrap(), 3);
+            assert_eq!(with_canvas(&slice, |c| Ok(c.width())).unwrap(), 3);
+            slice
         });
 
-        assert!(with_canvas(|_| Ok(())).is_err());
+        assert!(with_canvas(&kept, |_| Ok(())).is_err());
+        scope_canvas(&mut inner, |_| {
+            assert!(with_canvas(&kept, |_| Ok(())).is_err(), "ended lend");
+        });
     }
 }

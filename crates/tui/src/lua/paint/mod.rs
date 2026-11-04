@@ -481,12 +481,7 @@ pub(crate) fn paint(
         changes,
     )?;
     let _perf = smelt_perf::perf::begin("lua:paint");
-    slice::scope_slice(slice, || {
-        runtime.lua.scope(|scope| {
-            let ud = scope.create_userdata(slice::PaintSliceUd)?;
-            func.call::<()>((ud, ctx_tbl))
-        })
-    })
+    slice::scope_slice(slice, |slice| func.call::<()>((slice, ctx_tbl)))
 }
 
 /// Map screen cell `at` through the pointer-map callback `handle`, on a
