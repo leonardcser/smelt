@@ -1267,6 +1267,17 @@ async fn async_main() {
     }
     drop(resolution_startup);
 
+    // Share one client across TUI startup tasks (auth refresh and
+    // context-window fetch). Headless uses only the engine's client. Loading
+    // TLS roots takes milliseconds, so it overlaps service startup.
+    let startup_http_client = (!args.headless).then(|| {
+        std::thread::spawn(|| {
+            smelt_provider::http_client_builder()
+                .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .unwrap_or_else(|_| smelt_provider::http_client())
+        })
+    });
     let services_startup = smelt_perf::perf::begin("startup:services");
     let shared_session: Arc<Mutex<Option<tui::app::SharedSessionState>>> =
         Arc::new(Mutex::new(None));
@@ -1502,12 +1513,10 @@ async fn async_main() {
             std::process::exit(exit.code());
         }
     } else {
-        // Share one client across TUI startup tasks (auth refresh and
-        // context-window fetch). Headless uses only the engine's client.
-        let startup_http_client = smelt_provider::http_client_builder()
-            .user_agent(concat!("smelt/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_else(|_| smelt_provider::http_client());
+        let startup_http_client = startup_http_client
+            .expect("the TUI starts its HTTP client")
+            .join()
+            .expect("build startup HTTP client");
         let tui_construct_startup = smelt_perf::perf::begin("startup:tui_construct");
         let session_persistence = if args.ephemeral {
             match tui::app::SessionPersistence::ephemeral() {
@@ -1548,7 +1557,7 @@ async fn async_main() {
             .then(|| smelt_core::session::SessionStorage::from_env(&env).spawn_idle_maintenance());
 
         println!();
-        app.run(startup_http_client.clone(), initial_message).await;
+        app.run(startup_http_client, initial_message).await;
         // Fire `smelt.lifecycle.on("shutdown", fn)` hooks. The TUI is torn
         // down at this point so stdout is in cooked mode - plugins (e.g.
         // the bundled resume-hint banner) can `print(...)` straight to the
