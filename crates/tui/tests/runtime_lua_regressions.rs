@@ -1344,6 +1344,9 @@ fn prompt_chrome_lua_fixture() -> mlua::Lua {
             format = function(stamp, fmt) return os.date(fmt, stamp) end,
           },
           theme = { is_light = function() return false end },
+          paint = {
+            frame = function() return { invalidate_after = function() end } end,
+          },
           timer = {
             every = function() return { remove = function() end } end,
             set = function() return { remove = function() end } end,

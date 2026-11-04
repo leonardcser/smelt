@@ -37,7 +37,7 @@ fn compaction_draft_rejection_clears_queued_preview() {
         id,
         delta: "rejected summary".into(),
     });
-    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+    app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
     assert!(app.render_to_frame().text().contains("rejected summary"));
     app.app
         .queue_engine_continuation(EngineEvent::EngineAskDelta {
@@ -53,7 +53,7 @@ fn compaction_draft_rejection_clears_queued_preview() {
     while !app.app.transcript_work.is_empty() {
         app.app.apply_pending_transcript_work();
     }
-    app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+    app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
     let frame = app.render_to_frame().text();
     assert!(frame.contains("recovered summary"));
     assert!(!frame.contains("rejected"));

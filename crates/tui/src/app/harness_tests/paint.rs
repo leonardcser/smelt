@@ -736,8 +736,9 @@ fn freshink_example_inks_only_new_text_while_the_view_follows_it() {
         b: 170,
     });
     let words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
-    let mut inked_new = false;
     for (i, word) in words.iter().enumerate() {
+        // The glyphs inked over the frames that reveal this delta, in order.
+        let mut ink_seen = String::new();
         app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
             // One paragraph that wraps over many rows, so the streaming block
             // itself scrolls.
@@ -757,10 +758,14 @@ fn freshink_example_inks_only_new_text_while_the_view_follows_it() {
                     "text that only scrolled is not new: {inked:?}\n{}",
                     frame.text()
                 );
-                inked_new |= inked.contains(word);
+                ink_seen.extend(inked.chars().filter(|ch| !ch.is_whitespace()));
             }
             app.clock.advance(Duration::from_millis(40));
         }
+        assert!(
+            ink_seen.starts_with(&format!("{word}wordskeep")),
+            "each streamed glyph gets the ink as it shows: {ink_seen}"
+        );
     }
     let scrolls = app
         .eval_lua::<String>("return table.concat(_G.__dys, ',')")
@@ -768,21 +773,6 @@ fn freshink_example_inks_only_new_text_while_the_view_follows_it() {
     assert!(
         !scrolls.is_empty(),
         "the view follows the stream and scrolls"
-    );
-    let frame = app.render_to_frame();
-    let dbg = app
-        .eval_lua::<String>(
-            r#"local t = {}
-            for _, b in ipairs(smelt.transcript.visible_blocks()) do
-              t[#t + 1] = b.role .. ":" .. tostring(b.streaming) .. ":" .. (b.rect and (b.rect.y .. "+" .. b.rect.height .. " top " .. b.top) or "off")
-            end
-            return table.concat(t, " | ")"#,
-        )
-        .unwrap();
-    assert!(
-        inked_new,
-        "the streamed words get the ink:\n{}\n{dbg}",
-        frame.text()
     );
 }
 

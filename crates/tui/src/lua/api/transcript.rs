@@ -258,7 +258,8 @@ pub(crate) struct TranscriptStreamState {
     width: Option<u16>,
     raw_text: String,
     saw_delta: bool,
-    animation: crate::app::stream_animation::StreamAnimation,
+    /// Paces the newest glyphs of the buffer, which is one segment.
+    reveal: crate::app::stream_reveal::StreamReveal<()>,
 }
 
 impl LuaTranscriptStream {
@@ -271,7 +272,7 @@ impl LuaTranscriptStream {
             width: opts.and_then(|opts| opts.width),
             raw_text: String::new(),
             saw_delta: false,
-            animation: Default::default(),
+            reveal: Default::default(),
         }));
         crate::lua::with_conversation_host(|host| {
             host.register_transcript_stream(std::rc::Rc::downgrade(&state));
@@ -281,18 +282,12 @@ impl LuaTranscriptStream {
 }
 
 impl TranscriptStreamState {
-    pub(crate) fn advance(&mut self, now: std::time::Instant) -> bool {
-        let delta = self.animation.advance(now);
-        self.append_visible(&delta);
-        self.animation.is_pending()
+    pub(crate) fn buf(&self) -> crate::smelt_edit::BufId {
+        self.buf.id
     }
 
-    fn append_visible(&mut self, delta: &str) {
-        if !delta.is_empty() {
-            self.parser
-                .append_streaming_text(&mut self.transcript.history, delta);
-            self.render();
-        }
+    pub(crate) fn reveal_mut(&mut self) -> &mut crate::app::stream_reveal::StreamReveal<()> {
+        &mut self.reveal
     }
 
     fn render(&mut self) {
@@ -318,26 +313,29 @@ impl mlua::UserData for LuaTranscriptStream {
         methods.add_method_mut("append", |_, this, delta: String| {
             let mut state = this.state.borrow_mut();
             if !delta.is_empty() {
+                if !state.reveal.tracks(&()) {
+                    let baseline = if state.raw_text.is_empty() {
+                        crate::app::stream_reveal::Baseline::Empty
+                    } else {
+                        crate::app::stream_reveal::Baseline::Current
+                    };
+                    state.reveal.track((), 0, baseline);
+                }
+                let now = crate::lua::with_conversation_host(|host| host.stream_arrival_time());
+                state.reveal.arrive(&(), now);
                 state.saw_delta = true;
                 state.raw_text.push_str(&delta);
-                let now = crate::lua::with_conversation_host(|host| host.stream_arrival_time());
-                let visible = state.animation.push(
-                    crate::app::stream_animation::StreamKind::Text,
-                    delta,
-                    now,
-                );
-                state.append_visible(&visible);
-                if state.animation.is_pending() {
-                    crate::lua::with_conversation_host(|host| host.request_stream_frame());
-                }
+                let state = &mut *state;
+                state
+                    .parser
+                    .append_streaming_text(&mut state.transcript.history, &delta);
+                state.render();
             }
             Ok(())
         });
         methods.add_method_mut("finish", |_, this, final_text: Option<String>| {
             let mut state = this.state.borrow_mut();
-            if let Some((_, delta)) = state.animation.finish() {
-                state.append_visible(&delta);
-            }
+            state.reveal.finish_all();
             if let Some(text) = final_text.as_deref().filter(|text| !text.is_empty()) {
                 if !state.saw_delta || text != state.raw_text {
                     state.transcript = Transcript::new();
@@ -361,7 +359,7 @@ impl mlua::UserData for LuaTranscriptStream {
         });
         methods.add_method_mut("reset", |_, this, ()| {
             let mut state = this.state.borrow_mut();
-            state.animation.clear();
+            state.reveal.finish_all();
             state.transcript = Transcript::new();
             state.projection = crate::content::transcript_buf::TranscriptProjection::new();
             state.parser.clear();

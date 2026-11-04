@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use super::stream_animation::{StreamAnimation, StreamKind};
+use super::stream_reveal::{Baseline, StreamReveal};
 
 use super::{
     agent::TurnLifecycle, session_document::TuiSessionDocument, transcript::ResumePreviewCache,
@@ -98,17 +98,31 @@ struct PersistencePreparationBlock {
     cause: crate::persist::PersistenceCause,
 }
 
-#[derive(Default)]
-struct ToolDraftAnimation {
-    animation: StreamAnimation,
-    call_id: Option<String>,
-    name: Option<String>,
+/// Which channel of the response a delta streams into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StreamKind {
+    Text,
+    Thinking,
 }
 
+/// A stream whose newest glyphs the transcript reveal paces.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RevealKey {
+    /// The response's text and raw thinking.
+    Response,
+    /// A reasoning summary part, by id.
+    Summary(String),
+    /// A tool call's streamed arguments, by stream id.
+    ToolDraft(String),
+    Compaction,
+}
+
+/// A reasoning summary part still receiving deltas.
 #[derive(Default)]
-struct SummaryAnimation {
-    animation: StreamAnimation,
-    visible: String,
+struct SummaryDraft {
+    text: String,
+    /// Deltas arrived since the part was last rendered as finished.
+    streaming: bool,
     title: Option<String>,
     previous: Option<super::transcript::ReasoningSummarySnapshot>,
 }
@@ -117,7 +131,7 @@ struct SummaryPart {
     id: String,
     block_id: Option<smelt_core::transcript_model::BlockId>,
     after: Option<smelt_core::transcript_model::BlockId>,
-    animation: Option<SummaryAnimation>,
+    draft: Option<SummaryDraft>,
 }
 
 /// Owns canonical conversation state and the runtime machinery that keeps its
@@ -127,13 +141,13 @@ pub(crate) struct ConversationRuntime {
     document: TuiSessionDocument,
     committed_transcript_view: Option<CommittedTranscriptView>,
     parser: smelt_core::content::stream_parser::StreamParser,
-    stream_animation: StreamAnimation,
-    tool_draft_animations: std::collections::HashMap<String, ToolDraftAnimation>,
+    /// Paces the newest glyphs of streamed transcript blocks on screen.
+    reveal: StreamReveal<RevealKey>,
+    /// The channel the response streamed into last, while its reveal runs.
+    streaming_kind: Option<StreamKind>,
     // Keep completed slots until response acceptance so delayed parts retain their position.
     summary_parts: Vec<SummaryPart>,
-    compaction_animation: StreamAnimation,
     compaction_source: String,
-    compaction_visible: String,
     response_draft_blocks: Vec<smelt_core::transcript_model::BlockId>,
     /// Earliest canonical suffix whose transcript projection must be rebuilt
     /// after live stream-parser blocks finish.
@@ -178,12 +192,10 @@ impl ConversationRuntime {
             document,
             committed_transcript_view: None,
             parser: smelt_core::content::stream_parser::StreamParser::new(),
-            stream_animation: StreamAnimation::default(),
-            tool_draft_animations: Default::default(),
+            reveal: StreamReveal::default(),
+            streaming_kind: None,
             summary_parts: Default::default(),
-            compaction_animation: StreamAnimation::default(),
             compaction_source: String::new(),
-            compaction_visible: String::new(),
             response_draft_blocks: Vec::new(),
             pending_transcript_history_rebuild_from: None,
             resume_preview_cache,
@@ -1327,7 +1339,7 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn append_block(&mut self, block: smelt_core::transcript_model::Block) -> bool {
-        self.finish_stream_animation();
+        self.finish_stream_reveal();
         self.apply_transcript_mutation(super::session_document::TranscriptMutation::AppendBlock {
             block,
         })
@@ -1405,50 +1417,35 @@ impl ConversationRuntime {
         summary: String,
         arrived_at: std::time::Instant,
     ) -> Option<smelt_core::transcript_model::BlockId> {
-        let replaced = !summary.starts_with(&self.compaction_source);
-        if replaced {
-            self.compaction_animation.clear();
-            self.compaction_source.clear();
-            self.compaction_visible.clear();
-        }
-        let delta =
-            smelt_buffer::text::slice(&summary, self.compaction_source.len()..summary.len())
-                .to_string();
-        self.compaction_source = summary;
-        let visible = self
-            .compaction_animation
-            .push(StreamKind::Text, delta, arrived_at);
-        self.compaction_visible.push_str(&visible);
-        if visible.is_empty() && !replaced {
+        if summary == self.compaction_source {
             if let Some(id) = self.document.transcript.compaction_preview_id() {
                 return Some(id);
             }
         }
-        self.apply_compaction_preview()
-    }
-
-    fn apply_compaction_preview(&mut self) -> Option<smelt_core::transcript_model::BlockId> {
-        self.apply_transcript_mutation(
-            super::session_document::TranscriptMutation::UpdateCompactionPreview {
-                summary: self.compaction_visible.clone(),
-            },
-        )
-        .block_id
-    }
-
-    pub(super) fn advance_compaction_animation(&mut self, now: std::time::Instant) -> bool {
-        let delta = self.compaction_animation.advance(now);
-        if !delta.is_empty() {
-            self.compaction_visible.push_str(&delta);
-            self.apply_compaction_preview();
+        if !summary.starts_with(&self.compaction_source) {
+            self.reveal.finish(&RevealKey::Compaction);
         }
-        self.compaction_animation.is_pending()
+        self.compaction_source.clone_from(&summary);
+        let existed = self.document.transcript.compaction_preview_id();
+        let id = self
+            .apply_transcript_mutation(
+                super::session_document::TranscriptMutation::UpdateCompactionPreview { summary },
+            )
+            .block_id?;
+        // A new preview's header shows at once; the summary types in below it.
+        let baseline = if existed == Some(id) {
+            Baseline::Current
+        } else {
+            Baseline::Header
+        };
+        self.reveal.track(RevealKey::Compaction, id.get(), baseline);
+        self.reveal.arrive(&RevealKey::Compaction, arrived_at);
+        Some(id)
     }
 
     pub(crate) fn clear_compaction_preview(&mut self) {
-        self.compaction_animation.clear();
+        self.reveal.finish(&RevealKey::Compaction);
         self.compaction_source.clear();
-        self.compaction_visible.clear();
         self.apply_transcript_mutation(
             super::session_document::TranscriptMutation::ClearCompactionPreview,
         );
@@ -1475,14 +1472,21 @@ impl ConversationRuntime {
             !self
                 .summary_parts
                 .iter()
-                .any(|part| part.animation.is_some() && part.block_id == Some(previous.id))
+                .any(|part| part.draft.is_some() && part.block_id == Some(previous.id))
         });
         let index = self.summary_parts.len();
+        if let Some(previous) = &previous {
+            self.reveal.track(
+                RevealKey::Summary(id.clone()),
+                previous.id.get(),
+                Baseline::Current,
+            );
+        }
         self.summary_parts.push(SummaryPart {
             id,
             block_id: previous.as_ref().map(|previous| previous.id),
             after: self.document.transcript.history().last_block_id(),
-            animation: Some(SummaryAnimation {
+            draft: Some(SummaryDraft {
                 previous,
                 ..Default::default()
             }),
@@ -1490,57 +1494,43 @@ impl ConversationRuntime {
         index
     }
 
-    pub(super) fn queue_summary_delta(
+    pub(super) fn append_summary_delta(
         &mut self,
         id: String,
         title: Option<String>,
         delta: String,
         arrived_at: std::time::Instant,
-    ) -> bool {
+    ) {
         if delta.is_empty() {
-            return false;
+            return;
         }
+        let key = RevealKey::Summary(id.clone());
         let index = self.start_summary_part(id);
         let mut parts = std::mem::take(&mut self.summary_parts);
-        let pending = if let Some(state) = parts[index].animation.as_mut() {
-            let title_changed = title
-                .as_ref()
-                .is_some_and(|title| state.title.as_ref() != Some(title));
+        if let Some(draft) = parts[index].draft.as_mut() {
             if title.is_some() {
-                state.title = title;
+                draft.title = title;
             }
-            let visible = state
-                .animation
-                .push(StreamKind::Thinking, delta, arrived_at);
-            state.visible.push_str(&visible);
-            let pending = state.animation.is_pending();
-            if !visible.is_empty() || title_changed {
-                self.render_summary_prefix(
-                    &mut parts,
-                    index,
-                    engine::ReasoningSummaryPhase::Streaming,
-                );
-            }
-            pending
-        } else {
-            false
-        };
+            draft.text.push_str(&delta);
+            draft.streaming = true;
+            self.render_summary_draft(&mut parts, index, engine::ReasoningSummaryPhase::Streaming);
+        }
         self.summary_parts = parts;
-        pending
+        self.reveal.arrive(&key, arrived_at);
     }
 
-    fn render_summary_prefix(
+    fn render_summary_draft(
         &mut self,
         parts: &mut [SummaryPart],
         index: usize,
         phase: engine::ReasoningSummaryPhase,
     ) {
-        let Some(state) = parts[index].animation.as_ref() else {
+        let Some(draft) = parts[index].draft.as_ref() else {
             return;
         };
-        let (mut title, body) = engine::normalize_reasoning_summary(&state.visible, phase);
+        let (mut title, body) = engine::normalize_reasoning_summary(&draft.text, phase);
         if phase == engine::ReasoningSummaryPhase::Streaming {
-            title = title.or_else(|| state.title.clone());
+            title = title.or_else(|| draft.title.clone());
         }
         self.render_summary(parts, index, title, &body);
     }
@@ -1557,9 +1547,9 @@ impl ConversationRuntime {
             return;
         }
         let previous = part
-            .animation
+            .draft
             .as_ref()
-            .and_then(|state| state.previous.as_ref());
+            .and_then(|draft| draft.previous.as_ref());
         let block = super::transcript::reasoning_summary_block(previous, title, body);
         if let Some(id) = part.block_id {
             self.rewrite_block(id, block);
@@ -1580,6 +1570,13 @@ impl ConversationRuntime {
             if let Some(id) = self.apply_transcript_mutation(mutation).block_id {
                 parts[index].block_id = Some(id);
                 self.response_draft_blocks.push(id);
+                if parts[index].draft.is_some() {
+                    self.reveal.track(
+                        RevealKey::Summary(parts[index].id.clone()),
+                        id.get(),
+                        Baseline::Empty,
+                    );
+                }
             }
         }
     }
@@ -1594,45 +1591,27 @@ impl ConversationRuntime {
             return false;
         };
         let mut parts = std::mem::take(&mut self.summary_parts);
-        if parts[index].animation.is_some() {
+        if parts[index].draft.is_some() {
             self.render_summary(&mut parts, index, title.map(str::to_string), content);
-            parts[index].animation = None;
+            parts[index].draft = None;
+            self.reveal
+                .finish(&RevealKey::Summary(parts[index].id.clone()));
         }
         self.summary_parts = parts;
         true
     }
 
-    fn advance_summary_parts(&mut self, now: std::time::Instant) -> bool {
-        let mut parts = std::mem::take(&mut self.summary_parts);
-        let mut pending = false;
-        for index in 0..parts.len() {
-            let Some(state) = parts[index].animation.as_mut() else {
-                continue;
-            };
-            let delta = state.animation.advance(now);
-            pending |= state.animation.is_pending();
-            if !delta.is_empty() {
-                state.visible.push_str(&delta);
-                self.render_summary_prefix(
-                    &mut parts,
-                    index,
-                    engine::ReasoningSummaryPhase::Streaming,
-                );
-            }
-        }
-        self.summary_parts = parts;
-        pending
-    }
-
+    /// Render the summary parts that received deltas as finished, before a
+    /// block that follows them in the transcript. A part stays open for its
+    /// own finish event.
     fn finish_summary_parts(&mut self) {
         let mut parts = std::mem::take(&mut self.summary_parts);
         for index in 0..parts.len() {
-            let Some(state) = parts[index].animation.as_mut() else {
+            let Some(draft) = parts[index].draft.as_mut() else {
                 continue;
             };
-            if let Some((_, delta)) = state.animation.finish() {
-                state.visible.push_str(&delta);
-                self.render_summary_prefix(
+            if std::mem::take(&mut draft.streaming) {
+                self.render_summary_draft(
                     &mut parts,
                     index,
                     engine::ReasoningSummaryPhase::Finished,
@@ -1640,83 +1619,63 @@ impl ConversationRuntime {
             }
         }
         self.summary_parts = parts;
+        self.reveal
+            .finish_where(|key| matches!(key, RevealKey::Summary(_)));
     }
 
-    pub(super) fn queue_stream_delta(
+    pub(super) fn append_stream_delta(
         &mut self,
         kind: StreamKind,
-        text: String,
+        delta: String,
         arrived_at: std::time::Instant,
-    ) -> bool {
-        if text.is_empty() {
-            return self.stream_animation.is_pending();
-        }
-        if kind == StreamKind::Text {
-            self.finish_summary_parts();
-        }
-        if self
-            .stream_animation
-            .kind()
-            .is_some_and(|active| active != kind)
-        {
-            self.finish_stream_animation();
-        }
-        let delta = self.stream_animation.push(kind, text, arrived_at);
-        self.apply_animated_delta(kind, delta);
-        self.stream_animation.is_pending()
-    }
-
-    pub(super) fn advance_stream_animation(&mut self, now: std::time::Instant) -> bool {
-        if let Some(kind) = self.stream_animation.kind() {
-            let delta = self.stream_animation.advance(now);
-            self.apply_animated_delta(kind, delta);
-        }
-        let summary_pending = self.advance_summary_parts(now);
-        self.stream_animation.is_pending() || summary_pending
-    }
-
-    pub(super) fn finish_stream_animation(&mut self) {
-        if let Some((kind, delta)) = self.stream_animation.finish() {
-            self.apply_animated_delta(kind, delta);
-        }
-        self.finish_summary_parts();
-    }
-
-    #[cfg(test)]
-    pub(super) fn has_pending_stream_animation(&self) -> bool {
-        self.stream_animation.is_pending()
-            || self.has_pending_tool_draft_animation()
-            || self.summary_parts.iter().any(|part| {
-                part.animation
-                    .as_ref()
-                    .is_some_and(|state| state.animation.is_pending())
-            })
-    }
-
-    fn apply_animated_delta(&mut self, kind: StreamKind, delta: String) {
+    ) {
         use super::session_document::StreamMutation;
 
         if delta.is_empty() {
             return;
         }
+        if kind == StreamKind::Text {
+            self.finish_summary_parts();
+        }
+        if self.streaming_kind.is_some_and(|active| active != kind) {
+            self.reveal.finish(&RevealKey::Response);
+        }
+        self.streaming_kind = Some(kind);
         let first = self.response_draft_boundary();
         self.apply_stream_mutation(match kind {
             StreamKind::Text => StreamMutation::AppendText { delta },
             StreamKind::Thinking => StreamMutation::AppendThinking { delta },
         });
+        for &id in self.document.transcript.history().order.iter().skip(first) {
+            self.reveal
+                .track(RevealKey::Response, id.get(), Baseline::Empty);
+        }
+        self.reveal.arrive(&RevealKey::Response, arrived_at);
         self.track_response_draft_from(first);
     }
 
+    /// Show everything the response and its summaries streamed so far, before
+    /// a block that follows them in the transcript.
+    pub(super) fn finish_stream_reveal(&mut self) {
+        self.reveal.finish(&RevealKey::Response);
+        self.streaming_kind = None;
+        self.finish_summary_parts();
+    }
+
+    pub(crate) fn reveal_mut(&mut self) -> &mut StreamReveal<RevealKey> {
+        &mut self.reveal
+    }
+
     pub(crate) fn flush_streaming_thinking(&mut self) {
-        if self.stream_animation.kind() == Some(StreamKind::Thinking) {
-            self.finish_stream_animation();
+        if self.streaming_kind == Some(StreamKind::Thinking) {
+            self.finish_stream_reveal();
         }
         self.apply_stream_mutation(super::session_document::StreamMutation::FlushThinking);
     }
 
     pub(crate) fn flush_streaming_text(&mut self) {
-        self.finish_stream_animation();
-        self.finish_tool_draft_animations();
+        self.finish_stream_reveal();
+        self.finish_tool_draft_reveals();
         self.apply_stream_mutation(super::session_document::StreamMutation::FlushText);
     }
 
@@ -1731,7 +1690,7 @@ impl ConversationRuntime {
         start: smelt_core::content::stream_parser::ToolStart,
         now: std::time::Instant,
     ) {
-        self.finish_stream_animation();
+        self.finish_stream_reveal();
         self.apply_stream_mutation(super::session_document::StreamMutation::StartTool {
             start,
             now,
@@ -1862,9 +1821,9 @@ impl ConversationRuntime {
         start: smelt_core::content::stream_parser::ToolStart,
         now: std::time::Instant,
     ) -> bool {
-        self.finish_stream_animation();
+        self.finish_stream_reveal();
         if let Some(id) = &stream_id {
-            self.tool_draft_animations.remove(id);
+            self.reveal.finish(&RevealKey::ToolDraft(id.clone()));
         }
         self.apply_stream_mutation(super::session_document::StreamMutation::PromoteToolDraft {
             stream_id,
@@ -1897,8 +1856,8 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn reject_response_draft(&mut self) {
-        self.stream_animation.clear();
-        self.tool_draft_animations.clear();
+        self.reveal.finish_all();
+        self.streaming_kind = None;
         self.summary_parts.clear();
         self.parser.clear_response_output();
         for id in std::mem::take(&mut self.response_draft_blocks)
@@ -1919,7 +1878,7 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn clear_stream_tool_drafts(&mut self) {
-        self.tool_draft_animations.clear();
+        self.finish_tool_draft_reveals();
         self.apply_stream_mutation(super::session_document::StreamMutation::ClearToolDrafts);
     }
 
@@ -1930,21 +1889,20 @@ impl ConversationRuntime {
         name: Option<String>,
         native: bool,
     ) -> Option<smelt_core::transcript_model::BlockId> {
-        self.finish_stream_animation();
-        self.tool_draft_animations
-            .entry(stream_id.clone())
-            .or_insert_with(|| ToolDraftAnimation {
-                call_id: call_id.clone(),
-                name: name.clone(),
-                ..Default::default()
-            });
-        self.apply_stream_mutation(super::session_document::StreamMutation::StartToolDraft {
-            stream_id,
-            call_id,
-            name,
-            native,
-        })
-        .block_id
+        self.finish_stream_reveal();
+        let first = self.response_draft_boundary();
+        let id = self
+            .apply_stream_mutation(super::session_document::StreamMutation::StartToolDraft {
+                stream_id: stream_id.clone(),
+                call_id,
+                name,
+                native,
+            })
+            .block_id?;
+        let baseline = self.tool_draft_baseline(first);
+        self.reveal
+            .track(RevealKey::ToolDraft(stream_id), id.get(), baseline);
+        Some(id)
     }
 
     pub(crate) fn append_tool_draft(
@@ -1955,34 +1913,12 @@ impl ConversationRuntime {
         delta: String,
         arrived_at: std::time::Instant,
     ) -> Option<(smelt_core::transcript_model::BlockId, bool)> {
-        if !self.tool_draft_animations.contains_key(&stream_id) {
-            self.finish_stream_animation();
-        }
-        let state = self
-            .tool_draft_animations
-            .entry(stream_id.clone())
-            .or_default();
-        if call_id.is_some() {
-            state.call_id = call_id;
-        }
-        if name.is_some() {
-            state.name = name;
-        }
-        let visible = state.animation.push(StreamKind::Text, delta, arrived_at);
-        let call_id = state.call_id.clone();
-        let name = state.name.clone();
-        self.apply_tool_draft_delta(stream_id, call_id, name, visible)
-    }
-
-    fn apply_tool_draft_delta(
-        &mut self,
-        stream_id: String,
-        call_id: Option<String>,
-        name: Option<String>,
-        delta: String,
-    ) -> Option<(smelt_core::transcript_model::BlockId, bool)> {
         if delta.is_empty() {
             return None;
+        }
+        let key = RevealKey::ToolDraft(stream_id.clone());
+        if !self.reveal.tracks(&key) {
+            self.finish_stream_reveal();
         }
         let first = self.response_draft_boundary();
         let change =
@@ -1992,45 +1928,27 @@ impl ConversationRuntime {
                 name,
                 delta,
             });
+        let baseline = self.tool_draft_baseline(first);
         self.track_response_draft_from(first);
-        change
-            .block_id
-            .map(|block_id| (block_id, change.presentation_changed))
+        let block_id = change.block_id?;
+        self.reveal.track(key.clone(), block_id.get(), baseline);
+        self.reveal.arrive(&key, arrived_at);
+        Some((block_id, change.presentation_changed))
     }
 
-    pub(super) fn has_pending_tool_draft_animation(&self) -> bool {
-        self.tool_draft_animations
-            .values()
-            .any(|state| state.animation.is_pending())
-    }
-
-    pub(super) fn advance_tool_draft_animations(
-        &mut self,
-        now: std::time::Instant,
-    ) -> Vec<smelt_core::transcript_model::BlockId> {
-        let mut states = std::mem::take(&mut self.tool_draft_animations);
-        let mut changed = Vec::new();
-        for (id, state) in &mut states {
-            let delta = state.animation.advance(now);
-            if let Some((block_id, true)) = self.apply_tool_draft_delta(
-                id.clone(),
-                state.call_id.clone(),
-                state.name.clone(),
-                delta,
-            ) {
-                changed.push(block_id);
-            }
+    /// A draft created past response block `first` shows its header at once
+    /// and types in its arguments below it.
+    fn tool_draft_baseline(&self, first: usize) -> Baseline {
+        if first < self.response_draft_boundary() {
+            Baseline::Header
+        } else {
+            Baseline::Current
         }
-        self.tool_draft_animations = states;
-        changed
     }
 
-    fn finish_tool_draft_animations(&mut self) {
-        for (id, mut state) in std::mem::take(&mut self.tool_draft_animations) {
-            if let Some((_, delta)) = state.animation.finish() {
-                self.apply_tool_draft_delta(id, state.call_id, state.name, delta);
-            }
-        }
+    fn finish_tool_draft_reveals(&mut self) {
+        self.reveal
+            .finish_where(|key| matches!(key, RevealKey::ToolDraft(_)));
     }
 
     pub(crate) fn finish_tool_draft(
@@ -2040,7 +1958,7 @@ impl ConversationRuntime {
         name: String,
         arguments: String,
     ) -> Option<smelt_core::transcript_model::BlockId> {
-        self.tool_draft_animations.remove(&stream_id);
+        self.reveal.finish(&RevealKey::ToolDraft(stream_id.clone()));
         self.apply_stream_mutation(super::session_document::StreamMutation::FinishToolDraft {
             stream_id,
             call_id,
@@ -2081,7 +1999,7 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn start_exec(&mut self, command: String) {
-        self.finish_stream_animation();
+        self.finish_stream_reveal();
         self.apply_stream_mutation(super::session_document::StreamMutation::StartExec { command });
     }
 
@@ -2098,8 +2016,8 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn begin_turn(&mut self) {
-        self.finish_stream_animation();
-        self.tool_draft_animations.clear();
+        self.reveal.finish_all();
+        self.streaming_kind = None;
         self.summary_parts.clear();
         self.turn.clear_context_tokens_updated();
         self.response_draft_blocks.clear();
@@ -2429,12 +2347,10 @@ impl ConversationRuntime {
     }
 
     pub(crate) fn clear_stream_parser(&mut self) {
-        self.stream_animation.clear();
-        self.tool_draft_animations.clear();
+        self.reveal.finish_all();
+        self.streaming_kind = None;
         self.summary_parts.clear();
-        self.compaction_animation.clear();
         self.compaction_source.clear();
-        self.compaction_visible.clear();
         self.response_draft_blocks.clear();
         self.parser.clear();
     }
@@ -3857,7 +3773,7 @@ mod tests {
                 delta: "captured streaming text α".into(),
             },
         ));
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_silent();
         app.app.save_session();
         let generation = app.app.conversation.persistence_generation();
@@ -3866,7 +3782,7 @@ mod tests {
                 delta: " newer text 界".into(),
             },
         ));
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_silent();
         assert!(app.app.conversation.persistence_generation() > generation);
         release.send(()).unwrap();

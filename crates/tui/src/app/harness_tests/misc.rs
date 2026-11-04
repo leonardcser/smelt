@@ -653,7 +653,7 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
             tool_name: Some(tool_name.into()),
             delta: format!(r#"{{"pattern":{}"#, serde_json::to_string(pattern).unwrap()),
         }));
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         let pattern_frame = app.render_to_frame().text();
         let expected_pattern = format!("* {tool_name} {pattern}");
         assert!(
@@ -672,7 +672,7 @@ fn streaming_search_tool_summaries_keep_patterns_while_absolute_paths_collapse()
             tool_name: Some(tool_name.into()),
             delta: format!(r#","path":{}"#, partial_cwd),
         }));
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         let hidden_path_frame = app.render_to_frame().text();
         assert!(
             hidden_path_frame.contains(&expected_pattern),
@@ -908,7 +908,7 @@ fn fast_streaming_keeps_thinking_before_answer() {
                 .contains("The lighthouse stood on the cliff."),
             "late reasoning completion flushed the answer animation"
         );
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         frames.push(app.render_to_frame().text());
         assert!(frames
             .last()
@@ -1253,15 +1253,18 @@ fn tick_every_runs_while_idle_and_only_now_listeners_wake_each_second() {
 }
 
 #[test]
-fn the_working_indicator_paints_on_a_wall_clock_grid_its_letter_steps_fit() {
+fn the_working_indicator_paints_on_a_wall_clock_grid_without_laying_the_bar_out() {
     let mut app = TestApp::builder().build();
     app.animate_with_virtual_clock();
     app.run_lua(
         r#"
-        _G.paints = {}
+        _G.layouts, _G.paints = 0, {}
         smelt.prompt.top:add("zz_probe", function()
-          _G.paints[#_G.paints + 1] = smelt.time.now_ms()
+          _G.layouts = _G.layouts + 1
           return nil
+        end)
+        smelt.paint.frame(function()
+          _G.paints[#_G.paints + 1] = smelt.time.now_ms()
         end)
         "#,
     );
@@ -1270,13 +1273,7 @@ fn the_working_indicator_paints_on_a_wall_clock_grid_its_letter_steps_fit() {
         app.advance_animation(1);
     }
 
-    let paints: Vec<i64> = app
-        .app
-        .lua
-        .lua()
-        .load("return _G.paints")
-        .eval::<Vec<i64>>()
-        .unwrap();
+    let paints: Vec<i64> = app.eval_lua("return _G.paints").unwrap();
     let painted: std::collections::HashSet<i64> = paints.iter().copied().collect();
     let first_frame = (paints[0] + 21) / 22 * 22;
     let missed: Vec<i64> = (0..50)
@@ -1287,6 +1284,12 @@ fn the_working_indicator_paints_on_a_wall_clock_grid_its_letter_steps_fit() {
         missed.is_empty(),
         "every 22 ms wall-clock frame is painted, so each 110 ms sweep step \
          lasts exactly five frames; missed {missed:?} in {paints:?}"
+    );
+    let layouts: usize = app.eval_lua("return _G.layouts").unwrap();
+    assert!(
+        layouts * 4 < paints.len(),
+        "the animation paints over the laid-out bar: {layouts} layouts for {} frames",
+        paints.len()
     );
 }
 

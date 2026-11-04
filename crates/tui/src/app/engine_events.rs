@@ -6,7 +6,7 @@ use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::ConfirmRequest;
 use std::time::Duration;
 
-use super::stream_animation::StreamKind;
+use super::conversation::StreamKind;
 
 #[derive(Default)]
 pub(super) struct NativeSessionUi {
@@ -809,22 +809,22 @@ impl TuiApp {
             } => {
                 assistant_output_started = !delta.is_empty();
                 let bytes = delta.len();
-                if kind == protocol::ReasoningKind::Raw
-                    && self.conversation.queue_stream_delta(
+                match kind {
+                    protocol::ReasoningKind::Raw => self.conversation.append_stream_delta(
                         StreamKind::Thinking,
                         delta.clone(),
                         arrived_at,
-                    )
-                {
-                    self.request_continuation_render();
+                    ),
+                    protocol::ReasoningKind::Summary => {
+                        self.conversation.append_summary_delta(
+                            id,
+                            title,
+                            delta.clone(),
+                            arrived_at,
+                        );
+                    }
                 }
-                if kind == protocol::ReasoningKind::Summary
-                    && self
-                        .conversation
-                        .queue_summary_delta(id, title, delta.clone(), arrived_at)
-                {
-                    self.request_continuation_render();
-                }
+                self.request_continuation_render();
                 self.core.signals.emit_dyn(
                     "stream_delta",
                     std::rc::Rc::new(smelt_core::signals::StreamDelta {
@@ -884,12 +884,9 @@ impl TuiApp {
             EngineEvent::TextDelta { delta } => {
                 assistant_output_started = !delta.is_empty();
                 let bytes = delta.len();
-                if self
-                    .conversation
-                    .queue_stream_delta(StreamKind::Text, delta.clone(), arrived_at)
-                {
-                    self.request_continuation_render();
-                }
+                self.conversation
+                    .append_stream_delta(StreamKind::Text, delta.clone(), arrived_at);
+                self.request_continuation_render();
                 self.core.signals.emit_dyn(
                     "stream_delta",
                     std::rc::Rc::new(smelt_core::signals::StreamDelta {

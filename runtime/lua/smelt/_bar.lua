@@ -48,6 +48,12 @@ local RULE_MIN_CELLS = 4
 ---@field selectable? boolean Include the text in drag-copy. Defaults to true.
 ---@field row? integer Orders the rows of a strip: rows with lower numbers sit higher, negative rows count from the bottom (`-1` is the last row), and a row with no items takes no space. Defaults to 1. A rule ignores it.
 ---@field fill? string Theme group that styles the empty space of this item's row instead of the bar's background.
+---@field paint? fun(slice: smelt.paint.Slice, ctx: smelt.bar.PaintCtx) Draw over the item's cells on every frame, after the bar lays out its text and before it reaches the screen. The slice covers the cells the item's text took, which a narrow bar may have cut short, so restyle them with `slice:patch_style` to keep the text as laid out. Use it to animate an item: an animation drawn here costs no relayout, and asks for its next frame with `ctx.invalidate_after`. An error removes the bar's paints until `/reload`.
+
+--- What an item's `paint` gets on every frame: the `smelt.paint.Ctx` of the
+--- bar's frame paint and a way to ask for the next frame.
+---@class smelt.bar.PaintCtx: smelt.paint.Ctx
+---@field invalidate_after fun(ms: integer) Paint the item again after `ms` milliseconds. Nothing repaints on its own, so an animation asks on every paint.
 
 --- What a source gets on every repaint.
 ---@class smelt.bar.Context
@@ -70,9 +76,11 @@ local RULE_MIN_CELLS = 4
 
 -- ── rows ────────────────────────────────────────────────────────────
 
+-- A laid-out row also lists `paints`: the cells `{ item, col, width }` of
+-- each item with a `paint`, in display columns.
 local function segments_to_line(segs)
-  local parts, highlights = {}, {}
-  local byte_pos = 0
+  local parts, highlights, paints = {}, {}, {}
+  local byte_pos, col = 0, 0
   for _, seg in ipairs(segs) do
     local len = #seg.text
     if len > 0 then
@@ -84,9 +92,53 @@ local function segments_to_line(segs)
         selectable = seg.selectable,
       }
       byte_pos = byte_pos + len
+      local w = smelt.text.width(seg.text)
+      local last = paints[#paints]
+      if seg.item and seg.item.paint then
+        if last and last.item == seg.item and last.col + last.width == col then
+          last.width = last.width + w
+        else
+          paints[#paints + 1] = { item = seg.item, col = col, width = w }
+        end
+      end
+      col = col + w
     end
   end
-  return { text = table.concat(parts), highlights = highlights }
+  return { text = table.concat(parts), highlights = highlights, paints = paints }
+end
+
+-- Draw each item's `paint` over its cells on the frames after `bar` laid
+-- them out. One frame paint per bar serves every item, below the effects
+-- that plugins register at the default order.
+local PAINT_ORDER = -1000
+
+local function paint_items(bar, slice, ctx)
+  local win = bar.paints_win
+  if not win or #bar.paints == 0 then return end
+  ctx.invalidate_after = bar.paint_after
+  for _, placed in ipairs(bar.paints) do
+    local area = { x = placed.col, y = placed.row, width = placed.width, height = 1 }
+    slice:window(win, function(cells) placed.item.paint(cells, ctx) end, area)
+  end
+end
+
+-- Remember where the items with a `paint` landed in `rows` of `win`.
+local function place_paints(bar, rows, win)
+  local paints = {}
+  for i, row in ipairs(rows) do
+    for _, placed in ipairs(row.paints or {}) do
+      placed.row = i - 1
+      paints[#paints + 1] = placed
+    end
+  end
+  bar.paints, bar.paints_win = paints, win
+  if #paints > 0 and not bar.effect then
+    bar.effect = smelt.paint.frame(function(slice, ctx) paint_items(bar, slice, ctx) end, {
+      name = bar.name .. ".paint",
+      order = PAINT_ORDER,
+    })
+    bar.paint_after = function(ms) bar.effect:invalidate_after(ms) end
+  end
 end
 
 local function write_rows(buf, rows, ns)
@@ -283,6 +335,7 @@ local function join_side(entries, right, out, style_of, gap_style, sep, sep_styl
             text = run.text,
             style = style_of(run.style or e.item.style),
             selectable = selectable,
+            item = e.item,
           }
         end
       else
@@ -290,6 +343,7 @@ local function join_side(entries, right, out, style_of, gap_style, sep, sep_styl
           text = e.text,
           style = style_of(e.item.style),
           selectable = e.item.selectable,
+          item = e.item,
         }
       end
       prev = e
@@ -378,7 +432,7 @@ function M.layout_strip(items, width, opts)
       if w > room or (w == room and rest > 0) then
         local kept = w > room and smelt.text.fit(run.text, room, { suffix = "…" })
           or smelt.text.fit(run.text, room - 1, { suffix = "" }) .. "…"
-        run = { text = kept, style = run.style, selectable = run.selectable }
+        run = { text = kept, style = run.style, selectable = run.selectable, item = run.item }
         w = smelt.text.width(kept)
       end
       segs[#segs + 1] = run
@@ -1035,7 +1089,9 @@ function Bar:_default_view()
   local ns = smelt.ns(self.name)
   win:set_renderer(function()
     local height = (win:rect() or {}).height or self:rows()
-    write_rows(buf, layout_rows(self, win:content_width() or self.context.width, height), ns)
+    local rows = layout_rows(self, win:content_width() or self.context.width, height)
+    write_rows(buf, rows, ns)
+    place_paints(self, rows, win)
     if self.shown_rows and self:rows() ~= self.shown_rows then smelt.ui.layout.invalidate() end
   end)
   return view
@@ -1062,6 +1118,7 @@ local function new_bar(opts, hosted)
     items = nil, -- collected on demand, dropped on invalidate
     folded = nil, -- items for fewer rows than wanted, dropped on invalidate
     shown_rows = nil, -- rows the layout last reserved
+    paints = {}, -- cells of the items with a `paint`, as last laid out
   }, Bar)
   for key, value in pairs(defaults) do bar[key] = value end
   bar.schedule = function(ms) bar:invalidate_after(ms) end

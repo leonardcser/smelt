@@ -4,7 +4,7 @@
 //! Coordinates are signed: writes outside the slice are dropped and reads
 //! outside it return `nil`, so moving effects never clamp by hand.
 
-use crate::smelt_edit::{Cell, Grid, GridSlice, Rect, Style};
+use crate::smelt_edit::{Cell, ComposedFrame, Grid, GridSlice, Rect, Style, WinId};
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use scoped_tls_hkt::scoped_thread_local;
@@ -30,6 +30,10 @@ trait Canvas {
     fn snapshot(&self) -> Grid;
     /// Place the hidden terminal cursor.
     fn set_cursor(&mut self, x: u16, y: u16);
+    /// The screen area the canvas covers, when it maps straight onto it.
+    fn screen_rect(&self) -> Option<Rect> {
+        None
+    }
 }
 
 impl Canvas for GridSlice<'_> {
@@ -71,6 +75,146 @@ impl Canvas for GridSlice<'_> {
     fn set_cursor(&mut self, x: u16, y: u16) {
         self.set_terminal_cursor_position(x, y);
     }
+
+    fn screen_rect(&self) -> Option<Rect> {
+        Some(self.grid_rect())
+    }
+}
+
+/// The cells of one window's text area on the screen canvas, from
+/// `slice:window`. Cells the window does not show, such as those under an
+/// overlay, read as `nil` and drop writes.
+struct WindowCanvas<'a> {
+    screen: &'a mut dyn Canvas,
+    composed: &'a ComposedFrame,
+    win: WinId,
+    /// The view's screen area.
+    rect: Rect,
+}
+
+impl WindowCanvas<'_> {
+    /// The screen cell under view cell `(x, y)`, when the window shows it.
+    fn shown(&self, x: u16, y: u16) -> Option<(u16, u16)> {
+        if x >= self.rect.width || y >= self.rect.height {
+            return None;
+        }
+        let (sx, sy) = (self.rect.x + x, self.rect.y + y);
+        self.composed
+            .owner(sx, sy)
+            .is_some_and(|owner| owner.win == self.win)
+            .then_some((sx, sy))
+    }
+}
+
+impl Canvas for WindowCanvas<'_> {
+    fn width(&self) -> u16 {
+        self.rect.width
+    }
+
+    fn height(&self) -> u16 {
+        self.rect.height
+    }
+
+    fn cell(&self, x: u16, y: u16) -> Option<&Cell> {
+        let (x, y) = self.shown(x, y)?;
+        self.screen.cell(x, y)
+    }
+
+    fn set_symbol(&mut self, x: u16, y: u16, symbol: &str, style: Style) {
+        if let Some((x, y)) = self.shown(x, y) {
+            self.screen.set_symbol(x, y, symbol, style);
+        }
+    }
+
+    fn put_cell(&mut self, x: u16, y: u16, cell: &Cell) {
+        if let Some((x, y)) = self.shown(x, y) {
+            self.screen.put_cell(x, y, cell);
+        }
+    }
+
+    fn restyle(&mut self, x: u16, y: u16, style: Style) {
+        if let Some((x, y)) = self.shown(x, y) {
+            self.screen.restyle(x, y, style);
+        }
+    }
+
+    fn snapshot(&self) -> Grid {
+        let mut grid = Grid::new(self.rect.width, self.rect.height);
+        for y in 0..self.rect.height {
+            for x in 0..self.rect.width {
+                if let (Some(cell), Some(out)) = (self.cell(x, y), grid.cell_mut(x, y)) {
+                    *out = cell.clone();
+                }
+            }
+        }
+        grid
+    }
+
+    fn set_cursor(&mut self, x: u16, y: u16) {
+        if let Some((x, y)) = self.shown(x, y) {
+            self.screen.set_cursor(x, y);
+        }
+    }
+}
+
+/// Area for `slice:window`, in cells of the window's text from its top-left.
+#[derive(Debug, Default, LuaOpts)]
+#[lua(name = "smelt.paint.WindowArea")]
+pub struct LuaWindowArea {
+    /// Left column. Default 0.
+    pub x: Option<u16>,
+    /// Top row, counted from the first row on screen. Default 0.
+    pub y: Option<u16>,
+    /// Default: to the right edge of the text.
+    pub width: Option<u16>,
+    /// Default: to the bottom edge of the text.
+    pub height: Option<u16>,
+}
+
+scoped_thread_local!(static COMPOSED: ComposedFrame);
+
+/// Lend the composed frame to `slice:window` while frame paints run.
+pub(crate) fn scope_composed<R>(composed: &ComposedFrame, body: impl FnOnce() -> R) -> R {
+    COMPOSED.set(composed, body)
+}
+
+/// Run `f` with a view of `win`'s text on the screen canvas `screen`.
+/// Returns whether the window is on screen.
+fn with_window(
+    screen: &mut dyn Canvas,
+    win: WinId,
+    area: LuaWindowArea,
+    f: &mlua::Function,
+) -> LuaResult<bool> {
+    if !COMPOSED.is_set() {
+        return Err(LuaError::RuntimeError(
+            "slice:window: only frame paints can see windows".into(),
+        ));
+    }
+    COMPOSED.with(|composed| {
+        let full = Rect::new(0, 0, composed.grid.width(), composed.grid.height());
+        if screen.screen_rect() != Some(full) {
+            return Err(LuaError::RuntimeError(
+                "slice:window: call it on the screen slice of a frame paint".into(),
+            ));
+        }
+        let Some(painted) = composed.windows().iter().find(|painted| painted.win == win) else {
+            return Ok(false);
+        };
+        let text = painted.text;
+        let x = area.x.unwrap_or(0).min(text.width);
+        let y = area.y.unwrap_or(0).min(text.height);
+        let width = area.width.unwrap_or(text.width).min(text.width - x);
+        let height = area.height.unwrap_or(text.height).min(text.height - y);
+        let mut view = WindowCanvas {
+            screen,
+            composed,
+            win,
+            rect: Rect::new(text.x + x, text.y + y, width, height),
+        };
+        scope_canvas(&mut view, || f.call::<()>(PaintSliceUd))?;
+        Ok(true)
+    })
 }
 
 /// `(x, y)` as a cell of the canvas, or `None` outside it.
@@ -473,6 +617,18 @@ impl mlua::UserData for PaintSliceUd {
             })
         });
         methods.add_method(
+            "window",
+            |_,
+             _,
+             (win, f, area): (
+                crate::lua::api::win::LuaWin,
+                mlua::Function,
+                Option<LuaWindowArea>,
+            )| {
+                with_canvas(|c| with_window(c, win.id, area.unwrap_or_default(), &f))
+            },
+        );
+        methods.add_method(
             "blit",
             |_, _, (snapshot, x, y): (PaintSnapshot, Option<i32>, Option<i32>)| {
                 with_canvas(|c| {
@@ -499,6 +655,7 @@ macro_rules! doc_type {
 doc_type!(PaintCell, "smelt.paint.Cell");
 use crate::lua::parse::LuaStyle;
 doc_type!(PaintCtx, "smelt.paint.Ctx");
+doc_type!(PaintSliceDoc, "smelt.paint.Slice");
 
 fn field(name: &'static str, ty: &str, optional: bool, doc: &'static str) -> LuaClassField {
     LuaClassField {
@@ -587,6 +744,7 @@ pub fn register_paint_slice_docs() {
             "recolor" => fn(f: mlua::Function, opts: Option<LuaRecolorOpts>) -> (), "Pass every color on the slice through `f(r, g, b, layer)`, where `layer` is `\"fg\"` or `\"bg\"` and the channels are 0-255 as the terminal shows them. Return new `r, g, b` (rounded and clamped), or `nil` to keep the color. `f` runs once per distinct color, not per cell, so screen-wide filters such as night shift or color-blind simulation stay cheap. Image cells keep their colors.",
             "snapshot" => fn() -> PaintSnapshot, "Copy the slice into a `Snapshot` that stays valid after the callback, for example to keep the screen as it was before a change.",
             "blit" => fn(snapshot: PaintSnapshot, x: Option<i32>, y: Option<i32>) -> (), "Draw `snapshot` with its top-left cell at `(x, y)` (default `0, 0`). Cells outside the slice are dropped.",
+            "window" => fn(win: crate::lua::api::win::LuaWin, f: LuaCallback<(PaintSliceDoc,), ()>, area: Option<LuaWindowArea>) -> bool, "In a frame paint, call `f(view)` with a slice over `win`'s text as it shows on screen: `(0, 0)` is the first text cell of its first row on screen, and `area` narrows the view. Cells the window does not show, such as those under an overlay, read as `nil` and drop writes. Returns `false`, without calling `f`, when the window is not on screen.",
             "set_cursor" => fn(x: i32, y: i32) -> (), "Move the hidden terminal cursor to `(x, y)`; outside the slice it stays put. Terminals anchor input-method text there, so an effect that moves the caret cell should move the cursor with it. The visible caret is an ordinary cell and moves with the cells.",
         },
     });

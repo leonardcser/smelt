@@ -99,6 +99,7 @@
 ---@field selectable? boolean Include the text in drag-copy. Defaults to true.
 ---@field row? integer Orders the rows of a strip: rows with lower numbers sit higher, negative rows count from the bottom (`-1` is the last row), and a row with no items takes no space. Defaults to 1. A rule ignores it.
 ---@field fill? string Theme group that styles the empty space of this item's row instead of the bar's background.
+---@field paint? fun(slice: smelt.paint.Slice, ctx: smelt.bar.PaintCtx) Draw over the item's cells on every frame, after the bar lays out its text and before it reaches the screen. The slice covers the cells the item's text took, which a narrow bar may have cut short, so restyle them with `slice:patch_style` to keep the text as laid out. Use it to animate an item: an animation drawn here costs no relayout, and asks for its next frame with `ctx.invalidate_after`. An error removes the bar's paints until `/reload`.
 
 --- Options for `smelt.bar.new`. The look keys of `smelt.bar.Config` set the
 --- defaults that `bar:reset(key)` restores.
@@ -118,6 +119,12 @@
 ---@field min_rows? integer Rows kept even when no source shows an item. Defaults to 1; 0 makes the bar collapse while empty.
 ---@field sources? { [1]: string, [2]: smelt.bar.Source|(fun(ctx: smelt.bar.Context): (smelt.bar.Item|smelt.bar.Item[]|nil)) }[] Built-in sources added in order; `bar:builtin(name)` returns them.
 ---@field win_opts? table Extra window options, such as focus_on_click or padding.
+
+--- What an item's `paint` gets on every frame: the `smelt.paint.Ctx` of the
+--- bar's frame paint and a way to ask for the next frame.
+--- Classification: Supported - Primary alpha facade for user config and plugins.
+---@class smelt.bar.PaintCtx
+---@field invalidate_after fun(ms: integer) Paint the item again after `ms` milliseconds. Nothing repaints on its own, so an animation asks on every paint.
 
 --- Portable content with its update dependencies. Wrappers retain `signals` and call `render(ctx)`.
 --- Classification: Supported - Primary alpha facade for user config and plugins.
@@ -688,6 +695,7 @@
 ---@field recolor fun(f: function, opts: smelt.paint.RecolorOpts?): nil Pass every color on the slice through `f(r, g, b, layer)`, where `layer` is `"fg"` or `"bg"` and the channels are 0-255 as the terminal shows them. Return new `r, g, b` (rounded and clamped), or `nil` to keep the color. `f` runs once per distinct color, not per cell, so screen-wide filters such as night shift or color-blind simulation stay cheap. Image cells keep their colors.
 ---@field snapshot fun(): smelt.paint.Snapshot Copy the slice into a `Snapshot` that stays valid after the callback, for example to keep the screen as it was before a change.
 ---@field blit fun(snapshot: smelt.paint.Snapshot, x: integer?, y: integer?): nil Draw `snapshot` with its top-left cell at `(x, y)` (default `0, 0`). Cells outside the slice are dropped.
+---@field window fun(win: smelt.win.Win, f: fun(value: smelt.paint.Slice), area: smelt.paint.WindowArea?): boolean In a frame paint, call `f(view)` with a slice over `win`'s text as it shows on screen: `(0, 0)` is the first text cell of its first row on screen, and `area` narrows the view. Cells the window does not show, such as those under an overlay, read as `nil` and drop writes. Returns `false`, without calling `f`, when the window is not on screen.
 ---@field set_cursor fun(x: integer, y: integer): nil Move the hidden terminal cursor to `(x, y)`; outside the slice it stays put. Terminals anchor input-method text there, so an effect that moves the caret cell should move the cursor with it. The visible caret is an ordinary cell and moves with the cells.
 
 --- A read-only copy of screen cells: `ctx.prev` in a frame paint with `history`, or the result of `slice:snapshot()`. Draw it back with `slice:blit`.
@@ -696,6 +704,14 @@
 ---@field width fun(): integer Return the snapshot width in cells.
 ---@field height fun(): integer Return the snapshot height in cells.
 ---@field get fun(x: integer, y: integer): smelt.paint.Cell? Return the cell at `(x, y)`, or `nil` outside the snapshot.
+
+--- Area for `slice:window`, in cells of the window's text from its top-left.
+--- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
+---@class smelt.paint.WindowArea
+---@field x? integer Left column. Default 0.
+---@field y? integer Top row, counted from the first row on screen. Default 0.
+---@field width? integer Default: to the right edge of the text.
+---@field height? integer Default: to the bottom edge of the text.
 
 --- Effect-level decisions that apply to tools without a more specific rule.
 --- Classification: Supported - Primary alpha facade for user config and plugins.

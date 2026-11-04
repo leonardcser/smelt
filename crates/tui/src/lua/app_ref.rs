@@ -431,10 +431,6 @@ impl ConversationLuaHost<'_> {
         self.app.plugin_streams.push(stream);
     }
 
-    pub(crate) fn request_stream_frame(&mut self) {
-        self.app.request_continuation_render();
-    }
-
     pub(crate) fn render_transcript_stream(
         &mut self,
         buffer_id: crate::smelt_edit::BufId,
@@ -1293,11 +1289,17 @@ impl UiLuaHost<'_> {
         paint: crate::smelt_edit::layout::PaintId,
         after: Option<std::time::Duration>,
     ) -> bool {
+        use crate::app::render_loop::FrameUrgency;
+
         let known = self.app.paint_registry.contains(paint);
         if known {
-            match after {
-                Some(after) => self.app.request_animation_render(after),
-                None => self.app.request_urgent_render(),
+            let urgency = after.map_or(FrameUrgency::Urgent, FrameUrgency::Animation);
+            // Frame paints draw over the composed screen, so they only
+            // present again. A leaf paints while the screen composes.
+            if self.app.paint_registry.leaf(paint).is_some() {
+                self.app.frame_scheduler.request(urgency);
+            } else {
+                self.app.frame_scheduler.request_present(urgency);
             }
         }
         known

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub(crate) use slice::{register_paint_slice_docs, PaintCtx};
+pub(crate) use slice::{register_paint_slice_docs, scope_composed, PaintCtx};
 
 /// Paint ids start above this base to partition the shared `u64` space:
 /// - `id <  PAINT_ID_BASE` → WinId (owned by `Ui`)
@@ -277,15 +277,16 @@ impl PaintTimeline {
         }
     }
 
-    /// Compare the finished screen `base`, with its windows' content at
-    /// `areas`, to the last one recorded, before frame paints change it.
-    /// Pass the result to [`Self::end_history`].
-    pub(crate) fn begin_history(&mut self, base: &Grid, areas: Vec<ScrollArea>) -> FrameChanges {
-        self.history.begin(base, areas)
+    /// Note where a newly composed screen put its windows' content, for the
+    /// next present to tell scrolling from change.
+    pub(crate) fn compose_history(&mut self, areas: Vec<ScrollArea>) {
+        self.history.compose(areas);
     }
 
-    pub(crate) fn end_history(&mut self, changes: FrameChanges) {
-        self.history.end(changes);
+    /// Record the screen `base` being presented, before frame paints, and
+    /// return what changed since the last one presented.
+    pub(crate) fn present_history(&mut self, base: &Grid) -> FrameChanges {
+        self.history.present(base)
     }
 
     /// Forget the previous frame while no paint asks for it.
@@ -325,15 +326,27 @@ impl ScrollArea {
     }
 }
 
-/// The screen as smelt drew it on the previous frame, before frame paints.
+/// The screen as smelt presented it, before frame paints.
 #[derive(Default)]
 struct FrameHistory {
-    prev: Option<(Arc<Grid>, Vec<ScrollArea>)>,
+    base: Option<(Arc<Grid>, Vec<ScrollArea>)>,
+    /// Where the latest composed screen put its windows' content, until it is
+    /// first presented. Presenting it again moves nothing.
+    composed: Option<Vec<ScrollArea>>,
 }
 
 impl FrameHistory {
-    fn begin(&mut self, base: &Grid, areas: Vec<ScrollArea>) -> FrameChanges {
-        let prev = self.prev.take();
+    fn compose(&mut self, areas: Vec<ScrollArea>) {
+        self.composed = Some(areas);
+    }
+
+    fn present(&mut self, base: &Grid) -> FrameChanges {
+        let prev = self.base.take();
+        let areas = self
+            .composed
+            .take()
+            .or_else(|| prev.as_ref().map(|(_, areas)| areas.clone()))
+            .unwrap_or_default();
         let moves: Vec<(Rect, i32)> = areas
             .iter()
             .map(|now| {
@@ -353,16 +366,12 @@ impl FrameHistory {
             .filter(|(_, (_, dy))| *dy != 0)
             .map(|(area, &(rect, dy))| (area.win, rect, dy))
             .collect();
+        self.base = Some((Arc::new(base.clone()), areas));
         FrameChanges {
             prev: prev.map(|(grid, _)| grid),
             damage,
             scrolls,
-            base: (Arc::new(base.clone()), areas),
         }
-    }
-
-    fn end(&mut self, changes: FrameChanges) {
-        self.prev = Some(changes.base);
     }
 }
 
@@ -373,7 +382,6 @@ pub(crate) struct FrameChanges {
     damage: Vec<Rect>,
     /// Each window whose text moved, its text area, and by how many rows up.
     scrolls: Vec<(crate::smelt_edit::WinId, Rect, i32)>,
-    base: (Arc<Grid>, Vec<ScrollArea>),
 }
 
 /// Frame-wide values every paint callback sees in `ctx`.
@@ -577,26 +585,32 @@ mod tests {
     }
 
     #[test]
-    fn history_reports_damage_and_keeps_the_previous_base() {
+    fn history_reports_what_each_present_changed() {
         let mut history = FrameHistory::default();
         let mut base = Grid::new(4, 1);
 
-        let first = history.begin(&base, Vec::new());
+        history.compose(Vec::new());
+        let first = history.present(&base);
         assert!(first.prev.is_none());
         assert_eq!(first.damage, [Rect::new(0, 0, 4, 1)]);
-        history.end(first);
 
         base.as_mut_slice()
             .put_str(1, 0, "x", crate::smelt_edit::Style::default());
-        let second = history.begin(&base, Vec::new());
+        let second = history.present(&base);
         let prev = second.prev.as_ref().expect("previous frame");
         assert_eq!(prev.cell(1, 0).symbol, ' ');
-        assert_eq!(second.damage, [Rect::new(1, 0, 1, 1)]);
-        history.end(second);
+        assert_eq!(
+            second.damage,
+            [Rect::new(1, 0, 1, 1)],
+            "a present-time change is damage"
+        );
 
-        let third = history.begin(&base, Vec::new());
-        assert!(third.damage.is_empty());
-        assert_eq!(third.prev.as_ref().unwrap().cell(1, 0).symbol, 'x');
+        let again = history.present(&base);
+        assert!(
+            again.damage.is_empty(),
+            "presenting the same screen changes nothing"
+        );
+        assert_eq!(again.prev.as_ref().unwrap().cell(1, 0).symbol, 'x');
     }
 
     #[test]
@@ -617,18 +631,19 @@ mod tests {
             grid
         };
         let mut history = FrameHistory::default();
-        let first = history.begin(&rows(["a", "b", "c"]), content(0));
-        history.end(first);
+        history.compose(content(0));
+        history.present(&rows(["a", "b", "c"]));
 
-        let scrolled = history.begin(&rows(["b", "c", "d"]), content(-1));
+        history.compose(content(-1));
+        let scrolled = history.present(&rows(["b", "c", "d"]));
         assert_eq!(
             scrolled.scrolls,
             [(crate::smelt_edit::WinId(1), Rect::new(0, 0, 3, 3), 1)]
         );
         assert_eq!(scrolled.damage, [Rect::new(0, 2, 3, 1)], "only the new row");
-        history.end(scrolled);
 
-        let still = history.begin(&rows(["b", "c", "e"]), content(-1));
+        history.compose(content(-1));
+        let still = history.present(&rows(["b", "c", "e"]));
         assert!(still.scrolls.is_empty());
         assert_eq!(still.damage, [Rect::new(0, 2, 1, 1)]);
     }

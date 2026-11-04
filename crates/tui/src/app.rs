@@ -33,7 +33,7 @@ pub(crate) mod session_document;
 pub(crate) mod session_load;
 pub(crate) mod session_preview;
 pub(crate) mod shell_panel;
-pub(crate) mod stream_animation;
+pub(crate) mod stream_reveal;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
 pub(crate) mod transcript;
@@ -343,10 +343,13 @@ pub struct TuiApp {
     rewind_operations: crate::app::session_load::SessionOperationRuntime,
     session_preview: crate::app::session_preview::SessionPreviewRuntime,
     pending_transcript_search: Option<crate::app::search::PendingTranscriptSearch>,
-    frame_scheduler: crate::app::render_loop::FrameScheduler,
+    pub(crate) frame_scheduler: crate::app::render_loop::FrameScheduler,
     transcript_work: crate::app::transcript_work::TranscriptWorkQueue,
     continuing_engine_ask_ids: std::collections::HashSet<u64>,
     pub(crate) stream_event_arrived_at: Option<Instant>,
+    /// The last composed frame, presented again while only present-time
+    /// effects change.
+    composed: Option<crate::smelt_edit::ComposedFrame>,
     pub(crate) plugin_streams: Vec<crate::lua::api::transcript::WeakTranscriptStream>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
@@ -2165,6 +2168,7 @@ impl TuiApp {
             transcript_work: crate::app::transcript_work::TranscriptWorkQueue::default(),
             continuing_engine_ask_ids: std::collections::HashSet::new(),
             stream_event_arrived_at: None,
+            composed: None,
             plugin_streams: Vec::new(),
             last_width: term_w,
             last_height: term_h,
@@ -4098,8 +4102,10 @@ impl TuiApp {
                 _ = tokio::time::sleep(next_scheduled_frame_delay.unwrap_or(Duration::MAX)), if next_scheduled_frame_delay.is_some() => {
                     if has_animation && self.tick_drag_autoscroll_with_transcript_intent() {
                         self.dispatch_ui_window_events(false);
+                        self.render_normal();
+                    } else {
+                        self.render_scheduled();
                     }
-                    self.render_normal();
                 }
 
                 _ = tokio::time::sleep(next_idle_delay.unwrap_or(Duration::MAX)), if next_idle_delay.is_some() => {

@@ -27,7 +27,7 @@ pub use crate::event_source::SourceEvent;
 const POLL_INTERVAL: Duration = Duration::from_micros(100);
 
 /// Time after which every received stream chunk is fully revealed.
-pub const STREAM_REVEAL_LIMIT: Duration = crate::app::stream_animation::MAX_SPREAD;
+pub const STREAM_REVEAL_LIMIT: Duration = crate::app::stream_reveal::MAX_SPREAD;
 
 mod driver;
 mod invariants;

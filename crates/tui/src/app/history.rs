@@ -1531,7 +1531,7 @@ impl TuiApp {
             ));
             return;
         }
-        self.conversation.finish_stream_animation();
+        self.conversation.finish_stream_reveal();
         let applied_items: Vec<HistoryItem> = self
             .conversation
             .pending_history_appends()
@@ -1669,7 +1669,7 @@ impl TuiApp {
                 return 0;
             }
         };
-        self.conversation.finish_stream_animation();
+        self.conversation.finish_stream_reveal();
         let common_len = existing
             .iter()
             .zip(&items)
@@ -4930,7 +4930,7 @@ mod checkpoint_tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
         app.app.update_compaction_preview("one".into());
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_to_frame();
         let id = app
             .app
@@ -4944,7 +4944,7 @@ mod checkpoint_tests {
         ));
 
         app.app.update_compaction_preview("one\ntwo".into());
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_to_frame();
         assert_eq!(
             app.app.conversation.transcript().compaction_preview_id(),

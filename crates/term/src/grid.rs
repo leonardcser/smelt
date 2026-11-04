@@ -116,6 +116,10 @@ impl CellSymbol {
         Self(CompactString::from(symbol))
     }
 
+    pub fn space() -> Self {
+        Self::new(" ")
+    }
+
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -231,6 +235,14 @@ impl Grid {
         if x < self.width && y < self.height {
             self.terminal_cursor_position = Some((x, y));
         }
+    }
+
+    /// Become a copy of `other`, reusing this grid's storage.
+    pub fn copy_from(&mut self, other: &Grid) {
+        self.cells.clone_from(&other.cells);
+        self.width = other.width;
+        self.height = other.height;
+        self.terminal_cursor_position = other.terminal_cursor_position;
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {

@@ -247,11 +247,21 @@ local function heat()
   return mix(stops[i], stops[i + 1], at - (i - 1))
 end
 
-local function coal_item(color)
+-- Time to the next frame on the wall-clock grid shared by every instance.
+local function next_frame(now) return FRAME_MS - now % FRAME_MS end
+
+-- The coal in `color_at(now)`. With `animating`, it is recolored on every frame
+-- while `animating(now)` holds, without laying the bar out again.
+local function coal_item(color_at, animating)
   return {
-    runs = { { text = COAL, style = { fg = color, bold = true } } },
+    runs = { { text = COAL, style = { fg = color_at(smelt.time.now_ms()), bold = true } } },
     priority = INDICATOR_PRIORITY,
     selectable = false,
+    paint = animating and function(slice, ctx)
+      local now = smelt.time.now_ms()
+      slice:patch_style(0, 0, 1, 1, { fg = color_at(now) })
+      if animating(now) then ctx.invalidate_after(next_frame(now)) end
+    end,
   }
 end
 
@@ -259,22 +269,28 @@ local function breath(now)
   return 0.45 + 0.55 * (0.5 + 0.5 * math.sin(now / BREATH_MS * 2 * math.pi))
 end
 
+local function always() return true end
+
 -- The coal catches when the turn starts or resumes, then breathes.
 local started
-local function working_coal(now)
-  started = started or now
-  local p = math.min((now - started) / IGNITE_MS, 1)
-  return coal_item(mix(ground(), heat(), 0.1 + (breath(now) - 0.1) * p))
+local function working_coal()
+  return coal_item(function(now)
+    started = started or now
+    local p = math.min((now - started) / IGNITE_MS, 1)
+    return mix(ground(), heat(), 0.1 + (breath(now) - 0.1) * p)
+  end, always)
 end
 
 -- A failed request waits out a backoff before the next attempt: the coal is
 -- banked low and warms as the wait runs down.
 local backoff
 local function banked_coal()
-  local remaining = smelt.signal.get("work_retry_remaining_ms") or 0
-  backoff = math.max(backoff or 0, remaining)
-  local progress = backoff > 0 and 1 - remaining / backoff or 0
-  return coal_item(mix(ground(), heat(), 0.15 + 0.45 * progress))
+  return coal_item(function()
+    local remaining = smelt.signal.get("work_retry_remaining_ms") or 0
+    backoff = math.max(backoff or 0, remaining)
+    local progress = backoff > 0 and 1 - remaining / backoff or 0
+    return mix(ground(), heat(), 0.15 + 0.45 * progress)
+  end, always)
 end
 
 local done_at
@@ -295,29 +311,43 @@ local function flare(i, age, now)
   return math.max(landed, swept)
 end
 
--- Time to the next frame on the wall-clock grid shared by every instance.
-local function next_frame(now) return FRAME_MS - now % FRAME_MS end
+local function rest_color()
+  local rest = smelt.theme.is_light() and 120 or 150
+  return { rest, rest, rest }
+end
 
+-- The label types in, followed by an ellipsis. Each typed letter lays the bar
+-- out again; the colors change on every frame without a layout.
 local shown, shown_since
-local function typed_label(label, now)
+local function typed_label(label, ctx)
+  local now = smelt.time.now_ms()
   if label ~= shown then shown, shown_since = label, now end
-  local light = smelt.theme.is_light()
-  local rest = light and 120 or 150
-  local rest_color = { rest, rest, rest }
-  local flash = light and { 40, 12, 0 } or { 255, 252, 240 }
+  local letters = {}
+  for _, code in utf8.codes(label) do letters[#letters + 1] = utf8.char(code) end
+  local count = #letters
   local age = now - shown_since
-  local typed = math.min(#label, math.floor(age / TYPE_MS))
-  local runs = {}
-  for i = 1, #label + 1 do
-    if i <= typed or i == #label + 1 then
-      local landed = i <= typed or age >= #label * TYPE_MS
-      runs[#runs + 1] = {
-        text = i <= #label and label:sub(i, i) or "\u{2026}",
-        style = { fg = mix(rest_color, flash, landed and flare(i, age, now) or 0), bold = true },
-      }
-    end
-  end
-  return { runs = runs, priority = LABEL_PRIORITY }
+  local typed = math.min(count, math.floor(age / TYPE_MS))
+  if typed < count then ctx.invalidate_after(TYPE_MS - age % TYPE_MS) end
+  local text = table.concat(letters, "", 1, typed) .. "\u{2026}"
+  return {
+    runs = { { text = text, style = { fg = rest_color(), bold = true } } },
+    priority = LABEL_PRIORITY,
+    paint = function(slice, paint_ctx)
+      local now = smelt.time.now_ms()
+      local flash = smelt.theme.is_light() and { 40, 12, 0 } or { 255, 252, 240 }
+      local rest = rest_color()
+      local age = now - shown_since
+      local x = 0
+      for i = 1, typed + 1 do
+        local letter = i <= typed and letters[i] or "\u{2026}"
+        local width = smelt.text.width(letter)
+        local landed = i <= typed or age >= count * TYPE_MS
+        slice:patch_style(x, 0, width, 1, { fg = mix(rest, flash, landed and flare(i, age, now) or 0) })
+        x = x + width
+      end
+      paint_ctx.invalidate_after(next_frame(now))
+    end,
+  }
 end
 
 define("indicator", { "auto_continue_status", "work_state", "work_label" }, function(ctx)
@@ -332,7 +362,6 @@ define("indicator", { "auto_continue_status", "work_state", "work_label" }, func
     elseif state == "retrying" or state == "working" or state == "busy" then label = "working"
     end
   end
-  local now = smelt.time.now_ms()
 
   if state == "working" or state == "busy" or state == "retrying" then
     local mark
@@ -341,23 +370,20 @@ define("indicator", { "auto_continue_status", "work_state", "work_label" }, func
       mark = banked_coal()
     else
       backoff = nil
-      mark = working_coal(now)
+      mark = working_coal()
     end
-    local item = typed_label(label, now)
-    ctx.invalidate_after(next_frame(now))
-    return { mark, item }
+    return { mark, typed_label(label, ctx) }
   end
 
   started, backoff, shown = nil, nil, nil
   local mark
   if state == "paused" then
-    mark = coal_item(mix(ground(), heat(), PAUSED_LEVEL))
+    mark = coal_item(function() return mix(ground(), heat(), PAUSED_LEVEL) end)
   elseif state == "done" then
-    local cool = done_at and math.min((now - done_at) / COOL_MS, 1) or 1
-    mark = coal_item(mix(heat(), ash(), cool))
-    if cool < 1 then ctx.invalidate_after(next_frame(now)) end
+    local function cool(now) return done_at and math.min((now - done_at) / COOL_MS, 1) or 1 end
+    mark = coal_item(function(now) return mix(heat(), ash(), cool(now)) end, function(now) return cool(now) < 1 end)
   else
-    mark = coal_item(ash())
+    mark = coal_item(ash)
   end
   local items = { mark }
   if label ~= "" then

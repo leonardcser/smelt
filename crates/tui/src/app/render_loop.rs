@@ -55,6 +55,9 @@ struct PendingFrameTrace {
     urgency: FrameUrgency,
     /// Streamed output is waiting to be painted.
     streamed: bool,
+    /// UI state changed, so the frame is composed again. Otherwise only
+    /// present-time effects changed and the last composed frame is reused.
+    compose: bool,
 }
 
 #[derive(Debug)]
@@ -76,20 +79,28 @@ impl Default for FrameScheduler {
 
 impl FrameScheduler {
     pub(crate) fn request(&mut self, urgency: FrameUrgency) {
-        self.request_pending(urgency, false);
+        self.request_pending(urgency, false, true);
     }
 
-    /// Request a frame that paints streamed output: engine deltas, queued
-    /// transcript work, or a stream reveal in progress. Such a frame is painted
-    /// before the next engine event, which may finish or replace that output.
+    /// Request a frame that only presents again: present-time effects such
+    /// as frame paints and the stream reveal changed, and nothing they draw
+    /// over did.
+    pub(crate) fn request_present(&mut self, urgency: FrameUrgency) {
+        self.request_pending(urgency, false, false);
+    }
+
+    /// Request a frame that paints streamed output: engine deltas or queued
+    /// transcript work. Such a frame is painted before the next engine event,
+    /// which may finish or replace that output.
     pub(crate) fn request_stream(&mut self) {
-        self.request_pending(FrameUrgency::Continuation, true);
+        self.request_pending(FrameUrgency::Continuation, true, true);
     }
 
-    fn request_pending(&mut self, urgency: FrameUrgency, streamed: bool) {
+    fn request_pending(&mut self, urgency: FrameUrgency, streamed: bool, compose: bool) {
         if let Some(pending) = &mut self.pending {
             pending.urgency = pending.urgency.merge(urgency);
             pending.streamed |= streamed;
+            pending.compose |= compose;
             return;
         }
         let id = self.next_id;
@@ -100,6 +111,7 @@ impl FrameScheduler {
             requested_at_us,
             urgency,
             streamed,
+            compose,
         });
         smelt_perf::perf::record_value("frame:requested:id", id);
         smelt_perf::perf::record_value("frame:requested:at_us", requested_at_us);
@@ -843,7 +855,7 @@ impl TuiApp {
         if !self.scheduled_frame_is_due() {
             return false;
         }
-        self.render_normal_to(out);
+        self.render_scheduled_to(out);
         true
     }
 
@@ -854,7 +866,7 @@ impl TuiApp {
         if !self.frame_scheduler.has_pending() {
             return false;
         }
-        self.render_normal_to(out);
+        self.render_scheduled_to(out);
         true
     }
 
@@ -1052,49 +1064,58 @@ impl TuiApp {
     /// `std::io::stdout()`; the fuzz harness passes `std::io::sink()` so
     /// every code path under `content/*` and `compositor:*` runs without
     /// dumping megabytes of ANSI per scenario into libFuzzer's log file.
+    ///
+    /// A frame composes the UI into a grid, then presents it: present-time
+    /// effects (the stream reveal, then frame paints) draw over a copy and the
+    /// copy is flushed. Rendering on demand always composes, since the caller
+    /// may have changed anything.
     pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {
+        self.render_frame_to(out, true);
+    }
+
+    /// Render the frame the scheduler asked for. When only present-time
+    /// effects asked, the last composed grid is presented again.
+    pub(crate) fn render_scheduled_to<W: std::io::Write>(&mut self, out: &mut W) {
+        self.render_frame_to(out, false);
+    }
+
+    pub(crate) fn render_scheduled(&mut self) {
+        self.render_scheduled_to(&mut std::io::stdout());
+    }
+
+    fn render_frame_to<W: std::io::Write>(&mut self, out: &mut W, compose: bool) {
         crate::content::display_layout::update_kitty_geometry();
         let frame_trace = self
             .frame_scheduler
             .begin_frame(self.core.clock.instant_now());
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
+        let size = self.ui.terminal_size();
+        let composed_stale = self
+            .composed
+            .as_ref()
+            .is_none_or(|composed| (composed.grid.width(), composed.grid.height()) != size);
+        let compose = compose || frame_trace.is_none_or(|trace| trace.compose) || composed_stale;
+        let clock = if compose {
+            Some(self.compose_frame())
+        } else {
+            None
+        };
+        self.present_frame(out, clock);
+        if let Some(trace) = frame_trace {
+            FrameScheduler::record_flushed(trace);
+        }
+    }
+
+    /// Bring the UI up to date and paint it into [`TuiApp::composed`].
+    /// Returns the paint clock its leaf paints saw.
+    fn compose_frame(&mut self) -> crate::lua::paint::PaintClock {
+        let _perf = smelt_perf::perf::begin("compositor:compose");
         self.apply_pending_transcript_work();
         // Published after queued work is applied: it can end the turn, and
         // renderers must paint that state rather than the previous one.
         self.publish_diff_signals();
-        let streams = self
-            .plugin_streams
-            .iter()
-            .filter_map(std::rc::Weak::upgrade)
-            .collect::<Vec<_>>();
         self.plugin_streams
             .retain(|stream| stream.strong_count() > 0);
-        let now = self.core.clock.instant_now();
-        let pending = crate::lua::scope_app(self, || {
-            let mut pending = false;
-            for stream in streams {
-                pending |= stream.borrow_mut().advance(now);
-            }
-            pending
-        });
-        if pending {
-            self.frame_scheduler.request_stream();
-        }
-        if self
-            .conversation
-            .advance_stream_animation(self.core.clock.instant_now())
-        {
-            self.frame_scheduler.request_stream();
-        }
-        if self.conversation.advance_compaction_animation(now) {
-            self.frame_scheduler.request_stream();
-        }
-        for block_id in self.conversation.advance_tool_draft_animations(now) {
-            self.transcript_work.request_tool_draft_summary(block_id);
-        }
-        if self.conversation.has_pending_tool_draft_animation() {
-            self.frame_scheduler.request_stream();
-        }
         self.refresh_pending_tool_draft_summaries();
         if !self.transcript_work.is_empty() && !self.transcript_work.front_waits_for_hydration() {
             self.frame_scheduler.request_stream();
@@ -1179,11 +1200,10 @@ impl TuiApp {
             }
         }
 
-        let _p = smelt_perf::perf::begin("compositor:render_flush");
-
         // Transcript content was materialized by the committed-view phase. The
         // prepare pass still materializes other row-backed windows and applies search.
         let prepared_frame = {
+            let _p = smelt_perf::perf::begin("compositor:prepare");
             let overlays = &mut self.overlays;
             let search_session = overlays
                 .search_session()
@@ -1222,7 +1242,7 @@ impl TuiApp {
         // Lua paint callbacks need a scoped app host, which cannot alias the UI
         // borrow. The frame owns its grid and borrows the UI only while painting
         // built-in commands, so each Lua leaf paints directly into the frame in
-        // its layer order. Frame-stage paints then see the finished screen.
+        // its layer order.
         let clock = self.paint_timeline.advance(
             self.core.monotonic_ms(),
             self.platform.terminal_is_focused(),
@@ -1240,27 +1260,118 @@ impl TuiApp {
                 None,
             );
         }
-        let windows = frame.windows().to_vec();
-        let mut frame = frame.into_grid();
+        let composed = frame.finish();
+        self.measure_stream_reveals(&composed);
+        if self
+            .paint_registry
+            .frame_paints()
+            .iter()
+            .any(|slot| slot.options.history())
+        {
+            let areas = self.scroll_areas(composed.windows());
+            self.paint_timeline.compose_history(areas);
+        } else {
+            self.paint_timeline.drop_history();
+        }
+        self.composed = Some(composed);
+        clock
+    }
+
+    /// Count what each stream reveal gained on the frame just composed.
+    fn measure_stream_reveals(&mut self, composed: &crate::smelt_edit::ComposedFrame) {
+        let now = self.core.clock.instant_now();
+        let painted = |shows: &dyn Fn(&crate::smelt_edit::PaintedWindow) -> bool| {
+            composed
+                .windows()
+                .iter()
+                .find(|painted| shows(painted))
+                .copied()
+        };
+        if self.conversation.reveal_mut().is_tracking() {
+            let layout: std::collections::HashMap<u64, _> = self
+                .conversation
+                .transcript()
+                .visible_block_layout()
+                .map(|(block, start, rows)| (block.get(), (start, rows)))
+                .collect();
+            let window = painted(&|painted| painted.win == crate::app::TRANSCRIPT_WIN);
+            self.conversation.reveal_mut().measure(
+                composed,
+                window,
+                |id| layout.get(&id).copied(),
+                now,
+            );
+        }
+        for stream in self
+            .plugin_streams
+            .iter()
+            .filter_map(std::rc::Weak::upgrade)
+        {
+            let mut stream = stream.borrow_mut();
+            if !stream.reveal_mut().is_tracking() {
+                continue;
+            }
+            // The stream's buffer is its one segment.
+            let buf = stream.buf();
+            let window = painted(&|painted| painted.buf == buf);
+            let rows = self
+                .ui
+                .buf(buf)
+                .map_or(0, |buf| buf.line_count() as crate::smelt_edit::RowIndex);
+            stream
+                .reveal_mut()
+                .measure(composed, window, |_| Some((0, rows)), now);
+        }
+    }
+
+    /// Present the composed frame: hide unrevealed stream glyphs, run frame
+    /// paints over a copy and flush it. `clock` is the composing frame's when
+    /// this frame composed, so leaf and frame paints share one frame.
+    fn present_frame<W: std::io::Write>(
+        &mut self,
+        out: &mut W,
+        clock: Option<crate::lua::paint::PaintClock>,
+    ) {
+        let Some(composed) = self.composed.take() else {
+            return;
+        };
+        let _perf = smelt_perf::perf::begin("compositor:present");
+        let now = self.core.clock.instant_now();
+        let mut grid = self.ui.begin_present(&composed.grid);
+        let mut revealing = self
+            .conversation
+            .reveal_mut()
+            .present(&mut grid, &composed, now);
+        for stream in self
+            .plugin_streams
+            .iter()
+            .filter_map(std::rc::Weak::upgrade)
+        {
+            revealing |= stream
+                .borrow_mut()
+                .reveal_mut()
+                .present(&mut grid, &composed, now);
+        }
+        if revealing {
+            self.frame_scheduler
+                .request_present(FrameUrgency::Continuation);
+        }
+        let clock = clock.unwrap_or_else(|| {
+            self.paint_timeline.advance(
+                self.core.monotonic_ms(),
+                self.platform.terminal_is_focused(),
+            )
+        });
         let frame_paints = self.paint_registry.frame_paints();
         let changes = frame_paints
             .iter()
             .any(|slot| slot.options.history())
-            .then(|| {
-                let areas = self.scroll_areas(&windows);
-                self.paint_timeline.begin_history(&frame, areas)
-            });
-        if changes.is_none() {
-            self.paint_timeline.drop_history();
-        }
-        self.run_frame_paints(&frame_paints, &mut frame, &clock, changes.as_ref());
-        if let Some(changes) = changes {
-            self.paint_timeline.end_history(changes);
-        }
-        let _ = self.ui.flush_frame(out, frame);
-        if let Some(trace) = frame_trace {
-            FrameScheduler::record_flushed(trace);
-        }
+            .then(|| self.paint_timeline.present_history(&grid));
+        crate::lua::paint::scope_composed(&composed, || {
+            self.run_frame_paints(&frame_paints, &mut grid, &clock, changes.as_ref());
+        });
+        let _ = self.ui.flush_frame(out, grid);
+        self.composed = Some(composed);
     }
 
     /// Where each painted window's content sat, so frame paints can tell
@@ -1890,17 +2001,20 @@ mod tests {
             };
             content.snapshot()
         }
-        assert_eq!(streamed_text(&app), "f");
+        assert_eq!(streamed_text(&app), "first");
 
         app.clock.advance(6 * CONTINUATION_FRAME_INTERVAL);
         assert!(app.app.render_pending_transient_frame_to(&mut sink));
-        let partial = streamed_text(&app);
-        assert!(
-            partial.len() > 1 && "first second third".starts_with(&partial) && partial.len() < 18
-        );
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
-        assert!(app.app.render_pending_transient_frame_to(&mut sink));
         assert_eq!(streamed_text(&app), "first second third");
+        let screen = app.app.ui.flushed_snapshot().text();
+        assert!(
+            screen.contains('f') && !screen.contains("first second third"),
+            "the new text types in over later frames: {screen}"
+        );
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
+        assert!(app.app.render_pending_transient_frame_to(&mut sink));
+        let screen = app.app.ui.flushed_snapshot().text();
+        assert!(screen.contains("first second third"), "{screen}");
     }
 
     #[test]
@@ -1923,7 +2037,7 @@ mod tests {
             });
         app.app.apply_pending_transcript_work();
         app.render_to_frame();
-        app.clock.advance(crate::app::stream_animation::MAX_SPREAD);
+        app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         let frame = app.render_to_frame().text();
         assert!(frame.contains("valid answer"));
         assert!(!frame.contains("rejected"));

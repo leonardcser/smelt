@@ -46,9 +46,7 @@ impl TuiApp {
                 self.transcript_work.request_tool_draft_summary(block_id);
             }
         }
-        if self.conversation.has_pending_tool_draft_animation() {
-            self.request_continuation_render();
-        }
+        self.request_continuation_render();
     }
 
     pub(crate) fn handle_tool_draft_finished(

@@ -32,9 +32,9 @@ pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
 
 pub use smelt_term::{
-    flush_diff, Border, Cell, CellUpdate, Color, Compositor, Constraint, ContainerId, Grid,
-    GridSlice, HitRegistry, LayoutTree, Line, Natural, NaturalRef, PaintId, Rect, SnapshotFrame,
-    Span, StaticNatural, Style, Theme,
+    flush_diff, Border, Cell, CellSymbol, CellUpdate, Color, Compositor, Constraint, ContainerId,
+    Grid, GridSlice, HitRegistry, LayoutTree, Line, Natural, NaturalRef, PaintId, Rect,
+    SnapshotFrame, Span, StaticNatural, Style, Theme,
 };
 pub use smelt_term::{grid, layout};
 
@@ -197,6 +197,7 @@ pub struct PreparedPaintLeaf {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaintedWindow {
     pub win: WinId,
+    pub buf: BufId,
     /// Where its buffer text sits on screen: row `r` shows buffer row
     /// `scroll_top + r`.
     pub text: Rect,
@@ -218,6 +219,86 @@ pub struct Frame {
     commands: std::vec::IntoIter<PreparedFrameCommand>,
     theme: std::sync::Arc<Theme>,
     windows: Vec<PaintedWindow>,
+    owners: ScreenOwners,
+}
+
+/// Which painted window's text shows in each screen cell. Anything painted
+/// later over a window, such as an overlay, a border or a paint leaf, takes
+/// the cell away from it.
+#[derive(Clone, Debug, Default)]
+struct ScreenOwners {
+    width: u16,
+    /// Index into the frame's windows per cell, or [`Self::NONE`].
+    cells: Vec<u16>,
+}
+
+impl ScreenOwners {
+    const NONE: u16 = u16::MAX;
+
+    fn new(width: u16, height: u16) -> Self {
+        Self {
+            width,
+            cells: vec![Self::NONE; usize::from(width) * usize::from(height)],
+        }
+    }
+
+    fn mark(&mut self, rect: Rect, owner: u16) {
+        let height = (self.cells.len() / usize::from(self.width.max(1))) as u16;
+        let right = rect.right().min(self.width);
+        for y in rect.y..rect.bottom().min(height) {
+            let row = usize::from(y) * usize::from(self.width);
+            if rect.x < right {
+                self.cells[row + usize::from(rect.x)..row + usize::from(right)].fill(owner);
+            }
+        }
+    }
+
+    fn get(&self, x: u16, y: u16) -> Option<usize> {
+        if x >= self.width {
+            return None;
+        }
+        let owner = *self
+            .cells
+            .get(usize::from(y) * usize::from(self.width) + usize::from(x))?;
+        (owner != Self::NONE).then_some(usize::from(owner))
+    }
+}
+
+/// A finished frame: the screen as the UI painted it, and where each
+/// window's text landed on it.
+#[derive(Clone)]
+pub struct ComposedFrame {
+    pub grid: Grid,
+    windows: Vec<PaintedWindow>,
+    owners: ScreenOwners,
+}
+
+impl ComposedFrame {
+    /// A frame whose `windows` were painted in order over `grid`, each
+    /// owning its text area.
+    pub fn new(grid: Grid, windows: Vec<PaintedWindow>) -> Self {
+        let mut owners = ScreenOwners::new(grid.width(), grid.height());
+        for (index, window) in windows.iter().enumerate() {
+            owners.mark(window.text, index as u16);
+        }
+        Self {
+            grid,
+            windows,
+            owners,
+        }
+    }
+
+    /// The windows painted, in painter order.
+    pub fn windows(&self) -> &[PaintedWindow] {
+        &self.windows
+    }
+
+    /// The window whose text shows in screen cell `(x, y)`, if any.
+    pub fn owner(&self, x: u16, y: u16) -> Option<&PaintedWindow> {
+        self.owners
+            .get(x, y)
+            .and_then(|index| self.windows.get(index))
+    }
 }
 
 impl Frame {
@@ -228,7 +309,10 @@ impl Frame {
         let theme = &self.theme;
         for command in self.commands.by_ref() {
             match command {
-                PreparedFrameCommand::Clear(area) => grid.slice_mut(area).clear(),
+                PreparedFrameCommand::Clear(area) => {
+                    grid.slice_mut(area).clear();
+                    self.owners.mark(area, ScreenOwners::NONE);
+                }
                 PreparedFrameCommand::Divider { divider, active } => {
                     let mut normal = theme.get("Comment");
                     let mut dragging = theme.get("SmeltResizeHandle");
@@ -244,7 +328,10 @@ impl Frame {
                     area,
                     chrome,
                     context,
-                } => layout::paint_chrome(grid, area, &chrome, theme, context),
+                } => {
+                    layout::paint_chrome(grid, area, &chrome, theme, context);
+                    self.owners.mark(area, ScreenOwners::NONE);
+                }
                 PreparedFrameCommand::Window { win, rect, context } => {
                     let Some(window) = ui.wins.get(&win) else {
                         continue;
@@ -253,15 +340,26 @@ impl Frame {
                         continue;
                     };
                     window.render(buffer, &mut grid.slice_mut(rect), &context);
+                    self.owners.mark(rect, ScreenOwners::NONE);
                     if let Some(text) = window.text_rect() {
+                        let index = u16::try_from(self.windows.len())
+                            .ok()
+                            .filter(|index| *index != ScreenOwners::NONE);
+                        if let Some(index) = index {
+                            self.owners.mark(text, index);
+                        }
                         self.windows.push(PaintedWindow {
                             win,
+                            buf: window.buf,
                             text,
                             scroll_top: window.scroll_top(),
                         });
                     }
                 }
-                PreparedFrameCommand::Paint(leaf) => return Some(leaf),
+                PreparedFrameCommand::Paint(leaf) => {
+                    self.owners.mark(leaf.rect, ScreenOwners::NONE);
+                    return Some(leaf);
+                }
             }
         }
         None
@@ -271,15 +369,14 @@ impl Frame {
         &mut self.grid
     }
 
-    /// The windows painted so far, in painter order.
-    pub fn windows(&self) -> &[PaintedWindow] {
-        &self.windows
-    }
-
     /// Finish the frame. Remaining commands are dropped; call
     /// [`Self::paint_to_next_leaf`] until it returns `None` first.
-    pub fn into_grid(self) -> Grid {
-        self.grid
+    pub fn finish(self) -> ComposedFrame {
+        ComposedFrame {
+            grid: self.grid,
+            windows: self.windows,
+            owners: self.owners,
+        }
     }
 }
 
@@ -2883,12 +2980,23 @@ impl Ui {
     /// borrows the UI only while painting built-in commands, so hosts can run
     /// code that needs the whole UI between leaves.
     pub fn begin_frame(&mut self, prepared: PreparedFrame) -> Frame {
+        let grid = self.surface.compositor_mut().begin_frame();
+        let owners = ScreenOwners::new(grid.width(), grid.height());
         Frame {
-            grid: self.surface.compositor_mut().begin_frame(),
+            grid,
             commands: prepared.commands.into_iter(),
             theme: prepared.theme,
             windows: Vec::new(),
+            owners,
         }
+    }
+
+    /// A grid for presenting a frame composed earlier: a copy of `composed`
+    /// in the compositor's next buffer. Pass it to [`Self::flush_frame`].
+    pub fn begin_present(&mut self, composed: &Grid) -> Grid {
+        let mut grid = self.surface.compositor_mut().begin_frame();
+        grid.copy_from(composed);
+        grid
     }
 
     /// Paint a prepared frame, calling `paint` for each host-owned leaf in painter order.
@@ -2900,7 +3008,7 @@ impl Ui {
         while let Some(leaf) = frame.paint_to_next_leaf(self) {
             paint(&leaf, &mut frame.grid_mut().slice_mut(leaf.rect));
         }
-        frame.into_grid()
+        frame.finish().grid
     }
 
     /// Flush a painted frame and recycle its grid.
@@ -4795,7 +4903,8 @@ mod tests {
             .slice_mut(leaf.rect)
             .set(0, 0, 'X', Style::default());
         assert!(frame.paint_to_next_leaf(&ui).is_none());
-        ui.flush_frame(&mut Vec::new(), frame.into_grid()).unwrap();
+        ui.flush_frame(&mut Vec::new(), frame.finish().grid)
+            .unwrap();
 
         assert!(ui.flushed_snapshot().text().contains('X'));
     }

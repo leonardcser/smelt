@@ -275,8 +275,9 @@ impl TestApp {
         }
     }
 
-    pub(crate) fn ui_snapshot(&mut self) -> crate::smelt_edit::SnapshotFrame {
-        self.app.ui.snapshot()
+    /// The frame last presented to the terminal.
+    pub(crate) fn presented_frame(&self) -> crate::smelt_edit::SnapshotFrame {
+        self.app.ui.flushed_snapshot()
     }
 
     /// Consume a scripted source through the event and compositor paths used
@@ -293,7 +294,7 @@ impl TestApp {
         while let Some(event) = source.next().await {
             let mut transient_frame = None;
             self.feed_one_with_transient_observer(event, |app| {
-                transient_frame = Some(app.ui.snapshot());
+                transient_frame = Some(app.ui.flushed_snapshot());
             });
             if let Some(snapshot) = transient_frame {
                 frames.push(RenderLoopFrame {
@@ -335,7 +336,7 @@ impl TestApp {
     ) -> bool {
         self.app
             .dispatch_engine_event_in_render_loop_to(event, out, |app| {
-                on_transient_frame(app.ui.snapshot());
+                on_transient_frame(app.ui.flushed_snapshot());
             })
     }
 
@@ -350,7 +351,7 @@ impl TestApp {
     ) -> bool {
         self.app
             .dispatch_engine_output_in_render_loop_to(output, out, |app| {
-                on_transient_frame(app.ui.snapshot());
+                on_transient_frame(app.ui.flushed_snapshot());
             })
     }
 
@@ -364,7 +365,7 @@ impl TestApp {
     ) -> crate::app::render_loop::EngineOutputDrainOutcome {
         self.app
             .drain_ready_engine_outputs_for_frame_to(out, |app| {
-                on_transient_frame(app.ui.snapshot());
+                on_transient_frame(app.ui.flushed_snapshot());
             })
     }
 
