@@ -362,13 +362,21 @@ fn discover_project_context(
     root: Option<&Path>,
     repository_key: Option<PathBuf>,
 ) -> ProjectContext {
-    let git_root = worktree_root(cwd).ok();
+    // Outside a repository every other Git query fails, so none runs.
+    let in_repository = repository_key.is_some();
+    let git_root = in_repository.then(|| worktree_root(cwd).ok()).flatten();
     let active_root = git_root
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
         .unwrap_or_else(|| std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
-    let branch = current_branch(&active_root).unwrap_or_default();
-    let base = default_base_ref(&active_root);
-    let worktrees = git_worktrees(&active_root).unwrap_or_default();
+    let (branch, base, worktrees) = if in_repository {
+        (
+            current_branch(&active_root).unwrap_or_default(),
+            default_base_ref(&active_root),
+            git_worktrees(&active_root).unwrap_or_default(),
+        )
+    } else {
+        (String::new(), "HEAD".to_string(), Vec::new())
+    };
     let default_base_path =
         find_branch_worktree(&worktrees, &base).map(|p| std::fs::canonicalize(&p).unwrap_or(p));
     let base_path = default_base_path
