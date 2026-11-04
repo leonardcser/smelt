@@ -2096,6 +2096,9 @@ struct PersistenceActor {
     head: smelt_store::StoreHead,
     /// The head reclamation last observed and when it did.
     reclamation_head: (smelt_store::StoreHead, Instant),
+    /// The head a reclamation pass last finished at; nothing is left to reclaim
+    /// until the head moves.
+    reclaimed_head: Option<smelt_store::StoreHead>,
     durable: PersistenceGeneration,
     last_publication: Option<PersistenceAcknowledgement>,
     retained_save: Option<RetainedSessionSave>,
@@ -2232,6 +2235,7 @@ fn persistence_actor(
         search_projection_requested: false,
         head: actual_head,
         reclamation_head: (actual_head, Instant::now()),
+        reclaimed_head: None,
         durable: generation,
         last_publication: None,
         retained_save: None,
@@ -2275,7 +2279,7 @@ impl PersistenceActor {
                         Err(TryRecvError::Empty) if self.drive_one_audit() => continue,
                         Err(TryRecvError::Empty) if self.drive_automatic_retry() => continue,
                         Err(TryRecvError::Empty) if self.drive_one_reclamation() => continue,
-                        Err(TryRecvError::Empty) => match controls.recv_timeout(self.idle_wait()) {
+                        Err(TryRecvError::Empty) => match self.wait_for_control(&controls) {
                             Ok(control) => control,
                             Err(RecvTimeoutError::Timeout) => continue,
                             Err(RecvTimeoutError::Disconnected) => {
@@ -2516,7 +2520,8 @@ impl PersistenceActor {
     fn drive_one_reclamation(&mut self) -> bool {
         // Startup settles the journal before publishing this writer. Uncertain
         // foreground commands must settle through explicit retry before GC runs.
-        if self.blocked.is_some()
+        if self.reclaimed_head == Some(self.head)
+            || self.blocked.is_some()
             || self.retained_save.is_some()
             || self
                 .latest_generation()
@@ -2552,7 +2557,11 @@ impl PersistenceActor {
             Ok(released > 0)
         });
         match result {
-            Ok(more) => more,
+            Ok(true) => true,
+            Ok(false) => {
+                self.reclaimed_head = Some(self.head);
+                false
+            }
             Err(error) => {
                 // Maintenance does not change durable acknowledgements or turn a
                 // failed canonical operation into an implicit retry. The next
@@ -2746,13 +2755,21 @@ impl PersistenceActor {
         true
     }
 
-    /// Sleeps until the next control, but no longer than idle reclamation or a due retry allow.
-    fn idle_wait(&self) -> Duration {
-        self.automatic_retry_at()
-            .map_or(IDLE_RECLAMATION_INTERVAL, |at| {
-                at.saturating_duration_since(Instant::now())
-                    .min(IDLE_RECLAMATION_INTERVAL)
-            })
+    /// Sleeps until the next control, but no longer than pending reclamation or a due retry
+    /// allow. With neither, an idle session does not wake at all.
+    fn wait_for_control(
+        &self,
+        controls: &Receiver<PersistenceControl>,
+    ) -> Result<PersistenceControl, RecvTimeoutError> {
+        let reclamation =
+            (self.reclaimed_head != Some(self.head)).then_some(IDLE_RECLAMATION_INTERVAL);
+        let retry = self
+            .automatic_retry_at()
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        match reclamation.into_iter().chain(retry).min() {
+            Some(wait) => controls.recv_timeout(wait),
+            None => controls.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        }
     }
 
     fn block_persistence(
@@ -3811,8 +3828,17 @@ mod tests {
     }
 
     #[test]
-    fn resumed_idle_actor_reclaims_abandoned_history_without_changing_durable_state() {
+    fn resumed_idle_actor_reclaims_abandoned_history_once_without_changing_durable_state() {
         let _home = crate::app::test_harness::initialized_test_home_guard();
+        smelt_perf::perf::set_enabled(true);
+        smelt_perf::perf::clear();
+        let reclamation_passes = || {
+            smelt_perf::perf::snapshot()
+                .values
+                .iter()
+                .find(|entry| entry.label == "persist:reclamation:rows_examined")
+                .map_or(0, |entry| entry.count)
+        };
         let root = tempfile::tempdir().unwrap();
         let sessions = smelt_core::session::SessionStorage::new(root.path().to_path_buf());
         let mut session = fixture_session();
@@ -3898,6 +3924,16 @@ mod tests {
         );
         assert!(reader.storage_stats().unwrap().object_rows < before);
         assert!(reader.doctor_report().unwrap().healthy);
+        thread::sleep(IDLE_RECLAMATION_INTERVAL * 2);
+        let passes = reclamation_passes();
+        assert!(passes > 0);
+        thread::sleep(IDLE_RECLAMATION_INTERVAL * 2);
+        assert_eq!(
+            reclamation_passes(),
+            passes,
+            "an unchanged head is reclaimed once, not on every idle wake"
+        );
+        smelt_perf::perf::set_enabled(false);
         assert!(actor
             .close(
                 PersistenceGeneration::ZERO,
