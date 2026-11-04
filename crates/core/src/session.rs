@@ -1410,6 +1410,8 @@ const IDLE_MAINTENANCE_SHUTDOWN_DEADLINE: Duration = Duration::from_millis(50);
 /// it cancels the work between bounded steps.
 pub struct IdleMaintenance {
     cancel: Arc<AtomicBool>,
+    /// Dropping it ends the delay before maintenance starts.
+    delay: Option<std::sync::mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -1417,16 +1419,15 @@ impl SessionStorage {
     pub fn spawn_idle_maintenance(&self) -> IdleMaintenance {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
+        let (delay, delay_ended) = std::sync::mpsc::channel::<()>();
         let sessions_root = self.sessions_dir();
         let thread = std::thread::Builder::new()
             .name("smelt-session-maintenance".into())
             .spawn(move || {
-                let started = Instant::now();
-                while started.elapsed() < IDLE_MAINTENANCE_DELAY {
-                    if worker_cancel.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
+                if delay_ended.recv_timeout(IDLE_MAINTENANCE_DELAY)
+                    != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                {
+                    return;
                 }
                 let _ =
                     smelt_store::cleanup_abandoned_lineages(&sessions_root, LINEAGE_CLEANUP_BATCH);
@@ -1444,13 +1445,18 @@ impl SessionStorage {
                 }
             })
             .ok();
-        IdleMaintenance { cancel, thread }
+        IdleMaintenance {
+            cancel,
+            delay: Some(delay),
+            thread,
+        }
     }
 }
 
 impl Drop for IdleMaintenance {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        drop(self.delay.take());
         let Some(thread) = self.thread.take() else {
             return;
         };
