@@ -27,15 +27,6 @@ prompt as ordinary text you can scroll through and edit before sending.
 For rules the agent should always follow in a project, put them in an
 [`AGENTS.md`](../customize/agent.md#instructions-agentsmd).
 
-## Find a file and open it in your editor
-
-Run `/files` (or `/files all`) to search workspace files, including untracked files
-that are not ignored. Use `/files git` for Git-tracked files only. Type to filter,
-then press `Enter` to open the selected file in `$VISUAL`, then `$EDITOR`, with
-`vi` as the fallback. Quit the editor to return to smelt.
-
-<figure class="term" data-replay="../../assets/replays/files.json" aria-label="Finding src/pricing.rs with /files, opening it in Neovim, then returning to smelt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
-
 ## Review before it changes anything
 
 **Modes** set how much the agent may do without asking. Press `Shift+Tab` to
@@ -60,6 +51,19 @@ to your decision that the agent will see.
 
 See [Permissions](../reference/permissions.md) for the rules behind each mode and
 approval scope, and [Tools](../reference/tools.md) for what the agent can call.
+
+## Review changes and open files
+
+Use `/diff` to review what the session changed in the working tree:
+
+<figure class="term" data-replay="../../assets/replays/diff.json" aria-label="Reviewing the working tree changes with /diff" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
+
+Run `/files` to search workspace files, including untracked files that are not
+ignored. Use `/files git` for Git-tracked files only. Press `Enter` to open the
+selection in `$VISUAL`, then `$EDITOR`, then `vi`. Quit the editor to return to
+smelt.
+
+<figure class="term" data-replay="../../assets/replays/files.json" aria-label="Finding src/pricing.rs with /files, opening it in Neovim, then returning to smelt" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 ## Run hands-off
 
@@ -198,10 +202,6 @@ smelt --resume <SESSION_ID> # resume a specific session
 Inside smelt, `/resume` does the same:
 
 <figure class="term" data-replay="../../assets/replays/resume.json" aria-label="Picking an earlier session with /resume" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
-
-Use `/diff` to review what the session changed in the working tree:
-
-<figure class="term" data-replay="../../assets/replays/diff.json" aria-label="Reviewing the working tree changes with /diff" markdown="0"><pre class="term__screen" aria-hidden="true"></pre></figure>
 
 ### Rewind to an earlier turn
 

@@ -62,14 +62,14 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 
 ## File finder
 
-[Find a file and open it in your editor](../guide/workflows.md#find-a-file-and-open-it-in-your-editor)
+[Find a file and open it in your editor](../guide/workflows.md#review-changes-and-open-files)
 with `/files` or `/files git`.
 
 No global keybindings are installed. To add your own:
 
 ```lua
 smelt.keymap.set("n", "<leader>ff", function()
-  smelt.cmd.run("files all")
+  smelt.cmd.run("files")
 end, { desc = "find workspace file" })
 
 smelt.keymap.set("n", "<leader>fg", function()
