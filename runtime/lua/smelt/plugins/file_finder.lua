@@ -40,14 +40,14 @@ local function open(tracked)
     surface = "list_inert", kind = "list", initial_cursor = 0,
     pad_left = 1, pad_right = 1, scrollbar = false,
   })
-  local preview_buf, preview
-  if (smelt.ui.size().width or 80) >= 100 then
-    preview_buf = smelt.buf.new({ readonly = true })
-    preview_buf:lines({ "  (no file selected)" })
-    preview = smelt.win.new(preview_buf, {
-      surface = "selectable_text", wrap = false, scrollbar = true, gutter = "line_numbers",
-    })
-  end
+  local preview_buf = smelt.buf.new({ readonly = true })
+  preview_buf:lines({ "  (no file selected)" })
+  local preview = smelt.win.new(preview_buf, {
+    surface = "selectable_text", wrap = false, scrollbar = true, gutter = "line_numbers",
+  })
+  -- The preview needs room beside the list; narrower terminals show the list alone.
+  local function wants_preview() return (smelt.ui.size().width or 80) >= 100 end
+  local show_preview = wants_preview()
   local list = smelt.list.new({
     leaf = list_win, buf = list_buf, items = {},
     render = require("smelt.widgets.file_row").render,
@@ -84,7 +84,7 @@ local function open(tracked)
 
   -- The first preview renders immediately; later cursor movement is debounced.
   local function schedule_preview()
-    if not preview then return end
+    if not show_preview then return end
     if preview_timer then preview_timer:remove(); preview_timer = nil end
     if not preview_path then return render_preview() end
     preview_timer = smelt.timer.set(40, function()
@@ -180,20 +180,31 @@ local function open(tracked)
       { layout.leaf(count_win, { measure = count_size }), width = "fit" },
     }, { border = { all = "Comment" }, gap = 0 }), height = 3 },
   }, { gap = 0 })
-  local root = left
-  if preview then
-    root = layout.hbox({
-      { left, width = "40%" },
-      { layout.leaf(preview, {
-        border = { all = "Comment" }, title = smelt.dialog.title(" preview "),
-      }), width = "fill" },
-    }, { gap = 0, padding = 0 })
+  local function mount()
+    local root = left
+    if show_preview then
+      root = layout.hbox({
+        { left, width = "40%" },
+        { layout.leaf(preview, {
+          border = { all = "Comment" }, title = smelt.dialog.title(" preview "),
+        }), width = "fill" },
+      }, { gap = 0, padding = 0 })
+    end
+    overlay = smelt.overlay.new({
+      name = "smelt.files", anchor = "center", border = "none", modal = true,
+      width = "85%", height = "75%", layout = root, keymaps = keymaps,
+    })
   end
-  overlay = smelt.overlay.new({
-    anchor = "center", border = "none", modal = true,
-    width = "85%", height = "75%", layout = root, keymaps = keymaps,
-  })
+  mount()
   input:focus()
+  list_win:on("resized", function()
+    local wide = wants_preview()
+    if closed or wide == show_preview then return end
+    show_preview = wide
+    mount()
+    input:focus()
+    if wide then preview_path = nil; render_preview() end
+  end)
 
   poll = smelt.timer.every(100, function() if not closed then refilter(false) end end)
   refilter(true)

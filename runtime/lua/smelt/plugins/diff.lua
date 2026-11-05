@@ -29,6 +29,12 @@ function M.open(opts)
   -- Title cells the full tab row needs: " Changes  Branch  History ".
   local tabs_width = 26
   local compact_tabs = false
+  -- Below this overlay width the two panes cannot both fit, so one shows at a time.
+  local single_pane_width = 72
+  local function fits_one_pane()
+    return math.floor((smelt.ui.size().width or 80) * 0.94) < single_pane_width
+  end
+  local single_pane, shown_pane = fits_one_pane(), "preview"
   local view = opts.view or "changes"
   local browsing = view ~= "changes" and not opts.revision
   local base, revision = opts.base, opts.revision
@@ -82,8 +88,9 @@ function M.open(opts)
     local overlay_width = math.floor((smelt.terminal.size().width or 80) * 0.94)
     compact_tabs = math.min(42, overlay_width - 32) - 2 < tabs_width
   end
+  local status
   local overlay_opts = { name = "smelt.diff", anchor = "center", width = "94%", height = "85%", modal = true, border = "none" }
-  local function status()
+  function status()
     local label = busy or (stale and "stale - r refresh")
     -- The sidebar's top border doubles as the view switcher; span ids make it clickable.
     local switcher = {}
@@ -94,26 +101,30 @@ function M.open(opts)
       switcher[#switcher + 1] = { id = tab, text = " " .. name .. " ",
         style = tab == view and { fg = false, bg = "CursorLine", bold = true } or { dim = true } }
     end
+    shown_pane = focused
     local files_leaf = layout.leaf(sidebar, {
-      border = { top = "Comment", bottom = "Comment", left = "Comment" },
+      border = single_pane and { all = "Comment" } or { top = "Comment", bottom = "Comment", left = "Comment" },
       title = switcher,
     })
     local caption = label or comparison_label
     local title = caption and smelt.dialog.title(" " .. caption .. " ") or nil
+    local pane_border = single_pane and { all = "Comment" }
+      or { top = "Comment", bottom = "Comment", right = "Comment" }
     local detail = layout.leaf(preview, {
-      border = { top = "Comment", bottom = "Comment", right = "Comment" }, title = title,
+      border = pane_border, title = title,
     })
     if view ~= "changes" then
       detail = layout.frame(layout.vbox({
         { layout.leaf(info), height = 3 },
         { layout.leaf(preview, { border = { top = "Comment" }, title = title }), height = "fill" },
       }), {
-        border = { top = "Comment", bottom = "Comment", right = "Comment" },
+        border = pane_border,
         title = smelt.dialog.title(browsing and " review " or " commit "),
       })
     end
     local rows = {
-      { split:layout(files_leaf, detail), height = "fill" },
+      { single_pane and (focused == "files" and files_leaf or detail) or split:layout(files_leaf, detail),
+        height = "fill" },
       { layout.leaf(input, { border = { all = "Comment" },
         title = smelt.dialog.title(input_purpose == "base" and " comparison base " or " revision ") }),
         height = query_open and 3 or 0 },
@@ -211,6 +222,7 @@ function M.open(opts)
   local function focus_pane(name)
     sidebar_count, folder_press = nil, nil
     focused = name
+    if single_pane and shown_pane ~= name then status() end
     if name == "preview" then preview:focus(); sync_sidebar() else sidebar:focus() end
   end
   sidebar:on("focus", function() focused = "files" end)
@@ -735,7 +747,16 @@ function M.open(opts)
     focus_pane("files")
     status()
   end)
+  local function on_terminal_resize()
+    local narrow = fits_one_pane()
+    if narrow == single_pane then return end
+    single_pane = narrow
+    status()
+    focus_pane(focused)
+  end
+  preview:on("resized", on_terminal_resize)
   sidebar:on("resized", function(event)
+    on_terminal_resize()
     if browsing then render_commits() end
     -- The title runs from after the corner to one cell before the divider.
     local compact = event.width - 1 < tabs_width
@@ -753,6 +774,9 @@ function M.open(opts)
         if view ~= "changes" and not browsing then
           if #entries == 0 then load_history(false) else show_commits() end
         end
+      end },
+      { key = "alt-w", on_press = function()
+        if single_pane then focus_pane(focused == "files" and "preview" or "files") end
       end },
       { key = "alt-r", on_press = function() edit_query("revision") end },
       { key = "alt-b", on_press = function() edit_query("base") end },

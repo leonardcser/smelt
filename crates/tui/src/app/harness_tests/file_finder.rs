@@ -376,3 +376,20 @@ fn file_finder_editor_reports_missing_file_or_terminal() {
     )
     .unwrap();
 }
+
+#[test]
+fn file_finder_drops_preview_when_terminal_narrows() {
+    let (_dir, mut app) = fixture_app();
+    app.run_lua_result("smelt.cmd.run('files')").unwrap();
+    wait_for_frame(&mut app, " preview ");
+    app.set_terminal_size(70, 30);
+    app.render_silent();
+    app.dispatch_ui_window_events(false);
+    let frame = wait_for_frame(&mut app, "alpha.rs");
+    assert!(!frame.contains(" preview "), "{frame}");
+    app.set_terminal_size(120, 30);
+    app.render_silent();
+    app.dispatch_ui_window_events(false);
+    let frame = wait_for_frame(&mut app, "alpha_preview");
+    assert!(frame.contains(" preview "), "{frame}");
+}

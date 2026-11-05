@@ -525,12 +525,18 @@ fn diff_sidebar_counts_follow_labels_when_resized() {
 }
 
 #[test]
-fn diff_narrow_split_keeps_group_counts_readable() {
+fn diff_narrow_terminal_shows_one_pane_at_a_time() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(60, 18);
     open_fixture(&mut app, 1);
     paint_diff(&mut app);
     let frame = app.render_to_frame().text();
+    assert!(frame.contains("abcdefghijklmnopqrstuvwxyz"), "{frame}");
+    assert!(!frame.contains("unstaged (2)"), "{frame}");
+    app.press_mod(KeyCode::Char('w'), KeyModifiers::ALT);
+    paint_diff(&mut app);
+    let frame = app.render_to_frame().text();
+    assert!(!frame.contains("abcdefghijklmnopqrstuvwxyz"), "{frame}");
     for label in ["unstaged (2) +2 -1", "M first.rs +1", "M last.rs +1 -1"] {
         assert!(frame.contains(label), "missing {label:?}:\n{frame}");
     }
