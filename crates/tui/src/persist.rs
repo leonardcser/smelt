@@ -18,7 +18,6 @@ const MAX_AUDIT_SUMMARY_TEXT_BYTES: usize = 512;
 pub(crate) const DEFAULT_PERSISTENCE_DEADLINE: Duration = Duration::from_secs(5);
 pub(crate) const INTERACTIVE_PERSISTENCE_DEADLINE: Duration = Duration::from_millis(500);
 const DROP_PERSISTENCE_DEADLINE: Duration = Duration::from_millis(250);
-const IDLE_RECLAMATION_INTERVAL: Duration = Duration::from_secs(1);
 /// Every save restarts a reclamation pass, so passes wait for the head to settle.
 const RECLAMATION_QUIET: Duration = Duration::from_secs(5);
 /// Lock contention clears on its own, so a transient block retries itself, backing off from the
@@ -2085,6 +2084,18 @@ fn verify_canonical_head(
     ))))
 }
 
+/// Idle reclamation progress for a store head.
+#[derive(Clone, Copy)]
+enum Reclamation {
+    /// A pass starts once `head` stays unchanged for [`RECLAMATION_QUIET`] after `since`.
+    Settling {
+        head: smelt_store::StoreHead,
+        since: Instant,
+    },
+    /// Nothing is left to reclaim until the head moves.
+    Done(smelt_store::StoreHead),
+}
+
 struct PersistenceActor {
     sessions: smelt_core::session::SessionStorage,
     epoch: SessionEpoch,
@@ -2094,11 +2105,7 @@ struct PersistenceActor {
     search_projector: Option<smelt_store::LineageSearchProjector>,
     search_projection_requested: bool,
     head: smelt_store::StoreHead,
-    /// The head reclamation last observed and when it did.
-    reclamation_head: (smelt_store::StoreHead, Instant),
-    /// The head a reclamation pass last finished at; nothing is left to reclaim
-    /// until the head moves.
-    reclaimed_head: Option<smelt_store::StoreHead>,
+    reclamation: Reclamation,
     durable: PersistenceGeneration,
     last_publication: Option<PersistenceAcknowledgement>,
     retained_save: Option<RetainedSessionSave>,
@@ -2234,8 +2241,10 @@ fn persistence_actor(
         search_projector,
         search_projection_requested: false,
         head: actual_head,
-        reclamation_head: (actual_head, Instant::now()),
-        reclaimed_head: None,
+        reclamation: Reclamation::Settling {
+            head: actual_head,
+            since: Instant::now(),
+        },
         durable: generation,
         last_publication: None,
         retained_save: None,
@@ -2517,23 +2526,50 @@ impl PersistenceActor {
         }
     }
 
-    fn drive_one_reclamation(&mut self) -> bool {
-        // Startup settles the journal before publishing this writer. Uncertain
-        // foreground commands must settle through explicit retry before GC runs.
-        if self.reclaimed_head == Some(self.head)
-            || self.blocked.is_some()
+    /// Startup settles the journal before publishing this writer. Uncertain
+    /// foreground commands must settle through explicit retry before GC runs.
+    fn reclamation_excluded(&self) -> bool {
+        self.blocked.is_some()
             || self.retained_save.is_some()
             || self
                 .latest_generation()
                 .is_some_and(|generation| generation > self.durable)
-        {
+    }
+
+    /// When the next reclamation pass is due, if one is.
+    fn reclamation_at(&self) -> Option<Instant> {
+        match self.reclamation {
+            Reclamation::Settling { head, since }
+                if head == self.head && !self.reclamation_excluded() =>
+            {
+                Some(since + RECLAMATION_QUIET)
+            }
+            _ => None,
+        }
+    }
+
+    fn settle_reclamation(&mut self) {
+        self.reclamation = Reclamation::Settling {
+            head: self.head,
+            since: Instant::now(),
+        };
+    }
+
+    fn drive_one_reclamation(&mut self) -> bool {
+        if self.reclamation_excluded() {
             return false;
         }
-        if self.reclamation_head.0 != self.head {
-            self.reclamation_head = (self.head, Instant::now());
-        }
-        if self.reclamation_head.1.elapsed() < RECLAMATION_QUIET {
-            return false;
+        match self.reclamation {
+            Reclamation::Done(head) if head == self.head => return false,
+            Reclamation::Settling { head, since } if head == self.head => {
+                if since.elapsed() < RECLAMATION_QUIET {
+                    return false;
+                }
+            }
+            _ => {
+                self.settle_reclamation();
+                return false;
+            }
         }
         let writer = self.writer.as_mut().expect("actor writer");
         let result = writer.reopen_connection().and_then(|()| {
@@ -2559,17 +2595,19 @@ impl PersistenceActor {
         match result {
             Ok(true) => true,
             Ok(false) => {
-                self.reclaimed_head = Some(self.head);
+                self.reclamation = Reclamation::Done(self.head);
                 false
             }
             Err(error) => {
                 // Maintenance does not change durable acknowledgements or turn a
                 // failed canonical operation into an implicit retry. The next
-                // idle attempt is delayed; foreground work can reopen meanwhile.
+                // idle attempt waits another quiet period; foreground work can
+                // reopen meanwhile.
                 smelt_perf::perf::record_value("persist:reclamation:failures", 1);
                 if error.invalidates_connection() {
                     writer.invalidate_connection();
                 }
+                self.settle_reclamation();
                 false
             }
         }
@@ -2755,19 +2793,19 @@ impl PersistenceActor {
         true
     }
 
-    /// Sleeps until the next control, but no longer than pending reclamation or a due retry
-    /// allow. With neither, an idle session does not wake at all.
+    /// Sleeps until the next control, a due reclamation pass, or a due retry. With neither
+    /// pending, an idle session does not wake at all.
     fn wait_for_control(
         &self,
         controls: &Receiver<PersistenceControl>,
     ) -> Result<PersistenceControl, RecvTimeoutError> {
-        let reclamation =
-            (self.reclaimed_head != Some(self.head)).then_some(IDLE_RECLAMATION_INTERVAL);
-        let retry = self
-            .automatic_retry_at()
-            .map(|at| at.saturating_duration_since(Instant::now()));
-        match reclamation.into_iter().chain(retry).min() {
-            Some(wait) => controls.recv_timeout(wait),
+        match self
+            .reclamation_at()
+            .into_iter()
+            .chain(self.automatic_retry_at())
+            .min()
+        {
+            Some(at) => controls.recv_timeout(at.saturating_duration_since(Instant::now())),
             None => controls.recv().map_err(|_| RecvTimeoutError::Disconnected),
         }
     }
@@ -3924,14 +3962,15 @@ mod tests {
         );
         assert!(reader.storage_stats().unwrap().object_rows < before);
         assert!(reader.doctor_report().unwrap().healthy);
-        thread::sleep(IDLE_RECLAMATION_INTERVAL * 2);
+        // The pass that finds nothing left follows without delay.
+        thread::sleep(Duration::from_millis(200));
         let passes = reclamation_passes();
         assert!(passes > 0);
-        thread::sleep(IDLE_RECLAMATION_INTERVAL * 2);
+        thread::sleep(RECLAMATION_QUIET + Duration::from_millis(500));
         assert_eq!(
             reclamation_passes(),
             passes,
-            "an unchanged head is reclaimed once, not on every idle wake"
+            "an unchanged head is reclaimed once, not after every quiet period"
         );
         smelt_perf::perf::set_enabled(false);
         assert!(actor
@@ -4055,7 +4094,7 @@ mod tests {
         let before = reader.storage_stats().unwrap().object_rows;
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         release.send(()).unwrap();
-        thread::sleep(IDLE_RECLAMATION_INTERVAL + Duration::from_millis(100));
+        thread::sleep(RECLAMATION_QUIET + Duration::from_millis(100));
         let flush_started = Instant::now();
         assert!(matches!(
             actor.flush(PersistenceGeneration::ZERO, deadline()),
@@ -4097,7 +4136,7 @@ mod tests {
             committed.head.revision,
             expected.head.revision.checked_add(1).unwrap()
         );
-        thread::sleep(IDLE_RECLAMATION_INTERVAL + Duration::from_millis(100));
+        thread::sleep(RECLAMATION_QUIET + Duration::from_millis(100));
         assert_eq!(actor.status().state, blocked);
         assert_eq!(reader.snapshot().unwrap(), committed);
         assert!(
