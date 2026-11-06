@@ -622,7 +622,6 @@ pub enum EngineEvent {
     TurnPreparationError {
         turn_id: u64,
         session_id: String,
-        persistence: PersistenceScope,
         message: String,
     },
 
@@ -771,29 +770,17 @@ impl StartTurnInput {
     }
 }
 
-/// Provider-visible history for a turn. Interactive frontends use the store
-/// variant so request start does not clone full session history through the UI
-/// channel; tests and headless callers can still provide already materialized
-/// items explicitly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ModelHistorySource {
-    Items {
-        items: Vec<crate::history::HistoryItem>,
-        coordinates: ModelHistoryCoordinates,
-    },
-    Store {
-        prefix: Vec<crate::history::HistoryItem>,
-        lineage_id: String,
-        first_live_index: usize,
-        end_index: usize,
-        suffix: Vec<crate::history::HistoryItem>,
-        coordinates: ModelHistoryCoordinates,
-    },
+/// Provider-visible history for a turn: the live context since the last
+/// compaction, which the frontend keeps in memory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelHistorySource {
+    pub items: Vec<crate::history::HistoryItem>,
+    pub coordinates: ModelHistoryCoordinates,
 }
 
 impl ModelHistorySource {
     pub fn items(items: Vec<crate::history::HistoryItem>) -> Self {
-        Self::Items {
+        Self {
             items,
             coordinates: ModelHistoryCoordinates::canonical(),
         }
@@ -803,85 +790,12 @@ impl ModelHistorySource {
         items: Vec<crate::history::HistoryItem>,
         coordinates: ModelHistoryCoordinates,
     ) -> Self {
-        Self::Items { items, coordinates }
-    }
-
-    pub fn store(
-        prefix: Vec<crate::history::HistoryItem>,
-        lineage_id: String,
-        first_live_index: usize,
-        end_index: usize,
-    ) -> Self {
-        let coordinates = ModelHistoryCoordinates::projected(prefix.len(), first_live_index);
-        Self::Store {
-            prefix,
-            lineage_id,
-            first_live_index,
-            end_index,
-            suffix: Vec::new(),
-            coordinates,
-        }
-    }
-
-    pub fn store_with_suffix(
-        prefix: Vec<crate::history::HistoryItem>,
-        lineage_id: String,
-        first_live_index: usize,
-        end_index: usize,
-        suffix: Vec<crate::history::HistoryItem>,
-        canonical_start: usize,
-    ) -> Self {
-        let coordinates = ModelHistoryCoordinates::projected(prefix.len(), canonical_start);
-        Self::Store {
-            prefix,
-            lineage_id,
-            first_live_index,
-            end_index,
-            suffix,
-            coordinates,
-        }
+        Self { items, coordinates }
     }
 
     pub fn requested_len(&self) -> usize {
-        match self {
-            Self::Items { items, .. } => items.len(),
-            Self::Store {
-                prefix,
-                first_live_index,
-                end_index,
-                suffix,
-                ..
-            } => end_index
-                .saturating_sub(*first_live_index)
-                .saturating_add(prefix.len())
-                .saturating_add(suffix.len()),
-        }
+        self.items.len()
     }
-
-    pub fn coordinates(&self) -> ModelHistoryCoordinates {
-        match self {
-            Self::Items { coordinates, .. } => *coordinates,
-            Self::Store { coordinates, .. } => *coordinates,
-        }
-    }
-}
-
-impl Default for ModelHistorySource {
-    fn default() -> Self {
-        Self::items(Vec::new())
-    }
-}
-
-/// Payload for [`UiCommand::StartTurn`]. Boxed at the variant so the
-/// enum stays small - the other variants are channel-frequent
-/// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn carries
-/// once-per-turn request metadata and a provider-history source.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PersistenceScope {
-    pub epoch: u64,
-    pub required_generation: u64,
-    /// Canonical session revision that made this request dispatchable.
-    pub store_revision: u64,
 }
 
 /// Native agent preset (or explicit replacement) and host-owned additions.
@@ -899,6 +813,10 @@ pub const CONTROL_SESSION_ENV: &str = "SMELT_SESSION_ID";
 pub const CONTROL_TURN_ENV: &str = "SMELT_TURN_ID";
 pub const CONTROL_ENV_KEYS: [&str; 3] = [CONTROL_SOCKET_ENV, CONTROL_SESSION_ENV, CONTROL_TURN_ENV];
 
+/// Payload for [`UiCommand::StartTurn`]. Boxed at the variant so the
+/// enum stays small - the other variants are channel-frequent
+/// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn carries
+/// once-per-turn request metadata and a provider-history source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTurnPayload {
     pub turn_id: u64,
@@ -919,14 +837,11 @@ pub struct StartTurnPayload {
     pub history: ModelHistorySource,
     /// Stable identity for storage and provider cache routing.
     pub session_id: String,
-    /// Root containing canonical lineage databases.
+    /// Root of session storage, for per-session artifacts.
     pub sessions_root: std::path::PathBuf,
     /// Do not persist agent-backend conversations or session links for this turn.
     #[serde(default)]
     pub ephemeral: bool,
-    /// Persistence actor coordinates captured when the turn was dispatched.
-    #[serde(default)]
-    pub persistence: PersistenceScope,
     /// Per-turn permission overrides (from custom commands or Lua).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_overrides: Option<PermissionOverrides>,
@@ -1067,9 +982,6 @@ pub enum UiCommand {
         /// cache shard as the main turn.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         session_id: String,
-        /// Persistence actor coordinates captured when this request was dispatched.
-        #[serde(default)]
-        persistence: PersistenceScope,
         /// Emit incremental text deltas as `EngineAskDelta` events.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         stream: bool,
@@ -1144,7 +1056,7 @@ mod tests {
         let coordinates = ModelHistoryCoordinates::projected(1, 24);
         let source = ModelHistorySource::projected_items(Vec::new(), coordinates);
 
-        assert_eq!(source.coordinates(), coordinates);
+        assert_eq!(source.coordinates, coordinates);
     }
 
     // ---- ToolExecutionMode defaults + rename ----
@@ -1327,7 +1239,6 @@ mod tests {
             session_id: "s".into(),
             sessions_root: std::path::PathBuf::from("/tmp"),
             ephemeral: false,
-            persistence: PersistenceScope::default(),
             permission_overrides: None,
             system_prompt: None,
             native_prompt: None,
@@ -1373,11 +1284,6 @@ mod tests {
             fast_mode: false,
             tools: Vec::new(),
             session_id: "session".into(),
-            persistence: PersistenceScope {
-                epoch: 3,
-                required_generation: 7,
-                store_revision: 11,
-            },
             stream: true,
             visible_retries: false,
         };

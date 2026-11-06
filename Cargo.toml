@@ -156,6 +156,6 @@ smelt-test-support = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
-smelt-store = { path = "crates/store", features = ["test-util"] }
+smelt-store = { path = "crates/store" }
 rusqlite = { version = "0.41.1", default-features = false }
 vt100 = "0.18.1"

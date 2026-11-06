@@ -53,19 +53,15 @@ impl RewindPageRequest {
         let mut turns = self.live_turns;
         if turns.len() <= REWIND_PAGE_SIZE {
             if let Some(store) = self.store.filter(|_| self.before.min(self.stored_end) > 0) {
-                let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                    &store.sessions_root,
-                    &store.lineage_id,
-                    &store.session_id,
-                )
-                .map_err(|error| format!("open rewind index: {error}"))?;
+                let reader = store
+                    .reader()
+                    .map_err(|error| format!("open rewind index: {error}"))?;
                 let end = self.before.min(self.stored_end);
                 let records = reader
-                    .transcript_records_before_kind_cancellable(
+                    .transcript_records_before_kind(
                         "user",
                         end as u64,
                         REWIND_PAGE_SIZE + 1 - turns.len(),
-                        cancelled,
                     )
                     .map_err(|error| format!("read rewind index: {error}"))?;
                 turns.extend(records.into_iter().map(|record| {
@@ -142,63 +138,60 @@ impl StoredRewindRequest {
             }
         };
         check()?;
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &self.store.sessions_root,
-            &self.store.lineage_id,
-            &self.store.session_id,
-        )
-        .map_err(|error| format!("open rewind history: {error}"))?;
+        let reader = self
+            .store
+            .reader()
+            .map_err(|error| format!("open rewind history: {error}"))?;
         reader
             .read_snapshot(|reader| {
-                check()?;
-                let item = if self.input.is_none() {
-                    reader
-                        .history_range(
-                            self.history_idx as u64,
-                            self.history_idx.saturating_add(1) as u64,
-                        )
-                        .map_err(|error| format!("read rewind input: {error}"))?
-                        .into_iter()
-                        .next()
-                } else {
-                    None
-                };
-                check()?;
-                let transcript = match self.transcript.take() {
-                    Some(transcript) => transcript,
-                    None => stored_transcript_rewind_target(reader, &self)?,
-                };
-                check()?;
-                let input = match self.input {
-                    Some(input) => input,
-                    None => item
-                        .as_ref()
-                        .and_then(rewind_input)
-                        .ok_or_else(|| "cannot rewind to this history item".to_string())?,
-                };
-                check()?;
-                let mode = self.mode.resolve(reader)?;
-                check()?;
-                let user_turn_count = match self.user_turn_count {
-                    Some(count) => count,
-                    None => usize::try_from(
+                Ok((|| {
+                    check()?;
+                    let item = if self.input.is_none() {
                         reader
-                            .history_user_turn_count_before_cancellable(
+                            .history_range(
                                 self.history_idx as u64,
-                                cancelled,
+                                self.history_idx.saturating_add(1) as u64,
                             )
-                            .map_err(|error| format!("read rewind user count: {error}"))?,
-                    )
-                    .map_err(|_| "rewind user count exceeds platform limits".to_string())?,
-                };
-                check()?;
-                Ok(PreparedRewind {
-                    history_idx: self.history_idx,
-                    user_turn_count,
-                    input,
-                    transcript,
-                    mode: AgentMode::parse(&mode).unwrap_or_else(AgentMode::normal),
-                })
+                            .map_err(|error| format!("read rewind input: {error}"))?
+                            .into_iter()
+                            .next()
+                    } else {
+                        None
+                    };
+                    check()?;
+                    let transcript = match self.transcript.take() {
+                        Some(transcript) => transcript,
+                        None => stored_transcript_rewind_target(reader, &self)?,
+                    };
+                    check()?;
+                    let input = match self.input {
+                        Some(input) => input,
+                        None => item
+                            .as_ref()
+                            .and_then(rewind_input)
+                            .ok_or_else(|| "cannot rewind to this history item".to_string())?,
+                    };
+                    check()?;
+                    let mode = self.mode.resolve(reader)?;
+                    check()?;
+                    let user_turn_count = match self.user_turn_count {
+                        Some(count) => count,
+                        None => usize::try_from(
+                            reader
+                                .history_user_turn_count_before(self.history_idx as u64)
+                                .map_err(|error| format!("read rewind user count: {error}"))?,
+                        )
+                        .map_err(|_| "rewind user count exceeds platform limits".to_string())?,
+                    };
+                    check()?;
+                    Ok(PreparedRewind {
+                        history_idx: self.history_idx,
+                        user_turn_count,
+                        input,
+                        transcript,
+                        mode: AgentMode::parse(&mode).unwrap_or_else(AgentMode::normal),
+                    })
+                })())
             })
             .map_err(|error| format!("read rewind snapshot: {error}"))?
     }
@@ -232,18 +225,14 @@ impl std::fmt::Debug for RewindWorkerResult {
 }
 
 fn stored_transcript_rewind_target(
-    reader: &smelt_store::LineageSessionReader,
+    reader: &smelt_store::SessionReader,
     request: &StoredRewindRequest,
 ) -> Result<TranscriptRewindTarget, String> {
     let record_count = reader
         .transcript_record_index_for_history_idx(request.history_idx as u64)
         .map_err(|error| format!("find transcript rewind boundary: {error}"))?
         .ok_or_else(|| "transcript has no record for this history item".to_string())?;
-    let address = crate::app::transcript::TranscriptStoreAddress::new(
-        request.store.sessions_root.clone(),
-        request.store.session_id.clone(),
-        request.store.lineage_id.clone(),
-    );
+    let address = request.store.clone();
     let transcript = if record_count == 0 {
         crate::app::transcript::LoadedTranscript::empty_from_store(address)
     } else {
@@ -336,108 +325,42 @@ impl<'a> ToolSummaryResolver<'a> {
 pub(crate) fn live_session_for_test(
     id: String,
     history_len: usize,
-    checkpoint: Option<smelt_core::ContextCheckpoint>,
 ) -> smelt_core::session_runtime::LiveSession {
-    live_session_for_test_with_address(id, history_len, checkpoint, None)
-}
-
-#[cfg(test)]
-pub(crate) fn store_backed_live_session_for_test(
-    id: String,
-    history_len: usize,
-    checkpoint: Option<smelt_core::ContextCheckpoint>,
-    store_address: smelt_core::session::SessionStoreAddress,
-) -> smelt_core::session_runtime::LiveSession {
-    live_session_for_test_with_address(id, history_len, checkpoint, Some(store_address))
-}
-
-#[cfg(test)]
-fn live_session_for_test_with_address(
-    id: String,
-    history_len: usize,
-    checkpoint: Option<smelt_core::ContextCheckpoint>,
-    store_address: Option<smelt_core::session::SessionStoreAddress>,
-) -> smelt_core::session_runtime::LiveSession {
-    let reader = store_address.as_ref().map(|store| {
-        smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &store.sessions_root,
-            &store.lineage_id,
-            &store.session_id,
-        )
-        .expect("open fixture lineage")
-    });
-    let revision = reader
-        .as_ref()
-        .map_or(0, |reader| reader.store_head().unwrap().revision.get());
-    let user_turn_count = reader.as_ref().map_or(0, |reader| {
-        usize::try_from(
-            reader
-                .history_user_turn_count_before(history_len as u64)
-                .unwrap(),
-        )
-        .unwrap()
-    });
-    let header = smelt_core::session::SessionHeader {
-        meta: smelt_core::session::SessionMeta {
-            id,
-            title: None,
-            slug: None,
-            first_user_message: None,
-            created_at_ms: 0,
-            updated_at_ms: 0,
-            mode: None,
-            reasoning_effort: None,
-            model: None,
-            fast_mode: None,
-            cwd: None,
-            parent_id: None,
-            authoritative_context_tokens: None,
-            display_context_tokens: None,
-            history_len: Some(history_len),
-            checkpoint,
-            checkpoint_events: Default::default(),
-            text_bytes: None,
-        },
-        history_len,
-        revision,
-        degraded_warnings: Vec::new(),
-    };
     smelt_core::session_runtime::LiveSession::from_parts(
-        header,
+        id,
         std::path::PathBuf::new(),
-        store_address,
-        user_turn_count,
+        None,
+        history_len,
+        0,
     )
 }
 
-/// Full-history materialization is reserved for explicit test assertions. Resume, render, save,
-/// Lua lightweight APIs, rewind, and fork paths stay store-backed.
+/// A live session whose first `history_len` items are only in the store.
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FullSessionMaterializationReason {
-    TestSavedSessionAssertion,
+pub(crate) fn store_backed_live_session_for_test(
+    store_address: smelt_core::session::SessionStoreAddress,
+    history_len: usize,
+) -> smelt_core::session_runtime::LiveSession {
+    let user_turn_count = store_address
+        .reader()
+        .and_then(|reader| reader.history_user_turn_count_before(history_len as u64))
+        .expect("count fixture user turns");
+    smelt_core::session_runtime::LiveSession::from_parts(
+        store_address.session_id.clone(),
+        store_address.artifact_dir(),
+        Some(store_address),
+        history_len,
+        user_turn_count as usize,
+    )
 }
 
+/// The whole saved session, for assertions about what reached the store.
 #[cfg(test)]
-impl FullSessionMaterializationReason {
-    fn counter(self) -> &'static str {
-        match self {
-            FullSessionMaterializationReason::TestSavedSessionAssertion => {
-                "test:session:load_full_assertion"
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn materialize_full_session(
+pub(crate) fn load_saved_session(
     sessions: &session::SessionStorage,
     id: &str,
-    reason: FullSessionMaterializationReason,
 ) -> Option<session::Session> {
-    smelt_perf::perf::record_value("session:full_materialized", 1);
-    smelt_perf::perf::record_value(reason.counter(), 1);
-    sessions.load_full_result(id).ok().flatten()
+    sessions.load_full(id).ok()
 }
 
 /// A compaction marker positioned where the checkpoint completed. `kept` is
@@ -660,13 +583,8 @@ pub(crate) fn load_transcript_tail_from_sqlite_id(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let resolved = sessions.resolve_session_for_read(id)?;
     crate::app::transcript::LoadedTranscript::tail_from_sqlite(
-        crate::app::transcript::TranscriptStoreAddress::new(
-            resolved.sessions_root,
-            resolved.id,
-            resolved.lineage_id,
-        ),
+        sessions.address(id.to_owned()),
         width,
         viewport_rows,
     )
@@ -1086,22 +1004,7 @@ mod tests {
         root: &std::path::Path,
         records: Vec<smelt_store::StoredTranscriptBlock>,
     ) -> crate::app::transcript::TranscriptStoreAddress {
-        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.id = SESSION_ID.into();
-        let mut command = session::initial_store_commit_from_session(&session).unwrap();
-        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::ZERO,
-            records,
-        });
-        let mut writer = smelt_store::OwnedLineageWriter::open(root, SESSION_ID).unwrap();
-        writer.commit_session(&command).unwrap();
-        let lineage_id = writer.lineage_id().to_string();
-        writer.release().unwrap();
-        crate::app::transcript::TranscriptStoreAddress::new(
-            root.to_path_buf(),
-            SESSION_ID.into(),
-            lineage_id,
-        )
+        crate::app::transcript::seed_test_transcript_rows_for(root, SESSION_ID, records)
     }
 
     #[test]
@@ -1433,10 +1336,6 @@ mod tests {
         assert_eq!(record_window.start.get(), 160);
         assert_eq!(record_window.end().get(), 200);
         assert_eq!(record_window.total_count, 200);
-        assert_eq!(
-            record_window.hydration,
-            smelt_store::TranscriptRecordHydration::ObjectBacked
-        );
         assert!(loaded.transcript.history.order.is_empty());
         assert_eq!(record_window.records.len(), 40);
         assert_eq!(record_window.records[0].block_id.get(), 160);
@@ -1962,51 +1861,28 @@ impl TuiApp {
             return;
         }
 
+        // A read-only source cannot save first, so the fork carries its unsaved changes.
         let preserve_unsaved = source_is_read_only && self.session_document_has_unflushed_work();
-        let acknowledged_head = self.conversation.acknowledged_head();
-        let prepared_fork = if preserve_unsaved {
-            let mut forked = self
-                .conversation
-                .session()
-                .fork_store_backed(self.core.env.pid());
-            let runtime_metadata = self.runtime_session_metadata();
-            let intent = match self
-                .conversation
-                .prepare_fork_save(&mut forked, runtime_metadata)
-            {
-                Ok(Some(intent)) => intent,
-                Ok(None) => {
-                    self.notify_session_error_sticky(
-                        "failed to prepare fork: dirty session produced no event batch".into(),
-                    );
-                    return;
-                }
+        let mut forked = self
+            .conversation
+            .session()
+            .fork_store_backed(self.core.env.pid());
+        let unsaved = if preserve_unsaved {
+            let metadata = self.runtime_session_metadata();
+            match self.conversation.capture_fork_commit(&mut forked, metadata) {
+                Ok(commit) => Some(commit),
                 Err(err) => {
                     self.notify_session_error_sticky(format!("failed to prepare fork: {err}"));
                     return;
                 }
-            };
-            Some((forked, intent))
+            }
         } else {
             None
         };
-        let original_id = self.conversation.session().id.clone();
-        let (forked, preserved_projection) = prepared_fork.map_or_else(
-            || {
-                (
-                    self.conversation
-                        .session()
-                        .fork_store_backed(self.core.env.pid()),
-                    None,
-                )
-            },
-            |(forked, intent)| (forked, Some(intent)),
-        );
         self.request_session_fork(super::session_load::SessionForkRequest {
-            source_id: original_id,
+            source_id: self.conversation.session().id.clone(),
             forked,
-            expected_source: preserve_unsaved.then_some(acknowledged_head),
-            preserved_projection,
+            unsaved,
         });
     }
 
@@ -2224,20 +2100,10 @@ impl TuiApp {
         let store_head = self
             .conversation
             .sessions()
-            .resolve_session_for_read_result(session_id)
-            .and_then(|resolved| {
-                smelt_store::LineageSessionReader::open_existing_in_lineage(
-                    &resolved.sessions_root,
-                    &resolved.lineage_id,
-                    session_id,
-                )
-                .and_then(|reader| reader.snapshot())
-                .map(|state| state.head)
-                .map_err(|error| smelt_core::session::SessionStoreError::Corrupt {
-                    context: error.to_string(),
-                })
-            })
-            .ok();
+            .reader(session_id)
+            .ok()
+            .and_then(|reader| reader.head().ok())
+            .unwrap_or_default();
         self.conversation
             .install_loaded_full_session(transcript, store_head);
         self.claim_writer_access_for_current_session();
@@ -2274,7 +2140,7 @@ impl TuiApp {
     pub(super) fn load_store_backed_session_with_writer(
         &mut self,
         document: crate::app::session_document::StoreBackedSessionDocument,
-        writer: Option<crate::persist::SessionWriterHandoff>,
+        writer: Option<smelt_store::SessionWriter>,
     ) -> bool {
         if !self.begin_session_replacement(crate::persist::ClosePolicy::RequireDurable) {
             return false;
@@ -2286,7 +2152,7 @@ impl TuiApp {
     pub(super) fn adopt_store_backed_session(
         &mut self,
         document: crate::app::session_document::StoreBackedSessionDocument,
-        writer: Option<crate::persist::SessionWriterHandoff>,
+        writer: Option<smelt_store::SessionWriter>,
     ) {
         debug_assert!(
             !self.conversation.has_persistence(),
@@ -2460,109 +2326,6 @@ impl TuiApp {
         self.conversation.set_checkpoint(checkpoint);
     }
 
-    fn store_session_model_history_source(&self) -> protocol::ModelHistorySource {
-        if let Some(live) = self.conversation.live_session() {
-            return live.model_history_source(self.conversation.session().checkpoint.as_ref());
-        }
-        let (prefix, first_live_index, end_index) =
-            self.conversation.session().model_history_range();
-        let coordinates =
-            protocol::ModelHistoryCoordinates::projected(prefix.len(), first_live_index);
-        if let Some(base) = self.conversation.session().archive_base() {
-            return protocol::ModelHistorySource::store(
-                prefix,
-                base.lineage_id.clone(),
-                first_live_index,
-                end_index,
-            );
-        }
-        let Ok(resolved) = self
-            .conversation
-            .sessions()
-            .resolve_session_for_read_result(&self.conversation.session().id)
-        else {
-            let mut items = prefix;
-            items.extend(
-                self.conversation.session().history[first_live_index..end_index]
-                    .iter()
-                    .cloned(),
-            );
-            return protocol::ModelHistorySource::projected_items(items, coordinates);
-        };
-        protocol::ModelHistorySource::store(
-            prefix,
-            resolved.lineage_id,
-            first_live_index,
-            end_index,
-        )
-    }
-
-    pub(crate) fn store_model_history_source_for_committed_request(
-        source: &protocol::ModelHistorySource,
-        lineage_id: String,
-        end_index: usize,
-    ) -> protocol::ModelHistorySource {
-        let coordinates = source.coordinates();
-        let prefix = match source {
-            protocol::ModelHistorySource::Items { items, .. } => items
-                .iter()
-                .take(coordinates.model_prefix_len())
-                .cloned()
-                .collect(),
-            protocol::ModelHistorySource::Store { prefix, .. } => prefix.clone(),
-        };
-        protocol::ModelHistorySource::store(
-            prefix,
-            lineage_id,
-            coordinates.canonical_start().get(),
-            end_index,
-        )
-    }
-
-    fn materialize_model_history_source(
-        &self,
-        source: protocol::ModelHistorySource,
-    ) -> Vec<HistoryItem> {
-        match source {
-            protocol::ModelHistorySource::Items { items, .. } => items,
-            protocol::ModelHistorySource::Store {
-                prefix,
-                first_live_index,
-                end_index,
-                suffix,
-                ..
-            } => match self.session_history_range(first_live_index..end_index) {
-                Ok(items) => {
-                    let mut history = prefix;
-                    history.extend(items);
-                    history.extend(suffix);
-                    history
-                }
-                Err(err) => {
-                    smelt_perf::perf::record_value("live_session:history_range_error", 1);
-                    smelt_perf::perf::record_value(
-                        "live_session:history_range_error_bytes",
-                        err.len() as u64,
-                    );
-                    Vec::new()
-                }
-            },
-        }
-    }
-
-    pub(crate) fn session_model_history_source(&self) -> protocol::ModelHistorySource {
-        let source = self.store_session_model_history_source();
-        if self.ephemeral() {
-            let coordinates = source.coordinates();
-            protocol::ModelHistorySource::projected_items(
-                self.materialize_model_history_source(source),
-                coordinates,
-            )
-        } else {
-            source
-        }
-    }
-
     // ── History / session ────────────────────────────────────────────────
 
     pub(crate) fn restore_screen(&mut self) {
@@ -2650,39 +2413,12 @@ impl TuiApp {
                 self.request_urgent_render();
             }
             Ok(crate::app::conversation::SaveStatus::SkippedReadOnly)
-            | Ok(crate::app::conversation::SaveStatus::Blocked)
             | Ok(crate::app::conversation::SaveStatus::DurableEphemeral)
             | Ok(crate::app::conversation::SaveStatus::Submitted) => {}
             Err(message) => {
                 self.notify_session_save_failure(&self.conversation.session().id.clone(), &message);
             }
         }
-    }
-
-    pub(crate) fn submit_canonical_turn(
-        &mut self,
-        turn: smelt_store::NewTurn,
-    ) -> Result<
-        crate::app::conversation::CanonicalTurnSubmitOutcome,
-        crate::persist::PersistenceCause,
-    > {
-        let metadata = self.runtime_session_metadata();
-        self.conversation.submit_canonical_turn(metadata, turn)
-    }
-
-    pub(crate) fn enqueue_canonical_turn_transition(
-        &mut self,
-        turn_id: smelt_store::TurnId,
-        state: smelt_store::TurnState,
-        terminal_reason: Option<String>,
-    ) -> Result<(), crate::persist::PersistenceCause> {
-        let metadata = self.runtime_session_metadata();
-        self.conversation.enqueue_canonical_turn_transition(
-            metadata,
-            turn_id,
-            state,
-            terminal_reason,
-        )
     }
 
     fn runtime_session_metadata(&self) -> crate::app::session_document::RuntimeSessionMetadata {
@@ -2704,7 +2440,7 @@ impl TuiApp {
         self.conversation.has_unflushed_work()
     }
 
-    /// Submit the latest cumulative document intent and wait for its exact generation.
+    /// Saves every change and waits until it is durable.
     pub(crate) fn save_session_and_flush(&mut self) {
         self.save_session_and_flush_with_timeout(crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
     }
@@ -2716,7 +2452,7 @@ impl TuiApp {
         }
     }
 
-    /// Wait for the current document generation without retrying or sleeping.
+    /// Waits until every submitted save is durable.
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistenceFlushOutcome {
         self.flush_persist_until(
@@ -2729,23 +2465,13 @@ impl TuiApp {
         deadline: std::time::Instant,
     ) -> crate::persist::PersistenceFlushOutcome {
         let outcome = self.conversation.flush_persistence_until(deadline);
+        // Failures reach the user through the persistence report.
         self.drain_persist_reports();
-        match &outcome {
-            crate::persist::PersistenceFlushOutcome::Blocked { cause, .. }
-            | crate::persist::PersistenceFlushOutcome::OwnershipLost { cause, .. }
-            | crate::persist::PersistenceFlushOutcome::Stopped { cause, .. } => {
-                self.notify_session_persistence_failure(
-                    &self.conversation.session().id.clone(),
-                    cause,
-                );
-            }
-            crate::persist::PersistenceFlushOutcome::Deadline { .. } => {
-                self.notify_session_save_failure(
-                    &self.conversation.session().id.clone(),
-                    "persistence deadline elapsed before the requested generation became durable",
-                );
-            }
-            crate::persist::PersistenceFlushOutcome::Durable { .. } => {}
+        if outcome == crate::persist::PersistenceFlushOutcome::Deadline {
+            self.notify_session_save_failure(
+                &self.conversation.session().id.clone(),
+                "session save did not finish in time",
+            );
         }
         outcome
     }
@@ -2764,8 +2490,17 @@ impl TuiApp {
             Ok(None) => true,
             Err(message) => {
                 self.notify_session_save_failure(&session_id, &message);
+                self.restore_session_writer();
                 false
             }
+        }
+    }
+
+    /// Gives a session that stays open a writer again after a refused close
+    /// stopped its old one.
+    pub(super) fn restore_session_writer(&mut self) {
+        if !self.conversation.has_persistence() && !self.conversation.is_read_only() {
+            self.claim_writer_access_for_current_session();
         }
     }
 
@@ -2931,72 +2666,26 @@ impl TuiApp {
         true
     }
 
+    /// The history the model sees: the checkpoint summary, then the history since it.
     pub(crate) fn model_history_source(&self) -> protocol::ModelHistorySource {
-        self.session_model_history_source()
+        self.conversation
+            .model_history_source()
+            .unwrap_or_else(|err| {
+                smelt_perf::perf::record_value("live_session:history_range_error", 1);
+                smelt_perf::perf::record_value(
+                    "live_session:history_range_error_bytes",
+                    err.len() as u64,
+                );
+                protocol::ModelHistorySource::items(Vec::new())
+            })
     }
 
     pub(crate) fn model_history(&self) -> Vec<HistoryItem> {
-        self.materialize_model_history_source(self.model_history_source())
+        self.model_history_source().items
     }
 
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
-        match self.read_model_history_from_store() {
-            Ok(Some(history)) => {
-                smelt_perf::perf::record_value("tui:model_history:messages_store", 1);
-                protocol::history_to_messages(&history)
-            }
-            Ok(None) => {
-                smelt_perf::perf::record_value("tui:model_history:messages_fallback_expected", 1);
-                protocol::history_to_messages(&self.model_history())
-            }
-            Err(err) => {
-                smelt_perf::perf::record_value("tui:model_history:messages_fallback_error", 1);
-                smelt_perf::perf::record_value(
-                    "tui:model_history:messages_fallback_error_bytes",
-                    err.len() as u64,
-                );
-                protocol::history_to_messages(&self.model_history())
-            }
-        }
-    }
-
-    fn read_model_history_from_store(&self) -> Result<Option<Vec<HistoryItem>>, String> {
-        if self.conversation.has_document_work() {
-            return Ok(None);
-        }
-        let protocol::ModelHistorySource::Store {
-            prefix,
-            first_live_index,
-            end_index,
-            suffix,
-            ..
-        } = self.model_history_source()
-        else {
-            return Ok(None);
-        };
-        let mut history = prefix;
-        if end_index > first_live_index {
-            let resolved = self
-                .conversation
-                .sessions()
-                .resolve_session_for_read_result(&self.conversation.session().id)
-                .map_err(|err| format!("resolve canonical model history: {err}"))?;
-            let mut rows = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                &resolved.sessions_root,
-                &resolved.lineage_id,
-                &resolved.id,
-            )
-            .map_err(|err| format!("open canonical model history: {err}"))?
-            .history_range(first_live_index as u64, end_index as u64)
-            .map_err(|err| format!("read canonical model history rows: {err}"))?;
-            smelt_perf::perf::record_value(
-                "tui:model_history:messages_store_rows",
-                rows.len() as u64,
-            );
-            history.append(&mut rows);
-        }
-        history.extend(suffix);
-        Ok(Some(history))
+        protocol::history_to_messages(&self.model_history())
     }
 
     fn loaded_transcript_rewind_block(&self, history_idx: usize) -> Option<usize> {
@@ -3333,27 +3022,27 @@ mod checkpoint_tests {
     fn lineage_reader(
         app: &crate::app::test_harness::TestApp,
         session_id: &str,
-    ) -> smelt_store::LineageSessionReader {
-        smelt_store::LineageSessionReader::open_existing(
-            app.app.core.sessions.sessions_dir(),
-            session_id,
-        )
-        .expect("open canonical lineage session")
+    ) -> smelt_store::SessionReader {
+        app.app
+            .core
+            .sessions
+            .reader(session_id)
+            .expect("open canonical lineage session")
     }
 
-    fn lineage_history(reader: &smelt_store::LineageSessionReader) -> Vec<protocol::HistoryItem> {
-        let state = reader.snapshot().expect("read lineage state");
+    fn lineage_history(reader: &smelt_store::SessionReader) -> Vec<protocol::HistoryItem> {
+        let state = reader.state().expect("read lineage state");
         reader
             .history_range(0, state.head.history_len.get())
             .expect("read canonical history")
     }
 
     fn lineage_transcript(
-        reader: &smelt_store::LineageSessionReader,
+        reader: &smelt_store::SessionReader,
     ) -> Vec<smelt_store::StoredTranscriptBlock> {
-        let state = reader.snapshot().expect("read lineage state");
+        let state = reader.state().expect("read lineage state");
         reader
-            .transcript_range(0, state.transcript_len)
+            .transcript_range(0, state.head.transcript_record_count.get())
             .expect("read canonical transcript")
     }
 
@@ -3430,53 +3119,46 @@ mod checkpoint_tests {
             .unwrap_or(0)
     }
 
-    fn perf_duration_max(label: &str) -> u64 {
-        smelt_perf::perf::snapshot()
-            .durations
-            .into_iter()
-            .find(|row| row.label == label)
-            .map(|row| row.max_us)
-            .unwrap_or(0)
-    }
-
     fn assert_perf_value_absent(label: &str) {
         let value = perf_value_max(label);
         assert_eq!(value, 0, "{label} recorded {value}, expected no samples");
     }
 
-    fn assert_cached_persist_db() {
-        assert_eq!(
-            perf_duration_max("store:lineage:open_read_write"),
-            0,
-            "hot suffix save should reuse the persist worker database connection"
-        );
-        assert_eq!(
-            perf_value_max("store:lineage:cached_read_write"),
-            1,
-            "hot suffix save did not reuse the lineage writer connection"
-        );
-    }
-
     fn assert_no_full_store_reads() {
+        let snapshot = smelt_perf::perf::snapshot();
         for label in [
-            "store:history:read_all",
-            "store:history:read_all_rows",
-            "store:session:load_full_snapshot",
-            "store:session:full_snapshot_rows_read",
-            "store:transcript:search_blob_full",
-            "store:transcript:read_records_full",
-            "store:transcript:records_full_loaded",
+            "session:load_full",
             "session:full_materialized",
-            "session:rebuild_transcript_full_fallback",
-            "session:display_only_load_full",
-            "session:save:record_sparse_full_rebuild",
             "transcript:build_from_session:history_items",
         ] {
-            assert_perf_value_absent(label);
+            let samples = snapshot
+                .durations
+                .iter()
+                .filter(|row| row.label == label)
+                .map(|row| row.count)
+                .chain(
+                    snapshot
+                        .values
+                        .iter()
+                        .filter(|row| row.label == label)
+                        .map(|row| row.count),
+                )
+                .sum::<usize>();
+            assert_eq!(samples, 0, "{label} recorded {samples} samples");
         }
     }
 
     fn large_saved_session_app(history_len: usize) -> crate::app::test_harness::TestApp {
+        saved_session_app(history_len, false)
+    }
+
+    /// A saved session whose whole history precedes a compaction checkpoint, so
+    /// a resume keeps none of it in memory.
+    fn compacted_saved_session_app(history_len: usize) -> crate::app::test_harness::TestApp {
+        saved_session_app(history_len, true)
+    }
+
+    fn saved_session_app(history_len: usize, compacted: bool) -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         session.first_user_message = Some("old user 0".into());
@@ -3489,6 +3171,14 @@ mod checkpoint_tests {
                 }
             })
             .collect();
+        if compacted {
+            session.checkpoint = Some(ContextCheckpoint {
+                kind: "compaction".to_string(),
+                summary: "summary of old history".into(),
+                first_live_index: history_len,
+                ..Default::default()
+            });
+        }
 
         let target_id = session.id.clone();
         app.load_session(session);
@@ -3507,10 +3197,7 @@ mod checkpoint_tests {
             .app
             .flush_persist_until(std::time::Instant::now() + std::time::Duration::from_secs(30));
         assert!(
-            matches!(
-                outcome,
-                crate::persist::PersistenceFlushOutcome::Durable { .. }
-            ),
+            matches!(outcome, crate::persist::PersistenceFlushOutcome::Durable),
             "large fixture initial publication did not become durable: {outcome:?}"
         );
         app
@@ -3575,9 +3262,11 @@ mod checkpoint_tests {
         app.app.load_session(session.clone());
         let retained_id = app.app.conversation.session().id.clone();
         let retained_text = app.render_to_frame().text();
-        let close_deadline_notice = app.app.overlays.notification().is_some_and(|notice| {
-            notice.summary.contains("deadline") || notice.summary.contains("before session close")
-        });
+        let close_deadline_notice = app
+            .app
+            .overlays
+            .notification()
+            .is_some_and(|notice| notice.summary.contains("did not finish in time"));
         let unflushed = app.app.session_document_has_unflushed_work();
         release.send(()).unwrap();
         assert_eq!(retained_id, source_id);
@@ -3591,7 +3280,7 @@ mod checkpoint_tests {
         );
         assert!(matches!(
             app.flush_persist(),
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
+            crate::persist::PersistenceFlushOutcome::Durable
         ));
 
         app.load_session(session);
@@ -3607,46 +3296,35 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn full_session_load_retains_source_until_writer_finalization_finishes() {
+    fn full_session_load_saves_the_source_before_adopting_the_target() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
         app.app
-            .show_user_message("retained source display", Vec::new());
+            .show_user_message("first source message", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let (finalizing, release) = app.app.conversation.install_persistence_finish_barrier();
+        let release = app.app.conversation.pause_persistence();
+        app.app.show_user_message("last source message", Vec::new());
         let mut target = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         target.history = vec![user("replacement user")];
         let target_id = target.id.clone();
 
-        app.app.load_session(target.clone());
-        finalizing
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-        let retained_id = app.session_snapshot().id.clone();
-        let retained_actor = app.app.conversation.has_persistence();
-        let retained_display = app.render_unsettled_silent().text();
-        release.send(()).unwrap();
-        assert_eq!(
-            retained_id, source_id,
-            "adopted before physical writer release"
-        );
-        assert!(retained_actor, "forgot the finalizing writer owner");
-        assert!(retained_display.contains("retained source display"));
+        let release_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            release.send(()).unwrap();
+        });
+        app.app.load_session(target);
+        release_thread.join().unwrap();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while app.session_snapshot().id != target_id {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "writer release did not permit retry"
-            );
-            app.app.load_session(target.clone());
-            std::thread::yield_now();
-        }
+        assert_eq!(app.session_snapshot().id, target_id);
         assert!(app
             .render_unsettled_silent()
             .text()
             .contains("replacement user"));
+        let source = lineage_transcript(&lineage_reader(&app, &source_id));
+        assert!(source
+            .iter()
+            .any(|record| record.preview_text.contains("last source message")));
         app.assert_invariants();
     }
 
@@ -3665,9 +3343,8 @@ mod checkpoint_tests {
             .app
             .core
             .sessions
-            .load_full_result(&id)
-            .expect("load verified replacement owner")
-            .expect("stored session exists");
+            .load_full(&id)
+            .expect("load stored session");
         replacement.history = vec![user("replacement user"), assistant("replacement assistant")];
         app.load_session(replacement);
         app.app.restore_screen();
@@ -3756,27 +3433,23 @@ mod checkpoint_tests {
         let loaded_transcript =
             load_transcript_tail_from_sqlite_id(&app.app.core.sessions, &id, 80, 24)
                 .expect("display-only transcript tail should load");
-        let smelt_core::session::SessionStoreResume {
-            header,
-            session,
-            store_address,
-            head,
-            user_turn_count,
-            ..
-        } = app
+        let resume = app
             .app
             .core
             .sessions
-            .load_store_resume_result(&id, 80, 24)
-            .expect("stored session resume should load")
-            .expect("stored session should exist");
+            .load_resume(&id, 80, 24)
+            .expect("stored session resume should load");
+        let live = smelt_core::session_runtime::LiveSession::from_resume(
+            resume.address,
+            resume.context_start,
+            resume.context,
+            resume.user_turn_count,
+        );
         let document = crate::app::session_document::SessionDocument::from_store(
-            header,
-            session,
-            store_address,
-            head,
+            resume.session,
+            live,
+            resume.head,
             loaded_transcript,
-            user_turn_count,
         );
 
         app.load_store_backed_session(document.into_store_backed());
@@ -3791,14 +3464,7 @@ mod checkpoint_tests {
             }),
         );
 
-        assert!(matches!(
-            source,
-            protocol::ModelHistorySource::Store {
-                first_live_index: 0,
-                end_index: 2,
-                ..
-            }
-        ));
+        assert_eq!(source.items.len(), 2, "the context precedes the new item");
         assert_eq!(
             app.app
                 .conversation
@@ -3850,14 +3516,7 @@ mod checkpoint_tests {
             }),
         );
 
-        assert!(matches!(
-            source,
-            protocol::ModelHistorySource::Store {
-                first_live_index: 0,
-                end_index: 2,
-                ..
-            }
-        ));
+        assert_eq!(source.items.len(), 2, "the context precedes the new item");
         assert_eq!(app.app.conversation.session().history.len(), 3);
 
         let reader = lineage_reader(&app, &id);
@@ -3879,9 +3538,6 @@ mod checkpoint_tests {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
         let id = app.app.conversation.session().id.clone();
-        let before = lineage_reader(&app, &id)
-            .snapshot()
-            .expect("read initial canonical session");
 
         app.app.restore_screen();
 
@@ -3898,24 +3554,19 @@ mod checkpoint_tests {
         );
         smelt_perf::perf::set_enabled(false);
 
-        assert!(matches!(
-            source,
-            protocol::ModelHistorySource::Store {
-                first_live_index: 0,
-                end_index: OLD_HISTORY_LEN,
-                ..
-            }
-        ));
+        assert_eq!(
+            source.items.len(),
+            OLD_HISTORY_LEN,
+            "the context precedes the new item"
+        );
         assert_eq!(
             app.app.conversation.session().history.len(),
             OLD_HISTORY_LEN + 1
         );
-        assert_cached_persist_db();
         assert_no_full_store_reads();
 
         let reader = lineage_reader(&app, &id);
-        let after = reader.snapshot().expect("read appended canonical session");
-        assert_eq!(after.head.revision.get(), before.head.revision.get() + 1);
+        let after = reader.state().expect("read appended canonical session");
         assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
         assert_eq!(
             reader
@@ -3982,7 +3633,7 @@ mod checkpoint_tests {
 
     #[test]
     fn stalled_rewind_keeps_spinner_and_debug_panels_responsive() {
-        let mut app = large_saved_session_app(128);
+        let mut app = compacted_saved_session_app(128);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
         // The harness freezes animation for snapshots. Animate against the virtual
@@ -4045,7 +3696,7 @@ mod checkpoint_tests {
 
     #[test]
     fn live_rewind_with_stored_dependencies_prepares_off_ui() {
-        let mut app = large_saved_session_app(128);
+        let mut app = compacted_saved_session_app(128);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
         app.app.stage_request_history_item(
@@ -4121,13 +3772,33 @@ mod checkpoint_tests {
     }
 
     #[test]
+    fn rewind_before_checkpoint_keeps_model_context_in_memory() {
+        let mut app = compacted_saved_session_app(128);
+        let id = app.app.conversation.session().id.clone();
+        assert!(app.load_session_by_id(&id));
+        app.ensure_writer_ready();
+        let prepared = match app.app.prepare_rewind(64).unwrap() {
+            RewindPreparation::Stored(request) => request.prepare(&|| false).unwrap(),
+            RewindPreparation::Ready(_) => panic!("stored target requires worker preparation"),
+        };
+        app.app.apply_prepared_rewind(prepared);
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let history = app.app.model_history();
+        smelt_perf::perf::set_enabled(false);
+        assert_eq!(history.len(), 64);
+        assert_eq!(history[0], user("old user 0"));
+        assert_perf_value_absent("live_session:context_storage_read");
+    }
+
+    #[test]
     fn failed_stored_count_preparation_leaves_history_and_navigation_unchanged() {
-        let mut app = large_saved_session_app(128);
+        let mut app = compacted_saved_session_app(128);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
         app.ensure_writer_ready();
         let mut live = app.app.conversation.live_session().unwrap().clone();
-        live.store_address.as_mut().unwrap().lineage_id = "0".repeat(32);
+        live.store_address.as_mut().unwrap().session_id = "0".repeat(64);
         app.app.conversation.install_live_session_for_harness(live);
         assert!(app.app.session_truncate_from(64).is_err());
         assert_eq!(app.app.session_history_len(), 128);
@@ -4207,7 +3878,6 @@ mod checkpoint_tests {
         }
         smelt_perf::perf::set_enabled(false);
         assert_perf_value_absent("store:history:decoded_rows");
-        assert_perf_value_absent("store:transcript:body_reads");
         assert_eq!(
             indices,
             (0..=HISTORY_LEN)
@@ -4216,23 +3886,6 @@ mod checkpoint_tests {
                 .collect::<Vec<_>>()
         );
         assert!(app.app.conversation.session().history.is_empty());
-        let reader = lineage_reader(&app, &id);
-        let checks = std::cell::Cell::new(0);
-        let page = reader.transcript_records_before_kind_cancellable(
-            "user",
-            HISTORY_LEN as u64,
-            REWIND_PAGE_SIZE,
-            &|| {
-                checks.set(checks.get() + 1);
-                checks.get() == 3
-            },
-        );
-        assert!(matches!(page, Err(smelt_store::StoreError::Cancelled)));
-        assert_eq!(checks.get(), 3);
-        assert!(reader
-            .read_snapshot(|reader| reader.store_head())
-            .unwrap()
-            .is_ok());
     }
 
     #[test]
@@ -4262,7 +3915,7 @@ mod checkpoint_tests {
         app.app.flush_persist();
 
         let snapshot = lineage_reader(&app, &id)
-            .snapshot()
+            .state()
             .expect("read rewound session");
         assert_eq!(snapshot.head.history_len.get(), 0);
         assert_eq!(snapshot.head.transcript_record_count.get(), 0);
@@ -4275,7 +3928,7 @@ mod checkpoint_tests {
 
     #[test]
     fn stored_rewind_selection_keeps_input_responsive_and_preserves_a_new_draft() {
-        let mut app = large_saved_session_app(128);
+        let mut app = compacted_saved_session_app(128);
         let session_id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&session_id));
         app.apply_lua_command("rewind");
@@ -4312,7 +3965,7 @@ mod checkpoint_tests {
 
     #[test]
     fn double_escape_cancels_stored_rewind_without_applying_a_late_result() {
-        let mut app = large_saved_session_app(128);
+        let mut app = compacted_saved_session_app(128);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
         app.app.rewind_to_history_index(Some(100), false);
@@ -4329,7 +3982,7 @@ mod checkpoint_tests {
 
     #[test]
     fn stored_rewind_result_cannot_replace_a_newer_selection() {
-        let mut app = large_saved_session_app(128);
+        let mut app = compacted_saved_session_app(128);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
         app.app.rewind_to_history_index(Some(100), false);
@@ -4346,7 +3999,7 @@ mod checkpoint_tests {
 
     #[test]
     fn session_replacement_rejects_a_late_stored_rewind_result() {
-        let mut app = large_saved_session_app(128);
+        let mut app = compacted_saved_session_app(128);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
         app.app.rewind_to_history_index(Some(100), false);
@@ -4383,11 +4036,7 @@ mod checkpoint_tests {
                 .live_session()
                 .and_then(|live| live.store_address.as_ref())
                 .expect("loaded session store address");
-            crate::app::transcript::TranscriptStoreAddress::new(
-                store.sessions_root.clone(),
-                store.session_id.clone(),
-                store.lineage_id.clone(),
-            )
+            store.clone()
         };
         let loaded = crate::app::transcript::LoadedTranscript::from_record_slice(slice, address)
             .expect("install deterministic sparse window");
@@ -4430,7 +4079,7 @@ mod checkpoint_tests {
         }));
         app.app.flush_persist();
         let rewound = lineage_reader(&app, &session_id)
-            .snapshot()
+            .state()
             .expect("read first rewind");
         assert_eq!(
             rewound.head.history_len.get() as usize,
@@ -4462,19 +4111,17 @@ mod checkpoint_tests {
 
     #[test]
     fn rewind_turn_enumeration_reports_store_failure_without_partial_results() {
-        let mut app = large_saved_session_app(1_024);
+        let mut app = compacted_saved_session_app(1_024);
         let id = app.app.conversation.session().id.clone();
         assert!(app.load_session_by_id(&id));
-        let reader = lineage_reader(&app, &id);
-        let database_path = reader.database_path().to_path_buf();
-        drop(reader);
-        std::fs::remove_file(database_path).expect("remove canonical lineage database");
+        std::fs::remove_file(app.app.core.sessions.store().database_path())
+            .expect("remove session database");
 
         let error = app
             .eval_lua::<usize>("return #smelt.session.turns()")
             .expect_err("turn enumeration must fail as one operation");
 
-        assert!(error.contains("open lineage session"), "{error}");
+        assert!(error.contains("open session"), "{error}");
         assert!(app.app.overlays.notification().is_some_and(|notification| {
             notification
                 .summary
@@ -4548,7 +4195,7 @@ mod checkpoint_tests {
         app.app.save_session_and_flush();
 
         let reader = lineage_reader(&app, &id);
-        let snapshot = reader.snapshot().expect("read replaced session");
+        let snapshot = reader.state().expect("read replaced session");
         assert_eq!(
             snapshot.head.history_len.get() as usize,
             TARGET_HISTORY_INDEX + 2
@@ -4649,24 +4296,13 @@ mod checkpoint_tests {
         assert_eq!(app.app.conversation.session().history.len(), 0);
         let checkpoint = app.app.conversation.session().checkpoint.as_ref().unwrap();
         assert_eq!(checkpoint.first_live_index, 4);
-        match app.app.session_model_history_source() {
-            protocol::ModelHistorySource::Store {
-                prefix,
-                first_live_index,
-                end_index,
-                suffix,
-                ..
-            } => {
-                assert_eq!(prefix.len(), 1);
-                assert_eq!(first_live_index, 4);
-                assert_eq!(end_index, 32);
-                assert!(suffix.is_empty());
-            }
-            protocol::ModelHistorySource::Items { .. } => {
-                panic!("expected store-backed model history")
-            }
-        }
-        assert!(app.app.conversation.has_document_work());
+        let source = app.app.model_history_source();
+        assert_eq!(
+            source.coordinates,
+            protocol::ModelHistoryCoordinates::projected(1, 4)
+        );
+        assert_eq!(source.items.len(), 1 + 32 - 4);
+        assert!(app.app.conversation.has_unflushed_work());
     }
 
     #[test]
@@ -4689,14 +4325,14 @@ mod checkpoint_tests {
         let submitted = user("fresh user")
             .with_sent_at_ms(engine::clock::unix_time_ms(app.app.core.clock.as_ref()));
         app.press(crossterm::event::KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
 
         let turn_id = app.current_turn_id().expect("fresh turn is active");
         let submitted_history_idx = app.app.session_history_len() - 1;
         let flush = app.app.flush_persist();
         assert!(matches!(
             flush,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
+            crate::persist::PersistenceFlushOutcome::Durable
         ));
 
         let history = app
@@ -4740,9 +4376,6 @@ mod checkpoint_tests {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
         let id = app.app.conversation.session().id.clone();
-        let before = lineage_reader(&app, &id)
-            .snapshot()
-            .expect("read initial canonical session");
         app.load_session_by_id(&id);
         assert!(app.app.conversation.has_live_session());
         assert!(app.app.conversation.session().history.is_empty());
@@ -4760,8 +4393,7 @@ mod checkpoint_tests {
         assert_no_full_store_reads();
 
         let reader = lineage_reader(&app, &id);
-        let after = reader.snapshot().expect("read appended canonical session");
-        assert_eq!(after.head.revision.get(), before.head.revision.get() + 1);
+        let after = reader.state().expect("read appended canonical session");
         assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
         let tail = reader
             .history_range(OLD_HISTORY_LEN as u64, OLD_HISTORY_LEN as u64 + 1)
@@ -4814,9 +4446,6 @@ mod checkpoint_tests {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app(OLD_HISTORY_LEN);
         let id = app.app.conversation.session().id.clone();
-        let before = lineage_reader(&app, &id)
-            .snapshot()
-            .expect("read initial canonical session");
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         app.app
@@ -4829,12 +4458,10 @@ mod checkpoint_tests {
             app.app.conversation.session().history.len(),
             OLD_HISTORY_LEN + 1
         );
-        assert_cached_persist_db();
         assert_no_full_store_reads();
 
         let reader = lineage_reader(&app, &id);
-        let after = reader.snapshot().expect("read appended canonical session");
-        assert_eq!(after.head.revision.get(), before.head.revision.get() + 1);
+        let after = reader.state().expect("read appended canonical session");
         assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
         assert_eq!(
             reader
@@ -4845,12 +4472,12 @@ mod checkpoint_tests {
     }
 
     #[test]
-    fn no_op_save_does_not_advance_canonical_revision() {
+    fn no_op_save_leaves_the_store_unchanged() {
         let mut app = large_saved_session_app(256);
         let id = app.app.conversation.session().id.clone();
         let before = lineage_reader(&app, &id)
-            .snapshot()
-            .expect("read initial canonical session");
+            .state()
+            .expect("read canonical session before no-op save");
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -4865,10 +4492,10 @@ mod checkpoint_tests {
         );
         assert_no_full_store_reads();
         let after = lineage_reader(&app, &id)
-            .snapshot()
+            .state()
             .expect("read canonical session after no-op save");
         assert_eq!(after.head, before.head);
-        assert_eq!(after.revision_id, before.revision_id);
+        assert_eq!(after.metadata, before.metadata);
     }
 
     #[test]
@@ -4887,14 +4514,12 @@ mod checkpoint_tests {
         );
 
         let reader = lineage_reader(&app, &id);
-        let snapshot = reader.snapshot().expect("read canonical session");
+        let snapshot = reader.state().expect("read canonical session");
         assert_eq!(lineage_history(&reader), vec![user("new user")]);
-        assert_eq!(snapshot.side_tables.metadata_snapshots.len(), 1);
-        assert_eq!(snapshot.side_tables.metadata_snapshots[0].0.get(), 1);
+        assert_eq!(snapshot.metadata_snapshots.len(), 1);
+        assert_eq!(snapshot.metadata_snapshots[0].0, 1);
         assert_eq!(
-            snapshot.side_tables.metadata_snapshots[0]
-                .1
-                .get("first_user_message"),
+            snapshot.metadata_snapshots[0].1.get("first_user_message"),
             Some(&serde_json::Value::String("new user".into()))
         );
     }
@@ -4918,11 +4543,11 @@ mod checkpoint_tests {
         app.app.flush_persist();
 
         let reader = lineage_reader(&app, &id);
-        let state = reader.snapshot().expect("read rewound state");
+        let state = reader.state().expect("read rewound state");
         assert!(lineage_history(&reader).is_empty());
         assert!(lineage_transcript(&reader).is_empty());
         assert_eq!(state.head.history_len.get(), 0);
-        assert_eq!(state.transcript_len, 0);
+        assert_eq!(state.head.transcript_record_count.get(), 0);
     }
 
     #[test]
@@ -5179,7 +4804,7 @@ mod checkpoint_tests {
             })
             .collect();
         assert_eq!(markers, vec![(2, "old summary"), (6, "new summary")]);
-        assert!(app.app.conversation.has_document_work());
+        assert!(app.app.conversation.has_unflushed_work());
     }
 
     #[test]
@@ -5964,8 +5589,7 @@ mod checkpoint_tests {
             .transcript()
             .history()
             .is_materialized(target_id));
-        let (commit_started, release_commit) =
-            app.app.conversation.install_persistence_commit_barrier();
+        let release_commit = app.app.conversation.pause_persistence();
         app.app
             .rewind_to_history_index(Some(TARGET_HISTORY_INDEX), false);
         app.render_silent();
@@ -5992,9 +5616,6 @@ mod checkpoint_tests {
             "rewind retained stale transcript origins: {remaining_origins:?}"
         );
 
-        commit_started
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("truncating save reaches the commit barrier");
         assert!(!app
             .app
             .conversation
@@ -6009,10 +5630,7 @@ mod checkpoint_tests {
         release_commit.send(()).expect("release truncating save");
         let outcome = app.flush_persist();
         assert!(
-            matches!(
-                outcome,
-                crate::persist::PersistenceFlushOutcome::Durable { .. }
-            ),
+            matches!(outcome, crate::persist::PersistenceFlushOutcome::Durable),
             "newer save should converge after truncation: {outcome:?}"
         );
         assert!(
@@ -6021,9 +5639,12 @@ mod checkpoint_tests {
             app.overlays_probe().notification()
         );
         let reader = lineage_reader(&app, &session_id);
-        let state = reader.snapshot().expect("read rewound lineage state");
+        let state = reader.state().expect("read rewound lineage state");
         assert_eq!(state.head.history_len.get() as usize, TARGET_HISTORY_INDEX);
-        assert_eq!(state.transcript_len as usize, TARGET_HISTORY_INDEX + 1);
+        assert_eq!(
+            state.head.transcript_record_count.get() as usize,
+            TARGET_HISTORY_INDEX + 1
+        );
         let records = lineage_transcript(&reader);
         assert_eq!(records.len(), TARGET_HISTORY_INDEX + 1);
         assert_eq!(

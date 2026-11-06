@@ -1428,17 +1428,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link",
-]
-
-[[package]]
 name = "html5ever"
 version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3695,6 +3684,7 @@ version = "0.0.0-dev"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "futures-util",
  "rand 0.10.3",
@@ -3720,13 +3710,10 @@ dependencies = [
 name = "smelt-store"
 version = "0.0.0-dev"
 dependencies = [
- "getrandom 0.4.3",
- "hostname",
  "libc",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "smelt-buffer",
  "smelt-perf",
  "smelt-protocol",

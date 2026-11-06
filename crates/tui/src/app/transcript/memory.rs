@@ -2,9 +2,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use smelt_core::transcript_model::BlockId;
 
-const DEFAULT_HYDRATED_BLOCK_BUDGET: usize = 32 * 1024 * 1024;
-const DEFAULT_RECORD_WINDOW_BUDGET: usize = 16 * 1024 * 1024;
-const DEFAULT_RENDERED_PAYLOAD_BUDGET: usize = 16 * 1024 * 1024;
+const MAX_HYDRATED_BLOCK_BUDGET: usize = 32 * 1024 * 1024;
+const MAX_RECORD_WINDOW_BUDGET: usize = 16 * 1024 * 1024;
+const MAX_RENDERED_PAYLOAD_BUDGET: usize = 16 * 1024 * 1024;
+const MIN_BUDGET: usize = 1024 * 1024;
+/// Generous cache cost of one terminal cell of transcript content.
+const BYTES_PER_CELL: usize = 16;
+/// Screens of content each cache keeps around the viewport.
+const HYDRATED_SCREENS: usize = 64;
+const RECORD_WINDOW_SCREENS: usize = 32;
+const RENDERED_SCREENS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptMemoryBudget {
@@ -13,12 +20,30 @@ pub(crate) struct TranscriptMemoryBudget {
     pub(crate) rendered_rows: usize,
 }
 
+impl TranscriptMemoryBudget {
+    /// Budgets that keep a fixed number of screens of content around a
+    /// `width` by `rows` viewport, so memory stops growing with the session.
+    pub(crate) fn for_viewport(width: u16, rows: u16) -> Self {
+        let screen = usize::from(width.max(1))
+            .saturating_mul(usize::from(rows.max(1)))
+            .saturating_mul(BYTES_PER_CELL);
+        let budget =
+            |screens: usize, max: usize| screen.saturating_mul(screens).clamp(MIN_BUDGET, max);
+        Self {
+            hydrated_blocks: budget(HYDRATED_SCREENS, MAX_HYDRATED_BLOCK_BUDGET),
+            record_windows: budget(RECORD_WINDOW_SCREENS, MAX_RECORD_WINDOW_BUDGET),
+            rendered_rows: budget(RENDERED_SCREENS, MAX_RENDERED_PAYLOAD_BUDGET),
+        }
+    }
+}
+
 impl Default for TranscriptMemoryBudget {
+    /// The largest budgets, used until a viewport is known.
     fn default() -> Self {
         Self {
-            hydrated_blocks: DEFAULT_HYDRATED_BLOCK_BUDGET,
-            record_windows: DEFAULT_RECORD_WINDOW_BUDGET,
-            rendered_rows: DEFAULT_RENDERED_PAYLOAD_BUDGET,
+            hydrated_blocks: MAX_HYDRATED_BLOCK_BUDGET,
+            record_windows: MAX_RECORD_WINDOW_BUDGET,
+            rendered_rows: MAX_RENDERED_PAYLOAD_BUDGET,
         }
     }
 }
@@ -81,6 +106,8 @@ pub(super) struct TranscriptHydrationState {
     pub(super) evicted_bytes: u64,
     pub(super) dematerialized_entries: u64,
     pub(super) dematerialized_bytes: u64,
+    /// The history hydrated revision the LRU last matched.
+    pub(super) lru_revision: Option<u64>,
 }
 
 impl TranscriptHydrationState {

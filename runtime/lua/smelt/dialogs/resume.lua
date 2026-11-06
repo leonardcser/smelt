@@ -72,29 +72,9 @@ end
 local LEADING, SIZE_COL, TIME_COL, GAP = 1, SIZE_WIDTH, 4, 1
 local PREVIEW_MIN_TERM_WIDTH = 100
 
-local UNAVAILABLE_LABELS = {
-  missing_database = "missing database",
-  symlink_not_allowed = "unsafe symlink",
-  unsupported_schema = "unsupported schema",
-  corrupt = "corrupt session",
-  io = "I/O error",
-  sqlite = "database error",
-}
-
-local function unavailable_reason(entry)
-  return UNAVAILABLE_LABELS[entry.error_kind] or "storage error"
-end
-
 local function make_render(now_ms)
   return function(entry)
     local prefix = entry.tree_prefix or ""
-    if entry.available == false then
-      local meta = string.rep(" ", LEADING + SIZE_COL + GAP + TIME_COL + GAP)
-      return {
-        text = meta .. prefix .. "Unavailable - " .. unavailable_reason(entry),
-        marks = { { col = 0, opts = { end_col = #meta + #prefix, style = { dim = true } } } },
-      }
-    end
     local size_str = format_size(entry.size_bytes)
     local ts = (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms
     local meta = string.format(
@@ -150,21 +130,13 @@ smelt.cmd.register("resume", function()
   smelt.spawn(function()
     local entries = {}
     local cursor = nil
-    local catalog_state = "ready"
     repeat
       local page = smelt.session.list({ limit = 500, cursor = cursor })
-      catalog_state = page.catalog.state
       for _, entry in ipairs(page.entries) do table.insert(entries, entry) end
       cursor = page.next_cursor
     until cursor == nil
     if #entries == 0 then
-      if catalog_state == "reconciling" then
-        smelt.notify.error("session catalog is rebuilding; try again shortly")
-      elseif catalog_state == "degraded" then
-        smelt.notify.error("session catalog is unavailable")
-      else
-        smelt.notify.error("no saved sessions")
-      end
+      smelt.notify.error("no saved sessions")
       return
     end
 
@@ -176,7 +148,7 @@ smelt.cmd.register("resume", function()
     -- Title haystacks by session id, built once and ranked in one call per query.
     local title_hays = {}
     for _, e in ipairs(entries) do
-      title_hays[e.id] = table.concat({ display_title(e), e.subtitle or "", e.error or "" }, " ")
+      title_hays[e.id] = display_title(e) .. " " .. (e.subtitle or "")
     end
 
     -- Lowercased conversation text by session id; `nil` until the background
@@ -186,7 +158,7 @@ smelt.cmd.register("resume", function()
     local function visible_tree()
       local candidates = {}
       for _, e in ipairs(entries) do
-        if e.available == false or not workspace_only or e.cwd == current_cwd then
+        if not workspace_only or e.cwd == current_cwd then
           table.insert(candidates, e)
         end
       end
@@ -277,17 +249,6 @@ smelt.cmd.register("resume", function()
         preview_leaf:scroll(0)
         return
       end
-      if e.available == false then
-        preview_buf:lines({
-          "  Session unavailable: " .. unavailable_reason(e),
-          "",
-          "  " .. (e.error or "No storage details are available."),
-          "",
-          "  Press Alt-D to remove this session.",
-        })
-        preview_leaf:scroll(0)
-        return
-      end
       local width, height = preview_size()
       smelt.session.render_preview_into(e.id, {
         buf = preview_buf,
@@ -351,10 +312,6 @@ smelt.cmd.register("resume", function()
     local function submit()
       local e = list:selected()
       if not e then return end
-      if e.available == false then
-        smelt.notify.error(e.error or "session unavailable")
-        return
-      end
       close(e)
     end
 
@@ -467,9 +424,7 @@ smelt.cmd.register("resume", function()
     input_leaf:focus()
 
     local text_ids = {}
-    for _, e in ipairs(entries) do
-      if e.available ~= false then table.insert(text_ids, e.id) end
-    end
+    for _, e in ipairs(entries) do table.insert(text_ids, e.id) end
     texts_load = smelt.spawn(function() merge_texts(smelt.session.texts(text_ids)) end)
 
     local picked = smelt.task.wait(task_id)

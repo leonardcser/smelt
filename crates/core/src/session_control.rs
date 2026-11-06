@@ -162,20 +162,40 @@ impl SessionControl {
 #[cfg(unix)]
 struct Server {
     path: std::path::PathBuf,
+    lock_path: std::path::PathBuf,
     task: tokio::task::JoinHandle<()>,
-    _directory: tempfile::TempDir,
+    /// Held for the process lifetime; a later process removes the socket once it
+    /// can take this lock, so a killed process leaves nothing behind for long.
+    _lock: std::fs::File,
 }
 
 #[cfg(unix)]
 impl Server {
     fn start(state: Arc<Mutex<State>>) -> io::Result<Self> {
-        use std::os::unix::fs::PermissionsExt;
+        Self::start_in(&control_dir(), state)
+    }
+
+    fn start_in(directory: &std::path::Path, state: Arc<Mutex<State>>) -> io::Result<Self> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
-        let directory = tempfile::Builder::new()
-            .prefix("smelt-control-")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()?;
-        let path = directory.path().join("control.sock");
+        create_private_dir(directory)?;
+        remove_abandoned_endpoints(directory);
+        let name = format!(
+            "{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let lock_path = directory.join(format!("{name}.lock"));
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&lock_path)?;
+        lock.try_lock().map_err(io::Error::other)?;
+        let path = directory.join(format!("{name}.sock"));
         let listener = tokio::net::UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let task = runtime.spawn(async move {
@@ -188,8 +208,9 @@ impl Server {
         });
         Ok(Self {
             path,
+            lock_path,
             task,
-            _directory: directory,
+            _lock: lock,
         })
     }
 }
@@ -198,6 +219,59 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+#[cfg(unix)]
+fn control_dir() -> std::path::PathBuf {
+    crate::public_status::runtime_root()
+        .join("smelt")
+        .join("control")
+}
+
+/// Creates `directory` private to this user, refusing one another user owns.
+#[cfg(unix)]
+fn create_private_dir(directory: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)?;
+    let metadata = std::fs::symlink_metadata(directory)?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.is_dir() || metadata.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not a directory owned by this user",
+                directory.display()
+            ),
+        ));
+    }
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Removes the endpoints of processes that exited without cleaning up.
+#[cfg(unix)]
+fn remove_abandoned_endpoints(directory: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let lock_path = entry.path();
+        if lock_path.extension().and_then(|ext| ext.to_str()) != Some("lock") {
+            continue;
+        }
+        let Ok(lock) = std::fs::OpenOptions::new().write(true).open(&lock_path) else {
+            continue;
+        };
+        if lock.try_lock().is_ok() {
+            let _ = std::fs::remove_file(lock_path.with_extension("sock"));
+            let _ = std::fs::remove_file(&lock_path);
+        }
     }
 }
 
@@ -422,5 +496,26 @@ mod tests {
         );
         drop(control);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn startup_removes_endpoints_of_exited_processes_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let exited = directory.path().join("1-a.lock");
+        std::fs::write(&exited, "").unwrap();
+        std::fs::write(exited.with_extension("sock"), "").unwrap();
+        let live = directory.path().join("2-b.lock");
+        let live_lock = std::fs::File::create(&live).unwrap();
+        live_lock.try_lock().unwrap();
+        std::fs::write(live.with_extension("sock"), "").unwrap();
+
+        let server = Server::start_in(directory.path(), Arc::default()).unwrap();
+
+        assert!(!exited.exists() && !exited.with_extension("sock").exists());
+        assert!(live.exists() && live.with_extension("sock").exists());
+        assert!(server.path.exists() && server.lock_path.exists());
+        let (path, lock_path) = (server.path.clone(), server.lock_path.clone());
+        drop(server);
+        assert!(!path.exists() && !lock_path.exists());
     }
 }

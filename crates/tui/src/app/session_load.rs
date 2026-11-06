@@ -114,16 +114,15 @@ impl Drop for SessionOperationRuntime {
 }
 
 pub(super) struct PreparedSessionLoad {
-    header: smelt_core::session::SessionHeader,
-    user_turn_count: usize,
     session: smelt_core::session::Session,
-    store_address: smelt_core::session::SessionStoreAddress,
+    live_session: smelt_core::session_runtime::LiveSession,
     head: smelt_store::StoreHead,
     transcript: crate::app::transcript::LoadedTranscript,
     layout: (u16, u16),
 }
 
 impl PreparedSessionLoad {
+    /// Reuses this load when the layout and the stored session are unchanged.
     fn refresh(
         self: Box<Self>,
         sessions: &smelt_core::session::SessionStorage,
@@ -135,15 +134,10 @@ impl PreparedSessionLoad {
             return Err("session load cancelled".into());
         }
         if self.layout == (width, target_rows) {
-            let store = &self.store_address;
-            let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                &store.sessions_root,
-                &store.lineage_id,
-                &store.session_id,
-            )
-            .map_err(|error| format!("open resume destination: {error}"))?;
-            let head = reader
-                .store_head()
+            let head = sessions
+                .reader(&self.session.id)
+                .map_err(|error| format!("open resume destination: {error}"))?
+                .head()
                 .map_err(|error| format!("refresh resume destination: {error}"))?;
             if head == self.head {
                 smelt_perf::perf::record_value("session:resume:reused", 1);
@@ -153,38 +147,29 @@ impl PreparedSessionLoad {
         prepare_session_load(sessions, &self.session.id, width, target_rows, cancelled)
     }
 
-    fn finish(
-        self,
-    ) -> (
-        crate::app::session_document::StoreBackedSessionDocument,
-        Vec<String>,
-    ) {
-        let warnings = self.header.degraded_warnings.clone();
-        let document = crate::app::session_document::SessionDocument::from_store(
-            self.header,
+    fn finish(self) -> crate::app::session_document::StoreBackedSessionDocument {
+        crate::app::session_document::SessionDocument::from_store(
             self.session,
-            self.store_address,
+            self.live_session,
             self.head,
             self.transcript,
-            self.user_turn_count,
         )
-        .into_store_backed();
-        (document, warnings)
+        .into_store_backed()
     }
 }
 
 pub(super) struct SessionForkRequest {
     pub(super) source_id: String,
     pub(super) forked: smelt_core::session::Session,
-    pub(super) expected_source: Option<smelt_store::StoreHead>,
-    pub(super) preserved_projection: Option<crate::app::session_document::ProjectedSessionSave>,
+    /// Changes the source has not saved, applied on top of the copied session.
+    pub(super) unsaved: Option<smelt_store::SessionCommit>,
 }
 
 enum SessionPreparation {
     Load,
     Refresh(Box<PreparedSessionLoad>),
-    Fork(SessionForkRequest),
-    Archive(super::history_archive::HistoryArchiveRequest),
+    Fork(Box<SessionForkRequest>),
+    Archive(Box<super::history_archive::HistoryArchiveRequest>),
 }
 
 struct SessionLoadRequest {
@@ -216,7 +201,8 @@ impl std::fmt::Debug for SessionLoadWorkerResult {
 
 struct SessionAdoption {
     generation: u64,
-    source_generation: super::session_document::PersistenceGeneration,
+    /// The source document revision; a change cancels the adoption.
+    source_revision: u64,
     busy: super::BusyToken,
     target_id: String,
     preparation: Option<SessionPreparation>,
@@ -225,7 +211,11 @@ struct SessionAdoption {
 }
 
 enum SessionAdoptionStage {
-    Settling {
+    /// Waiting to save and close the source session.
+    Settling,
+    /// Waiting for the source's saves to become durable. The writer stays open,
+    /// so a cancel or a failed save leaves the source as it was.
+    Flushing {
         deadline: std::time::Instant,
     },
     Closing {
@@ -259,6 +249,17 @@ impl Default for SessionLoadRuntime {
 }
 
 impl SessionLoadRuntime {
+    /// Whether an adoption is waiting for the source session's writer to close.
+    #[cfg(test)]
+    pub(super) fn is_releasing_source(&self) -> bool {
+        self.adoption.as_ref().is_some_and(|adoption| {
+            matches!(
+                adoption.stage,
+                SessionAdoptionStage::Flushing { .. } | SessionAdoptionStage::Closing { .. }
+            )
+        })
+    }
+
     fn request(
         &mut self,
         event_tx: tokio::sync::mpsc::UnboundedSender<super::AppEvent>,
@@ -282,7 +283,7 @@ impl SessionLoadRuntime {
                     SessionPreparation::Refresh(prepared) => Ok(Some(prepared)),
                     SessionPreparation::Fork(fork) => {
                         forked_from = Some(fork.source_id.clone());
-                        create_session_fork(&request.sessions, fork, &cancelled).map(|()| None)
+                        create_session_fork(&request.sessions, *fork, &cancelled).map(|()| None)
                     }
                     SessionPreparation::Archive(archive) => {
                         archive.run(&request.sessions, &cancelled).map(|seed| {
@@ -350,57 +351,33 @@ impl SessionLoadRuntime {
 
 fn create_session_fork(
     sessions: &smelt_core::session::SessionStorage,
-    mut request: SessionForkRequest,
+    request: SessionForkRequest,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     if cancelled() {
         return Err("session fork cancelled".into());
     }
-    let (mut destination, imported) = smelt_store::OwnedLineageWriter::fork_from(
-        sessions.sessions_dir(),
-        &request.source_id,
-        &request.forked.id,
-        request.forked.created_at_ms,
-        request.expected_source,
-        cancelled,
-    )
-    .map_err(|error| format!("failed to fork session store: {error}"))?;
-    let outcome = (|| {
-        if !request.forked.bind_fork_archives(&imported) {
-            return Err("copied fork archives do not match the captured source".to_string());
-        }
-        let expected = imported.session.receipt.current;
-        let frame = if let Some(projection) = request.preserved_projection {
-            projection.prepare_archives(&request.forked, expected)
-        } else {
-            request.forked.prepare_archive_save(
-                expected,
-                smelt_store::HistorySuffix {
-                    start: smelt_store::HistoryIndex::new(expected.history_len.get()),
-                    final_len: expected.history_len,
-                    items: Vec::new(),
-                },
-                None,
-            )
-        }
-        .map_err(|error| format!("{error:?}"))?;
-        let result = destination
-            .commit_compact_session(frame.command())
-            .map_err(|error| format!("{error:?}"))?;
-        sessions
-            .publish_archive_save_catalog(&destination, &frame, &result)
-            .map_err(|error| format!("failed to publish fork session: {error}"))
-    })();
-    if let Err(error) = outcome {
-        let cleanup = destination.delete_branch(smelt_core::session::now_ms());
-        return Err(match cleanup {
+    let store = sessions.store();
+    let created_at = request.forked.created_at_ms.min(i64::MAX as u64) as i64;
+    store
+        .fork(&request.source_id, &request.forked.id, created_at)
+        .map_err(|error| format!("failed to fork session store: {error}"))?;
+    let Some(unsaved) = request.unsaved else {
+        return Ok(());
+    };
+    let identity = smelt_core::session::store_identity(&request.forked);
+    let saved = store
+        .writer(&request.forked.id)
+        .and_then(|mut writer| writer.commit(&identity, &unsaved));
+    if let Err(error) = saved {
+        return Err(match store.delete(&request.forked.id) {
             Ok(()) => format!("failed to preserve fork state: {error}"),
-            Err(cleanup) => format!("failed to preserve fork state: {error}; failed to remove incomplete fork: {cleanup}"),
+            Err(cleanup) => format!(
+                "failed to preserve fork state: {error}; failed to remove incomplete fork: {cleanup}"
+            ),
         });
     }
-    destination
-        .release()
-        .map_err(|error| format!("failed to release fork writer: {error}"))
+    Ok(())
 }
 
 pub(super) fn prepare_session_load(
@@ -411,38 +388,40 @@ pub(super) fn prepare_session_load(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<PreparedSessionLoad, String> {
     let _perf = smelt_perf::perf::begin("session:resume:prepare");
-    let resume = match sessions.load_store_resume_cancellable(id, width, target_rows, cancelled) {
-        Ok(Some(resume)) => resume,
-        Ok(None) => return Err(format!("session {id:?} has no stored state")),
-        Err(error) => return Err(format!("failed to load session: {error}")),
-    };
+    let resume = sessions
+        .load_resume(id, width, target_rows)
+        .map_err(|error| format!("failed to load session: {error}"))?;
     if cancelled() {
         return Err("session load cancelled".into());
     }
     let smelt_core::session::SessionStoreResume {
-        header,
-        user_turn_count,
         session,
-        store_address,
+        address,
         head,
-        transcript_record_tail,
-    } = resume;
-    let address = crate::app::transcript::TranscriptStoreAddress::new(
-        store_address.sessions_root.clone(),
-        store_address.session_id.clone(),
-        store_address.lineage_id.clone(),
-    );
-    let transcript = if head.transcript_record_count.get() == 0 && head.history_len.get() == 0 {
-        crate::app::transcript::LoadedTranscript::empty_from_store(address)
-    } else {
-        crate::app::transcript::LoadedTranscript::from_record_slice(transcript_record_tail, address)
-            .ok_or_else(|| format!("session {id:?} has no stored transcript records"))?
-    };
-    Ok(PreparedSessionLoad {
-        header,
+        context_start,
+        context,
         user_turn_count,
+        transcript_record_tail,
+        ..
+    } = resume;
+    let transcript = if head.transcript_record_count.get() == 0 && head.history_len.get() == 0 {
+        crate::app::transcript::LoadedTranscript::empty_from_store(address.clone())
+    } else {
+        crate::app::transcript::LoadedTranscript::from_record_slice(
+            transcript_record_tail,
+            address.clone(),
+        )
+        .ok_or_else(|| format!("session {id:?} has no stored transcript records"))?
+    };
+    let live_session = smelt_core::session_runtime::LiveSession::from_resume(
+        address,
+        context_start,
+        context,
+        user_turn_count,
+    );
+    Ok(PreparedSessionLoad {
         session,
-        store_address,
+        live_session,
         head,
         transcript,
         layout: (width, target_rows),
@@ -451,7 +430,7 @@ pub(super) fn prepare_session_load(
 
 pub(super) struct RecoveredSession {
     prepared: PreparedSessionLoad,
-    writer: crate::persist::SessionWriterHandoff,
+    writer: smelt_store::SessionWriter,
 }
 
 #[cfg(test)]
@@ -487,8 +466,8 @@ impl OwnershipRecovery {
             let cancelled = || token.cancelled();
             let outcome = (|| {
                 while !cancelled() {
-                    match smelt_store::SessionWriter::open_existing(sessions.sessions_dir(), &id) {
-                        Ok(mut writer) => {
+                    match sessions.store().writer(&id) {
+                        Ok(writer) => {
                             let prepared = prepare_session_load(
                                 &sessions,
                                 &id,
@@ -496,16 +475,9 @@ impl OwnershipRecovery {
                                 target_rows,
                                 &cancelled,
                             )?;
-                            // The snapshot already includes interrupted-turn recovery.
-                            if writer.take_startup_recovery().is_some() {
-                                sessions.request_session_catalog_repair(
-                                    &id,
-                                    prepared.head.revision.get(),
-                                );
-                            }
-                            return Ok((prepared, writer));
+                            return Ok(RecoveredSession { prepared, writer });
                         }
-                        Err(smelt_store::StoreError::OwnershipConflict { .. }) => {
+                        Err(smelt_store::StoreError::Owned { .. }) => {
                             #[cfg(test)]
                             let _ = observe.send(OwnershipRecoveryEvent::Waiting);
                             thread::sleep(std::time::Duration::from_millis(250));
@@ -515,32 +487,10 @@ impl OwnershipRecovery {
                 }
                 Err("session ownership recovery cancelled".into())
             })();
-            let (outcome, handoff) = match outcome {
-                Ok((prepared, writer)) => {
-                    let (transfer, receive) = crate::persist::SessionWriterHandoff::channel();
-                    (
-                        Ok(RecoveredSession {
-                            prepared,
-                            writer: receive,
-                        }),
-                        Some((transfer, writer)),
-                    )
-                }
-                Err(error) => (Err(error), None),
-            };
-            let delivered = if cancelled() {
-                drop(outcome);
-                false
-            } else {
-                send.send(outcome).is_ok()
-            };
-            if delivered {
+            if !cancelled() && send.send(outcome).is_ok() {
                 #[cfg(test)]
                 let _ = observe.send(OwnershipRecoveryEvent::Ready);
                 let _ = events.send(super::AppEvent::OwnershipRecoveryReady);
-            }
-            if let Some((transfer, writer)) = handoff {
-                let _ = transfer.send(writer);
             }
             #[cfg(test)]
             let _ = observe.send(OwnershipRecoveryEvent::Stopped);
@@ -586,13 +536,13 @@ impl super::TuiApp {
         };
         match outcome {
             Ok(recovered) => {
-                let (document, warnings) = recovered.prepared.finish();
+                let document = recovered.prepared.finish();
                 if !self.load_store_backed_session_with_writer(document, Some(recovered.writer)) {
                     self.conversation
                         .mark_read_only("failed to restore session writer".into());
                     return;
                 }
-                self.finish_loaded_transcript(&warnings);
+                self.finish_loaded_transcript();
             }
             Err(error) => {
                 self.conversation.mark_read_only(error.clone());
@@ -627,7 +577,7 @@ impl super::TuiApp {
             id: fork.forked.id.clone(),
             width: self.last_width,
             target_rows: super::transcript::record_tail_target_rows(self.last_height),
-            preparation: SessionPreparation::Fork(fork),
+            preparation: SessionPreparation::Fork(Box::new(fork)),
         };
         match self
             .session_load
@@ -647,15 +597,12 @@ impl super::TuiApp {
         self.session_load.pending.set(true);
         self.session_load.adoption = Some(SessionAdoption {
             generation,
-            source_generation: self.conversation.persistence_generation(),
+            source_revision: self.conversation.document_revision(),
             busy: self.busy_stack.push_token("archiving history".into()),
             target_id: archive.session.id.clone(),
-            preparation: Some(SessionPreparation::Archive(archive)),
+            preparation: Some(SessionPreparation::Archive(Box::new(archive))),
             forked_from: None,
-            stage: SessionAdoptionStage::Settling {
-                deadline: std::time::Instant::now()
-                    + crate::persist::INTERACTIVE_PERSISTENCE_DEADLINE,
-            },
+            stage: SessionAdoptionStage::Settling,
         });
         self.poll_session_adoption();
     }
@@ -673,21 +620,14 @@ impl super::TuiApp {
     }
 
     pub(super) fn install_prepared_session_load(&mut self, prepared: PreparedSessionLoad) -> bool {
-        let (document, degraded_warnings) = prepared.finish();
-        if !self.load_store_backed_session(document) {
+        if !self.load_store_backed_session(prepared.finish()) {
             return false;
         }
-        self.finish_loaded_transcript(&degraded_warnings);
+        self.finish_loaded_transcript();
         true
     }
 
-    fn finish_loaded_transcript(&mut self, warnings: &[String]) {
-        if !warnings.is_empty() {
-            self.notify_session_error_sticky(format!(
-                "session loaded with unavailable attachments: {}",
-                warnings.join("; ")
-            ));
-        }
+    fn finish_loaded_transcript(&mut self) {
         self.finish_transcript_turn();
         self.transcript_win_mut().follow_tail();
     }
@@ -703,8 +643,8 @@ impl super::TuiApp {
                 let adoption = self.session_load.adoption.take().expect("session adoption");
                 adoption.busy.release();
                 self.session_load.pending.set(false);
-                if adoption.source_generation != self.conversation.persistence_generation() {
-                    self.restore_source_writer();
+                if adoption.source_revision != self.conversation.document_revision() {
+                    self.restore_session_writer();
                     self.notify_session_load_error(
                         "session changed while loading; resume cancelled".into(),
                     );
@@ -714,7 +654,7 @@ impl super::TuiApp {
                 let continuation = result.continuation;
                 if continuation.is_some() {
                     if let Err(error) = self.check_archive_continuation_idle() {
-                        self.restore_source_writer();
+                        self.restore_session_writer();
                         self.notify_session_load_error(error);
                         return;
                     }
@@ -725,9 +665,8 @@ impl super::TuiApp {
                         self.cancel_live_search(false);
                         self.lua.cancel_tasks();
                         self.finish_session_replacement();
-                        let (document, warnings) = prepared.finish();
-                        self.adopt_store_backed_session(document, None);
-                        self.finish_loaded_transcript(&warnings);
+                        self.adopt_store_backed_session(prepared.finish(), None);
+                        self.finish_loaded_transcript();
                         if let Some(source_id) = forked_from {
                             self.publish_history_delta(super::history::HistoryDeltaKind::Forked);
                             self.notify(format!("forked from {source_id}"));
@@ -741,7 +680,7 @@ impl super::TuiApp {
                         }
                     }
                     Err(error) => {
-                        self.restore_source_writer();
+                        self.restore_session_writer();
                         self.notify_session_load_error(error);
                     }
                 }
@@ -764,23 +703,14 @@ impl super::TuiApp {
         }
         self.session_load.adoption = Some(SessionAdoption {
             generation: result.generation,
-            source_generation: self.conversation.persistence_generation(),
+            source_revision: self.conversation.document_revision(),
             busy: self.busy_stack.push_token("loading session".into()),
             target_id: result.id,
             preparation: Some(SessionPreparation::Refresh(prepared)),
             forked_from: result.forked_from,
-            stage: SessionAdoptionStage::Settling {
-                deadline: std::time::Instant::now()
-                    + crate::persist::INTERACTIVE_PERSISTENCE_DEADLINE,
-            },
+            stage: SessionAdoptionStage::Settling,
         });
         self.poll_session_adoption();
-    }
-
-    fn restore_source_writer(&mut self) {
-        if !self.conversation.has_persistence() && !self.conversation.is_read_only() {
-            self.claim_writer_access_for_current_session();
-        }
     }
 
     fn notify_session_load_error(&mut self, error: String) {
@@ -802,44 +732,56 @@ impl super::TuiApp {
             return;
         };
         let current = self.session_load.operations.is_current(adoption.generation);
-        let changed = !matches!(adoption.stage, SessionAdoptionStage::Settling { .. })
-            && adoption.source_generation != self.conversation.persistence_generation();
+        let changed = !matches!(adoption.stage, SessionAdoptionStage::Settling)
+            && adoption.source_revision != self.conversation.document_revision();
         let cancelled = !current || changed;
         let outcome = match &mut adoption.stage {
-            SessionAdoptionStage::Settling { deadline } => {
+            SessionAdoptionStage::Settling => {
                 if cancelled {
                     Ok(None)
-                } else if self.conversation.canonical_operations_are_pending()
-                    || !self
-                        .conversation
-                        .submissions
-                        .settling_cancellations
-                        .is_empty()
-                {
-                    if std::time::Instant::now() >= *deadline {
-                        Err("session cancellation commands did not settle before the close deadline".into())
-                    } else {
-                        self.session_load.adoption = Some(adoption);
-                        return;
-                    }
                 } else {
                     self.save_session();
-                    match self.conversation.begin_persistence_close() {
-                        Ok(close) => {
-                            adoption.source_generation = self.conversation.persistence_generation();
+                    adoption.source_revision = self.conversation.document_revision();
+                    adoption.stage = SessionAdoptionStage::Flushing {
+                        deadline: std::time::Instant::now()
+                            + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
+                    };
+                    self.session_load.adoption = Some(adoption);
+                    self.poll_session_adoption();
+                    return;
+                }
+            }
+            SessionAdoptionStage::Flushing { deadline } => {
+                if cancelled {
+                    Ok(None)
+                } else {
+                    match self.conversation.poll_persistence_settled() {
+                        Some(Ok(())) => {
+                            let close = self.conversation.begin_persistence_close();
                             adoption.stage = SessionAdoptionStage::Closing {
                                 close: close.map(Box::new),
                             };
                             self.session_load.adoption = Some(adoption);
+                            self.poll_session_adoption();
                             return;
                         }
-                        Err(error) => Err(error),
+                        Some(Err(reason)) => Err(reason),
+                        None if std::time::Instant::now() >= *deadline => {
+                            Err("session save did not finish in time".into())
+                        }
+                        None => {
+                            self.session_load.adoption = Some(adoption);
+                            return;
+                        }
                     }
                 }
             }
             SessionAdoptionStage::Closing { close, .. } => {
                 if let Some(close) = close {
-                    match self.conversation.poll_persistence_close(close, cancelled) {
+                    match self
+                        .conversation
+                        .poll_persistence_close(close.as_ref(), cancelled)
+                    {
                         Some(outcome) => outcome,
                         None => {
                             self.session_load.adoption = Some(adoption);
@@ -863,7 +805,7 @@ impl super::TuiApp {
         }
         if cancelled || outcome.is_err() {
             adoption.busy.release();
-            self.restore_source_writer();
+            self.restore_session_writer();
             if current {
                 self.session_load.cancel();
                 self.notify_session_load_error(if changed {
@@ -904,7 +846,7 @@ impl super::TuiApp {
             Err(error) => {
                 adoption.busy.release();
                 self.session_load.pending.set(false);
-                self.restore_source_writer();
+                self.restore_session_writer();
                 self.notify_session_load_error(error);
             }
         }

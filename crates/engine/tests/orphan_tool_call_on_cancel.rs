@@ -143,7 +143,6 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,

@@ -1,6 +1,4 @@
 use std::fmt;
-use std::io::Write;
-use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStoreError {
@@ -15,77 +13,60 @@ pub enum SessionStoreError {
         prefix: String,
         matches: usize,
     },
-    MissingDatabase {
+    /// Another smelt process has the session open.
+    Owned {
         id: String,
-    },
-    InvalidListQuery {
-        message: String,
-    },
-    CatalogUnavailable {
-        kind: String,
-        summary: String,
-    },
-    SymlinkNotAllowed {
-        operation: &'static str,
-        path: String,
-    },
-    ReadOnlyOwnerConflict {
-        owner: String,
-    },
-    Busy {
-        operation: String,
-        attempts: u32,
-        waited_ms: u64,
-    },
-    Io {
-        operation: &'static str,
-        path: String,
-        message: String,
-    },
-    UnsupportedSchema {
-        found: i32,
-        supported: i32,
-    },
-    MissingObject {
-        reference: String,
-    },
-    ObjectTooLarge {
-        size: u64,
-        max: u64,
     },
     Corrupt {
         context: String,
     },
-    JournalRecovery {
-        failure: Box<smelt_store::SessionCommitFailure>,
-    },
-    Sqlite {
+    Store {
         operation: &'static str,
-        path: String,
+        code: &'static str,
+        transient: bool,
         message: String,
     },
 }
 
 impl SessionStoreError {
-    pub fn code(&self) -> &str {
+    pub fn store(operation: &'static str, error: smelt_store::StoreError) -> Self {
+        match error {
+            smelt_store::StoreError::NotFound { session_id } => {
+                Self::SessionNotFound { id: session_id }
+            }
+            smelt_store::StoreError::Owned { session_id } => Self::Owned { id: session_id },
+            smelt_store::StoreError::Integrity(message) => Self::Corrupt {
+                context: format!("{operation}: {message}"),
+            },
+            error => Self::Store {
+                operation,
+                code: error.code(),
+                transient: error.is_transient(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidSessionId { .. } => "invalid_session_id",
             Self::SessionNotFound { .. } => "session_not_found",
             Self::AmbiguousPrefix { .. } => "ambiguous_prefix",
-            Self::MissingDatabase { .. } => "missing_database",
-            Self::InvalidListQuery { .. } => "invalid_list_query",
-            Self::CatalogUnavailable { kind, .. } => kind,
-            Self::SymlinkNotAllowed { .. } => "symlink_not_allowed",
-            Self::ReadOnlyOwnerConflict { .. } => "read_only_owner_conflict",
-            Self::Busy { .. } => "busy",
-            Self::Io { .. } => "io",
-            Self::UnsupportedSchema { .. } => "unsupported_schema",
-            Self::MissingObject { .. } => "missing_object",
-            Self::ObjectTooLarge { .. } => "object_too_large",
+            Self::Owned { .. } => "owned",
             Self::Corrupt { .. } => "corrupt",
-            Self::JournalRecovery { .. } => "journal_recovery",
-            Self::Sqlite { .. } => "sqlite",
+            Self::Store { code, .. } => code,
         }
+    }
+
+    /// Busy or locked storage that can succeed when retried.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Store {
+                transient: true,
+                ..
+            }
+        )
     }
 }
 
@@ -102,50 +83,11 @@ impl fmt::Display for SessionStoreError {
                     "session prefix {prefix:?} is ambiguous ({matches} matches)"
                 )
             }
-            Self::MissingDatabase { id } => {
-                write!(f, "session {id} has no sqlite database")
-            }
-            Self::InvalidListQuery { message } => {
-                write!(f, "invalid session list query: {message}")
-            }
-            Self::CatalogUnavailable { summary, .. } => f.write_str(summary),
-            Self::SymlinkNotAllowed { operation, path } => {
-                write!(f, "cannot {operation} symlinked session path {path}")
-            }
-            Self::ReadOnlyOwnerConflict { owner } => {
-                write!(f, "session is owned by another writer: {owner}")
-            }
-            Self::Busy {
-                operation,
-                attempts,
-                waited_ms,
-            } => write!(
-                f,
-                "session database busy during {operation} after {attempts} attempts over {waited_ms}ms"
-            ),
-            Self::Io {
-                operation,
-                path,
-                message,
-            } => write!(f, "failed to {operation} {path}: {message}"),
-            Self::UnsupportedSchema { found, supported } => write!(
-                f,
-                "unsupported session schema version {found}; this build supports {supported}"
-            ),
-            Self::MissingObject { reference } => {
-                write!(f, "session attachment or object is missing: {reference}")
-            }
-            Self::ObjectTooLarge { size, max } => write!(
-                f,
-                "session attachment or object is too large: {size} bytes exceeds {max}"
-            ),
+            Self::Owned { id } => write!(f, "session {id} is open in another smelt process"),
             Self::Corrupt { context } => write!(f, "corrupt session: {context}"),
-            Self::JournalRecovery { failure } => write!(f, "session journal recovery failed: {failure:?}"),
-            Self::Sqlite {
-                operation,
-                path,
-                message,
-            } => write!(f, "sqlite {operation} failed for {path}: {message}"),
+            Self::Store {
+                operation, message, ..
+            } => write!(f, "failed to {operation}: {message}"),
         }
     }
 }
@@ -154,196 +96,13 @@ impl std::error::Error for SessionStoreError {}
 
 pub type SessionStoreResult<T> = Result<T, SessionStoreError>;
 
-pub fn store_error(
-    operation: &'static str,
-    path: &Path,
-    err: smelt_store::StoreError,
-) -> SessionStoreError {
-    match err {
-        smelt_store::StoreError::Io(err) => SessionStoreError::Io {
-            operation,
-            path: path.display().to_string(),
-            message: err.to_string(),
-        },
-        smelt_store::StoreError::Sqlite(err) => SessionStoreError::Sqlite {
-            operation,
-            path: path.display().to_string(),
-            message: err.to_string(),
-        },
-        smelt_store::StoreError::Json(err) => SessionStoreError::Corrupt {
-            context: format!("{operation} {}: {err}", path.display()),
-        },
-        smelt_store::StoreError::Busy {
-            operation,
-            attempts,
-            waited_ms,
-        } => SessionStoreError::Busy {
-            operation: operation.to_string(),
-            attempts,
-            waited_ms,
-        },
-        smelt_store::StoreError::TransactionCleanup {
-            operation: transaction_operation,
-            message,
-        } => SessionStoreError::Sqlite {
-            operation,
-            path: path.display().to_string(),
-            message: format!(
-                "transaction cleanup failed during {transaction_operation}: {message}"
-            ),
-        },
-        smelt_store::StoreError::OperationCleanup {
-            operation: failed_operation,
-            primary,
-            cleanup,
-        } => SessionStoreError::Sqlite {
-            operation,
-            path: path.display().to_string(),
-            message: format!(
-                "{failed_operation} failed: {primary}; cleanup also failed: {}",
-                cleanup
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-        },
-        smelt_store::StoreError::OwnershipConflict { owner } => {
-            SessionStoreError::ReadOnlyOwnerConflict {
-                owner: owner.unwrap_or_else(|| "unknown owner".into()),
-            }
-        }
-        smelt_store::StoreError::OwnershipLost => SessionStoreError::ReadOnlyOwnerConflict {
-            owner: "writer ownership was lost".into(),
-        },
-        smelt_store::StoreError::JournalRecovery { failure } => {
-            SessionStoreError::JournalRecovery { failure }
-        }
-        smelt_store::StoreError::Cancelled => SessionStoreError::Corrupt {
-            context: format!("{operation} {}: operation cancelled", path.display()),
-        },
-        smelt_store::StoreError::MissingObject { reference } => {
-            SessionStoreError::MissingObject { reference }
-        }
-        smelt_store::StoreError::ObjectTooLarge { size, max } => {
-            SessionStoreError::ObjectTooLarge { size, max }
-        }
-        smelt_store::StoreError::Integrity(message) => SessionStoreError::Corrupt {
-            context: format!("{operation} {}: {message}", path.display()),
-        },
-        smelt_store::StoreError::UnsupportedSchema { found, expected } => {
-            SessionStoreError::UnsupportedSchema {
-                found,
-                supported: expected,
-            }
-        }
-    }
+/// Maps a store result into a session result for `operation`.
+pub(crate) trait StoreContext<T> {
+    fn context(self, operation: &'static str) -> SessionStoreResult<T>;
 }
 
-pub(crate) fn reject_symlink_in(
-    state_root: &Path,
-    path: &Path,
-    operation: &'static str,
-) -> SessionStoreResult<()> {
-    if !path.starts_with(state_root) {
-        return Err(SessionStoreError::Io {
-            operation: "confine session path beneath",
-            path: state_root.display().to_string(),
-            message: format!("{} escaped its storage root", path.display()),
-        });
-    }
-    for candidate in path.ancestors() {
-        match std::fs::symlink_metadata(candidate) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(SessionStoreError::SymlinkNotAllowed {
-                    operation,
-                    path: candidate.display().to_string(),
-                });
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(SessionStoreError::Io {
-                    operation: "inspect",
-                    path: candidate.display().to_string(),
-                    message: err.to_string(),
-                });
-            }
-        }
-        if candidate == state_root {
-            return Ok(());
-        }
-    }
-    Err(SessionStoreError::Io {
-        operation: "inspect storage root for",
-        path: path.display().to_string(),
-        message: format!("storage root {} was not an ancestor", state_root.display()),
-    })
-}
-
-pub fn export_history_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), String> {
-    reader_for_export(id_or_prefix)
-        .and_then(|reader| {
-            reader.export_history_jsonl(out).map_err(|error| {
-                store_error("export lineage history", reader.database_path(), error)
-            })
-        })
-        .map_err(|error| error.to_string())
-}
-
-pub fn export_requests_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), String> {
-    reader_for_export(id_or_prefix)
-        .and_then(|reader| {
-            reader.export_requests_jsonl(out).map_err(|error| {
-                store_error("export lineage requests", reader.database_path(), error)
-            })
-        })
-        .map_err(|error| error.to_string())
-}
-
-fn reader_for_export(id_or_prefix: &str) -> SessionStoreResult<smelt_store::LineageSessionReader> {
-    let resolved = crate::session::resolve_session_for_read_result(id_or_prefix)?;
-    smelt_store::LineageSessionReader::open_existing_in_lineage(
-        &resolved.sessions_root,
-        &resolved.lineage_id,
-        &resolved.id,
-    )
-    .map_err(|error| {
-        store_error(
-            "open lineage export database",
-            &resolved.sessions_root,
-            error,
-        )
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn journal_recovery_error_retains_structured_command_failure() {
-        let failure = smelt_store::SessionCommitFailure::Busy {
-            operation: "journal commit".into(),
-            attempts: 3,
-            waited_ms: 10,
-        };
-        let error = store_error(
-            "open writer",
-            Path::new("synthetic"),
-            smelt_store::StoreError::JournalRecovery {
-                failure: Box::new(failure.clone()),
-            },
-        );
-        assert_eq!(error.code(), "journal_recovery");
-        assert!(error
-            .to_string()
-            .starts_with("session journal recovery failed:"));
-        assert_eq!(
-            error,
-            SessionStoreError::JournalRecovery {
-                failure: Box::new(failure)
-            }
-        );
+impl<T> StoreContext<T> for smelt_store::Result<T> {
+    fn context(self, operation: &'static str) -> SessionStoreResult<T> {
+        self.map_err(|error| SessionStoreError::store(operation, error))
     }
 }

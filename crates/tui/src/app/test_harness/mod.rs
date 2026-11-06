@@ -668,11 +668,6 @@ fn reset_test_home(environment: &ProcessEnvironmentGuard) {
 
     smelt_core::session::create_private_dir_all(&smelt_core::config::state_dir())
         .expect("recreate test state directory");
-    smelt_core::session::request_session_catalog_reconciliation();
-    assert!(
-        smelt_core::session::wait_for_session_catalog(std::time::Duration::from_secs(5)),
-        "session catalog did not quiesce after resetting the test home"
-    );
 }
 
 fn harness_root(kind: &str) -> PathBuf {
@@ -771,30 +766,17 @@ mod runtime_path_tests {
         first.app.save_session_and_flush();
         second.app.save_session_and_flush();
 
-        assert!(smelt_store::LineageSessionReader::open_existing(
-            first.app.core.sessions.sessions_dir(),
-            &first_id,
-        )
-        .is_ok());
-        assert!(smelt_store::LineageSessionReader::open_existing(
-            second.app.core.sessions.sessions_dir(),
-            &second_id,
-        )
-        .is_ok());
-        assert!(smelt_store::LineageSessionReader::try_open_existing(
-            first.app.core.sessions.sessions_dir(),
-            &second_id,
-        )
-        .unwrap()
-        .is_none());
-        assert!(smelt_store::LineageSessionReader::try_open_existing(
-            second.app.core.sessions.sessions_dir(),
-            &first_id,
-        )
-        .unwrap()
-        .is_none());
-        assert_eq!(first.app.core.sessions.list_sessions()[0].id, first_id);
-        assert_eq!(second.app.core.sessions.list_sessions()[0].id, second_id);
+        assert!(first.app.core.sessions.reader(&first_id).is_ok());
+        assert!(second.app.core.sessions.reader(&second_id).is_ok());
+        assert!(first.app.core.sessions.reader(&second_id).is_err());
+        assert!(second.app.core.sessions.reader(&first_id).is_err());
+        let only_session = |app: &TestApp| {
+            let sessions = app.app.core.sessions.list_all_sessions().unwrap();
+            assert_eq!(sessions.len(), 1);
+            sessions[0].id.clone()
+        };
+        assert_eq!(only_session(&first), first_id);
+        assert_eq!(only_session(&second), second_id);
 
         assert_eq!(std::env::current_dir().unwrap(), process_cwd);
         assert_eq!(std::env::var_os("HOME"), process_home);

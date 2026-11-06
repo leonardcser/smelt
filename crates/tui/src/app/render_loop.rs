@@ -21,29 +21,30 @@ pub(crate) const CONTINUATION_FRAME_INTERVAL: std::time::Duration =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameUrgency {
+    /// The next frame on the frame grid.
     Continuation,
-    Animation(std::time::Duration),
+    /// A frame at this instant, or on the frame grid if that is later.
+    Animation(std::time::Instant),
     Urgent,
 }
 
 impl FrameUrgency {
-    fn interval(self) -> std::time::Duration {
+    /// When the frame is due after a frame at `last`; `None` is now.
+    fn due_at(self, last: Option<std::time::Instant>) -> Option<std::time::Instant> {
+        let grid = last.map(|last| last + CONTINUATION_FRAME_INTERVAL);
         match self {
-            Self::Continuation => CONTINUATION_FRAME_INTERVAL,
-            Self::Animation(interval) => interval,
-            Self::Urgent => std::time::Duration::ZERO,
+            Self::Urgent => None,
+            Self::Continuation => grid,
+            Self::Animation(at) => Some(grid.map_or(at, |grid| grid.max(at))),
         }
     }
 
     fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Urgent, _) | (_, Self::Urgent) => Self::Urgent,
-            (Self::Continuation, Self::Continuation) => Self::Continuation,
             (Self::Animation(left), Self::Animation(right)) => Self::Animation(left.min(right)),
-            (Self::Continuation, Self::Animation(interval))
-            | (Self::Animation(interval), Self::Continuation) => {
-                Self::Animation(CONTINUATION_FRAME_INTERVAL.min(interval))
-            }
+            // The grid is never later than an animation deadline clamped to it.
+            (Self::Continuation, _) | (_, Self::Continuation) => Self::Continuation,
         }
     }
 }
@@ -129,20 +130,20 @@ impl FrameScheduler {
         let Some(pending) = self.pending else {
             return false;
         };
-        let interval = pending.urgency.interval();
-        interval.is_zero()
-            || self
-                .last_frame_at
-                .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+        pending
+            .urgency
+            .due_at(self.last_frame_at)
+            .is_none_or(|due| now >= due)
     }
 
     pub(crate) fn next_delay(&self, now: std::time::Instant) -> Option<std::time::Duration> {
         let pending = self.pending?;
-        let interval = pending.urgency.interval();
         Some(
-            self.last_frame_at
-                .map_or(std::time::Duration::ZERO, |last| {
-                    interval.saturating_sub(now.saturating_duration_since(last))
+            pending
+                .urgency
+                .due_at(self.last_frame_at)
+                .map_or(std::time::Duration::ZERO, |due| {
+                    due.saturating_duration_since(now)
                 }),
         )
     }
@@ -1930,13 +1931,44 @@ mod tests {
         let start = std::time::Instant::now();
         let mut scheduler = FrameScheduler::default();
         scheduler.begin_frame(start);
-        scheduler.request(FrameUrgency::Animation(std::time::Duration::from_millis(
-            40,
-        )));
+        scheduler.request(FrameUrgency::Animation(
+            start + std::time::Duration::from_millis(40),
+        ));
         scheduler.request(FrameUrgency::Continuation);
 
         assert!(!scheduler.is_due(start + std::time::Duration::from_millis(15)));
         assert!(scheduler.is_due(start + CONTINUATION_FRAME_INTERVAL));
+    }
+
+    #[test]
+    fn animation_deadlines_wait_for_the_frame_grid() {
+        let start = std::time::Instant::now();
+        let mut scheduler = FrameScheduler::default();
+        scheduler.begin_frame(start);
+        scheduler.request_present(FrameUrgency::Animation(
+            start + std::time::Duration::from_millis(1),
+        ));
+
+        assert!(!scheduler.is_due(start + std::time::Duration::from_millis(15)));
+        assert!(scheduler.is_due(start + CONTINUATION_FRAME_INTERVAL));
+    }
+
+    #[test]
+    fn animation_deadlines_count_from_the_request_not_the_last_frame() {
+        let start = std::time::Instant::now();
+        let mut scheduler = FrameScheduler::default();
+        scheduler.begin_frame(start);
+        let requested = start + std::time::Duration::from_millis(500);
+        scheduler.request_present(FrameUrgency::Animation(
+            requested + std::time::Duration::from_millis(100),
+        ));
+
+        assert!(!scheduler.is_due(requested));
+        assert_eq!(
+            scheduler.next_delay(requested),
+            Some(std::time::Duration::from_millis(100))
+        );
+        assert!(scheduler.is_due(requested + std::time::Duration::from_millis(100)));
     }
 
     #[test]
@@ -2298,10 +2330,10 @@ mod tests {
             .expect("animation renderer call count");
 
         for _ in 0..3 {
-            app.clock.advance(std::time::Duration::from_millis(16));
-            app.app.tick_timers();
             app.app
                 .request_animation_render(std::time::Duration::from_millis(16));
+            app.clock.advance(std::time::Duration::from_millis(16));
+            app.app.tick_timers();
             assert!(app
                 .app
                 .render_requested_transient_frame_to(&mut std::io::sink()));

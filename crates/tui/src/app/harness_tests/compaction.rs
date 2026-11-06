@@ -1846,7 +1846,7 @@ fn delayed_host_calls_cannot_claim_a_replacement_turn() {
                 app.press(KeyCode::Enter);
                 app.press(KeyCode::Enter);
                 app.press(KeyCode::Enter);
-                app.wait_for_turn_persistence();
+                app.wait_for_turn_dispatch();
                 assert_ne!(app.current_turn_id(), Some(42));
                 let (reply, response) = tokio::sync::oneshot::channel();
                 current_response = Some(response);
@@ -2272,13 +2272,10 @@ async fn real_engine_compaction_preserves_queued_inputs() {
             assert_eq!(app.queued_message_count(), 0);
             app.save_session_and_flush();
             let session_id = app.session_snapshot().id;
-            let history = crate::app::history::materialize_full_session(
-                &app.core_probe().sessions,
-                &session_id,
-                crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
-            )
-            .expect("saved canonical history")
-            .history;
+            let history =
+                crate::app::history::load_saved_session(&app.core_probe().sessions, &session_id)
+                    .expect("saved canonical history")
+                    .history;
             for (content, expected_time) in [
                 ("CURRENT_TASK", SENT_AT_MS),
                 ("QUEUED_FIRST", SENT_AT_MS + 1_000),

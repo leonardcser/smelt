@@ -95,19 +95,17 @@ server indexes a large workspace. See the
 First run the read-only health check:
 
 ```bash
-smelt session doctor <SESSION>
-smelt session doctor --all --json
+smelt session doctor
+smelt session doctor <SESSION> --json
 ```
 
-Create a verified database backup before maintenance:
+Copy the session database before you change anything by hand:
 
 ```bash
-smelt session backup <SESSION> ./session-backup.db
+smelt session backup ./sessions-backup.db
 ```
 
-The selected session belongs to a canonical lineage shared by its forks. Close
-every smelt process using any branch in that lineage before `compact`; it
-requires exclusive ownership and fails instead of racing a live writer. See [Session maintenance](../reference/cli.md#session-maintenance).
+See [Session maintenance](../reference/cli.md#session-maintenance).
 
 ## Headless tools are denied
 

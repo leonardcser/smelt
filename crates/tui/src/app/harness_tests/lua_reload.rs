@@ -2071,14 +2071,10 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     )));
     app.save_session_and_flush();
     assert_eq!(
-        crate::app::history::materialize_full_session(
-            &app.core_probe().sessions,
-            &session_id,
-            crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
-        )
-        .expect("explicit cwd change persisted")
-        .cwd
-        .as_deref(),
+        crate::app::history::load_saved_session(&app.core_probe().sessions, &session_id)
+            .expect("explicit cwd change persisted")
+            .cwd
+            .as_deref(),
         Some(expected.as_str())
     );
 }
@@ -2789,7 +2785,7 @@ fn loading_session_restores_persisted_cwd() {
         crate::app::session_document::StoreBackedSessionDocument::new(
             display_session,
             crate::app::transcript::LoadedTranscript::full(transcript),
-            crate::app::history::live_session_for_test(display_session_id.clone(), 0, None),
+            crate::app::history::live_session_for_test(display_session_id.clone(), 0),
             smelt_store::StoreHead::default(),
         ),
     );

@@ -1,596 +1,69 @@
-use std::ops::Range;
+use protocol::{HistoryItem, HistoryNote, HistoryNoteKind, HistoryNoteProjection};
 
-use protocol::HistoryItem;
-use rusqlite::Connection;
-use serde_json::{json, Value};
-use smelt_buffer::cell_width;
-
-use crate::compression::ObjectCompression;
-use crate::error::{Result, StoreError};
-use crate::object::{self, sha256_hex};
-
-pub(crate) const METADATA_OBJECT_MIN_BYTES: usize = 4 * 1024;
-pub(crate) const OBJECT_REF_KEY: &str = "$smelt_object_ref";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HistoryObjectRole {
-    AttachmentImage,
-    Metadata,
+/// The columns that describe a history item next to its body.
+pub(crate) struct HistoryRow<'a> {
+    pub user_turn: bool,
+    pub visible: bool,
+    pub note_kind: Option<&'static str>,
+    pub context: Option<&'a str>,
+    pub mode: Option<&'a str>,
+    pub base_mode: Option<&'a str>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct TranscriptRecordOffset(usize);
-
-impl TranscriptRecordOffset {
-    pub fn new(index: usize) -> Self {
-        Self(index)
-    }
-
-    pub fn get(self) -> usize {
-        self.0
-    }
-}
-
-impl From<usize> for TranscriptRecordOffset {
-    fn from(value: usize) -> Self {
-        Self::new(value)
-    }
-}
-
-/// A transcript block to read by id, with the record index it was last known at.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct TranscriptBlockLookup {
-    pub block_idx: u64,
-    pub record_index_hint: Option<usize>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct TranscriptRecordRange {
-    start: TranscriptRecordOffset,
-    end: TranscriptRecordOffset,
-}
-
-impl TranscriptRecordRange {
-    pub fn new(start: TranscriptRecordOffset, end: TranscriptRecordOffset) -> Self {
-        Self { start, end }
-    }
-
-    pub fn start(self) -> TranscriptRecordOffset {
-        self.start
-    }
-
-    pub fn end(self) -> TranscriptRecordOffset {
-        self.end
-    }
-}
-
-impl From<Range<usize>> for TranscriptRecordRange {
-    fn from(value: Range<usize>) -> Self {
-        Self::new(value.start.into(), value.end.into())
-    }
-}
-
-pub const TRANSCRIPT_EXTENT_PROFILE_WIDTHS: [u16; 6] = [20, 40, 80, 120, 160, 240];
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct TranscriptExtentProfile {
-    rows: [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()],
-}
-
-impl TranscriptExtentProfile {
-    pub fn new(rows: [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()]) -> Self {
-        let mut rows = rows;
-        for index in 1..rows.len() {
-            rows[index] = rows[index].min(rows[index - 1]);
-        }
-        Self { rows }
-    }
-
-    pub fn rows(self) -> [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()] {
-        self.rows
-    }
-
-    /// Rows at the widest profile width that fits `width`.
-    ///
-    /// Snapping (instead of interpolating) keeps estimates additive: the rows of
-    /// a range always equal the sum of its records' rows.
-    pub fn estimated_rows(self, width: u16) -> u64 {
-        let bucket = TRANSCRIPT_EXTENT_PROFILE_WIDTHS
-            .iter()
-            .rposition(|bucket| *bucket <= width)
-            .unwrap_or(0);
-        self.rows[bucket]
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TranscriptRecordProfile {
-    pub block_idx: u64,
-    pub history_idx: Option<u64>,
-    pub kind: String,
-    pub role: String,
-    pub first_line: String,
-    pub estimated_text_bytes: u64,
-    pub extent: TranscriptExtentProfile,
-}
-
-impl TranscriptRecordProfile {
-    pub fn estimated_rows(&self, width: u16) -> u64 {
-        self.extent.estimated_rows(width)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TranscriptNavigationRecord {
-    pub record_index: TranscriptRecordOffset,
-    pub profile: TranscriptRecordProfile,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct StoredTranscriptBlock {
-    pub block_idx: u64,
-    pub history_idx: Option<u64>,
-    pub kind: String,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub content_hash: String,
-    pub estimated_text_bytes: u64,
-    pub preview_text: String,
-    pub indexed_text: String,
-    pub block_json: String,
-    pub origin_json: Option<String>,
-    pub tool_state_json: Option<String>,
-    #[serde(default)]
-    pub tool_render_revision: u64,
-}
-
-fn estimated_text_row_profile(text: &str) -> [u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()] {
-    let mut rows = [0_u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()];
-    for line in text.lines() {
-        let cells = cell_width::text_width(line).max(1) as u64;
-        for (total, width) in rows.iter_mut().zip(TRANSCRIPT_EXTENT_PROFILE_WIDTHS) {
-            *total = total.saturating_add(cells.div_ceil(u64::from(width)));
-        }
-    }
-    rows.map(|rows| rows.max(1))
-}
-
-pub(crate) fn transcript_record_extent_profile(
-    record: &StoredTranscriptBlock,
-) -> TranscriptExtentProfile {
-    transcript_text_extent_profile(
-        &record.kind,
-        &record.preview_text,
-        &record.indexed_text,
-        record.estimated_text_bytes,
-    )
-}
-
-/// Row estimate profile of one transcript record from its indexed text.
-pub fn transcript_text_extent_profile(
-    kind: &str,
-    preview_text: &str,
-    indexed_text: &str,
-    estimated_text_bytes: u64,
-) -> TranscriptExtentProfile {
-    let compact = matches!(kind, "tool" | "thinking" | "process_status" | "mode");
-    let text = if matches!(kind, "tool" | "thinking") && !preview_text.is_empty() {
-        preview_text
-            .lines()
-            .find(|line| !line.is_empty())
-            .unwrap_or_default()
-    } else if compact && !preview_text.is_empty() {
-        preview_text
-    } else {
-        indexed_text
-    };
-    let omitted_bytes = if compact {
-        0
-    } else {
-        estimated_text_bytes.saturating_sub(text.len() as u64)
-    };
-    let text_rows = estimated_text_row_profile(text);
-    TranscriptExtentProfile::new(std::array::from_fn(|index| {
-        text_rows[index]
-            .saturating_add(
-                omitted_bytes.div_ceil(u64::from(TRANSCRIPT_EXTENT_PROFILE_WIDTHS[index])),
-            )
-            .saturating_add(1)
-    }))
-}
-
-pub(crate) fn transcript_extent_profile(
-    records: &[StoredTranscriptBlock],
-) -> TranscriptExtentProfile {
-    let mut rows = [0_u64; TRANSCRIPT_EXTENT_PROFILE_WIDTHS.len()];
-    for record in records {
-        for (total, value) in rows
-            .iter_mut()
-            .zip(transcript_record_extent_profile(record).rows())
-        {
-            *total = total.saturating_add(value);
-        }
-    }
-    TranscriptExtentProfile::new(rows)
-}
-
-pub(crate) fn estimated_transcript_record_rows(
-    records: &[StoredTranscriptBlock],
-    width: u16,
-) -> u64 {
-    transcript_extent_profile(records).estimated_rows(width)
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TranscriptBlockMetadataRecord {
-    pub block_idx: u64,
-    pub record_idx: Option<u64>,
-    pub history_idx: Option<u64>,
-    pub kind: String,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub content_hash: Option<String>,
-    pub estimated_text_bytes: u64,
-    pub estimated_rows: Option<u64>,
-    pub preview_text: String,
-    pub has_block: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TranscriptRecordHydration {
-    Hydrated,
-    ObjectBacked,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TranscriptRecordSlice {
-    pub start: TranscriptRecordOffset,
-    pub total_count: usize,
-    pub hydration: TranscriptRecordHydration,
-    pub records: Vec<StoredTranscriptBlock>,
-}
-
-impl TranscriptRecordSlice {
-    pub fn new(
-        start: TranscriptRecordOffset,
-        total_count: usize,
-        hydration: TranscriptRecordHydration,
-        records: Vec<StoredTranscriptBlock>,
-    ) -> Self {
+impl<'a> HistoryRow<'a> {
+    pub(crate) fn of(item: &'a HistoryItem) -> Self {
+        let note = match item {
+            HistoryItem::Note(note) => Some(note),
+            _ => None,
+        };
         Self {
-            start,
-            total_count,
-            hydration,
-            records,
+            user_turn: is_user_turn(item),
+            visible: !matches!(
+                item,
+                HistoryItem::System { .. } | HistoryItem::Note(HistoryNote::Context { .. })
+            ),
+            note_kind: note.map(|note| note_kind_name(note.kind())),
+            context: note.and_then(HistoryNote::context_name),
+            mode: note.and_then(HistoryNote::mode),
+            base_mode: note.and_then(HistoryNote::base_mode),
         }
     }
-
-    pub fn len(&self) -> usize {
-        self.records.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
-    pub fn end(&self) -> TranscriptRecordOffset {
-        TranscriptRecordOffset::new(self.start.get().saturating_add(self.records.len()))
-    }
-
-    pub fn into_records(self) -> Vec<StoredTranscriptBlock> {
-        self.records
-    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TranscriptSearchCandidate {
-    pub block_idx: u64,
-    pub history_idx: Option<u64>,
+/// A user message typed by the user, as opposed to synthetic user content.
+pub fn is_user_turn(item: &HistoryItem) -> bool {
+    matches!(item, HistoryItem::User { content, .. } if matches!(
+        protocol::classify_user_history_content(content),
+        protocol::UserHistoryContent::Plain
+    ))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TranscriptSearchDirection {
-    Forward,
-    Backward,
-}
-
-pub(crate) fn item_hash(item: &HistoryItem) -> Result<String> {
-    let normalized = normalized_history_value(item, ObjectCompression::none(), None)?;
-    let json = serde_json::to_string(&normalized.value)?;
-    Ok(sha256_hex(json.as_bytes()))
-}
-
-pub(crate) fn history_object_bytes(value: &Value) -> usize {
-    match value {
-        Value::Object(map) => {
-            if let Some(reference) = map.get(OBJECT_REF_KEY) {
-                return reference
-                    .get("raw_size")
-                    .and_then(Value::as_u64)
-                    .and_then(|size| usize::try_from(size).ok())
-                    .unwrap_or(0);
-            }
-            map.values().fold(0usize, |total, child| {
-                total.saturating_add(history_object_bytes(child))
-            })
-        }
-        Value::Array(values) => values.iter().fold(0usize, |total, child| {
-            total.saturating_add(history_object_bytes(child))
-        }),
-        _ => 0,
+fn note_kind_name(kind: HistoryNoteKind) -> &'static str {
+    match kind {
+        HistoryNoteKind::ModeChange => "mode_change",
+        HistoryNoteKind::Context => "context",
+        HistoryNoteKind::ProcessStatus => "process_status",
     }
 }
 
-/// Transcript record kinds that make up a session's search text: what the
-/// user and assistant said, plus compaction summaries standing in for both.
-/// Tool output, reasoning and status rows are left out.
-const CONVERSATION_KINDS: [&str; 3] = ["user", "assistant", "compacted"];
-
-/// Search text of one stored transcript record: its indexed text when the
-/// record is conversation, else `None`. Decodes without allocating the text
-/// of other kinds, which is almost all stored bytes in tool-heavy sessions.
-pub(crate) struct ConversationText(pub(crate) Option<String>);
-
-impl<'de> serde::Deserialize<'de> for ConversationText {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        #[derive(serde::Deserialize)]
-        #[serde(field_identifier, rename_all = "snake_case")]
-        enum Field {
-            Kind,
-            IndexedText,
-            #[serde(other)]
-            Other,
-        }
-
-        struct Visitor;
-
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = ConversationText;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a stored transcript record")
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> std::result::Result<Self::Value, A::Error> {
-                let mut kind: Option<String> = None;
-                let mut text: Option<String> = None;
-                while let Some(field) = map.next_key()? {
-                    match field {
-                        Field::Kind => kind = Some(map.next_value()?),
-                        // Records serialize `kind` first; keep the text only
-                        // while the kind is unknown or conversation.
-                        Field::IndexedText if kind.as_deref().is_none_or(is_conversation_kind) => {
-                            text = Some(map.next_value()?)
-                        }
-                        _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
-                        }
-                    }
-                }
-                Ok(ConversationText(text.filter(|_| {
-                    kind.as_deref().is_some_and(is_conversation_kind)
-                })))
-            }
-        }
-
-        deserializer.deserialize_map(Visitor)
-    }
-}
-
-fn is_conversation_kind(kind: &str) -> bool {
-    CONVERSATION_KINDS.contains(&kind)
+pub(crate) fn note_projection(
+    kind: Option<String>,
+    mode: Option<String>,
+) -> Option<HistoryNoteProjection> {
+    let kind = match kind.as_deref()? {
+        "mode_change" => HistoryNoteKind::ModeChange,
+        "context" => HistoryNoteKind::Context,
+        "process_status" => HistoryNoteKind::ProcessStatus,
+        _ => return None,
+    };
+    Some(HistoryNoteProjection { kind, mode })
 }
 
 /// Conversation text of a history item: user input and assistant replies.
-pub(crate) fn history_conversation_text(item: &HistoryItem) -> Option<std::borrow::Cow<'_, str>> {
+pub(crate) fn conversation_text(item: &HistoryItem) -> Option<std::borrow::Cow<'_, str>> {
     match item {
         HistoryItem::User { content, .. } => Some(content.text_content()),
         HistoryItem::Assistant(step) => step.content.as_ref().map(|content| content.text_content()),
         HistoryItem::System { .. } | HistoryItem::Note(_) => None,
-    }
-}
-
-struct NormalizedHistoryItem {
-    value: Value,
-    json: String,
-}
-
-fn normalized_history_value(
-    item: &HistoryItem,
-    compression: ObjectCompression,
-    conn: Option<&Connection>,
-) -> Result<NormalizedHistoryItem> {
-    let mut value = serde_json::to_value(item)?;
-    let mut refs = Vec::new();
-    normalize_attachments(conn, &mut value, compression, &mut refs)?;
-    normalize_metadata(conn, &mut value, compression, &mut refs)?;
-    let json = serde_json::to_string(&value)?;
-    Ok(NormalizedHistoryItem { value, json })
-}
-
-pub(crate) fn serialize_normalized_history_item(
-    conn: &Connection,
-    item: &HistoryItem,
-    compression: ObjectCompression,
-) -> Result<Vec<u8>> {
-    Ok(normalized_history_value(item, compression, Some(conn))?
-        .json
-        .into_bytes())
-}
-
-fn normalize_attachments(
-    conn: Option<&Connection>,
-    value: &mut Value,
-    compression: ObjectCompression,
-    refs: &mut Vec<(String, HistoryObjectRole)>,
-) -> Result<()> {
-    match value {
-        Value::Object(map) => {
-            if map.get("type").and_then(Value::as_str) == Some("image_url") {
-                let url = map
-                    .get_mut("image_url")
-                    .and_then(Value::as_object_mut)
-                    .and_then(|image| image.get_mut("url"));
-                if let Some(url @ Value::String(_)) = url {
-                    let data_url = url.as_str().expect("matched image URL string");
-                    if data_url.starts_with("data:image/") {
-                        let bytes = data_url.as_bytes();
-                        let hash = if let Some(conn) = conn {
-                            object::put_object(conn, bytes, compression)?
-                                .hash()
-                                .to_owned()
-                        } else {
-                            sha256_hex(bytes)
-                        };
-                        refs.push((hash.clone(), HistoryObjectRole::AttachmentImage));
-                        *url = object_ref_json(&hash, bytes.len() as u64);
-                        return Ok(());
-                    }
-                }
-            }
-            for child in map.values_mut() {
-                normalize_attachments(conn, child, compression, refs)?;
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                normalize_attachments(conn, child, compression, refs)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-pub(crate) fn normalize_metadata(
-    conn: Option<&Connection>,
-    value: &mut Value,
-    compression: ObjectCompression,
-    refs: &mut Vec<(String, HistoryObjectRole)>,
-) -> Result<()> {
-    match value {
-        Value::Object(map) => {
-            let keys = map.keys().cloned().collect::<Vec<_>>();
-            for key in keys {
-                let Some(child) = map.get_mut(&key) else {
-                    continue;
-                };
-                if key == "metadata" && !child.is_null() {
-                    let bytes = serde_json::to_vec(child)?;
-                    if bytes.len() >= METADATA_OBJECT_MIN_BYTES {
-                        let hash = if let Some(conn) = conn {
-                            object::put_object(conn, &bytes, compression)?
-                                .hash()
-                                .to_owned()
-                        } else {
-                            sha256_hex(&bytes)
-                        };
-                        refs.push((hash.clone(), HistoryObjectRole::Metadata));
-                        *child = object_ref_json(&hash, bytes.len() as u64);
-                        continue;
-                    }
-                }
-                normalize_metadata(conn, child, compression, refs)?;
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                normalize_metadata(conn, child, compression, refs)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn object_ref_json(hash: &str, raw_size: u64) -> Value {
-    json!({ OBJECT_REF_KEY: { "hash": hash, "raw_size": raw_size } })
-}
-
-pub(crate) fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Result<()> {
-    match value {
-        Value::Object(map) => {
-            if let Some(reference) = map.get(OBJECT_REF_KEY) {
-                let hash = reference
-                    .get("hash")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| StoreError::Integrity("object reference has no hash".into()))?;
-                let declared_size = reference
-                    .get("raw_size")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| {
-                        StoreError::Integrity("object reference has invalid raw_size".into())
-                    })?;
-                if declared_size > object::MAX_OBJECT_RAW_SIZE {
-                    return Err(StoreError::ObjectTooLarge {
-                        size: declared_size,
-                        max: object::MAX_OBJECT_RAW_SIZE,
-                    });
-                }
-                let bytes = object::object_bytes_by_hash(conn, hash)?.ok_or_else(|| {
-                    StoreError::MissingObject {
-                        reference: hash.to_owned(),
-                    }
-                })?;
-                if bytes.len() as u64 != declared_size {
-                    return Err(StoreError::Integrity(format!(
-                        "object reference {hash} declares {declared_size} bytes but contains {}",
-                        bytes.len()
-                    )));
-                }
-                *value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-                    Value::String(String::from_utf8_lossy(&bytes).into_owned())
-                });
-                return Ok(());
-            }
-            for child in map.values_mut() {
-                rehydrate_object_refs(conn, child)?;
-            }
-        }
-        Value::Array(values) => {
-            for child in values {
-                rehydrate_object_refs(conn, child)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extent_profile_interpolates_monotonically() {
-        let profile = TranscriptExtentProfile::new([120, 80, 40, 30, 20, 10]);
-        let estimates = [20, 30, 40, 60, 80, 120, 240].map(|width| profile.estimated_rows(width));
-        assert!(estimates.windows(2).all(|pair| pair[0] >= pair[1]));
-    }
-
-    #[test]
-    fn stored_transcript_block_defaults_legacy_render_revision() {
-        let record: StoredTranscriptBlock = serde_json::from_value(json!({
-            "block_idx": 1,
-            "history_idx": null,
-            "kind": "tool",
-            "tool_call_id": "call-1",
-            "tool_name": "bash",
-            "content_hash": "1",
-            "estimated_text_bytes": 0,
-            "preview_text": "",
-            "indexed_text": "",
-            "block_json": "{}",
-            "origin_json": null,
-            "tool_state_json": null
-        }))
-        .unwrap();
-
-        assert_eq!(record.tool_render_revision, 0);
     }
 }

@@ -27,7 +27,6 @@ impl TestApp {
             .conversation
             .set_active(Some(crate::app::TurnState {
                 turn_id,
-                canonical: false,
                 pending: Vec::new(),
                 permissions: self.app.core.permissions.snapshot(),
                 submitted_history_idx: self.app.session_history_len().saturating_sub(1),
@@ -56,14 +55,15 @@ impl TestApp {
             .app
             .begin_agent_turn(text, protocol::Content::text(text), sent_at_ms);
         self.app.conversation.set_active(turn);
-        self.wait_for_turn_persistence();
+        self.wait_for_turn_dispatch();
         assert!(self.agent_running(), "test app has a usable model");
     }
 
-    /// Settle explicit canonical fixture setup without advancing the virtual clock.
-    /// Key dispatch and rendering never call this wait implicitly.
-    pub fn wait_for_turn_persistence(&mut self) {
-        self.wait_for_turn_persistence_until(
+    /// Wait until a submitted turn finished preparing its input and context and
+    /// was dispatched, without advancing the virtual clock. Key dispatch and
+    /// rendering never call this wait implicitly.
+    pub fn wait_for_turn_dispatch(&mut self) {
+        self.wait_for_turn_dispatch_until(
             std::time::Instant::now() + std::time::Duration::from_secs(10),
         );
     }
@@ -91,7 +91,7 @@ impl TestApp {
         }
     }
 
-    pub(crate) fn wait_for_turn_persistence_until(&mut self, deadline: std::time::Instant) {
+    pub(crate) fn wait_for_turn_dispatch_until(&mut self, deadline: std::time::Instant) {
         loop {
             self.app.drain_persist_reports();
             if let Some(event) = self.app.platform.try_recv_app_event() {
@@ -101,14 +101,12 @@ impl TestApp {
             if self.app.frame_scheduler.has_pending() {
                 self.app.render_normal_to(&mut std::io::sink());
             }
-            if !self.app.conversation.canonical_operations_are_pending()
-                && !self.app.turn_submission_is_pending()
-            {
+            if !self.app.turn_submission_is_pending() {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "turn persistence timed out"
+                "turn dispatch timed out"
             );
             std::thread::sleep(super::POLL_INTERVAL);
         }
@@ -163,13 +161,19 @@ impl TestApp {
     /// Canonical session history as seen by the TUI. Focused engine-event and
     /// persistence state machines compare this against independent suffix and
     /// append models after every transition.
-    pub fn session_history(&self) -> &[protocol::HistoryItem] {
-        &self.app.conversation.session().history
+    pub fn session_history(&self) -> Vec<protocol::HistoryItem> {
+        let conversation = &self.app.conversation;
+        conversation
+            .history_range(0..conversation.history_len())
+            .expect("read session history")
     }
 
-    /// Read-only copy of current session state for integration assertions.
+    /// Read-only copy of current session state, with its whole history, for
+    /// integration assertions.
     pub fn session_snapshot(&self) -> smelt_core::session::Session {
-        self.app.conversation.session().clone()
+        let mut session = self.app.conversation.session().clone();
+        session.history = self.session_history();
+        session
     }
 
     /// `turn_id` of the active agent turn, if any. Used by fuzz ops that
@@ -719,46 +723,6 @@ impl TestApp {
         }
     }
 
-    pub fn publish_session_catalog_commit(
-        &self,
-        command: &smelt_store::SessionCommit,
-        receipt: &smelt_store::SaveReceipt,
-    ) {
-        self.app
-            .core
-            .sessions
-            .publish_session_catalog_commit(command, receipt);
-    }
-
-    pub fn reconcile_session_catalog(&self) -> Result<(), String> {
-        self.app
-            .core
-            .sessions
-            .request_session_catalog_reconciliation();
-        if self
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5))
-        {
-            return Ok(());
-        }
-
-        let page = self
-            .app
-            .core
-            .sessions
-            .list_session_page_result(smelt_core::session::SessionListQuery {
-                limit: 1_000,
-                ..smelt_core::session::SessionListQuery::default()
-            })
-            .map_err(|err| err.to_string())?;
-        Err(format!(
-            "session catalog did not reconcile: {:?}",
-            page.catalog.last_error
-        ))
-    }
-
     pub fn mark_project_trusted(&self, cwd: &std::path::Path) -> Result<String, String> {
         self.app.lua.mark_project_trusted(cwd)
     }
@@ -956,13 +920,13 @@ impl TestApp {
         self.app.save_session();
     }
 
-    pub(crate) fn set_transcript_session_dir_for_harness(
+    pub(crate) fn set_transcript_store_for_harness(
         &mut self,
-        session_dir: std::path::PathBuf,
+        store: Option<smelt_core::session::SessionStoreAddress>,
     ) {
         self.app
             .conversation
-            .set_transcript_session_dir_for_harness(session_dir);
+            .set_transcript_store_for_harness(store);
     }
 
     pub(crate) fn flush_persist(&mut self) -> crate::persist::PersistenceFlushOutcome {
@@ -1455,7 +1419,7 @@ impl TestApp {
     }
 
     #[cfg(test)]
-    pub(crate) fn inject_commit_failure(&self, failure: smelt_store::SessionCommitFailure) {
+    pub(crate) fn inject_commit_failure(&self, failure: smelt_store::StoreError) {
         self.app.conversation.inject_commit_failure(failure);
     }
 

@@ -628,7 +628,6 @@ impl HeadlessApp {
                 sessions_root: self.core.sessions.sessions_dir(),
                 // One-shot headless history is not persisted.
                 ephemeral: true,
-                persistence: protocol::PersistenceScope::default(),
                 permission_overrides: None,
                 system_prompt: Some(self.system_prompt.clone()),
                 native_prompt: self.native_prompt.clone(),

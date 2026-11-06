@@ -133,7 +133,6 @@ async fn run_responses(
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,

@@ -13,7 +13,7 @@ use engine::clock::VirtualClock;
 use engine::{EngineConfig, EngineHandle, HostCallbacks};
 use protocol::{
     AgentMode, Content, Decision, EngineEvent, HistoryItem, InvocationId, ModelConfig,
-    ModelHistorySource, ModelTarget, PersistenceScope, ReasoningEffort, RequestRuntimeConfig,
+    ModelHistorySource, ModelTarget, ReasoningEffort, RequestRuntimeConfig,
     StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags,
     ToolMetadata, ToolVisibility, UiCommand,
 };
@@ -605,11 +605,11 @@ impl Sim {
                 request_config: RequestRuntimeConfig::default(),
                 reasoning_effort: ReasoningEffort::Off,
                 fast_mode: false,
+                control_env: Default::default(),
                 history: ModelHistorySource::items(self.history.clone()),
                 session_id: "sim-session".into(),
                 sessions_root: std::env::temp_dir(),
                 ephemeral: false,
-                persistence: PersistenceScope::default(),
                 permission_overrides: None,
                 native_prompt: None,
                 tool_visibility: ToolVisibility::Interactive,

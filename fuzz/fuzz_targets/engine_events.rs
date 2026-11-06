@@ -419,6 +419,7 @@ fn apply(app: &mut TestApp, model: &mut Model, op: Op) {
                     stream_id: stream_id.clone(),
                     call_id: Some(call_id.clone()),
                     tool_name: Some(name.clone()),
+                    native: false,
                 },
             );
             for delta in deltas.into_iter().take(8) {

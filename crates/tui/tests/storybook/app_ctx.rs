@@ -458,16 +458,9 @@ impl AppStoryCtx {
         self.app.cwd_str()
     }
 
-    /// Write a canonical database-backed session fixture and publish its catalog overlay.
+    /// Write a database-backed session fixture.
     pub fn write_session_meta(&self, meta: &smelt_core::session::SessionMeta) {
         self.app.seed_session_meta(meta);
-    }
-
-    /// Reconcile canonical session fixtures before a story opens the resume list.
-    pub fn wait_for_session_catalog(&self) {
-        self.app
-            .reconcile_session_catalog()
-            .expect("reconcile storybook session catalog");
     }
 
     /// Commit a fresh Lua generation through the production reload pipeline.

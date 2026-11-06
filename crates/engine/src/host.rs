@@ -118,10 +118,10 @@ pub enum HostCall {
         reply: oneshot::Sender<HostRequestDecision>,
     },
 
-    /// Append a provider request audit row through the host's fixed-session
-    /// persistence actor after the required document generation is durable.
+    /// Append a provider request audit row through the host's session writer.
     RequestAudit {
-        persistence: protocol::PersistenceScope,
+        /// The session whose request this was; a host showing another session drops it.
+        session_id: String,
         entry: Box<protocol::request_log::RequestLogEntry>,
         payload_mode: smelt_store::RequestAuditPayloadMode,
     },

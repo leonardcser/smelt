@@ -96,7 +96,7 @@ impl TestApp {
         let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
         let turn = self.app.begin_custom_command_turn(cmd, sent_at_ms);
         self.app.conversation.set_active(turn);
-        self.wait_for_turn_persistence();
+        self.wait_for_turn_dispatch();
         if !self.agent_running() {
             return None;
         }

@@ -245,7 +245,6 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
@@ -348,7 +347,6 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 session_id: "sess".into(),
                 sessions_root: PathBuf::from("/tmp"),
                 ephemeral: false,
-                persistence: protocol::PersistenceScope::default(),
                 permission_overrides: Some(protocol::PermissionOverrides {
                     tools: Some(protocol::RuleSetOverride {
                         allow: vec![TOOL_NAME.into()],

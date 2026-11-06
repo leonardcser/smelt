@@ -1905,7 +1905,7 @@ fn display_only_resume_sets_resume_hint_state() {
         crate::app::session_document::StoreBackedSessionDocument::new(
             session,
             crate::app::transcript::LoadedTranscript::full(transcript),
-            crate::app::history::live_session_for_test(session_id.clone(), 0, None),
+            crate::app::history::live_session_for_test(session_id.clone(), 0),
             smelt_store::StoreHead::default(),
         ),
     );
@@ -1993,8 +1993,6 @@ fn open_sparse_resume_preview(guard: &TestEnvironmentGuard) -> TestApp {
 
     let mut app = TestApp::builder().build_without_test_home_reset(guard);
     app.set_terminal_size(120, 32);
-    app.reconcile_session_catalog()
-        .expect("reconcile resume preview fixture");
 
     assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
     app.settle_lua();
@@ -2156,58 +2154,29 @@ fn resume_overlay_reports_unhydratable_preview_without_panicking() {
         app.session_snapshot().id.clone()
     };
 
-    let sessions_root = smelt_core::session::sessions_dir();
-    let lineage = smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id)
-        .expect("open canonical preview fixture");
+    let sessions = smelt_core::session::storage();
     let preview = crate::app::transcript::LoadedTranscript::tail_from_sqlite(
-        smelt_core::session::SessionStoreAddress::new(
-            sessions_root.clone(),
-            session_id.clone(),
-            lineage.lineage_id().to_string(),
-        ),
+        sessions.address(session_id.clone()),
         59,
         22,
     )
     .expect("load compact preview before corruption");
-    let db = rusqlite::Connection::open(lineage.database_path())
-        .expect("open canonical preview fixture database");
+    let db = rusqlite::Connection::open(sessions.store().database_path())
+        .expect("open preview fixture database");
     db.execute(
-        "UPDATE objects
-             SET bytes = zeroblob(length(bytes))
-             WHERE hash = (
-                 SELECT object_hash
-                 FROM lineage_payload_object_refs
-                 WHERE payload_kind = 'transcript'
-                 ORDER BY rowid DESC
-                 LIMIT 1
-             )",
+        "UPDATE transcript SET block = zeroblob(length(block))
+         WHERE idx = (SELECT max(idx) FROM transcript)",
         [],
     )
-    .expect("corrupt canonical preview fixture body");
+    .expect("corrupt preview fixture body");
     drop(db);
 
     let mut app = TestApp::builder().build_without_test_home_reset(&guard);
     app.set_terminal_size(120, 32);
-    app.reconcile_session_catalog()
-        .expect("reconcile corrupt preview fixture");
-    let updated_at_ms = app
-        .app
-        .conversation
-        .sessions()
-        .list_session_entries_result()
-        .expect("list corrupt preview fixture")
-        .into_iter()
-        .find_map(|entry| {
-            (entry.id == session_id)
-                .then_some(entry.status)
-                .and_then(|status| match status {
-                    smelt_core::session::SessionListStatus::Available(meta) => {
-                        Some(meta.updated_at_ms)
-                    }
-                    smelt_core::session::SessionListStatus::Unavailable(_) => None,
-                })
-        })
-        .expect("corrupt preview fixture catalog metadata");
+    let updated_at_ms = sessions
+        .load_meta(&session_id)
+        .expect("corrupt preview fixture metadata")
+        .updated_at_ms;
     app.app.conversation.store_resume_preview(
         format!("{session_id}:{updated_at_ms}"),
         crate::app::transcript::TranscriptDocument::from_loaded_transcript(preview),
@@ -2253,7 +2222,6 @@ fn shared_session_state_uses_resume_hint_message_state() {
     app.install_live_session_for_harness(crate::app::history::live_session_for_test(
         "saved-session".into(),
         0,
-        None,
     ));
 
     app.publish_shared_session_state();
@@ -7870,22 +7838,7 @@ pub(super) fn resumed_transcript_app_from_records(
     let session_id = format!("e{serial:063x}");
     let mut session = smelt_core::session::Session::new(1, dir.path().to_path_buf());
     session.id = session_id.clone();
-    let initial = smelt_core::session::initial_store_commit_from_session(&session)
-        .expect("build initial session fixture");
-    let mut writer = smelt_store::OwnedLineageWriter::open(dir.path(), &session_id)
-        .expect("open session fixture writer");
-    writer
-        .commit_session(&initial)
-        .expect("commit initial session fixture");
-    let lineage_id = writer.lineage_id().to_string();
-    writer.release().expect("release session fixture writer");
-    let store = smelt_core::session::SessionStoreAddress::new(
-        dir.path().to_path_buf(),
-        session_id,
-        lineage_id,
-    );
-    crate::persist::write_transcript_record_suffix(&store, 0, &records)
-        .expect("write transcript records");
+    let store = crate::persist::save_session_fixture(dir.path(), &session, &records);
     let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(store, width, height)
         .expect("tail transcript");
     let mut app = TestApp::builder().build();
@@ -9087,8 +9040,6 @@ fn resume_preview_mouse_drag_paints_selection_and_copies() {
     }
     let mut app = TestApp::builder().build_without_test_home_reset(&guard);
     app.set_terminal_size(120, 32);
-    app.reconcile_session_catalog()
-        .expect("reconcile resume preview fixture");
     assert!(app.run_lua(r#"smelt.cmd.run("resume")"#));
     app.settle_lua();
     app.render_silent();

@@ -292,22 +292,18 @@ If no visible animated decoration changes cells, no compositor frame is needed.
 
 ### Payload-independent extent index
 
-Persistence stores a compact `RecordProfile` beside each transcript record. It
-contains semantic kind, role, logical line facts, byte and cell summaries, and
-other payload-independent data needed for row estimation.
+Each transcript row stores the cumulative estimated rows of all records up to and
+including it, at six profile widths. A range extent is the difference of two
+cumulative values, so prefix and range queries read two indexed rows and never
+deserialize transcript payloads.
 
-Profiles are aggregated in a persisted prefix tree or equivalent ordered index.
-Range and prefix extent queries read aggregate profiles in `O(log records)` plus
-a bounded number of profile rows. Partial boundaries never deserialize transcript
-payloads.
-
-The runtime retains one width-keyed extent view per immutable transcript root and
-active loaded range. Loaded-prefix, scrollbar-total, viewport planning, and
+The runtime retains one width-keyed extent view per stored head and active loaded
+range. Loaded-prefix, scrollbar-total, viewport planning, and
 scroll anchoring share that view.
 
 ### Semantic navigation index
 
-Persistence maintains ordered indexes for role and semantic block kind. Nearest
+The transcript table has indexes on role and semantic block kind. Nearest
 previous and next queries return record offsets and compact metadata in
 `O(log records)` without loading intervening records.
 
@@ -317,8 +313,7 @@ scans.
 
 ### Hydration service
 
-Each open sparse session owns two purpose-specific persistent lineage readers or
-equivalent pooled immutable store handles. The transcript document's metadata
+Each open sparse session owns two purpose-specific persistent store readers. The transcript document's metadata
 reader answers payload-free index and extent queries. The hydration worker's
 reader serves bounded payload reads off the UI thread, merging nearby requests and
 prioritizing the viewport.
@@ -328,9 +323,9 @@ open stores or wait on unbounded reads. Explicit ID sets are submitted as one
 worker request, coalesced into bounded canonical ranges, and installed under the
 same hydrated-content budget as viewport work. A request larger than cache
 capacity succeeds when worker processing completes; LRU eviction may prevent all
-requested blocks from remaining materialized simultaneously. Changing an
-immutable store address explicitly replaces both retained readers and invalidates
-only indexes tied to the old root.
+requested blocks from remaining materialized simultaneously. Changing the store
+address replaces both retained readers and invalidates the indexes tied to the
+old session.
 
 ## Ownership
 
@@ -352,19 +347,15 @@ The consolidated production path has one owner for each kind of state:
   per semantic frame before projection; incremental indexes provide pending-tool
   lookup and main-turn cancellation without repeated queue scans. Animation state
   is independent of transcript revisions.
-- The lineage store owns immutable payload profiles and persistent sequence-node
-  aggregates. Extent, row, block, canonical history-boundary, role, and kind
-  queries descend that sequence without loading payloads or building a root-sized
-  index.
-- Derived search format 2 owns immutable FTS and short-posting segments plus an
-  atomically published ordered manifest keyed by canonical transcript-root ID.
-  Forks and rewinds reuse manifests for shared roots. Candidate queries validate
-  root identity without walking canonical leaves, lazily reconstruct only selected
-  source segments for exact literal verification, and fall back to canonical
-  direct search when projection data is missing, stale, corrupt, or incompatible.
+- The session store owns flat history and transcript rows with cumulative
+  extent and user-ordinal columns. Extent, row, block, history-boundary, role, and
+  kind queries use indexed lookups without loading payloads or building a
+  session-sized index.
+- Transcript search scans the stored search text in pages with `instr` and
+  verifies candidates against live blocks; unsaved records are scanned in memory.
 - Each active sparse document owns one persistent metadata reader, while its
   background hydration service owns one persistent payload reader and one bounded
-  request queue. Both share one immutable store address and one width/root extent
+  request queue. Both share one store address and one width/head extent
   view. Prefix
   and row-location caches are independently capped at 256 entries, and retained
   text tails are capped at 64 visual rows per width and ANSI mode.

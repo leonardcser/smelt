@@ -102,59 +102,14 @@ fn generate(turns: usize, words: usize, title: Option<String>) -> Result<(), Box
 }
 
 fn save_session_with_transcript_records(session: &Session) -> Result<usize, Box<dyn Error>> {
-    let receipt = session::save_result(session)?;
-    let resolved = session::resolve_session_for_read_result(&session.id)?;
-    let sessions_root = resolved.sessions_root.clone();
-    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-        &sessions_root,
-        &resolved.lineage_id,
-        &session.id,
-    )?;
-    let state = reader.snapshot()?;
-    if state.head != receipt.current {
-        return Err(format!(
-            "synthetic session head changed while saving: expected {:?}, found {:?}",
-            receipt.current, state.head
-        )
-        .into());
-    }
-    drop(reader);
-
     let records = tui::project_session_transcript_records(session)?;
     let record_count = records.len();
-    if records.is_empty() {
-        return Ok(0);
-    }
-
-    let mut writer = smelt_store::OwnedLineageWriter::open_existing_in_lineage(
-        &sessions_root,
-        &resolved.lineage_id,
-        &session.id,
-    )?;
-    let command = smelt_store::SessionCommit {
-        session_id: session.id.clone(),
-        expected: state.head,
-        identity: state.identity,
-        metadata: state.metadata,
-        history: smelt_store::HistorySuffix {
-            start: smelt_store::HistoryIndex::new(state.head.history_len.get()),
-            final_len: state.head.history_len,
-            items: Vec::new(),
-        },
-        side_tables: smelt_store::SideTableSuffixes {
-            start: smelt_store::HistoryIndex::new(state.head.history_len.get()),
-            ..Default::default()
-        },
-        transcript_records: Some(smelt_store::TranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::ZERO,
-            records,
-        }),
-    };
-    writer
-        .commit_session(&command)
-        .map_err(|failure| format!("synthetic transcript record commit failed: {failure:?}"))?;
-    writer.refresh_catalog()?;
-    writer.release()?;
+    let mut commit = session::full_commit(session)?;
+    commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
+    session::storage()
+        .store()
+        .writer(&session.id)?
+        .commit(&session::store_identity(session), &commit)?;
     Ok(record_count)
 }
 

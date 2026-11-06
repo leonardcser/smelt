@@ -58,7 +58,7 @@ libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 mimalloc = { version = "0.1.52", features = ["override"] }
 
 [dev-dependencies]
-smelt-store = { workspace = true, features = ["test-util"] }
+smelt-store = { workspace = true }
 smelt-test-support = { workspace = true }
 
 [build-dependencies]

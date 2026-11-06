@@ -53,7 +53,7 @@ smelt-test-support = { workspace = true }
 # workspace builds keep this off; tests, storybook, and examples that need it
 # opt in explicitly.
 default = []
-harness = ["smelt-store/test-util", "dep:smelt-test-support"]
+harness = ["dep:smelt-test-support"]
 transcript-fixture = []
 transcript-bench = ["harness"]
 

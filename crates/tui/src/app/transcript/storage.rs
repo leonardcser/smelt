@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) struct SqliteTranscriptStore {
-    reader: smelt_store::LineageSessionReader,
+    reader: smelt_store::SessionReader,
     #[cfg(test)]
     extent_read_count: std::cell::Cell<usize>,
 }
@@ -9,11 +9,7 @@ pub(super) struct SqliteTranscriptStore {
 impl SqliteTranscriptStore {
     pub(super) fn open_read_only(store: &TranscriptStoreAddress) -> smelt_store::Result<Self> {
         let _perf = smelt_perf::perf::begin("transcript:store:open_read_only");
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &store.sessions_root,
-            &store.lineage_id,
-            &store.session_id,
-        )?;
+        let reader = store.reader()?;
         Ok(Self {
             reader,
             #[cfg(test)]
@@ -26,13 +22,10 @@ impl SqliteTranscriptStore {
         width: u16,
         target_rows: u16,
     ) -> smelt_store::Result<smelt_store::TranscriptRecordSlice> {
-        let total = usize::try_from(self.reader.snapshot()?.transcript_len).map_err(|_| {
-            smelt_store::StoreError::Integrity(
-                "lineage transcript length exceeds platform limits".into(),
-            )
-        })?;
-        self.reader
-            .transcript_tail_for_rows_with_total(total, width, target_rows)
+        self.reader.read_snapshot(|reader| {
+            let total = reader.head()?.transcript_record_count.as_usize();
+            reader.transcript_tail_for_rows_with_total(total, width, target_rows)
+        })
     }
 
     #[cfg(test)]
@@ -76,7 +69,7 @@ impl SqliteTranscriptStore {
         let index = navigation.record_index.get();
         let mut records = self
             .reader
-            .transcript_object_backed_range(index as u64, index.saturating_add(1) as u64)?;
+            .transcript_range(index as u64, index.saturating_add(1) as u64)?;
         let Some(record) = records.pop() else {
             return Ok(None);
         };

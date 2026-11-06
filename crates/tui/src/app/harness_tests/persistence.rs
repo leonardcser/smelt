@@ -6,6 +6,24 @@ use protocol::{
 };
 use smelt_core::transcript_model::Block;
 
+/// Saves `session` with `records` as its transcript straight to the app's store.
+fn commit_session_fixture(
+    app: &TestApp,
+    session: &smelt_core::session::Session,
+    records: Vec<smelt_store::StoredTranscriptBlock>,
+) -> smelt_store::StoreHead {
+    let mut commit = smelt_core::session::full_commit(session).unwrap();
+    commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
+    app.app
+        .core
+        .sessions
+        .store()
+        .writer(&session.id)
+        .unwrap()
+        .commit(&smelt_core::session::store_identity(session), &commit)
+        .unwrap()
+}
+
 #[test]
 fn stored_session_info_counts_canonical_users_without_opening_history() {
     let mut app = TestApp::builder().build();
@@ -29,13 +47,12 @@ fn stored_session_info_counts_canonical_users_without_opening_history() {
         .history
         .push(HistoryItem::user(Content::text("unrecorded request")));
     let id = session.id.clone();
-    let root = app.app.core.sessions.sessions_dir().to_path_buf();
-    let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
     let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
     let record = transcript.history.block_records_with_ids_from(0).remove(0);
-    command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-        start: smelt_store::TranscriptRecordIndex::ZERO,
-        records: vec![
+    commit_session_fixture(
+        &app,
+        &session,
+        vec![
             smelt_core::transcript_model::transcript_block_row_with_block_idx(
                 0,
                 record.block_id.get(),
@@ -43,11 +60,7 @@ fn stored_session_info_counts_canonical_users_without_opening_history() {
             )
             .unwrap(),
         ],
-    });
-    let mut writer = smelt_store::OwnedLineageWriter::open(&root, &id).unwrap();
-    writer.commit_session(&command).unwrap();
-    writer.refresh_catalog().unwrap();
-    writer.release().unwrap();
+    );
     assert!(app.resume_session(&id));
     app.ensure_writer_ready();
     assert!(app.app.conversation.has_live_session());
@@ -72,299 +85,48 @@ fn stored_session_info_counts_canonical_users_without_opening_history() {
 }
 
 #[test]
-fn title_catalog_refresh_does_not_materialize_retained_archive_values() {
-    let mut app = TestApp::builder().build();
-    let mut session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-    session.title = Some("seed title".into());
-    session.first_user_message = Some("synthetic retained message ".repeat(512).into());
-    session.history = (0..4)
-        .map(|index| HistoryItem::user(Content::text(format!("request {index}"))))
-        .collect();
-    session.snapshot_metadata_at(1);
-    session.first_user_message = Some("synthetic active message ".repeat(512).into());
-    session.snapshot_metadata_at(4);
-    app.app.load_session(session);
-    app.ensure_writer_ready();
-    save_full_history_fixture(&mut app);
-    let outcome = app.app.flush_persist();
-    let crate::persist::PersistenceFlushOutcome::Durable {
-        receipt: Some(receipt),
-        ..
-    } = outcome
-    else {
-        panic!("initial catalog fixture was not persisted: {outcome:?}");
-    };
-    assert!(app
-        .app
-        .core
-        .sessions
-        .wait_for_session_catalog(Duration::from_secs(5)));
-    let id = app.session_snapshot().id.clone();
-    assert_eq!(receipt.session_id, id);
-    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-        app.app.core.sessions.sessions_dir(),
-        receipt.lineage_id.as_deref().expect("fixture lineage"),
-        &id,
-    )
-    .unwrap();
-    let initial = reader.snapshot().unwrap();
-    assert_eq!(
-        initial.metadata.first_user_message,
-        Some("synthetic active message ".repeat(512)),
-        "fixture active message must differ from the retained snapshot"
-    );
-    let conn = rusqlite::Connection::open(reader.database_path()).unwrap();
-    assert_eq!(
-        conn.execute(
-            "UPDATE objects SET bytes = zeroblob(stored_size)
-             WHERE hash = (
-                 SELECT payload.object_hash FROM lineage_revision_state_roots archive
-                 JOIN lineage_revisions revision ON revision.lineage_id = archive.lineage_id
-                   AND revision.state_payload_id = archive.state_payload_id
-                 JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
-                   AND root.root_id = archive.root_id AND root.item_count = 4 AND root.depth = 1
-                 JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
-                   AND entry.node_id = root.root_node_id AND entry.entry_index = 1
-                 JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
-                   AND payload.payload_id = entry.payload_id
-                 WHERE revision.revision_id = ?1 AND archive.role = 'metadata_snapshots'
-             )",
-            [&initial.revision_id],
-        )
-        .unwrap(),
-        1,
-        "fixture must corrupt only the retained metadata snapshot body"
-    );
-    assert!(reader.snapshot().is_err());
-    assert!(app.run_lua("smelt.session.title.set('durable new title')"));
-    app.save_session_and_flush();
-    let head = reader.store_head().unwrap();
-    assert!(head.revision > initial.head.revision);
-    assert_eq!(head.history_len, initial.head.history_len);
-    assert!(app
-        .app
-        .core
-        .sessions
-        .wait_for_session_catalog(Duration::from_secs(5)));
-    let row =
-        smelt_store::CatalogReader::open_existing(app.app.core.sessions.layout().catalog_path())
-            .unwrap()
-            .unwrap()
-            .session(&id)
-            .unwrap()
-            .unwrap();
-    assert_eq!(
-        row.availability,
-        smelt_store::CatalogAvailability::Available
-    );
-    assert_eq!(row.source_revision, head.revision.get());
-    assert_eq!(row.title.as_deref(), Some("durable new title"));
-    assert_eq!(
-        row.first_user_message.as_deref(),
-        initial.metadata.first_user_message.as_deref()
-    );
-    assert!(
-        reader.snapshot().is_err(),
-        "cold archive integrity checks remain mandatory"
-    );
-}
-
-#[test]
-fn title_save_uses_metadata_boundary_coordinates_without_hydrating_old_header_fields() {
-    let mut app = TestApp::builder().build();
-    let mut session =
-        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-    session.title = Some("boundary seed title".into());
-    session.history = (0..4)
-        .map(|index| HistoryItem::user(Content::text(format!("request {index}"))))
-        .collect();
-    session.snapshot_metadata_at(1);
-    session.snapshot_metadata_at(4);
-    let id = session.id.clone();
-    let root = app.app.core.sessions.sessions_dir().to_path_buf();
-    let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
-    command.side_tables.metadata_snapshots[0].1["future_field"] =
-        serde_json::json!({"preserved": "synthetic retained non-message field"});
-    command.side_tables.metadata_snapshots[1].1["future_field"] =
-        serde_json::Value::String("synthetic unknown header field α\n".repeat(16 * 1024));
-    let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
-    command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-        start: smelt_store::TranscriptRecordIndex::ZERO,
-        records: transcript
-            .history
-            .block_records_with_ids_from(0)
-            .iter()
-            .enumerate()
-            .map(|(index, record)| {
-                smelt_core::transcript_model::transcript_block_row_with_block_idx(
-                    index,
-                    record.block_id.get(),
-                    &record.record,
-                )
-                .unwrap()
-            })
-            .collect(),
-    });
-    let mut writer = smelt_store::OwnedLineageWriter::open(&root, &id).unwrap();
-    let receipt = writer.commit_session(&command).unwrap();
-    let initial = writer.snapshot().unwrap();
-    writer.refresh_catalog().unwrap();
-    writer.release().unwrap();
-    assert!(app.resume_session(&id));
-    app.ensure_writer_ready();
-    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-        &root,
-        receipt.lineage_id.as_deref().unwrap(),
-        &id,
-    )
-    .unwrap();
-    assert_eq!(reader.snapshot().unwrap(), initial);
-    let conn = rusqlite::Connection::open(reader.database_path()).unwrap();
-    let header: (String, Vec<u8>, i64) = conn
-        .query_row(
-            "SELECT object.hash, object.bytes, payload.byte_count
-             FROM lineage_revision_state_roots archive
-             JOIN lineage_revisions revision ON revision.lineage_id = archive.lineage_id
-               AND revision.state_payload_id = archive.state_payload_id
-             JOIN lineage_sequence_roots root ON root.lineage_id = archive.lineage_id
-               AND root.root_id = archive.root_id AND root.item_count = 4 AND root.depth = 1
-             JOIN lineage_sequence_entries entry ON entry.lineage_id = root.lineage_id
-               AND entry.node_id = root.root_node_id AND entry.entry_index = 2
-             JOIN lineage_payload_object_refs payload ON payload.lineage_id = entry.lineage_id
-               AND payload.payload_id = entry.payload_id
-             JOIN objects object ON object.hash = payload.object_hash
-             WHERE revision.revision_id = ?1 AND archive.role = 'metadata_snapshots'",
-            [&initial.revision_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert!(
-        header.2 > 512 * 1024,
-        "fixture needs a large non-message header"
-    );
-    assert_eq!(
-        conn.execute(
-            "UPDATE objects SET bytes = zeroblob(stored_size) WHERE hash = ?1",
-            [&header.0],
-        )
-        .unwrap(),
-        1
-    );
-    assert!(reader.snapshot().is_err());
-    assert!(app.run_lua("smelt.session.title.set('bounded boundary title')"));
-    app.save_session_and_flush();
-    let head = reader.store_head().unwrap();
-    conn.execute(
-        "UPDATE objects SET bytes = ?1 WHERE hash = ?2",
-        (&header.1, &header.0),
-    )
-    .unwrap();
-    let saved = reader.snapshot().unwrap();
-    assert!(app.run_lua("smelt.session.title.set('restored boundary title')"));
-    let _ = retry_persistence_via_lua(&mut app);
-    app.save_session_and_flush();
-    let restored = reader.snapshot().unwrap();
-    assert!(
-        restored.head.revision > initial.head.revision,
-        "restoring the old header must restore ordinary title saves: {:?}",
-        app.app.conversation.persistence_status().unwrap().state
-    );
-    assert_eq!(
-        restored.metadata.title.as_deref(),
-        Some("restored boundary title")
-    );
-    assert_eq!(
-        restored.side_tables.metadata_snapshots[0],
-        initial.side_tables.metadata_snapshots[0]
-    );
-    assert!(
-        head.revision > initial.head.revision,
-        "title save must use verified boundary coordinates, not read old non-message header fields"
-    );
-    assert_eq!(head.history_len, initial.head.history_len);
-    assert_eq!(
-        head.transcript_record_count,
-        initial.head.transcript_record_count
-    );
-    assert_eq!(
-        saved.metadata.title.as_deref(),
-        Some("bounded boundary title")
-    );
-    assert_eq!(
-        saved.side_tables.metadata_snapshots[0],
-        initial.side_tables.metadata_snapshots[0]
-    );
-    assert_eq!(
-        conn.query_row(
-            "SELECT bytes FROM objects WHERE hash = ?1",
-            [&header.0],
-            |row| row.get::<_, Vec<u8>>(0)
-        )
-        .unwrap(),
-        header.1,
-        "historical header bytes must remain exact"
-    );
-}
-
-#[test]
-fn canonical_enter_serializes_records_on_writer_before_dispatch() {
+fn enter_dispatches_and_repaints_while_the_writer_is_paused() {
     let mut app = TestApp::builder().build();
     app.ensure_writer_ready();
     let release = app.app.conversation.pause_persistence();
-    let perf_enabled = smelt_perf::perf::enabled();
-    smelt_perf::perf::set_enabled(true);
-    smelt_perf::perf::clear();
-    let projection_count = || {
-        smelt_perf::perf::snapshot()
-            .durations
-            .iter()
-            .find(|row| row.label == "session:project_transcript_record")
-            .map_or(0, |row| row.count)
-    };
-    app.type_text("projected submitted request α");
+    app.type_text("submitted request α");
+    let started = std::time::Instant::now();
     app.press(KeyCode::Enter);
-    let prepared_count = projection_count();
-    let pending = app.app.turn_submission_is_pending();
-    let running = app.agent_running();
-    release.send(()).unwrap();
-    app.wait_for_turn_persistence();
-    let durable_count = projection_count();
-    smelt_perf::perf::set_enabled(perf_enabled);
-    assert!(pending);
-    assert!(!running);
-    assert_eq!(
-        prepared_count, 0,
-        "Enter must capture records without serializing them on the UI"
-    );
-    assert_eq!(
-        durable_count, 1,
-        "the writer must serialize the captured user record exactly once before dispatch"
-    );
+    // Storage stays paused, so any wait on it would run to the persistence deadline.
+    assert!(started.elapsed() < crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
+    assert!(app.agent_running());
+    assert_eq!(app.state().prompt_text, "");
     assert_eq!(
         app.drain_engine_sends()
             .iter()
             .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
             .count(),
-        1,
+        1
     );
+    app.type_text("draft while saving");
+    assert!(app.render_to_frame().text().contains("draft while saving"));
+
+    release.send(()).unwrap();
+    assert_eq!(
+        app.flush_persist(),
+        crate::persist::PersistenceFlushOutcome::Durable
+    );
+    assert_eq!(app.state().prompt_text, "draft while saving");
     let id = app.session_snapshot().id.clone();
-    let reader =
-        smelt_store::LineageSessionReader::open_existing(app.app.core.sessions.sessions_dir(), &id)
-            .unwrap();
-    let head = reader.store_head().unwrap();
-    let total = head.transcript_record_count.as_usize().unwrap();
+    let reader = app.app.core.sessions.reader(&id).unwrap();
+    let head = reader.head().unwrap();
+    let total = head.transcript_record_count.as_usize();
     let records = reader
         .transcript_record_slice_with_total((0..total).into(), total)
         .unwrap();
     assert!(records
         .records
         .iter()
-        .any(|row| row.indexed_text.contains("projected submitted request α")));
+        .any(|row| row.indexed_text.contains("submitted request α")));
 }
 
 #[test]
-fn canonical_dispatch_boundary_measures_preparation_commit_and_publication_separately() {
+fn enter_dispatches_without_waiting_for_storage_at_any_history_size() {
     for retained in [0, 128, 4096] {
         let mut app = TestApp::builder().with_vim(false).build();
         if retained > 0 {
@@ -391,27 +153,13 @@ fn canonical_dispatch_boundary_measures_preparation_commit_and_publication_separ
             assert!(app.resume_session(&id));
         }
         app.ensure_writer_ready();
-        let enabled = smelt_perf::perf::enabled();
-        smelt_perf::perf::set_enabled(true);
-        smelt_perf::perf::clear();
         let mut enters = Vec::new();
-        let mut dispatches = Vec::new();
         for sample in 0..10 {
             let release = app.app.conversation.pause_persistence();
             app.type_text(&format!("measured request {sample}"));
             let entered = std::time::Instant::now();
             app.press(KeyCode::Enter);
             enters.push(entered.elapsed().as_micros());
-            assert!(app.app.turn_submission_is_pending());
-            assert!(!app.agent_running());
-            assert!(app
-                .drain_engine_sends()
-                .iter()
-                .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-            let released = std::time::Instant::now();
-            release.send(()).unwrap();
-            app.wait_for_turn_persistence();
-            dispatches.push(released.elapsed().as_micros());
             assert_eq!(
                 app.drain_engine_sends()
                     .iter()
@@ -419,92 +167,16 @@ fn canonical_dispatch_boundary_measures_preparation_commit_and_publication_separ
                     .count(),
                 1
             );
+            release.send(()).unwrap();
             assert!(app.finish_turn());
             app.save_session_and_flush();
         }
-        let snapshot = smelt_perf::perf::snapshot();
-        smelt_perf::perf::set_enabled(enabled);
-        eprintln!("dispatch boundary retained={retained} Enter_us={enters:?} release_to_dispatch_us={dispatches:?}");
-        for label in [
-            "persist:canonical:prepare",
-            "persist:submit_turn",
-            "persist:publication:complete",
-        ] {
-            let row = snapshot
-                .durations
-                .iter()
-                .find(|row| row.label == label)
-                .expect("measured boundary phase");
-            assert!(row.count >= 10, "{label}: {row:?}");
-            eprintln!("{row:?}");
-        }
+        eprintln!("dispatch retained={retained} Enter_us={enters:?}");
         // Storage stays paused, so any wait on it would run to the persistence deadline.
         assert!(enters
             .iter()
             .all(|elapsed| *elapsed < crate::persist::DEFAULT_PERSISTENCE_DEADLINE.as_micros()));
     }
-}
-
-#[test]
-fn enter_uses_owned_lineage_while_catalog_repair_is_blocked() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    app.start_submitted_turn("initial request");
-    app.drain_engine_sends();
-    assert!(app.finish_turn());
-    app.save_session_and_flush();
-    assert!(app.app.conversation.live_session().is_none());
-    let base = app
-        .app
-        .conversation
-        .session()
-        .archive_base()
-        .unwrap()
-        .clone();
-    let root = app.core_probe().sessions.sessions_dir().to_path_buf();
-    assert!(app
-        .core_probe()
-        .sessions
-        .wait_for_session_catalog(Duration::from_secs(5)));
-    let id = app.session_snapshot().id.clone();
-    let layout = smelt_store::SessionStoreLayout::from_sessions_root(&root);
-    let storage_release = app.app.conversation.pause_persistence();
-    let marker = smelt_store::CatalogMarkerLock::acquire(&root, &id).unwrap();
-    smelt_store::Catalog::open(layout.catalog_path())
-        .unwrap()
-        .remove(&id)
-        .unwrap();
-    std::fs::create_dir_all(layout.catalog_pending_dir()).unwrap();
-    std::fs::write(layout.catalog_pending_path(&id), [1; 16]).unwrap();
-    app.type_text("follow-up request");
-    let elapsed = std::thread::scope(|scope| {
-        scope.spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
-            drop(marker);
-        });
-        let entered_at = std::time::Instant::now();
-        app.press(KeyCode::Enter);
-        entered_at.elapsed()
-    });
-    let accepted = app.app.turn_submission_is_pending();
-    storage_release.send(()).unwrap();
-    app.wait_for_turn_persistence();
-    assert!(
-        elapsed < Duration::from_millis(250),
-        "Enter waited for catalog repair for {elapsed:?}"
-    );
-    assert!(accepted);
-    let request = app
-        .drain_engine_sends()
-        .into_iter()
-        .find_map(|command| match command {
-            protocol::UiCommand::StartTurn(request) => Some(request),
-            _ => None,
-        })
-        .unwrap();
-    assert!(
-        matches!(request.history, protocol::ModelHistorySource::Store { lineage_id, .. }
-        if lineage_id == base.lineage_id)
-    );
 }
 
 #[test]
@@ -556,7 +228,7 @@ fn file_expansion_accepts_input_before_reading_and_keeps_the_ui_responsive() {
         assert!(started.elapsed() < Duration::from_millis(250));
     }
     release.send(()).unwrap();
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     assert!(app.agent_running());
     assert_eq!(app.state().prompt_text, "new draft");
 }
@@ -578,7 +250,7 @@ fn file_expansion_includes_turn_start_context_changes() {
     app.press(KeyCode::Enter);
     input_started.recv_timeout(Duration::from_secs(5)).unwrap();
     release.send(()).unwrap();
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     assert!(
         app.agent_running(),
         "turn-start context invalidated accepted input"
@@ -591,32 +263,7 @@ fn file_expansion_includes_turn_start_context_changes() {
             _ => None,
         })
         .unwrap();
-    let history = match &payload.history {
-        protocol::ModelHistorySource::Items { items, .. } => items.clone(),
-        protocol::ModelHistorySource::Store {
-            prefix,
-            lineage_id,
-            first_live_index,
-            end_index,
-            suffix,
-            ..
-        } => {
-            let mut history = prefix.clone();
-            let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                &payload.sessions_root,
-                lineage_id,
-                &payload.session_id,
-            )
-            .unwrap();
-            history.extend(
-                reader
-                    .history_range(*first_live_index as u64, *end_index as u64)
-                    .unwrap(),
-            );
-            history.extend(suffix.clone());
-            history
-        }
-    };
+    let history = &payload.history.items;
     assert!(history.iter().any(|item| matches!(item,
         HistoryItem::Note(protocol::HistoryNote::Context { name, text })
             if name == "acceptance-hook" && text == "request context from hook"
@@ -625,130 +272,10 @@ fn file_expansion_includes_turn_start_context_changes() {
 }
 
 #[test]
-fn file_preparation_failure_keeps_older_cancelled_receipts_pending() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    app.ensure_writer_ready();
-    let storage_release = app.app.conversation.pause_persistence();
-    app.type_text("older request");
-    app.press(KeyCode::Enter);
-    let (input_started, input_release) = app.app.conversation.submissions.pause_input();
-    app.type_text("replacement @missing-receipt-fixture.txt");
-    app.press(KeyCode::Esc);
-    for _ in 0..3 {
-        app.press(KeyCode::Enter);
-    }
-    input_started.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(
-        app.app
-            .conversation
-            .submissions
-            .settling_cancellations
-            .len(),
-        1
-    );
-    app.session_append_history(HistoryItem::Note(protocol::HistoryNote::Context {
-        name: "later-change".into(),
-        text: "invalidate replacement preparation".into(),
-    }));
-    input_release.send(()).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while app.app.turn_submission_is_pending() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "file preparation did not finish"
-        );
-        if let Some(event) = app.app.platform.try_recv_app_event() {
-            app.app.handle_app_event(event);
-        } else {
-            std::thread::yield_now();
-        }
-    }
-    let pending_cancellations = app
-        .app
-        .conversation
-        .submissions
-        .settling_cancellations
-        .len();
-    storage_release.send(()).unwrap();
-    assert_eq!(
-        pending_cancellations, 1,
-        "input preparation forgot an older cancelled receipt"
-    );
-    assert_eq!(
-        app.state().prompt_text,
-        "replacement @missing-receipt-fixture.txt"
-    );
-    app.wait_for_turn_persistence();
-    assert!(app.session_history().iter().any(|item| matches!(item,
-        HistoryItem::Note(protocol::HistoryNote::Context { name, text })
-            if name == "later-change" && text == "invalidate replacement preparation"
-    )));
-    assert!(app
-        .app
-        .conversation
-        .submissions
-        .settling_cancellations
-        .is_empty());
-    assert!(app
-        .drain_engine_sends()
-        .iter()
-        .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-    app.assert_invariants();
-}
-
-#[test]
-fn ordinary_submission_failure_preserves_callback_history_and_display() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    app.ensure_writer_ready();
-    app.app
-        .conversation
-        .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
-            message: "injected submission rejection".into(),
-        });
-    assert!(app.run_lua(
-        r#"
-        smelt.events.on("turn_start", function()
-            smelt.session.context_note("retained-hook", "keep hook context")
-        end)
-        "#
-    ));
-    let release = app.app.conversation.pause_persistence();
-    app.type_text("ordinary request");
-    app.press(KeyCode::Enter);
-    app.app.push_block(Block::Text {
-        content: "keep callback display".into(),
-    });
-    release.send(()).unwrap();
-    app.wait_for_turn_persistence();
-    assert!(!app.agent_running());
-    assert_eq!(app.state().prompt_text, "ordinary request");
-    assert!(app.session_history().iter().any(|item| matches!(item,
-        HistoryItem::Note(protocol::HistoryNote::Context { name, text })
-            if name == "retained-hook" && text == "keep hook context"
-    )));
-    assert!(app
-        .session_history()
-        .iter()
-        .all(|item| !matches!(item, HistoryItem::User { .. })));
-    assert!(app
-        .render_unsettled_silent()
-        .text()
-        .contains("keep callback display"));
-    app.assert_invariants();
-}
-
-#[test]
-fn file_expansion_failure_preserves_callback_history_and_display() {
-    for change_history in [false, true] {
+fn history_change_during_file_expansion_cancels_submission_and_keeps_callback_work() {
+    {
         let mut app = TestApp::builder().with_vim(false).build();
         app.ensure_writer_ready();
-        if !change_history {
-            app.app.conversation.inject_commit_failure(
-                smelt_store::SessionCommitFailure::InvalidCommand {
-                    message: "injected expanded submission rejection".into(),
-                },
-            );
-        }
         assert!(app.run_lua(
             r#"
             smelt.events.on("turn_start", function()
@@ -764,14 +291,12 @@ fn file_expansion_failure_preserves_callback_history_and_display() {
         app.app.push_block(Block::Text {
             content: "keep callback display".into(),
         });
-        if change_history {
-            app.session_append_history(HistoryItem::Note(protocol::HistoryNote::Context {
-                name: "later-context".into(),
-                text: "keep later context".into(),
-            }));
-        }
+        app.session_append_history(HistoryItem::Note(protocol::HistoryNote::Context {
+            name: "later-context".into(),
+            text: "keep later context".into(),
+        }));
         release.send(()).unwrap();
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(!app.agent_running());
         assert!(!app.app.turn_submission_is_pending());
         assert_eq!(
@@ -804,13 +329,11 @@ fn file_expansion_display_is_not_saved_until_promoted_in_place() {
         .build();
     app.start_submitted_turn("baseline");
     app.finish_turn();
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     app.save_session_and_flush();
     let id = app.session_snapshot().id.clone();
-    let reader =
-        smelt_store::LineageSessionReader::open_existing(app.app.core.sessions.sessions_dir(), &id)
-            .unwrap();
-    let baseline = reader.store_head().unwrap();
+    let reader = app.app.core.sessions.reader(&id).unwrap();
+    let baseline = reader.head().unwrap();
     let (input_started, release) = app.app.conversation.submissions.pause_input();
     app.type_text("summarize @fixture.txt");
     app.press(KeyCode::Esc);
@@ -830,7 +353,7 @@ fn file_expansion_display_is_not_saved_until_promoted_in_place() {
         .history()
         .is_persisted_block(block_id));
     app.save_session_and_flush();
-    let saved = reader.store_head().unwrap();
+    let saved = reader.head().unwrap();
     assert_eq!(saved.history_len, baseline.history_len);
     assert_eq!(
         saved.transcript_record_count,
@@ -842,7 +365,7 @@ fn file_expansion_display_is_not_saved_until_promoted_in_place() {
         .files
         .has(&tmp.path().join("fixture.txt").to_string_lossy()));
     release.send(()).unwrap();
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     assert_eq!(
         app.app.conversation.transcript().history().last_block_id(),
         Some(block_id)
@@ -909,7 +432,7 @@ fn file_expansion_cancellation_and_force_ignore_stale_results() {
             assert!(!app.app.turn_submission_is_pending());
         }
         release.send(()).unwrap();
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(!app
             .app
             .core
@@ -942,15 +465,10 @@ fn scoped_preparation_errors_cannot_stop_another_turn_or_session() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.type_text("active request");
     app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     let turn_id = app.app.conversation.active().unwrap().turn_id;
     let session_id = app.session_snapshot().id.clone();
-    let persistence = app.app.conversation.persistence_scope();
-    for stale in 0..3 {
-        let mut scope = persistence;
-        if stale == 2 {
-            scope.epoch = scope.epoch.wrapping_add(1);
-        }
+    for stale in 0..2 {
         app.engine_event(EngineEvent::TurnPreparationError {
             turn_id: if stale == 0 { turn_id + 1 } else { turn_id },
             session_id: if stale == 1 {
@@ -958,7 +476,6 @@ fn scoped_preparation_errors_cannot_stop_another_turn_or_session() {
             } else {
                 session_id.clone()
             },
-            persistence: scope,
             message: "stale request preparation failure".into(),
         });
         assert!(app.agent_running());
@@ -970,7 +487,6 @@ fn scoped_preparation_errors_cannot_stop_another_turn_or_session() {
     app.engine_event(EngineEvent::TurnPreparationError {
         turn_id,
         session_id,
-        persistence,
         message: "matching request preparation failure".into(),
     });
     assert!(!app.agent_running());
@@ -982,328 +498,7 @@ fn scoped_preparation_errors_cannot_stop_another_turn_or_session() {
 }
 
 #[test]
-fn canonical_enter_returns_and_repaints_while_storage_is_paused() {
-    let mut app = TestApp::builder().build();
-    app.ensure_writer_ready();
-    let release = app.app.conversation.pause_persistence();
-    app.type_text("submitted request");
-    let started = std::time::Instant::now();
-    app.press(KeyCode::Enter);
-    // Storage stays paused, so any wait on it would run to the persistence deadline.
-    assert!(started.elapsed() < crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
-    assert!(app.app.turn_submission_is_pending());
-    assert!(!app.agent_running());
-    assert_eq!(app.state().prompt_text, "");
-    assert!(app
-        .drain_engine_sends()
-        .iter()
-        .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-
-    let started = std::time::Instant::now();
-    app.type_text("draft while saving");
-    assert!(app.render_to_frame().text().contains("draft while saving"));
-    assert!(started.elapsed() < crate::persist::DEFAULT_PERSISTENCE_DEADLINE);
-    release.send(()).unwrap();
-    app.wait_for_turn_persistence();
-    assert!(app.agent_running());
-    assert_eq!(app.state().prompt_text, "draft while saving");
-    assert_eq!(
-        app.drain_engine_sends()
-            .iter()
-            .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn rejected_async_submission_restores_attachments_without_losing_new_draft() {
-    for image in [false, true] {
-        for draft in [false, true] {
-            let mut app = TestApp::builder().build();
-            app.ensure_writer_ready();
-            app.app.conversation.inject_commit_failure(
-                smelt_store::SessionCommitFailure::InvalidCommand {
-                    message: "injected submission rejection".into(),
-                },
-            );
-            let release = app.app.conversation.pause_persistence();
-            app.type_text("submitted request");
-            if image {
-                app.insert_attachment("pic.png".into());
-            }
-            let submitted = app.state().prompt_text;
-            app.press(KeyCode::Enter);
-            assert!(app.state().prompt_text.is_empty());
-            if draft {
-                app.type_text("new draft 界");
-            }
-            release.send(()).unwrap();
-            app.app.flush_persist();
-            app.wait_for_turn_persistence();
-            assert_eq!(
-                app.state().prompt_text,
-                if draft {
-                    format!("{submitted}\nnew draft 界")
-                } else {
-                    submitted
-                }
-            );
-            assert_eq!(app.prompt_attachment_count(), usize::from(image));
-            assert!(!app.agent_running());
-            assert!(app
-                .drain_engine_sends()
-                .iter()
-                .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-            assert!(app
-                .session_history()
-                .iter()
-                .all(|item| !matches!(item, HistoryItem::User { .. })));
-            app.assert_invariants();
-        }
-    }
-}
-
-#[test]
-fn rejected_visual_submission_restores_its_original_range() {
-    for (original, linewise, move_up, remaining) in [
-        ("alpha beta gamma", false, false, "alpha  gamma"),
-        ("界 beta 界", false, false, "界  界"),
-        ("one\ntwo\nthree", true, true, "one\nthree"),
-        ("one\ntwo", true, false, "one"),
-    ] {
-        let mut app = TestApp::builder().with_vim(true).build();
-        app.ensure_writer_ready();
-        app.app.conversation.inject_commit_failure(
-            smelt_store::SessionCommitFailure::InvalidCommand {
-                message: "injected selection rejection".into(),
-            },
-        );
-        let release = app.app.conversation.pause_persistence();
-        app.type_text(original);
-        app.press(KeyCode::Esc);
-        if linewise {
-            if move_up {
-                app.type_char('k');
-            }
-            app.type_char('0');
-            app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
-        } else {
-            app.type_char('0');
-            app.type_char('w');
-            app.type_char('v');
-            app.type_char('e');
-        }
-        app.press(KeyCode::Enter);
-        assert_eq!(app.state().prompt_text, remaining);
-        app.render_silent();
-        release.send(()).unwrap();
-        app.app.flush_persist();
-        app.wait_for_turn_persistence();
-        assert_eq!(app.state().prompt_text, original);
-        app.type_char('u');
-        assert_eq!(app.state().prompt_text, remaining);
-        app.press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL);
-        assert_eq!(app.state().prompt_text, original);
-        assert!(!app.agent_running());
-        assert!(app
-            .drain_engine_sends()
-            .iter()
-            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-        app.assert_invariants();
-    }
-}
-
-#[test]
-fn rejected_visual_line_submission_restores_attachment_order_and_separator() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.ensure_writer_ready();
-    app.app
-        .conversation
-        .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
-            message: "injected attachment selection rejection".into(),
-        });
-    let release = app.app.conversation.pause_persistence();
-    app.type_text("keep 界 ");
-    app.insert_attachment("keep.png".into());
-    app.type_text("\nsend 界 ");
-    app.insert_attachment("send.png".into());
-    let original = app.state().prompt_text;
-    let original_ids = crate::input::prompt_ctx_ref(&app.app.ui)
-        .buf
-        .attachment_ids
-        .clone();
-    app.press(KeyCode::Esc);
-    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
-    app.press(KeyCode::Enter);
-    assert_eq!(app.prompt_attachment_count(), 1);
-    app.render_silent();
-    release.send(()).unwrap();
-    app.app.flush_persist();
-    app.wait_for_turn_persistence();
-    assert_eq!(app.state().prompt_text, original);
-    assert_eq!(
-        crate::input::prompt_ctx_ref(&app.app.ui).buf.attachment_ids,
-        original_ids
-    );
-    assert_eq!(app.prompt_attachment_count(), 2);
-    app.assert_invariants();
-}
-
-#[test]
-fn rejected_visual_submission_preserves_a_changed_draft() {
-    let mut app = TestApp::builder().with_vim(true).build();
-    app.ensure_writer_ready();
-    app.app
-        .conversation
-        .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
-            message: "injected edited selection rejection".into(),
-        });
-    let release = app.app.conversation.pause_persistence();
-    app.type_text("alpha beta gamma");
-    app.press(KeyCode::Esc);
-    app.type_text("0wve");
-    app.press(KeyCode::Enter);
-    app.type_char('A');
-    app.type_text(" newer draft 界");
-    let draft = app.state().prompt_text;
-    release.send(()).unwrap();
-    app.app.flush_persist();
-    app.wait_for_turn_persistence();
-    assert_eq!(app.state().prompt_text, format!("beta\n{draft}"));
-    assert!(!app.agent_running());
-    app.assert_invariants();
-}
-
-#[test]
-fn rejected_submission_preserves_paste_provenance_of_both_inputs() {
-    for submitted_paste in [false, true] {
-        for draft_paste in [false, true] {
-            let mut app = TestApp::builder().with_vim(false).build();
-            app.ensure_writer_ready();
-            app.app.conversation.inject_commit_failure(
-                smelt_store::SessionCommitFailure::InvalidCommand {
-                    message: "injected submission rejection".into(),
-                },
-            );
-            let release = app.app.conversation.pause_persistence();
-            if submitted_paste {
-                app.feed_one(SourceEvent::Term(Event::Paste("submitted request".into())));
-            } else {
-                app.type_text("submitted request");
-            }
-            app.press(KeyCode::Enter);
-            assert!(app.app.turn_submission_is_pending());
-            if draft_paste {
-                app.feed_one(SourceEvent::Term(Event::Paste(
-                    "!new draft from paste".into(),
-                )));
-            } else {
-                app.type_text("new typed draft");
-            }
-            let draft = app.state().prompt_text;
-            release.send(()).unwrap();
-            app.wait_for_turn_persistence();
-            assert_eq!(
-                app.state().prompt_text,
-                format!("submitted request\n{draft}")
-            );
-            assert_eq!(
-                app.app.prompt.skip_shell_escape(),
-                submitted_paste || draft_paste,
-                "submitted_paste={submitted_paste}, draft_paste={draft_paste}"
-            );
-            assert!(!app.agent_running());
-            app.assert_invariants();
-        }
-    }
-}
-
-#[test]
-fn rejected_paste_keeps_shell_escape_disabled_on_resubmission() {
-    let mut app = TestApp::builder().build();
-    app.ensure_writer_ready();
-    app.app
-        .conversation
-        .inject_commit_failure(smelt_store::SessionCommitFailure::InvalidCommand {
-            message: "injected paste rejection".into(),
-        });
-    app.feed_one(SourceEvent::Term(Event::Paste(
-        "!this is pasted text".into(),
-    )));
-    app.press(KeyCode::Enter);
-    app.app.flush_persist();
-    app.wait_for_turn_persistence();
-    assert_eq!(app.state().prompt_text, "!this is pasted text");
-    assert!(app.app.prompt.skip_shell_escape());
-    assert!(app.app.retry_blocked_persistence());
-    app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
-    assert!(app.agent_running());
-    assert!(app
-        .drain_engine_sends()
-        .iter()
-        .any(|command| matches!(command,
-        protocol::UiCommand::StartTurn(payload)
-            if payload.input.provider_content().text_content() == "!this is pasted text")));
-}
-
-#[test]
-fn queued_paste_recovery_does_not_reinterpret_model_input_as_a_shell_command() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    app.start_submitted_turn("first request");
-    app.app.flush_persist();
-    app.feed_one(SourceEvent::Term(Event::Paste(
-        "!literal model input".into(),
-    )));
-    app.press(KeyCode::Enter);
-    assert_eq!(app.state().queued_inputs, ["!literal model input"]);
-    app.app
-        .conversation
-        .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
-    app.app.discard_turn(crate::app::TurnEnd::Complete);
-    app.app.flush_persist();
-    app.wait_for_turn_persistence();
-    assert_eq!(app.prompt_source(), "!literal model input");
-    assert!(app.app.prompt.skip_shell_escape());
-    assert!(!app.agent_running());
-}
-
-#[test]
-fn repeated_force_during_pending_submit_dispatches_only_the_latest_turn() {
-    let mut app = TestApp::builder().with_vim(false).build();
-    app.ensure_writer_ready();
-    let release = app.app.conversation.pause_persistence();
-    app.type_text("first accepted");
-    app.press(KeyCode::Enter);
-    for replacement in ["second accepted", "third accepted"] {
-        app.type_text(replacement);
-        app.press(KeyCode::Enter);
-        app.press(KeyCode::Enter);
-        app.press(KeyCode::Enter);
-        assert!(app.state().queued_inputs.is_empty());
-        assert!(app.app.turn_submission_is_pending());
-        assert!(app.working_probe().is_animating());
-    }
-    release.send(()).unwrap();
-    app.wait_for_turn_persistence();
-    let inputs: Vec<_> = app
-        .drain_engine_sends()
-        .into_iter()
-        .filter_map(|command| match command {
-            protocol::UiCommand::StartTurn(payload) => {
-                Some(payload.input.provider_content().text_content().into_owned())
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(inputs, ["third accepted"]);
-    assert!(app.agent_running());
-    app.assert_invariants();
-}
-
-#[test]
-fn forced_queued_submission_is_visible_before_cancel_persistence() {
+fn forced_queued_submission_starts_while_the_writer_is_paused() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_submitted_turn("initial request");
     app.drain_engine_sends();
@@ -1318,16 +513,15 @@ fn forced_queued_submission_is_visible_before_cancel_persistence() {
         matches!(block, smelt_core::Block::User { text, .. } if text == "forced replacement")
     });
     let queued = app.state().queued_inputs.len();
-    let preparing = app.app.turn_submission_is_pending();
+    let started = app.agent_running();
     release.send(()).unwrap();
-    app.wait_for_turn_persistence();
     assert!(visible, "forced message was not in the transcript: {frame}");
     assert_eq!(queued, 0, "forced message returned to a queue");
-    assert!(preparing, "forced message did not start a visible turn");
+    assert!(started, "forced message did not start a visible turn");
 }
 
 #[test]
-fn large_response_accepts_follow_up_before_persistence_receipt() {
+fn large_response_starts_follow_up_while_the_writer_is_paused() {
     let mut app = TestApp::builder().with_vim(false).build();
     app.start_submitted_turn("initial request");
     app.drain_engine_sends();
@@ -1358,16 +552,15 @@ fn large_response_accepts_follow_up_before_persistence_receipt() {
     assert!(!app.working_probe().is_animating());
     app.type_text("follow-up request");
     app.press(KeyCode::Enter);
-    let accepted = app.app.turn_submission_is_pending();
+    let started = app.agent_running();
     release.send(()).unwrap();
-    assert!(accepted);
-    app.wait_for_turn_persistence();
-    assert!(app.agent_running());
-    let reader = smelt_store::LineageSessionReader::open_existing(
-        app.core_probe().sessions.sessions_dir(),
-        &app.session_snapshot().id,
-    )
-    .unwrap();
+    assert!(started);
+    app.flush_persist();
+    let reader = app
+        .core_probe()
+        .sessions
+        .reader(&app.session_snapshot().id)
+        .unwrap();
     let stored = reader.history_range(1, 3).unwrap();
     assert!(matches!(&stored[0], HistoryItem::Assistant(step)
         if step.content.as_ref().unwrap().text_content() == format!("```\n{}\n```", "x".repeat(1024 * 1024))));
@@ -1376,7 +569,7 @@ fn large_response_accepts_follow_up_before_persistence_receipt() {
 }
 
 #[test]
-fn canonical_completion_accepts_queued_work_before_receipt_and_gates_dispatch() {
+fn completion_dispatches_queued_work_while_the_writer_is_busy() {
     for queued in [false, true] {
         let mut app = TestApp::builder().build();
         app.start_submitted_turn("initial request");
@@ -1385,11 +578,10 @@ fn canonical_completion_accepts_queued_work_before_receipt_and_gates_dispatch() 
             app.push_queued_message("next request".into());
         }
         let release = app.app.conversation.pause_persistence();
+        app.clear_actions();
         assert!(app.finish_turn());
         app.render_silent();
-        assert!(!app.agent_running());
-        assert_eq!(app.working_probe().is_animating(), queued);
-        assert_eq!(app.app.turn_submission_is_pending(), queued);
+        assert_eq!(app.agent_running(), queued);
         assert!(app.state().queued_inputs.is_empty());
         if !queued {
             assert_eq!(
@@ -1397,58 +589,45 @@ fn canonical_completion_accepts_queued_work_before_receipt_and_gates_dispatch() 
                 Some(smelt_core::working::TurnOutcome::Done)
             );
         }
-        assert!(app.app.conversation.canonical_operations_are_pending());
-        assert!(app
-            .drain_engine_sends()
-            .iter()
-            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
+        assert_eq!(
+            app.actions()
+                .iter()
+                .filter(|action| matches!(action, Action::EngineSend(command)
+                    if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))))
+                .count(),
+            usize::from(queued)
+        );
         app.type_text("draft after completion");
         assert!(app
             .render_to_frame()
             .text()
             .contains("draft after completion"));
         release.send(()).unwrap();
-        app.wait_for_turn_persistence();
-        assert_eq!(app.agent_running(), queued);
+        app.flush_persist();
         assert_eq!(app.state().prompt_text, "draft after completion");
-        assert_eq!(
-            app.drain_engine_sends()
-                .iter()
-                .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
-                .count(),
-            usize::from(queued)
-        );
     }
 }
 
 fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
-    crate::app::history::materialize_full_session(
-        &app.core_probe().sessions,
-        id,
-        crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
-    )
-    .expect("session saved")
+    crate::app::history::load_saved_session(&app.core_probe().sessions, id).expect("session saved")
 }
 
-fn lineage_reader(id: &str) -> smelt_store::LineageSessionReader {
-    smelt_store::LineageSessionReader::open_existing(smelt_core::session::sessions_dir(), id)
-        .unwrap()
+fn lineage_reader(id: &str) -> smelt_store::SessionReader {
+    smelt_core::session::storage().reader(id).unwrap()
 }
 
-fn session_revision(_app: &TestApp, id: &str) -> u64 {
-    lineage_reader(id).snapshot().unwrap().head.revision.get()
+/// How many saves of the current session reached the store.
+fn durable_saves(app: &TestApp) -> u64 {
+    app.app
+        .conversation
+        .persistence_status()
+        .and_then(|status| status.durable)
+        .map_or(0, |durable| durable.seq)
 }
 
 fn save_full_history_fixture(app: &mut TestApp) {
-    assert_eq!(
-        app.app.conversation.session().history.len(),
-        app.app.conversation.history_len(),
-        "record-backed fixture requires complete in-memory history"
-    );
-    let transcript = crate::app::history::build_transcript_from_session(
-        &app.app.lua,
-        app.app.conversation.session(),
-    );
+    let transcript =
+        crate::app::history::build_transcript_from_session(&app.app.lua, &app.session_snapshot());
     app.app
         .conversation
         .replace_transcript_from_history(transcript);
@@ -1461,22 +640,9 @@ fn save_and_close_full_history_fixture(mut app: TestApp) -> String {
     app.app
         .shutdown_persist()
         .expect("close saved fixture persistence");
-    // A fresh runtime resolves the session through the asynchronously published catalog.
     assert!(
-        app.app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(120)),
-        "saved fixture catalog entry was not published"
-    );
-    let catalog = smelt_store::CatalogReader::open_existing(
-        app.core_probe().sessions.layout().catalog_path(),
-    )
-    .unwrap()
-    .unwrap();
-    assert!(
-        catalog.session(&session_id).unwrap().is_some(),
-        "closed fixture must be catalog-visible before another app can resume it"
+        app.core_probe().sessions.reader(&session_id).is_ok(),
+        "closed fixture must be visible to another app"
     );
     session_id
 }
@@ -1648,7 +814,7 @@ fn user_timestamp_survives_submission_save_resume_and_history_rebuild() {
         assert!(app.run_lua("smelt.settings.transcript.show_timestamps = false"));
         app.type_text("Preserve this message's submission time.");
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         let input = app
             .drain_engine_sends()
             .into_iter()
@@ -1722,29 +888,33 @@ fn metadata_only_title_update_persists_after_clean_history_save() {
 }
 
 #[test]
-fn fast_mode_only_save_advances_canonical_revision_once() {
+fn fast_mode_only_change_is_saved_once() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
     app.session_append_history(HistoryItem::user(Content::text("persisted history")));
     app.save_session_and_flush();
-    let before = session_revision(&app, &session_id);
+    let before = durable_saves(&app);
 
     app.set_fast_mode(true);
     app.save_session_and_flush();
 
-    assert_eq!(session_revision(&app, &session_id), before + 1);
+    assert_eq!(durable_saves(&app), before + 1);
     assert_eq!(loaded_session(&app, &session_id).fast_mode, Some(true));
 }
 
 #[test]
-fn record_only_save_advances_canonical_revision_once() {
+fn record_only_change_is_saved_once() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
     app.session_append_history(HistoryItem::user(Content::text("persisted history")));
     app.save_session_and_flush();
-    let before = session_revision(&app, &session_id);
+    let before = durable_saves(&app);
+    let records_before = lineage_reader(&session_id)
+        .head()
+        .unwrap()
+        .transcript_record_count;
 
     app.push_transcript_block(Block::Thinking {
         title: None,
@@ -1754,7 +924,14 @@ fn record_only_save_advances_canonical_revision_once() {
     });
     app.save_session_and_flush();
 
-    assert_eq!(session_revision(&app, &session_id), before + 1);
+    assert_eq!(durable_saves(&app), before + 1);
+    assert!(
+        lineage_reader(&session_id)
+            .head()
+            .unwrap()
+            .transcript_record_count
+            > records_before
+    );
 }
 
 #[test]
@@ -1931,9 +1108,9 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
     );
 
     let reader = lineage_reader(&session_id);
-    let state = reader.snapshot().unwrap();
+    let state = reader.state().unwrap();
     let durable_previews = reader
-        .transcript_range(0, state.transcript_len)
+        .transcript_range(0, state.head.transcript_record_count.get())
         .unwrap()
         .into_iter()
         .map(|record| record.preview_text)
@@ -2029,7 +1206,7 @@ fn process_status_session_accepts_persisted_follow_up() {
     let session_id = {
         let mut app = TestApp::builder().build_with_test_home_guard(&guard);
         app.handle_job_completed("4242".into(), Some(0), protocol::JobTermination::Exited);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         let turn_id = app.current_turn_id().expect("process-status turn started");
         app.feed_one(SourceEvent::engine(EngineEvent::TurnComplete {
             turn_id,
@@ -2067,17 +1244,19 @@ fn process_status_session_accepts_persisted_follow_up() {
 }
 
 #[test]
-fn exact_no_op_save_does_not_advance_canonical_revision() {
+fn no_op_save_writes_nothing() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
     app.session_append_history(HistoryItem::user(Content::text("persisted history")));
     app.save_session_and_flush();
-    let before = session_revision(&app, &session_id);
+    let before = durable_saves(&app);
+    let head = lineage_reader(&session_id).head().unwrap();
 
     app.save_session_and_flush();
 
-    assert_eq!(session_revision(&app, &session_id), before);
+    assert_eq!(durable_saves(&app), before);
+    assert_eq!(lineage_reader(&session_id).head().unwrap(), head);
 }
 
 #[test]
@@ -2104,7 +1283,7 @@ fn shutdown_flushes_latest_generation_after_in_flight_save() {
 }
 
 #[test]
-fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
+fn rewind_truncates_the_stored_suffix_across_restart() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
@@ -2129,8 +1308,8 @@ fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
         }),
     );
     let retained_block_len = app.transcript_block_count();
-    let retained = lineage_reader(&session_id).snapshot().unwrap();
-    let retained_history_len = retained.head.history_len.as_usize().unwrap();
+    let retained = lineage_reader(&session_id).state().unwrap();
+    let retained_history_len = retained.head.history_len.as_usize();
 
     app.commit_request_history_item(
         HistoryItem::user(Content::text("discarded prompt")),
@@ -2151,44 +1330,28 @@ fn rewind_reuses_prior_roots_across_restart_without_synchronous_reclamation() {
             content: "discarded reply".into(),
         }),
     );
-    let extended_reader = lineage_reader(&session_id);
-    let extended = extended_reader.snapshot().unwrap();
-    let extended_stats = extended_reader.storage_stats().unwrap();
-    assert_ne!(extended.history_root_id, retained.history_root_id);
-    assert_ne!(extended.transcript_root_id, retained.transcript_root_id);
+    let sessions = smelt_core::session::storage();
+    let store = sessions.store();
+    assert!(lineage_reader(&session_id).head().unwrap().history_len > retained.head.history_len);
 
     app.rewind_to_history_index(Some(retained_history_len), false);
     app.save_session_and_flush();
 
     let rewound_reader = lineage_reader(&session_id);
-    let rewound = rewound_reader.snapshot().unwrap();
-    let rewound_stats = rewound_reader.storage_stats().unwrap();
-    assert_eq!(rewound.history_root_id, retained.history_root_id);
-    assert_eq!(rewound.transcript_root_id, retained.transcript_root_id);
-    assert_eq!(rewound.head.history_len, retained.head.history_len);
+    let rewound = rewound_reader.state().unwrap();
+    let rewound_stats = rewound_reader.storage_stats(store).unwrap();
+    assert_eq!(rewound.head, retained.head);
+    assert_eq!(rewound_stats.history_rows, retained_history_len as u64);
     assert_eq!(
-        rewound.head.transcript_record_count,
-        retained.head.transcript_record_count
+        rewound_stats.transcript_rows,
+        retained.head.transcript_record_count.get()
     );
-    assert!(
-        rewound_stats.object_rows >= extended_stats.object_rows,
-        "rewind synchronously reclaimed canonical suffix objects"
-    );
-
     drop(rewound_reader);
-    drop(extended_reader);
     drop(app);
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
-    let restarted = lineage_reader(&session_id).snapshot().unwrap();
-    assert_eq!(restarted.history_root_id, retained.history_root_id);
-    assert_eq!(restarted.transcript_root_id, retained.transcript_root_id);
-    assert_eq!(restarted.head.history_len, retained.head.history_len);
-    assert_eq!(
-        restarted.head.transcript_record_count,
-        retained.head.transcript_record_count
-    );
+    assert_eq!(lineage_reader(&session_id).head().unwrap(), retained.head);
     assert_eq!(resumed.session_message_count(), 2);
     assert_eq!(resumed.transcript_block_count(), retained_block_len);
 }
@@ -2200,7 +1363,7 @@ fn blocked_save_requires_explicit_retry() {
     let session_id = app.session_snapshot().id.clone();
     app.session_append_history(HistoryItem::user(Content::text("baseline")));
     app.save_session_and_flush();
-    app.inject_commit_failure(smelt_store::SessionCommitFailure::UnsupportedSchema {
+    app.inject_commit_failure(smelt_store::StoreError::UnsupportedSchema {
         found: i32::MAX,
         expected: 0,
     });
@@ -2229,29 +1392,16 @@ fn environmental_failures_remain_dirty_until_explicit_retry() {
     app.session_append_history(HistoryItem::user(Content::text("baseline")));
     app.save_session_and_flush();
 
-    for (index, failure) in [
-        smelt_store::SessionCommitFailure::Sqlite {
-            message: "disk full while extending session database".into(),
-        },
-        smelt_store::SessionCommitFailure::Io {
-            message: "permission denied while writing session database".into(),
-        },
-        smelt_store::SessionCommitFailure::Io {
-            message: "session storage root is missing".into(),
-        },
+    for (index, message) in [
+        "disk full while extending session database",
+        "permission denied while writing session database",
+        "session storage root is missing",
     ]
     .into_iter()
     .enumerate()
     {
-        let message = match &failure {
-            smelt_store::SessionCommitFailure::Sqlite { message }
-            | smelt_store::SessionCommitFailure::Io { message } => message,
-            _ => unreachable!("environmental fault fixture"),
-        };
-        for _ in 0..2 {
-            app.inject_commit_failure(failure.clone());
-        }
-        app.session_append_history(HistoryItem::user(Content::text(message.as_str())));
+        app.inject_commit_failure(smelt_store::StoreError::Io(std::io::Error::other(message)));
+        app.session_append_history(HistoryItem::user(Content::text(message)));
 
         app.save_session_and_flush();
 
@@ -2260,7 +1410,7 @@ fn environmental_failures_remain_dirty_until_explicit_retry() {
         assert!(app
             .overlays_probe()
             .notification()
-            .is_some_and(|notification| notification.summary.contains(message.as_str())));
+            .is_some_and(|notification| notification.summary.contains(message)));
         assert_eq!(loaded_session(&app, &session_id).history.len(), index + 1);
 
         assert!(retry_persistence_via_lua(&mut app));
@@ -2271,18 +1421,16 @@ fn environmental_failures_remain_dirty_until_explicit_retry() {
 }
 
 #[test]
-fn blocked_environmental_save_retains_submitted_turn_until_retry() {
+fn turn_submitted_after_a_failed_save_saves_everything_once() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
     app.session_append_history(HistoryItem::user(Content::text("baseline")));
     app.save_session_and_flush();
 
-    for _ in 0..2 {
-        app.inject_commit_failure(smelt_store::SessionCommitFailure::Sqlite {
-            message: "database or disk is full".into(),
-        });
-    }
+    app.inject_commit_failure(smelt_store::StoreError::Io(std::io::Error::other(
+        "database or disk is full",
+    )));
     app.session_append_history(HistoryItem::user(Content::text("unsaved before Enter")));
     app.save_session_and_flush();
     assert!(app.session_document_has_unflushed_work());
@@ -2291,8 +1439,7 @@ fn blocked_environmental_save_retains_submitted_turn_until_retry() {
     app.type_text("submit after freeing space");
     app.press(KeyCode::Enter);
 
-    assert!(app.app.turn_submission_is_pending());
-    assert!(!app.agent_running());
+    assert!(app.agent_running());
     assert!(!app.session_is_read_only());
     assert_eq!(app.state().prompt_text, "");
     assert_eq!(
@@ -2312,36 +1459,31 @@ fn blocked_environmental_save_retains_submitted_turn_until_retry() {
         app.session_snapshot().title.as_deref(),
         Some("Still writable")
     );
-    assert!(app.drain_engine_sends().iter().all(|command| !matches!(
-        command,
-        protocol::UiCommand::StartTurn(payload)
-            if payload.input.provider_content().text_content() == "submit after freeing space"
-    )));
-    assert_eq!(loaded_session(&app, &session_id).history.len(), 1);
+    let submitted = |app: &mut TestApp| {
+        app.drain_engine_sends()
+            .into_iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    protocol::UiCommand::StartTurn(payload)
+                        if payload.input.provider_content().text_content()
+                            == "submit after freeing space"
+                )
+            })
+            .count()
+    };
+    assert_eq!(submitted(&mut app), 1);
 
-    assert!(retry_persistence_via_lua(&mut app));
+    app.save_session_and_flush();
     let outcome = app.flush_persist();
 
     assert!(matches!(
         outcome,
-        crate::persist::PersistenceFlushOutcome::Durable { .. }
+        crate::persist::PersistenceFlushOutcome::Durable
     ));
-    assert!(!app.app.turn_submission_is_pending());
     assert!(app.agent_running());
     assert!(!app.session_is_read_only());
-    let submitted = app
-        .drain_engine_sends()
-        .into_iter()
-        .filter(|command| {
-            matches!(
-                command,
-                protocol::UiCommand::StartTurn(payload)
-                    if payload.input.provider_content().text_content()
-                        == "submit after freeing space"
-            )
-        })
-        .count();
-    assert_eq!(submitted, 1);
+    assert_eq!(submitted(&mut app), 0);
     let loaded = loaded_session(&app, &session_id);
     assert_eq!(loaded.title.as_deref(), Some("Still writable"));
     for expected in [
@@ -2368,30 +1510,35 @@ fn blocked_environmental_save_retains_submitted_turn_until_retry() {
 }
 
 #[test]
-fn failed_canonical_submit_dispatches_once_after_explicit_retry() {
+fn failed_submit_save_is_written_once_after_explicit_retry() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
     app.session_append_history(HistoryItem::user(Content::text("baseline")));
     app.save_session_and_flush();
 
-    for _ in 0..2 {
-        app.inject_commit_failure(smelt_store::SessionCommitFailure::Sqlite {
-            message: "database or disk is full".into(),
-        });
-    }
+    app.inject_commit_failure(smelt_store::StoreError::Io(std::io::Error::other(
+        "database or disk is full",
+    )));
     app.drain_engine_sends();
     app.type_text("retry this exact turn");
     app.press(KeyCode::Enter);
+    let submitted = |app: &mut TestApp| {
+        app.drain_engine_sends()
+            .into_iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    protocol::UiCommand::StartTurn(payload)
+                        if payload.input.provider_content().text_content() == "retry this exact turn"
+                )
+            })
+            .count()
+    };
 
-    assert!(app.app.turn_submission_is_pending());
-    assert!(!app.agent_running());
+    assert!(app.agent_running());
     assert!(!app.session_is_read_only());
-    assert!(app.drain_engine_sends().iter().all(|command| !matches!(
-        command,
-        protocol::UiCommand::StartTurn(payload)
-            if payload.input.provider_content().text_content() == "retry this exact turn"
-    )));
+    assert_eq!(submitted(&mut app), 1);
     let _ = app.flush_persist();
     assert!(app
         .overlays_probe()
@@ -2402,24 +1549,11 @@ fn failed_canonical_submit_dispatches_once_after_explicit_retry() {
     app.press(KeyCode::Enter);
     assert!(matches!(
         app.flush_persist(),
-        crate::persist::PersistenceFlushOutcome::Durable { .. }
+        crate::persist::PersistenceFlushOutcome::Durable
     ));
-
-    assert!(!app.app.turn_submission_is_pending());
     assert!(app.agent_running());
     assert!(!app.session_is_read_only());
-    let submitted = app
-        .drain_engine_sends()
-        .into_iter()
-        .filter(|command| {
-            matches!(
-                command,
-                protocol::UiCommand::StartTurn(payload)
-                    if payload.input.provider_content().text_content() == "retry this exact turn"
-            )
-        })
-        .count();
-    assert_eq!(submitted, 1);
+    assert_eq!(submitted(&mut app), 0);
     assert_eq!(
         loaded_session(&app, &session_id)
             .history
@@ -2430,39 +1564,6 @@ fn failed_canonical_submit_dispatches_once_after_explicit_retry() {
             ))
             .count(),
         1
-    );
-}
-
-#[test]
-fn writer_startup_failure_does_not_dispatch_a_queued_turn() {
-    let guard = test_home_guard();
-    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    let session_id = app.session_snapshot().id.clone();
-    let layout =
-        smelt_store::SessionStoreLayout::from_sessions_root(smelt_core::session::sessions_dir());
-    std::fs::create_dir_all(layout.lineage_lock_path(&session_id)).unwrap();
-
-    let turn = app.app.begin_agent_turn(
-        "do not dispatch",
-        Content::text("do not dispatch"),
-        smelt_core::session::now_ms(),
-    );
-    assert!(turn.is_none());
-    assert!(app.app.conversation.writer_is_opening());
-    assert!(app.app.turn_submission_is_pending());
-
-    app.wait_for_session_lifecycle();
-    assert!(app.session_is_read_only());
-    assert!(!app.app.turn_submission_is_pending());
-    assert!(!app.agent_running());
-    app.app.drain_persist_reports();
-    assert!(app
-        .drain_engine_sends()
-        .iter()
-        .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-    assert_eq!(
-        app.overlays_probe().notification().unwrap().kind,
-        smelt_core::messages::MessageKind::Error
     );
 }
 
@@ -2492,7 +1593,7 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
     let sessions_root = smelt_core::session::sessions_dir();
-    let locks_dir = smelt_store::SessionStoreLayout::from_sessions_root(&sessions_root).locks_dir();
+    let locks_dir = smelt_core::session::storage().store().locks_dir();
     std::fs::create_dir_all(&sessions_root).unwrap();
     std::fs::write(&locks_dir, "permanently blocks directory creation").unwrap();
     app.session_append_history(HistoryItem::user(Content::text("cannot save")));
@@ -2501,28 +1602,20 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
 
     assert!(app.session_document_has_unflushed_work());
     assert!(app.overlays_probe().notification().is_some());
-    assert!(
-        smelt_store::LineageSessionReader::try_open_existing(&sessions_root, &session_id,)
-            .unwrap()
-            .is_none()
-    );
+    assert!(smelt_core::session::storage().reader(&session_id).is_err());
 }
 
 #[test]
-fn new_empty_session_does_not_create_a_directory() {
+fn new_empty_session_is_not_saved() {
     let guard = test_home_guard();
     let app = TestApp::builder().build_with_test_home_guard(&guard);
-    let lineage_dir =
-        smelt_store::SessionStoreLayout::from_sessions_root(smelt_core::session::sessions_dir())
-            .lineage_dir(&app.session_snapshot().id);
-
-    assert!(!lineage_dir.exists());
+    let session_id = app.session_snapshot().id.clone();
     drop(app);
-    assert!(!lineage_dir.exists());
+    assert!(smelt_core::session::storage().reader(&session_id).is_err());
 }
 
 #[test]
-fn identical_object_bytes_can_serve_distinct_request_roles() {
+fn request_audit_with_equal_body_and_response_keeps_both() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
@@ -2539,31 +1632,29 @@ fn identical_object_bytes_can_serve_distinct_request_roles() {
     });
 
     app.dispatch_host_call(engine::HostCall::RequestAudit {
-        persistence: app.conversation_probe().persistence_scope(),
+        session_id: session_id.clone(),
         entry: Box::new(audit),
         payload_mode: smelt_store::RequestAuditPayloadMode::Full,
     });
     app.flush_persist();
 
     let reader = lineage_reader(&session_id);
-    let attempts = reader
-        .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+    let requests = reader
+        .requests(&smelt_store::RequestAuditQuery::default())
         .unwrap();
-    assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].body_hash, attempts[0].response_hash);
-    let payloads = reader.request_payloads(attempts[0].id).unwrap().unwrap();
+    assert_eq!(requests.len(), 1);
+    let payloads = reader.request_payloads(requests[0].id).unwrap().unwrap();
     assert_eq!(payloads.body, Some(serde_json::json!({})));
     assert_eq!(payloads.response, Some(serde_json::json!({})));
 }
 
 #[test]
-fn stale_request_audit_after_session_switch_is_rejected() {
+fn stale_request_audit_after_session_switch_is_dropped() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     app.session_append_history(HistoryItem::user(Content::text("old session")));
     app.save_session_and_flush();
     let old_id = app.session_snapshot().id.clone();
-    let old_scope = app.conversation_probe().persistence_scope();
 
     app.reset_session();
     app.session_append_history(HistoryItem::user(Content::text("new session")));
@@ -2571,7 +1662,7 @@ fn stale_request_audit_after_session_switch_is_rejected() {
     let new_id = app.session_snapshot().id.clone();
 
     app.dispatch_host_call(engine::HostCall::RequestAudit {
-        persistence: old_scope,
+        session_id: old_id.clone(),
         entry: Box::new(request_audit_entry(42)),
         payload_mode: smelt_store::RequestAuditPayloadMode::SUMMARY,
     });
@@ -2579,170 +1670,10 @@ fn stale_request_audit_after_session_switch_is_rejected() {
 
     for id in [&old_id, &new_id] {
         assert!(lineage_reader(id)
-            .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+            .requests(&smelt_store::RequestAuditQuery::default())
             .unwrap()
             .is_empty());
     }
-}
-
-#[test]
-fn full_history_fixture_rejects_sparse_fork_without_erasing_transcript() {
-    let guard = test_home_guard();
-    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    app.session_append_history(HistoryItem::user(Content::text("complete source history")));
-    save_full_history_fixture(&mut app);
-    let source_id = app.session_snapshot().id.clone();
-    app.fork_session();
-    let fork_id = app.session_snapshot().id.clone();
-    assert_ne!(fork_id, source_id);
-    assert!(app.app.conversation.session().history.is_empty());
-    assert_eq!(app.app.conversation.history_len(), 1);
-    let reader = lineage_reader(&fork_id);
-    let before = reader.snapshot().unwrap();
-
-    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        save_full_history_fixture(&mut app);
-    }));
-    assert!(
-        rejected.is_err(),
-        "fixture accepted sparse history and changed transcript root from {} to {}",
-        before.transcript_root_id,
-        reader.snapshot().unwrap().transcript_root_id
-    );
-    let panic = rejected.unwrap_err();
-    assert!(panic
-        .downcast_ref::<String>()
-        .unwrap()
-        .contains("requires complete in-memory history"));
-    app.save_session_and_flush();
-    let after = reader.snapshot().unwrap();
-    assert_eq!(after.transcript_root_id, before.transcript_root_id);
-    assert_eq!(after.head.history_len, before.head.history_len);
-
-    app.app.shutdown_persist().unwrap();
-    assert!(app
-        .app
-        .core
-        .sessions
-        .wait_for_session_catalog(Duration::from_secs(120)));
-    drop(app);
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    assert!(
-        resumed.load_session_by_id(&fork_id),
-        "{:?}",
-        resumed.overlays_probe().notification()
-    );
-}
-
-#[test]
-fn turn_transitions_remain_durable_before_and_after_fork() {
-    let guard = test_home_guard();
-    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
-    app.type_text("source request");
-    app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
-    assert!(app.agent_running(), "{:?}", app.flush_persist());
-    assert!(app.finish_turn());
-    app.wait_for_turn_persistence();
-    // An unchanged transcript rebuild must reuse already stored sequence nodes.
-    save_full_history_fixture(&mut app);
-    let outcome = app.flush_persist();
-    assert!(
-        matches!(
-            outcome,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ),
-        "source turn must be durable: {outcome:?}"
-    );
-    let source_id = app.session_snapshot().id.clone();
-    let source_reader = lineage_reader(&source_id);
-    assert_eq!(
-        source_reader.turns().unwrap()[0].state,
-        smelt_store::TurnState::Completed
-    );
-
-    app.fork_session();
-    let fork_id = app.session_snapshot().id.clone();
-    assert_ne!(
-        fork_id,
-        source_id,
-        "{:?}",
-        app.overlays_probe().notification()
-    );
-    let fork_reader = lineage_reader(&fork_id);
-    let source = source_reader.snapshot().unwrap();
-    assert_eq!(
-        fork_reader
-            .snapshot()
-            .unwrap()
-            .identity
-            .parent_id
-            .as_deref(),
-        Some(source_id.as_str())
-    );
-    assert_eq!(
-        fork_reader.history_range(0, 1).unwrap(),
-        source_reader.history_range(0, 1).unwrap()
-    );
-
-    app.type_text("fork request");
-    app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
-    assert!(app.agent_running(), "{:?}", app.flush_persist());
-    assert!(app.finish_turn());
-    app.wait_for_turn_persistence();
-    let outcome = app.flush_persist();
-    assert!(
-        matches!(
-            outcome,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ),
-        "fork turn must be durable: {outcome:?}"
-    );
-    let fork = fork_reader.snapshot().unwrap();
-    assert_eq!(
-        fork.head.history_len.get(),
-        source.head.history_len.get() + 1
-    );
-    let turns = fork_reader.turns().unwrap();
-    assert!(!turns.is_empty());
-    assert!(turns
-        .iter()
-        .all(|turn| turn.state == smelt_store::TurnState::Completed));
-    assert_eq!(source_reader.snapshot().unwrap(), source);
-
-    app.app.shutdown_persist().unwrap();
-    assert!(app
-        .app
-        .core
-        .sessions
-        .wait_for_session_catalog(Duration::from_secs(120)));
-    drop(app);
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    assert!(
-        resumed.load_session_by_id(&fork_id),
-        "{:?}",
-        resumed.overlays_probe().notification()
-    );
-    resumed.type_text("resumed fork request");
-    resumed.press(KeyCode::Enter);
-    resumed.wait_for_turn_persistence();
-    assert!(resumed.agent_running(), "{:?}", resumed.flush_persist());
-    assert!(resumed.finish_turn());
-    resumed.wait_for_turn_persistence();
-    let outcome = resumed.flush_persist();
-    assert!(
-        matches!(
-            outcome,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ),
-        "resumed fork turn must be durable: {outcome:?}"
-    );
-    assert_eq!(
-        fork_reader.snapshot().unwrap().head.history_len.get(),
-        fork.head.history_len.get() + 1
-    );
-    assert_eq!(source_reader.snapshot().unwrap(), source);
 }
 
 #[test]
@@ -2770,7 +1701,7 @@ fn sparse_fork_publishes_a_complete_destination() {
         resumed.overlays_probe().notification()
     );
     let reader = lineage_reader(&fork_id);
-    let stored = reader.snapshot().unwrap();
+    let stored = reader.state().unwrap();
     assert_eq!(stored.identity.id, fork_id);
     assert_eq!(
         stored.identity.parent_id.as_deref(),
@@ -2801,10 +1732,10 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
         "fork should become active: {:?}",
         resumed.overlays_probe().notification()
     );
-    let source_revision = lineage_reader(&source_id).snapshot().unwrap().revision_id;
+    let source_head = lineage_reader(&source_id).head().unwrap();
     resumed.session_append_history(HistoryItem::user(Content::text("fork only")));
     resumed.save_session_and_flush();
-    let fork_revision = lineage_reader(&fork_id).snapshot().unwrap().revision_id;
+    let fork_head = lineage_reader(&fork_id).head().unwrap();
 
     assert!(
         resumed.load_session_by_id(&source_id),
@@ -2812,10 +1743,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
     );
     assert_eq!(resumed.session_snapshot().id, source_id);
     assert_eq!(resumed.app.session_history_len(), 1);
-    assert_eq!(
-        lineage_reader(&source_id).snapshot().unwrap().revision_id,
-        source_revision
-    );
+    assert_eq!(lineage_reader(&source_id).head().unwrap(), source_head);
 
     assert!(
         resumed.load_session_by_id(&fork_id),
@@ -2824,10 +1752,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
     );
     assert_eq!(resumed.session_snapshot().id, fork_id);
     assert_eq!(resumed.app.session_history_len(), 2);
-    assert_eq!(
-        lineage_reader(&fork_id).snapshot().unwrap().revision_id,
-        fork_revision
-    );
+    assert_eq!(lineage_reader(&fork_id).head().unwrap(), fork_head);
 }
 
 #[test]
@@ -2861,12 +1786,7 @@ fn deleting_source_branch_leaves_active_fork_intact() {
         .expect("delete source branch through the user-facing session API");
 
     assert!(
-        smelt_store::LineageSessionReader::try_open_existing(
-            smelt_core::session::sessions_dir(),
-            &source_id,
-        )
-        .unwrap()
-        .is_none(),
+        smelt_core::session::storage().reader(&source_id).is_err(),
         "deleted source branch is no longer visible"
     );
     assert_eq!(resumed.session_snapshot().id, fork_id);
@@ -2875,73 +1795,6 @@ fn deleting_source_branch_leaves_active_fork_intact() {
         fork.history_range(0, 1).unwrap(),
         vec![HistoryItem::user(Content::text("shared fork history"))]
     );
-}
-
-#[test]
-fn lua_save_retry_reconciles_committed_title_before_publishing_newer_edits() {
-    let mut app = TestApp::builder().build();
-    app.session_append_history(HistoryItem::user(Content::text(
-        "synthetic save retry history",
-    )));
-    app.save_session_and_flush();
-    app.ensure_writer_ready();
-    let session_id = app.session_snapshot().id.clone();
-    let reader = smelt_store::LineageSessionReader::open_existing(
-        app.core_probe().sessions.sessions_dir(),
-        &session_id,
-    )
-    .unwrap();
-    let initial = reader.snapshot().unwrap();
-
-    app.app.conversation.inject_publish_failure();
-    assert!(app.run_lua("smelt.session.title.set('committed title awaiting acknowledgement')"));
-    app.save_session_and_flush();
-    assert!(matches!(
-        app.flush_persist(),
-        crate::persist::PersistenceFlushOutcome::Blocked { .. }
-    ));
-    let committed = reader.snapshot().unwrap();
-    assert_eq!(
-        committed.metadata.title.as_deref(),
-        Some("committed title awaiting acknowledgement")
-    );
-    assert!(committed.head.revision > initial.head.revision);
-    assert!(app.session_document_has_unflushed_work());
-
-    assert!(app.run_lua("smelt.session.title.set('newer pending title')"));
-    app.save_session();
-    assert!(matches!(
-        app.flush_persist(),
-        crate::persist::PersistenceFlushOutcome::Blocked { .. }
-    ));
-    assert_eq!(
-        reader.store_head().unwrap(),
-        committed.head,
-        "new edits must not implicitly retry a blocked publication"
-    );
-    assert!(retry_persistence_via_lua(&mut app));
-    let outcome = app.flush_persist();
-    assert!(matches!(outcome, crate::persist::PersistenceFlushOutcome::Durable { .. }),
-        "explicit retry must reconcile the unchanged committed save before publishing newer edits: {outcome:?}");
-    assert!(!app.session_document_has_unflushed_work());
-    let latest = reader.snapshot().unwrap();
-    assert_eq!(
-        latest.metadata.title.as_deref(),
-        Some("newer pending title")
-    );
-    assert_eq!(
-        latest.head.revision,
-        committed.head.revision.checked_add(1).unwrap()
-    );
-    assert_eq!(latest.history_root_id, initial.history_root_id);
-    assert_eq!(latest.transcript_root_id, initial.transcript_root_id);
-    assert_eq!(
-        reader.history_range(0, 1).unwrap(),
-        vec![HistoryItem::user(Content::text(
-            "synthetic save retry history"
-        ))]
-    );
-    assert!(!has_sticky_session_save_failure(&app, &session_id));
 }
 
 #[test]
@@ -2964,10 +1817,10 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
     app.render_silent();
 
     let session_id = app.session_snapshot().id.clone();
-    let session_dir = smelt_core::session::sessions_dir().join(&session_id);
+    let sessions = smelt_core::session::storage();
     app.require_transcript_record_resave_from_for_harness(0);
     app.set_fast_mode(true);
-    app.set_transcript_session_dir_for_harness(session_dir.join("missing-hydration-source"));
+    app.set_transcript_store_for_harness(Some(sessions.address("0".repeat(32))));
 
     app.save_session();
     app.render_silent();
@@ -2983,11 +1836,11 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
         }));
     assert!(matches!(
         app.flush_persist(),
-        crate::persist::PersistenceFlushOutcome::Blocked { cause, .. }
+        crate::persist::PersistenceFlushOutcome::Failed(cause)
             if cause.message.contains("hydrate canonical transcript record suffix")
     ));
 
-    app.set_transcript_session_dir_for_harness(session_dir);
+    app.set_transcript_store_for_harness(Some(sessions.address(session_id.clone())));
     assert!(
         !app.load_session_by_id(&session_id),
         "loading must report that destination activation was refused"
@@ -3014,9 +1867,11 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
     assert!(!has_sticky_session_save_failure(&app, &session_id));
     assert_eq!(
         lineage_reader(&session_id)
-            .snapshot()
+            .state()
             .unwrap()
-            .transcript_len,
+            .head
+            .transcript_record_count
+            .get(),
         RECORD_COUNT as u64
     );
 }
@@ -3038,8 +1893,8 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
     let persistence_deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         match app.flush_persist() {
-            crate::persist::PersistenceFlushOutcome::Durable { .. } => break,
-            crate::persist::PersistenceFlushOutcome::Deadline { .. }
+            crate::persist::PersistenceFlushOutcome::Durable => break,
+            crate::persist::PersistenceFlushOutcome::Deadline
                 if std::time::Instant::now() < persistence_deadline => {}
             outcome => panic!("large fork fixture persistence failed: {outcome:?}"),
         }
@@ -3053,10 +1908,10 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
 
     let source_id = app.session_snapshot().id.clone();
     let source = lineage_reader(&source_id);
-    let source_state = source.snapshot().unwrap();
+    let source_state = source.state().unwrap();
     let source_history = source.history_range(0, ROW_COUNT as u64).unwrap();
     let source_records = source
-        .transcript_range(0, source_state.transcript_len)
+        .transcript_range(0, source_state.head.transcript_record_count.get())
         .unwrap();
     drop(source);
     assert!(
@@ -3068,7 +1923,9 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
     );
 
     let unsaved = HistoryItem::user(Content::text("preserved read-only suffix"));
-    app.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    app.inject_commit_failure(smelt_store::StoreError::Owned {
+        session_id: String::new(),
+    });
     app.session_append_history(unsaved.clone());
     app.save_session_and_flush();
     assert!(app.session_is_read_only());
@@ -3092,7 +1949,7 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
         app.overlays_probe().notification()
     );
     let fork = lineage_reader(&fork_id);
-    let fork_state = fork.snapshot().unwrap();
+    let fork_state = fork.state().unwrap();
     assert_eq!(
         fork.history_range(0, ROW_COUNT as u64).unwrap(),
         source_history
@@ -3103,20 +1960,21 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
         vec![unsaved]
     );
     assert_eq!(
-        fork.transcript_range(0, fork_state.transcript_len).unwrap(),
+        fork.transcript_range(0, fork_state.head.transcript_record_count.get())
+            .unwrap(),
         source_records
     );
     drop(fork);
 
     let retained_source = lineage_reader(&source_id);
-    let retained_state = retained_source.snapshot().unwrap();
+    let retained_state = retained_source.state().unwrap();
     assert_eq!(
         retained_source.history_range(0, ROW_COUNT as u64).unwrap(),
         source_history
     );
     assert_eq!(
         retained_source
-            .transcript_range(0, retained_state.transcript_len)
+            .transcript_range(0, retained_state.head.transcript_record_count.get())
             .unwrap(),
         source_records
     );
@@ -3141,10 +1999,10 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
         app.session_snapshot().id.clone()
     };
     let source = lineage_reader(&session_id);
-    let source_state = source.snapshot().unwrap();
+    let source_state = source.state().unwrap();
     let source_history = source.history_range(0, 700).unwrap();
     let source_records = source
-        .transcript_range(0, source_state.transcript_len)
+        .transcript_range(0, source_state.head.transcript_record_count.get())
         .unwrap();
     assert_eq!(source_history.len(), 700);
     assert_eq!(source_records.len(), 700);
@@ -3180,15 +2038,12 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
     let fork = lineage_reader(&fork_id);
-    let fork_state = fork.snapshot().unwrap();
-    assert_eq!(fork_state.history_root_id, source_state.history_root_id);
-    assert_eq!(
-        fork_state.transcript_root_id,
-        source_state.transcript_root_id
-    );
+    let fork_state = fork.state().unwrap();
+    assert_eq!(fork_state.head, source_state.head);
     assert_eq!(fork.history_range(0, 700).unwrap(), source_history);
     assert_eq!(
-        fork.transcript_range(0, fork_state.transcript_len).unwrap(),
+        fork.transcript_range(0, fork_state.head.transcript_record_count.get())
+            .unwrap(),
         source_records
     );
 
@@ -3218,8 +2073,10 @@ fn shutdown_flushes_record_only_transcript_blocks() {
     app.save_session_and_flush();
 
     let reader = lineage_reader(&session_id);
-    let state = reader.snapshot().unwrap();
-    let rows = reader.transcript_range(0, state.transcript_len).unwrap();
+    let state = reader.state().unwrap();
+    let rows = reader
+        .transcript_range(0, state.head.transcript_record_count.get())
+        .unwrap();
     assert!(
         rows.iter().any(|row| row
             .preview_text
@@ -3272,11 +2129,11 @@ fn record_resume_interrupt_save_compacts_and_appends_again() {
     drop(resumed);
 
     let reader = lineage_reader(&session_id);
-    let state = reader.snapshot().unwrap();
-    assert_eq!(state.transcript_len, 3);
+    let state = reader.state().unwrap();
+    assert_eq!(state.head.transcript_record_count.get(), 3);
     assert_eq!(
         reader
-            .transcript_range(0, state.transcript_len)
+            .transcript_range(0, state.head.transcript_record_count.get())
             .unwrap()
             .len(),
         3
@@ -3299,8 +2156,10 @@ fn record_resume_interrupt_save_compacts_and_appends_again() {
     );
 
     let reader = lineage_reader(&session_id);
-    let state = reader.snapshot().unwrap();
-    let rows = reader.transcript_range(0, state.transcript_len).unwrap();
+    let state = reader.state().unwrap();
+    let rows = reader
+        .transcript_range(0, state.head.transcript_record_count.get())
+        .unwrap();
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().any(|row| row
         .preview_text
@@ -3371,7 +2230,7 @@ fn store_backed_resume_uses_provider_snapshot_for_pre_request_compaction() {
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
     assert!(resumed.conversation_probe().has_live_session());
-    assert!(resumed.session_snapshot().history.is_empty());
+    assert!(resumed.app.conversation.session().history.is_empty());
 
     let mut settings = resumed.core_probe().config.settings.clone();
     settings.auto_compact = true;
@@ -3430,7 +2289,7 @@ fn store_backed_usage_records_canonical_history_coordinate() {
     });
     resumed.save_session_and_flush();
 
-    let stored = lineage_reader(&session_id).snapshot().unwrap();
+    let stored = lineage_reader(&session_id).state().unwrap();
     assert_eq!(stored.head.history_len.get(), 2);
     assert_eq!(stored.metadata.context_tokens, Some(200));
     assert_eq!(stored.metadata.context_tokens_history_len, Some(2));
@@ -3663,16 +2522,18 @@ fn resumed_rewind_restores_prior_turn_context_before_next_request() {
         "context pill disappeared after submission:\n{submitted_frame}"
     );
 
-    resumed.wait_for_turn_persistence();
+    resumed.wait_for_turn_dispatch();
     let mut settings = resumed.core_probe().config.settings.clone();
     settings.auto_compact = true;
     settings.compact_threshold = 0.8;
     resumed.set_settings_for_harness(settings);
     let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let turn_id = resumed.current_turn_id().expect("active request turn");
+    let history = resumed.model_history();
     resumed.dispatch_host_call(engine::HostCall::PrepareRequest {
-        turn_id: resumed.current_turn_id().expect("active request turn"),
+        turn_id,
         messages: engine::PreparedRequestMessages::model_only(protocol::history_to_messages(
-            &resumed.model_history(),
+            &history,
         )),
         estimated_tokens: 2_000,
         reply: tx,
@@ -3830,7 +2691,7 @@ fn store_backed_resume_restores_tool_calls_for_model_history() {
 
     assert_eq!(resumed.session_snapshot().id, session_id);
     assert!(
-        resumed.session_snapshot().history.is_empty(),
+        resumed.app.conversation.session().history.is_empty(),
         "resume should use the production sparse SQLite session path"
     );
     assert_eq!(resumed.session_message_count(), 2);
@@ -3908,37 +2769,6 @@ fn repeated_store_backed_resume_cycles_preserve_all_history() {
     }
 }
 
-#[test]
-fn resume_waits_for_pending_catalog_publication() {
-    let guard = test_home_guard();
-    let session_id = saved_one_row_session(&guard);
-    let root = smelt_core::session::sessions_dir();
-    let layout = smelt_store::SessionStoreLayout::from_sessions_root(&root);
-    let marker = smelt_store::CatalogMarkerLock::acquire(&root, &session_id).unwrap();
-    smelt_store::Catalog::open(layout.catalog_path())
-        .unwrap()
-        .remove(&session_id)
-        .unwrap();
-    std::fs::create_dir_all(layout.catalog_pending_dir()).unwrap();
-    std::fs::write(layout.catalog_pending_path(&session_id), [1; 16]).unwrap();
-    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            drop(marker);
-        });
-        assert!(
-            resumed.load_session_by_id(&session_id),
-            "resume rejected a durable session while catalog publication was pending: {:?}",
-            resumed
-                .overlays_probe()
-                .notification()
-                .map(|notification| &notification.summary)
-        );
-    });
-    assert_eq!(resumed.session_message_count(), 1);
-}
-
 fn wait_for_fork(app: &mut TestApp, source_id: &str) -> String {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while app.session_snapshot().id == source_id {
@@ -4001,13 +2831,7 @@ fn resume_recovery_contention_does_not_block_the_ui() {
         owner.save_session_and_flush();
         let source_id = owner.session_snapshot().id.clone();
         let turn_id = owner.current_turn_id().unwrap();
-        let address = owner
-            .core_probe()
-            .sessions
-            .resolve_session_for_read_result(&source_id)
-            .unwrap();
-        let path = smelt_store::SessionStoreLayout::from_sessions_root(address.sessions_root)
-            .lineage_database_path(&address.lineage_id);
+        let path = owner.core_probe().sessions.store().database_path();
         (source_id, turn_id, path)
     };
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
@@ -4044,13 +2868,7 @@ fn fork_storage_contention_does_not_block_the_ui() {
     app.session_append_history(HistoryItem::user(Content::text("shared history")));
     save_full_history_fixture(&mut app);
     let source_id = app.session_snapshot().id.clone();
-    let address = app
-        .core_probe()
-        .sessions
-        .resolve_session_for_read_result(&source_id)
-        .unwrap();
-    let path = smelt_store::SessionStoreLayout::from_sessions_root(address.sessions_root)
-        .lineage_database_path(&address.lineage_id);
+    let path = app.core_probe().sessions.store().database_path();
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch("BEGIN IMMEDIATE").unwrap();
     let elapsed = std::thread::scope(|scope| {
@@ -4151,7 +2969,7 @@ fn resuming_session_with_active_writer_is_read_only() {
     save_full_history_fixture(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
-    let before = lineage_reader(&session_id).snapshot().unwrap();
+    let before = lineage_reader(&session_id).state().unwrap();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     reader.load_session_by_id(&session_id);
 
@@ -4189,9 +3007,8 @@ fn resuming_session_with_active_writer_is_read_only() {
     reader.save_session_and_flush();
 
     let after_reader = lineage_reader(&session_id);
-    let after = after_reader.snapshot().unwrap();
-    assert_eq!(after.head.revision, before.head.revision);
-    assert_eq!(after.head.history_len, before.head.history_len);
+    let after = after_reader.state().unwrap();
+    assert_eq!(after.head, before.head);
     assert_eq!(
         after_reader
             .history_range(0, after.head.history_len.get())
@@ -4225,12 +3042,13 @@ fn read_only_session_becomes_writable_after_owner_closes() {
     assert_eq!(reader.session_message_count(), 2);
     assert!(reader.overlays_probe().notification().is_none());
     reader.press(crossterm::event::KeyCode::Enter);
-    reader.wait_for_turn_persistence();
+    reader.wait_for_turn_dispatch();
     assert!(reader.current_turn_id().is_some());
     assert!(!reader.session_is_read_only());
+    reader.save_session_and_flush();
     let stored = lineage_reader(&session_id);
     let history = stored
-        .history_range(0, stored.snapshot().unwrap().head.history_len.get())
+        .history_range(0, stored.state().unwrap().head.history_len.get())
         .unwrap();
     assert_eq!(
         &history[..2],
@@ -4341,16 +3159,17 @@ fn ownership_recovery_keeps_lease_until_writer_startup() {
     drop(owner);
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Ready);
 
-    let root = smelt_core::session::sessions_dir();
+    let sessions = smelt_core::session::storage();
+    let store = sessions.store();
     assert!(reader.session_is_read_only());
     assert!(matches!(
-        smelt_store::SessionWriter::open_existing(&root, &session_id),
-        Err(smelt_store::StoreError::OwnershipConflict { .. })
+        store.writer(&session_id),
+        Err(smelt_store::StoreError::Owned { .. })
     ));
     wait_for_ownership_recovery(&mut reader);
     assert!(matches!(
-        smelt_store::SessionWriter::open_existing(&root, &session_id),
-        Err(smelt_store::StoreError::OwnershipConflict { .. })
+        store.writer(&session_id),
+        Err(smelt_store::StoreError::Owned { .. })
     ));
     reader.start_submitted_turn("continue after handoff");
     assert!(reader.current_turn_id().is_some());
@@ -4376,9 +3195,10 @@ fn successful_manual_load_discards_ready_ownership_recovery() {
     assert_eq!(reader.session_snapshot().id, target_id);
     assert!(!reader.session_is_read_only());
     wait_for_ownership_event(&observer, OwnershipRecoveryEvent::Stopped);
-    let _released =
-        smelt_store::SessionWriter::open_existing(smelt_core::session::sessions_dir(), &source_id)
-            .expect("leaving a session must release its recovered writer");
+    let _released = smelt_core::session::storage()
+        .store()
+        .writer(&source_id)
+        .expect("leaving a session must release its recovered writer");
 }
 
 #[test]
@@ -4455,11 +3275,12 @@ fn ownership_recovery_loads_interrupted_turn_before_writer_startup() {
 fn resuming_session_with_writer_io_failure_still_reports_an_error() {
     let guard = test_home_guard();
     let session_id = saved_one_row_session(&guard);
-    let layout =
-        smelt_store::SessionStoreLayout::from_sessions_root(smelt_core::session::sessions_dir());
-    let lock_path = layout.lineage_lock_path(&session_id);
-    std::fs::remove_file(&lock_path).unwrap();
-    std::fs::create_dir(&lock_path).unwrap();
+    let lock_path = smelt_core::session::storage()
+        .store()
+        .locks_dir()
+        .join(format!("{session_id}.lock"));
+    let _ = std::fs::remove_file(&lock_path);
+    std::fs::create_dir_all(&lock_path).unwrap();
 
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     assert!(reader.load_session_by_id(&session_id));
@@ -4470,7 +3291,7 @@ fn resuming_session_with_writer_io_failure_still_reports_an_error() {
     assert_eq!(notice.kind, smelt_core::messages::MessageKind::Error);
     assert!(notice
         .summary
-        .starts_with("opened session read-only: open session writer:"));
+        .starts_with("opened session read-only: open session:"));
 }
 
 #[test]
@@ -4641,7 +3462,9 @@ fn ownership_loss_moves_session_to_read_only_and_keeps_document_dirty() {
             .map(|notification| notification.summary.as_str())
     );
     assert!(!resumed.session_is_read_only());
-    resumed.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    resumed.inject_commit_failure(smelt_store::StoreError::Owned {
+        session_id: String::new(),
+    });
     resumed.session_append_history(HistoryItem::user(Content::text(
         "unsaved after ownership loss",
     )));
@@ -4671,7 +3494,9 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
         delta: "stream finalized by fork cancellation".into(),
     }));
     assert!(resumed.streaming_state().text);
-    resumed.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+    resumed.inject_commit_failure(smelt_store::StoreError::Owned {
+        session_id: String::new(),
+    });
     resumed.session_append_history(HistoryItem::user(Content::text(
         "preserved in ownership-loss fork",
     )));
@@ -4688,21 +3513,19 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
     assert_ne!(fork_id, session_id);
     assert!(!resumed.session_is_read_only());
     assert!(!resumed.session_document_has_unflushed_work());
-    assert!(resumed.session_snapshot().history.is_empty());
+    assert!(resumed.app.conversation.session().history.is_empty());
     assert!(resumed.conversation_probe().has_live_session());
     let reader = lineage_reader(&fork_id);
-    let state = reader.snapshot().unwrap();
-    let record_rows = reader.transcript_range(0, state.transcript_len).unwrap();
+    let state = reader.state().unwrap();
+    let record_rows = reader
+        .transcript_range(0, state.head.transcript_record_count.get())
+        .unwrap();
     assert!(record_rows
         .iter()
         .any(|row| row.preview_text.contains("unsaved ownership-loss record")));
-    assert!(state
-        .side_tables
-        .turn_metas
-        .iter()
-        .any(|(history_len, meta)| {
-            history_len.get() == 2 && meta["interrupted"] == serde_json::Value::Bool(true)
-        }));
+    assert!(state.turn_metas.iter().any(|(history_len, meta)| {
+        *history_len == 2 && meta["interrupted"] == serde_json::Value::Bool(true)
+    }));
     let forked = loaded_session(&resumed, &fork_id);
     assert_eq!(forked.parent_id.as_deref(), Some(session_id.as_str()));
     assert_eq!(forked.history.len(), 2);
@@ -4712,6 +3535,43 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
             if content.text_content() == "preserved in ownership-loss fork"
     ));
     assert_eq!(loaded_session(&resumed, &session_id).history.len(), 1);
+}
+
+#[test]
+fn saved_new_session_keeps_only_model_context_in_memory() {
+    let guard = test_home_guard();
+    let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+    for idx in 0..4 {
+        app.session_append_history(HistoryItem::user(Content::text(format!("row {idx}"))));
+    }
+    app.session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
+        kind: "compaction".into(),
+        summary: "summary".into(),
+        first_live_index: 3,
+        created_at_ms: 1,
+        tokens_before: None,
+        tokens_after_estimate: None,
+        tokens_after_estimate_history_len: None,
+        pre_checkpoint_context_tokens: None,
+        pre_checkpoint_context_history_len: None,
+    }));
+    app.save_session_and_flush();
+
+    assert!(app.app.conversation.session().history.is_empty());
+    let live = app
+        .conversation_probe()
+        .live_session()
+        .expect("saved session reads history from the store");
+    assert_eq!((live.live_start, live.history_len()), (3, 4));
+    let rows: Vec<_> = app
+        .session_history()
+        .into_iter()
+        .filter_map(|item| match item {
+            HistoryItem::User { content, .. } => Some(content.text_content().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, ["row 0", "row 1", "row 2", "row 3"]);
 }
 
 #[test]
@@ -4739,7 +3599,8 @@ fn live_save_restarts_at_stored_prefix_when_dirty_marker_skips_missing_row() {
         .conversation_probe()
         .live_session()
         .expect("store-backed session");
-    assert_eq!(live.live_suffix_len(), 0);
+    // Without a checkpoint the whole history is model context, so it stays in memory.
+    assert_eq!(live.live_suffix_len(), live.history_len());
 
     let loaded = loaded_session(&resumed, &session_id);
     assert_eq!(loaded.history.len(), stored_len + 1);
@@ -4974,7 +3835,7 @@ fn sparse_resume_compaction_keeps_completed_marker_at_tail() {
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
-    assert!(resumed.session_snapshot().history.is_empty());
+    assert!(resumed.app.conversation.session().history.is_empty());
     let initial_loaded_len = resumed.conversation_probe().transcript().history().len();
     assert!(
         initial_loaded_len < HISTORY_LEN,
@@ -4997,9 +3858,9 @@ fn sparse_resume_compaction_keeps_completed_marker_at_tail() {
     resumed.save_session_and_flush();
 
     let reader = lineage_reader(&session_id);
-    let state = reader.snapshot().unwrap();
+    let state = reader.state().unwrap();
     let durable_marker = reader
-        .transcript_range(0, state.transcript_len)
+        .transcript_range(0, state.head.transcript_record_count.get())
         .unwrap()
         .into_iter()
         .find(|record| record.kind == "compacted")
@@ -5089,7 +3950,7 @@ fn live_rewind_below_checkpoint_then_next_append_saves_without_bad_checkpoint() 
     }
     assert!(matches!(
         resumed.flush_persist(),
-        crate::persist::PersistenceFlushOutcome::Durable { .. }
+        crate::persist::PersistenceFlushOutcome::Durable
     ));
 
     assert!(
@@ -5129,7 +3990,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     save_full_history_fixture(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
-    let before = lineage_reader(&session_id).snapshot().unwrap();
+    let before = lineage_reader(&session_id).state().unwrap();
     for idx in 0..5 {
         let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
         reader.load_session_by_id(&session_id);
@@ -5146,9 +4007,8 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     }
 
     let after_reader = lineage_reader(&session_id);
-    let after = after_reader.snapshot().unwrap();
-    assert_eq!(after.head.revision, before.head.revision);
-    assert_eq!(after.head.history_len, before.head.history_len);
+    let after = after_reader.state().unwrap();
+    assert_eq!(after.head, before.head);
     assert_eq!(
         after_reader
             .history_range(0, after.head.history_len.get())

@@ -209,16 +209,7 @@ impl SessionPersistence {
         sessions: &smelt_core::session::SessionStorage,
         session: &smelt_core::session::Session,
     ) -> Option<crate::app::transcript::TranscriptStoreAddress> {
-        matches!(self, Self::Persistent)
-            .then(|| sessions.resolve_session_for_read(&session.id))
-            .flatten()
-            .map(|resolved| {
-                crate::app::transcript::TranscriptStoreAddress::new(
-                    resolved.sessions_root,
-                    resolved.id,
-                    resolved.lineage_id,
-                )
-            })
+        matches!(self, Self::Persistent).then(|| sessions.address(session.id.clone()))
     }
 }
 
@@ -935,7 +926,6 @@ pub enum AppFocus {
 
 pub(crate) struct TurnState {
     pub(crate) turn_id: u64,
-    pub(crate) canonical: bool,
     pub(crate) pending: Vec<PendingTool>,
     pub(crate) permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
     pub(crate) submitted_history_idx: usize,
@@ -1353,9 +1343,10 @@ impl TuiApp {
             .request(crate::app::render_loop::FrameUrgency::Continuation);
     }
 
-    pub(crate) fn request_animation_render(&mut self, interval: Duration) {
+    pub(crate) fn request_animation_render(&mut self, after: Duration) {
+        let at = self.core.clock.instant_now() + after;
         self.frame_scheduler
-            .request(crate::app::render_loop::FrameUrgency::Animation(interval));
+            .request(crate::app::render_loop::FrameUrgency::Animation(at));
     }
 
     /// Schedules the frame that repaints invalidated Lua renderers, whatever
@@ -1449,19 +1440,9 @@ impl TuiApp {
         queued: QueuedInput,
         target: QueueStage,
     ) -> bool {
-        let replacing_cancelled_turn = self.conversation.canonical_operations_are_pending()
-            && self
-                .conversation
-                .turn_pause()
-                .is_some_and(|pause| pause.kind == Some(protocol::EngineAskErrorKind::Cancelled));
-        let accepted = if replacing_cancelled_turn {
-            // The replacement must precede preserved follow-ups while its receipt is pending.
-            self.prompt.try_queue_replacement(queued)
-        } else {
-            match target {
-                QueueStage::Turn => self.prompt.try_queue_turn(queued),
-                QueueStage::Request => self.queue_input_for_request(queued),
-            }
+        let accepted = match target {
+            QueueStage::Turn => self.prompt.try_queue_turn(queued),
+            QueueStage::Request => self.queue_input_for_request(queued),
         };
         if accepted {
             self.clear_cancelled_pause();
@@ -2900,106 +2881,24 @@ impl TuiApp {
     }
 
     pub(crate) fn drain_persist_reports(&mut self) {
-        let Some(report) = self.conversation.drain_persistence_report() else {
-            self.drive_canonical_operations();
-            self.poll_session_adoption();
-            self.poll_ownership_recovery();
-            return;
-        };
-        if let Some(Err(cause)) = report.startup {
-            self.fail_pending_turn_submission(None, &cause);
-            self.conversation.abandon_all_canonical_operations();
-            self.notify_writer_startup_failure(&cause);
-        }
-        if let Some(session_id) = report.acknowledged_session_id {
-            self.dismiss_session_save_failure_notification(&session_id);
-        }
-        for completion in report.canonical_completions {
-            self.handle_canonical_completion(completion);
-        }
-        if let Some(failure) = report.failure {
-            let notify = match failure.target {
-                crate::app::conversation::PersistenceFailureTarget::Command(command_id) => {
-                    self.fail_pending_turn_submission(Some(command_id), &failure.cause);
-                    false
-                }
-                crate::app::conversation::PersistenceFailureTarget::AllCanonicalCommands => {
-                    self.fail_pending_turn_submission(None, &failure.cause);
-                    self.conversation.abandon_all_canonical_operations();
-                    true
-                }
-                crate::app::conversation::PersistenceFailureTarget::None => true,
-            };
-            if notify {
-                self.notify_session_persistence_failure(&failure.session_id, &failure.cause);
+        if let Some(report) = self.conversation.drain_persistence_report() {
+            let session_id = self.conversation.session().id.clone();
+            if let Some(Err(cause)) = &report.startup {
+                self.fail_pending_turn_submission(&cause.message);
+                self.notify_writer_startup_failure(cause);
+            }
+            if report.durable {
+                self.dismiss_session_save_failure_notification(&session_id);
+            }
+            if let Some(cause) = &report.failure {
+                self.notify_session_persistence_failure(&session_id, cause);
+            }
+            if let Some(warning) = report.audit_warning {
+                self.notify_warn(warning);
             }
         }
-        if let Some(warning) = report.audit_warning {
-            self.notify_warn(warning);
-        }
-        self.drive_canonical_operations();
         self.poll_session_adoption();
         self.poll_ownership_recovery();
-    }
-
-    fn handle_canonical_completion(
-        &mut self,
-        completion: crate::persist::CanonicalCommandCompletion,
-    ) {
-        match completion {
-            crate::persist::CanonicalCommandCompletion::Submit(acknowledgement) => {
-                let command_id = acknowledgement.command_id;
-                if self.resume_turn_submission_after_persistence(*acknowledgement) {
-                    self.conversation.confirm_canonical_completion(command_id);
-                }
-            }
-            crate::persist::CanonicalCommandCompletion::Transition(acknowledgement) => {
-                let command_id = acknowledgement.command_id;
-                let turn_id = acknowledgement.receipt.turn_id;
-                let terminal = acknowledgement.receipt.state.is_terminal();
-                if self.conversation.confirm_canonical_completion(command_id) && terminal {
-                    self.conversation.mark_terminal(turn_id.get());
-                    self.start_next_queued_input_if_idle();
-                }
-            }
-            crate::persist::CanonicalCommandCompletion::Failed {
-                command_id, cause, ..
-            } => {
-                if !self.fail_pending_turn_submission(Some(command_id), &cause) {
-                    self.conversation.confirm_canonical_completion(command_id);
-                }
-                self.notify_session_persistence_failure(
-                    &self.conversation.session().id.clone(),
-                    &cause,
-                );
-            }
-        }
-    }
-
-    fn drive_canonical_operations(&mut self) {
-        loop {
-            let events = self.conversation.drive_canonical_operations();
-            if events.is_empty() {
-                return;
-            }
-            for event in events {
-                match event {
-                    crate::app::conversation::CanonicalOperationEvent::Submit(outcome) => {
-                        self.handle_canonical_submit_outcome(outcome);
-                    }
-                    crate::app::conversation::CanonicalOperationEvent::Failed {
-                        command_id,
-                        cause,
-                    } => {
-                        self.fail_pending_turn_submission(Some(command_id), &cause);
-                        self.notify_session_persistence_failure(
-                            &self.conversation.session().id.clone(),
-                            &cause,
-                        );
-                    }
-                }
-            }
-        }
     }
 
     pub(crate) fn handle_app_event(&mut self, event: AppEvent) {
@@ -3067,7 +2966,6 @@ impl TuiApp {
                     if self.complete_pending_transcript_details() {
                         self.request_urgent_render();
                     }
-                    self.drive_canonical_operations();
                     self.save_deferred_session_batch_if_ready();
                     if !self.conversation.transcript_hydration_is_pending() {
                         self.retry_pending_transcript_search();
@@ -3179,16 +3077,14 @@ impl TuiApp {
         session_id: &str,
         cause: &crate::persist::PersistenceCause,
     ) {
-        let message = match cause.recovery_action() {
-            Some(crate::persist::PersistenceRecoveryAction::Retry) => format!(
+        let message = match cause.class {
+            crate::persist::PersistenceFailureClass::Ownership => cause.message.clone(),
+            crate::persist::PersistenceFailureClass::Invariant
+            | crate::persist::PersistenceFailureClass::Environment
+            | crate::persist::PersistenceFailureClass::Unavailable => format!(
                 "{}; fix the storage problem, then run /retry-save to continue this session",
                 cause.message
             ),
-            Some(crate::persist::PersistenceRecoveryAction::AutomaticRetry) => format!(
-                "{}; smelt keeps retrying, or run /retry-save to retry now",
-                cause.message
-            ),
-            None => cause.message.clone(),
         };
         self.notify_session_save_failure(session_id, &message);
     }

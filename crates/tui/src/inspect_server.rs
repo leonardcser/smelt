@@ -268,7 +268,6 @@ struct SessionListItem {
 struct SessionListPage {
     sessions: Vec<SessionListItem>,
     next_cursor: Option<smelt_core::session::SessionListCursor>,
-    catalog: smelt_core::session::SessionCatalogStatus,
 }
 
 type RequestStats = smelt_store::RequestAuditStats;
@@ -469,17 +468,6 @@ fn server_error(message: &str) -> (&'static str, &'static str, String) {
     )
 }
 
-fn unavailable_or_not_found(
-    sessions: &smelt_core::session::SessionStorage,
-    id: &str,
-) -> (&'static str, &'static str, String) {
-    match smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id) {
-        Ok(Some(_)) => server_error("session storage is unavailable"),
-        Ok(None) => not_found(),
-        Err(error) => server_error(&error.to_string()),
-    }
-}
-
 async fn list_sessions(
     sessions: &smelt_core::session::SessionStorage,
     query: &str,
@@ -492,9 +480,6 @@ async fn list_sessions(
     let page = match tokio::task::spawn_blocking(move || list_session_items(&sessions, query)).await
     {
         Ok(Ok(page)) => page,
-        Ok(Err(smelt_core::session::SessionStoreError::InvalidListQuery { message })) => {
-            return bad_request(&message);
-        }
         Ok(Err(error)) => return server_error(&error.to_string()),
         Err(error) => return server_error(&error.to_string()),
     };
@@ -514,7 +499,9 @@ fn parse_session_list_query(query: &str) -> Result<smelt_core::session::SessionL
             "limit" => {
                 limit = value
                     .parse::<u32>()
-                    .map_err(|error| format!("invalid session page limit: {error}"))?;
+                    .ok()
+                    .filter(|limit| *limit > 0)
+                    .ok_or("session page limit must be a positive integer")?;
             }
             "cursor_updated_at_ms" => {
                 cursor_updated_at = Some(
@@ -540,7 +527,6 @@ fn parse_session_list_query(query: &str) -> Result<smelt_core::session::SessionL
         limit,
         cursor,
         cwd: None,
-        availability: Some(smelt_core::session::SessionListAvailability::Available),
     })
 }
 
@@ -549,29 +535,23 @@ async fn session_detail(
     id: &str,
 ) -> (&'static str, &'static str, String) {
     let id = id.to_string();
-    let lookup_id = id.clone();
-    let lookup_sessions = sessions.clone();
     let sessions = sessions.clone();
     let session = match tokio::task::spawn_blocking(move || {
-        smelt_perf::perf::record_value("session:full_materialized", 1);
         smelt_perf::perf::record_value("inspect:session:detail_load_full", 1);
-        sessions.load_full_result(&id)
+        sessions.load_full(&id)
     })
     .await
     {
         Ok(Ok(session)) => session,
         Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
-            return unavailable_or_not_found(&lookup_sessions, &lookup_id);
+            return not_found();
         }
         Ok(Err(err)) => return server_error(&err.to_string()),
         Err(err) => return server_error(&err.to_string()),
     };
-    match session {
-        Some(session) => match serde_json::to_string(&session) {
-            Ok(body) => ("200 OK", "application/json", body),
-            Err(e) => server_error(&e.to_string()),
-        },
-        None => unavailable_or_not_found(&lookup_sessions, &lookup_id),
+    match serde_json::to_string(&session) {
+        Ok(body) => ("200 OK", "application/json", body),
+        Err(e) => server_error(&e.to_string()),
     }
 }
 
@@ -580,24 +560,19 @@ async fn session_summary(
     id: &str,
 ) -> (&'static str, &'static str, String) {
     let id = id.to_string();
-    let lookup_id = id.clone();
-    let lookup_sessions = sessions.clone();
     let sessions = sessions.clone();
     let summary =
         match tokio::task::spawn_blocking(move || build_session_summary(&sessions, &id)).await {
             Ok(Ok(summary)) => summary,
             Ok(Err(smelt_core::session::SessionStoreError::SessionNotFound { .. })) => {
-                return unavailable_or_not_found(&lookup_sessions, &lookup_id);
+                return not_found();
             }
             Ok(Err(err)) => return server_error(&err.to_string()),
             Err(err) => return server_error(&err.to_string()),
         };
-    match summary {
-        Some(summary) => match serde_json::to_string(&summary) {
-            Ok(body) => ("200 OK", "application/json", body),
-            Err(e) => server_error(&e.to_string()),
-        },
-        None => unavailable_or_not_found(&lookup_sessions, &lookup_id),
+    match serde_json::to_string(&summary) {
+        Ok(body) => ("200 OK", "application/json", body),
+        Err(e) => server_error(&e.to_string()),
     }
 }
 
@@ -619,28 +594,15 @@ async fn session_requests(
     }
 }
 
-/// Interactive catalog reads give up after a short busy timeout. The inspect
-/// server is a diagnostic tool, so it waits out a briefly busy catalog instead
-/// of answering 500.
-fn resolve_with_retry(
+/// The session's reader, or `None` when the session does not exist.
+fn session_reader(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
-) -> std::result::Result<smelt_core::session::ResolvedSession, smelt_core::session::SessionStoreError>
-{
-    use smelt_core::session::SessionStoreError;
-    const ATTEMPTS: u32 = 20;
-    const DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-    let mut attempt = 1;
-    loop {
-        match sessions.resolve_session_for_read_result(id) {
-            Err(SessionStoreError::Busy { .. } | SessionStoreError::Sqlite { .. })
-                if attempt < ATTEMPTS =>
-            {
-                attempt += 1;
-                std::thread::sleep(DELAY);
-            }
-            result => return result,
-        }
+) -> std::result::Result<Option<smelt_store::SessionReader>, String> {
+    match sessions.reader(id) {
+        Ok(reader) => Ok(Some(reader)),
+        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => Ok(None),
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -648,34 +610,15 @@ fn session_requests_json(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
 ) -> std::result::Result<Option<String>, String> {
-    let resolved = match resolve_with_retry(sessions, id) {
-        Ok(resolved) => resolved,
-        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
-            return match smelt_store::LineageSessionReader::try_open_existing(
-                sessions.sessions_dir(),
-                id,
-            ) {
-                Ok(None) => Ok(None),
-                Ok(Some(_)) => Err("session storage is unavailable".into()),
-                Err(error) => Err(error.to_string()),
-            };
-        }
-        Err(err) => return Err(err.to_string()),
+    let Some(reader) = session_reader(sessions, id)? else {
+        return Ok(None);
     };
     let query = smelt_store::RequestAuditQuery {
         limit: u32::MAX,
         order: smelt_store::RequestAuditOrder::OldestFirst,
         ..Default::default()
     };
-    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-        &resolved.sessions_root,
-        &resolved.lineage_id,
-        &resolved.id,
-    )
-    .map_err(|err| err.to_string())?;
-    let attempts = reader
-        .query_request_attempts(&query)
-        .map_err(|err| err.to_string())?;
+    let attempts = reader.requests(&query).map_err(|err| err.to_string())?;
     let values: Vec<serde_json::Value> = attempts.iter().map(request_summary_json).collect();
     serde_json::to_string(&values)
         .map(Some)
@@ -713,26 +656,9 @@ fn request_payload_json(
     id: &str,
     attempt_id: i64,
 ) -> std::result::Result<Option<String>, String> {
-    let resolved = match resolve_with_retry(sessions, id) {
-        Ok(resolved) => resolved,
-        Err(smelt_core::session::SessionStoreError::SessionNotFound { .. }) => {
-            return match smelt_store::LineageSessionReader::try_open_existing(
-                sessions.sessions_dir(),
-                id,
-            ) {
-                Ok(None) => Ok(None),
-                Ok(Some(_)) => Err("session storage is unavailable".into()),
-                Err(error) => Err(error.to_string()),
-            };
-        }
-        Err(err) => return Err(err.to_string()),
+    let Some(reader) = session_reader(sessions, id)? else {
+        return Ok(None);
     };
-    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-        &resolved.sessions_root,
-        &resolved.lineage_id,
-        &resolved.id,
-    )
-    .map_err(|err| err.to_string())?;
     let payloads = reader
         .request_payloads(attempt_id)
         .map_err(|err| err.to_string())?;
@@ -785,9 +711,9 @@ fn request_summary_json(entry: &smelt_store::RequestAuditSummary) -> serde_json:
         "attempt": entry.attempt,
         "background": entry.background,
         "raw_body_size": entry.raw_body_size,
-        "has_body": entry.body_hash.is_some(),
-        "has_response": entry.response_hash.is_some(),
-        "has_error": entry.error_hash.is_some(),
+        "has_body": entry.has_body,
+        "has_response": entry.has_response,
+        "has_error": entry.has_error,
         "has_raw_response": entry.response_payload_kind == Some(smelt_store::ResponsePayloadKind::Full),
         "response_payload_kind": entry.response_payload_kind,
         "response": response,
@@ -822,14 +748,10 @@ fn list_session_items(
     sessions: &smelt_core::session::SessionStorage,
     query: smelt_core::session::SessionListQuery,
 ) -> smelt_core::session::SessionStoreResult<SessionListPage> {
-    let page = sessions.list_session_page_result(query)?;
+    let page = sessions.list_page(query)?;
     let sessions = page
-        .entries
+        .sessions
         .into_iter()
-        .filter_map(|entry| match entry.status {
-            smelt_core::session::SessionListStatus::Available(meta) => Some(*meta),
-            smelt_core::session::SessionListStatus::Unavailable(_) => None,
-        })
         .map(|meta| {
             let (project, path_group) = project_labels(meta.cwd.as_deref());
             SessionListItem {
@@ -842,24 +764,21 @@ fn list_session_items(
     Ok(SessionListPage {
         sessions,
         next_cursor: page.next_cursor,
-        catalog: page.catalog,
     })
 }
 
 fn build_session_summary(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
-) -> smelt_core::session::SessionStoreResult<Option<SessionSummary>> {
-    let Some(meta) = sessions.load_meta_result(id)? else {
-        return Ok(None);
-    };
+) -> smelt_core::session::SessionStoreResult<SessionSummary> {
+    let meta = sessions.load_meta(id)?;
     let (project, path_group) = project_labels(meta.cwd.as_deref());
-    Ok(Some(SessionSummary {
+    Ok(SessionSummary {
         id: meta.id.clone(),
         project,
         path_group,
         request_stats: request_stats_for_session(sessions, &meta.id),
-    }))
+    })
 }
 
 fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
@@ -885,10 +804,11 @@ fn request_stats_for_session(
     sessions: &smelt_core::session::SessionStorage,
     id: &str,
 ) -> RequestStats {
-    match smelt_store::LineageSessionReader::try_open_existing(sessions.sessions_dir(), id) {
-        Ok(Some(reader)) => reader.request_audit_stats().unwrap_or_default(),
-        Ok(None) | Err(_) => RequestStats::default(),
-    }
+    sessions
+        .reader(id)
+        .ok()
+        .and_then(|reader| reader.request_stats().ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -958,9 +878,7 @@ mod tests {
             .push(HistoryItem::user(Content::text(format!(
                 "message for {title}"
             ))));
-        sessions
-            .save_result(&session)
-            .expect("save canonical session");
+        sessions.save(&session).expect("save session");
     }
 
     fn append_request_audit(
@@ -968,11 +886,9 @@ mod tests {
         id: &str,
         mode: smelt_store::RequestAuditPayloadMode,
     ) -> i64 {
-        let sessions_dir = sessions.sessions_dir();
-        let mut writer = smelt_store::OwnedLineageWriter::open_existing(sessions_dir, id)
-            .expect("open canonical lineage writer");
-        let attempt_id = writer
-            .append_request_attempt(
+        let mut writer = sessions.store().writer(id).expect("open session writer");
+        writer
+            .append_request(
                 &protocol::request_log::RequestLogEntry {
                     request_id: 42,
                     kind: "turn".into(),
@@ -1013,9 +929,7 @@ mod tests {
                 },
                 mode,
             )
-            .expect("append request audit");
-        writer.release().expect("release canonical session writer");
-        attempt_id
+            .expect("append request audit")
     }
 
     #[tokio::test]
@@ -1056,7 +970,6 @@ mod tests {
         assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
         assert_eq!(first["sessions"][0]["id"], NEWER_SESSION_ID);
         assert_eq!(first["sessions"][0]["project"], "newer");
-        assert!(first["catalog"]["state"].is_string());
         let cursor = &first["next_cursor"];
         let next_path = format!(
             "/api/sessions?limit=1&cursor_updated_at_ms={}&cursor_id={}",
@@ -1172,16 +1085,9 @@ mod tests {
             NEWER_SESSION_ID,
             smelt_store::RequestAuditPayloadMode::Full,
         );
-        let reader = smelt_store::LineageSessionReader::open_existing(
-            state.sessions.sessions_dir(),
-            NEWER_SESSION_ID,
-        )
-        .unwrap();
-        let path = reader.database_path().to_path_buf();
-        drop(reader);
-        let conn = rusqlite::Connection::open(path).unwrap();
+        let conn = rusqlite::Connection::open(state.sessions.store().database_path()).unwrap();
         conn.execute(
-            "DELETE FROM request_object_refs WHERE request_attempt_id = ?1 AND role = 'body_json'",
+            "UPDATE requests SET body = NULL WHERE id = ?1",
             [attempt_id],
         )
         .unwrap();
@@ -1237,18 +1143,9 @@ mod tests {
         let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(summary["request_stats"]["raw_response_count"], 0);
 
-        let reader = smelt_store::LineageSessionReader::open_existing(
-            state.sessions.sessions_dir(),
-            NEWER_SESSION_ID,
-        )
-        .unwrap();
-        let path = reader.database_path().to_path_buf();
-        drop(reader);
-        let conn = rusqlite::Connection::open(path).unwrap();
+        let conn = rusqlite::Connection::open(state.sessions.store().database_path()).unwrap();
         conn.execute(
-            "INSERT INTO request_object_refs (request_attempt_id, object_hash, role)
-             SELECT request_attempt_id, object_hash, 'body_json' FROM request_object_refs
-             WHERE request_attempt_id = ?1 AND role = 'response_diagnostics'",
+            "UPDATE requests SET body = response WHERE id = ?1",
             [attempt_id],
         )
         .unwrap();
@@ -1311,14 +1208,11 @@ mod tests {
             "/work/corrupt",
             200,
         );
-        let lineage = smelt_store::LineageSessionReader::open_existing(
-            state.sessions.sessions_dir(),
-            NEWER_SESSION_ID,
+        std::fs::write(
+            state.sessions.store().database_path(),
+            b"not a sqlite database",
         )
         .unwrap();
-        let database_path = lineage.database_path().to_path_buf();
-        drop(lineage);
-        std::fs::write(database_path, b"not a sqlite database").unwrap();
 
         for path in [
             format!("/api/sessions/{NEWER_SESSION_ID}"),

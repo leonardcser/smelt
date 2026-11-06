@@ -50,39 +50,28 @@ const DEFAULT_LUA_SESSION_MAX_BYTES: usize = 1024 * 1024;
 
 fn session_entries_to_lua(
     lua: &Lua,
-    entries: Vec<smelt_core::session::SessionListEntry>,
+    sessions: Vec<smelt_core::session::SessionListMeta>,
     current_id: &str,
 ) -> LuaResult<mlua::Table> {
     let out = lua.create_table()?;
     let mut index = 1;
-    for entry in entries {
-        if entry.id == current_id {
+    for meta in sessions {
+        if meta.id == current_id {
             continue;
         }
         let row = lua.create_table()?;
-        row.set("id", entry.id)?;
-        match entry.status {
-            smelt_core::session::SessionListStatus::Available(meta) => {
-                let meta = *meta;
-                row.set("available", true)?;
-                row.set("title", meta.title.unwrap_or_default())?;
-                row.set(
-                    "subtitle",
-                    meta.first_user_message.as_deref().unwrap_or_default(),
-                )?;
-                row.set("cwd", meta.cwd.unwrap_or_default())?;
-                row.set("parent_id", meta.parent_id.unwrap_or_default())?;
-                row.set("updated_at_ms", meta.updated_at_ms)?;
-                row.set("created_at_ms", meta.created_at_ms)?;
-                if let Some(size) = meta.text_bytes {
-                    row.set("size_bytes", size)?;
-                }
-            }
-            smelt_core::session::SessionListStatus::Unavailable(error) => {
-                row.set("available", false)?;
-                row.set("error_kind", error.code())?;
-                row.set("error", error.to_string())?;
-            }
+        row.set("id", meta.id)?;
+        row.set("title", meta.title.unwrap_or_default())?;
+        row.set(
+            "subtitle",
+            meta.first_user_message.as_deref().unwrap_or_default(),
+        )?;
+        row.set("cwd", meta.cwd.unwrap_or_default())?;
+        row.set("parent_id", meta.parent_id.unwrap_or_default())?;
+        row.set("updated_at_ms", meta.updated_at_ms)?;
+        row.set("created_at_ms", meta.created_at_ms)?;
+        if let Some(size) = meta.text_bytes {
+            row.set("size_bytes", size)?;
         }
         out.set(index, row)?;
         index += 1;
@@ -973,7 +962,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "list",
-        "List canonical lineage sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.",
+        "List saved sessions other than the current one, newest first. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd }`, returns `{ entries, next_cursor }`.",
         &["opts"],
         |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
             let current_id =
@@ -992,30 +981,17 @@ pub(super) fn register(
                     })
                 })
                 .transpose()?;
-            let availability = match opts.get::<Option<String>>("availability")?.as_deref() {
-                None => None,
-                Some("available") => Some(smelt_core::session::SessionListAvailability::Available),
-                Some("unavailable") => {
-                    Some(smelt_core::session::SessionListAvailability::Unavailable)
-                }
-                Some(other) => {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "invalid session availability {other:?}"
-                    )))
-                }
-            };
             let query = smelt_core::session::SessionListQuery {
                 limit: opts.get::<Option<u32>>("limit")?.unwrap_or(200),
                 cursor,
                 cwd: opts.get("cwd")?,
-                availability,
             };
             let page = crate::lua::with_session_host(|host| host.list_session_page(query))
             .map_err(|error| mlua::Error::RuntimeError(error.to_string()))?;
             let result = lua.create_table()?;
             result.set(
                 "entries",
-                session_entries_to_lua(lua, page.entries, &current_id)?,
+                session_entries_to_lua(lua, page.sessions, &current_id)?,
             )?;
             if let Some(cursor) = page.next_cursor {
                 let next = lua.create_table()?;
@@ -1023,25 +999,12 @@ pub(super) fn register(
                 next.set("id", cursor.id)?;
                 result.set("next_cursor", next)?;
             }
-            let catalog = lua.create_table()?;
-            catalog.set(
-                "state",
-                match page.catalog.state {
-                    smelt_core::session::SessionCatalogState::Reconciling => "reconciling",
-                    smelt_core::session::SessionCatalogState::Ready => "ready",
-                    smelt_core::session::SessionCatalogState::Degraded => "degraded",
-                },
-            )?;
-            catalog.set("completed_scan_id", page.catalog.completed_scan_id)?;
-            catalog.set("reconciled_at_ms", page.catalog.reconciled_at_ms)?;
-            catalog.set("error", page.catalog.last_error)?;
-            result.set("catalog", catalog)?;
             Ok(result)
         },
     )?;
     m.advanced_live_only_fn(
         "retry_persistence",
-        "Explicitly reconcile and retry blocked session persistence. Retained turns remain undispatched until their canonical operation is durable. Returns true when the retry request is accepted. No automatic retry timer is used.",
+        "Retry saving the session after a save failure. Returns true when a save was submitted. No automatic retry timer is used.",
         &[],
         |_, ()| -> LuaResult<bool> {
             Ok(
@@ -1052,7 +1015,7 @@ pub(super) fn register(
     )?;
     m.live_only_fn(
         "load",
-        "Request a UI switch to canonical lineage session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.",
+        "Request a UI switch to saved session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.",
         &["id"],
         |_, id: String| -> LuaResult<()> {
             crate::lua::with_session_host(|host| host.request_session_load(&id));
@@ -1326,6 +1289,14 @@ mod tests {
                 }),
             );
         }
+        // Both turns precede the checkpoint, so a resume keeps them only in storage.
+        app.app
+            .session_set_checkpoint(Some(smelt_core::ContextCheckpoint {
+                kind: "compaction".into(),
+                summary: "summary".into(),
+                first_live_index: 2,
+                ..Default::default()
+            }));
         app.save_session_and_flush();
         let id = app.session_snapshot().id.clone();
         assert!(app.load_session_by_id(&id));

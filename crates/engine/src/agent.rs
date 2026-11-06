@@ -25,7 +25,6 @@ use tokio::sync::mpsc;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
-static MODEL_HISTORY_READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(crate) fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
@@ -37,7 +36,7 @@ pub(crate) fn next_invocation_id() -> protocol::InvocationId {
 
 fn dispatch_request_audit(
     host_tx: &crate::HostCallSender,
-    persistence: protocol::PersistenceScope,
+    session_id: &str,
     ctx: crate::request_log::RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
@@ -47,7 +46,7 @@ fn dispatch_request_audit(
         return;
     };
     let _ = host_tx.send(crate::host::HostCall::RequestAudit {
-        persistence,
+        session_id: session_id.to_owned(),
         entry: Box::new(entry),
         payload_mode,
     });
@@ -193,9 +192,8 @@ pub(crate) async fn engine_task(
                     control_env: _,
                     history,
                     session_id,
-                    sessions_root,
+                    sessions_root: _,
                     ephemeral: _,
-                    persistence,
                     permission_overrides,
                     system_prompt: tui_system_prompt,
                     native_prompt: _,
@@ -206,51 +204,6 @@ pub(crate) async fn engine_task(
                     .into_iter()
                     .filter(|tool| tool_visibility.includes(tool.headless))
                     .collect();
-                let preparation_cancel = CancellationToken::new();
-                let load = prepare_model_history(
-                    history,
-                    sessions_root,
-                    session_id.clone(),
-                    preparation_cancel.clone(),
-                );
-                let ctx = BackgroundCtx {
-                    config: &config,
-                    http_client: &client,
-                    dispatcher: &*dispatcher,
-                    event_tx: &event_tx,
-                    host_tx: &host_tx,
-                    bg_cancel: bg_cancel.clone(),
-                };
-                let (loaded_history, deferred) = match wait_for_model_history(
-                    load,
-                    &mut cmd_rx,
-                    &ctx,
-                    &preparation_cancel,
-                )
-                .await
-                {
-                    ModelHistoryPreparation::Ready(Ok(history), deferred) => (history, deferred),
-                    ModelHistoryPreparation::Ready(Err(message), deferred) => {
-                        install_preparation_contexts(&mut config, deferred);
-                        let _ = event_tx.send(EngineEvent::TurnPreparationError {
-                            turn_id,
-                            session_id,
-                            persistence,
-                            message,
-                        });
-                        continue;
-                    }
-                    ModelHistoryPreparation::Cancelled(deferred) => {
-                        install_preparation_contexts(&mut config, deferred);
-                        continue;
-                    }
-                    ModelHistoryPreparation::Superseded(payload, deferred) => {
-                        install_preparation_contexts(&mut config, deferred);
-                        pending_command = Some(UiCommand::StartTurn(payload));
-                        continue;
-                    }
-                };
-
                 let provider = build_provider(&model_target, &client, &config);
                 let system_prompt = tui_system_prompt
                     .or_else(|| config.system_prompt_override.clone())
@@ -277,7 +230,7 @@ pub(crate) async fn engine_task(
                     cancel: CancellationToken::new(),
                     bg_cancel: bg_cancel.clone(),
                     history: Vec::new(),
-                    history_coordinates: loaded_history.coordinates,
+                    history_coordinates: history.coordinates,
                     mode,
                     reasoning_effort,
                     fast_mode,
@@ -292,12 +245,10 @@ pub(crate) async fn engine_task(
                     next_history_changed_from: 0,
                     history_revision: 0,
                     session_id,
-                    persistence,
                     started_at,
                     tps_samples: Vec::new(),
                 };
-                turn.install_history(input, loaded_history.items);
-                turn.apply_deferred_turn_cmds(deferred);
+                turn.install_history(input, history.items);
                 turn.run_prepared().await;
             }
             UiCommand::SetTurnModel { .. } => {}
@@ -326,170 +277,6 @@ pub(crate) async fn engine_task(
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
 }
 
-pub(crate) struct LoadedModelHistory {
-    pub(crate) items: Vec<HistoryItem>,
-    pub(crate) coordinates: protocol::ModelHistoryCoordinates,
-}
-
-enum ModelHistoryPreparation {
-    Ready(Result<LoadedModelHistory, String>, Vec<UiCommand>),
-    Cancelled(Vec<UiCommand>),
-    Superseded(Box<protocol::StartTurnPayload>, Vec<UiCommand>),
-}
-
-fn install_preparation_contexts(config: &mut EngineConfig, commands: Vec<UiCommand>) {
-    for command in commands {
-        if let UiCommand::UpdateAgentProjectContext(context) = command {
-            config.install_project_context(&context);
-        }
-    }
-}
-
-pub(crate) async fn prepare_model_history(
-    source: protocol::ModelHistorySource,
-    sessions_root: std::path::PathBuf,
-    session_id: String,
-    cancel: CancellationToken,
-) -> Result<LoadedModelHistory, String> {
-    if let protocol::ModelHistorySource::Items { items, coordinates } = source {
-        smelt_perf::perf::record_value("engine:model_history:source_items", 1);
-        smelt_perf::perf::record_value("engine:model_history:items", items.len() as u64);
-        return Ok(LoadedModelHistory { items, coordinates });
-    }
-    let permit = MODEL_HISTORY_READERS
-        .acquire()
-        .await
-        .map_err(|error| error.to_string())?;
-    let result = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        load_model_history_cancellable(source, &sessions_root, &session_id, &cancel)
-    })
-    .await
-    .map_err(|error| format!("model history worker failed: {error}"))?;
-    result
-}
-
-/// Keep turn control live during history I/O. History-dependent commands retain
-/// their order and apply only after the captured request history is installed.
-async fn wait_for_model_history(
-    load: impl std::future::Future<Output = Result<LoadedModelHistory, String>>,
-    commands: &mut mpsc::UnboundedReceiver<UiCommand>,
-    ctx: &BackgroundCtx<'_>,
-    cancel: &CancellationToken,
-) -> ModelHistoryPreparation {
-    tokio::pin!(load);
-    let mut deferred = Vec::new();
-    loop {
-        tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    cancel.cancel();
-                    return ModelHistoryPreparation::Cancelled(deferred);
-                };
-                match ActiveTurnCommand::classify(command) {
-                    ActiveTurnCommand::Cancel => {
-                        cancel.cancel();
-                        ctx.bg_cancel.cancel();
-                        return ModelHistoryPreparation::Cancelled(deferred);
-                    }
-                    ActiveTurnCommand::Other(UiCommand::StartTurn(payload)) => {
-                        cancel.cancel();
-                        return ModelHistoryPreparation::Superseded(payload, deferred);
-                    }
-                    ActiveTurnCommand::Other(command) => { let _ = dispatch_background_cmd(command, ctx); }
-                    command => deferred.push(command.into_command()),
-                }
-            }
-            result = &mut load => return ModelHistoryPreparation::Ready(result, deferred),
-        }
-    }
-}
-
-#[cfg(test)]
-fn load_model_history(
-    source: protocol::ModelHistorySource,
-    sessions_root: &std::path::Path,
-    session_id: &str,
-) -> Result<LoadedModelHistory, String> {
-    load_model_history_cancellable(source, sessions_root, session_id, &CancellationToken::new())
-}
-
-fn load_model_history_cancellable(
-    source: protocol::ModelHistorySource,
-    sessions_root: &std::path::Path,
-    session_id: &str,
-    cancel: &CancellationToken,
-) -> Result<LoadedModelHistory, String> {
-    let _perf = smelt_perf::perf::begin("engine:model_history:load");
-    let coordinates = source.coordinates();
-    let items = match source {
-        protocol::ModelHistorySource::Items { items, .. } => {
-            smelt_perf::perf::record_value("engine:model_history:source_items", 1);
-            smelt_perf::perf::record_value("engine:model_history:items", items.len() as u64);
-            items
-        }
-        protocol::ModelHistorySource::Store {
-            prefix,
-            lineage_id,
-            first_live_index,
-            end_index,
-            suffix,
-            ..
-        } => {
-            smelt_perf::perf::record_value("engine:model_history:source_store", 1);
-            smelt_perf::perf::record_value(
-                "engine:model_history:first_live_index",
-                first_live_index as u64,
-            );
-            smelt_perf::perf::record_value("engine:model_history:end_index", end_index as u64);
-            smelt_perf::perf::record_value(
-                "engine:model_history:suffix_items",
-                suffix.len() as u64,
-            );
-            let mut history = prefix;
-            if end_index > first_live_index {
-                let reader = {
-                    let _perf = smelt_perf::perf::begin("engine:model_history:open_store");
-                    smelt_store::LineageSessionReader::open_existing_in_lineage(
-                        sessions_root,
-                        lineage_id,
-                        session_id,
-                    )
-                    .map_err(|err| format!("open model history lineage: {err}"))?
-                };
-                reader
-                    .read_snapshot(|reader| {
-                        let mut start = first_live_index;
-                        while start < end_index {
-                            if cancel.is_cancelled() {
-                                return Err("model history preparation cancelled".to_string());
-                            }
-                            let end = start.saturating_add(256).min(end_index);
-                            let mut rows = reader.history_range(start as u64, end as u64).map_err(
-                                |error| format!("read lineage model history rows: {error}"),
-                            )?;
-                            smelt_perf::perf::record_value(
-                                "engine:model_history:rows_read",
-                                rows.len() as u64,
-                            );
-                            if rows.len() != end - start {
-                                return Err("model history range is incomplete".to_string());
-                            }
-                            history.append(&mut rows);
-                            start = end;
-                        }
-                        Ok(())
-                    })
-                    .map_err(|error| format!("read model history snapshot: {error}"))??;
-            }
-            history.extend(suffix);
-            smelt_perf::perf::record_value("engine:model_history:items", history.len() as u64);
-            history
-        }
-    };
-    Ok(LoadedModelHistory { items, coordinates })
-}
-
 /// One pending out-of-band LLM call. Mirrors the fields plumbed through
 /// `UiCommand::EngineAsk`; bundles them so the spawn surface stays a
 /// two-arg function (config + task) instead of an ever-growing arg list.
@@ -509,7 +296,6 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
-    pub persistence: protocol::PersistenceScope,
     /// Whether text deltas for this auxiliary request should be forwarded
     /// as `EngineAskDelta` events.
     pub stream: bool,
@@ -586,7 +372,6 @@ pub(crate) fn dispatch_background_cmd(
             fast_mode,
             tools,
             session_id,
-            persistence,
             stream,
             visible_retries,
         } => {
@@ -605,7 +390,6 @@ pub(crate) fn dispatch_background_cmd(
                     fast_mode,
                     tools,
                     session_id,
-                    persistence,
                     stream,
                     visible_retries,
                 },
@@ -643,7 +427,6 @@ fn spawn_engine_ask(
         fast_mode,
         tools: supplied_tools,
         session_id,
-        persistence,
         stream,
         visible_retries,
     } = task;
@@ -669,6 +452,7 @@ fn spawn_engine_ask(
     let cache_ttl_long = request_config.cache_ttl_long;
     let audit_mode = request_config.request_audit;
     let audit_host_tx = host_tx.clone();
+    let audit_session_id = session_id.clone();
     tokio::spawn(async move {
         messages.insert(0, protocol::Message::system(&system));
         let ask_id = id;
@@ -751,7 +535,7 @@ fn spawn_engine_ask(
                 };
                 dispatch_request_audit(
                     &audit_host_tx,
-                    persistence,
+                    &audit_session_id,
                     ctx,
                     &info,
                     &resolved,
@@ -1145,7 +929,6 @@ struct Turn<'a> {
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
-    persistence: protocol::PersistenceScope,
     started_at: Instant,
     tps_samples: Vec<f64>,
 }
@@ -2941,8 +2724,8 @@ impl<'a> Turn<'a> {
                 &self.model_target.api_base,
                 &self.model_target.config,
             );
-            let persistence = self.persistence;
             let audit_host_tx = self.host_tx.clone();
+            let audit_session_id = self.session_id.clone();
             let turn_id = self.turn_id;
             let history_len = self.history.len();
             let audit_mode = self.request_config.request_audit;
@@ -2974,7 +2757,7 @@ impl<'a> Turn<'a> {
                 };
                 dispatch_request_audit(
                     &audit_host_tx,
-                    persistence,
+                    &audit_session_id,
                     ctx,
                     &info,
                     &pricing,
@@ -3464,43 +3247,6 @@ mod tests {
         (event_tx, TestEventReceiver(output_rx))
     }
 
-    fn test_store_commit(id: &str, history: Vec<HistoryItem>) -> smelt_store::SessionCommit {
-        smelt_store::SessionCommit {
-            session_id: id.into(),
-            expected: smelt_store::StoreHead::default(),
-            identity: smelt_store::SessionIdentity {
-                id: id.into(),
-                created_at: 10,
-                parent_id: None,
-            },
-            metadata: smelt_store::SessionMetadata {
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: None,
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                checkpoint_events_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
-                updated_at: 20,
-            },
-            history: smelt_store::HistorySuffix {
-                start: smelt_store::HistoryIndex::ZERO,
-                final_len: smelt_store::HistoryLen::new(history.len() as u64),
-                items: history,
-            },
-            side_tables: smelt_store::SideTableSuffixes::default(),
-            transcript_records: None,
-        }
-    }
-
     #[test]
     fn completed_only_reasoning_part_emits_its_content_as_a_delta() {
         let (tx, mut rx) = test_event_channel();
@@ -3770,180 +3516,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn stalled_model_history_can_be_cancelled_before_a_new_turn_starts() {
-        let root = tempfile::tempdir().unwrap();
-        let permit = MODEL_HISTORY_READERS.acquire_many(2).await.unwrap();
-        let mut handle = crate::start(
-            test_engine_config(std::sync::Arc::new(crate::clock::RealClock)),
-            Box::new(crate::tools::EmptyDispatcher::new()),
-        );
-        assert!(matches!(handle.recv().await, Some(EngineEvent::Ready)));
-        let payload = |turn_id, history| {
-            Box::new(protocol::StartTurnPayload {
-                turn_id,
-                input: protocol::StartTurnInput::user(Content::text(format!(
-                    "synthetic request {turn_id}"
-                ))),
-                mode: AgentMode::normal(),
-                model_target: model_target(),
-                request_config: RequestRuntimeConfig::default(),
-                reasoning_effort: ReasoningEffort::Off,
-                fast_mode: false,
-                control_env: Default::default(),
-                history,
-                session_id: "preparation-fixture".into(),
-                sessions_root: root.path().to_path_buf(),
-                ephemeral: false,
-                persistence: protocol::PersistenceScope::default(),
-                permission_overrides: None,
-                native_prompt: None,
-                tool_visibility: protocol::ToolVisibility::Interactive,
-                system_prompt: Some("synthetic system".into()),
-                tools: Vec::new(),
-            })
-        };
-        handle.send(UiCommand::StartTurn(payload(
-            1,
-            protocol::ModelHistorySource::store(Vec::new(), "missing-lineage".into(), 0, 1),
-        )));
-        tokio::task::yield_now().await;
-        handle.send(UiCommand::Cancel);
-        handle.send(UiCommand::StartTurn(payload(
-            2,
-            protocol::ModelHistorySource::items(Vec::new()),
-        )));
-        let observed = tokio::time::timeout(std::time::Duration::from_millis(250), async {
-            loop {
-                match handle.recv_output().await {
-                    Some(crate::EngineOutput::HostCall(
-                        crate::host::HostCall::PrepareRequest { turn_id, .. },
-                    )) => break turn_id,
-                    Some(crate::EngineOutput::Event(EngineEvent::TurnPreparationError {
-                        ..
-                    })) => panic!("cancelled preparation reported an error"),
-                    Some(_) => {}
-                    None => panic!("engine stopped before the replacement request"),
-                }
-            }
-        })
-        .await
-        .expect("cancelled history loading blocked the replacement request");
-        assert_eq!(observed, 2);
-        handle.send(UiCommand::Cancel);
-        drop(permit);
-    }
-
-    #[tokio::test]
-    async fn model_history_preparation_retains_turn_commands_in_order() {
-        let client = smelt_provider::http_client();
-        let dispatcher = crate::tools::EmptyDispatcher::new();
-        let config = test_engine_config(std::sync::Arc::new(crate::clock::RealClock));
-        let (event_tx, host_tx, _outputs) = crate::output_channel(crate::HostCallbacks::Enabled);
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send(UiCommand::Steer {
-            input: protocol::StartTurnInput::user(Content::text("queued input")),
-        })
-        .unwrap();
-        tx.send(UiCommand::SetFastMode { enabled: true }).unwrap();
-        tx.send(UiCommand::Unsteer { count: 1 }).unwrap();
-        let ctx = BackgroundCtx {
-            config: &config,
-            http_client: &client,
-            dispatcher: &dispatcher,
-            event_tx: &event_tx,
-            host_tx: &host_tx,
-            bg_cancel: CancellationToken::new(),
-        };
-        let result = wait_for_model_history(
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                Ok(LoadedModelHistory {
-                    items: Vec::new(),
-                    coordinates: protocol::ModelHistoryCoordinates::canonical(),
-                })
-            },
-            &mut rx,
-            &ctx,
-            &CancellationToken::new(),
-        )
-        .await;
-        let ModelHistoryPreparation::Ready(Ok(_), commands) = result else {
-            panic!("preparation did not complete");
-        };
-        assert_eq!(commands.len(), 3);
-        assert!(matches!(commands[0], UiCommand::Steer { .. }));
-        assert!(matches!(
-            commands[1],
-            UiCommand::SetFastMode { enabled: true }
-        ));
-        assert!(matches!(commands[2], UiCommand::Unsteer { count: 1 }));
-    }
-
-    #[test]
-    fn load_model_history_reads_requested_lineage_range() {
-        let root = tempfile::tempdir().unwrap();
-        let session_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let old = HistoryItem::user(protocol::Content::text("old"));
-        let recent = HistoryItem::user(protocol::Content::text("recent"));
-        let reply = HistoryItem::Assistant(protocol::AssistantStep::terminal(
-            Some(protocol::Content::text("reply")),
-            None,
-            Vec::new(),
-        ));
-        let command = test_store_commit(session_id, vec![old, recent.clone(), reply.clone()]);
-        let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), session_id).unwrap();
-        writer.commit_session(&command).unwrap();
-        let lineage_id = writer.lineage_id().to_string();
-        writer.release().unwrap();
-
-        let history = load_model_history(
-            protocol::ModelHistorySource::store(
-                vec![HistoryItem::user(protocol::Content::text(
-                    "SUMMARY:\ncompact",
-                ))],
-                lineage_id,
-                1,
-                3,
-            ),
-            root.path(),
-            session_id,
-        )
-        .unwrap();
-
-        assert_eq!(history.items.len(), 3);
-        assert!(
-            matches!(&history.items[0], HistoryItem::User { content, .. } if content.text_content() == "SUMMARY:\ncompact")
-        );
-        assert_eq!(history.items[1], recent);
-        assert_eq!(history.items[2], reply);
-        assert_eq!(
-            history.coordinates,
-            protocol::ModelHistoryCoordinates::projected(1, 1)
-        );
-    }
-
-    #[test]
-    fn model_history_read_completes_while_writer_remains_owned() {
-        let root = tempfile::tempdir().unwrap();
-        let session_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let item = HistoryItem::user(protocol::Content::text("persisted"));
-        let command = test_store_commit(session_id, vec![item.clone()]);
-        let mut writer = smelt_store::OwnedLineageWriter::open(root.path(), session_id).unwrap();
-        writer.commit_session(&command).unwrap();
-        let lineage_id = writer.lineage_id().to_string();
-
-        let history = load_model_history(
-            protocol::ModelHistorySource::store(Vec::new(), lineage_id, 0, 1),
-            root.path(),
-            session_id,
-        )
-        .unwrap();
-        writer.release().unwrap();
-
-        assert_eq!(history.items, vec![item]);
-    }
-
     #[test]
     fn classify_provider_error_preserves_cyber_policy() {
         let err = ProviderError::CyberPolicy {
@@ -4206,7 +3778,6 @@ mod tests {
             next_history_changed_from: 0,
             history_revision: 0,
             session_id: "s".into(),
-            persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
         };
@@ -4424,7 +3995,6 @@ mod tests {
             next_history_changed_from: 0,
             history_revision: 0,
             session_id: "s".into(),
-            persistence: protocol::PersistenceScope::default(),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
         };
@@ -4542,7 +4112,6 @@ mod tests {
             session_id: "s".into(),
             sessions_root: std::path::PathBuf::from("/tmp"),
             ephemeral: false,
-            persistence: protocol::PersistenceScope::default(),
             permission_overrides: None,
             native_prompt: None,
             tool_visibility: protocol::ToolVisibility::Interactive,

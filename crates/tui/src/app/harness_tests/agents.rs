@@ -225,7 +225,7 @@ fn a_prompt_queues_until_the_native_session_finishes_its_own_work() {
     assert_eq!(work_label(&mut app), "working");
     app.type_text("next question");
     app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
     assert_eq!(
         app.app.prompt.queued_texts(),
@@ -234,7 +234,7 @@ fn a_prompt_queues_until_the_native_session_finishes_its_own_work() {
     assert!(!started_turn(&app));
 
     native_session(&mut app, true, false);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
     assert!(app.app.prompt.queued_texts().is_empty());
     assert!(started_turn(&app));
@@ -249,7 +249,7 @@ fn esc_esc_on_a_clean_turn_interrupts_and_spares_native_background_work() {
     native_session(&mut app, true, false);
     app.type_text("next question");
     app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
     assert!(started_turn(&app));
     app.clear_actions();
@@ -304,7 +304,7 @@ fn ctrl_c_interrupts_idle_native_background_work_and_keeps_its_session() {
 
     app.type_text("fresh prompt");
     app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
     assert!(
         started_turn(&app),

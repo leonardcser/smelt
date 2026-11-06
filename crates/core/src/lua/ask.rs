@@ -13,7 +13,6 @@ pub struct AskContext {
     pub reasoning_effort: ReasoningEffort,
     pub fast_mode: bool,
     pub session_id: String,
-    pub persistence: protocol::PersistenceScope,
 }
 
 #[derive(Default)]
@@ -77,7 +76,6 @@ pub fn prepare_request(
         reasoning_effort,
         fast_mode: context.fast_mode,
         session_id: context.session_id,
-        persistence: context.persistence,
         response_format: request.response_format,
         stream: request.stream,
         visible_retries: request.visible_retries,

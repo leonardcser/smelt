@@ -989,9 +989,7 @@ impl TuiApp {
             self.cancel_turn_work();
             self.working
                 .finish(smelt_core::working::TurnOutcome::Cancelled);
-            self.cancel_pending_turn_submission(
-                crate::app::agent::PendingTurnCancellation::Rewound,
-            );
+            self.cancel_pending_turn_submission();
             self.restore_rewind_input(input, restore_vim_insert);
             return true;
         }
@@ -1035,9 +1033,7 @@ impl TuiApp {
             self.cancel_turn_work();
             self.working
                 .finish(smelt_core::working::TurnOutcome::Cancelled);
-            self.cancel_pending_turn_submission(
-                crate::app::agent::PendingTurnCancellation::Rewound,
-            );
+            self.cancel_pending_turn_submission();
         }
         self.cancel_native_session();
         if let Some(history_idx) = history_idx {

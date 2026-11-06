@@ -204,94 +204,36 @@ struct SessionArgs {
 enum SessionCommand {
     /// Mark the current session complete after its turn succeeds
     Complete,
-    /// Check schema, integrity, references, indexes, and storage sizes without changing data
+    /// Check database integrity and storage sizes without changing data
     Doctor(SessionDoctorArgs),
-    /// Copy a transactionally consistent session database to a new file
+    /// Copy every saved session into a new consistent database file
     Backup(SessionBackupArgs),
-    /// Delete unreachable rows, objects and derived search data, then return free pages to the filesystem
-    Compact(SessionTargetArgs),
 }
 
 #[derive(Debug, Clone, clap::Args)]
 struct SessionDoctorArgs {
-    /// Session id or unique prefix to inspect
-    #[arg(required_unless_present = "all")]
+    /// Session id or unique prefix whose row counts to include
     session: Option<String>,
-    /// Inspect every visible session
-    #[arg(long, conflicts_with = "session")]
-    all: bool,
     /// Print machine-readable JSON
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Clone, clap::Args)]
-struct SessionTargetArgs {
-    /// Session id or unique prefix
-    session: String,
-}
-
-#[derive(Debug, Clone, clap::Args)]
 struct SessionBackupArgs {
-    /// Session id or unique prefix
-    session: String,
     /// New backup database path; existing files are never overwritten
     output: PathBuf,
 }
 
 #[derive(Debug, serde::Serialize)]
 struct SessionDoctorOutput {
-    session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    report: Option<smelt_store::DoctorReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recovery: Option<SessionRecoveryDoctor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct SessionRecoveryDoctor {
-    canonical_revision: u64,
-    nonterminal_turns: Vec<NonterminalTurnDoctor>,
-    catalog: DerivedRevisionDoctor,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct NonterminalTurnDoctor {
-    turn_id: u64,
-    state: smelt_store::TurnState,
-    created_at_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DerivedRevisionState {
-    Current,
-    Lagging,
-    Ahead,
-    Missing,
-    Unavailable,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct DerivedRevisionDoctor {
-    state: DerivedRevisionState,
-    source_revision: Option<u64>,
-    revision_lag: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct SessionBackupManifest {
-    format_version: u32,
-    session_id: String,
-    lineage_id: String,
+    database: PathBuf,
     schema_version: i32,
-    created_at_ms: u64,
-    database_file: String,
-    stats: smelt_store::StorageStats,
+    issues: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stats: Option<smelt_store::StorageStats>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -352,7 +294,6 @@ fn inspect_url(base_url: &str, session: Option<&str>) -> Result<String, String> 
 }
 
 async fn run_inspect_command(args: InspectArgs) {
-    smelt_core::session::request_session_catalog_reconciliation();
     let mut server = match tui::inspect_server::Server::start_on_port(args.port).await {
         Ok(server) => server,
         Err(err) => {
@@ -497,12 +438,17 @@ fn run_config_command(args: ConfigArgs) {
 }
 
 fn run_export_command(args: ExportArgs) {
+    let sessions = smelt_core::session::storage();
     let result = match args.command {
         ExportCommand::History(args) => export_jsonl(args, |session, out| {
-            smelt_core::session::export_history_jsonl(session, out)
+            sessions
+                .export_history_jsonl(session, out)
+                .map_err(|err| err.to_string())
         }),
         ExportCommand::Requests(args) => export_jsonl(args, |session, out| {
-            smelt_core::session::export_requests_jsonl(session, out)
+            sessions
+                .export_requests_jsonl(session, out)
+                .map_err(|err| err.to_string())
         }),
     };
     if let Err(err) = result {
@@ -540,308 +486,67 @@ where
     }
 }
 
-fn backup_manifest_path(database: &std::path::Path) -> PathBuf {
-    let mut name = database
-        .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("lineage.db"))
-        .to_os_string();
-    name.push(".manifest.json");
-    database.with_file_name(name)
-}
-
-fn write_backup_manifest(
-    path: &std::path::Path,
-    manifest: &SessionBackupManifest,
-) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(manifest).map_err(|err| err.to_string())?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
-    use std::io::Write;
-    let result = file
-        .write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|err| format!("failed to write {}: {err}", path.display()));
-    drop(file);
-    if result.is_err() {
-        let _ = std::fs::remove_file(path);
-    }
-    result
-}
-
-fn resolve_session_target(reference: &str) -> Result<(String, PathBuf), String> {
-    // Canonical readers/writers check exact IDs. Derived catalog publication is
-    // not required to diagnose, back up or reclaim canonical storage.
-    let id = smelt_core::session_id::SessionId::parse(reference)
-        .or_else(|_| smelt_core::session::resolve_prefix(reference))
-        .map_err(|err| err.to_string())?;
-    Ok((id.into_string(), smelt_core::session::sessions_dir()))
-}
-
-fn derived_revision_doctor(canonical_revision: u64, source_revision: u64) -> DerivedRevisionDoctor {
-    let state = match source_revision.cmp(&canonical_revision) {
-        std::cmp::Ordering::Less => DerivedRevisionState::Lagging,
-        std::cmp::Ordering::Equal => DerivedRevisionState::Current,
-        std::cmp::Ordering::Greater => DerivedRevisionState::Ahead,
-    };
-    DerivedRevisionDoctor {
-        state,
-        source_revision: Some(source_revision),
-        revision_lag: canonical_revision.checked_sub(source_revision),
-        error: None,
-    }
-}
-
-fn unavailable_derived_revision(error: impl Into<String>) -> DerivedRevisionDoctor {
-    DerivedRevisionDoctor {
-        state: DerivedRevisionState::Unavailable,
-        source_revision: None,
-        revision_lag: None,
-        error: Some(error.into()),
-    }
-}
-
-fn missing_derived_revision(state: DerivedRevisionState) -> DerivedRevisionDoctor {
-    DerivedRevisionDoctor {
-        state,
-        source_revision: None,
-        revision_lag: None,
-        error: None,
-    }
-}
-
-fn catalog_doctor(
-    session_id: &str,
-    sessions_root: &std::path::Path,
-    canonical_revision: u64,
-) -> DerivedRevisionDoctor {
-    let layout = smelt_store::SessionStoreLayout::from_sessions_root(sessions_root);
-    match smelt_store::CatalogReader::open_existing(layout.catalog_path()) {
-        Ok(None) => missing_derived_revision(DerivedRevisionState::Missing),
-        Ok(Some(catalog)) => match catalog.session(session_id) {
-            Ok(None) => missing_derived_revision(DerivedRevisionState::Missing),
-            Ok(Some(row)) if row.availability == smelt_store::CatalogAvailability::Unavailable => {
-                let mut status = derived_revision_doctor(canonical_revision, row.source_revision);
-                status.state = DerivedRevisionState::Unavailable;
-                status.error = row.error_summary.or(row.error_kind);
-                status
-            }
-            Ok(Some(row)) => derived_revision_doctor(canonical_revision, row.source_revision),
-            Err(error) => unavailable_derived_revision(error.to_string()),
-        },
-        Err(error) => unavailable_derived_revision(error.to_string()),
-    }
-}
-
-fn doctor_session(reference: &str) -> SessionDoctorOutput {
-    let (session_id, sessions_root) = match resolve_session_target(reference) {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            return SessionDoctorOutput {
-                session_id: reference.to_string(),
-                report: None,
-                recovery: None,
-                error: Some(error),
-            };
+fn session_doctor(session: Option<&str>) -> Result<SessionDoctorOutput, String> {
+    let sessions = smelt_core::session::storage();
+    let store = sessions.store();
+    let issues = store
+        .integrity_issues()
+        .map_err(|err| format!("failed to check session database: {err}"))?;
+    let (session_id, stats) = match session {
+        Some(reference) => {
+            let reader = sessions.reader(reference).map_err(|err| err.to_string())?;
+            let stats = reader
+                .storage_stats(store)
+                .map_err(|err| format!("failed to read storage stats: {err}"))?;
+            (Some(reader.session_id().to_owned()), Some(stats))
         }
+        None => (None, None),
     };
-    let result = (|| {
-        let reader = smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id)?;
-        let report = reader.doctor_report()?;
-        let canonical_revision = reader.snapshot()?.head.revision.get();
-        let turns = reader.turns()?;
-        let nonterminal_turns = turns
-            .into_iter()
-            .filter(|turn| {
-                matches!(
-                    turn.state,
-                    smelt_store::TurnState::Ready | smelt_store::TurnState::Running
-                )
-            })
-            .map(|turn| NonterminalTurnDoctor {
-                turn_id: turn.turn_id.get(),
-                state: turn.state,
-                created_at_ms: turn.created_at_ms,
-            })
-            .collect();
-        let catalog = catalog_doctor(&session_id, &sessions_root, canonical_revision);
-        Ok::<_, smelt_store::StoreError>((
-            report,
-            SessionRecoveryDoctor {
-                canonical_revision,
-                nonterminal_turns,
-                catalog,
-            },
-        ))
-    })();
-    match result {
-        Ok((report, recovery)) => SessionDoctorOutput {
-            session_id,
-            report: Some(report),
-            recovery: Some(recovery),
-            error: None,
-        },
-        Err(err) => SessionDoctorOutput {
-            session_id,
-            report: None,
-            recovery: None,
-            error: Some(err.to_string()),
-        },
-    }
+    Ok(SessionDoctorOutput {
+        database: store.database_path(),
+        schema_version: smelt_store::SCHEMA_VERSION,
+        issues,
+        session_id,
+        stats,
+    })
 }
 
 fn print_doctor_output(output: &SessionDoctorOutput) {
-    println!("session: {}", output.session_id);
-    if let Some(error) = &output.error {
-        println!("status: unavailable");
-        println!("error: {error}");
-        return;
-    }
-    let report = output.report.as_ref().expect("doctor result or error");
+    println!("database: {}", output.database.display());
+    println!("schema_version: {}", output.schema_version);
     println!(
         "status: {}",
-        if report.healthy {
+        if output.issues.is_empty() {
             "healthy"
         } else {
             "degraded"
         }
     );
-    println!("schema_version: {}", report.schema_version);
-    println!("database_bytes: {}", report.stats.database_bytes);
-    println!("wal_bytes: {}", report.stats.wal_bytes);
-    println!("history_rows: {}", report.stats.history_rows);
-    println!(
-        "transcript_record_rows: {}",
-        report.stats.transcript_record_rows
-    );
-    println!("object_rows: {}", report.stats.object_rows);
-    println!("object_raw_bytes: {}", report.stats.object_raw_bytes);
-    println!("object_stored_bytes: {}", report.stats.object_stored_bytes);
-    println!("request_rows: {}", report.stats.request_rows);
-    let recovery = output.recovery.as_ref().expect("doctor recovery status");
-    println!("canonical_revision: {}", recovery.canonical_revision);
-    for turn in &recovery.nonterminal_turns {
-        println!(
-            "nonterminal_turn: id={} state={} created_at_ms={}",
-            turn.turn_id,
-            turn.state.as_str(),
-            turn.created_at_ms
-        );
-    }
-    let catalog = &recovery.catalog;
-    let catalog_state = match catalog.state {
-        DerivedRevisionState::Current => "current",
-        DerivedRevisionState::Lagging => "lagging",
-        DerivedRevisionState::Ahead => "ahead",
-        DerivedRevisionState::Missing => "missing",
-        DerivedRevisionState::Unavailable => "unavailable",
-    };
-    println!(
-        "catalog: state={catalog_state} source_revision={} revision_lag={}",
-        catalog
-            .source_revision
-            .map_or_else(|| "none".to_string(), |revision| revision.to_string()),
-        catalog
-            .revision_lag
-            .map_or_else(|| "none".to_string(), |lag| lag.to_string())
-    );
-    if let Some(error) = &catalog.error {
-        println!("catalog_error: {error}");
-    }
-    if let Some(search) = &report.search {
-        println!(
-            "search: state={} format_version={} ready_segments={} total_segments={} database_bytes={}",
-            search.state.as_str(),
-            search
-                .format_version
-                .map_or_else(|| "none".to_string(), |version| version.to_string()),
-            search.ready_segments,
-            search.total_segments,
-            search.database_bytes
-        );
-        if let Some(error) = &search.error {
-            println!("search_error: {error}");
-        }
-    }
-    for issue in &report.issues {
+    for issue in &output.issues {
         println!("issue: {issue}");
     }
-}
-
-fn run_session_doctor(args: SessionDoctorArgs) -> Result<bool, String> {
-    let outputs = if args.all {
-        let mut cursor = None;
-        let mut session_ids = Vec::new();
-        loop {
-            let page = smelt_core::session::list_session_page_result(
-                smelt_core::session::SessionListQuery {
-                    limit: 500,
-                    cursor,
-                    cwd: None,
-                    availability: None,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            if page.catalog.state == smelt_core::session::SessionCatalogState::Degraded
-                || (page.catalog.state == smelt_core::session::SessionCatalogState::Reconciling
-                    && page.catalog.completed_scan_id == 0)
-            {
-                return Err(page.catalog.last_error.unwrap_or_else(|| {
-                    "session catalog is reconciling; retry after it is ready".into()
-                }));
-            }
-            session_ids.extend(page.entries.into_iter().map(|entry| entry.id));
-            let Some(next_cursor) = page.next_cursor else {
-                break;
-            };
-            cursor = Some(next_cursor);
-        }
-        session_ids
-            .into_iter()
-            .map(|id| doctor_session(&id))
-            .collect::<Vec<_>>()
-    } else {
-        vec![doctor_session(
-            args.session.as_deref().expect("required by clap"),
-        )]
-    };
-    if args.json {
-        print_status_json(&outputs)?;
-    } else {
-        for (index, output) in outputs.iter().enumerate() {
-            if index != 0 {
-                println!();
-            }
-            print_doctor_output(output);
-        }
+    if let (Some(session_id), Some(stats)) = (&output.session_id, &output.stats) {
+        println!("session: {session_id}");
+        println!("database_bytes: {}", stats.database_bytes);
+        println!("wal_bytes: {}", stats.wal_bytes);
+        println!("history_rows: {}", stats.history_rows);
+        println!("history_text_bytes: {}", stats.history_text_bytes);
+        println!("transcript_rows: {}", stats.transcript_rows);
+        println!("request_rows: {}", stats.request_rows);
     }
-    Ok(outputs.iter().all(|output| {
-        output.error.is_none() && output.report.as_ref().is_some_and(|report| report.healthy)
-    }))
 }
 
-fn with_lineage_writer<T>(
-    reference: &str,
-    action: impl FnOnce(&mut smelt_store::OwnedLineageWriter) -> Result<T, String>,
-) -> Result<T, String> {
-    let (session_id, sessions_root) = resolve_session_target(reference)?;
-    let mut writer = smelt_store::OwnedLineageWriter::open_existing(&sessions_root, session_id)
-        .map_err(|err| format!("failed to acquire lineage maintenance ownership: {err}"))?;
-    let result = action(&mut writer);
-    let release = writer
-        .release()
-        .map_err(|err| format!("failed to release lineage maintenance ownership: {err}"));
-    match (result, release) {
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-        (Ok(value), Ok(())) => Ok(value),
+fn run_session_doctor(args: SessionDoctorArgs) -> Result<(), String> {
+    let output = session_doctor(args.session.as_deref())?;
+    if args.json {
+        print_status_json(&output)?;
+    } else {
+        print_doctor_output(&output);
+    }
+    if output.issues.is_empty() {
+        Ok(())
+    } else {
+        Err("session database failed its integrity check".into())
     }
 }
 
@@ -856,94 +561,12 @@ async fn run_session_command(args: SessionArgs) {
                     );
                 })
         }
-        SessionCommand::Doctor(args) => run_session_doctor(args).and_then(|healthy| {
-            if healthy {
-                Ok(())
-            } else {
-                Err("one or more sessions are unavailable or degraded".into())
-            }
-        }),
-        SessionCommand::Backup(args) => {
-            let manifest_path = backup_manifest_path(&args.output);
-            let result =
-                resolve_session_target(&args.session).and_then(|(session_id, sessions_root)| {
-                    let backup_result = (|| {
-                        let reader = smelt_store::LineageSessionReader::open_existing(
-                            sessions_root,
-                            &session_id,
-                        )
-                        .map_err(|err| format!("failed to open lineage session: {err}"))?;
-                        let lineage_id = reader.lineage_id().to_owned();
-                        reader
-                            .backup_to(&args.output)
-                            .map_err(|err| format!("failed to back up lineage: {err}"))?;
-                        let report = smelt_store::verify_lineage_backup(&args.output, &lineage_id)
-                            .map_err(|err| format!("failed to verify lineage backup: {err}"))?;
-                        Ok::<_, String>((1, lineage_id, report.schema_version, report.stats))
-                    })();
-                    let (format_version, lineage_id, schema_version, stats) = match backup_result {
-                        Ok(backup) => backup,
-                        Err(error) => {
-                            let _ = std::fs::remove_file(&args.output);
-                            return Err(error);
-                        }
-                    };
-                    let finalize = write_backup_manifest(
-                        &manifest_path,
-                        &SessionBackupManifest {
-                            format_version,
-                            session_id,
-                            lineage_id,
-                            schema_version,
-                            created_at_ms: smelt_core::session::now_ms(),
-                            database_file: args
-                                .output
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            stats,
-                        },
-                    );
-                    if finalize.is_err() {
-                        let _ = std::fs::remove_file(&args.output);
-                    }
-                    finalize
-                });
-            if result.is_ok() {
-                println!("backup: {}", args.output.display());
-                println!("manifest: {}", manifest_path.display());
-            }
-            result
-        }
-        SessionCommand::Compact(args) => with_lineage_writer(&args.session, |writer| {
-            let search_segments_deleted = writer
-                .prune_search_projection()
-                .map_err(|err| format!("failed to prune derived search data: {err}"))?;
-            let mut transactions = 0usize;
-            loop {
-                let step = writer
-                    .reclaim_step(smelt_store::RECLAMATION_STEP_ROWS)
-                    .map_err(|err| format!("failed to reclaim lineage data: {err}"))?;
-                transactions = transactions.saturating_add(1);
-                if step.complete {
-                    break;
-                }
-                if step.rows_examined == 0 {
-                    return Err("lineage reclamation made no bounded progress".into());
-                }
-            }
-            let vacuum = writer
-                .vacuum()
-                .map_err(|err| format!("failed to release free lineage pages: {err}"))?;
-            println!("deleted_search_segments: {search_segments_deleted}");
-            println!("free_pages_before: {}", vacuum.free_pages_before);
-            println!("free_pages_after: {}", vacuum.free_pages_after);
-            println!("pages_reclaimed: {}", vacuum.pages_reclaimed);
-            println!("wal_truncated: {}", vacuum.wal_truncated);
-            println!("transactions: {transactions}");
-            Ok(())
-        }),
+        SessionCommand::Doctor(args) => run_session_doctor(args),
+        SessionCommand::Backup(args) => smelt_core::session::storage()
+            .store()
+            .backup_to(&args.output)
+            .map(|()| println!("backup: {}", args.output.display()))
+            .map_err(|err| format!("failed to back up sessions: {err}")),
     };
     if let Err(err) = result {
         eprintln!("error: {err}");
@@ -993,8 +616,8 @@ fn restore_canonical_session_cwd_for_launch(
     id_or_prefix: &str,
 ) -> Option<PathBuf> {
     let sessions = smelt_core::session::SessionStorage::from_env(env);
-    let (header, _) = sessions.load_store_header_result(id_or_prefix).ok()??;
-    let requested = header.meta.cwd.as_deref()?.trim();
+    let meta = sessions.load_meta(id_or_prefix).ok()?;
+    let requested = meta.cwd.as_deref()?.trim();
     if requested.is_empty() {
         return None;
     }
@@ -1165,8 +788,6 @@ async fn async_main() {
     }
 
     let resolution_startup = smelt_perf::perf::begin("startup:resolution");
-    smelt_core::session::initialize_session_catalog();
-
     if let Some(ref path) = args.config {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
     }
@@ -1553,8 +1174,6 @@ async fn async_main() {
         );
         drop(tui_construct_startup);
         redirect_stderr();
-        let _idle_maintenance = (!args.ephemeral)
-            .then(|| smelt_core::session::SessionStorage::from_env(&env).spawn_idle_maintenance());
 
         println!();
         app.run(startup_http_client, initial_message).await;

@@ -26,9 +26,8 @@ pub use event::{
     AgentProjectContext, AskResponseFormat, CanonicalHistoryDelta, CanonicalHistoryIndex,
     ClaudeCodeToolPolicy, Decision, EngineAskError, EngineAskErrorKind, EngineEvent, InvocationId,
     ModelHistoryCoordinates, ModelHistoryIndex, ModelHistorySource, NativeCompaction,
-    NativeProcess, NativeSystemPrompt, PersistenceScope, ReasoningKind, StartTurnInput,
-    StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
-    ToolVisibility, UiCommand,
+    NativeProcess, NativeSystemPrompt, ReasoningKind, StartTurnInput, StartTurnPayload, ToolDef,
+    ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata, ToolVisibility, UiCommand,
 };
 pub use history::{
     apply_history_append, classify_user_history_content, compaction_summary_content,

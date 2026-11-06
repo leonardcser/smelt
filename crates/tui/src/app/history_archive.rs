@@ -34,13 +34,8 @@ impl HistoryArchiveRequest {
             if cancelled() {
                 return Err("history archive cancelled".into());
             }
-            let resolved = sessions.resolve_session_for_read_result(&self.source_id)?;
-            let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                &resolved.sessions_root,
-                &resolved.lineage_id,
-                &resolved.id,
-            )?;
-            let head = reader.store_head()?;
+            let reader = sessions.reader(&self.source_id)?;
+            let head = reader.head()?;
             if head.history_len.get() != self.history_len as u64 {
                 return Err("session changed before history could be archived".into());
             }
@@ -51,7 +46,7 @@ impl HistoryArchiveRequest {
                 .suffix(".jsonl")
                 .tempfile_in(dir)?;
             let mut out = std::io::BufWriter::new(file.as_file_mut());
-            reader.export_history_jsonl_cancellable(&mut out, cancelled)?;
+            reader.export_history_jsonl(&mut out, cancelled)?;
             out.flush()?;
             let mut latest_request = String::new();
             let mut before = head.history_len.get();
@@ -72,7 +67,7 @@ impl HistoryArchiveRequest {
             }
             drop(out);
             file.as_file().sync_all()?;
-            if reader.store_head()? != head {
+            if reader.head()? != head {
                 return Err("session changed while history was being archived".into());
             }
             let path = file.path().to_path_buf();
@@ -99,7 +94,7 @@ impl HistoryArchiveRequest {
             if cancelled() {
                 return Err("history archive cancelled".into());
             }
-            sessions.save_result(&self.session)?;
+            sessions.save(&self.session)?;
             file.keep()?;
             Ok(seed)
         };
@@ -196,7 +191,7 @@ mod tests {
         app.save_session_and_flush();
         assert!(matches!(
             app.flush_persist(),
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
+            crate::persist::PersistenceFlushOutcome::Durable
         ));
         app
     }
@@ -264,7 +259,7 @@ mod tests {
             .continue_with_archived_history("ACTIVE_GOAL".into())
             .unwrap();
         app.wait_for_session_lifecycle();
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         let path = std::fs::read_dir(
             app.core_probe()
                 .sessions
@@ -322,11 +317,7 @@ mod tests {
         assert!(fresh.contains("LATEST_REQUEST"));
         assert!(fresh.contains(&path.to_string_lossy().to_string()));
         assert!(!fresh.contains("request 0"));
-        let reader = smelt_store::LineageSessionReader::open_existing(
-            app.core_probe().sessions.sessions_dir(),
-            &source,
-        )
-        .unwrap();
+        let reader = app.core_probe().sessions.reader(&source).unwrap();
         assert_eq!(
             reader.history_range(0, original.len() as u64).unwrap(),
             original

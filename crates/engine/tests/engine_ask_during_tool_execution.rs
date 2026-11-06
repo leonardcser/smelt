@@ -213,7 +213,6 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
         fast_mode: false,
         tools: Vec::new(),
         session_id: "sess".into(),
-        persistence: protocol::PersistenceScope::default(),
         stream: false,
         visible_retries: false,
     };
@@ -232,7 +231,6 @@ async fn check_response_callback_steering(case: ResponseSteeringCase) {
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
@@ -501,7 +499,6 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: Some(protocol::PermissionOverrides {
             tools: Some(protocol::RuleSetOverride {
                 allow: vec![TOOL_NAME.into()],
@@ -579,7 +576,6 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                             fast_mode: false,
                             tools: Vec::new(),
                             session_id: "sess".into(),
-                            persistence: protocol::PersistenceScope::default(),
                             stream: false,
                             visible_retries: false,
                         });
@@ -725,7 +721,6 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
@@ -750,7 +745,6 @@ async fn queued_message_during_streamed_tool_call_is_acknowledged_after_tool_fin
         fast_mode: false,
         tools: Vec::new(),
         session_id: "sess".into(),
-        persistence: protocol::PersistenceScope::default(),
         stream: false,
         visible_retries: false,
     });
@@ -878,7 +872,6 @@ async fn queued_message_is_acknowledged_after_all_parallel_tools_finish() {
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
@@ -1026,7 +1019,6 @@ async fn chat_reasoning_replay_tracks_model_switches_during_tool_execution() {
             session_id: "sess".into(),
             sessions_root: PathBuf::from("/tmp"),
             ephemeral: false,
-            persistence: protocol::PersistenceScope::default(),
             permission_overrides: None,
             native_prompt: None,
             tool_visibility: protocol::ToolVisibility::Interactive,
@@ -1207,7 +1199,6 @@ async fn model_switch_during_in_flight_request_applies_at_next_request_boundary(
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: None,
         native_prompt: None,
         tool_visibility: protocol::ToolVisibility::Interactive,
@@ -1289,7 +1280,6 @@ async fn updates_during_sequential_tool_wait_apply_after_tool_finishes() {
         session_id: "sess".into(),
         sessions_root: PathBuf::from("/tmp"),
         ephemeral: false,
-        persistence: protocol::PersistenceScope::default(),
         permission_overrides: Some(protocol::PermissionOverrides {
             tools: Some(protocol::RuleSetOverride {
                 allow: vec![TOOL_NAME.into()],
@@ -1426,7 +1416,6 @@ async fn engine_ask_without_an_answer_reports_an_error() {
         fast_mode: false,
         tools: Vec::new(),
         session_id: "sess".into(),
-        persistence: protocol::PersistenceScope::default(),
         stream: true,
         visible_retries: false,
     });

@@ -155,7 +155,6 @@ impl HeadlessCompaction {
                         reasoning_effort: core.config.reasoning_effort.clone(),
                         fast_mode: core.config.settings.fast_mode,
                         session_id: state.session.id.clone(),
-                        persistence: protocol::PersistenceScope::default(),
                     };
                     let request = AskRequest {
                         id,

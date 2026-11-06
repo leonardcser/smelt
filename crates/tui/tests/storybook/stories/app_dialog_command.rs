@@ -699,7 +699,6 @@ app_story!(resume_dialog, |ctx| {
         };
         ctx.write_session_meta(&meta);
     }
-    ctx.wait_for_session_catalog();
     ctx.run_command("resume");
     ctx.assert_snapshot();
 

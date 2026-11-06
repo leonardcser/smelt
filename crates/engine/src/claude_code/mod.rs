@@ -132,13 +132,6 @@ enum Move {
     Sent { path: PathBuf, resume: bool },
 }
 
-enum Preparation {
-    Ready(agent::LoadedModelHistory),
-    /// The turn failed or was cancelled before its prompt.
-    Dropped,
-    Ended,
-}
-
 /// Everything scoped to one Claude Code process, replaced whole when the
 /// process is retired.
 struct Native<'a> {
@@ -379,14 +372,7 @@ impl Runtime<'_> {
             started: self.config.clock.instant_now(),
             stage: Stage::Preparing,
         });
-        let loaded = match self.prepare().await? {
-            Preparation::Ready(loaded) => loaded,
-            Preparation::Dropped => {
-                self.turn = None;
-                return Ok(self.native.process.is_some());
-            }
-            Preparation::Ended => return Ok(false),
-        };
+        let loaded = std::mem::take(&mut self.payload.history);
         let history = loaded.items;
         let index = loaded
             .coordinates
@@ -498,46 +484,6 @@ impl Runtime<'_> {
             turn.stage = Stage::Queued(content);
         }
         Ok(true)
-    }
-
-    /// Loads the turn's model history, applying commands as they arrive.
-    async fn prepare(&mut self) -> Result<Preparation, String> {
-        let cancel = CancellationToken::new();
-        let history = agent::prepare_model_history(
-            std::mem::take(&mut self.payload.history),
-            self.payload.sessions_root.clone(),
-            self.payload.session_id.clone(),
-            cancel.clone(),
-        );
-        tokio::pin!(history);
-        loop {
-            tokio::select! {
-                result = &mut history => {
-                    return Ok(match result {
-                        Ok(loaded) => Preparation::Ready(loaded),
-                        Err(message) => {
-                            let _ = self.tx.send(EngineEvent::TurnPreparationError {
-                                turn_id: self.payload.turn_id,
-                                session_id: self.payload.session_id.clone(),
-                                persistence: self.payload.persistence,
-                                message,
-                            });
-                            Preparation::Dropped
-                        }
-                    });
-                }
-                command = self.commands.recv() => {
-                    if !self.command(command.unwrap_or(UiCommand::EndNativeSession)).await? {
-                        cancel.cancel();
-                        return Ok(Preparation::Ended);
-                    }
-                    if self.turn.is_none() {
-                        cancel.cancel();
-                        return Ok(Preparation::Dropped);
-                    }
-                }
-            }
-        }
     }
 
     fn background(&self, command: UiCommand) {

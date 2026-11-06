@@ -19,7 +19,6 @@ type MaterializedBlockRecords =
 pub(crate) struct LoadedRecordWindow {
     pub(crate) start: smelt_store::TranscriptRecordOffset,
     pub(crate) total_count: usize,
-    pub(crate) hydration: smelt_store::TranscriptRecordHydration,
     pub(crate) records: Vec<StoredBlockWithId>,
 }
 
@@ -28,7 +27,6 @@ impl std::fmt::Debug for LoadedRecordWindow {
         f.debug_struct("LoadedRecordWindow")
             .field("start", &self.start)
             .field("total_count", &self.total_count)
-            .field("hydration", &self.hydration)
             .field("record_count", &self.records.len())
             .finish()
     }
@@ -54,7 +52,6 @@ impl LoadedRecordWindow {
         }
         let start = slice.start;
         let total_count = slice.total_count;
-        let hydration = slice.hydration;
         let mut materialized = BTreeMap::new();
         let records = {
             let _perf = smelt_perf::perf::begin("transcript:record_window:compact_records");
@@ -80,7 +77,6 @@ impl LoadedRecordWindow {
             Self {
                 start,
                 total_count,
-                hydration,
                 records,
             },
             materialized,
@@ -383,8 +379,7 @@ fn transcript_hydration_worker_loop(
     event_tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>,
     #[cfg(test)] metrics: Arc<HydrationWorkerMetrics>,
 ) {
-    let mut retained_store: Option<(TranscriptStoreAddress, smelt_store::LineageSessionReader)> =
-        None;
+    let mut retained_store: Option<(TranscriptStoreAddress, smelt_store::SessionReader)> = None;
     while let Some((token, mut request)) = mailbox.recv() {
         request.worker_generation = token.generation;
 
@@ -397,11 +392,7 @@ fn transcript_hydration_worker_loop(
             metrics.retained_reader_count.store(0, Ordering::Release);
             #[cfg(test)]
             metrics.open_attempt_count.fetch_add(1, Ordering::AcqRel);
-            let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                &request.store_address.sessions_root,
-                &request.store_address.lineage_id,
-                &request.store_address.session_id,
-            );
+            let reader = request.store_address.reader();
             match reader {
                 Ok(reader) => {
                     retained_store = Some((request.store_address.clone(), reader));
@@ -436,7 +427,7 @@ fn transcript_hydration_worker_loop(
 }
 
 pub(super) fn execute_hydration_request(
-    reader: &smelt_store::LineageSessionReader,
+    reader: &smelt_store::SessionReader,
     request: TranscriptHydrationRequest,
     cancelled: impl Fn() -> bool,
 ) -> Option<TranscriptHydrationWorkerResult> {
@@ -658,36 +649,22 @@ mod tests {
         let session_id = marker.to_string().repeat(64);
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.id.clone_from(&session_id);
-        let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
         let mut transcript = smelt_core::content::transcript::Transcript::new();
         for index in 0..32 {
             transcript.push(smelt_core::transcript_model::Block::Text {
                 content: format!("{marker} record {index}").into(),
             });
         }
-        let records = transcript
-            .history
-            .block_records()
-            .iter()
-            .enumerate()
-            .map(|(index, record)| {
-                smelt_core::transcript_model::transcript_block_row_with_block_idx(
-                    index,
-                    index as u64,
-                    record,
-                )
-                .unwrap()
-            })
-            .collect();
-        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::ZERO,
-            records,
-        });
-        let mut writer = smelt_store::OwnedLineageWriter::open(root, &session_id).unwrap();
-        writer.commit_session(&command).unwrap();
-        let lineage_id = writer.lineage_id().to_string();
-        writer.release().unwrap();
-        TranscriptStoreAddress::new(root.to_path_buf(), session_id, lineage_id)
+        let storage = smelt_core::session::SessionStorage::new(root.to_path_buf());
+        storage.save(&session).unwrap();
+        let address = storage.address(session_id);
+        crate::persist::write_transcript_record_suffix(
+            &address,
+            0,
+            &transcript.history.block_records(),
+        )
+        .unwrap();
+        address
     }
 
     fn record_request(
@@ -745,9 +722,8 @@ mod tests {
         );
         queue.request_record_ranges(viewport.clone(), vec![viewport.clone()]);
         let address = TranscriptStoreAddress::new(
-            std::path::PathBuf::from("/tmp/smelt-hydration-test"),
+            smelt_store::Store::new("/tmp/smelt-hydration-test"),
             "session".to_owned(),
-            "lineage".to_owned(),
         );
 
         let request = queue.request(1, Some(&address), 200).unwrap();
@@ -765,12 +741,7 @@ mod tests {
     fn record_window_read_materializes_an_overlapping_block_without_a_second_range() {
         let root = tempfile::tempdir().unwrap();
         let address = seed_store(root.path(), 'e');
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &address.sessions_root,
-            &address.lineage_id,
-            &address.session_id,
-        )
-        .unwrap();
+        let reader = address.reader().unwrap();
         let mut row = reader
             .transcript_record_slice_with_total((5..6).into(), 32)
             .unwrap()
@@ -885,9 +856,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let address = seed_store(root.path(), 'f');
         let missing = TranscriptStoreAddress::new(
-            root.path().join("missing"),
+            smelt_store::Store::new(root.path().join("missing")),
             "0".repeat(64),
-            "missing-lineage".to_owned(),
         );
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let worker = TranscriptHydrationWorker::spawn(event_tx);

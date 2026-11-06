@@ -7,95 +7,34 @@ use super::{
     CommittedTranscriptView, SessionAccess, SessionPersistence, SharedSessionState,
 };
 
+/// What changed in the session writer since the last report.
+#[derive(Default)]
 pub(crate) struct PersistenceReport {
-    pub(crate) acknowledged_session_id: Option<String>,
-    pub(crate) canonical_completions: Vec<crate::persist::CanonicalCommandCompletion>,
-    pub(crate) failure: Option<PersistenceFailureReport>,
-    pub(crate) audit_warning: Option<String>,
+    /// The writer finished opening the session, or failed to.
     pub(crate) startup: Option<Result<(), crate::persist::PersistenceCause>>,
+    /// More saves became durable.
+    pub(crate) durable: bool,
+    pub(crate) failure: Option<crate::persist::PersistenceCause>,
+    pub(crate) audit_warning: Option<String>,
 }
 
-pub(crate) struct PersistenceFailureReport {
-    pub(crate) session_id: String,
-    pub(crate) target: PersistenceFailureTarget,
-    pub(crate) cause: crate::persist::PersistenceCause,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum PersistenceFailureTarget {
-    Command(crate::persist::CanonicalCommandId),
-    AllCanonicalCommands,
-    None,
-}
-
-pub(crate) enum CanonicalTurnSubmitOutcome {
-    PendingPersistence {
-        command_id: crate::persist::CanonicalCommandId,
-        generation: super::session_document::PersistenceGeneration,
-    },
-    PendingPreparation {
-        command_id: crate::persist::CanonicalCommandId,
-    },
-}
-
-pub(crate) enum CanonicalOperationEvent {
-    Submit(CanonicalTurnSubmitOutcome),
-    Failed {
-        command_id: crate::persist::CanonicalCommandId,
-        cause: crate::persist::PersistenceCause,
-    },
-}
-
-enum CanonicalOperationPayload {
-    Submit {
-        metadata: super::session_document::RuntimeSessionMetadata,
-        turn: smelt_store::NewTurn,
-    },
-    Transition {
-        metadata: super::session_document::RuntimeSessionMetadata,
-        turn_id: smelt_store::TurnId,
-        state: smelt_store::TurnState,
-        at_ms: u64,
-        terminal_reason: Option<String>,
-    },
-}
-
-struct CanonicalOperation {
-    command_id: crate::persist::CanonicalCommandId,
-    payload: CanonicalOperationPayload,
-    prepared: Option<super::session_document::SessionBatch>,
-}
-
-#[derive(Clone, Copy)]
-enum InflightCanonicalCommand {
-    Submit,
-    Transition {
-        generation: super::session_document::PersistenceGeneration,
-        terminal: bool,
-    },
-}
-
-enum CanonicalOperationProgress {
-    DeferredPreparation,
-    Submit(CanonicalTurnSubmitOutcome),
-    Queued,
+impl PersistenceReport {
+    fn is_empty(&self) -> bool {
+        self.startup.is_none()
+            && !self.durable
+            && self.failure.is_none()
+            && self.audit_warning.is_none()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SaveStatus {
     SkippedReadOnly,
-    Blocked,
     DeferredHydration,
     DeferredStartup,
     Unchanged,
     DurableEphemeral,
     Submitted,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PersistencePreparationBlock {
-    desired: super::session_document::PersistenceGeneration,
-    cause: crate::persist::PersistenceCause,
 }
 
 /// Which channel of the response a delta streams into.
@@ -160,13 +99,11 @@ pub(crate) struct ConversationRuntime {
     /// Raised by every persistence actor this conversation spawns, so the
     /// event loop wakes to apply their acknowledgements.
     persistence_wake: Arc<tokio::sync::Notify>,
-    persistence_epoch: crate::persist::SessionEpoch,
-    observed_persistence_status: Option<crate::persist::SessionPersistenceStatus>,
-    persistence_preparation_block: Option<PersistencePreparationBlock>,
-    next_canonical_command_id: u64,
-    canonical_operations: std::collections::VecDeque<CanonicalOperation>,
-    inflight_canonical_commands:
-        std::collections::HashMap<crate::persist::CanonicalCommandId, InflightCanonicalCommand>,
+    /// The last save failure; automatic saves wait for an explicit retry.
+    save_failure: Option<crate::persist::PersistenceCause>,
+    observed_audit_warning: Option<String>,
+    /// What the writer reported since the app last drained it.
+    pending_report: PersistenceReport,
     access: SessionAccess,
     ownership_recovery: super::session_load::OwnershipRecovery,
     sessions: smelt_core::session::SessionStorage,
@@ -204,12 +141,9 @@ impl ConversationRuntime {
             submissions: Default::default(),
             persistence: None,
             persistence_wake: Arc::default(),
-            persistence_epoch: crate::persist::SessionEpoch::ZERO,
-            observed_persistence_status: None,
-            persistence_preparation_block: None,
-            next_canonical_command_id: 1,
-            canonical_operations: std::collections::VecDeque::new(),
-            inflight_canonical_commands: std::collections::HashMap::new(),
+            save_failure: None,
+            observed_audit_warning: None,
+            pending_report: PersistenceReport::default(),
             access: SessionAccess::Owned,
             ownership_recovery: Default::default(),
             sessions,
@@ -800,29 +734,11 @@ impl ConversationRuntime {
     }
 
     #[cfg(any(test, feature = "harness"))]
-    pub(crate) fn set_transcript_session_dir_for_harness(
+    pub(crate) fn set_transcript_store_for_harness(
         &mut self,
-        session_dir: std::path::PathBuf,
+        store: Option<smelt_core::session::SessionStoreAddress>,
     ) {
-        let session_id = session_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let sessions_root = session_dir
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| self.sessions.sessions_dir());
-        let lineage_id = smelt_store::LineageSessionReader::try_open_existing(
-            &sessions_root,
-            session_id.clone(),
-        )
-        .ok()
-        .flatten()
-        .map(|reader| reader.lineage_id().to_string())
-        .unwrap_or_else(|| session_id.clone());
-        self.document.transcript.set_store_address(Some(
-            smelt_core::session::SessionStoreAddress::new(sessions_root, session_id, lineage_id),
-        ));
+        self.document.transcript.set_store_address(store);
     }
 
     #[cfg(test)]
@@ -903,41 +819,38 @@ impl ConversationRuntime {
         self.document.live_session.is_some()
     }
 
-    pub(crate) fn acknowledged_head(&self) -> smelt_store::StoreHead {
-        self.document.published_head()
-    }
-
-    pub(crate) fn persistence_generation(&self) -> super::session_document::PersistenceGeneration {
-        self.document.generation()
+    pub(crate) fn document_revision(&self) -> u64 {
+        self.document.revision()
     }
 
     pub(crate) fn transcript_records_persisted(&self) -> bool {
         self.document.records_persisted()
     }
 
-    pub(crate) fn has_document_work(&self) -> bool {
-        self.document.has_session_work()
+    /// The history the model sees: the checkpoint summary, then the history since it.
+    pub(crate) fn model_history_source(&self) -> Result<protocol::ModelHistorySource, String> {
+        let checkpoint = self.session.checkpoint.as_ref();
+        if let Some(live) = self.document.live_session.as_ref() {
+            return live.model_history_source(checkpoint);
+        }
+        let (mut items, first_live_index, end_index) = self.session.model_history_range();
+        let coordinates =
+            protocol::ModelHistoryCoordinates::projected(items.len(), first_live_index);
+        items.extend_from_slice(&self.session.history[first_live_index..end_index]);
+        Ok(protocol::ModelHistorySource::projected_items(
+            items,
+            coordinates,
+        ))
     }
 
-    pub(crate) fn automatic_save_blocked(&self) -> bool {
-        self.persistence_preparation_block.is_some()
-            || self.persistence.as_ref().is_some_and(|persistence| {
-                matches!(
-                    persistence.status().state,
-                    crate::persist::PersistenceState::Blocked { .. }
-                        | crate::persist::PersistenceState::OwnershipLost { .. }
-                        | crate::persist::PersistenceState::Stopped { cause: Some(_), .. }
-                )
-            })
-    }
-
-    pub(crate) fn prepare_fork_save(
+    /// The commit that copies this session's unsaved changes into `forked`.
+    pub(crate) fn capture_fork_commit(
         &mut self,
         forked: &mut smelt_core::session::Session,
         metadata: super::session_document::RuntimeSessionMetadata,
-    ) -> Result<Option<super::session_document::ProjectedSessionSave>, String> {
+    ) -> Result<smelt_store::SessionCommit, String> {
         self.document
-            .prepare_fork_save(forked, metadata, &self.session.history)
+            .capture_fork_commit(forked, metadata, &self.session.history)
             .map_err(|error| error.to_string())
     }
 
@@ -957,7 +870,7 @@ impl ConversationRuntime {
     pub(crate) fn install_loaded_full_session(
         &mut self,
         transcript: super::transcript::LoadedTranscript,
-        store_head: Option<smelt_store::StoreHead>,
+        store_head: smelt_store::StoreHead,
     ) {
         self.document
             .install_loaded_full_session(transcript, store_head);
@@ -999,7 +912,25 @@ impl ConversationRuntime {
         &mut self,
         mutation: super::session_document::HistoryMutation,
     ) -> super::session_document::DocumentChange {
-        self.document.apply_history(&mut self.session, mutation)
+        let change = self.document.apply_history(&mut self.session, mutation);
+        self.load_model_context();
+        change
+    }
+
+    /// Keeps the model context in memory, so requests do not read storage.
+    /// After a rewind or a checkpoint change it may start before the memory
+    /// window. A failed read leaves it in storage, where requests read it.
+    fn load_model_context(&mut self) {
+        let checkpoint = self.session.checkpoint.as_ref();
+        let Some(live) = self.document.live_session.as_mut() else {
+            return;
+        };
+        if live
+            .load_from(live.model_context_start(checkpoint))
+            .is_err()
+        {
+            smelt_perf::perf::record_value("live_session:context_load_error", 1);
+        }
     }
 
     fn apply_transcript_mutation(
@@ -1034,7 +965,9 @@ impl ConversationRuntime {
         &mut self,
         mutation: super::session_document::TurnStateMutation,
     ) -> super::session_document::DocumentChange {
-        self.document.apply_turn_state(&mut self.session, mutation)
+        let change = self.document.apply_turn_state(&mut self.session, mutation);
+        self.load_model_context();
+        change
     }
 
     fn plan_history_append(
@@ -2202,6 +2135,7 @@ impl ConversationRuntime {
     ) {
         self.turn
             .record_started_turn(turn_id, mode, reasoning_effort);
+        self.session.last_turn_id = self.session.last_turn_id.max(turn_id);
     }
 
     pub(crate) fn issue_continuation_token(&mut self) -> u64 {
@@ -2261,6 +2195,15 @@ impl ConversationRuntime {
     pub(crate) fn set_history_resave_from_for_harness(&mut self, history_index: usize) {
         self.document
             .set_history_resave_from_for_test(history_index);
+    }
+
+    /// Makes the next session save fail with `error`.
+    #[cfg(test)]
+    pub(crate) fn inject_commit_failure(&self, error: smelt_store::StoreError) {
+        self.persistence
+            .as_ref()
+            .expect("persistent session writer")
+            .fail_next_save(error);
     }
 
     #[cfg(test)]
@@ -2605,7 +2548,7 @@ impl ConversationRuntime {
     pub(crate) fn is_read_only(&self) -> bool {
         self.access.is_read_only()
             && !(self.writer_is_opening()
-                && self.document.published_head() == smelt_store::StoreHead::default())
+                && self.document.durable_head() == smelt_store::StoreHead::default())
     }
 
     pub(crate) fn writer_is_opening(&self) -> bool {
@@ -2672,64 +2615,8 @@ impl ConversationRuntime {
         self.persistence.is_some()
     }
 
-    pub(crate) fn request_search_projection(&self) -> bool {
-        self.persistence
-            .as_ref()
-            .is_some_and(crate::persist::SessionPersistence::request_search_projection)
-    }
-
-    pub(crate) fn delete_branch_through_persistence(
-        &self,
-        target: &smelt_core::session_id::SessionId,
-    ) -> Result<bool, String> {
-        let Some(persistence) = self.persistence.as_ref() else {
-            return Ok(false);
-        };
-        let root = self.sessions.sessions_dir();
-        let active = smelt_store::LineageSessionReader::try_open_existing(&root, &self.session.id)
-            .map_err(|error| error.to_string())?;
-        let target_reader =
-            smelt_store::LineageSessionReader::try_open_existing(root, target.as_str())
-                .map_err(|error| error.to_string())?;
-        let (Some(active), Some(target_reader)) = (active, target_reader) else {
-            return Ok(false);
-        };
-        if active.lineage_id() != target_reader.lineage_id() {
-            return Ok(false);
-        }
-        persistence
-            .delete_branch(
-                target.clone(),
-                std::time::Instant::now() + crate::persist::INTERACTIVE_PERSISTENCE_DEADLINE,
-            )
-            .map_err(|cause| cause.message)?;
-        Ok(true)
-    }
-
     pub(crate) fn has_unflushed_work(&self) -> bool {
-        !self.is_ephemeral() && self.document.has_unflushed_work(&self.session)
-    }
-
-    pub(crate) fn persistence_scope(&self) -> protocol::PersistenceScope {
-        self.persistence_scope_at(
-            self.document.generation().get(),
-            self.document.published_head().revision.get(),
-        )
-    }
-
-    pub(crate) fn persistence_scope_at(
-        &self,
-        required_generation: u64,
-        store_revision: u64,
-    ) -> protocol::PersistenceScope {
-        protocol::PersistenceScope {
-            epoch: self
-                .persistence
-                .as_ref()
-                .map_or(0, |actor| actor.epoch().get()),
-            required_generation,
-            store_revision,
-        }
+        !self.is_ephemeral() && self.document.has_unsaved_work()
     }
 
     #[cfg(test)]
@@ -2738,26 +2625,10 @@ impl ConversationRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn persistence_status(&self) -> Option<crate::persist::SessionPersistenceStatus> {
+    pub(crate) fn persistence_status(&self) -> Option<crate::persist::PersistenceStatus> {
         self.persistence
             .as_ref()
-            .map(|persistence| persistence.status())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_commit_failure(&self, failure: smelt_store::SessionCommitFailure) {
-        self.persistence
-            .as_ref()
-            .expect("persistence actor")
-            .inject_commit_failure(failure);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_publish_failure(&self) {
-        self.persistence
-            .as_ref()
-            .expect("persistence actor")
-            .inject_publish_failure();
+            .map(crate::persist::SessionPersistence::status)
     }
 
     pub(crate) fn reset(&mut self, pid: u32, cwd: std::path::PathBuf) -> String {
@@ -2772,9 +2643,8 @@ impl ConversationRuntime {
         self.access = SessionAccess::Owned;
         self.document.enable_change_tracking();
         self.turn.reset_session();
-        self.canonical_operations.clear();
-        self.inflight_canonical_commands.clear();
         self.document.mark_session_unpersisted();
+        self.save_failure = None;
         self.clear_shared_state();
         old_id
     }
@@ -2787,8 +2657,8 @@ impl ConversationRuntime {
         self.session = loaded;
         self.clear_live_session();
         self.turn.reset_session();
-        self.canonical_operations.clear();
-        self.inflight_canonical_commands.clear();
+        self.turn.restore_last_turn(self.session.last_turn_id);
+        self.save_failure = None;
         self.session.cwd.clone()
     }
 
@@ -2796,9 +2666,10 @@ impl ConversationRuntime {
         self.claim_writer_access_with_writer(None)
     }
 
+    /// Starts the session writer. `writer` is one the caller already opened.
     pub(super) fn claim_writer_access_with_writer(
         &mut self,
-        writer: Option<crate::persist::SessionWriterHandoff>,
+        writer: Option<smelt_store::SessionWriter>,
     ) -> Result<(), crate::persist::PersistenceCause> {
         debug_assert!(self.persistence.is_none());
         if self.is_ephemeral() {
@@ -2806,60 +2677,16 @@ impl ConversationRuntime {
             self.document.enable_change_tracking();
             return Ok(());
         }
-        let epoch = self
-            .persistence_epoch
-            .checked_next()
-            .expect("session persistence epoch overflow");
-        let session_id =
-            smelt_core::session_id::SessionId::parse(&self.session.id).map_err(|error| {
-                crate::persist::PersistenceCause::invariant(format!("invalid session id: {error}"))
-            })?;
         let persistence = crate::persist::SessionPersistence::spawn(
-            self.sessions.clone(),
-            session_id,
-            epoch,
-            self.document.durable_generation(),
-            self.document.published_head(),
+            self.sessions.store().clone(),
+            self.session.id.clone(),
             writer,
             Arc::clone(&self.persistence_wake),
         )?;
-        self.persistence_epoch = epoch;
-        self.observed_persistence_status = None;
-        self.document.bind_persistence(epoch);
         self.persistence = Some(persistence);
+        self.observed_audit_warning = None;
         self.access = SessionAccess::Opening;
         self.document.enable_change_tracking();
-        Ok(())
-    }
-
-    fn finish_writer_startup(
-        &mut self,
-        startup: crate::persist::SessionPersistenceStartup,
-    ) -> Result<(), crate::persist::PersistenceCause> {
-        if startup.epoch != self.persistence_epoch {
-            return Err(crate::persist::PersistenceCause::invariant(
-                "startup persistence epoch did not match the session document",
-            ));
-        }
-        if let Some(recovery) = startup.recovery {
-            let acknowledged = self.document.acknowledge_startup_recovery(
-                startup.epoch,
-                &mut self.session,
-                &recovery,
-            );
-            if !acknowledged {
-                let reason =
-                    "startup turn recovery receipt did not match the session document".to_string();
-                self.mark_read_only(reason.clone());
-                return Err(crate::persist::PersistenceCause::invariant(reason));
-            }
-        }
-        self.turn.set_last_terminal_turn_id(
-            startup
-                .latest_terminal_turn_id
-                .map(smelt_store::TurnId::get),
-        );
-        self.access = SessionAccess::Owned;
         Ok(())
     }
 
@@ -2867,121 +2694,89 @@ impl ConversationRuntime {
         Arc::clone(&self.persistence_wake)
     }
 
+    /// Everything the writer reported since the last drain.
     pub(crate) fn drain_persistence_report(&mut self) -> Option<PersistenceReport> {
-        let startup = if self.writer_is_opening() {
-            let startup = self.persistence.as_mut()?.take_startup()?;
-            let result = startup.and_then(|startup| self.finish_writer_startup(startup));
-            if let Err(cause) = &result {
-                self.mark_read_only(cause.message.clone());
-            }
-            Some(result)
-        } else {
-            None
-        };
-        let persistence = self.persistence.as_ref()?;
-        let status_changed = persistence.take_status_changed();
-        if startup.is_none()
-            && !status_changed
-            && !persistence.is_finished()
-            && persistence.status().canonical_completions.is_empty()
-        {
-            return None;
-        }
-        let status = persistence.take_status();
-        if startup.is_none()
-            && self.observed_persistence_status.as_ref() == Some(&status)
-            && status.canonical_completions.is_empty()
-        {
-            return None;
-        }
-        self.observed_persistence_status = Some(status.clone());
-
-        let mut acknowledged_session_id = None;
-        let publication_adopted = status
-            .acknowledgement
+        if let Some(status) = self
+            .persistence
             .as_ref()
-            .is_none_or(|acknowledgement| {
-                let applied = self.apply_persistence_acknowledgement(acknowledgement);
-                if applied == Some(true) {
-                    acknowledged_session_id =
-                        Some(acknowledgement.result.receipt.session_id.clone());
-                }
-                applied.is_some()
-            });
-        let durable_generation = self.document.durable_generation();
-        let canonical_completions = status
-            .canonical_completions
-            .iter()
-            .filter(|completion| {
-                publication_adopted
-                    || match completion {
-                        crate::persist::CanonicalCommandCompletion::Submit(acknowledgement) => {
-                            acknowledgement.persistence.generation <= durable_generation
-                        }
-                        crate::persist::CanonicalCommandCompletion::Transition(acknowledgement) => {
-                            acknowledgement.persistence.generation <= durable_generation
-                        }
-                        crate::persist::CanonicalCommandCompletion::Failed { .. } => true,
-                    }
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+            .and_then(crate::persist::SessionPersistence::take_changed_status)
+        {
+            self.apply_persistence_status(status);
+        }
+        let report = std::mem::take(&mut self.pending_report);
+        (!report.is_empty()).then_some(report)
+    }
 
-        let failure = match &status.state {
-            crate::persist::PersistenceState::Blocked { desired, cause, .. } => {
-                let command_id =
-                    canonical_completions
-                        .iter()
-                        .find_map(|completion| match completion {
-                            crate::persist::CanonicalCommandCompletion::Failed {
-                                command_id,
-                                generation,
-                                cause: command_cause,
-                            } if generation == desired && command_cause == cause => {
-                                Some(*command_id)
-                            }
-                            _ => None,
-                        });
-                Some(PersistenceFailureReport {
-                    session_id: self.session.id.clone(),
-                    target: command_id.map_or(
-                        PersistenceFailureTarget::None,
-                        PersistenceFailureTarget::Command,
-                    ),
-                    cause: cause.clone(),
-                })
+    /// Applies the writer's status and keeps what changed for the next drain.
+    /// Applying the same status again changes nothing.
+    fn apply_persistence_status(&mut self, status: crate::persist::PersistenceStatus) {
+        let startup = match &status.opened {
+            Some(opened) if self.writer_is_opening() => {
+                match opened {
+                    Ok(()) => self.access = SessionAccess::Owned,
+                    Err(cause) => self.mark_read_only(cause.message.clone()),
+                }
+                Some(opened.clone())
             }
-            crate::persist::PersistenceState::OwnershipLost { cause, .. } => {
-                self.mark_read_only(cause.message.clone());
-                Some(PersistenceFailureReport {
-                    session_id: self.session.id.clone(),
-                    target: PersistenceFailureTarget::AllCanonicalCommands,
-                    cause: cause.clone(),
-                })
-            }
-            crate::persist::PersistenceState::Stopped {
-                cause: Some(cause), ..
-            } => Some(PersistenceFailureReport {
-                session_id: self.session.id.clone(),
-                target: PersistenceFailureTarget::AllCanonicalCommands,
-                cause: cause.clone(),
-            }),
-            crate::persist::PersistenceState::Idle { .. }
-            | crate::persist::PersistenceState::Saving { .. }
-            | crate::persist::PersistenceState::Durable { .. }
-            | crate::persist::PersistenceState::Stopped { cause: None, .. } => None,
+            _ => None,
         };
-        Some(PersistenceReport {
-            acknowledged_session_id,
-            canonical_completions,
-            failure: if startup.as_ref().is_some_and(Result::is_err) {
-                None
-            } else {
-                failure
-            },
-            audit_warning: status.latest_audit_warning.map(|warning| warning.message),
-            startup,
+        let durable = status
+            .durable
+            .is_some_and(|durable| self.document.acknowledge(durable, &mut self.session));
+        if durable {
+            self.save_failure = None;
+        }
+        let failure = status.failure.and_then(|(seq, cause)| {
+            if !self.document.fail_save(seq) {
+                return None;
+            }
+            if cause.class == crate::persist::PersistenceFailureClass::Ownership {
+                self.mark_read_only(cause.message.clone());
+            }
+            self.save_failure = Some(cause.clone());
+            Some(cause)
+        });
+        let audit_warning = (status.audit_warning != self.observed_audit_warning)
+            .then(|| {
+                self.observed_audit_warning = status.audit_warning.clone();
+                status.audit_warning
+            })
+            .flatten();
+        let report = &mut self.pending_report;
+        report.startup = startup.or(report.startup.take());
+        report.durable |= durable;
+        report.failure = failure.or(report.failure.take());
+        report.audit_warning = audit_warning.or(report.audit_warning.take());
+    }
+
+    fn apply_current_persistence_status(&mut self) {
+        if let Some(status) = self
+            .persistence
+            .as_ref()
+            .map(crate::persist::SessionPersistence::status)
+        {
+            self.apply_persistence_status(status);
+        }
+    }
+
+    /// Why closing now would lose changes, if it would.
+    fn unsaved_reason(&self, outcome: crate::persist::PersistenceFlushOutcome) -> Option<String> {
+        self.document.has_unsaved_work().then(|| {
+            self.save_failure.as_ref().map_or_else(
+                || {
+                    outcome
+                        .into_result()
+                        .err()
+                        .unwrap_or_else(|| "session has unsaved changes".into())
+                },
+                |cause| cause.message.clone(),
+            )
         })
+    }
+
+    /// Whether automatic saves wait for an explicit retry.
+    pub(crate) fn automatic_save_blocked(&self) -> bool {
+        self.save_failure.is_some()
     }
 
     pub(crate) fn save(
@@ -2994,19 +2789,8 @@ impl ConversationRuntime {
         if self.is_read_only() {
             return Ok(SaveStatus::SkippedReadOnly);
         }
-        if self.persistence_preparation_block.is_some() {
-            return Ok(SaveStatus::Blocked);
-        }
         if self.is_ephemeral() {
-            self.apply_metadata_mutation(
-                super::session_document::MetadataMutation::UpdateRuntime {
-                    updated_at_ms: metadata.updated_at_ms,
-                    mode: metadata.mode,
-                    reasoning_effort: metadata.reasoning_effort,
-                    model: metadata.model,
-                    fast_mode: metadata.fast_mode,
-                },
-            );
+            self.apply_metadata_mutation(metadata.into_mutation());
             self.publish_shared_state();
             self.document.mark_ephemeral_persisted();
             return Ok(SaveStatus::DurableEphemeral);
@@ -3017,20 +2801,15 @@ impl ConversationRuntime {
                 live.live_suffix_len() as u64,
             );
         }
-        let intent = match self
-            .document
-            .capture_event_batch(&mut self.session, metadata)
-        {
-            Ok(Some(intent)) => intent,
+        let save = match self.document.capture_save(&mut self.session, metadata) {
+            Ok(Some(save)) => save,
             Ok(None) => return Ok(SaveStatus::Unchanged),
-            Err(super::session_document::SessionBatchPreparationError::HydrationPending) => {
+            Err(super::session_document::SaveCaptureError::HydrationPending) => {
                 return Ok(SaveStatus::DeferredHydration);
             }
-            Err(super::session_document::SessionBatchPreparationError::Invalid(message)) => {
-                self.persistence_preparation_block = Some(PersistencePreparationBlock {
-                    desired: self.document.generation(),
-                    cause: crate::persist::PersistenceCause::invariant(message.clone()),
-                });
+            Err(super::session_document::SaveCaptureError::Invalid(message)) => {
+                self.save_failure =
+                    Some(crate::persist::PersistenceCause::invariant(message.clone()));
                 return Err(message);
             }
         };
@@ -3042,105 +2821,60 @@ impl ConversationRuntime {
         }
         self.publish_shared_state();
         self.persistence
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| "persistence actor is unavailable".to_string())?
-            .submit(intent)
+            .submit(save)
             .map_err(|cause| cause.message)?;
         Ok(SaveStatus::Submitted)
     }
 
+    /// Clears a save failure and saves again.
     pub(crate) fn retry_blocked_persistence(
         &mut self,
         metadata: super::session_document::RuntimeSessionMetadata,
     ) -> Result<SaveStatus, String> {
-        let preparation_blocked = self.persistence_preparation_block.is_some();
-        let actor_blocked_at = self
-            .persistence
-            .as_ref()
-            .and_then(|persistence| match persistence.status().state {
-                crate::persist::PersistenceState::Blocked { desired, .. }
-                | crate::persist::PersistenceState::OwnershipLost { desired, .. } => Some(desired),
-                _ => None,
-            });
-        if !preparation_blocked && actor_blocked_at.is_none() {
+        if self.save_failure.take().is_none() {
             return Ok(SaveStatus::Unchanged);
         }
-
-        let latest_generation = self.document.generation();
-        let prepare_latest = preparation_blocked
-            || actor_blocked_at.is_some_and(|blocked| blocked < latest_generation);
-        if preparation_blocked {
-            self.document.transcript.retry_failed_hydrations();
-        }
-        if prepare_latest {
-            let intent = match self
-                .document
-                .capture_event_batch(&mut self.session, metadata)
-            {
-                Ok(intent) => intent,
-                Err(super::session_document::SessionBatchPreparationError::HydrationPending) => {
-                    self.persistence_preparation_block = None;
-                    return Ok(SaveStatus::DeferredHydration);
-                }
-                Err(super::session_document::SessionBatchPreparationError::Invalid(message)) => {
-                    self.persistence_preparation_block = Some(PersistencePreparationBlock {
-                        desired: self.document.generation(),
-                        cause: crate::persist::PersistenceCause::invariant(message.clone()),
-                    });
-                    return Err(message);
-                }
-            };
-            if let Some(intent) = intent {
-                if self.persistence.is_none() {
-                    if let Err(cause) = self.claim_writer_access() {
-                        self.mark_read_only(cause.message.clone());
-                        return Err(cause.message);
-                    }
-                }
-                self.publish_shared_state();
-                self.persistence
-                    .as_ref()
-                    .ok_or_else(|| "persistence actor is unavailable".to_string())?
-                    .submit(intent)
-                    .map_err(|cause| cause.message)?;
-            }
-            self.persistence_preparation_block = None;
-        }
-
-        if actor_blocked_at.is_some() {
-            self.persistence
-                .as_ref()
-                .ok_or_else(|| "persistence actor is unavailable".to_string())?
-                .retry_blocked()
-                .map_err(|cause| cause.message)?;
-        }
-        Ok(SaveStatus::Submitted)
+        self.document.transcript.retry_failed_hydrations();
+        self.save(metadata)
     }
 
+    /// Waits until every submitted save is durable. A save that failed before
+    /// reaching the writer fails the flush too.
     pub(crate) fn flush_persistence_until(
-        &self,
+        &mut self,
         deadline: std::time::Instant,
     ) -> crate::persist::PersistenceFlushOutcome {
-        let target = self.document.generation();
-        if let Some(block) = self.persistence_preparation_block.as_ref() {
-            return crate::persist::PersistenceFlushOutcome::Blocked {
-                epoch: self.persistence_epoch,
-                target: target.max(block.desired),
-                durable: self.document.durable_generation(),
-                cause: block.cause.clone(),
-            };
-        }
         let Some(persistence) = self.persistence.as_ref() else {
-            return crate::persist::PersistenceFlushOutcome::Stopped {
-                epoch: self.persistence_epoch,
-                target,
-                durable: self.document.durable_generation(),
-                cause: crate::persist::PersistenceCause::unavailable(
-                    "persistence actor is unavailable",
-                ),
-            };
+            return crate::persist::PersistenceFlushOutcome::Failed(
+                self.save_failure.clone().unwrap_or_else(|| {
+                    crate::persist::PersistenceCause::unavailable(
+                        "persistence actor is unavailable",
+                    )
+                }),
+            );
         };
-        persistence.flush(target, deadline)
+        let outcome = persistence.flush(deadline);
+        self.apply_current_persistence_status();
+        match (outcome, &self.save_failure) {
+            (crate::persist::PersistenceFlushOutcome::Durable, Some(cause)) => {
+                crate::persist::PersistenceFlushOutcome::Failed(cause.clone())
+            }
+            (outcome, _) => outcome,
+        }
+    }
+
+    /// Whether the writer may close without losing changes: `None` while saves
+    /// are still pending, then `Ok` once they are durable or why not. Without a
+    /// writer there is nothing to wait for.
+    pub(crate) fn poll_persistence_settled(&mut self) -> Option<Result<(), String>> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Some(Ok(()));
+        };
+        let outcome = persistence.try_flush()?;
+        self.apply_current_persistence_status();
+        Some(self.unsaved_reason(outcome).map_or(Ok(()), Err))
     }
 
     #[cfg(test)]
@@ -3151,76 +2885,58 @@ impl ConversationRuntime {
             .pause()
     }
 
-    #[cfg(test)]
-    pub(crate) fn install_persistence_commit_barrier(
-        &self,
-    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        self.persistence
-            .as_ref()
-            .expect("persistence actor is running")
-            .install_commit_barrier()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_persistence_finish_barrier(
-        &self,
-    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        self.persistence
-            .as_ref()
-            .expect("persistence actor is running")
-            .install_finish_barrier()
-    }
-
     pub(crate) fn append_request_audit(
-        &self,
-        scope: protocol::PersistenceScope,
+        &mut self,
         entry: protocol::request_log::RequestLogEntry,
         payload_mode: smelt_store::RequestAuditPayloadMode,
     ) -> Result<bool, crate::persist::PersistenceCause> {
-        let Some(actor) = self.persistence.as_ref() else {
-            return Ok(false);
-        };
-        let epoch = crate::persist::SessionEpoch::new(scope.epoch);
-        if epoch != actor.epoch() || self.is_ephemeral() || self.is_read_only() {
+        if self.is_ephemeral() || self.is_read_only() {
             return Ok(false);
         }
-        actor.append_request_audit(crate::persist::RequestAuditIntent {
-            epoch,
-            required_generation: super::session_document::PersistenceGeneration::new(
-                scope.required_generation,
-            ),
-            entry,
-            payload_mode,
-            payload_capture_skipped_bytes: None,
-        })?;
+        let Some(actor) = self.persistence.as_mut() else {
+            return Ok(false);
+        };
+        actor.append_request_audit(entry, payload_mode)?;
         Ok(true)
     }
 
     pub(crate) fn begin_persistence_close(
         &self,
-    ) -> Result<Option<crate::persist::PendingPersistenceClose>, String> {
-        if let Some(block) = self.persistence_preparation_block.as_ref() {
-            return Err(block.cause.message.clone());
-        }
-        Ok(self.persistence.as_ref().map(|actor| {
+    ) -> Option<crate::persist::PendingPersistenceClose> {
+        self.persistence.as_ref().map(|actor| {
             actor.begin_close(
-                self.document.generation(),
                 std::time::Instant::now() + crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
             )
-        }))
+        })
     }
 
+    /// The close result once the writer stopped. A cancelled close keeps the
+    /// session: the stopped writer is dropped and every save it did not confirm
+    /// is rewritten by the next writer.
     pub(crate) fn poll_persistence_close(
         &mut self,
-        pending: &mut crate::persist::PendingPersistenceClose,
+        pending: &crate::persist::PendingPersistenceClose,
         cancelled: bool,
     ) -> Option<Result<Option<String>, String>> {
         let persistence = self
             .persistence
             .as_mut()
             .expect("closing writer remains owned");
-        let outcome = persistence.poll_close(pending, cancelled)?;
-        Some(outcome.and_then(|outcome| self.finish_persistence_close(outcome, None)))
+        let outcome = persistence.poll_close(pending)?;
+        if !cancelled {
+            return Some(
+                self.finish_persistence_close(outcome, crate::persist::ClosePolicy::RequireDurable),
+            );
+        }
+        if !persistence.is_finished() {
+            return Some(Err(
+                "persistence writer has not finished releasing ownership".into(),
+            ));
+        }
+        self.apply_current_persistence_status();
+        self.release_stopped_writer();
+        self.save_failure = None;
+        Some(Ok(None))
     }
 
     pub(crate) fn close_persistence_until(
@@ -3228,543 +2944,66 @@ impl ConversationRuntime {
         policy: crate::persist::ClosePolicy,
         deadline: std::time::Instant,
     ) -> Result<Option<String>, String> {
-        let target = self.document.generation();
+        let Some(persistence) = self.persistence.as_mut() else {
+            return match (&self.save_failure, policy) {
+                (Some(cause), crate::persist::ClosePolicy::RequireDurable) => {
+                    Err(cause.message.clone())
+                }
+                (cause, _) => Ok(cause.as_ref().map(|cause| cause.message.clone())),
+            };
+        };
         if policy == crate::persist::ClosePolicy::RequireDurable {
-            if let Some(block) = self.persistence_preparation_block.as_ref() {
-                return Err(block.cause.message.clone());
+            // Keep the writer when the close would be refused anyway.
+            let outcome = persistence.flush(deadline);
+            self.apply_current_persistence_status();
+            if let Some(reason) = self.unsaved_reason(outcome) {
+                return Err(reason);
             }
         }
-        let preparation_failure = self
-            .persistence_preparation_block
-            .take()
-            .map(|block| block.cause.message);
-        let Some(persistence) = self.persistence.as_mut() else {
-            return Ok(preparation_failure);
-        };
-        let outcome = persistence.close(target, deadline, policy);
-        self.finish_persistence_close(outcome, preparation_failure)
+        let persistence = self.persistence.as_mut().expect("writer checked above");
+        let outcome = persistence.close(deadline);
+        self.finish_persistence_close(outcome, policy)
     }
 
+    /// Applies the writer's final status. Unsaved changes fail a close that requires them.
     fn finish_persistence_close(
         &mut self,
-        outcome: crate::persist::PersistenceCloseOutcome,
-        preparation_failure: Option<String>,
+        outcome: crate::persist::PersistenceFlushOutcome,
+        policy: crate::persist::ClosePolicy,
     ) -> Result<Option<String>, String> {
-        let epoch = outcome.epoch;
-        let writer_released = self
+        let released = self
             .persistence
             .as_ref()
-            .is_none_or(|actor| actor.is_finished());
-        if let Some(acknowledgement) = outcome.acknowledgement.as_ref() {
-            let _ = self.apply_persistence_acknowledgement(acknowledgement);
+            .expect("closing writer")
+            .is_finished();
+        self.apply_current_persistence_status();
+        let unsaved = self.unsaved_reason(outcome);
+        if !released {
+            return Err(unsaved.unwrap_or_else(|| {
+                "persistence writer has not finished releasing ownership".into()
+            }));
         }
-        if outcome.durable < outcome.target && outcome.omitted.is_none() {
-            return Err(outcome.cause.map_or_else(
-                || {
-                    format!(
-                        "generation {} did not become durable before session close",
-                        outcome.target.get()
-                    )
-                },
-                |cause| cause.message,
-            ));
+        self.release_stopped_writer();
+        if let (Some(message), crate::persist::ClosePolicy::RequireDurable) = (&unsaved, policy) {
+            // The session stays open; the caller gives it a writer again.
+            return Err(message.clone());
         }
-        if !writer_released {
-            return Err(outcome.cause.map_or_else(
-                || "persistence writer has not finished releasing ownership".into(),
-                |cause| cause.message,
-            ));
-        }
-        self.document.unbind_persistence(epoch);
+        self.save_failure = None;
+        Ok(unsaved)
+    }
+
+    /// Drops a writer that has stopped. Saves it did not confirm are rewritten
+    /// by the next writer.
+    fn release_stopped_writer(&mut self) {
         self.persistence = None;
-        self.observed_persistence_status = None;
-        self.canonical_operations.clear();
-        self.inflight_canonical_commands.clear();
-        Ok(outcome
-            .cause
-            .map(|cause| cause.message)
-            .or(preparation_failure))
-    }
-
-    pub(crate) fn submit_canonical_turn(
-        &mut self,
-        metadata: super::session_document::RuntimeSessionMetadata,
-        turn: smelt_store::NewTurn,
-    ) -> Result<CanonicalTurnSubmitOutcome, crate::persist::PersistenceCause> {
-        if self.persistence.is_none() {
-            if let Err(cause) = self.claim_writer_access() {
-                self.mark_read_only(cause.message.clone());
-                return Err(cause);
-            }
-        }
-        if matches!(
-            self.access,
-            SessionAccess::ReadOnly { .. } | SessionAccess::WaitingForOwnership
-        ) {
-            return Err(crate::persist::PersistenceCause::unavailable(
-                "session is read-only",
-            ));
-        }
-        let command_id = self.allocate_canonical_command_id();
-        let operation = CanonicalOperation {
-            command_id,
-            payload: CanonicalOperationPayload::Submit { metadata, turn },
-            prepared: None,
-        };
-        let can_drive = self.canonical_operations.is_empty();
-        self.canonical_operations.push_back(operation);
-        if !can_drive {
-            return Ok(CanonicalTurnSubmitOutcome::PendingPreparation { command_id });
-        }
-        match self.process_front_canonical_operation() {
-            Ok(CanonicalOperationProgress::Submit(outcome)) => Ok(outcome),
-            Ok(CanonicalOperationProgress::DeferredPreparation) => {
-                Ok(CanonicalTurnSubmitOutcome::PendingPreparation { command_id })
-            }
-            Ok(CanonicalOperationProgress::Queued) => {
-                unreachable!("new canonical submission is the front operation")
-            }
-            Err(cause) => {
-                self.discard_canonical_operation(command_id);
-                Err(cause)
-            }
-        }
-    }
-
-    pub(crate) fn enqueue_canonical_turn_transition(
-        &mut self,
-        metadata: super::session_document::RuntimeSessionMetadata,
-        turn_id: smelt_store::TurnId,
-        state: smelt_store::TurnState,
-        terminal_reason: Option<String>,
-    ) -> Result<(), crate::persist::PersistenceCause> {
-        let command_id = self.allocate_canonical_command_id();
-        let operation = CanonicalOperation {
-            command_id,
-            payload: CanonicalOperationPayload::Transition {
-                metadata,
-                turn_id,
-                state,
-                at_ms: smelt_core::session::now_ms(),
-                terminal_reason,
-            },
-            prepared: None,
-        };
-        let can_drive = self.canonical_operations.is_empty();
-        self.canonical_operations.push_back(operation);
-        if !can_drive {
-            return Ok(());
-        }
-        match self.process_front_canonical_operation() {
-            Ok(
-                CanonicalOperationProgress::DeferredPreparation
-                | CanonicalOperationProgress::Queued,
-            ) => Ok(()),
-            Ok(CanonicalOperationProgress::Submit(_)) => {
-                unreachable!("enqueued transition cannot complete synchronously")
-            }
-            Err(cause) => {
-                self.discard_canonical_operation(command_id);
-                Err(cause)
-            }
-        }
-    }
-
-    pub(crate) fn canonical_operations_are_pending(&self) -> bool {
-        !self.canonical_operations.is_empty() || !self.inflight_canonical_commands.is_empty()
-    }
-
-    pub(crate) fn confirm_canonical_completion(
-        &mut self,
-        command_id: crate::persist::CanonicalCommandId,
-    ) -> bool {
-        if self
-            .inflight_canonical_commands
-            .remove(&command_id)
-            .is_none()
-        {
-            return false;
-        }
-        if let Some(persistence) = self.persistence.as_ref() {
-            persistence.confirm_canonical_completion(command_id);
-        }
-        true
-    }
-
-    pub(crate) fn abandon_canonical_operation(
-        &mut self,
-        command_id: crate::persist::CanonicalCommandId,
-    ) {
-        self.discard_canonical_operation(command_id);
-        self.inflight_canonical_commands.remove(&command_id);
-        if let Some(persistence) = self.persistence.as_ref() {
-            persistence.confirm_canonical_completion(command_id);
-        }
-    }
-
-    pub(crate) fn abandon_all_canonical_operations(&mut self) {
-        let mut command_ids = self
-            .canonical_operations
-            .drain(..)
-            .map(|operation| operation.command_id)
-            .collect::<Vec<_>>();
-        command_ids.extend(
-            self.inflight_canonical_commands
-                .drain()
-                .map(|(command_id, _)| command_id),
-        );
-        if let Some(persistence) = self.persistence.as_ref() {
-            for command_id in command_ids {
-                persistence.confirm_canonical_completion(command_id);
-            }
-        }
-    }
-
-    pub(crate) fn drive_canonical_operations(&mut self) -> Vec<CanonicalOperationEvent> {
-        let mut events = Vec::new();
-        loop {
-            if self.canonical_operations.is_empty() {
-                break;
-            }
-            let command_id = self
-                .canonical_operations
-                .front()
-                .expect("front canonical operation")
-                .command_id;
-            match self.process_front_canonical_operation() {
-                Ok(CanonicalOperationProgress::DeferredPreparation) => break,
-                Ok(CanonicalOperationProgress::Queued) => {}
-                Ok(CanonicalOperationProgress::Submit(outcome)) => {
-                    events.push(CanonicalOperationEvent::Submit(outcome));
-                    break;
-                }
-                Err(cause) => {
-                    self.discard_canonical_operation(command_id);
-                    events.push(CanonicalOperationEvent::Failed { command_id, cause });
-                    break;
-                }
-            }
-        }
-        events
-    }
-
-    fn process_front_canonical_operation(
-        &mut self,
-    ) -> Result<CanonicalOperationProgress, crate::persist::PersistenceCause> {
-        if self.writer_is_opening() {
-            return Ok(CanonicalOperationProgress::DeferredPreparation);
-        }
-        let operation = self
-            .canonical_operations
-            .front_mut()
-            .expect("front canonical operation");
-        let command_id = operation.command_id;
-        let prepared = operation.prepared.take().filter(|batch| {
-            batch.generation == self.document.generation()
-                && batch.matches_archive_base(&self.session)
-        });
-        let session = if let Some(prepared) = prepared {
-            prepared
-        } else {
-            let metadata = match &operation.payload {
-                CanonicalOperationPayload::Submit { metadata, .. }
-                | CanonicalOperationPayload::Transition { metadata, .. } => metadata.clone(),
-            };
-            let session = match self
-                .document
-                .capture_turn_batch(&mut self.session, metadata)
-            {
-                Ok(session) => session,
-                Err(super::session_document::SessionBatchPreparationError::HydrationPending) => {
-                    return Ok(CanonicalOperationProgress::DeferredPreparation);
-                }
-                Err(super::session_document::SessionBatchPreparationError::Invalid(message)) => {
-                    return Err(crate::persist::PersistenceCause::invariant(message));
-                }
-            };
-            self.publish_shared_state();
-            session
-        };
-        let payload = &self
-            .canonical_operations
-            .front()
-            .expect("front canonical operation")
-            .payload;
-        match payload {
-            CanonicalOperationPayload::Submit { turn, .. } => {
-                let generation = session.generation;
-                let status = self
-                    .persistence
-                    .as_ref()
-                    .ok_or_else(|| {
-                        crate::persist::PersistenceCause::unavailable(
-                            "persistence actor is unavailable",
-                        )
-                    })?
-                    .enqueue_turn_submission(crate::persist::SubmitTurnIntent {
-                        command_id,
-                        session,
-                        turn: turn.clone(),
-                    })?;
-                if let crate::persist::CanonicalEnqueueStatus::Backpressure(intent) = status {
-                    self.canonical_operations.front_mut().unwrap().prepared = Some(intent.session);
-                    return Ok(CanonicalOperationProgress::DeferredPreparation);
-                }
-                self.canonical_operations.pop_front();
-                self.inflight_canonical_commands
-                    .insert(command_id, InflightCanonicalCommand::Submit);
-                Ok(CanonicalOperationProgress::Submit(
-                    CanonicalTurnSubmitOutcome::PendingPersistence {
-                        command_id,
-                        generation,
-                    },
-                ))
-            }
-            CanonicalOperationPayload::Transition {
-                turn_id,
-                state,
-                at_ms,
-                terminal_reason,
-                ..
-            } => {
-                let generation = session.generation;
-                let intent = crate::persist::TurnTransitionIntent {
-                    command_id,
-                    session,
-                    turn_id: *turn_id,
-                    state: *state,
-                    at_ms: *at_ms,
-                    terminal_reason: terminal_reason.clone(),
-                };
-                let terminal = state.is_terminal();
-                let status = self
-                    .persistence
-                    .as_ref()
-                    .ok_or_else(|| {
-                        crate::persist::PersistenceCause::unavailable(
-                            "persistence actor is unavailable",
-                        )
-                    })?
-                    .enqueue_turn_transition(intent)?;
-                if let crate::persist::CanonicalEnqueueStatus::Backpressure(intent) = status {
-                    self.canonical_operations.front_mut().unwrap().prepared = Some(intent.session);
-                    return Ok(CanonicalOperationProgress::DeferredPreparation);
-                }
-                self.canonical_operations.pop_front();
-                self.inflight_canonical_commands.insert(
-                    command_id,
-                    InflightCanonicalCommand::Transition {
-                        generation,
-                        terminal,
-                    },
-                );
-                Ok(CanonicalOperationProgress::Queued)
-            }
-        }
-    }
-
-    fn allocate_canonical_command_id(&mut self) -> crate::persist::CanonicalCommandId {
-        let command_id = crate::persist::CanonicalCommandId::new(self.next_canonical_command_id);
-        self.next_canonical_command_id = self
-            .next_canonical_command_id
-            .checked_add(1)
-            .expect("canonical command ID overflow");
-        command_id
-    }
-
-    fn discard_canonical_operation(&mut self, command_id: crate::persist::CanonicalCommandId) {
-        self.canonical_operations
-            .retain(|operation| operation.command_id != command_id);
-    }
-
-    /// A matching publication can settle its command while newer document work
-    /// stays dirty. The value reports whether the current document is clean.
-    fn apply_persistence_acknowledgement(
-        &mut self,
-        acknowledgement: &crate::persist::PersistenceAcknowledgement,
-    ) -> Option<bool> {
-        if !self
-            .document
-            .adopt_archive_publication(acknowledgement, &mut self.session)
-        {
-            return None;
-        }
-        let applied = self.document.acknowledge_coalesced_batch(
-            acknowledgement,
-            &self.session.id,
-            self.history_len(),
-            self.session.checkpoint.as_ref(),
-        );
-        if applied {
-            self.refresh_transcript_store_address(&acknowledgement.result.receipt);
-            if let Some(persistence) = self.persistence.as_ref() {
-                persistence.confirm_acknowledgement(acknowledgement);
-            }
-        }
-        if applied || acknowledgement.generation <= self.document.durable_generation() {
-            self.confirm_superseded_nonterminal_commands(acknowledgement.generation);
-        }
-        Some(applied)
-    }
-
-    fn confirm_superseded_nonterminal_commands(
-        &mut self,
-        durable_generation: super::session_document::PersistenceGeneration,
-    ) {
-        // A later cumulative acknowledgement makes nonterminal transitions durable.
-        // Equal-generation receipts still need exact command confirmation.
-        let command_ids = self
-            .inflight_canonical_commands
-            .iter()
-            .filter_map(|(command_id, command)| match command {
-                InflightCanonicalCommand::Transition {
-                    generation,
-                    terminal: false,
-                } if *generation < durable_generation => Some(*command_id),
-                InflightCanonicalCommand::Submit => None,
-                InflightCanonicalCommand::Transition { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        for command_id in command_ids {
-            self.inflight_canonical_commands.remove(&command_id);
-            if let Some(persistence) = self.persistence.as_ref() {
-                persistence.confirm_canonical_completion(command_id);
-            }
-        }
-    }
-
-    fn refresh_transcript_store_address(&mut self, receipt: &smelt_store::SaveReceipt) {
-        let Some(lineage_id) = receipt.lineage_id.clone() else {
-            return;
-        };
-        self.document.transcript.set_store_address(Some(
-            smelt_core::session::SessionStoreAddress::new(
-                self.sessions.sessions_dir(),
-                self.session.id.clone(),
-                lineage_id,
-            ),
-        ));
+        self.document.fail_all_in_flight();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
-    use crate::persist::PersistenceFlushOutcome;
-
     #[test]
-    fn foreign_startup_epoch_does_not_adopt_access_or_terminal_turn() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let conversation = &mut app.app.conversation;
-        conversation.access = super::SessionAccess::Opening;
-        let head = conversation.document.published_head();
-        let terminal = conversation.last_terminal_turn_id();
-        let startup = crate::persist::SessionPersistenceStartup {
-            epoch: conversation.persistence_epoch.checked_next().unwrap(),
-            recovery: None,
-            latest_terminal_turn_id: Some(smelt_store::TurnId::new(99)),
-        };
-        assert!(conversation.finish_writer_startup(startup).is_err());
-        assert!(conversation.writer_is_opening());
-        assert_eq!(conversation.last_terminal_turn_id(), terminal);
-        assert_eq!(conversation.document.published_head(), head);
-    }
-
-    #[test]
-    fn backpressure_reuses_prepared_batches_until_the_document_changes() {
-        use crossterm::event::KeyCode;
-        for change_title in [false, true] {
-            let mut app = crate::app::test_harness::TestApp::builder().build();
-            app.ensure_writer_ready();
-            let release = app
-                .app
-                .conversation
-                .persistence
-                .as_ref()
-                .unwrap()
-                .pause_with_full_control_lane();
-            app.type_text("retained request");
-            app.press(KeyCode::Enter);
-            assert!(app.app.turn_submission_is_pending());
-            assert!(!app.agent_running());
-            let prepared = app
-                .app
-                .conversation
-                .canonical_operations
-                .front()
-                .unwrap()
-                .prepared
-                .clone()
-                .unwrap();
-            if change_title {
-                app.app
-                    .set_session_title("new title".into(), "new-title".into(), None);
-                app.app.drive_canonical_operations();
-                let changed = app
-                    .app
-                    .conversation
-                    .canonical_operations
-                    .front()
-                    .unwrap()
-                    .prepared
-                    .as_ref()
-                    .unwrap();
-                assert_ne!(changed.generation, prepared.generation);
-                assert!(!changed.shares_storage_with(&prepared));
-            }
-            let prepared = app
-                .app
-                .conversation
-                .canonical_operations
-                .front()
-                .unwrap()
-                .prepared
-                .clone()
-                .unwrap();
-            app.type_text("new draft");
-            for _ in 0..20 {
-                app.app.drive_canonical_operations();
-                app.render_unsettled_silent();
-                let retained = app
-                    .app
-                    .conversation
-                    .canonical_operations
-                    .front()
-                    .unwrap()
-                    .prepared
-                    .as_ref()
-                    .unwrap();
-                assert_eq!(retained.generation, prepared.generation);
-                assert!(
-                    retained.shares_storage_with(&prepared),
-                    "unchanged backpressure replaced the captured batch"
-                );
-            }
-            assert_eq!(app.state().prompt_text, "new draft");
-            assert!(app
-                .drain_engine_sends()
-                .iter()
-                .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-            release.send(()).unwrap();
-            app.wait_for_turn_persistence();
-            assert!(app.agent_running());
-            assert_eq!(app.state().prompt_text, "new draft");
-            assert_eq!(
-                app.drain_engine_sends()
-                    .iter()
-                    .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
-                    .count(),
-                1
-            );
-            if change_title {
-                assert_eq!(app.session_snapshot().title.as_deref(), Some("new title"));
-            }
-        }
-    }
-
-    #[test]
-    fn streaming_save_publishes_its_capture_without_consuming_newer_deltas() {
+    fn streaming_save_keeps_deltas_that_arrive_after_its_capture() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_submitted_turn("initial request");
         let release = app.app.conversation.pause_persistence();
@@ -3776,7 +3015,7 @@ mod tests {
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_silent();
         app.app.save_session();
-        let generation = app.app.conversation.persistence_generation();
+        assert!(!app.app.conversation.document.has_uncaptured_work());
         app.feed_one(crate::event_source::SourceEvent::engine(
             protocol::EngineEvent::TextDelta {
                 delta: " newer text 界".into(),
@@ -3784,208 +3023,25 @@ mod tests {
         ));
         app.clock.advance(crate::app::stream_reveal::MAX_SPREAD);
         app.render_silent();
-        assert!(app.app.conversation.persistence_generation() > generation);
+        assert!(app.app.conversation.document.has_uncaptured_work());
         release.send(()).unwrap();
-        let actor = app.app.conversation.persistence.as_ref().unwrap();
-        assert!(matches!(
-            actor.flush(generation, Instant::now() + Duration::from_secs(5)),
-            PersistenceFlushOutcome::Durable { .. }
-        ));
-        let acknowledgement = actor.status().acknowledgement.unwrap();
-        assert_eq!(acknowledgement.generation, generation);
-        let row = acknowledgement
-            .frame
-            .command()
-            .transcript_records
-            .as_ref()
-            .unwrap()
-            .records
-            .last()
-            .unwrap()
-            .clone();
-        let record = smelt_core::TranscriptBlockRecord::try_from(row).unwrap();
-        assert_eq!(
-            record.block.raw_text().unwrap(),
-            "captured streaming text α"
-        );
-        assert_eq!(record.content_hash, record.block.content_hash());
-        app.app.drain_persist_reports();
-        assert!(app.app.conversation.has_unflushed_work());
         app.save_session_and_flush();
-        let reader = smelt_store::LineageSessionReader::open_existing(
-            app.app.core.sessions.sessions_dir(),
-            &app.session_snapshot().id,
-        )
-        .unwrap();
-        let count = reader
-            .store_head()
-            .unwrap()
-            .transcript_record_count
-            .as_usize()
+        assert!(!app.app.conversation.has_unflushed_work());
+
+        let reader = app
+            .app
+            .core
+            .sessions
+            .reader(&app.session_snapshot().id)
             .unwrap();
-        let saved = reader
-            .transcript_record_slice_with_total((count - 1..count).into(), count)
-            .unwrap();
+        let count = reader.head().unwrap().transcript_record_count.get();
+        let saved = reader.transcript_range(count - 1, count).unwrap();
         let record =
-            smelt_core::TranscriptBlockRecord::try_from(saved.records.into_iter().next().unwrap())
-                .unwrap();
+            smelt_core::TranscriptBlockRecord::try_from(saved.into_iter().next().unwrap()).unwrap();
         assert_eq!(
             record.block.raw_text().unwrap(),
             "captured streaming text α newer text 界"
         );
         assert_eq!(record.content_hash, record.block.content_hash());
-    }
-
-    #[test]
-    fn first_message_rewind_after_a_late_persistence_confirmation_can_resubmit() {
-        for vim in [false, true] {
-            let mut app = crate::app::test_harness::TestApp::builder()
-                .with_vim(vim)
-                .build();
-            app.ensure_writer_ready();
-            app.app.stage_request_history_item_with_first_user(
-                protocol::HistoryItem::user(protocol::Content::text("first request")),
-                Some(smelt_core::transcript_model::Block::User {
-                    text: "first request".into(),
-                    image_labels: Vec::new(),
-                    command: false,
-                    sent_at_ms: None,
-                }),
-                Some("first request".into()),
-            );
-            let super::CanonicalTurnSubmitOutcome::PendingPersistence {
-                command_id,
-                generation,
-            } = app
-                .app
-                .submit_canonical_turn(smelt_store::NewTurn {
-                    kind: smelt_store::TurnKind::User,
-                    submitted_history_idx: smelt_store::HistoryIndex::new(0),
-                    continuation_of: None,
-                    created_at_ms: smelt_core::session::now_ms(),
-                })
-                .unwrap()
-            else {
-                panic!("first turn submission was not queued");
-            };
-            let actor = app.app.conversation.persistence.as_ref().unwrap();
-            assert!(matches!(
-                actor.flush(generation, Instant::now() + Duration::from_secs(5)),
-                PersistenceFlushOutcome::Durable { .. }
-            ));
-            let submitted = actor
-                .status()
-                .canonical_completions
-                .iter()
-                .find_map(|completion| match completion {
-                    crate::persist::CanonicalCommandCompletion::Submit(submitted)
-                        if submitted.command_id == command_id =>
-                    {
-                        Some(submitted.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            app.app.conversation.drain_persistence_report().unwrap();
-            assert!(app
-                .app
-                .conversation
-                .confirm_canonical_completion(command_id));
-
-            // Engine dispatch can be active while Ready -> Running is still queued.
-            app.start_turn(submitted.receipt.turn_id.get());
-            let mut turn = app.app.conversation.clear_active().unwrap();
-            turn.canonical = true;
-            turn.rewind_history_idx = Some(0);
-            app.app.conversation.set_active(Some(turn));
-            let conversation = &mut app.app.conversation;
-            conversation.set_title("First request".into(), "first-request".into(), 1);
-            let metadata = crate::app::session_document::RuntimeSessionMetadata {
-                updated_at_ms: conversation.session.updated_at_ms,
-                mode: app.app.core.config.mode.as_str().to_string(),
-                reasoning_effort: app.app.core.config.reasoning_effort.clone(),
-                model: conversation.session.model.clone(),
-                fast_mode: conversation.session.fast_mode.unwrap_or(false),
-            };
-            assert_eq!(
-                conversation.save(metadata.clone()).unwrap(),
-                super::SaveStatus::Submitted
-            );
-            let generation = conversation.persistence_generation();
-            let actor = conversation.persistence.as_ref().unwrap();
-            assert!(matches!(
-                actor.flush(generation, Instant::now() + Duration::from_secs(5)),
-                PersistenceFlushOutcome::Durable { .. }
-            ));
-            let saved = actor.status().acknowledgement.unwrap();
-            let resume = actor.pause();
-            conversation
-                .enqueue_canonical_turn_transition(
-                    metadata,
-                    submitted.receipt.turn_id,
-                    smelt_store::TurnState::Running,
-                    None,
-                )
-                .unwrap();
-            assert_eq!(conversation.persistence_generation(), generation);
-            conversation
-                .persistence
-                .as_ref()
-                .unwrap()
-                .resume_before_next_confirmation(resume);
-
-            // Only the worker advances between applying the save and confirming it.
-            // Both writes are queued before the UI takes its status snapshot.
-            app.app.drain_persist_reports();
-            let conversation = &app.app.conversation;
-            assert_eq!(conversation.persistence_generation(), generation);
-            assert_eq!(
-                conversation.acknowledged_head(),
-                saved.result.receipt.current
-            );
-            let status = conversation.persistence.as_ref().unwrap().status();
-            let running = status.acknowledgement.as_ref().unwrap();
-            assert_eq!(running.generation, saved.generation);
-            assert_eq!(
-                running.result.receipt.previous,
-                saved.result.receipt.current
-            );
-            // A turn-state-only commit keeps the saved session revision unchanged.
-            assert_eq!(running.result.receipt.current, saved.result.receipt.current);
-            assert_ne!(running.result.receipt, saved.result.receipt);
-            assert_eq!(status.canonical_completions.len(), 1);
-            assert!(matches!(
-                status.canonical_completions.front(),
-                Some(crate::persist::CanonicalCommandCompletion::Transition(completion))
-                    if completion.receipt.state == smelt_store::TurnState::Running
-            ));
-
-            app.press(crossterm::event::KeyCode::Esc);
-            app.press(crossterm::event::KeyCode::Esc);
-            assert_eq!(app.state().prompt_text, "first request");
-            app.press(crossterm::event::KeyCode::Enter);
-            assert!(app.app.turn_submission_is_pending());
-            assert!(app.state().queued_inputs.is_empty());
-            let generation = app.app.conversation.persistence_generation();
-            let actor = app.app.conversation.persistence.as_ref().unwrap();
-            assert!(matches!(
-                actor.flush(generation, Instant::now() + Duration::from_secs(5)),
-                PersistenceFlushOutcome::Durable { .. }
-            ));
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !app.agent_running() && Instant::now() < deadline {
-                app.app.drain_persist_reports();
-                app.app.save_deferred_session_batch_if_ready();
-                app.app.start_next_queued_input_if_idle();
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            assert!(
-                app.agent_running(),
-                "rewound first message stayed queued (vim={vim}): head={:?}, persistence={:?}",
-                app.app.conversation.acknowledged_head(),
-                app.app.conversation.persistence.as_ref().unwrap().status(),
-            );
-            assert!(app.app.prompt.queue_is_empty());
-        }
     }
 }

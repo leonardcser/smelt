@@ -317,8 +317,7 @@ fn session_preview_worker_loop(
     shared: Arc<SessionPreviewWorkerShared>,
     event_tx: tokio::sync::mpsc::UnboundedSender<super::AppEvent>,
 ) {
-    let mut retained_reader: Option<(TranscriptStoreAddress, smelt_store::LineageSessionReader)> =
-        None;
+    let mut retained_reader: Option<(TranscriptStoreAddress, smelt_store::SessionReader)> = None;
     loop {
         let request = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -379,13 +378,11 @@ fn session_preview_worker_loop(
                     .as_ref()
                     .is_none_or(|(address, _)| address != &hydration.store_address);
                 if needs_open {
-                    retained_reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                        &hydration.store_address.sessions_root,
-                        &hydration.store_address.lineage_id,
-                        &hydration.store_address.session_id,
-                    )
-                    .ok()
-                    .map(|reader| (hydration.store_address.clone(), reader));
+                    retained_reader = hydration
+                        .store_address
+                        .reader()
+                        .ok()
+                        .map(|reader| (hydration.store_address.clone(), reader));
                 }
                 let hydrated = retained_reader
                     .as_ref()
@@ -434,29 +431,22 @@ fn load_session_preview(
     id: &str,
     width: u16,
     height: u16,
-    retained_reader: &mut Option<(TranscriptStoreAddress, smelt_store::LineageSessionReader)>,
+    retained_reader: &mut Option<(TranscriptStoreAddress, smelt_store::SessionReader)>,
     cancelled: &dyn Fn() -> bool,
 ) -> Option<LoadedTranscript> {
-    let resolved = sessions.resolve_session_for_read_result(id).ok()?;
+    let address = sessions.resolve(id).ok()?;
     if cancelled() {
         return None;
     }
-    let address =
-        TranscriptStoreAddress::new(resolved.sessions_root, resolved.id, resolved.lineage_id);
     let needs_open = retained_reader
         .as_ref()
         .is_none_or(|(current, _)| current != &address);
     if needs_open {
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &address.sessions_root,
-            &address.lineage_id,
-            &address.session_id,
-        )
-        .ok()?;
+        let reader = address.reader().ok()?;
         *retained_reader = Some((address.clone(), reader));
     }
     let reader = &retained_reader.as_ref()?.1;
-    let total_count = usize::try_from(reader.snapshot().ok()?.transcript_len).ok()?;
+    let total_count = reader.head().ok()?.transcript_record_count.as_usize();
     if total_count == 0 {
         return None;
     }
@@ -885,12 +875,8 @@ mod tests {
         let session_id = marker.to_string().repeat(64);
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.id.clone_from(&session_id);
-        storage.save_result(&session).expect("save preview session");
-        let resolved = storage
-            .resolve_session_for_read_result(&session_id)
-            .expect("resolve preview session");
-        let address =
-            TranscriptStoreAddress::new(resolved.sessions_root, resolved.id, resolved.lineage_id);
+        storage.save(&session).expect("save preview session");
+        let address = storage.address(session_id.clone());
         let mut transcript = smelt_core::content::transcript::Transcript::new();
         for index in 0..64 {
             transcript.push(smelt_core::transcript_model::Block::Text {
@@ -954,9 +940,7 @@ mod tests {
         let session_id = "f".repeat(64);
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.id.clone_from(&session_id);
-        storage
-            .save_result(&session)
-            .expect("save recordless session");
+        storage.save(&session).expect("save recordless session");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let worker = SessionPreviewWorker::spawn(event_tx);
 

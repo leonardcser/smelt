@@ -42,7 +42,7 @@ pub fn entry(
         protocol::RequestAuditMode::Off => return None,
         protocol::RequestAuditMode::Summary => (
             smelt_store::RequestAuditPayloadMode::Summary {
-                raw_body_size: Some(serialized_json_len(info.body) as u64),
+                raw_body_size: Some(info.body_bytes as u64),
             },
             false,
         ),
@@ -57,7 +57,7 @@ pub fn entry(
 /// Append one request attempt to the session's request audit.
 #[cfg(test)]
 pub fn append(
-    writer: &mut smelt_store::OwnedLineageWriter,
+    writer: &mut smelt_store::SessionWriter,
     ctx: RequestContext,
     info: &RequestAttemptInfo<'_>,
     pricing: &smelt_provider::ResolvedPricing,
@@ -66,9 +66,7 @@ pub fn append(
     let Some((entry, payload_mode)) = entry(ctx, info, pricing, mode) else {
         return Ok(None);
     };
-    writer
-        .append_request_attempt(&entry, payload_mode)
-        .map(Some)
+    writer.append_request(&entry, payload_mode).map(Some)
 }
 
 /// Static context for a logical request.
@@ -263,45 +261,23 @@ mod tests {
 
     const SESSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    fn open_writer(root: &std::path::Path) -> smelt_store::OwnedLineageWriter {
-        let mut writer = smelt_store::OwnedLineageWriter::open(root, SESSION_ID).unwrap();
+    fn open_writer(root: &std::path::Path) -> smelt_store::SessionWriter {
+        let mut writer = smelt_store::Store::new(root).writer(SESSION_ID).unwrap();
         writer
-            .commit_session(&smelt_store::SessionCommit {
-                session_id: SESSION_ID.into(),
-                expected: smelt_store::StoreHead::default(),
-                identity: smelt_store::SessionIdentity {
+            .commit(
+                &smelt_store::SessionIdentity {
                     id: SESSION_ID.into(),
                     created_at: 1,
                     parent_id: None,
                 },
-                metadata: smelt_store::SessionMetadata {
-                    title: None,
-                    slug: None,
-                    first_user_message: None,
-                    cwd: None,
-                    mode: None,
-                    reasoning_effort: None,
-                    model: None,
-                    fast_mode: None,
-                    accounting_json: None,
-                    checkpoint_json: None,
-                    checkpoint_events_json: None,
-                    context_tokens: None,
-                    context_tokens_history_len: None,
-                    display_context_tokens: None,
-                    session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
-                    updated_at: 1,
-                },
-                history: smelt_store::HistorySuffix {
-                    start: smelt_store::HistoryIndex::ZERO,
-                    final_len: smelt_store::HistoryLen::ZERO,
-                    items: Vec::new(),
-                },
-                side_tables: smelt_store::SideTableSuffixes::default(),
-                transcript_records: None,
-            })
+                &smelt_store::SessionCommit::default(),
+            )
             .unwrap();
         writer
+    }
+
+    fn open_reader(root: &std::path::Path) -> smelt_store::SessionReader {
+        smelt_store::Store::new(root).reader(SESSION_ID).unwrap()
     }
 
     fn zero_pricing() -> ResolvedPricing {
@@ -382,6 +358,7 @@ mod tests {
                     provider_kind: ProviderKind::OpenAiCompatible,
                     model: "test-model",
                     body: &body,
+                    body_bytes: serde_json::to_vec(&body).unwrap().len(),
                     attempt: index as u32 + 1,
                     elapsed_ms: 1,
                     result,
@@ -403,10 +380,9 @@ mod tests {
                         .unwrap(),
                 );
             }
-            writer.release().unwrap();
-            let reader =
-                smelt_store::LineageSessionReader::open_existing(tmp.path(), SESSION_ID).unwrap();
-            let stats = reader.request_audit_stats().unwrap();
+            drop(writer);
+            let reader = open_reader(tmp.path());
+            let stats = reader.request_stats().unwrap();
             assert_eq!(stats.request_count, 2);
             assert_eq!(stats.error_count, 1);
             assert_eq!(
@@ -421,7 +397,7 @@ mod tests {
             };
             assert_eq!(success.response_payload_kind, Some(expected_kind));
             let attempts = reader
-                .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+                .requests(&smelt_store::RequestAuditQuery::default())
                 .unwrap();
             let attempt = attempts
                 .iter()
@@ -488,6 +464,7 @@ mod tests {
             provider_kind: ProviderKind::OpenAiCompatible,
             model: "gpt-test",
             body: &body,
+            body_bytes: serde_json::to_vec(&body).unwrap().len(),
             attempt: 1,
             elapsed_ms: 42,
             result: Ok(&response),
@@ -559,6 +536,7 @@ mod tests {
             provider_kind: ProviderKind::OpenAiCompatible,
             model: "gpt-test",
             body: &body,
+            body_bytes: serde_json::to_vec(&body).unwrap().len(),
             attempt: 1,
             elapsed_ms: 42,
             result: Ok(&resp),
@@ -585,11 +563,10 @@ mod tests {
         .unwrap();
 
         assert!(id.is_none());
-        writer.release().unwrap();
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(tmp.path(), SESSION_ID).unwrap();
+        drop(writer);
+        let reader = open_reader(tmp.path());
         let attempts = reader
-            .query_request_attempts(&smelt_store::RequestAuditQuery::default())
+            .requests(&smelt_store::RequestAuditQuery::default())
             .unwrap();
         assert!(attempts.is_empty());
     }
@@ -616,6 +593,7 @@ mod tests {
             provider_kind: ProviderKind::OpenAiCompatible,
             model: "gpt-test",
             body: &body,
+            body_bytes: serde_json::to_vec(&body).unwrap().len(),
             attempt: 1,
             elapsed_ms: 42,
             result: Ok(&resp),
@@ -646,6 +624,7 @@ mod tests {
             provider_kind: ProviderKind::OpenAiCompatible,
             model: "gpt-test",
             body: &body,
+            body_bytes: serde_json::to_vec(&body).unwrap().len(),
             attempt: 2,
             elapsed_ms: 100,
             result: Err(&err),
@@ -670,11 +649,10 @@ mod tests {
         )
         .unwrap();
 
-        writer.release().unwrap();
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(tmp.path(), SESSION_ID).unwrap();
+        drop(writer);
+        let reader = open_reader(tmp.path());
         let attempts = reader
-            .query_request_attempts(&smelt_store::RequestAuditQuery {
+            .requests(&smelt_store::RequestAuditQuery {
                 order: smelt_store::RequestAuditOrder::OldestFirst,
                 ..Default::default()
             })
@@ -694,7 +672,7 @@ mod tests {
 
         let second = &attempts[1];
         assert_eq!(second.attempt, 2);
-        assert!(second.response_hash.is_none());
+        assert!(!second.has_response);
         let second_payloads = reader.request_payloads(second.id).unwrap().unwrap();
         let error: RequestError = serde_json::from_value(second_payloads.error.unwrap()).unwrap();
         assert_eq!(error.kind, "network");

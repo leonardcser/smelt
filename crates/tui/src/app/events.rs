@@ -2310,7 +2310,7 @@ mod tests {
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
         app.app.start_next_queued_input_if_idle();
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.actions().iter().any(|action| matches!(
@@ -2495,7 +2495,7 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.actions().iter().any(|action| matches!(
             action,
@@ -2531,7 +2531,7 @@ mod tests {
                 retry_at_ms: None,
             },
         ));
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert_eq!(
             app.app.prompt_work_state(),
             crate::app::PromptWorkState::Paused
@@ -2551,11 +2551,11 @@ mod tests {
                 if payload.input.provider_content().image_count() == 1)
         )));
 
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.finish_turn());
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.app.start_next_queued_input_if_idle();
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
         assert!(app.actions().iter().any(|action| matches!(
             action,
@@ -2686,7 +2686,7 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.agent_running());
@@ -2706,49 +2706,38 @@ mod tests {
     }
 
     #[test]
-    fn queued_turn_submit_timeout_resumes_without_making_session_read_only() {
+    fn turn_dispatches_while_the_session_writer_is_busy() {
         let mut app = TestApp::builder().build();
         app.type_text("baseline");
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
-        assert!(!app.app.conversation.canonical_operations_are_pending());
 
         let release_persistence = app.app.conversation.pause_persistence();
-        app.type_text("queued submit");
+        app.type_text("next request");
         app.press(KeyCode::Enter);
 
-        assert!(app.app.turn_submission_is_pending());
-        assert!(app.app.turn_lifecycle_is_active());
-        assert!(!app.agent_running());
-        assert!(!app.session_is_read_only());
-        assert_eq!(app.state().prompt_text, "");
-        assert!(!app.app.fail_pending_turn_submission(
-            Some(crate::persist::CanonicalCommandId::new(u64::MAX)),
-            &crate::persist::PersistenceCause::invariant("unrelated command failed"),
-        ));
-        assert!(app.app.turn_submission_is_pending());
-
-        release_persistence
-            .send(())
-            .expect("release turn submission");
-        let flush = app.app.flush_persist();
-        assert!(matches!(
-            flush,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ));
         assert!(app.agent_running());
         assert!(!app.app.turn_submission_is_pending());
+        assert!(!app.session_is_read_only());
+        assert_eq!(app.state().prompt_text, "");
+        release_persistence
+            .send(())
+            .expect("release session writer");
+        assert!(matches!(
+            app.app.flush_persist(),
+            crate::persist::PersistenceFlushOutcome::Durable
+        ));
         assert!(!app.session_is_read_only());
     }
 
     #[test]
-    fn queued_process_status_accepts_persistence_pending_turn() {
+    fn queued_process_status_dispatches_while_the_session_writer_is_busy() {
         let mut app = TestApp::builder().build();
         app.type_text("baseline");
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.finish_turn());
         let _ = app.app.flush_persist();
 
@@ -2757,113 +2746,15 @@ mod tests {
             "background process finished",
         ));
         assert!(app.app.start_queued_input(queued).is_ok());
-        assert!(app.app.turn_submission_is_pending());
-        assert!(!app.agent_running());
-
-        release_persistence
-            .send(())
-            .expect("release process-status turn submission");
-        let flush = app.app.flush_persist();
-        assert!(matches!(
-            flush,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ));
         assert!(app.agent_running());
         assert!(!app.app.turn_submission_is_pending());
+        release_persistence
+            .send(())
+            .expect("release session writer");
     }
 
     #[test]
-    fn pending_submission_rewind_restores_input_and_cannot_dispatch_late() {
-        for vim in [false, true] {
-            for (persisting, resubmit_early) in
-                [(false, false), (false, true), (true, false), (true, true)]
-            {
-                let mut app = TestApp::builder().with_vim(vim).build();
-                let release = if persisting {
-                    app.ensure_writer_ready();
-                    Some(app.app.conversation.pause_persistence())
-                } else {
-                    app.app.conversation.claim_writer_access().unwrap();
-                    None
-                };
-                // Dispatch terminal input without the harness's eager writer-startup drain.
-                for code in "first request".chars().map(KeyCode::Char).chain([
-                    KeyCode::Enter,
-                    KeyCode::Esc,
-                    KeyCode::Esc,
-                ]) {
-                    app.app.dispatch_terminal_event(Event::Key(KeyEvent::new(
-                        code,
-                        KeyModifiers::NONE,
-                    )));
-                }
-                assert!(!app.agent_running());
-                assert_eq!(app.state().prompt_text, "first request");
-                assert!(app.state().active_modal.is_none());
-                if vim {
-                    assert_eq!(app.state().vim_mode, crate::smelt_edit::VimMode::Insert);
-                }
-                assert!(app
-                    .app
-                    .model_history()
-                    .iter()
-                    .all(|item| !matches!(item, protocol::HistoryItem::User { .. })));
-                if resubmit_early {
-                    app.app.dispatch_terminal_event(Event::Key(KeyEvent::new(
-                        KeyCode::Enter,
-                        KeyModifiers::NONE,
-                    )));
-                }
-                if let Some(release) = release {
-                    release.send(()).unwrap();
-                }
-                app.ensure_writer_ready();
-                app.app.flush_persist();
-                // A late submit receipt schedules a separate cancellation commit.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while app.app.turn_submission_is_pending()
-                    || app.app.conversation.canonical_operations_are_pending()
-                {
-                    app.app.drain_persist_reports();
-                    app.app.save_deferred_session_batch_if_ready();
-                    app.app.start_next_queued_input_if_idle();
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "pending rewind did not settle"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                assert!(!app.session_is_read_only());
-                if !resubmit_early {
-                    assert!(!app.agent_running());
-                    assert_eq!(app.state().prompt_text, "first request");
-                    app.press(KeyCode::Enter);
-                    app.app.flush_persist();
-                }
-                assert!(
-                    app.agent_running(),
-                    "vim={vim}, persisting={persisting}, resubmit_early={resubmit_early}, queue={:?}, pause={:?}, canonical_pending={}, persistence={:?}, notification={:?}",
-                    app.state().queued_inputs,
-                    app.app.conversation.turn_pause(),
-                    app.app.conversation.canonical_operations_are_pending(),
-                    app.app.conversation.persistence_status(),
-                    app.state().notification,
-                );
-                assert!(app.state().queued_inputs.is_empty());
-                assert_eq!(
-                    app.app
-                        .model_history()
-                        .iter()
-                        .filter(|item| matches!(item, protocol::HistoryItem::User { .. }))
-                        .count(),
-                    1
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn finalizing_turn_does_not_promote_new_input_to_a_stopped_request() {
+    fn input_after_a_stopped_turn_starts_a_new_turn() {
         for cancelled in [false, true] {
             let mut app = TestApp::builder().build();
             app.start_submitted_turn("initial request");
@@ -2875,21 +2766,18 @@ mod tests {
                 crate::app::TurnEnd::Complete
             });
             assert!(!app.agent_running());
+            app.drain_engine_sends();
             app.type_text("follow-up");
             app.press(KeyCode::Enter);
-            app.clear_actions();
-            app.press(KeyCode::Enter);
             assert!(queue_stages(&app).is_empty());
-            assert!(app.app.turn_submission_is_pending());
+            assert!(app.agent_running());
+            assert!(app.state().queued_inputs.is_empty());
             assert!(app.actions().iter().all(|action| !matches!(
                 action,
                 Action::EngineSend(command)
                     if matches!(command.as_ref(), protocol::UiCommand::Steer { .. } | protocol::UiCommand::Cancel)
             )));
             release.send(()).unwrap();
-            app.wait_for_turn_persistence();
-            assert!(app.agent_running());
-            assert!(app.state().queued_inputs.is_empty());
         }
     }
 
@@ -2998,113 +2886,18 @@ mod tests {
             app.type_text("/follow-up");
             app.press_mod(KeyCode::Enter, modifiers);
             assert!(queue_stages(&app).is_empty());
-            assert!(app.app.turn_submission_is_pending());
-            release.send(()).unwrap();
-            app.wait_for_turn_persistence();
             assert!(app.agent_running(), "command stayed paused: {busy}");
             assert!(app.state().queued_inputs.is_empty());
+            release.send(()).unwrap();
         }
     }
 
     #[test]
-    fn cancelling_pending_turn_submit_does_not_dispatch_after_receipt() {
-        let mut app = TestApp::builder().build();
-        app.type_text("baseline");
-        app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
-        assert!(app.finish_turn());
-        let _ = app.app.flush_persist();
-        let baseline_turn_id = app
-            .app
-            .conversation
-            .last_terminal_turn_id()
-            .expect("baseline turn is terminal");
-        app.clear_actions();
-
-        let release_persistence = app.app.conversation.pause_persistence();
-        app.type_text("cancel before dispatch");
-        app.press(KeyCode::Enter);
-        assert!(app.app.turn_submission_is_pending());
-        assert!(!app.agent_running());
-
-        app.press(KeyCode::Esc);
-        app.press(KeyCode::Esc);
-        assert!(!app.app.turn_submission_is_pending());
-        assert!(app.app.conversation.canonical_operations_are_pending());
-        assert!(!app.agent_running());
-
-        release_persistence
-            .send(())
-            .expect("release cancelled turn submission");
-        let flush = app.app.flush_persist();
-        assert!(matches!(
-            flush,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ));
-        assert!(!app.app.turn_submission_is_pending());
-        assert!(!app.agent_running());
-        assert!(!app.session_is_read_only());
-        let terminal_flush = app.app.flush_persist();
-        assert!(matches!(
-            terminal_flush,
-            crate::persist::PersistenceFlushOutcome::Durable { .. }
-        ));
-        assert_eq!(
-            app.app.conversation.last_terminal_turn_id(),
-            Some(baseline_turn_id + 1)
-        );
-        assert!(app.actions().iter().all(|action| !matches!(
-            action,
-            Action::EngineSend(command)
-                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(payload)
-                    if payload.input.provider_content().text_content() == "cancel before dispatch")
-        )));
-    }
-
-    #[test]
-    fn replacing_session_resolves_pending_turn_without_dispatching_it() {
-        let mut app = TestApp::builder().build();
-        app.type_text("baseline");
-        app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
-        assert!(app.finish_turn());
-        let _ = app.app.flush_persist();
-
-        let release_persistence = app.app.conversation.pause_persistence();
-        app.type_text("replace before dispatch");
-        app.press(KeyCode::Enter);
-        assert!(app.app.turn_submission_is_pending());
-        assert!(!app.agent_running());
-
-        let replacement =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        let replacement_id = replacement.id.clone();
-        let release_thread = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            release_persistence
-                .send(())
-                .expect("release replaced turn submission");
-        });
-        app.app.load_session(replacement);
-        release_thread.join().expect("release persistence thread");
-
-        assert_eq!(app.session_snapshot().id, replacement_id);
-        assert!(!app.app.turn_submission_is_pending());
-        assert!(!app.agent_running());
-        assert!(!app.session_is_read_only());
-        assert!(app.drain_engine_sends().iter().all(|command| !matches!(
-            command,
-            protocol::UiCommand::StartTurn(payload)
-                if payload.input.provider_content().text_content() == "replace before dispatch"
-        )));
-    }
-
-    #[test]
-    fn interrupt_accepts_queued_request_before_terminal_persistence() {
+    fn interrupt_starts_queued_request_while_the_writer_is_paused() {
         let mut app = TestApp::builder().build();
         app.type_text("first turn");
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.agent_running());
         let _ = app.app.flush_persist();
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
@@ -3125,35 +2918,23 @@ mod tests {
         let release_persistence = app.app.conversation.pause_persistence();
 
         app.press(KeyCode::Enter);
-        assert!(
-            !app.session_is_read_only(),
-            "interrupt submitted the queued request before its terminal transition was durable: {}",
-            app.app.conversation.read_only_reason()
-        );
-        assert!(!app.agent_running());
+        assert!(app.agent_running(), "queued request did not start");
         assert!(app.state().queued_inputs.is_empty());
-        assert!(app.app.turn_submission_is_pending());
 
         release_persistence
             .send(())
             .expect("release terminal transition");
         let flush = app.app.flush_persist();
         assert!(
-            matches!(
-                flush,
-                crate::persist::PersistenceFlushOutcome::Durable { .. }
-            ),
+            matches!(flush, crate::persist::PersistenceFlushOutcome::Durable),
             "terminal transition did not become durable: {flush:?}"
         );
 
         assert!(
             !app.session_is_read_only(),
-            "queued request timeout made the session read-only: {}",
+            "queued request made the session read-only: {}",
             app.app.conversation.read_only_reason()
         );
-        app.wait_for_turn_persistence();
-        assert!(app.agent_running(), "queued request did not start");
-        assert!(app.state().queued_inputs.is_empty());
         assert!(app.session_snapshot().history.iter().any(|item| {
             matches!(item, protocol::HistoryItem::User { content, .. }
                 if content.text_content() == "run now")
@@ -3260,7 +3041,7 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.actions().iter().any(|action| matches!(
@@ -3417,7 +3198,7 @@ mod tests {
 
         app.clear_actions();
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.agent_running());
@@ -3434,7 +3215,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.type_text("before");
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         let first_turn_id = app.current_turn_id().expect("first turn starts");
         app.push_assistant_text("done");
         app.feed_one(crate::app::test_harness::SourceEvent::engine(
@@ -3456,9 +3237,9 @@ mod tests {
             .count();
         app.clear_actions();
 
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
 
         assert!(app.agent_running());

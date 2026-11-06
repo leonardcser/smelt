@@ -115,28 +115,36 @@ fn raw_reasoning_blocks(field: Option<&str>) -> Option<Vec<ReasoningBlock>> {
     })
 }
 
-fn sanitize_message_for_chat_completions(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    message: &Message,
-    origin: &serde_json::Value,
-) {
-    let Some(role) = obj.get("role").and_then(|v| v.as_str()) else {
-        return;
-    };
-    let allowed: &[&str] = match role {
-        "system" | "user" => &["role", "content"],
-        "assistant" => &["role", "content", "tool_calls"],
-        "tool" => &["role", "content", "tool_call_id"],
-        _ => &["role", "content"],
-    };
-    let reasoning = obj.remove("reasoning_content");
-    obj.retain(|key, _| allowed.contains(&key.as_str()));
-    if let Some(field) = replay_field(message, origin) {
-        obj.insert(
-            field.into(),
-            reasoning.unwrap_or_else(|| serde_json::json!("")),
-        );
+/// The wire form of one message: only the fields Chat Completions accepts,
+/// plus raw reasoning when it was produced by this transport and model.
+fn chat_completions_message(message: &Message, origin: &serde_json::Value) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("role".into(), serde_json::to_value(message.role).unwrap());
+    if let Some(content) = &message.content {
+        obj.insert("content".into(), serde_json::to_value(content).unwrap());
     }
+    match message.role {
+        Role::Assistant => {
+            if let Some(tool_calls) = &message.tool_calls {
+                obj.insert(
+                    "tool_calls".into(),
+                    serde_json::to_value(tool_calls).unwrap(),
+                );
+            }
+        }
+        Role::Tool => {
+            if let Some(id) = &message.tool_call_id {
+                obj.insert("tool_call_id".into(), id.as_str().into());
+            }
+        }
+        Role::System | Role::User => {}
+    }
+    sanitize_tool_call_arguments(&mut obj);
+    if let Some(field) = replay_field(message, origin) {
+        let reasoning = message.reasoning_content.as_deref().unwrap_or_default();
+        obj.insert(field.into(), reasoning.into());
+    }
+    serde_json::Value::Object(obj)
 }
 
 pub fn build_body(
@@ -148,14 +156,7 @@ pub fn build_body(
 ) -> serde_json::Value {
     let api_messages: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| {
-            let mut v = serde_json::to_value(m).unwrap();
-            if let Some(obj) = v.as_object_mut() {
-                sanitize_tool_call_arguments(obj);
-                sanitize_message_for_chat_completions(obj, m, &target.origin);
-            }
-            v
-        })
+        .map(|message| chat_completions_message(message, &target.origin))
         .collect();
 
     let mut body = serde_json::json!({ "model": target.model, "messages": api_messages });

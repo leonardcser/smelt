@@ -121,8 +121,11 @@ impl TurnLifecycle {
         );
     }
 
-    pub(crate) fn set_last_terminal_turn_id(&mut self, turn_id: Option<u64>) {
-        self.last_terminal_turn_id = turn_id;
+    /// Continues turn numbering after `last_turn_id`, the session's last started
+    /// turn. A loaded session runs no turn, so that turn is finished.
+    pub(crate) fn restore_last_turn(&mut self, last_turn_id: u64) {
+        self.last_terminal_turn_id = (last_turn_id > 0).then_some(last_turn_id);
+        self.next_turn_id = self.next_turn_id.max(last_turn_id.saturating_add(1));
     }
 
     pub(crate) fn applied_mode(&self) -> &protocol::AgentMode {
@@ -392,9 +395,7 @@ struct StagedTurnRollback {
 struct PreparedTurn {
     input: protocol::StartTurnInput,
     history: protocol::ModelHistorySource,
-    kind: smelt_store::TurnKind,
-    submitted_history_idx: smelt_store::HistoryIndex,
-    continuation_of: Option<smelt_store::TurnId>,
+    submitted_history_idx: usize,
     model_target: protocol::ModelTarget,
     request_config: protocol::RequestRuntimeConfig,
     reasoning_effort: protocol::ReasoningEffort,
@@ -415,24 +416,6 @@ enum PendingTurnSubmitState {
         block_id: smelt_core::transcript_model::BlockId,
         history_epoch: u64,
     },
-    Preparation {
-        command_id: crate::persist::CanonicalCommandId,
-    },
-    Persistence {
-        command_id: crate::persist::CanonicalCommandId,
-        generation: crate::app::session_document::PersistenceGeneration,
-    },
-}
-
-impl PendingTurnSubmitState {
-    fn command_id(self) -> Option<crate::persist::CanonicalCommandId> {
-        match self {
-            Self::Context { .. } | Self::Input { .. } => None,
-            Self::Preparation { command_id } | Self::Persistence { command_id, .. } => {
-                Some(command_id)
-            }
-        }
-    }
 }
 
 pub struct TurnInputPrepared {
@@ -457,8 +440,6 @@ pub(super) struct TurnSubmissions {
     next_operation_id: u64,
     input_operations: super::session_load::SessionOperationRuntime,
     pub(super) accepted: Option<PendingTurnDispatch>,
-    pub(super) settling_cancellations:
-        std::collections::HashSet<crate::persist::CanonicalCommandId>,
 }
 
 #[cfg(test)]
@@ -476,11 +457,6 @@ impl TurnSubmissions {
 pub(super) struct PendingTurnDispatch {
     dispatch: PreparedTurnDispatch,
     submit_state: PendingTurnSubmitState,
-}
-
-pub(super) enum PendingTurnCancellation {
-    Cancelled(protocol::TurnMeta),
-    Rewound,
 }
 
 struct PreparedTurnDispatch {
@@ -610,25 +586,15 @@ impl TuiApp {
         }
     }
 
-    fn continuation_target(&mut self) -> Option<smelt_store::TurnId> {
-        match self.conversation.last_terminal_turn_id() {
-            Some(turn_id) => Some(smelt_store::TurnId::new(turn_id)),
-            None => {
-                self.notify_turn_error_sticky(
-                    "cannot continue: this session has no durable prior turn; submit a new request first"
-                        .into(),
-                );
-                None
-            }
+    /// Whether a finished turn exists to continue from, with an error if not.
+    fn has_continuation_target(&mut self) -> bool {
+        if self.conversation.last_terminal_turn_id().is_some() {
+            return true;
         }
-    }
-
-    fn require_reopen_after_submit_failure(&mut self, cause: &crate::persist::PersistenceCause) {
-        let reason = format!(
-            "a canonical turn may already be durable; reopen the session before retrying ({})",
-            cause.message
+        self.notify_turn_error_sticky(
+            "cannot continue: this session has no prior turn; submit a new request first".into(),
         );
-        self.conversation.mark_read_only(reason);
+        false
     }
 
     fn accept_user_input(
@@ -658,9 +624,7 @@ impl TuiApp {
         let turn = PreparedTurn {
             input: input.with_sent_at_ms(sent_at_ms),
             history: self.model_history_source(),
-            kind: smelt_store::TurnKind::User,
-            submitted_history_idx: smelt_store::HistoryIndex::new(history_len as u64),
-            continuation_of: None,
+            submitted_history_idx: history_len,
             model_target,
             request_config: self.core.config.request_runtime_config(),
             reasoning_effort: self.core.config.reasoning_effort.clone(),
@@ -672,8 +636,7 @@ impl TuiApp {
         };
         let mut dispatch = self.prepare_turn_dispatch(turn, Some(block_id))?;
         dispatch.turn.history = self.model_history_source();
-        dispatch.turn.submitted_history_idx =
-            smelt_store::HistoryIndex::new(self.session_history_len() as u64);
+        dispatch.turn.submitted_history_idx = self.session_history_len();
         if !expand_files {
             return self.stage_accepted_input(dispatch, block_id, content, Vec::new());
         }
@@ -739,10 +702,7 @@ impl TuiApp {
             }
             Err(message) => {
                 self.conversation.remove_accepted_block(block_id);
-                self.fail_prepared_turn_dispatch(
-                    dispatch,
-                    &crate::persist::PersistenceCause::invariant(message),
-                );
+                self.fail_prepared_turn_dispatch(dispatch, message);
             }
         }
         self.request_urgent_render();
@@ -762,15 +722,10 @@ impl TuiApp {
                 if request_id == result.request_id
                     && self.conversation.submissions.input_operations.is_current(request_id)
                     && history_epoch == self.core.signals.get::<u64>("history_epoch").unwrap_or(0)
-                    && pending.dispatch.turn.submitted_history_idx.get() as usize == self.session_history_len())
+                    && pending.dispatch.turn.submitted_history_idx == self.session_history_len())
         });
         if !matches {
-            self.fail_pending_turn_submission(
-                None,
-                &crate::persist::PersistenceCause::invariant(
-                    "session history changed during request preparation",
-                ),
-            );
+            self.fail_pending_turn_submission("session history changed during request preparation");
             return;
         }
         let pending = self
@@ -843,19 +798,7 @@ impl TuiApp {
         for (path, state) in observations {
             self.core.files.set(&path, state);
         }
-        if self.ephemeral() {
-            let turn_id = self.conversation.next_turn_id();
-            self.finish_prepared_turn_dispatch(
-                dispatch,
-                turn_id,
-                0,
-                self.conversation.persistence_generation().get(),
-                None,
-                None,
-            )
-        } else {
-            self.submit_prepared_turn_dispatch(dispatch)
-        }
+        self.start_prepared_turn(dispatch)
     }
 
     pub(crate) fn begin_agent_turn(
@@ -885,7 +828,9 @@ impl TuiApp {
             trimmed => Some(trimmed.to_string()),
         };
         if content.is_empty() {
-            let continuation_of = self.continuation_target()?;
+            if !self.has_continuation_target() {
+                return None;
+            }
             self.prepare_user_visible_turn();
             self.publish_turn_input(submitted);
             let history = self.model_history_source();
@@ -893,9 +838,7 @@ impl TuiApp {
             return self.dispatch_prepared_turn(PreparedTurn {
                 input: protocol::StartTurnInput::user(content),
                 history,
-                kind: smelt_store::TurnKind::Continuation,
-                submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
-                continuation_of: Some(continuation_of),
+                submitted_history_idx,
                 model_target,
                 request_config: self.core.config.request_runtime_config(),
                 reasoning_effort: self.core.config.reasoning_effort.clone(),
@@ -999,71 +942,7 @@ impl TuiApp {
 
     fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> Option<TurnState> {
         let dispatch = self.prepare_turn_dispatch(turn, None)?;
-        if self.ephemeral() {
-            let turn_id = self.conversation.next_turn_id();
-            return self.finish_prepared_turn_dispatch(
-                dispatch,
-                turn_id,
-                0,
-                self.conversation.persistence_generation().get(),
-                None,
-                None,
-            );
-        }
-        self.submit_prepared_turn_dispatch(dispatch)
-    }
-
-    fn submit_prepared_turn_dispatch(
-        &mut self,
-        dispatch: PreparedTurnDispatch,
-    ) -> Option<TurnState> {
-        let new_turn = smelt_store::NewTurn {
-            kind: dispatch.turn.kind,
-            submitted_history_idx: dispatch.turn.submitted_history_idx,
-            continuation_of: dispatch.turn.continuation_of,
-            created_at_ms: session::now_ms(),
-        };
-        match self.submit_canonical_turn(new_turn) {
-            Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPersistence {
-                command_id,
-                generation,
-            }) => {
-                self.defer_prepared_turn_dispatch(
-                    dispatch,
-                    PendingTurnSubmitState::Persistence {
-                        command_id,
-                        generation,
-                    },
-                );
-                None
-            }
-            Ok(crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPreparation {
-                command_id,
-            }) => {
-                self.defer_prepared_turn_dispatch(
-                    dispatch,
-                    PendingTurnSubmitState::Preparation { command_id },
-                );
-                self.request_urgent_render();
-                None
-            }
-            Err(cause) => {
-                self.fail_prepared_turn_dispatch(dispatch, &cause);
-                None
-            }
-        }
-    }
-
-    fn defer_prepared_turn_dispatch(
-        &mut self,
-        dispatch: PreparedTurnDispatch,
-        submit_state: PendingTurnSubmitState,
-    ) {
-        debug_assert!(self.conversation.submissions.accepted.is_none());
-        self.conversation.submissions.accepted = Some(PendingTurnDispatch {
-            dispatch,
-            submit_state,
-        });
+        self.start_prepared_turn(dispatch)
     }
 
     pub(super) fn preserve_pending_prompt_submission(
@@ -1076,36 +955,22 @@ impl TuiApp {
         }
     }
 
-    fn fail_prepared_turn_dispatch(
-        &mut self,
-        dispatch: PreparedTurnDispatch,
-        cause: &crate::persist::PersistenceCause,
-    ) {
-        if cause.definitely_not_committed() {
-            if let Some(rollback) = dispatch.turn.rollback.as_ref() {
-                self.rollback_staged_turn(rollback);
-            }
-            if let Some(recovery) = dispatch.restore_prompt {
-                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.prompt.restore_failed_submission(&mut pctx, recovery);
-            }
-        } else if cause.requires_reopen() {
-            self.require_reopen_after_submit_failure(cause);
+    fn fail_prepared_turn_dispatch(&mut self, dispatch: PreparedTurnDispatch, message: String) {
+        if let Some(rollback) = dispatch.turn.rollback.as_ref() {
+            self.rollback_staged_turn(rollback);
+        }
+        if let Some(recovery) = dispatch.restore_prompt {
+            let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+            self.prompt.restore_failed_submission(&mut pctx, recovery);
         }
         self.platform.set_sleep_inhibited(false);
         self.working.finish(TurnOutcome::Errored);
-        self.notify_session_persistence_failure(&self.conversation.session().id.clone(), cause);
+        self.notify_turn_error_sticky(message);
     }
 
-    fn finish_prepared_turn_dispatch(
-        &mut self,
-        dispatch: PreparedTurnDispatch,
-        turn_id: u64,
-        submitted_revision: u64,
-        required_generation: u64,
-        durable_receipt_at: Option<std::time::Instant>,
-        committed_lineage_id: Option<String>,
-    ) -> Option<TurnState> {
+    /// Sends the prepared turn to the engine and saves its request.
+    fn start_prepared_turn(&mut self, dispatch: PreparedTurnDispatch) -> Option<TurnState> {
+        let turn_id = self.conversation.next_turn_id();
         let PreparedTurnDispatch {
             turn,
             system_prompt,
@@ -1115,17 +980,6 @@ impl TuiApp {
             operation_id: _,
             restore_prompt: _,
         } = dispatch;
-        let mut history = turn.history;
-        let canonical = !self.ephemeral();
-        if !matches!(turn.kind, smelt_store::TurnKind::Continuation) {
-            if let Some(lineage_id) = committed_lineage_id {
-                history = Self::store_model_history_source_for_committed_request(
-                    &history,
-                    lineage_id,
-                    turn.submitted_history_idx.get() as usize,
-                );
-            }
-        }
         self.conversation
             .record_started_turn(turn_id, mode.clone(), turn.reasoning_effort.clone());
         self.core
@@ -1152,13 +1006,10 @@ impl TuiApp {
             reasoning_effort: turn.reasoning_effort,
             fast_mode,
             control_env: self.core.session_control.agent_env(),
-            history,
+            history: turn.history,
             session_id: self.conversation.session().id.clone(),
             sessions_root: self.core.sessions.sessions_dir(),
             ephemeral: self.ephemeral(),
-            persistence: self
-                .conversation
-                .persistence_scope_at(required_generation, submitted_revision),
             permission_overrides: turn.permission_overrides,
             system_prompt: Some(system_prompt),
             native_prompt,
@@ -1171,13 +1022,6 @@ impl TuiApp {
             .try_send(UiCommand::StartTurn(Box::new(payload)))
             .is_err()
         {
-            if canonical {
-                let _ = self.enqueue_canonical_turn_transition(
-                    smelt_store::TurnId::new(turn_id),
-                    smelt_store::TurnState::Failed,
-                    Some("engine_channel_rejected".into()),
-                );
-            }
             self.platform.set_sleep_inhibited(false);
             self.working.finish(TurnOutcome::Errored);
             self.notify_application_error_sticky(
@@ -1188,41 +1032,18 @@ impl TuiApp {
         for input in self.prompt.queued_request_inputs() {
             self.core.engine.send(UiCommand::Steer { input });
         }
-        if let Some(durable_receipt_at) = durable_receipt_at {
-            smelt_perf::perf::record_value(
-                "persist:submit_turn:dispatch_after_receipt_ms",
-                durable_receipt_at
-                    .elapsed()
-                    .as_millis()
-                    .min(u128::from(u64::MAX)) as u64,
-            );
-        }
         smelt_perf::perf::record_value("agent:dispatch:start_turn:turn_id", turn_id);
-        smelt_perf::perf::record_value("agent:dispatch:start_turn:revision", submitted_revision);
         smelt_perf::perf::record_value(
             "agent:dispatch:start_turn:at_us",
             smelt_perf::perf::timestamp_us(),
         );
-
-        if canonical {
-            if let Err(cause) = self.enqueue_canonical_turn_transition(
-                smelt_store::TurnId::new(turn_id),
-                smelt_store::TurnState::Running,
-                None,
-            ) {
-                self.notify_session_persistence_failure(
-                    &self.conversation.session().id.clone(),
-                    &cause,
-                );
-            }
-        }
+        self.save_session();
 
         Some(TurnState {
             turn_id,
-            canonical,
             pending: Vec::new(),
             permissions,
-            submitted_history_idx: turn.submitted_history_idx.get() as usize,
+            submitted_history_idx: turn.submitted_history_idx,
             rewind_history_idx: turn.rewind_history_idx,
             assistant_output_started: false,
             _perf: smelt_perf::perf::begin("agent:turn"),
@@ -1283,98 +1104,11 @@ impl TuiApp {
                     provisional: Some(block_id),
                 } => self.conversation.remove_accepted_block(block_id),
                 PendingTurnSubmitState::Context { provisional: None } => {}
-                state => self
-                    .conversation
-                    .abandon_canonical_operation(state.command_id().expect("canonical command")),
-            }
-        }
-        self.conversation.submissions.settling_cancellations.clear();
-    }
-
-    pub(super) fn handle_canonical_submit_outcome(
-        &mut self,
-        outcome: crate::app::conversation::CanonicalTurnSubmitOutcome,
-    ) -> bool {
-        match outcome {
-            crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPersistence {
-                command_id,
-                generation,
-            } => {
-                let Some(pending) = self.conversation.submissions.accepted.as_mut() else {
-                    return false;
-                };
-                if pending.submit_state.command_id() != Some(command_id)
-                    || !matches!(
-                        pending.submit_state,
-                        PendingTurnSubmitState::Preparation { .. }
-                    )
-                {
-                    return false;
-                }
-                pending.submit_state = PendingTurnSubmitState::Persistence {
-                    command_id,
-                    generation,
-                };
-                true
-            }
-            crate::app::conversation::CanonicalTurnSubmitOutcome::PendingPreparation { .. } => {
-                false
             }
         }
     }
 
-    pub(super) fn resume_turn_submission_after_persistence(
-        &mut self,
-        acknowledgement: crate::persist::SubmitTurnAcknowledgement,
-    ) -> bool {
-        if self
-            .conversation
-            .submissions
-            .settling_cancellations
-            .remove(&acknowledgement.command_id)
-        {
-            if let Err(cause) = self.enqueue_canonical_turn_transition(
-                acknowledgement.receipt.turn_id,
-                smelt_store::TurnState::Cancelled,
-                Some("user_cancelled".into()),
-            ) {
-                self.notify_session_persistence_failure(
-                    &self.conversation.session().id.clone(),
-                    &cause,
-                );
-            }
-            return true;
-        }
-        let Some(pending) = self.conversation.submissions.accepted.take() else {
-            return false;
-        };
-        let matches_command = pending.submit_state.command_id() == Some(acknowledgement.command_id);
-        let matches_state = matches!(
-            pending.submit_state,
-            PendingTurnSubmitState::Preparation { .. }
-        ) || matches!(
-            pending.submit_state,
-            PendingTurnSubmitState::Persistence { generation, .. }
-                if generation == acknowledgement.persistence.generation
-        );
-        if !matches_command || !matches_state {
-            self.conversation.submissions.accepted = Some(pending);
-            return false;
-        }
-        if let Some(turn) = self.finish_prepared_turn_dispatch(
-            pending.dispatch,
-            acknowledgement.receipt.turn_id.get(),
-            acknowledgement.receipt.session.current.revision.get(),
-            acknowledgement.persistence.generation.get(),
-            Some(std::time::Instant::now()),
-            acknowledgement.receipt.session.lineage_id.clone(),
-        ) {
-            self.conversation.set_active(Some(turn));
-        }
-        true
-    }
-
-    pub(super) fn cancel_pending_turn_submission(&mut self, cancellation: PendingTurnCancellation) {
+    pub(super) fn cancel_pending_turn_submission(&mut self) {
         let Some(pending) = self.conversation.submissions.accepted.take() else {
             return;
         };
@@ -1391,69 +1125,14 @@ impl TuiApp {
                 self.conversation.submissions.input_operations.cancel();
                 self.conversation.remove_accepted_block(block_id);
             }
-            PendingTurnSubmitState::Preparation { command_id } => {
-                self.conversation.abandon_canonical_operation(command_id);
-                if matches!(cancellation, PendingTurnCancellation::Cancelled(_)) {
-                    if let Some(rollback) = pending.dispatch.turn.rollback.as_ref() {
-                        self.rollback_staged_turn(rollback);
-                    }
-                }
-            }
-            PendingTurnSubmitState::Persistence { command_id, .. } => {
-                self.conversation
-                    .submissions
-                    .settling_cancellations
-                    .insert(command_id);
-                if let PendingTurnCancellation::Cancelled(meta) = cancellation {
-                    self.record_finished_turn_state(meta);
-                    self.sync_agent_mode_applied();
-                    self.sync_reasoning_effort_applied();
-                }
-            }
         }
     }
 
-    pub(super) fn fail_pending_turn_submission(
-        &mut self,
-        command_id: Option<crate::persist::CanonicalCommandId>,
-        cause: &crate::persist::PersistenceCause,
-    ) -> bool {
-        if let Some(id) = command_id.filter(|id| {
-            self.conversation
-                .submissions
-                .settling_cancellations
-                .contains(id)
-        }) {
-            if cause.definitely_not_committed() {
-                self.conversation
-                    .submissions
-                    .settling_cancellations
-                    .remove(&id);
-                self.conversation.abandon_canonical_operation(id);
-            } else if cause.requires_reopen() {
-                self.require_reopen_after_submit_failure(cause);
-            }
-            self.notify_session_persistence_failure(&self.conversation.session().id.clone(), cause);
-            return true;
-        }
-        let should_fail = self
-            .conversation
-            .submissions
-            .accepted
-            .as_ref()
-            .is_some_and(|pending| {
-                command_id
-                    .is_none_or(|command_id| pending.submit_state.command_id() == Some(command_id))
-            });
-        if !should_fail {
+    /// Fails the turn that is still preparing, restoring what it staged.
+    pub(super) fn fail_pending_turn_submission(&mut self, message: &str) -> bool {
+        let Some(mut pending) = self.conversation.submissions.accepted.take() else {
             return false;
-        }
-        let mut pending = self
-            .conversation
-            .submissions
-            .accepted
-            .take()
-            .expect("pending turn submission");
+        };
         match pending.submit_state {
             PendingTurnSubmitState::Context { provisional: None } => {}
             PendingTurnSubmitState::Input { block_id, .. }
@@ -1464,11 +1143,8 @@ impl TuiApp {
                 self.conversation.remove_accepted_block(block_id);
                 pending.dispatch.turn.rollback = None;
             }
-            state => self
-                .conversation
-                .abandon_canonical_operation(state.command_id().expect("canonical command")),
         }
-        self.fail_prepared_turn_dispatch(pending.dispatch, cause);
+        self.fail_prepared_turn_dispatch(pending.dispatch, message.to_owned());
         true
     }
 
@@ -1511,9 +1187,7 @@ impl TuiApp {
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::note(history_note),
             history,
-            kind: smelt_store::TurnKind::Note,
-            submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
-            continuation_of: None,
+            submitted_history_idx,
             model_target,
             request_config,
             reasoning_effort: self.core.config.reasoning_effort.clone(),
@@ -1646,13 +1320,9 @@ impl TuiApp {
         } else {
             model_catalog.reconcile_reasoning_effort(self.core.config.reasoning_effort.clone())
         };
-        let (kind, continuation_of) = match start {
-            CommandTurnStart::Fresh => (smelt_store::TurnKind::Command, None),
-            CommandTurnStart::ContinueFromLast => (
-                smelt_store::TurnKind::Continuation,
-                Some(self.continuation_target()?),
-            ),
-        };
+        if matches!(start, CommandTurnStart::ContinueFromLast) && !self.has_continuation_target() {
+            return None;
+        }
         if evaluated.is_empty() && self.session_history_len() == 0 {
             return None;
         }
@@ -1764,9 +1434,7 @@ impl TuiApp {
             input: protocol::StartTurnInput::user_command(Content::text(evaluated), display)
                 .with_sent_at_ms(sent_at_ms),
             history,
-            kind,
-            submitted_history_idx: smelt_store::HistoryIndex::new(submitted_history_idx as u64),
-            continuation_of,
+            submitted_history_idx,
             model_target,
             request_config,
             reasoning_effort: reasoning,
@@ -1802,30 +1470,6 @@ impl TuiApp {
         self.discard_model_tool_cwd_change();
     }
 
-    fn enqueue_terminal_turn(
-        &mut self,
-        turn_id: u64,
-        state: smelt_store::TurnState,
-        reason: Option<String>,
-    ) {
-        match self.enqueue_canonical_turn_transition(
-            smelt_store::TurnId::new(turn_id),
-            state,
-            reason,
-        ) {
-            Ok(()) => {
-                self.conversation.mark_terminal(turn_id);
-                self.request_urgent_render();
-            }
-            Err(cause) => {
-                self.notify_session_persistence_failure(
-                    &self.conversation.session().id.clone(),
-                    &cause,
-                );
-            }
-        }
-    }
-
     /// Ends the native session with everything it runs, for history it no
     /// longer matches.
     pub(crate) fn cancel_native_session(&mut self) {
@@ -1854,10 +1498,7 @@ impl TuiApp {
         if self.cancel_session_handoff() {
             return;
         }
-        let turn = self
-            .conversation
-            .active()
-            .map(|turn| (turn.turn_id, turn.canonical));
+        let turn_id = self.conversation.active().map(|turn| turn.turn_id);
         self.cancel_turn_work();
         self.conversation.set_turn_pause(Some(TurnPause {
             kind: Some(protocol::EngineAskErrorKind::Cancelled),
@@ -1876,21 +1517,10 @@ impl TuiApp {
         self.record_finished_turn_state(meta);
         self.sync_agent_mode_applied();
         self.sync_reasoning_effort_applied();
-        match turn {
-            Some((turn_id, true)) => {
-                if let Err(cause) = self.enqueue_canonical_turn_transition(
-                    smelt_store::TurnId::new(turn_id),
-                    smelt_store::TurnState::Cancelled,
-                    Some("user_cancelled".into()),
-                ) {
-                    self.notify_session_persistence_failure(
-                        &self.conversation.session().id.clone(),
-                        &cause,
-                    );
-                }
-            }
-            Some((_, false)) | None => self.save_session(),
+        if let Some(turn_id) = turn_id {
+            self.conversation.mark_terminal(turn_id);
         }
+        self.save_session();
         self.prompt.clear_queue();
     }
 
@@ -1943,8 +1573,8 @@ impl TuiApp {
             self.cancel_turn_work();
             // Archive an interrupted outcome so the prompt bar shows
             // "interrupted" rather than falling back to idle/done.
-            let meta = self.working.finish(TurnOutcome::Cancelled);
-            self.cancel_pending_turn_submission(PendingTurnCancellation::Cancelled(meta));
+            self.working.finish(TurnOutcome::Cancelled);
+            self.cancel_pending_turn_submission();
         }
     }
 
@@ -1953,24 +1583,7 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("tui:finish_turn");
         use crate::app::TurnEnd;
 
-        let turn = self
-            .conversation
-            .active()
-            .map(|turn| (turn.turn_id, turn.canonical));
-        let (terminal_state, terminal_reason) = match &end {
-            TurnEnd::Complete => (smelt_store::TurnState::Completed, None),
-            TurnEnd::Cancelled => (
-                smelt_store::TurnState::Cancelled,
-                Some("user_cancelled".to_string()),
-            ),
-            TurnEnd::Errored { kind, .. } => (
-                smelt_store::TurnState::Failed,
-                Some(kind.map_or_else(
-                    || "engine_error".to_string(),
-                    |kind| format!("engine_error:{}", kind.as_str()),
-                )),
-            ),
-        };
+        let turn_id = self.conversation.active().map(|turn| turn.turn_id);
 
         match end {
             TurnEnd::Cancelled => self.cancel_turn_work(),
@@ -2037,7 +1650,7 @@ impl TuiApp {
             match end {
                 TurnEnd::Complete => {
                     let start_queued = !self.prompt.queue_is_empty() && !self.busy_stack.is_busy();
-                    let meta = if start_queued && !turn.is_some_and(|(_, canonical)| canonical) {
+                    let meta = if start_queued {
                         self.working
                             .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
                     } else {
@@ -2069,22 +1682,15 @@ impl TuiApp {
         }
         self.sync_agent_mode_applied();
         self.sync_reasoning_effort_applied();
-        match turn {
-            Some((turn_id, true)) => {
-                self.enqueue_terminal_turn(turn_id, terminal_state, terminal_reason);
-            }
-            turn => {
-                if let Some((turn_id, _)) = turn {
-                    self.conversation.mark_terminal(turn_id);
-                }
-                if matches!(end, TurnEnd::Complete) {
-                    self.schedule_session_save();
-                } else {
-                    self.save_session();
-                }
-            }
+        if let Some(turn_id) = turn_id {
+            self.conversation.mark_terminal(turn_id);
         }
-        if let Some((turn_id, _)) = turn {
+        if matches!(end, TurnEnd::Complete) {
+            self.schedule_session_save();
+        } else {
+            self.save_session();
+        }
+        if let Some(turn_id) = turn_id {
             if let Some(warning) = self.core.session_control.finish_turn(
                 &self.conversation.session().id,
                 turn_id,
@@ -2872,33 +2478,27 @@ pub(crate) fn lookup_api_key(
 mod tests {
     use super::*;
 
-    fn lineage_reader(
-        app: &crate::app::test_harness::TestApp,
-    ) -> smelt_store::LineageSessionReader {
-        smelt_store::LineageSessionReader::open_existing(
-            app.app.core.sessions.sessions_dir(),
-            &app.app.conversation.session().id,
-        )
-        .expect("open canonical lineage session")
+    fn lineage_reader(app: &crate::app::test_harness::TestApp) -> smelt_store::SessionReader {
+        app.app
+            .core
+            .sessions
+            .reader(&app.app.conversation.session().id)
+            .expect("open canonical lineage session")
     }
 
-    fn lineage_history(reader: &smelt_store::LineageSessionReader) -> Vec<protocol::HistoryItem> {
-        let head = reader.snapshot().expect("read lineage state").head;
+    fn lineage_history(reader: &smelt_store::SessionReader) -> Vec<protocol::HistoryItem> {
+        let head = reader.head().expect("read session head");
         reader
             .history_range(0, head.history_len.get())
-            .expect("read lineage history")
+            .expect("read session history")
     }
 
-    fn lineage_turn(
-        reader: &smelt_store::LineageSessionReader,
-        turn_id: u64,
-    ) -> smelt_store::StoredTurn {
-        reader
-            .turns()
-            .expect("read lineage turns")
-            .into_iter()
-            .find(|turn| turn.turn_id == smelt_store::TurnId::new(turn_id))
-            .expect("stored lineage turn")
+    fn stored_last_turn_id(app: &crate::app::test_harness::TestApp) -> u64 {
+        lineage_reader(app)
+            .state()
+            .expect("read session state")
+            .metadata
+            .last_turn_id
     }
 
     fn save_record_backed_session(
@@ -2906,17 +2506,8 @@ mod tests {
         session: &smelt_core::session::Session,
         transcript_text: &str,
     ) {
-        let receipt = app
-            .app
-            .core
-            .sessions
-            .save_result(session)
-            .expect("save canonical session");
-        let address = smelt_core::session::SessionStoreAddress::new(
-            app.app.core.sessions.sessions_dir(),
-            session.id.clone(),
-            receipt.lineage_id.expect("saved session lineage"),
-        );
+        app.app.core.sessions.save(session).expect("save session");
+        let address = app.app.core.sessions.address(session.id.clone());
         let mut transcript = smelt_core::content::transcript::Transcript::new();
         transcript.push(smelt_core::Block::Text {
             content: transcript_text.into(),
@@ -2927,31 +2518,6 @@ mod tests {
             &transcript.history.block_records(),
         )
         .expect("save canonical transcript records");
-    }
-
-    fn assert_catalog_converged(app: &mut crate::app::test_harness::TestApp) {
-        // Catalog work can be queued by a canonical commit still in flight.
-        app.wait_for_turn_persistence();
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-        let canonical_revision = lineage_reader(app)
-            .snapshot()
-            .expect("read canonical session")
-            .head
-            .revision
-            .get();
-        let catalog_session = smelt_store::CatalogReader::open_existing(
-            app.app.core.sessions.layout().catalog_path(),
-        )
-        .expect("open repaired session catalog")
-        .expect("session catalog exists")
-        .session(&app.app.conversation.session().id)
-        .expect("read repaired catalog session")
-        .expect("repaired catalog session exists");
-        assert_eq!(catalog_session.source_revision, canonical_revision);
     }
 
     #[test]
@@ -3146,28 +2712,6 @@ mod tests {
             .collect()
     }
 
-    fn complete_active_turn_with_assistant(
-        app: &mut crate::app::test_harness::TestApp,
-        text: &str,
-    ) {
-        let turn_id = app.current_turn_id().expect("turn is active");
-        let first_index = app.app.session_history_len();
-        app.feed_one(crate::app::test_harness::SourceEvent::engine(
-            protocol::EngineEvent::HistoryAppended {
-                turn_id,
-                delta: protocol::CanonicalHistoryDelta::new(
-                    first_index,
-                    vec![HistoryItem::assistant(protocol::AssistantStep::terminal(
-                        Some(Content::text(text)),
-                        None,
-                        Vec::new(),
-                    ))],
-                ),
-            },
-        ));
-        assert!(app.finish_turn());
-    }
-
     fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
         snapshot
             .values
@@ -3175,32 +2719,6 @@ mod tests {
             .find(|row| row.label == label)
             .map(|row| row.max)
             .unwrap_or(0)
-    }
-
-    fn perf_value_count(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> usize {
-        snapshot
-            .values
-            .iter()
-            .find(|row| row.label == label)
-            .map(|row| row.count)
-            .unwrap_or(0)
-    }
-
-    fn perf_value_total(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
-        snapshot
-            .values
-            .iter()
-            .find(|row| row.label == label)
-            .map(|row| row.total)
-            .unwrap_or(0)
-    }
-
-    fn perf_value_last(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> Option<u64> {
-        snapshot
-            .values
-            .iter()
-            .find(|row| row.label == label)
-            .map(|row| row.last)
     }
 
     fn assert_perf_value_absent(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
@@ -3324,12 +2842,11 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_submitted_turn("previous");
         app.app.discard_turn(crate::app::TurnEnd::Complete);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.app
             .notify_turn_error_sticky("quota exceeded".to_string());
         assert!(app.app.notification_win().is_some());
 
-        app.ensure_writer_ready();
         let turn = app.app.begin_command_request_turn(
             "continue".into(),
             String::new(),
@@ -3337,8 +2854,7 @@ mod tests {
             crate::app::CommandTurnStart::ContinueFromLast,
             0,
         );
-        assert!(turn.is_none());
-        app.wait_for_turn_persistence();
+        assert!(turn.is_some());
 
         assert!(app.app.notification_win().is_none());
     }
@@ -3361,20 +2877,19 @@ mod tests {
                 _ => None,
             })
             .expect("turn dispatched");
-        let protocol::ModelHistorySource::Store { end_index, .. } = &payload.history else {
-            panic!("interactive turn should dispatch store-backed model history");
-        };
-        assert_eq!(*end_index, app.app.conversation.session().history.len() - 1);
+        assert_eq!(
+            payload.history.items.len(),
+            app.app.conversation.session().history.len() - 1
+        );
         assert_eq!(
             payload.input.provider_content().text_content(),
             "first request"
         );
 
         app.app.flush_persist();
-        let loaded = crate::app::history::materialize_full_session(
+        let loaded = crate::app::history::load_saved_session(
             &app.app.core.sessions,
             &app.app.conversation.session().id,
-            crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
         )
         .expect("session saved");
         assert!(matches!(
@@ -3384,7 +2899,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_turn_commits_final_history_and_completed_state_together() {
+    fn terminal_turn_saves_final_history_and_turn_id() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_submitted_turn("finish me");
         let turn_id = app.current_turn_id().unwrap();
@@ -3396,57 +2911,13 @@ mod tests {
             )));
 
         app.app.discard_turn(crate::app::TurnEnd::Complete);
-        app.wait_for_turn_persistence();
+        app.app.save_session_and_flush();
 
-        let reader = lineage_reader(&app);
-        let stored = lineage_turn(&reader, turn_id);
-        assert_eq!(stored.state, smelt_store::TurnState::Completed);
-        let history = lineage_history(&reader);
+        assert_eq!(stored_last_turn_id(&app), turn_id);
         assert!(matches!(
-            history.last(),
+            lineage_history(&lineage_reader(&app)).last(),
             Some(HistoryItem::Assistant { .. })
         ));
-        assert!(stored
-            .finished_at_ms
-            .is_some_and(|finished| finished >= stored.created_at_ms));
-    }
-
-    #[test]
-    fn escape_interrupt_is_not_blocked_by_catalog_projection() {
-        let mut app = crate::app::test_harness::TestApp::builder()
-            .with_vim(true)
-            .build();
-        app.start_submitted_turn("interrupt me");
-        app.dispatch_engine_event(protocol::EngineEvent::TextDelta {
-            delta: "started".into(),
-        });
-        app.press(crossterm::event::KeyCode::Esc);
-        assert!(app.agent_running(), "first Escape is the local Vim action");
-
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
-            .expect("open session catalog");
-        catalog
-            .execute_batch("BEGIN IMMEDIATE")
-            .expect("hold session catalog write lock");
-
-        let started = std::time::Instant::now();
-        app.press(crossterm::event::KeyCode::Esc);
-        let elapsed = started.elapsed();
-        catalog
-            .execute_batch("ROLLBACK")
-            .expect("release catalog lock");
-
-        assert!(!app.agent_running(), "second Escape cancels the agent");
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "interrupt waited {elapsed:?} for derived catalog persistence"
-        );
-        assert_catalog_converged(&mut app);
     }
 
     #[test]
@@ -3458,12 +2929,6 @@ mod tests {
         app.press(crossterm::event::KeyCode::Esc);
         assert!(app.agent_running(), "first Escape is the local Vim action");
         app.app.flush_persist();
-        let turn_id = app
-            .app
-            .conversation
-            .active()
-            .expect("active canonical turn")
-            .turn_id;
         let release = app.app.conversation.pause_persistence();
 
         let started = std::time::Instant::now();
@@ -3478,20 +2943,13 @@ mod tests {
         );
         let flush = app.app.flush_persist();
         assert!(
-            matches!(
-                flush,
-                crate::persist::PersistenceFlushOutcome::Durable { .. }
-            ),
-            "cancel transition did not become durable: {flush:?}"
-        );
-        assert_eq!(
-            lineage_turn(&lineage_reader(&app), turn_id).state,
-            smelt_store::TurnState::Cancelled
+            matches!(flush, crate::persist::PersistenceFlushOutcome::Durable),
+            "cancel did not become durable: {flush:?}"
         );
     }
 
     #[test]
-    fn first_message_rewind_releases_pending_cancellation() {
+    fn first_message_rewind_restores_input_while_the_writer_is_busy() {
         for vim in [false, true] {
             for to_start in [false, true] {
                 let mut app = crate::app::test_harness::TestApp::builder()
@@ -3519,30 +2977,21 @@ mod tests {
                     .all(|item| !matches!(item, HistoryItem::User { .. })));
 
                 app.press(crossterm::event::KeyCode::Enter);
-                assert!(!app.agent_running());
-                assert!(app.app.turn_submission_is_pending());
+                app.wait_for_turn_dispatch();
+                assert!(app.agent_running());
                 assert!(app.state().queued_inputs.is_empty());
                 release.send(()).unwrap();
                 let flush = app.app.flush_persist();
                 assert!(
-                    matches!(
-                        flush,
-                        crate::persist::PersistenceFlushOutcome::Durable { .. }
-                    ),
+                    matches!(flush, crate::persist::PersistenceFlushOutcome::Durable),
                     "{flush:?}"
                 );
-                app.wait_for_turn_persistence();
-                assert!(app.agent_running());
                 assert!(app.app.prompt.queue_is_empty());
                 assert_eq!(
                     app.app.model_history().iter().filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "first request")).count(),
                     1
                 );
                 assert_ne!(app.app.conversation.active_id(), Some(turn_id));
-                assert_eq!(
-                    lineage_turn(&lineage_reader(&app), turn_id).state,
-                    smelt_store::TurnState::Cancelled
-                );
             }
         }
     }
@@ -3653,9 +3102,13 @@ mod tests {
         app.app.session_append_history(protocol::HistoryItem::note(
             protocol::HistoryNote::context("preserve before fork"),
         ));
-        let session_ids_before =
-            smelt_store::lineage_session_ids(app.app.core.sessions.sessions_dir())
-                .expect("list sessions before fork");
+        let session_ids_before = app
+            .app
+            .core
+            .sessions
+            .store()
+            .ids_with_prefix("", u32::MAX)
+            .expect("list sessions before fork");
         let release = app.app.conversation.pause_persistence();
 
         let started = std::time::Instant::now();
@@ -3668,7 +3121,11 @@ mod tests {
             "failed fork keeps the current session"
         );
         assert_eq!(
-            smelt_store::lineage_session_ids(app.app.core.sessions.sessions_dir())
+            app.app
+                .core
+                .sessions
+                .store()
+                .ids_with_prefix("", u32::MAX)
                 .expect("list sessions after fork"),
             session_ids_before,
             "failed fork does not publish a partial destination"
@@ -3683,7 +3140,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_fails_promptly_when_lineage_persistence_is_busy() {
+    fn deleting_a_fork_source_keeps_the_fork_while_its_writer_is_busy() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.session_append_history(protocol::HistoryItem::note(
             protocol::HistoryNote::context("fork before delete"),
@@ -3699,168 +3156,13 @@ mod tests {
             .expect("install source session id");
         let release = app.app.conversation.pause_persistence();
 
-        let started = std::time::Instant::now();
         let result = app.run_lua_result("smelt.session.delete(SOURCE_SESSION_ID)");
-        let elapsed = started.elapsed();
 
-        assert!(result.is_err(), "busy lineage deletion fails safely");
-        assert!(
-            elapsed < crate::persist::DEFAULT_PERSISTENCE_DEADLINE,
-            "delete waited {elapsed:?} for busy lineage persistence"
-        );
         release.send(()).expect("resume persistence actor");
-        assert!(
-            smelt_store::LineageSessionReader::try_open_existing(
-                app.app.core.sessions.sessions_dir(),
-                &source_id,
-            )
-            .expect("inspect source branch")
-            .is_some(),
-            "timed-out deletion preserves the source session"
-        );
-    }
-
-    #[test]
-    fn closing_dirty_session_is_not_blocked_by_catalog_projection() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("catalog baseline"),
-        ));
-        app.app.save_session_and_flush();
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-
-        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
-            .expect("open session catalog");
-        catalog
-            .execute_batch("BEGIN IMMEDIATE")
-            .expect("hold session catalog write lock");
-        app.start_submitted_turn("close this active agent");
-        assert!(app.agent_running(), "agent is active before shutdown");
-
-        let started = std::time::Instant::now();
-        let closed = app.app.finalize_graceful_shutdown();
-        let elapsed = started.elapsed();
-        catalog
-            .execute_batch("ROLLBACK")
-            .expect("release catalog lock");
-
-        assert!(closed.is_ok(), "active session closes: {closed:?}");
-        assert!(!app.agent_running(), "shutdown clears the active agent");
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "close waited {elapsed:?} for derived catalog persistence"
-        );
-        assert_catalog_converged(&mut app);
-    }
-
-    #[test]
-    fn session_list_is_not_blocked_by_an_exclusive_catalog_lock() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("catalog baseline"),
-        ));
-        app.app.save_session_and_flush();
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
-            .expect("open session catalog");
-        catalog
-            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE")
-            .expect("hold exclusive session catalog lock");
-
-        let started = std::time::Instant::now();
-        let listed = app.run_lua_result("smelt.session.list()");
-        let elapsed = started.elapsed();
-        catalog
-            .execute_batch("ROLLBACK")
-            .expect("release catalog lock");
-
-        assert!(
-            listed.is_ok(),
-            "catalog contention degrades the list safely"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "session list waited {elapsed:?} for the derived catalog"
-        );
-    }
-
-    #[test]
-    fn session_load_is_not_blocked_by_an_exclusive_catalog_lock() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let mut target =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        target
-            .history
-            .push(protocol::HistoryItem::note(protocol::HistoryNote::context(
-                "catalog-locked resume target",
-            )));
-        let target_id = target.id.clone();
-        app.app
-            .core
-            .sessions
-            .save_result(&target)
-            .expect("save resume target");
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-        let current_id = app.app.conversation.session().id.clone();
-        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
-            .expect("open session catalog");
-        catalog
-            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE")
-            .expect("hold exclusive session catalog lock");
-        app.set_lua_string_global("TARGET_SESSION_ID", target_id)
-            .expect("install target session id");
-
-        let started = std::time::Instant::now();
-        app.run_lua_result("smelt.session.load(TARGET_SESSION_ID)")
-            .expect("request session load through the user-facing API");
-        let dispatch_elapsed = started.elapsed();
-        assert!(
-            dispatch_elapsed < std::time::Duration::from_millis(100),
-            "session load dispatch blocked the UI for {dispatch_elapsed:?}"
-        );
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            if let Some(event) = app.try_recv_app_event() {
-                let completed = matches!(&event, crate::app::AppEvent::SessionLoadCompleted(_));
-                app.handle_app_event(event);
-                if completed {
-                    break;
-                }
-            } else {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "catalog-locked session load did not fail within its read deadline"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
-        catalog
-            .execute_batch("ROLLBACK")
-            .expect("release session catalog lock");
-
-        assert_eq!(
-            app.app.conversation.session().id,
-            current_id,
-            "failed session load preserves the current session"
-        );
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "session load waited {:?} for the derived catalog",
-            started.elapsed()
-        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(app.app.core.sessions.reader(&source_id).is_err());
+        app.app.flush_persist();
+        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 1);
     }
 
     #[test]
@@ -3877,7 +3179,7 @@ mod tests {
         app.app
             .core
             .sessions
-            .save_result(&target)
+            .save(&target)
             .expect("save recordless resume target");
         let current_id = app.app.conversation.session().id.clone();
         app.app
@@ -3923,7 +3225,7 @@ mod tests {
         app.app.show_user_message("retained source", Vec::new());
         app.save_session_and_flush();
         let source_id = app.session_snapshot().id.clone();
-        let (finalizing, release) = app.app.conversation.install_persistence_finish_barrier();
+        let release = app.app.conversation.pause_persistence();
         let target =
             smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         let target_id = target.id.clone();
@@ -3946,14 +3248,7 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         };
-        while finalizing.try_recv().is_err() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "writer did not start finalizing"
-            );
-            app.app.drain_persist_reports();
-            std::thread::yield_now();
-        }
+        wait_for_source_close(&mut app);
         let retained_id = app.session_snapshot().id.clone();
         let retained_actor = app.app.conversation.has_persistence();
         let display = app.render_unsettled_silent().text();
@@ -4011,7 +3306,7 @@ mod tests {
             let mut target =
                 smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
             save_record_backed_session(&app, &target, "destination display");
-            let (finalizing, release) = app.app.conversation.install_persistence_finish_barrier();
+            let release = app.app.conversation.pause_persistence();
             app.set_lua_string_global("TARGET_SESSION_ID", target.id.clone())
                 .unwrap();
             smelt_perf::perf::clear();
@@ -4019,7 +3314,7 @@ mod tests {
             app.run_lua_result("smelt.session.load(TARGET_SESSION_ID)")
                 .unwrap();
             wait_for_session_load_result(&mut app);
-            wait_for_writer_finalization(&mut app, &finalizing);
+            wait_for_source_close(&mut app);
             match change {
                 "head" => {
                     target
@@ -4097,17 +3392,15 @@ mod tests {
         }
     }
 
-    fn wait_for_writer_finalization(
-        app: &mut crate::app::test_harness::TestApp,
-        finalizing: &std::sync::mpsc::Receiver<()>,
-    ) {
+    fn wait_for_source_close(app: &mut crate::app::test_harness::TestApp) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while finalizing.try_recv().is_err() {
+        while !app.app.session_load.is_releasing_source() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "writer did not start finalizing"
+                "source session did not start closing"
             );
             app.app.drain_persist_reports();
+            app.app.poll_session_adoption();
             std::thread::yield_now();
         }
     }
@@ -4124,10 +3417,10 @@ mod tests {
         let target =
             smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         save_record_backed_session(&app, &target, "cancelled destination");
-        let (finalizing, release) = app.app.conversation.install_persistence_finish_barrier();
+        let release = app.app.conversation.pause_persistence();
         app.app.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
-        wait_for_writer_finalization(&mut app, &finalizing);
+        wait_for_source_close(&mut app);
         app.app.publish_diff_signals();
         app.render_unsettled_silent();
         let busy: bool = app.eval_lua("return smelt.work.is_busy()").unwrap();
@@ -4163,10 +3456,10 @@ mod tests {
         let latest =
             smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         save_record_backed_session(&app, &latest, "latest destination");
-        let (finalizing, release) = app.app.conversation.install_persistence_finish_barrier();
+        let release = app.app.conversation.pause_persistence();
         app.app.request_session_load(&first.id);
         wait_for_session_load_result(&mut app);
-        wait_for_writer_finalization(&mut app, &finalizing);
+        wait_for_source_close(&mut app);
         app.app.request_session_load(&latest.id);
         wait_for_session_load_result(&mut app);
         assert_eq!(app.session_snapshot().id, source_id);
@@ -4211,37 +3504,6 @@ mod tests {
     }
 
     #[test]
-    fn session_load_settles_cancelled_submission_before_releasing_source() {
-        let mut app = crate::app::test_harness::TestApp::builder()
-            .with_vim(false)
-            .build();
-        app.ensure_writer_ready();
-        let target =
-            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
-        save_record_backed_session(&app, &target, "resume destination");
-        app.app.show_user_message("source display", Vec::new());
-        app.save_session_and_flush();
-        let reader = lineage_reader(&app);
-        let resume = app.app.conversation.pause_persistence();
-        app.type_text("cancelled by session resume");
-        app.press(crossterm::event::KeyCode::Enter);
-        assert!(app.app.turn_submission_is_pending());
-        app.app.request_session_load(&target.id);
-        wait_for_session_load_result(&mut app);
-        resume.send(()).unwrap();
-        app.wait_for_session_lifecycle();
-        assert_eq!(app.session_snapshot().id, target.id);
-        let turns = reader.turns().unwrap();
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].state, smelt_store::TurnState::Cancelled);
-        assert!(app
-            .drain_engine_sends()
-            .iter()
-            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-        app.assert_invariants();
-    }
-
-    #[test]
     fn source_mutation_during_release_cancels_adoption_without_losing_work() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.ensure_writer_ready();
@@ -4251,10 +3513,10 @@ mod tests {
         let target =
             smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         save_record_backed_session(&app, &target, "obsolete destination");
-        let (finalizing, release) = app.app.conversation.install_persistence_finish_barrier();
+        let release = app.app.conversation.pause_persistence();
         app.app.request_session_load(&target.id);
         wait_for_session_load_result(&mut app);
-        wait_for_writer_finalization(&mut app, &finalizing);
+        wait_for_source_close(&mut app);
         app.session_append_history(protocol::HistoryItem::user(Content::text(
             "retained mutation",
         )));
@@ -4263,15 +3525,7 @@ mod tests {
         assert_eq!(app.session_snapshot().id, source_id);
         assert_eq!(app.app.session_history_len(), 1);
         app.save_session_and_flush();
-        assert_eq!(
-            lineage_reader(&app)
-                .snapshot()
-                .unwrap()
-                .head
-                .history_len
-                .get(),
-            1
-        );
+        assert_eq!(lineage_reader(&app).head().unwrap().history_len.get(), 1);
         app.assert_invariants();
     }
 
@@ -4361,485 +3615,6 @@ mod tests {
     }
 
     #[test]
-    fn forking_session_is_not_blocked_by_catalog_projection() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("catalog baseline"),
-        ));
-        app.app.push_block(smelt_core::Block::Text {
-            content: "catalog baseline transcript".into(),
-        });
-        app.app.save_session_and_flush();
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-        let original_id = app.app.conversation.session().id.clone();
-
-        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
-            .expect("open session catalog");
-        catalog
-            .execute_batch("BEGIN IMMEDIATE")
-            .expect("hold session catalog write lock");
-
-        let started = std::time::Instant::now();
-        app.app.fork_session();
-        let elapsed = started.elapsed();
-        catalog
-            .execute_batch("ROLLBACK")
-            .expect("release catalog lock");
-
-        app.wait_for_session_lifecycle();
-        let fork_id = app.app.conversation.session().id.clone();
-        assert_ne!(fork_id, original_id, "fork becomes the active session");
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "fork waited {elapsed:?} for derived catalog persistence"
-        );
-        assert!(app
-            .app
-            .core
-            .sessions
-            .resolve_session_for_read_result(&fork_id)
-            .is_ok());
-        assert_catalog_converged(&mut app);
-    }
-
-    #[test]
-    fn canonical_submit_ignores_an_unrelated_catalog_marker_lock() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let unrelated_session = "f".repeat(64);
-        let catalog_lock = smelt_store::CatalogMarkerLock::acquire(
-            app.app.core.sessions.sessions_dir(),
-            &unrelated_session,
-        )
-        .expect("hold unrelated catalog marker lock");
-
-        let started = std::time::Instant::now();
-        let turn = app.app.begin_agent_turn(
-            "locked catalog marker",
-            Content::text("locked catalog marker"),
-            0,
-        );
-        let elapsed = started.elapsed();
-        drop(catalog_lock);
-
-        assert!(
-            turn.is_some() || app.app.turn_submission_is_pending(),
-            "canonical submission remains independent"
-        );
-        if let Some(turn) = turn {
-            app.app.conversation.set_active(Some(turn));
-        }
-        app.wait_for_turn_persistence();
-        assert!(app.agent_running());
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "canonical submit waited {elapsed:?} for an unrelated catalog marker"
-        );
-    }
-
-    #[test]
-    fn same_session_catalog_marker_contention_retries_before_commit() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let session_id = app.app.conversation.session().id.clone();
-        let catalog_lock = smelt_store::CatalogMarkerLock::acquire(
-            app.app.core.sessions.sessions_dir(),
-            &session_id,
-        )
-        .expect("hold current session catalog marker lock");
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("blocked save"),
-        ));
-        let synchronized = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let release = {
-            let synchronized = synchronized.clone();
-            std::thread::spawn(move || {
-                synchronized.wait();
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                drop(catalog_lock);
-            })
-        };
-
-        synchronized.wait();
-        let started = std::time::Instant::now();
-        app.app.save_session_and_flush();
-        let elapsed = started.elapsed();
-        release.join().unwrap();
-
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "canonical save did not recover promptly from marker contention: {elapsed:?}"
-        );
-        assert!(!app.app.session_document_has_unflushed_work());
-    }
-
-    #[test]
-    fn canonical_submit_is_not_blocked_by_full_catalog_reconciliation() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.session_append_history(protocol::HistoryItem::note(
-            protocol::HistoryNote::context("catalog baseline"),
-        ));
-        app.app.save_session_and_flush();
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-
-        let catalog = rusqlite::Connection::open(app.app.core.sessions.layout().catalog_path())
-            .expect("open session catalog");
-        catalog
-            .execute_batch("BEGIN IMMEDIATE")
-            .expect("hold session catalog write lock");
-        app.app
-            .core
-            .sessions
-            .request_session_catalog_reconciliation();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let started = std::time::Instant::now();
-        app.start_submitted_turn("commit during reconciliation");
-        let elapsed = started.elapsed();
-        catalog
-            .execute_batch("ROLLBACK")
-            .expect("release catalog lock");
-
-        assert!(app.agent_running(), "canonical turn submission completes");
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "canonical submit waited {elapsed:?} for full catalog reconciliation"
-        );
-        assert!(app
-            .app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(5)));
-        app.app.discard_turn(crate::app::TurnEnd::Cancelled);
-        assert!(!app.agent_running());
-    }
-
-    #[test]
-    fn terminal_transition_failure_keeps_accepted_turn_from_dispatching() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.start_submitted_turn("first");
-        let turn_id = app.current_turn_id().unwrap();
-        let _ = app.app.flush_persist();
-        app.push_queued_message("accepted follow-up".into());
-        app.clear_actions();
-        app.app
-            .conversation
-            .inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
-
-        app.app.discard_turn(crate::app::TurnEnd::Complete);
-        let _ = app.app.flush_persist();
-
-        assert!(!app.agent_running());
-        assert!(app.state().queued_inputs.is_empty());
-        assert!(!app.app.turn_submission_is_pending());
-        assert_eq!(app.state().prompt_text, "accepted follow-up");
-        assert!(app.actions().iter().all(|action| !matches!(
-            action,
-            crate::app::test_harness::Action::EngineSend(command)
-                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
-        )));
-        assert!(app.app.session_document_has_unflushed_work());
-        let reader = lineage_reader(&app);
-        assert_eq!(
-            lineage_turn(&reader, turn_id).state,
-            smelt_store::TurnState::Running
-        );
-    }
-
-    #[test]
-    fn enter_submits_one_canonical_turn_before_engine_dispatch() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.type_text("phase zero submit");
-        app.clear_actions();
-
-        smelt_perf::perf::set_enabled(true);
-        smelt_perf::perf::clear();
-        app.press(crossterm::event::KeyCode::Enter);
-        app.wait_for_turn_persistence();
-        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
-        let snapshot = smelt_perf::perf::snapshot();
-        smelt_perf::perf::set_enabled(false);
-
-        let mut dispatched_turns = app.actions().iter().filter_map(|action| match action {
-            crate::app::test_harness::Action::EngineSend(command) => match command.as_ref() {
-                protocol::UiCommand::StartTurn(payload) => Some(payload.as_ref()),
-                _ => None,
-            },
-            _ => None,
-        });
-        let payload = dispatched_turns.next().expect("Enter dispatched StartTurn");
-        assert!(
-            dispatched_turns.next().is_none(),
-            "Enter must dispatch exactly one StartTurn"
-        );
-        assert_eq!(
-            perf_value_count(&snapshot, "agent:dispatch:start_turn:at_us"),
-            1,
-            "dispatch instrumentation should observe exactly one StartTurn"
-        );
-        assert_eq!(
-            perf_value_total(&snapshot, "persist:submit_turn:transactions"),
-            1
-        );
-        for metric in [
-            "persist:submit_turn:queue_wait_ms",
-            "persist:submit_turn:transaction_ms",
-            "persist:submit_turn:history_rows",
-            "persist:submit_turn:transcript_record_rows",
-            "persist:submit_turn:index_rows",
-            "persist:submit_turn:dispatch_after_receipt_ms",
-        ] {
-            assert_eq!(
-                perf_value_count(&snapshot, metric),
-                1,
-                "missing bounded SubmitTurn metric {metric}"
-            );
-        }
-        assert_eq!(
-            perf_value_total(&snapshot, "store:transaction:session_commit:attempts"),
-            0,
-            "Enter must not issue a preliminary ordinary save transaction"
-        );
-        assert_eq!(
-            perf_value_last(&snapshot, "agent:dispatch:start_turn:turn_id"),
-            Some(payload.turn_id)
-        );
-
-        let committed_at = perf_value_last(&snapshot, "persist:submit_turn:committed_at_us")
-            .expect("SubmitTurn commit timestamp");
-        let dispatched_at = perf_value_last(&snapshot, "agent:dispatch:start_turn:at_us")
-            .expect("dispatch timestamp");
-        assert!(
-            committed_at <= dispatched_at,
-            "expected SubmitTurn commit ({committed_at}) before dispatch ({dispatched_at})"
-        );
-        let reader = lineage_reader(&app);
-        let head = reader.snapshot().expect("read canonical state").head;
-        let stored_turn = lineage_turn(&reader, payload.turn_id);
-        assert_eq!(stored_turn.kind, smelt_store::TurnKind::User);
-        assert!(matches!(
-            stored_turn.state,
-            smelt_store::TurnState::Ready | smelt_store::TurnState::Running
-        ));
-        assert_eq!(
-            stored_turn.submitted_revision.get(),
-            payload.persistence.store_revision
-        );
-        assert_eq!(
-            perf_value_last(&snapshot, "agent:dispatch:start_turn:revision"),
-            Some(stored_turn.submitted_revision.get())
-        );
-        assert!(head.revision >= stored_turn.submitted_revision);
-        let history = lineage_history(&reader);
-        assert!(matches!(
-            history.last(),
-            Some(HistoryItem::User { content, .. }) if content.text_content() == "phase zero submit"
-        ));
-    }
-
-    #[test]
-    fn canonical_submit_failure_preserves_prompt_and_prevents_dispatch() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
-            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
-                "published baseline",
-            )));
-        app.app.save_session_and_flush();
-        app.type_text("retry this exact input");
-        app.app.conversation.inject_commit_failure(
-            smelt_store::SessionCommitFailure::InvalidCommand {
-                message: "injected pre-commit rejection".into(),
-            },
-        );
-
-        app.press(crossterm::event::KeyCode::Enter);
-        app.app.flush_persist();
-
-        assert_eq!(app.state().prompt_text, "retry this exact input");
-        assert!(!app.state().agent_running);
-        assert_eq!(app.app.session_history_len(), 2);
-        let history = app.app.session_history_range(0..2).unwrap();
-        assert!(history.last().is_some_and(|item| {
-            item.as_note().is_some_and(|note| {
-                note.context_name() == Some(protocol::DEFAULT_CONTEXT_NOTE_NAME)
-            })
-        }));
-        assert!(history
-            .iter()
-            .all(|item| !matches!(item, HistoryItem::User { .. })));
-        assert!(app.actions().iter().all(|action| !matches!(
-            action,
-            crate::app::test_harness::Action::EngineSend(command)
-                if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
-        )));
-
-        assert!(app.app.retry_blocked_persistence());
-        app.clear_actions();
-        app.press(crossterm::event::KeyCode::Enter);
-        app.wait_for_turn_persistence();
-        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
-        assert!(app.agent_running());
-        let _ = app.app.flush_persist();
-        let reader = lineage_reader(&app);
-        let history = lineage_history(&reader);
-        assert_eq!(history.len(), 3);
-        assert_eq!(
-            history
-                .iter()
-                .filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "retry this exact input"))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn title_response_after_submit_rollback_cannot_poison_persistence_recovery() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
-            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
-                "published baseline",
-            )));
-        app.app.save_session_and_flush();
-        let session_id = app.app.conversation.session().id.clone();
-        app.type_text("retry this exact input");
-        app.app.conversation.inject_commit_failure(
-            smelt_store::SessionCommitFailure::InvalidCommand {
-                message: "injected pre-commit rejection".into(),
-            },
-        );
-        let history_epoch = app
-            .app
-            .core
-            .signals
-            .get::<u64>("history_epoch")
-            .unwrap_or_default();
-
-        app.press(crossterm::event::KeyCode::Enter);
-        app.drive_lua_tasks();
-        app.app.flush_persist();
-        assert_eq!(
-            app.app.core.signals.get::<u64>("history_epoch"),
-            Some(history_epoch.wrapping_add(1)),
-            "rolling back the staged submission must invalidate history-bound work"
-        );
-        assert!(
-            app.app.notification_win().is_some(),
-            "the rejected canonical submission should surface its persistence failure"
-        );
-        let title_request = app
-            .pending_ask_id()
-            .expect("title request remains in flight");
-        let rolled_back_history_len = app.app.session_history_len();
-
-        app.respond_ask_with_text(
-            title_request,
-            r#"{"title":"Stale retry title","slug":"stale-retry"}"#,
-        );
-
-        assert_eq!(app.app.session_history_len(), rolled_back_history_len);
-        assert_eq!(app.app.conversation.session().title, None);
-        assert!(app
-            .app
-            .conversation
-            .session()
-            .metadata_snapshots
-            .iter()
-            .all(|(index, _)| *index <= rolled_back_history_len));
-
-        assert!(
-            app.app.retry_blocked_persistence(),
-            "the failed canonical submission should be retryable"
-        );
-        app.clear_actions();
-        // The initial title response was delivered directly by id, so discard its queued request
-        // before identifying the retry's title request from newly emitted actions.
-        let _ = app.drain_engine_sends();
-        app.press(crossterm::event::KeyCode::Enter);
-        app.wait_for_turn_persistence();
-        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
-        assert!(app.agent_running(), "the preserved prompt should resubmit");
-        let retry_title_request = app.wait_for_engine_ask("session_title");
-        complete_active_turn_with_assistant(&mut app, "retry completed");
-        app.respond_ask_with_text(
-            retry_title_request,
-            r#"{"title":"Recovered retry","slug":"recovered-retry"}"#,
-        );
-        app.app.save_session_and_flush();
-        assert!(
-            app.app.notification_win().is_none(),
-            "durable retry should dismiss the persistence failure"
-        );
-
-        app.clear_actions();
-        app.type_text("follow up after recovery");
-        app.press(crossterm::event::KeyCode::Enter);
-        app.wait_for_turn_persistence();
-        app.feed_one(crate::app::test_harness::SourceEvent::Tick(0));
-        assert!(app.agent_running(), "a subsequent turn should start");
-        let follow_up_title_request = app.wait_for_engine_ask("session_title");
-        complete_active_turn_with_assistant(&mut app, "follow-up completed");
-        app.respond_ask_with_text(
-            follow_up_title_request,
-            r#"{"title":"Recovered follow-up","slug":"recovered-follow-up"}"#,
-        );
-        assert_eq!(
-            app.app.conversation.session().title.as_deref(),
-            Some("Recovered follow-up")
-        );
-        app.app.save_session();
-        let outcome = app.app.flush_persist();
-        assert!(
-            matches!(
-                outcome,
-                crate::persist::PersistenceFlushOutcome::Durable { .. }
-            ),
-            "subsequent save should remain durable: {outcome:?}"
-        );
-
-        let saved = crate::app::history::materialize_full_session(
-            &app.app.core.sessions,
-            &session_id,
-            crate::app::history::FullSessionMaterializationReason::TestSavedSessionAssertion,
-        )
-        .expect("recovered session should load from durable storage");
-        let saved_history_len = saved.history.len();
-        assert_eq!(saved.title.as_deref(), Some("Recovered follow-up"));
-        for expected in ["retry this exact input", "follow up after recovery"] {
-            assert_eq!(
-                saved
-                    .history
-                    .iter()
-                    .filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == expected))
-                    .count(),
-                1,
-                "{expected:?} should be durable exactly once"
-            );
-        }
-        assert!(saved
-            .metadata_snapshots
-            .iter()
-            .all(|(index, _)| *index <= saved_history_len));
-        assert!(saved
-            .turn_metas
-            .iter()
-            .all(|(index, _)| *index <= saved_history_len));
-        assert!(saved
-            .context_snapshots
-            .iter()
-            .all(|(index, _)| *index <= saved_history_len));
-        assert!(
-            app.app.notification_win().is_none(),
-            "no session-save failure should remain after durable recovery"
-        );
-    }
-
-    #[test]
     fn title_target_beyond_current_history_is_rejected() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app
@@ -4857,271 +3632,6 @@ mod tests {
     }
 
     #[test]
-    fn command_submit_failure_rolls_back_request_and_retains_context_event() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
-            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
-                "published baseline",
-            )));
-        app.app.save_session_and_flush();
-        let baseline_history_len = app.app.session_history_len();
-        let baseline_transcript_len = app.app.conversation.transcript().history().order.len();
-        app.app.conversation.inject_commit_failure(
-            smelt_store::SessionCommitFailure::InvalidCommand {
-                message: "injected command rejection".into(),
-            },
-        );
-
-        assert!(app
-            .app
-            .begin_command_request_turn(
-                "/retry".into(),
-                "retry command".into(),
-                crate::app::CommandScope::default(),
-                crate::app::CommandTurnStart::Fresh,
-                0,
-            )
-            .is_none());
-        app.app.flush_persist();
-
-        assert_eq!(app.app.session_history_len(), baseline_history_len + 1);
-        assert!(app
-            .app
-            .session_history_range(baseline_history_len..baseline_history_len + 1)
-            .unwrap()
-            .first()
-            .and_then(HistoryItem::as_note)
-            .is_some_and(|note| {
-                note.context_name() == Some(protocol::DEFAULT_CONTEXT_NOTE_NAME)
-            }));
-        assert_eq!(
-            app.app.conversation.transcript().history().order.len(),
-            baseline_transcript_len
-        );
-        assert!(app.app.conversation.session().first_user_message.is_none());
-        assert!(user_blocks(&app).is_empty());
-        assert!(app
-            .drain_engine_sends()
-            .into_iter()
-            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-
-        assert!(app.app.retry_blocked_persistence());
-        app.ensure_writer_ready();
-        let turn = app.app.begin_command_request_turn(
-            "/retry".into(),
-            "retry command".into(),
-            crate::app::CommandScope::default(),
-            crate::app::CommandTurnStart::Fresh,
-            0,
-        );
-        app.app.conversation.set_active(turn);
-        app.wait_for_turn_persistence();
-        assert!(app.agent_running(), "command retry starts");
-        let reader = lineage_reader(&app);
-        let history = lineage_history(&reader);
-        assert_eq!(history.len(), baseline_history_len + 2);
-        assert_eq!(
-            history
-                .iter()
-                .filter(|item| matches!(item, HistoryItem::User { content, .. } if content.text_content() == "retry command"))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn note_submit_failure_rolls_back_request_and_retains_context_event() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
-            .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
-                "published baseline",
-            )));
-        app.app.save_session_and_flush();
-        let baseline_history_len = app.app.session_history_len();
-        let baseline_transcript_len = app.app.conversation.transcript().history().order.len();
-        let note = protocol::HistoryNote::process_status("background process 9 finished");
-        app.app.conversation.inject_commit_failure(
-            smelt_store::SessionCommitFailure::InvalidCommand {
-                message: "injected note rejection".into(),
-            },
-        );
-
-        assert!(app.app.begin_process_status_turn(note.clone()).is_none());
-        app.app.flush_persist();
-
-        assert_eq!(app.app.session_history_len(), baseline_history_len + 1);
-        assert!(app
-            .app
-            .session_history_range(baseline_history_len..baseline_history_len + 1)
-            .unwrap()
-            .first()
-            .and_then(HistoryItem::as_note)
-            .is_some_and(|note| {
-                note.context_name() == Some(protocol::DEFAULT_CONTEXT_NOTE_NAME)
-            }));
-        assert_eq!(
-            app.app.conversation.transcript().history().order.len(),
-            baseline_transcript_len
-        );
-        assert!(process_status_blocks(&app).is_empty());
-        assert!(app
-            .drain_engine_sends()
-            .into_iter()
-            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-
-        assert!(app.app.retry_blocked_persistence());
-        let turn = app.app.begin_process_status_turn(note);
-        app.app.conversation.set_active(turn);
-        app.wait_for_turn_persistence();
-        assert!(app.agent_running(), "note retry starts");
-        let reader = lineage_reader(&app);
-        let history = lineage_history(&reader);
-        assert_eq!(history.len(), baseline_history_len + 2);
-        assert_eq!(
-            history
-                .iter()
-                .filter(|item| item.note_kind() == Some(protocol::HistoryNoteKind::ProcessStatus))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn legacy_history_without_turn_rows_explains_continuation_requirement() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app
-            .session_append_history(HistoryItem::user(Content::text("legacy request")));
-        app.app
-            .session_append_history(HistoryItem::assistant(protocol::AssistantStep::terminal(
-                Some(Content::text("legacy response")),
-                None,
-                Vec::new(),
-            )));
-        app.app.save_session_and_flush();
-        assert_eq!(app.app.conversation.last_terminal_turn_id(), None);
-
-        assert!(app.app.begin_agent_turn("", Content::text(""), 0).is_none());
-        assert!(app.app.overlays.notification().is_some_and(|notification| {
-            notification.summary.contains("no durable prior turn")
-        }));
-        assert!(app
-            .app
-            .begin_command_request_turn(
-                "/continue".into(),
-                String::new(),
-                crate::app::CommandScope::default(),
-                crate::app::CommandTurnStart::ContinueFromLast,
-                0,
-            )
-            .is_none());
-        assert!(app
-            .drain_engine_sends()
-            .into_iter()
-            .all(|command| !matches!(command, protocol::UiCommand::StartTurn(_))));
-        let reader = lineage_reader(&app);
-        assert!(reader.turns().unwrap().is_empty());
-    }
-
-    #[test]
-    fn engine_rejection_records_failed_after_durable_submit() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.disconnect_engine_commands();
-        app.ensure_writer_ready();
-
-        assert!(app
-            .app
-            .begin_agent_turn("rejected", Content::text("rejected"), 0)
-            .is_none());
-        app.wait_for_turn_persistence();
-
-        let reader = lineage_reader(&app);
-        let turns = reader.turns().expect("read turns");
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].state, smelt_store::TurnState::Failed);
-        assert_eq!(
-            turns[0].terminal_reason.as_deref(),
-            Some("engine_channel_rejected")
-        );
-    }
-
-    #[test]
-    fn committed_ready_turn_resumes_after_receipt_publication_retry() {
-        let runtime = tempfile::tempdir().expect("create shared runtime root");
-        let session_id;
-        let sessions_root;
-        {
-            let mut app = crate::app::test_harness::TestApp::builder()
-                .with_runtime_home(runtime.path())
-                .build();
-            app.app
-                .session_append_history(HistoryItem::note(protocol::HistoryNote::context(
-                    "published baseline",
-                )));
-            app.app.save_session_and_flush();
-            session_id = app.app.conversation.session().id.clone();
-            sessions_root = app.app.core.sessions.sessions_dir();
-            app.type_text("durable before dispatch failure");
-            app.clear_actions();
-            app.app.conversation.inject_publish_failure();
-
-            app.press(crossterm::event::KeyCode::Enter);
-            app.app.flush_persist();
-
-            assert!(!app.state().agent_running);
-            assert!(app.app.turn_submission_is_pending());
-            assert!(!app.app.conversation.is_read_only());
-            assert!(app.actions().iter().all(|action| !matches!(
-                action,
-                crate::app::test_harness::Action::EngineSend(command)
-                    if matches!(command.as_ref(), protocol::UiCommand::StartTurn(_))
-            )));
-            let reader = lineage_reader(&app);
-            assert_eq!(
-                reader.turns().unwrap()[0].state,
-                smelt_store::TurnState::Ready
-            );
-            app.clear_actions();
-
-            assert!(app.app.retry_blocked_persistence());
-            app.wait_for_turn_persistence();
-
-            assert!(app.state().agent_running);
-            assert!(!app.app.turn_submission_is_pending());
-            assert!(!app.app.conversation.is_read_only());
-            assert_eq!(
-                app.drain_engine_sends()
-                    .iter()
-                    .filter(|command| matches!(command, protocol::UiCommand::StartTurn(_)))
-                    .count(),
-                1
-            );
-            let _ = app.app.flush_persist();
-            assert_eq!(reader.turns().unwrap().len(), 1);
-            assert_eq!(
-                reader.turns().unwrap()[0].state,
-                smelt_store::TurnState::Running
-            );
-        }
-
-        let writer = smelt_store::OwnedLineageWriter::open_existing(&sessions_root, &session_id)
-            .expect("writable restart recovers nonterminal turn");
-        let recovery = writer
-            .startup_recovery()
-            .expect("ready turn was interrupted on restart");
-        assert_eq!(
-            recovery.interrupted_turns,
-            vec![smelt_store::TurnId::new(1)]
-        );
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(&sessions_root, &session_id).unwrap();
-        assert_eq!(
-            lineage_turn(&reader, 1).state,
-            smelt_store::TurnState::Interrupted
-        );
-        writer.release().unwrap();
-    }
-
-    #[test]
     fn session_resume_interrupts_running_turn_without_redispatch() {
         let runtime = tempfile::tempdir().expect("create shared runtime root");
         let session_id;
@@ -5134,11 +3644,7 @@ mod tests {
             turn_id = app.current_turn_id().expect("turn starts");
             let _ = app.app.flush_persist();
             session_id = app.app.conversation.session().id.clone();
-            let reader = lineage_reader(&app);
-            assert_eq!(
-                lineage_turn(&reader, turn_id).state,
-                smelt_store::TurnState::Running
-            );
+            assert_eq!(stored_last_turn_id(&app), turn_id);
         }
 
         let mut resumed = crate::app::test_harness::TestApp::builder()
@@ -5189,24 +3695,8 @@ mod tests {
             Some(turn_id)
         );
         assert!(!resumed.app.conversation.is_read_only());
-        let reader = lineage_reader(&resumed);
-        assert_eq!(
-            lineage_turn(&reader, turn_id).state,
-            smelt_store::TurnState::Interrupted
-        );
-        let snapshot = reader.snapshot().unwrap();
-        assert_eq!(resumed.app.conversation.acknowledged_head(), snapshot.head);
-        let base = resumed
-            .app
-            .conversation
-            .session()
-            .archive_base()
-            .expect("resume binds verified archives");
-        assert_eq!(base.revision_id, snapshot.revision_id);
-        assert_eq!(
-            base.branch_sequence, snapshot.head.revision,
-            "startup must advance the verified archive base as well as the document head"
-        );
+        resumed.start_submitted_turn("after restart");
+        assert_eq!(resumed.current_turn_id(), Some(turn_id + 1));
     }
 
     #[test]
@@ -5236,23 +3726,11 @@ mod tests {
                 _ => None,
             })
             .expect("turn dispatched");
-        match payload.history {
-            protocol::ModelHistorySource::Store {
-                ref prefix,
-                first_live_index,
-                end_index,
-                ref suffix,
-                ..
-            } => {
-                assert!(prefix.is_empty());
-                assert_eq!(first_live_index, 0);
-                assert_eq!(end_index, old_history_len);
-                assert!(suffix.is_empty());
-            }
-            protocol::ModelHistorySource::Items { .. } => {
-                panic!("request start cloned full history")
-            }
-        }
+        assert_eq!(
+            payload.history.coordinates,
+            protocol::ModelHistoryCoordinates::canonical()
+        );
+        assert_eq!(payload.history.items.len(), old_history_len);
         assert_eq!(
             payload.input.provider_content().text_content(),
             "new request"
@@ -5329,7 +3807,7 @@ mod tests {
             0,
         );
         app.app.conversation.set_active(turn);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.agent_running(), "test app has a usable model");
 
         assert_eq!(
@@ -5386,7 +3864,7 @@ mod tests {
         app.type_text("summarize @note.txt");
         app.press(crossterm::event::KeyCode::Esc);
         app.press(crossterm::event::KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         let expanded = app
             .drain_engine_sends()
             .into_iter()
@@ -5423,7 +3901,7 @@ mod tests {
         app.type_text("summarize @nb.ipynb");
         app.press(crossterm::event::KeyCode::Esc);
         app.press(crossterm::event::KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         let expanded = app
             .drain_engine_sends()
             .into_iter()
@@ -5456,7 +3934,7 @@ mod tests {
                 output: String::new(),
             });
 
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.app.agent_is_running());
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
@@ -5477,7 +3955,7 @@ mod tests {
                 output: String::new(),
             });
 
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.app.agent_is_running());
         assert_eq!(
             process_status_blocks(&app),
@@ -5576,7 +4054,7 @@ mod tests {
             "test app has a usable model"
         );
 
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         assert!(app.app.agent_is_running());
         assert_eq!(process_status_blocks(&app), vec![text]);
         assert!(user_blocks(&app).is_empty());
@@ -5593,7 +4071,7 @@ mod tests {
                 termination: protocol::JobTermination::Exited,
                 output: String::new(),
             });
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         let turn_id = app
             .app
             .active_agent_turn_id()
@@ -5637,7 +4115,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            &app.app.conversation.session().history[1],
+            &app.session_history()[1],
             HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event, .. })
                 if text == "background process 751225 exited with code 1"
                     && event.as_ref().and_then(protocol::ProcessStatusEvent::process_id) == Some("751225")

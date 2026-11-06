@@ -145,13 +145,6 @@ fn record_record_window_metrics(window: &LoadedRecordWindow) {
         "transcript:record_window:payload_bytes",
         record_window_payload_bytes(&window.records),
     );
-    smelt_perf::perf::record_value(
-        "transcript:record_window:object_backed",
-        u64::from(matches!(
-            window.hydration,
-            smelt_store::TranscriptRecordHydration::ObjectBacked
-        )),
-    );
 }
 
 mod sparse_records;
@@ -221,6 +214,8 @@ pub(crate) struct TranscriptDocument {
     row_hints_key: Option<(u16, usize, usize, u64)>,
     viewport: TranscriptViewportRuntime,
     memory_budget: TranscriptMemoryBudget,
+    /// Whether `memory_budget` was set explicitly instead of following the viewport.
+    memory_budget_fixed: bool,
     hydration: TranscriptHydrationState,
     pending_hydration: TranscriptHydrationQueue,
     pending_compaction: Option<PendingTranscriptCompaction>,
@@ -950,6 +945,7 @@ impl TranscriptDocument {
             row_hints_key: None,
             viewport: TranscriptViewportRuntime::default(),
             memory_budget: TranscriptMemoryBudget::default(),
+            memory_budget_fixed: false,
             hydration: TranscriptHydrationState::default(),
             pending_hydration: TranscriptHydrationQueue::default(),
             pending_compaction: None,
@@ -975,6 +971,7 @@ impl TranscriptDocument {
         self.replace_loaded_transcript(LoadedTranscript::full(transcript));
         if let Some(store_address) = store_address {
             self.set_store_address(Some(store_address));
+            self.open_store();
         }
     }
 
@@ -982,10 +979,12 @@ impl TranscriptDocument {
         let inline_options = self.content.projection.inline_options().clone();
         let scroll_trace = self.viewport.trace.take();
         let memory_budget = self.memory_budget;
+        let memory_budget_fixed = self.memory_budget_fixed;
         *self = Self::from_loaded_transcript(loaded);
         self.viewport.trace = scroll_trace;
         self.set_inline_options(inline_options);
-        self.set_memory_budget(memory_budget);
+        self.apply_memory_budget(memory_budget);
+        self.memory_budget_fixed = memory_budget_fixed;
     }
 
     pub(crate) fn install_rewind_prefix(&mut self, loaded: LoadedTranscript, record_count: usize) {
@@ -995,7 +994,21 @@ impl TranscriptDocument {
         self.history_mut().require_record_resave_from(order_start);
     }
 
+    /// Pins the cache budgets, so viewport changes no longer resize them.
+    #[cfg(test)]
     pub(crate) fn set_memory_budget(&mut self, budget: TranscriptMemoryBudget) {
+        self.memory_budget_fixed = true;
+        self.apply_memory_budget(budget);
+    }
+
+    fn fit_memory_budget_to_viewport(&mut self, width: u16, rows: u16) {
+        let budget = TranscriptMemoryBudget::for_viewport(width, rows);
+        if !self.memory_budget_fixed && budget != self.memory_budget {
+            self.apply_memory_budget(budget);
+        }
+    }
+
+    fn apply_memory_budget(&mut self, budget: TranscriptMemoryBudget) {
         self.memory_budget = budget;
         self.content
             .projection
@@ -1022,10 +1035,15 @@ impl TranscriptDocument {
             self.hydration.operation_pins.clear();
             self.records.store_address = store_address;
             self.store_cache = TranscriptStoreCache::default();
-            self.store_cache
-                .store_for_session(self.records.store_address.as_ref());
             self.enforce_hydrated_budget();
         }
+    }
+
+    /// Opens the session's store once it holds records. A session that has not
+    /// saved yet has no store to read.
+    fn open_store(&mut self) {
+        self.store_cache
+            .store_for_session(self.records.store_address.as_ref());
     }
 
     pub(crate) fn store_address(&self) -> Option<&TranscriptStoreAddress> {
@@ -1132,7 +1150,7 @@ impl TranscriptDocument {
     }
 
     #[cfg(test)]
-    fn service_pending_hydration_for_test(&mut self) -> bool {
+    pub(crate) fn service_pending_hydration_for_test(&mut self) -> bool {
         let Some(request) = self.take_pending_hydration_request() else {
             return false;
         };
@@ -1525,13 +1543,22 @@ impl TranscriptDocument {
 
     fn enforce_hydrated_budget(&mut self) {
         let history = &self.content.transcript.history;
-        for (id, _) in history.hydrated_blocks() {
-            if self.hydration.lru_ids.insert(id) {
-                self.hydration.lru.push_back(id);
+        let revision = history.hydrated_revision();
+        let synced = self.hydration.lru_revision == Some(revision);
+        let mut retained = history.hydrated_retained_bytes();
+        if synced && retained <= self.memory_budget.hydrated_blocks {
+            return;
+        }
+        if !synced {
+            for (id, _) in history.hydrated_blocks() {
+                if self.hydration.lru_ids.insert(id) {
+                    self.hydration.lru.push_back(id);
+                }
             }
+            self.hydration.lru.retain(|id| history.is_hydrated(*id));
+            self.hydration.lru_ids.retain(|id| history.is_hydrated(*id));
         }
 
-        let mut retained = self.content.transcript.history.hydrated_retained_bytes();
         let mut attempts = self.hydration.lru.len();
         while retained > self.memory_budget.hydrated_blocks && attempts > 0 {
             attempts -= 1;
@@ -1554,12 +1581,7 @@ impl TranscriptDocument {
                 self.hydration.evicted_bytes.saturating_add(evicted as u64);
             attempts = self.hydration.lru.len();
         }
-        self.hydration
-            .lru
-            .retain(|id| self.content.transcript.history.is_hydrated(*id));
-        self.hydration
-            .lru_ids
-            .retain(|id| self.content.transcript.history.is_hydrated(*id));
+        self.hydration.lru_revision = Some(self.content.transcript.history.hydrated_revision());
 
         let pinned_bytes = self
             .content
@@ -1778,6 +1800,9 @@ impl TranscriptDocument {
         record_len: usize,
         persisted_bounds: Option<TranscriptRecordSaveBounds>,
     ) {
+        if record_len > 0 {
+            self.open_store();
+        }
         let mut next_order_index = self.compaction_order_index;
         let mut next_record_index = self.compacted_record_len;
         if let Some(bounds) =
@@ -1805,6 +1830,11 @@ impl TranscriptDocument {
                 });
             }
         }
+    }
+
+    /// Stops compaction until the next durable acknowledgement reschedules it.
+    pub(crate) fn suspend_compaction(&mut self) {
+        self.pending_compaction = None;
     }
 
     pub(crate) fn drain_compaction_slice(&mut self) -> bool {
@@ -5629,6 +5659,7 @@ impl TranscriptDocument {
         {
             self.viewport.projection_count = self.viewport.projection_count.saturating_add(1);
         }
+        self.fit_memory_budget_to_viewport(width, viewport_rows);
         self.sync_row_hints(width);
         let previous_top_anchor = self.viewport.state.resolved_anchor.map(|anchor| anchor.top);
         let deferred_projection = self.viewport.state.pending_projection.clone();
@@ -6836,18 +6867,7 @@ pub(crate) const TEST_LINEAGE_SESSION_ID: &str =
 
 #[cfg(test)]
 fn create_test_lineage_session(root: &std::path::Path) -> TranscriptStoreAddress {
-    let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
-    session.id = TEST_LINEAGE_SESSION_ID.into();
-    let command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
-    let mut writer = smelt_store::OwnedLineageWriter::open(root, TEST_LINEAGE_SESSION_ID).unwrap();
-    writer.commit_session(&command).unwrap();
-    let lineage_id = writer.lineage_id().to_string();
-    writer.release().unwrap();
-    TranscriptStoreAddress::new(
-        root.to_path_buf(),
-        TEST_LINEAGE_SESSION_ID.into(),
-        lineage_id,
-    )
+    seed_test_transcript_rows(root, Vec::new())
 }
 
 #[cfg(test)]
@@ -6855,22 +6875,27 @@ pub(crate) fn seed_test_transcript_rows(
     root: &std::path::Path,
     records: Vec<smelt_store::StoredTranscriptBlock>,
 ) -> TranscriptStoreAddress {
+    seed_test_transcript_rows_for(root, TEST_LINEAGE_SESSION_ID, records)
+}
+
+/// Saves an empty session `session_id` under the sessions root `root` with `records`.
+#[cfg(test)]
+pub(crate) fn seed_test_transcript_rows_for(
+    root: &std::path::Path,
+    session_id: &str,
+    records: Vec<smelt_store::StoredTranscriptBlock>,
+) -> TranscriptStoreAddress {
     let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
-    session.id = TEST_LINEAGE_SESSION_ID.into();
-    let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
-    command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-        start: smelt_store::TranscriptRecordIndex::ZERO,
-        records,
-    });
-    let mut writer = smelt_store::OwnedLineageWriter::open(root, TEST_LINEAGE_SESSION_ID).unwrap();
-    writer.commit_session(&command).unwrap();
-    let lineage_id = writer.lineage_id().to_string();
-    writer.release().unwrap();
-    TranscriptStoreAddress::new(
-        root.to_path_buf(),
-        TEST_LINEAGE_SESSION_ID.into(),
-        lineage_id,
-    )
+    session.id = session_id.into();
+    let mut commit = smelt_core::session::full_commit(&session).unwrap();
+    commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
+    let store = smelt_store::Store::new(root);
+    store
+        .writer(session_id)
+        .unwrap()
+        .commit(&smelt_core::session::store_identity(&session), &commit)
+        .unwrap();
+    TranscriptStoreAddress::new(store, session_id.into())
 }
 
 #[cfg(test)]
@@ -6969,13 +6994,11 @@ mod document_tests {
         let first = LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(0),
             total_count: 4,
-            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
             records: records_with_ids(&records[0..2], 0),
         };
         let second = LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(2),
             total_count: 4,
-            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
             records: records_with_ids(&records[2..4], 2),
         };
         let mut cache = SparseTranscriptRecords::default();
@@ -9121,7 +9144,6 @@ mod document_tests {
             record_window: Some(LoadedRecordWindow {
                 start: smelt_store::TranscriptRecordOffset::new(start),
                 total_count,
-                hydration: smelt_store::TranscriptRecordHydration::Hydrated,
                 records: window_records,
             }),
             store_address,
@@ -9272,7 +9294,6 @@ mod document_tests {
         let window = LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(5),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
             records: records_with_ids(&records[5..8], 5),
         };
         assert!(document.merge_record_window(window));
@@ -10108,7 +10129,6 @@ mod document_tests {
         assert!(document.records.sparse.merge(&LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(0),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
             records: records_with_ids(&records[0..1], 0),
         }));
         let active_before = document.records.active_range.clone();
@@ -10474,7 +10494,6 @@ mod document_tests {
         assert!(document.merge_record_window(LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(40),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
             records: records_with_ids(&records[40..48], 40),
         }));
 
@@ -10678,7 +10697,6 @@ mod document_tests {
         assert!(document.merge_record_window(LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(40),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
             records: records_with_ids(&records[40..48], 40),
         }));
         let average_before = document.approximate_average_record_rows(20);
@@ -10707,7 +10725,6 @@ mod document_tests {
         assert!(document.merge_record_window(LoadedRecordWindow {
             start: smelt_store::TranscriptRecordOffset::new(40),
             total_count: records.len(),
-            hydration: smelt_store::TranscriptRecordHydration::Hydrated,
             records: records_with_ids(&records[40..48], 40),
         }));
 
@@ -11648,9 +11665,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let records = (0..4).map(test_record_record).collect::<Vec<_>>();
         let store_address = seed_test_transcript_rows(dir.path(), records);
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
-                .unwrap();
+        let reader = smelt_store::Store::new(dir.path())
+            .reader(TEST_LINEAGE_SESSION_ID)
+            .unwrap();
         let tail = reader
             .transcript_record_slice_with_total((3..4).into(), 4)
             .unwrap();
@@ -11673,9 +11690,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let records = (0..6).map(test_record_record).collect::<Vec<_>>();
         let store_address = seed_test_transcript_rows(dir.path(), records);
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
-                .unwrap();
+        let reader = smelt_store::Store::new(dir.path())
+            .reader(TEST_LINEAGE_SESSION_ID)
+            .unwrap();
         let tail = reader
             .transcript_record_slice_with_total((4..6).into(), 6)
             .unwrap();
@@ -11746,15 +11763,13 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(34),
             100,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (34..37).map(test_record_record).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
             slice,
             super::TranscriptStoreAddress::new(
-                dir.path().to_path_buf(),
-                TEST_LINEAGE_SESSION_ID.into(),
+                smelt_store::Store::new(dir.path()),
                 TEST_LINEAGE_SESSION_ID.into(),
             ),
         )
@@ -11776,15 +11791,13 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(34),
             100,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (34..37).map(test_record_record).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
             slice,
             super::TranscriptStoreAddress::new(
-                dir.path().to_path_buf(),
-                TEST_LINEAGE_SESSION_ID.into(),
+                smelt_store::Store::new(dir.path()),
                 TEST_LINEAGE_SESSION_ID.into(),
             ),
         )
@@ -11807,15 +11820,13 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(98),
             100,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (98..100).map(test_record_record).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
             slice,
             super::TranscriptStoreAddress::new(
-                dir.path().to_path_buf(),
-                TEST_LINEAGE_SESSION_ID.into(),
+                smelt_store::Store::new(dir.path()),
                 TEST_LINEAGE_SESSION_ID.into(),
             ),
         )
@@ -11852,15 +11863,13 @@ mod tests {
         let tail = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(280),
             300,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (280..300).map(test_record_record).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
         let loaded = super::LoadedTranscript::from_record_slice(
             tail,
             super::TranscriptStoreAddress::new(
-                dir.path().to_path_buf(),
-                TEST_LINEAGE_SESSION_ID.into(),
+                smelt_store::Store::new(dir.path()),
                 TEST_LINEAGE_SESSION_ID.into(),
             ),
         )
@@ -11881,7 +11890,6 @@ mod tests {
         let earlier = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(100),
             300,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (100..120).map(test_record_record).collect(),
         );
         assert!(document.merge_record_window(
@@ -11915,7 +11923,6 @@ mod tests {
         let tail = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(280),
             300,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (280..300).map(test_record_record).collect(),
         );
         assert!(document.merge_record_window(
@@ -11939,7 +11946,6 @@ mod tests {
         let earlier = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(100),
             300,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (100..120).map(test_record_record).collect(),
         );
         assert!(document.merge_record_window(
@@ -11957,15 +11963,11 @@ mod tests {
         let slice = smelt_store::TranscriptRecordSlice::new(
             smelt_store::TranscriptRecordOffset::new(98),
             100,
-            smelt_store::TranscriptRecordHydration::Hydrated,
             (98..100).map(test_record_record).collect(),
         );
         let dir = tempfile::tempdir().unwrap();
-        let store_address = super::TranscriptStoreAddress::new(
-            dir.path().to_path_buf(),
-            "1".repeat(64),
-            "1".repeat(64),
-        );
+        let store_address =
+            super::TranscriptStoreAddress::new(smelt_store::Store::new(dir.path()), "1".repeat(64));
         let loaded = super::LoadedTranscript::from_record_slice(slice, store_address)
             .expect("loaded sparse tail");
         let mut document = super::TranscriptDocument::from_loaded_transcript(loaded);
@@ -12077,9 +12079,9 @@ mod tests {
         let mut records = (0..300).map(test_record_record).collect::<Vec<_>>();
         records[0].estimated_text_bytes = 1_000;
         let store_address = seed_test_transcript_rows(dir.path(), records);
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
-                .unwrap();
+        let reader = smelt_store::Store::new(dir.path())
+            .reader(TEST_LINEAGE_SESSION_ID)
+            .unwrap();
         let tail = reader
             .transcript_record_slice_with_total((298..300).into(), 300)
             .unwrap();
@@ -12109,9 +12111,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let records = (0..16).map(test_record_record).collect::<Vec<_>>();
         let store_address = seed_test_transcript_rows(dir.path(), records);
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(dir.path(), TEST_LINEAGE_SESSION_ID)
-                .unwrap();
+        let reader = smelt_store::Store::new(dir.path())
+            .reader(TEST_LINEAGE_SESSION_ID)
+            .unwrap();
         let tail = reader
             .transcript_record_slice_with_total((12..16).into(), 16)
             .unwrap();

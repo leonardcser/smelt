@@ -2,7 +2,6 @@ use crate::content::transcript_scene::{
     NodeLayoutKey, RenderGroupNode, RenderNode, RenderNodeId, TranscriptDefaultViewPolicy,
 };
 use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
-use smelt_core::buffer::LineDecoration;
 use smelt_core::content::block_layout::{
     BlockLayout, ContentRenderSpec, GutterSpec, HboxItem, IrLeaf, LayoutIr, LineSpec, LuaLeaf,
     RetainedContentSpec, RetainedInlineSyntax, SourceViewIr, StyleSpec, TextSpec,
@@ -364,7 +363,7 @@ struct CachedRenderRange {
 
 impl CachedRenderRange {
     fn new(key: RenderRangeKey, buffer: Buffer, line_count: usize) -> Self {
-        let retained_bytes = rendered_buffer_retained_bytes(&buffer);
+        let retained_bytes = buffer.retained_bytes();
         Self {
             key,
             buffer,
@@ -373,22 +372,6 @@ impl CachedRenderRange {
             dirty: false,
         }
     }
-}
-
-fn rendered_buffer_retained_bytes(buffer: &Buffer) -> usize {
-    std::mem::size_of::<Buffer>()
-        .saturating_add(
-            buffer
-                .lines()
-                .len()
-                .saturating_mul(std::mem::size_of::<String>()),
-        )
-        .saturating_add(buffer.lines().iter().map(String::capacity).sum::<usize>())
-        .saturating_add(
-            buffer
-                .line_count()
-                .saturating_mul(std::mem::size_of::<LineDecoration>()),
-        )
 }
 
 // Syntax colors are paint state. Compile them with the render theme, not during layout measurement.
@@ -684,6 +667,10 @@ impl LayoutCache {
     pub(crate) fn set_budget(&mut self, budget: usize) {
         self.budget = budget;
         self.enforce_budget();
+    }
+
+    pub(crate) fn pinned_nodes(&self) -> HashSet<RenderNodeId> {
+        self.pinned.clone()
     }
 
     pub(crate) fn set_pinned_nodes(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
@@ -1109,6 +1096,20 @@ impl LayoutCache {
             self.recompute_earliest_refresh_at();
         }
         due
+    }
+
+    pub(crate) fn has_layout(
+        &self,
+        id: RenderNodeId,
+        key: NodeLayoutKey,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+    ) -> bool {
+        let display_key =
+            DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
+        self.blocks
+            .get(&id)
+            .is_some_and(|cached| cached.key == display_key)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2484,6 +2485,85 @@ mod tests {
                 &[narrow],
             ),
             0
+        );
+    }
+
+    #[test]
+    fn rendered_range_budget_counts_the_heap_its_buffer_frees() {
+        smelt_perf::alloc::enable();
+        let id = RenderNodeId::Block(BlockId::new(1));
+        let key = LayoutKey {
+            width: 80,
+            view_state: ViewState::Expanded,
+            content_hash: 1,
+            sidecar_hash: 0,
+        };
+        let span = |text: &str, bold: bool| protocol::StyledSpan {
+            text: text.into(),
+            bold,
+            ..Default::default()
+        };
+        let lines = (0..200)
+            .map(|row| {
+                vec![
+                    span(&format!("{row:04} "), true),
+                    span("alpha ", false),
+                    span("beta ", true),
+                    span("gamma ", false),
+                    span("delta", true),
+                ]
+            })
+            .collect();
+        let layout = BlockLayout::Leaf(LuaLeaf::Runs(RunsSpec {
+            lines: protocol::StyledLines(lines),
+            hl_group: None,
+            continuation_indent: 0,
+            syntax_highlights: Default::default(),
+        }));
+        let layout = compile_layout_ir_with_cache(
+            &layout,
+            &mut CompileLayoutCache {
+                content_sources: &[],
+                group_children: None,
+                refresh_after_ms: None,
+            },
+        )
+        .unwrap();
+        let mut cache = LayoutCache::new();
+        cache.set_budget(usize::MAX);
+        cache.insert_compiled_blocks(vec![(
+            id,
+            DisplayCacheKey::from_node_key(key, 0, None),
+            layout,
+            None,
+        )]);
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: key.width,
+            view_state: key.view_state,
+            theme: &theme,
+            history: None,
+            inline_options: Default::default(),
+        };
+        cache
+            .with_rendered_range(id, key, 0, None, ctx, 0, 200, |_, _| ())
+            .expect("rendered range");
+        let range = cache
+            .blocks
+            .get_mut(&id)
+            .unwrap()
+            .rendered_ranges
+            .pop_back()
+            .expect("cached range");
+        let accounted = range.retained_bytes - std::mem::size_of::<Buffer>();
+
+        let before = smelt_perf::alloc::snapshot().current_bytes;
+        drop(range);
+        let freed = before - smelt_perf::alloc::snapshot().current_bytes;
+
+        assert!(
+            accounted * 10 >= freed * 9 && accounted * 10 <= freed * 11,
+            "the budget counts {accounted} bytes but the buffer frees {freed}"
         );
     }
 

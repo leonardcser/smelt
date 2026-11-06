@@ -433,7 +433,7 @@ fn click_named_window(app: &mut TestApp, name: &str) {
 }
 
 fn assert_scroll_pill_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
-    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_session_reads(snapshot, label);
     assert_no_full_block_renders_for_scroll(snapshot, label);
     let full_layouts = perf_duration_count(snapshot, "transcript:rebuild_row_index");
     assert_eq!(
@@ -454,6 +454,13 @@ fn assert_scroll_pill_operation_gates(snapshot: &smelt_perf::perf::Snapshot, lab
     assert_eq!(reused, 1, "{label} did not reuse the transcript row index");
 }
 
+/// Settles Lua garbage before a single-frame timing. An incremental GC step
+/// over the fixture heap costs about as much as one pill click, and where it
+/// lands depends on earlier allocations, not on the operation measured.
+fn collect_lua_garbage(app: &mut TestApp) {
+    app.app.lua.lua.gc_collect().expect("collect Lua garbage");
+}
+
 fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
     app.render_silent();
     let tail_scroll = app.app.transcript_win().scroll_top();
@@ -462,6 +469,7 @@ fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
         .named_win("smelt.scroll_pills.top.win")
         .is_some());
 
+    collect_lua_garbage(app);
     smelt_perf::perf::clear();
     let previous_user_start = std::time::Instant::now();
     click_named_window(app, "smelt.scroll_pills.top.win");
@@ -479,6 +487,7 @@ fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
         .is_some());
     app.render_silent();
 
+    collect_lua_garbage(app);
     smelt_perf::perf::clear();
     let bottom_start = std::time::Instant::now();
     click_named_window(app, "smelt.scroll_pills.bottom.win");
@@ -492,20 +501,22 @@ fn measure_scroll_pills(app: &mut TestApp) -> (f64, f64) {
     (previous_user_pill_ms, bottom_pill_ms)
 }
 
-fn assert_no_full_search_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+fn assert_no_full_session_reads(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
     for metric in [
-        "store:history:read_all",
-        "store:history:read_all_rows",
-        "store:session:load_full_snapshot",
-        "store:session:full_snapshot_rows_read",
-        "store:transcript:read_records_full",
-        "store:transcript:records_full_loaded",
+        "session:load_full",
+        "session:full_materialized",
         "transcript:build_from_session:history_items",
     ] {
-        let value = perf_value_max(snapshot, metric);
+        let samples = perf_duration_count(snapshot, metric)
+            + snapshot
+                .values
+                .iter()
+                .filter(|row| row.label == metric)
+                .map(|row| row.count)
+                .sum::<usize>();
         assert_eq!(
-            value, 0,
-            "{label} recorded {metric}={value}, expected no full-session search work"
+            samples, 0,
+            "{label} recorded {metric} {samples} times, expected no full-session reads"
         );
     }
 }
@@ -516,7 +527,7 @@ fn assert_search_refinement_gates(
     max_rows_per_refinement: u64,
     max_total_rows: u64,
 ) {
-    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_session_reads(snapshot, label);
     for metric in [
         "search:transcript:scanned_rows",
         "transcript:display_rows_for_range:rows",
@@ -545,20 +556,10 @@ fn assert_search_uses_candidate_index(
         sqlite_available, 1,
         "{label} did not use the persisted transcript search index"
     );
-    let manifest_available = perf_value_max(snapshot, "store:lineage:search_manifest_available");
-    assert_eq!(
-        manifest_available, 1,
-        "{label} rebuilt the canonical transcript source list instead of using the search manifest"
-    );
-    let trigram_build = perf_value_max(snapshot, "search:transcript:index_trigram_build_enabled");
-    assert_eq!(
-        trigram_build, 0,
-        "{label} rebuilt the full transcript trigram index"
-    );
-    let entries = perf_value_max(snapshot, "search:transcript:index_entries");
+    let entries = perf_value_max(snapshot, "search:transcript:candidates");
     assert!(
         entries <= max_index_entries,
-        "{label} indexed {entries} candidate entries, expected <= {max_index_entries}"
+        "{label} returned {entries} candidate entries, expected <= {max_index_entries}"
     );
 }
 
@@ -652,7 +653,7 @@ fn assert_no_full_block_renders_for_scroll(snapshot: &smelt_perf::perf::Snapshot
 }
 
 fn assert_view_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
-    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_session_reads(snapshot, label);
     let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
     assert!(
         materialized_rows <= 1024,
@@ -678,7 +679,7 @@ fn assert_copy_operation_gates(
     label: &str,
     max_requested_rows: u64,
 ) {
-    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_session_reads(snapshot, label);
     let exactified_rows = perf_value_total(snapshot, "transcript:exactified_rows");
     assert!(
         exactified_rows <= max_requested_rows,
@@ -702,7 +703,7 @@ fn assert_copy_operation_gates(
 }
 
 fn assert_burst_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
-    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_session_reads(snapshot, label);
     let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
     assert!(
         materialized_rows <= 4096,
@@ -716,24 +717,8 @@ fn assert_stream_operation_gates(
     memory: crate::app::transcript::TranscriptMemorySnapshot,
     label: &str,
 ) {
-    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_session_reads(snapshot, label);
     assert_no_full_block_renders_for_scroll(snapshot, label);
-    let repair_metric = "session:catalog:repair";
-    let repair_count = perf_duration_count(snapshot, repair_metric);
-    assert_eq!(
-        repair_count, 0,
-        "{label} recorded {repair_metric} {repair_count} times on the streaming hot path"
-    );
-    for metric in [
-        "session:catalog:reconcile_scanned",
-        "session:catalog:reconciliation_duration_ms",
-    ] {
-        assert_eq!(
-            perf_value_total(snapshot, metric),
-            0,
-            "{label} recorded {metric} on the streaming hot path"
-        );
-    }
     assert!(
         memory.rendered_oversize_debt_bytes <= 4 * 1024 * 1024,
         "{label} accumulated excessive rendered cache oversize debt: {memory:?}"
@@ -773,7 +758,7 @@ enum BurstBenchPosition {
     Bottom,
 }
 
-fn save_bench_fixture(app: &mut TestApp, label: &str) -> smelt_store::SaveReceipt {
+fn save_bench_fixture(app: &mut TestApp, label: &str) -> smelt_store::StoreHead {
     app.ensure_writer_ready();
     app.app.save_session();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -782,68 +767,19 @@ fn save_bench_fixture(app: &mut TestApp, label: &str) -> smelt_store::SaveReceip
         app.app.save_deferred_session_batch_if_ready();
         let outcome = app.app.flush_persist();
         match outcome {
-            crate::persist::PersistenceFlushOutcome::Durable {
-                receipt: Some(receipt),
-                ..
-            } => break receipt,
-            crate::persist::PersistenceFlushOutcome::Deadline { .. }
+            crate::persist::PersistenceFlushOutcome::Durable => {
+                break app
+                    .app
+                    .conversation
+                    .persistence_status()
+                    .and_then(|status| status.durable)
+                    .expect("durable save")
+                    .head
+            }
+            crate::persist::PersistenceFlushOutcome::Deadline
                 if std::time::Instant::now() < deadline => {}
             other => panic!("{label} fixture persistence failed: {other:?}"),
         }
-    }
-}
-
-fn wait_for_bench_catalog(app: &TestApp, label: &str, receipt: &smelt_store::SaveReceipt) {
-    let timeout = std::time::Duration::from_secs(120);
-    assert!(
-        app.app.core.sessions.wait_for_session_catalog(timeout),
-        "{label} catalog worker did not complete queued projection work"
-    );
-
-    let session_id = &app.app.conversation.session().id;
-    let catalog_path = app.app.core.sessions.layout().catalog_path();
-    let expected_revision = receipt.current.revision.get();
-    let catalog_current = smelt_store::CatalogReader::open_existing(&catalog_path)
-        .ok()
-        .flatten()
-        .and_then(|catalog| catalog.session(session_id).ok().flatten())
-        .is_some_and(|session| session.source_revision == expected_revision);
-    assert!(
-        catalog_current,
-        "{label} catalog row did not reach canonical revision {expected_revision}"
-    );
-}
-
-fn wait_for_bench_search_projection(app: &TestApp, label: &str) {
-    assert!(
-        app.app.conversation.request_search_projection(),
-        "{label} search projection request was not accepted"
-    );
-    let address = app
-        .app
-        .conversation
-        .transcript()
-        .store_address()
-        .expect("benchmark transcript has a store address");
-    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-        &address.sessions_root,
-        &address.lineage_id,
-        &address.session_id,
-    )
-    .expect("open benchmark search projection reader");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let status = reader
-            .search_projection_status()
-            .expect("read benchmark search projection status");
-        if status.state == smelt_store::SearchProjectionState::Current {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{label} search projection did not become current: {status:?}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
 
@@ -1124,7 +1060,7 @@ fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f6
     if report_perf {
         search_perf_snapshot("sparse_rare_cold", &rare_snapshot);
     }
-    assert_no_full_search_hot_path_reads(&rare_snapshot, "sparse_rare_cold");
+    assert_no_full_session_reads(&rare_snapshot, "sparse_rare_cold");
 
     smelt_perf::perf::clear();
     let common_start = std::time::Instant::now();
@@ -1146,7 +1082,7 @@ fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f6
     if report_perf {
         search_perf_snapshot("sparse_common_hot_next100", &common_snapshot);
     }
-    assert_no_full_search_hot_path_reads(&common_snapshot, "sparse_common_hot_next100");
+    assert_no_full_session_reads(&common_snapshot, "sparse_common_hot_next100");
     (rare_ms, common_submit_ms, next100_ms)
 }
 
@@ -1171,8 +1107,7 @@ fn run_resumed_wheel_scroll_bench_sample(
     app.app.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
-    let receipt = save_bench_fixture(&mut app, "resumed wheel");
-    wait_for_bench_catalog(&app, "resumed wheel", &receipt);
+    save_bench_fixture(&mut app, "resumed wheel");
 
     install_sparse_resume_bench_transcript(&mut app);
     app.type_char('G');
@@ -1248,9 +1183,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.app.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
-    let receipt = save_bench_fixture(&mut app, "search");
-    wait_for_bench_catalog(&app, "search", &receipt);
-    wait_for_bench_search_projection(&app, "search");
+    save_bench_fixture(&mut app, "search");
     smelt_perf::perf::clear();
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
@@ -1370,11 +1303,6 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         search_perf_snapshot("short_common", &short_common_snapshot);
     }
     assert_search_uses_candidate_index(&short_common_snapshot, "short_common", 512);
-    assert_eq!(
-        perf_value_max(&short_common_snapshot, "store:transcript:search_fts"),
-        0,
-        "short_common unexpectedly used FTS"
-    );
 
     smelt_perf::perf::clear();
     let short_absent_start = std::time::Instant::now();
@@ -1390,11 +1318,6 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         search_perf_snapshot("short_absent", &short_absent_snapshot);
     }
     assert_search_uses_candidate_index(&short_absent_snapshot, "short_absent", 0);
-    assert_eq!(
-        perf_value_max(&short_absent_snapshot, "store:transcript:search_fts"),
-        0,
-        "short_absent unexpectedly used FTS"
-    );
 
     smelt_perf::perf::clear();
     let common_start = std::time::Instant::now();
@@ -1651,7 +1574,9 @@ fn seed_resume_bench_session(id: String, updated_at_ms: u64, target_text_bytes: 
         ));
         turn += 1;
     }
-    smelt_core::session::save(&session);
+    smelt_core::session::storage()
+        .save(&session)
+        .expect("save resume bench session");
 }
 
 fn seed_resume_bench_sessions(count: usize) {
@@ -1672,8 +1597,7 @@ fn seed_resume_bench_preview_session(
     app.app.handle_resize(120, 32);
     let bytes = push_search_bench_transcript(&mut app, preview_bytes);
     app.render_silent();
-    let receipt = save_bench_fixture(&mut app, "resume preview");
-    wait_for_bench_catalog(&app, "resume preview", &receipt);
+    save_bench_fixture(&mut app, "resume preview");
     let id = app.app.conversation.session().id.clone();
     assert!(
         crate::app::history::load_transcript_tail_from_sqlite_id(
@@ -1726,7 +1650,7 @@ fn duration_total_us(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 
 fn print_resume_perf(label: &str, snapshot: &smelt_perf::perf::Snapshot) {
     for row in snapshot.durations.iter().filter(|row| {
         row.label.starts_with("session:")
-            || row.label.starts_with("store:lineage:")
+            || row.label.starts_with("store:")
             || row.label == "cmd:dispatch"
             || row.label == "lua:cmd"
             || row.label == "lua:timer"
@@ -1751,14 +1675,6 @@ fn resume_dialog_open_benchmark_suite() {
         .with_vim(true)
         .build_without_test_home_reset(&guard);
     app.app.handle_resize(120, 32);
-    assert!(
-        app.app
-            .core
-            .sessions
-            .wait_for_session_catalog(std::time::Duration::from_secs(120)),
-        "resume benchmark catalog did not finish indexing seeded sessions"
-    );
-
     smelt_perf::perf::clear();
     smelt_perf::perf::set_enabled(true);
     let open_ms = run_resume_command_to_dialog(&mut app);
@@ -1767,16 +1683,6 @@ fn resume_dialog_open_benchmark_suite() {
     assert!(
         app.state().active_modal.is_some(),
         "resume command did not open a dialog"
-    );
-    let open_ro = duration_count(&open_snapshot, "store:lineage:open_read_only");
-    assert!(
-        open_ro <= 8,
-        "opening /resume opened {open_ro} read-only sqlite databases for {count} sessions; listing must not be proportional to session count"
-    );
-    let open_rw = duration_count(&open_snapshot, "store:lineage:open_read_write");
-    assert!(
-        open_rw <= 8,
-        "opening /resume opened {open_rw} read-write sqlite databases for {count} sessions; listing must not backfill sidecars on the foreground path"
     );
     assert_eq!(
         duration_count(&open_snapshot, "session:load_full"),
@@ -1807,14 +1713,12 @@ fn resume_dialog_open_benchmark_suite() {
     );
 
     eprintln!(
-        "RESUME_DIALOG_BENCH_SUMMARY sessions={} latest_id={} preview_bytes={} open_ms={:.3} preview_ms={:.3} open_db_ro={} open_db_rw={} open_session_list_us={} preview_render_us={}",
+        "RESUME_DIALOG_BENCH_SUMMARY sessions={} latest_id={} preview_bytes={} open_ms={:.3} preview_ms={:.3} open_session_list_us={} preview_render_us={}",
         count,
         latest_id,
         seeded_preview_bytes,
         open_ms,
         preview_ms,
-        duration_count(&open_snapshot, "store:lineage:open_read_only"),
-        duration_count(&open_snapshot, "store:lineage:open_read_write"),
         duration_total_us(&open_snapshot, "session:list_page"),
         duration_total_us(&open_snapshot, "session:render_preview_into")
             + duration_total_us(&preview_snapshot, "session:render_preview_into"),
@@ -1931,7 +1835,7 @@ fn assert_tall_write_scroll_gates(
     label: &str,
     expanded: bool,
 ) {
-    assert_no_full_search_hot_path_reads(snapshot, label);
+    assert_no_full_session_reads(snapshot, label);
     assert_no_full_block_renders_for_scroll(snapshot, label);
     assert_eq!(
         perf_duration_count(snapshot, "transcript:rebuild_row_index"),
@@ -2574,8 +2478,7 @@ fn transcript_sparse_watcher_benchmark_suite() {
         app.app.push_block(block);
     }
     app.render_silent();
-    let receipt = save_bench_fixture(&mut app, "sparse watcher");
-    wait_for_bench_catalog(&app, "sparse watcher", &receipt);
+    save_bench_fixture(&mut app, "sparse watcher");
     install_sparse_resume_bench_transcript(&mut app);
     assert!(app.run_lua(
         r#"
@@ -2659,15 +2562,15 @@ struct AutonomousFrameSample {
     thread_bytes: u64,
     process_alloc_bytes: u64,
     process_dealloc_bytes: u64,
-    payloads_loaded: u64,
+    record_slice_reads: u64,
 }
 
 fn render_autonomous_frames(app: &mut TestApp, frames: usize) {
     let mut rendered = 0usize;
     for _ in 0..frames {
-        app.clock.advance(std::time::Duration::from_millis(16));
         app.app
             .request_animation_render(std::time::Duration::from_millis(16));
+        app.clock.advance(std::time::Duration::from_millis(16));
         rendered += usize::from(
             app.app
                 .render_requested_transient_frame_to(&mut std::io::sink()),
@@ -2721,7 +2624,8 @@ fn measure_autonomous_frames(app: &mut TestApp, frames: usize) -> AutonomousFram
         thread_bytes: thread_bytes_after.saturating_sub(thread_bytes_before),
         process_alloc_bytes: process_delta.bytes_allocated,
         process_dealloc_bytes: process_delta.bytes_deallocated,
-        payloads_loaded: perf_value_total(&snapshot, "store:object:payloads_loaded"),
+        record_slice_reads: perf_duration_count(&snapshot, "store:transcript:read_record_slice")
+            as u64,
     }
 }
 
@@ -2743,8 +2647,7 @@ fn transcript_sparse_autonomous_frame_benchmark_suite() {
     app.app.handle_resize(100, 32);
     let fixture_bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
-    let receipt = save_bench_fixture(&mut app, "sparse autonomous frames");
-    wait_for_bench_catalog(&app, "sparse autonomous frames", &receipt);
+    save_bench_fixture(&mut app, "sparse autonomous frames");
 
     begin_autonomous_text_turn(&mut app, 42, warmup_frames);
     let hydrated = measure_autonomous_frames(&mut app, frames);
@@ -2768,8 +2671,8 @@ fn transcript_sparse_autonomous_frame_benchmark_suite() {
         "autonomous sparse frames must reuse both retained session readers"
     );
     assert_eq!(
-        sparse.payloads_loaded, 0,
-        "warmed sparse frames must not deserialize transcript payloads"
+        sparse.record_slice_reads, 0,
+        "warmed sparse frames must not read transcript records"
     );
 
     assert_within_twenty_five_percent(
@@ -2816,7 +2719,7 @@ fn transcript_sparse_autonomous_frame_benchmark_suite() {
                 "thread_bytes": hydrated.thread_bytes,
                 "process_alloc_bytes": hydrated.process_alloc_bytes,
                 "process_dealloc_bytes": hydrated.process_dealloc_bytes,
-                "payloads_loaded": hydrated.payloads_loaded,
+                "record_slice_reads": hydrated.record_slice_reads,
             },
             "sparse": {
                 "frame_total_us": sparse.frame_total_us,
@@ -2829,7 +2732,7 @@ fn transcript_sparse_autonomous_frame_benchmark_suite() {
                 "thread_bytes": sparse.thread_bytes,
                 "process_alloc_bytes": sparse.process_alloc_bytes,
                 "process_dealloc_bytes": sparse.process_dealloc_bytes,
-                "payloads_loaded": sparse.payloads_loaded,
+                "record_slice_reads": sparse.record_slice_reads,
             },
             "ratios": {
                 "frame_total": sparse.frame_total_us as f64 / hydrated.frame_total_us as f64,
@@ -2843,17 +2746,11 @@ fn transcript_sparse_autonomous_frame_benchmark_suite() {
 
 #[derive(Clone, Copy, Debug)]
 struct HotPathCounters {
-    history_suffix_rows: u64,
-    history_inserted: u64,
+    history_rows: u64,
     history_deleted: u64,
-    record_suffix_rows: u64,
-    record_inserted: u64,
-    record_deleted: u64,
-    read_range_rows: u64,
-    cached_read_write_db: u64,
-    invariant_history_rows: u64,
-    search_blob_rows: u64,
-    search_blob_bytes: u64,
+    transcript_rows: u64,
+    transcript_deleted: u64,
+    history_rows_read: u64,
     user_turn_blocks_scanned: u64,
     user_turns_cloned: u64,
     user_turn_text_bytes_cloned: u64,
@@ -2862,23 +2759,11 @@ struct HotPathCounters {
 impl HotPathCounters {
     fn from(snapshot: &smelt_perf::perf::Snapshot) -> Self {
         Self {
-            history_suffix_rows: perf_value_max(snapshot, "store:history:dirty_suffix_rows"),
-            history_inserted: perf_value_max(snapshot, "store:session:history_rows_inserted"),
-            history_deleted: perf_value_max(snapshot, "store:session:history_rows_deleted"),
-            record_suffix_rows: perf_value_max(
-                snapshot,
-                "store:transcript:dirty_record_suffix_rows",
-            ),
-            record_inserted: perf_value_max(snapshot, "store:transcript:record_db_rows_inserted"),
-            record_deleted: perf_value_max(snapshot, "store:transcript:record_db_rows_deleted"),
-            read_range_rows: perf_value_max(snapshot, "store:history:read_range_rows"),
-            cached_read_write_db: perf_value_max(snapshot, "store:lineage:cached_read_write"),
-            invariant_history_rows: perf_value_max(
-                snapshot,
-                "store:session:invariant_history_rows",
-            ),
-            search_blob_rows: perf_value_max(snapshot, "store:transcript:search_blob_rows_read"),
-            search_blob_bytes: perf_value_max(snapshot, "store:transcript:search_blob_bytes_read"),
+            history_rows: perf_value_max(snapshot, "store:commit:history_rows"),
+            history_deleted: perf_value_max(snapshot, "store:commit:history_rows_deleted"),
+            transcript_rows: perf_value_max(snapshot, "store:commit:transcript_rows"),
+            transcript_deleted: perf_value_max(snapshot, "store:commit:transcript_rows_deleted"),
+            history_rows_read: perf_value_max(snapshot, "store:history:rows_read"),
             user_turn_blocks_scanned: perf_value_max(
                 snapshot,
                 "transcript:last_user_block_index:blocks_scanned",
@@ -3203,8 +3088,7 @@ fn stream_benchmark_app(
             push_stream_boundary_transcript(&mut app, boundary_record_bytes)
         };
         app.render_silent();
-        let receipt = save_bench_fixture(&mut app, "resumed stream");
-        wait_for_bench_catalog(&app, "resumed stream", &receipt);
+        save_bench_fixture(&mut app, "resumed stream");
         install_sparse_resume_bench_transcript(&mut app);
         match resumed_position {
             StreamResumePosition::Top => {
@@ -3628,10 +3512,7 @@ fn print_stream_perf(workload: StreamWorkload, snapshot: &smelt_perf::perf::Snap
         "compositor:input",
         "compositor:render_flush",
         "session:live_store:open",
-        "engine:model_history:open_store",
         "transcript:store:open_read_only",
-        "store:lineage:open_read_only_located",
-        "store:object:hydrate_bytes",
         "store:transcript:read_record_slice",
         "transcript:plan_viewport_projection",
         "transcript:plan_sparse_projection",
@@ -3649,8 +3530,6 @@ fn print_stream_perf(workload: StreamWorkload, snapshot: &smelt_perf::perf::Snap
         "transcript:navigation:block_from_anchor",
         "transcript:navigation:record_from_store",
         "transcript:navigation:record_before_kind",
-        "store:extent:reader_estimated_rows",
-        "store:extent:estimated_rows",
         "transcript:transcript_scene",
         "transcript:prepare_row_index",
         "transcript:prepare_row_index:rebuild_index",
@@ -3717,7 +3596,6 @@ fn print_stream_perf(workload: StreamWorkload, snapshot: &smelt_perf::perf::Snap
         "transcript:block_cache:hydration_duration_us",
         "transcript:extent:estimated_rows_for_record_range:records",
         "transcript:extent:sqlite_estimated_record_rows:records",
-        "store:extent:estimated_rows:records",
         "transcript:pending_work:applied",
         "transcript:stream:tool_output_accumulated_bytes",
         "transcript:stream:exec_output_accumulated_bytes",
@@ -4191,9 +4069,8 @@ struct HotPathSample {
     history_len: usize,
     history_item_bytes: usize,
     ms: f64,
-    queue_wait_ms: u64,
-    submit_turn_us: u64,
-    transaction_commit_us: u64,
+    save_us: u64,
+    commit_us: u64,
     begin_turn_us: u64,
     project_context_us: u64,
     thread_allocs: u64,
@@ -4368,7 +4245,7 @@ fn saved_hot_path_app(
 
     let session_id = session.id.clone();
     // Seed durable history and records before opening the bounded UI projection.
-    let receipt = {
+    {
         let transcript = crate::app::history::build_transcript_from_session(&app.app.lua, &session);
         let records = transcript
             .history
@@ -4384,28 +4261,20 @@ fn saved_hot_path_app(
             })
             .collect::<Result<Vec<_>, _>>()
             .expect("project hot path fixture records");
-        let mut command = smelt_core::session::initial_store_commit_from_session(&session)
-            .expect("prepare hot path fixture");
-        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::ZERO,
-            records,
-        });
-        let mut writer =
-            smelt_store::SessionWriter::open(app.app.core.sessions.sessions_dir(), &session_id)
-                .expect("open hot path fixture writer");
-        let receipt = writer
-            .commit_session(&command)
-            .expect("seed hot path fixture");
-        writer.release().expect("release hot path fixture writer");
+        let mut commit =
+            smelt_core::session::full_commit(&session).expect("prepare hot path fixture");
+        commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
         app.app
             .core
             .sessions
-            .publish_session_catalog_commit(&command, &receipt);
-        receipt
-    };
+            .store()
+            .writer(&session_id)
+            .expect("open hot path fixture writer")
+            .commit(&smelt_core::session::store_identity(&session), &commit)
+            .expect("seed hot path fixture");
+    }
     drop(session);
     assert!(app.resume_session(&session_id), "resume hot path fixture");
-    wait_for_bench_catalog(&app, "hot path", &receipt);
     app
 }
 
@@ -4465,34 +4334,8 @@ fn copy_fixture_tree(source: &std::path::Path, destination: &std::path::Path) ->
     copied_bytes
 }
 
-fn assert_no_full_store_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
-    for metric in [
-        "store:history:read_all",
-        "store:session:load_full_snapshot",
-        "store:transcript:read_records_full",
-    ] {
-        let count = perf_duration_count(snapshot, metric);
-        assert_eq!(
-            count, 0,
-            "{operation} recorded {metric} {count} times, expected no full-store hot-path work"
-        );
-    }
-    for metric in [
-        "store:history:read_all_rows",
-        "store:session:full_snapshot_rows_read",
-        "store:transcript:records_full_loaded",
-        "transcript:build_from_session:history_items",
-    ] {
-        let value = perf_value_max(snapshot, metric);
-        assert_eq!(
-            value, 0,
-            "{operation} recorded {metric}={value}, expected no full-store hot-path work"
-        );
-    }
-}
-
 fn assert_no_full_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
-    assert_no_full_store_hot_path_reads(snapshot, operation);
+    assert_no_full_session_reads(snapshot, operation);
     let fingerprint_count =
         perf_duration_count(snapshot, "transcript:transcript_scene:fingerprint");
     assert_eq!(
@@ -4511,19 +4354,6 @@ fn assert_hot_path_at_most(
     assert!(
         value <= max,
         "{operation} recorded {metric}={value}, expected <= {max}"
-    );
-}
-
-fn assert_cached_persist_db(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
-    let open_us = perf_duration_max(snapshot, "store:lineage:open_read_write");
-    assert_eq!(
-        open_us, 0,
-        "{operation} reopened the session database in {open_us}us instead of reusing the persist worker connection"
-    );
-    assert_eq!(
-        perf_value_max(snapshot, "store:lineage:cached_read_write"),
-        1,
-        "{operation} did not reuse the persist worker database connection"
     );
 }
 
@@ -4549,9 +4379,8 @@ fn capture_hot_path_sample(
         history_len,
         history_item_bytes: hot_path_history_item_bytes(),
         ms,
-        queue_wait_ms: perf_value_max(&snapshot, "persist:submit_turn:queue_wait_ms"),
-        submit_turn_us: perf_duration_max(&snapshot, "persist:submit_turn"),
-        transaction_commit_us: perf_duration_max(&snapshot, "store:lineage:transaction_commit"),
+        save_us: perf_duration_max(&snapshot, "persist:save"),
+        commit_us: perf_duration_max(&snapshot, "store:commit"),
         begin_turn_us: perf_duration_max(&snapshot, "agent:begin_turn"),
         project_context_us: perf_duration_max(&snapshot, "agent:project_context"),
         thread_allocs: allocs_after.saturating_sub(allocs_before),
@@ -4567,52 +4396,6 @@ fn capture_hot_path_sample(
     (sample, snapshot)
 }
 
-fn read_provider_history_source(
-    source: protocol::ModelHistorySource,
-    sessions_root: &std::path::Path,
-    session_id: &str,
-) -> Vec<protocol::HistoryItem> {
-    match source {
-        protocol::ModelHistorySource::Items { items, .. } => items,
-        protocol::ModelHistorySource::Store {
-            prefix,
-            lineage_id,
-            first_live_index,
-            end_index,
-            suffix,
-            ..
-        } => {
-            smelt_perf::perf::record_value("engine:model_history:source_store", 1);
-            smelt_perf::perf::record_value(
-                "engine:model_history:first_live_index",
-                first_live_index as u64,
-            );
-            smelt_perf::perf::record_value("engine:model_history:end_index", end_index as u64);
-            smelt_perf::perf::record_value(
-                "engine:model_history:suffix_items",
-                suffix.len() as u64,
-            );
-            let mut history = prefix;
-            if end_index > first_live_index {
-                let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-                    sessions_root,
-                    lineage_id,
-                    session_id,
-                )
-                .expect("open provider history lineage");
-                let mut rows = reader
-                    .history_range(first_live_index as u64, end_index as u64)
-                    .expect("read provider history rows");
-                smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
-                history.append(&mut rows);
-            }
-            history.extend(suffix);
-            smelt_perf::perf::record_value("engine:model_history:items", history.len() as u64);
-            history
-        }
-    }
-}
-
 fn run_noop_save_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let mut app = saved_hot_path_app("noop-save", history_len, None);
     let (sample, snapshot) = capture_hot_path_sample("noop_save", history_len, || {
@@ -4624,16 +4407,11 @@ fn run_noop_save_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::per
         1,
         "no-op save did not take the unchanged fast path"
     );
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 0);
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "store:history:dirty_suffix_rows",
-        0,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:transcript:dirty_record_suffix_rows",
+        "store:commit:transcript_rows",
         0,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
@@ -4652,37 +4430,26 @@ fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf
                 sent_at_ms: None,
             }),
         );
-        assert!(matches!(
-            source,
-            protocol::ModelHistorySource::Store { end_index, .. } if end_index == history_len
-        ));
+        assert_eq!(
+            source.items.len(),
+            history_len,
+            "the context precedes the new item"
+        );
     });
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 1);
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "store:history:dirty_suffix_rows",
+        "store:commit:transcript_rows",
         1,
     );
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "store:session:history_rows_inserted",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:transcript:dirty_record_suffix_rows",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:transcript:record_db_rows_inserted",
+        "store:commit:transcript_rows",
         1,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
-    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 
@@ -4700,26 +4467,8 @@ fn run_history_appended_hot_path(
             });
         app.app.flush_persist();
     });
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:history:dirty_suffix_rows",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:session:history_rows_inserted",
-        1,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "tui:set_history:dirty_prefix_compared",
-        0,
-    );
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 1);
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
-    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 
@@ -4741,24 +4490,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
             });
         app.app.flush_persist();
     });
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:history:dirty_suffix_rows",
-        0,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "tui:set_history:dirty_prefix_compared",
-        0,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "tui:set_history:dirty_from_hint",
-        0,
-    );
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 0);
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
@@ -4772,7 +4504,7 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         16,
     );
     assert!(
-        app.app.conversation.has_document_work(),
+        app.app.conversation.has_unflushed_work(),
         "{} did not defer completion metadata for the next save point",
         sample.operation
     );
@@ -4783,13 +4515,13 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         sample.operation
     );
     assert_eq!(
-        perf_duration_max(&snapshot, "persist:write_metadata"),
+        perf_duration_max(&snapshot, "persist:save"),
         0,
         "{} wrote low-priority completion metadata in the engine-event hot path",
         sample.operation
     );
     assert_eq!(
-        perf_duration_max(&snapshot, "store:lineage:transaction_commit"),
+        perf_duration_max(&snapshot, "store:commit"),
         0,
         "{} committed low-priority completion metadata in the engine-event hot path",
         sample.operation
@@ -4826,20 +4558,14 @@ fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         app.app.save_session();
         app.app.flush_persist();
     });
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:commit:history_rows", 0);
     assert_hot_path_at_most(
         &snapshot,
         sample.operation,
-        "store:history:dirty_suffix_rows",
-        0,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:session:history_rows_deleted",
+        "store:commit:history_rows_deleted",
         expected_deleted,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
-    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 
@@ -4848,25 +4574,11 @@ fn run_provider_history_hot_path(
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let first_live = history_len.saturating_sub(32);
     let app = saved_hot_path_app("provider-history", history_len, Some(first_live));
-    let source = app.app.model_history_source();
-    let sessions_root = app.app.core.sessions.sessions_dir();
-    let session_id = app.app.conversation.session().id.clone();
     let (sample, snapshot) = capture_hot_path_sample("provider_history_read", history_len, || {
-        let history = read_provider_history_source(source, &sessions_root, &session_id);
+        let history = app.app.model_history_source().items;
         assert_eq!(history.len(), history_len - first_live + 1);
     });
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:history:read_range_rows",
-        (history_len - first_live) as u64,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "engine:model_history:rows_read",
-        (history_len - first_live) as u64,
-    );
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:history:rows_read", 0);
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
     (sample, snapshot)
 }
@@ -4875,26 +4587,12 @@ fn run_uncheckpointed_provider_history_hot_path(
     history_len: usize,
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let app = saved_hot_path_app("provider-history-uncheckpointed", history_len, None);
-    let source = app.app.model_history_source();
-    let sessions_root = app.app.core.sessions.sessions_dir();
-    let session_id = app.app.conversation.session().id.clone();
     let (sample, snapshot) =
         capture_hot_path_sample("provider_history_uncheckpointed_read", history_len, || {
-            let history = read_provider_history_source(source, &sessions_root, &session_id);
+            let history = app.app.model_history_source().items;
             assert_eq!(history.len(), history_len);
         });
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:history:read_range_rows",
-        history_len as u64,
-    );
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "engine:model_history:rows_read",
-        history_len as u64,
-    );
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:history:rows_read", 0);
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
     (sample, snapshot)
 }
@@ -4903,12 +4601,9 @@ fn run_engine_request_materialization_hot_path(
     history_len: usize,
 ) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let app = saved_hot_path_app("engine-request-materialization", history_len, None);
-    let source = app.app.model_history_source();
-    let sessions_root = app.app.core.sessions.sessions_dir();
-    let session_id = app.app.conversation.session().id.clone();
     let (sample, snapshot) =
         capture_hot_path_sample("engine_request_materialization", history_len, || {
-            let history = read_provider_history_source(source, &sessions_root, &session_id);
+            let history = app.app.model_history_source().items;
             let mut engine_history = {
                 let _perf = smelt_perf::perf::begin("bench:engine_request:install_history");
                 let mut installed = Vec::with_capacity(history.len() + 1);
@@ -4941,12 +4636,7 @@ fn run_engine_request_materialization_hot_path(
             );
             std::hint::black_box((&mut engine_history, prepared));
         });
-    assert_hot_path_at_most(
-        &snapshot,
-        sample.operation,
-        "store:history:read_range_rows",
-        history_len as u64,
-    );
+    assert_hot_path_at_most(&snapshot, sample.operation, "store:history:rows_read", 0);
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
     (sample, snapshot)
 }
@@ -4970,7 +4660,7 @@ fn run_submit_hot_paths(
     let (submit, submit_snapshot) = capture_hot_path_sample("submit_enter", history_len, || {
         app.press(KeyCode::Enter);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        app.wait_for_turn_persistence_until(deadline);
+        app.wait_for_turn_dispatch_until(deadline);
         app.feed_one(SourceEvent::Tick(0));
     });
     let started = app.actions().iter().find_map(|action| match action {
@@ -4992,10 +4682,7 @@ fn run_submit_hot_paths(
             app.actions().len()
         );
     };
-    assert!(matches!(
-        &started.history,
-        protocol::ModelHistorySource::Store { .. }
-    ));
+    assert_eq!(started.history.items.len(), history_len + 1);
     assert_eq!(
         app.actions()
             .iter()
@@ -5013,39 +4700,21 @@ fn run_submit_hot_paths(
     assert_hot_path_at_most(
         &submit_snapshot,
         submit.operation,
-        "store:history:dirty_suffix_rows",
+        "store:commit:history_rows",
         max_dirty_history_rows,
     );
     assert_hot_path_at_most(
         &submit_snapshot,
         submit.operation,
-        "store:session:history_rows_deleted",
+        "store:commit:history_rows_deleted",
         0,
     );
     assert_hot_path_at_most(
         &submit_snapshot,
         submit.operation,
-        "store:transcript:dirty_record_suffix_rows",
+        "store:commit:transcript_rows",
         1,
     );
-    assert_eq!(
-        perf_value_max(&submit_snapshot, "persist:submit_turn:transactions"),
-        1,
-        "submit_enter did not use exactly one canonical SubmitTurn transaction"
-    );
-    assert_hot_path_at_most(
-        &submit_snapshot,
-        submit.operation,
-        "store:session:invariant_history_rows",
-        0,
-    );
-    assert_hot_path_at_most(
-        &submit_snapshot,
-        submit.operation,
-        "transcript:record_record_index:entries_scanned",
-        2,
-    );
-    assert_cached_persist_db(&submit_snapshot, submit.operation);
 
     let mut samples = Vec::with_capacity(2);
     if include_submit {
@@ -5056,7 +4725,7 @@ fn run_submit_hot_paths(
             capture_hot_path_sample("submit_first_render", history_len, || {
                 app.render_silent();
             });
-        assert_no_full_store_hot_path_reads(&render_snapshot, render.operation);
+        assert_no_full_session_reads(&render_snapshot, render.operation);
         samples.push((render, render_snapshot));
     }
     samples
@@ -5110,73 +4779,73 @@ fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
 
 fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
     let c = sample.counters;
+    let fields: [(&str, String); 24] = [
+        ("run", run.to_string()),
+        ("operation", sample.operation.to_string()),
+        ("history_len", sample.history_len.to_string()),
+        ("history_item_bytes", sample.history_item_bytes.to_string()),
+        ("ms", format!("{:.3}", sample.ms)),
+        ("save_us", sample.save_us.to_string()),
+        ("commit_us", sample.commit_us.to_string()),
+        ("begin_turn_us", sample.begin_turn_us.to_string()),
+        ("project_context_us", sample.project_context_us.to_string()),
+        ("thread_allocs", sample.thread_allocs.to_string()),
+        (
+            "thread_bytes_allocated",
+            sample.thread_bytes_allocated.to_string(),
+        ),
+        (
+            "process_bytes_allocated",
+            sample.process_bytes_allocated.to_string(),
+        ),
+        (
+            "process_bytes_deallocated",
+            sample.process_bytes_deallocated.to_string(),
+        ),
+        (
+            "process_current_bytes_before",
+            sample.process_current_bytes_before.to_string(),
+        ),
+        (
+            "process_current_bytes_after",
+            sample.process_current_bytes_after.to_string(),
+        ),
+        (
+            "process_retained_bytes",
+            sample.process_retained_bytes.to_string(),
+        ),
+        ("history_rows", c.history_rows.to_string()),
+        ("history_deleted", c.history_deleted.to_string()),
+        ("transcript_rows", c.transcript_rows.to_string()),
+        ("transcript_deleted", c.transcript_deleted.to_string()),
+        ("history_rows_read", c.history_rows_read.to_string()),
+        (
+            "user_turn_blocks_scanned",
+            c.user_turn_blocks_scanned.to_string(),
+        ),
+        ("user_turns_cloned", c.user_turns_cloned.to_string()),
+        (
+            "user_turn_text_bytes_cloned",
+            c.user_turn_text_bytes_cloned.to_string(),
+        ),
+    ];
+    let text = fields
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("TRANSCRIPT_HOT_PATH_BENCH_SAMPLE {text}");
+    let mut json = serde_json::Map::new();
+    json.insert("type".into(), "hot_path_sample".into());
+    for (key, value) in fields {
+        let value = value
+            .parse::<serde_json::Number>()
+            .map_or(serde_json::Value::String(value), serde_json::Value::Number);
+        json.insert(key.into(), value);
+    }
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} history_item_bytes={} ms={:.3} queue_wait_ms={} submit_turn_us={} transaction_commit_us={} begin_turn_us={} project_context_us={} thread_allocs={} thread_bytes_allocated={} process_bytes_allocated={} process_bytes_deallocated={} process_current_bytes_before={} process_current_bytes_after={} process_retained_bytes={} history_suffix_rows={} history_inserted={} history_deleted={} record_suffix_rows={} record_inserted={} record_deleted={} read_range_rows={} cached_read_write_db={} invariant_history_rows={} search_blob_rows={} search_blob_bytes={} user_turn_blocks_scanned={} user_turns_cloned={} user_turn_text_bytes_cloned={}",
-        run,
-        sample.operation,
-        sample.history_len,
-        sample.history_item_bytes,
-        sample.ms,
-        sample.queue_wait_ms,
-        sample.submit_turn_us,
-        sample.transaction_commit_us,
-        sample.begin_turn_us,
-        sample.project_context_us,
-        sample.thread_allocs,
-        sample.thread_bytes_allocated,
-        sample.process_bytes_allocated,
-        sample.process_bytes_deallocated,
-        sample.process_current_bytes_before,
-        sample.process_current_bytes_after,
-        sample.process_retained_bytes,
-        c.history_suffix_rows,
-        c.history_inserted,
-        c.history_deleted,
-        c.record_suffix_rows,
-        c.record_inserted,
-        c.record_deleted,
-        c.read_range_rows,
-        c.cached_read_write_db,
-        c.invariant_history_rows,
-        c.search_blob_rows,
-        c.search_blob_bytes,
-        c.user_turn_blocks_scanned,
-        c.user_turns_cloned,
-        c.user_turn_text_bytes_cloned,
-    );
-    eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"history_item_bytes\":{},\"ms\":{:.3},\"queue_wait_ms\":{},\"submit_turn_us\":{},\"transaction_commit_us\":{},\"begin_turn_us\":{},\"project_context_us\":{},\"thread_allocs\":{},\"thread_bytes_allocated\":{},\"process_bytes_allocated\":{},\"process_bytes_deallocated\":{},\"process_current_bytes_before\":{},\"process_current_bytes_after\":{},\"process_retained_bytes\":{},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"record_suffix_rows\":{},\"record_inserted\":{},\"record_deleted\":{},\"read_range_rows\":{},\"cached_read_write_db\":{},\"invariant_history_rows\":{},\"search_blob_rows\":{},\"search_blob_bytes\":{},\"user_turn_blocks_scanned\":{},\"user_turns_cloned\":{},\"user_turn_text_bytes_cloned\":{}}}",
-        run,
-        sample.operation,
-        sample.history_len,
-        sample.history_item_bytes,
-        sample.ms,
-        sample.queue_wait_ms,
-        sample.submit_turn_us,
-        sample.transaction_commit_us,
-        sample.begin_turn_us,
-        sample.project_context_us,
-        sample.thread_allocs,
-        sample.thread_bytes_allocated,
-        sample.process_bytes_allocated,
-        sample.process_bytes_deallocated,
-        sample.process_current_bytes_before,
-        sample.process_current_bytes_after,
-        sample.process_retained_bytes,
-        c.history_suffix_rows,
-        c.history_inserted,
-        c.history_deleted,
-        c.record_suffix_rows,
-        c.record_inserted,
-        c.record_deleted,
-        c.read_range_rows,
-        c.cached_read_write_db,
-        c.invariant_history_rows,
-        c.search_blob_rows,
-        c.search_blob_bytes,
-        c.user_turn_blocks_scanned,
-        c.user_turns_cloned,
-        c.user_turn_text_bytes_cloned,
+        "TRANSCRIPT_HOT_PATH_BENCH_JSON {}",
+        serde_json::Value::Object(json)
     );
 }
 
@@ -5312,7 +4981,7 @@ fn transcript_layout_hot_path_benchmark_suite() {
 
 fn saved_archive_bench_app(
     checkpoint_count: usize,
-) -> (TestApp, smelt_store::LineageSessionReader, usize) {
+) -> (TestApp, smelt_store::SessionReader, usize) {
     use smelt_core::session::{ContextCheckpoint, ContextCheckpointEvent, Session};
 
     let mut app = TestApp::builder().build();
@@ -5368,94 +5037,64 @@ fn saved_archive_bench_app(
         .sum();
     app.app.load_session(session);
     app.app.restore_screen();
-    let receipt = save_bench_fixture(&mut app, "archive acceptance");
-    wait_for_bench_catalog(&app, "archive acceptance", &receipt);
+    save_bench_fixture(&mut app, "archive acceptance");
     app.app.handle_resize(100, 32);
     app.render_silent();
     let address = app.app.conversation.transcript().store_address().unwrap();
-    let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-        &address.sessions_root,
-        &address.lineage_id,
-        &address.session_id,
-    )
-    .unwrap();
+    let reader = address.reader().unwrap();
     (app, reader, archive_bytes)
 }
 
-/// Measures public SDK root copying with an unchanged archive. Cold fixture
-/// construction and historical verification stay outside the sample.
+/// Measures a direct store fork with an unchanged archive. Fixture construction
+/// and verification stay outside the sample.
 #[test]
 #[ignore = "manual resource acceptance; see TESTING.md"]
-fn session_storage_public_fork_reuses_archive_roots() {
+fn session_storage_store_fork_is_independent_of_archive_bytes() {
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
         let (app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let address = app.app.conversation.transcript().store_address().unwrap();
-        let original = reader.snapshot().unwrap();
+        let source_id = reader.session_id().to_owned();
+        let original = reader.state().unwrap();
         let target = app
             .app
             .conversation
             .session()
             .fork_target(app.app.core.env.pid());
-        // Keep the source lease active, but exclude unrelated idle collection
-        // from the process-wide allocation sample of this direct SDK operation.
         let release = app.app.conversation.pause_persistence();
-        let mut fork = None;
-        let (sample, perf) = capture_hot_path_sample("public_fork_root_copy", checkpoints, || {
-            fork = Some(
-                smelt_store::OwnedLineageWriter::fork_from(
-                    &address.sessions_root,
-                    &address.session_id,
-                    &target.id,
-                    target.created_at_ms,
-                    Some(original.head),
-                    &|| false,
-                )
-                .unwrap(),
+        let store = app.app.core.sessions.store();
+        let mut head = None;
+        let (sample, _) = capture_hot_path_sample("store_fork", checkpoints, || {
+            head = Some(
+                store
+                    .fork(&source_id, &target.id, target.created_at_ms as i64)
+                    .unwrap(),
             );
         });
-        assert_hot_path_at_most(
-            &perf,
-            sample.operation,
-            "persist:reclamation:rows_examined",
-            0,
-        );
         release.send(()).expect("resume source persistence actor");
-        let (destination, result) = fork.unwrap();
-        assert_eq!(result.source_session_id, address.session_id);
-        assert_eq!(result.source_head, original.head);
-        assert_eq!(result.session.revision_id, original.revision_id);
-        let receipt = result.session.receipt;
-        assert_eq!(receipt.current.revision, smelt_store::Revision::new(1));
-        assert_eq!(receipt.current.history_len, original.head.history_len);
+        assert_eq!(head, Some(original.head));
+        let copied = store.reader(&target.id).unwrap().state().unwrap();
         assert_eq!(
-            receipt.current.transcript_record_count,
-            original.head.transcript_record_count
+            copied.identity.parent_id.as_deref(),
+            Some(source_id.as_str())
         );
-        let copied = destination.snapshot().unwrap();
-        assert_eq!(copied.revision_id, original.revision_id);
-        assert_eq!(copied.history_root_id, original.history_root_id);
-        assert_eq!(copied.transcript_root_id, original.transcript_root_id);
-        assert_eq!(copied.side_tables, original.side_tables);
+        assert_eq!(copied.head, original.head);
         assert_archive_retained(&original, &copied);
-        assert_eq!(reader.snapshot().unwrap(), original);
-        assert_hot_path_at_most(&perf, sample.operation, "store:object:bytes_hydrated", 0);
+        assert_eq!(reader.state().unwrap(), original);
         eprintln!(
-            "PUBLIC_FORK_HOT_WORK checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}",
+            "STORE_FORK checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}",
             sample.thread_bytes_allocated, sample.process_bytes_allocated,
         );
         samples.push((checkpoints, sample.process_bytes_allocated));
-        destination.release().unwrap();
     }
     let baseline = samples[0].1;
     for (checkpoints, allocated) in samples {
         assert!(allocated <= baseline + 256 * 1024,
-            "{checkpoints} retained checkpoints inflate public fork root copying to {allocated} allocated bytes, baseline {baseline}");
+            "{checkpoints} retained checkpoints inflate a store fork to {allocated} allocated bytes, baseline {baseline}");
     }
 }
 
 /// Measures actual command capture with many short retained records, independently
-/// of archive body size. Cold resume, settlement and exact reads are outside the sample.
+/// of archive body size. Cold resume and exact reads are outside the sample.
 #[test]
 #[ignore = "manual resource acceptance; see TESTING.md"]
 fn session_storage_clean_fork_capture_is_independent_of_record_count() {
@@ -5465,8 +5104,6 @@ fn session_storage_clean_fork_capture_is_independent_of_record_count() {
     let mut samples = Vec::new();
     for checkpoints in [0, 4096, 16_384] {
         let mut app = TestApp::builder().build();
-        let storage =
-            smelt_core::session::SessionStorage::new(app.session_storage_root().to_path_buf());
         let mut session = Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
         let texts = [
             "synthetic user",
@@ -5505,9 +5142,9 @@ fn session_storage_clean_fork_capture_is_independent_of_record_count() {
             first_live_index: 2,
             ..Default::default()
         });
-        let mut command = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
-        command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::ZERO,
+        let mut commit = smelt_core::session::full_commit(&session).unwrap();
+        commit.transcript = Some(smelt_store::TranscriptRecordSuffix {
+            start: 0,
             records: texts
                 .into_iter()
                 .enumerate()
@@ -5535,19 +5172,17 @@ fn session_storage_clean_fork_capture_is_independent_of_record_count() {
                 })
                 .collect(),
         });
-        let mut writer =
-            smelt_store::OwnedLineageWriter::open(storage.sessions_dir(), &session.id).unwrap();
-        let receipt = writer.commit_session(&command).unwrap();
-        app.publish_session_catalog_commit(&command, &receipt);
-        writer.release().unwrap();
-        app.reconcile_session_catalog().unwrap();
+        let store = app.app.core.sessions.store().clone();
+        store
+            .writer(&session.id)
+            .unwrap()
+            .commit(&smelt_core::session::store_identity(&session), &commit)
+            .unwrap();
         assert!(app.resume_session(&session.id));
         assert_eq!(app.session_snapshot().id, session.id);
         app.render_silent();
-        let reader =
-            smelt_store::LineageSessionReader::open_existing(storage.sessions_dir(), &session.id)
-                .unwrap();
-        let original = reader.snapshot().unwrap();
+        let reader = store.reader(&session.id).unwrap();
+        let original = reader.state().unwrap();
         let history = reader
             .history_range(0, original.head.history_len.get())
             .unwrap();
@@ -5561,18 +5196,14 @@ fn session_storage_clean_fork_capture_is_independent_of_record_count() {
         app.wait_for_session_lifecycle();
         let target_id = app.session_snapshot().id;
         assert_ne!(target_id, session.id);
-        let fork =
-            smelt_store::LineageSessionReader::open_existing(storage.sessions_dir(), target_id)
-                .unwrap();
-        let saved = fork.snapshot().unwrap();
+        let fork = store.reader(&target_id).unwrap();
+        let saved = fork.state().unwrap();
         assert_eq!(
             saved.identity.parent_id.as_deref(),
             Some(session.id.as_str())
         );
-        assert_eq!(saved.history_root_id, original.history_root_id);
-        assert_eq!(saved.transcript_root_id, original.transcript_root_id);
+        assert_eq!(saved.head, original.head);
         assert_archive_retained(&original, &saved);
-        assert_eq!(saved.side_tables, original.side_tables);
         assert_eq!(
             fork.history_range(0, saved.head.history_len.get()).unwrap(),
             history
@@ -5582,7 +5213,7 @@ fn session_storage_clean_fork_capture_is_independent_of_record_count() {
                 .unwrap(),
             transcript
         );
-        assert_eq!(reader.snapshot().unwrap(), original);
+        assert_eq!(reader.state().unwrap(), original);
         eprintln!("FORK_RECORD_COUNT records={checkpoints} ui_thread_alloc_bytes={} exact_content=true source_unchanged=true", sample.thread_bytes_allocated);
         samples.push((checkpoints, sample.thread_bytes_allocated));
     }
@@ -5605,7 +5236,7 @@ fn session_storage_preserved_fork_capture_is_independent_of_archive_bytes() {
     assert_archive_fork_capture_bounded(true);
 }
 
-// Keep worker persistence and cold historical verification outside the UI sample.
+// Keep worker persistence and verification outside the UI sample.
 fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
     let operation = if preserve_pending {
         "preserved_fork_request"
@@ -5615,14 +5246,8 @@ fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
         let (mut app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let address = app
-            .app
-            .conversation
-            .transcript()
-            .store_address()
-            .unwrap()
-            .clone();
-        let original = reader.snapshot().unwrap();
+        let source_id = reader.session_id().to_owned();
+        let original = reader.state().unwrap();
         let history = reader
             .history_range(0, original.head.history_len.get())
             .unwrap();
@@ -5631,14 +5256,16 @@ fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
             .unwrap();
         let pending = preserve_pending.then(|| hot_path_user("preserved fork pending suffix"));
         if let Some(pending) = &pending {
-            app.inject_commit_failure(smelt_store::SessionCommitFailure::OwnershipLost);
+            app.inject_commit_failure(smelt_store::StoreError::Owned {
+                session_id: source_id.clone(),
+            });
             app.session_append_history(pending.clone());
             app.save_session_and_flush();
             assert!(app.session_is_read_only());
             assert!(app.session_document_has_unflushed_work());
-            assert_eq!(reader.snapshot().unwrap(), original);
+            assert_eq!(reader.state().unwrap(), original);
         } else {
-            assert!(app.resume_session(&address.session_id));
+            assert!(app.resume_session(&source_id));
             assert!(!app.session_is_read_only());
             assert!(!app.session_document_has_unflushed_work());
         }
@@ -5652,16 +5279,14 @@ fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
         });
         app.wait_for_session_lifecycle();
         let fork_id = app.session_snapshot().id;
-        assert_ne!(fork_id, address.session_id);
+        assert_ne!(fork_id, source_id);
         assert!(!app.session_is_read_only());
         assert!(!app.session_document_has_unflushed_work());
-        let fork =
-            smelt_store::LineageSessionReader::open_existing(&address.sessions_root, &fork_id)
-                .unwrap();
-        let saved = fork.snapshot().unwrap();
+        let fork = app.app.core.sessions.reader(&fork_id).unwrap();
+        let saved = fork.state().unwrap();
         assert_eq!(
             saved.identity.parent_id.as_deref(),
-            Some(address.session_id.as_str())
+            Some(source_id.as_str())
         );
         assert_archive_retained(&original, &saved);
         assert_eq!(
@@ -5686,18 +5311,14 @@ fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
                 .unwrap(),
             records
         );
-        assert_eq!(reader.snapshot().unwrap(), original);
+        assert_eq!(reader.state().unwrap(), original);
         if !preserve_pending {
-            assert_eq!(saved.head.revision, smelt_store::Revision::new(2));
-            assert_eq!(saved.history_root_id, original.history_root_id);
-            assert_eq!(saved.transcript_root_id, original.transcript_root_id);
-            assert_eq!(
-                saved.head.transcript_record_count,
-                original.head.transcript_record_count
-            );
+            assert_eq!(saved.head, original.head);
             assert_eq!(saved.metadata.title, original.metadata.title);
             assert_eq!(saved.metadata.slug, original.metadata.slug);
-            assert_eq!(saved.side_tables, original.side_tables);
+            assert_eq!(saved.turn_metas, original.turn_metas);
+            assert_eq!(saved.metadata_snapshots, original.metadata_snapshots);
+            assert_eq!(saved.context_snapshots, original.context_snapshots);
         }
         eprintln!("ARCHIVE_FORK operation={operation} checkpoints={checkpoints} archive_bytes={archive_bytes} thread_alloc_bytes={} process_alloc_bytes={}", sample.thread_bytes_allocated, sample.process_bytes_allocated);
         print_hot_path_perf(operation, &perf);
@@ -5711,21 +5332,12 @@ fn assert_archive_fork_capture_bounded(preserve_pending: bool) {
 }
 
 fn assert_archive_retained(
-    original: &smelt_store::LineageSessionState,
-    saved: &smelt_store::LineageSessionState,
+    original: &smelt_store::SessionState,
+    saved: &smelt_store::SessionState,
 ) {
-    assert_eq!(
-        saved.metadata.checkpoint_events_json,
-        original.metadata.checkpoint_events_json
-    );
-    assert_eq!(
-        saved.metadata.checkpoint_json,
-        original.metadata.checkpoint_json
-    );
-    assert_eq!(
-        saved.metadata.first_user_message,
-        original.metadata.first_user_message
-    );
+    assert_eq!(saved.checkpoint_events, original.checkpoint_events);
+    assert_eq!(saved.checkpoint, original.checkpoint);
+    assert_eq!(saved.first_user_message, original.first_user_message);
 }
 
 /// Measures actual Lua title changes through canonical settlement with an unchanged
@@ -5736,23 +5348,15 @@ fn session_storage_title_save_allocations_are_bounded() {
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
         let (mut app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let original = reader.snapshot().expect("original archived state");
-        let mut receipt = None;
+        let original = reader.state().expect("original archived state");
+        let mut head = None;
         let (sample, perf) = capture_hot_path_sample("archive_title_hot_work", checkpoints, || {
             assert!(app.run_lua("smelt.session.title.set('bounded archive title')"));
-            receipt = Some(save_bench_fixture(&mut app, "archive title hot work"));
+            head = Some(save_bench_fixture(&mut app, "archive title hot work"));
         });
-        let receipt = receipt.expect("durable title receipt");
-        wait_for_bench_catalog(&app, "archive title hot work", &receipt);
-        assert_eq!(receipt.session_id, original.identity.id);
-        assert!(receipt.current.revision > original.head.revision);
-        assert_eq!(receipt.current.history_len, original.head.history_len);
-        assert_eq!(
-            receipt.current.transcript_record_count,
-            original.head.transcript_record_count
-        );
-        let saved = reader.snapshot().expect("saved archived state");
-        assert_eq!(saved.head, receipt.current);
+        assert_eq!(head, Some(original.head));
+        let saved = reader.state().expect("saved archived state");
+        assert_eq!(saved.head, original.head);
         assert_eq!(
             saved.metadata.title.as_deref(),
             Some("bounded archive title")
@@ -5761,7 +5365,7 @@ fn session_storage_title_save_allocations_are_bounded() {
         let preparation = perf
             .allocs
             .iter()
-            .find(|row| row.label == "session:capture_save_batch")
+            .find(|row| row.label == "session:capture_save")
             .expect("actual title-save capture must be instrumented");
         assert!(preparation.count > 0);
         eprintln!(
@@ -5789,45 +5393,36 @@ fn session_storage_title_save_allocations_are_bounded() {
 }
 
 /// Exercises real title changes with fixed history, checkpoint archive and
-/// provider context. Retaining titles must not retain another archive per save.
+/// provider context. A title save must not store the archive again.
 #[test]
 #[ignore = "manual resource acceptance; see TESTING.md"]
-fn session_storage_title_saves_reuse_checkpoint_archives() {
+fn session_storage_title_saves_do_not_grow_with_archives() {
     const SAVES: u64 = 20;
-    // Allows command receipts, index paths and small unique metadata, but not
-    // another compressed archive on every revision.
+    // Allows page churn and small metadata, but not another archive per save.
     const MAX_PHYSICAL_BYTES_PER_SAVE: u64 = 64 * 1024;
     let mut samples = Vec::new();
     for checkpoints in [0, 32, 128] {
         let (mut app, reader, archive_bytes) = saved_archive_bench_app(checkpoints);
-        let before = reader.storage_stats().expect("initial storage accounting");
-        let initial = reader.snapshot().expect("initial archived snapshot");
-        let mut head = initial.head;
+        let store = app.app.core.sessions.store().clone();
+        let before = reader
+            .storage_stats(&store)
+            .expect("initial storage accounting");
+        let initial = reader.state().expect("initial archived state");
         for save in 0..SAVES {
             let title = format!("archive growth title {save:02}");
             assert!(app.run_lua(&format!("smelt.session.title.set({title:?})")));
-            let receipt = save_bench_fixture(&mut app, "archive growth title");
-            wait_for_bench_catalog(&app, "archive growth title", &receipt);
-            assert_eq!(receipt.session_id, initial.identity.id);
-            assert!(receipt.current.revision > head.revision);
-            assert_eq!(receipt.current.history_len, head.history_len);
-            assert_eq!(
-                receipt.current.transcript_record_count,
-                head.transcript_record_count
-            );
-            let snapshot = reader.snapshot().expect("saved archived snapshot");
-            assert_eq!(snapshot.head, receipt.current);
-            assert_eq!(snapshot.metadata.title.as_deref(), Some(title.as_str()));
-            assert_archive_retained(&initial, &snapshot);
-            head = receipt.current;
+            let head = save_bench_fixture(&mut app, "archive growth title");
+            assert_eq!(head, initial.head);
+            let state = reader.state().expect("saved archived state");
+            assert_eq!(state.metadata.title.as_deref(), Some(title.as_str()));
+            assert_archive_retained(&initial, &state);
         }
-        let after = reader.storage_stats().expect("final storage accounting");
-        let physical_growth = after.object_stored_bytes - before.object_stored_bytes;
+        let after = reader
+            .storage_stats(&store)
+            .expect("final storage accounting");
+        let physical_growth = stored_bytes(&after).saturating_sub(stored_bytes(&before));
         eprintln!(
-            "ARCHIVE_STORAGE_GROWTH checkpoints={checkpoints} archive_bytes={archive_bytes} saves={SAVES} revisions={} object_rows_added={} logical_bytes_added={} physical_bytes_added={physical_growth} physical_bytes_per_save={} database_bytes={} wal_bytes={}",
-            head.revision.get() - initial.head.revision.get(),
-            after.object_rows - before.object_rows,
-            after.object_raw_bytes - before.object_raw_bytes,
+            "ARCHIVE_STORAGE_GROWTH checkpoints={checkpoints} archive_bytes={archive_bytes} saves={SAVES} physical_bytes_added={physical_growth} physical_bytes_per_save={} database_bytes={} wal_bytes={}",
             physical_growth / SAVES,
             after.database_bytes,
             after.wal_bytes,
@@ -5838,16 +5433,20 @@ fn session_storage_title_saves_reuse_checkpoint_archives() {
         assert!(
             physical_growth <= SAVES * MAX_PHYSICAL_BYTES_PER_SAVE,
             "{checkpoints} unchanged checkpoints repeated across title saves: \
-             {physical_growth} new physical object bytes, budget {}",
+             {physical_growth} new physical bytes, budget {}",
             SAVES * MAX_PHYSICAL_BYTES_PER_SAVE
         );
     }
 }
 
+fn stored_bytes(stats: &smelt_store::StorageStats) -> u64 {
+    stats.database_bytes + stats.wal_bytes
+}
+
 /// A retained initial paste must not be stored again when only the title changes.
 #[test]
 #[ignore = "manual resource acceptance; see TESTING.md"]
-fn session_storage_title_saves_reuse_initial_message() {
+fn session_storage_title_saves_do_not_store_the_initial_message_again() {
     const SAVES: u64 = 10;
     const MAX_PHYSICAL_BYTES_PER_SAVE: u64 = 64 * 1024;
     let mut samples = Vec::new();
@@ -5870,7 +5469,7 @@ fn session_storage_title_saves_reuse_initial_message() {
             message.clone(),
         )));
         app.press(KeyCode::Enter);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(SourceEvent::Tick(0));
         assert_eq!(
             app.app.conversation.session().first_user_message.as_deref(),
@@ -5878,74 +5477,52 @@ fn session_storage_title_saves_reuse_initial_message() {
             "terminal paste submission must retain the complete initial message"
         );
         app.app.discard_turn(crate::app::TurnEnd::Complete);
-        app.wait_for_turn_persistence();
-        let receipt = save_bench_fixture(&mut app, "initial message growth");
-        wait_for_bench_catalog(&app, "initial message growth", &receipt);
-        let address = app
+        app.wait_for_turn_dispatch();
+        save_bench_fixture(&mut app, "initial message growth");
+        let store = app.app.core.sessions.store().clone();
+        let reader = app
             .app
             .conversation
             .transcript()
             .store_address()
-            .expect("initial message fixture store address");
-        let reader = smelt_store::LineageSessionReader::open_existing_in_lineage(
-            &address.sessions_root,
-            &address.lineage_id,
-            &address.session_id,
-        )
-        .expect("open initial message fixture reader");
-        let initial = reader.snapshot().expect("initial message snapshot");
+            .expect("initial message fixture store address")
+            .reader()
+            .expect("open initial message fixture reader");
+        let initial = reader.state().expect("initial message state");
         assert_eq!(
-            initial.metadata.first_user_message.as_deref(),
+            initial.first_user_message.as_deref(),
             Some(message.as_str())
         );
-        let before = reader.storage_stats().expect("initial storage accounting");
-        let mut head = initial.head;
+        let before = reader
+            .storage_stats(&store)
+            .expect("initial storage accounting");
         let mut process_alloc_bytes = 0;
         let mut ui_alloc_bytes = 0;
         for save in 0..SAVES {
             let title = format!("initial message title {save:02}");
-            let mut saved_receipt = None;
+            let mut head = None;
             let (sample, _) = capture_hot_path_sample("initial_message_title", 1, || {
                 assert!(app.run_lua(&format!("smelt.session.title.set({title:?})")));
-                saved_receipt = Some(save_bench_fixture(&mut app, "initial message title"));
+                head = Some(save_bench_fixture(&mut app, "initial message title"));
             });
             process_alloc_bytes += sample.process_bytes_allocated;
             ui_alloc_bytes += sample.thread_bytes_allocated;
-            let receipt = saved_receipt.expect("title save receipt");
-            wait_for_bench_catalog(&app, "initial message title", &receipt);
-            assert_eq!(receipt.session_id, initial.identity.id);
-            assert!(receipt.current.revision > head.revision);
-            assert_eq!(receipt.current.history_len, initial.head.history_len);
-            assert_eq!(
-                receipt.current.transcript_record_count,
-                initial.head.transcript_record_count
-            );
-            let snapshot = reader.snapshot().expect("saved initial message snapshot");
-            assert_eq!(snapshot.head, receipt.current);
-            assert_eq!(snapshot.metadata.title.as_deref(), Some(title.as_str()));
-            assert_eq!(
-                snapshot.metadata.first_user_message.as_deref(),
-                Some(message.as_str())
-            );
-            let (_, metadata) = snapshot
-                .side_tables
+            assert_eq!(head, Some(initial.head));
+            let state = reader.state().expect("saved initial message state");
+            assert_eq!(state.metadata.title.as_deref(), Some(title.as_str()));
+            assert_eq!(state.first_user_message.as_deref(), Some(message.as_str()));
+            let (_, metadata) = state
                 .metadata_snapshots
                 .last()
                 .expect("title metadata snapshot");
             assert_eq!(metadata["title"].as_str(), Some(title.as_str()));
-            assert_eq!(
-                metadata["first_user_message"].as_str(),
-                Some(message.as_str())
-            );
-            head = receipt.current;
         }
-        let after = reader.storage_stats().expect("final storage accounting");
-        let physical_growth = after.object_stored_bytes - before.object_stored_bytes;
+        let after = reader
+            .storage_stats(&store)
+            .expect("final storage accounting");
+        let physical_growth = stored_bytes(&after).saturating_sub(stored_bytes(&before));
         eprintln!(
-            "INITIAL_MESSAGE_STORAGE_GROWTH message_bytes={message_bytes} saves={SAVES} revisions={} object_rows_added={} logical_bytes_added={} physical_bytes_added={physical_growth} physical_bytes_per_save={} ui_alloc_bytes={ui_alloc_bytes} process_alloc_bytes={process_alloc_bytes} database_bytes={} wal_bytes={}",
-            head.revision.get() - initial.head.revision.get(),
-            after.object_rows - before.object_rows,
-            after.object_raw_bytes - before.object_raw_bytes,
+            "INITIAL_MESSAGE_STORAGE_GROWTH message_bytes={message_bytes} saves={SAVES} physical_bytes_added={physical_growth} physical_bytes_per_save={} ui_alloc_bytes={ui_alloc_bytes} process_alloc_bytes={process_alloc_bytes} database_bytes={} wal_bytes={}",
             physical_growth / SAVES,
             after.database_bytes,
             after.wal_bytes,
@@ -5956,7 +5533,7 @@ fn session_storage_title_saves_reuse_initial_message() {
         assert!(
             physical_growth <= SAVES * MAX_PHYSICAL_BYTES_PER_SAVE,
             "{message_bytes} initial message bytes repeated across title saves: \
-             {physical_growth} new physical object bytes, budget {}",
+             {physical_growth} new physical bytes, budget {}",
             SAVES * MAX_PHYSICAL_BYTES_PER_SAVE
         );
     }
@@ -6016,12 +5593,10 @@ fn transcript_active_memory_benchmark_suite() {
                 });
             block_count += 1;
         }
-        let receipt = save_bench_fixture(&mut app, "active memory");
+        save_bench_fixture(&mut app, "active memory");
         while app.app.conversation.drain_transcript_compaction_slice() {}
         batch_count += 1;
         if generated_bytes >= target_bytes {
-            wait_for_bench_catalog(&app, "active memory", &receipt);
-            wait_for_bench_search_projection(&app, "active memory");
             break;
         }
     }
@@ -6031,12 +5606,14 @@ fn transcript_active_memory_benchmark_suite() {
         .app
         .conversation
         .transcript_memory_snapshot_for_harness();
-    assert_eq!(after_compaction.live_blocks, 0);
-    assert_eq!(after_compaction.stored_blocks, block_count);
+    // Compaction keeps blocks on screen live. Each block is taller than the
+    // viewport, so only the tail block stays.
+    assert_eq!(after_compaction.live_blocks, 1);
+    assert_eq!(after_compaction.stored_blocks, block_count - 1);
     assert_eq!(after_compaction.hydrated_blocks, 0);
     assert_eq!(
         after_compaction.dematerialized_entries as usize,
-        block_count
+        block_count - 1
     );
 
     app.app.app_focus = AppFocus::Content;
@@ -6487,7 +6064,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
         save_ms,
     } = scaling_bench_app(blocks, compacted, scaling_bench_block);
     if compacted {
-        let disk_bytes = directory_bytes(app.app.core.sessions.layout().sessions_root());
+        let disk_bytes = directory_bytes(app.app.core.sessions.store().root());
         let first = save_ms.first().copied().unwrap_or_default();
         let last = save_ms.iter().rev().nth(1).copied().unwrap_or(first);
         eprintln!(
@@ -6497,7 +6074,7 @@ fn run_scaling_sample(blocks: usize, compacted: bool, reps: usize) -> Vec<Scalin
             disk_bytes as f64 / content_bytes as f64,
         );
         let mut files = Vec::new();
-        directory_files(app.app.core.sessions.layout().sessions_root(), &mut files);
+        directory_files(app.app.core.sessions.store().root(), &mut files);
         files.sort_by(|a, b| b.cmp(a));
         for (bytes, name) in files.iter().take(6) {
             eprintln!("TRANSCRIPT_SCALING_STORAGE_FILE blocks={blocks} bytes={bytes} name={name}");
@@ -6855,9 +6432,6 @@ fn transcript_keys_benchmark_suite() {
     let mut results: Vec<Vec<(f64, f64)>> = Vec::new();
     for &blocks in &counts {
         let mut app = scaling_bench_app(blocks, compacted, keys_bench_block).app;
-        if compacted {
-            wait_for_bench_search_projection(&app, "keys");
-        }
         scaling_focus_transcript(&mut app);
         app.render_silent();
         let mut per_op = Vec::with_capacity(KEYS_BENCH_OPS.len());

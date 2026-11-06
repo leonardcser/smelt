@@ -107,7 +107,6 @@ fn payload(root: &Path, turn: u64, history: Vec<HistoryItem>) -> UiCommand {
         session_id: "test-session".into(),
         sessions_root: root.join("sessions"),
         ephemeral: false,
-        persistence: Default::default(),
         permission_overrides: None,
         system_prompt: None,
         native_prompt: None,
@@ -1073,7 +1072,6 @@ async fn auxiliary_ask(
         fast_mode: false,
         tools: Vec::new(),
         session_id: "test-session".into(),
-        persistence: Default::default(),
         stream: true,
         visible_retries: false,
     });

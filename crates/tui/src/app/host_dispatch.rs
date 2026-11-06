@@ -62,6 +62,9 @@ struct RequestHook {
     cancel_generation: u64,
     reply: RefCell<Option<MessageReply>>,
     compaction: RefCell<Option<super::BusyToken>>,
+    /// The request a prepare hook may read. Dropped when the hook resolves,
+    /// so Lua GC timing never holds a full history copy.
+    messages: RefCell<Option<PreparedRequestMessages>>,
 }
 
 impl RequestHook {
@@ -123,9 +126,9 @@ struct DeferredHostReply {
     owner: Rc<RequestHook>,
 }
 
-fn current_model_history_decision(app: &TuiApp) -> HostRequestDecision {
-    let coordinates = app.model_history_source().coordinates();
-    HostRequestDecision::replace_model_history(app.model_history(), coordinates)
+fn current_model_history_decision(app: &mut TuiApp) -> HostRequestDecision {
+    let source = app.model_history_source();
+    HostRequestDecision::replace_model_history(source.items, source.coordinates)
 }
 
 fn request_decision_from_lua(
@@ -183,7 +186,7 @@ pub(crate) fn drain_deferred_host_replies(app: &mut TuiApp) {
 
 fn prepare_request_to_lua(
     lua: &mlua::Lua,
-    messages: PreparedRequestMessages,
+    owner: &Rc<RequestHook>,
     estimated_tokens: u32,
     context_estimate: PrepareContextEstimate,
 ) -> mlua::Result<mlua::Table> {
@@ -195,12 +198,19 @@ fn prepare_request_to_lua(
     )?;
     request.set("context_estimate", context_estimate.into_lua_table(lua)?)?;
 
+    let owner = Rc::clone(owner);
     let mt = lua.create_table()?;
     mt.set(
         "__index",
         lua.create_function(move |lua, (table, key): (mlua::Table, mlua::Value)| {
             if let mlua::Value::String(s) = key {
                 if s.to_str()?.as_ref() == "messages" {
+                    let messages = owner.messages.borrow();
+                    let Some(messages) = messages.as_ref() else {
+                        return Err(mlua::Error::runtime(
+                            "request.messages is only readable until the hook replies",
+                        ));
+                    };
                     let value =
                         smelt_core::lua::serde_to_lua_preserving_nulls(lua, &messages.model())?;
                     table.raw_set("messages", value.clone())?;
@@ -222,6 +232,7 @@ impl TuiApp {
             cancel_generation: self.conversation.cancel_generation(),
             reply: RefCell::new(Some(reply)),
             compaction: RefCell::new(None),
+            messages: RefCell::new(None),
         });
         self.host_work.pending = Some(Rc::clone(&owner));
         owner
@@ -292,6 +303,7 @@ impl TuiApp {
         owner: &Rc<RequestHook>,
         decision: DeferredRequestDecision,
     ) -> HostRequestDecision {
+        owner.messages.borrow_mut().take();
         owner.finish_compaction();
         self.sync_compaction_phase();
         let owns_pending = self
@@ -402,14 +414,14 @@ impl TuiApp {
                 self.dispatch_recover_from_context_limit(turn_id, messages, reply);
             }
             HostCall::RequestAudit {
-                persistence,
+                session_id,
                 entry,
                 payload_mode,
             } => {
-                if let Err(cause) =
-                    self.conversation
-                        .append_request_audit(persistence, *entry, payload_mode)
-                {
+                if session_id != self.conversation.session().id {
+                    return;
+                }
+                if let Err(cause) = self.conversation.append_request_audit(*entry, payload_mode) {
                     self.notify_warn(format!("request audit was not queued: {}", cause.message));
                 }
             }
@@ -557,7 +569,7 @@ impl TuiApp {
             return;
         };
         let payload = smelt_core::lua::serde_to_lua_preserving_nulls(&lua, &messages);
-        self.call_message_reply_hook(turn_id, "on_context_limit", func, payload, reply);
+        self.call_message_reply_hook(turn_id, "on_context_limit", func, |_| payload, reply);
     }
 
     /// Hand the first registered `smelt.engine.on_prepare_request`
@@ -637,8 +649,11 @@ impl TuiApp {
                 },
             )
         };
-        let payload = prepare_request_to_lua(&lua, messages, estimated_tokens, context_estimate)
-            .map(mlua::Value::Table);
+        let payload = |owner: &Rc<RequestHook>| {
+            *owner.messages.borrow_mut() = Some(messages);
+            prepare_request_to_lua(&lua, owner, estimated_tokens, context_estimate)
+                .map(mlua::Value::Table)
+        };
         self.call_message_reply_hook(turn_id, "on_prepare_request", func, payload, reply);
     }
 
@@ -647,11 +662,12 @@ impl TuiApp {
         turn_id: u64,
         label: &'static str,
         func: mlua::Function,
-        payload: mlua::Result<mlua::Value>,
+        payload: impl FnOnce(&Rc<RequestHook>) -> mlua::Result<mlua::Value>,
         reply: MessageReply,
     ) {
         let lua = self.lua.lua().clone();
         let owner = self.begin_request_hook(turn_id, reply);
+        let payload = payload(&owner);
         let result = crate::lua::scope_app(self, || {
             let payload = payload?;
             let reply_fn = create_message_reply_fn(&lua, Rc::clone(&owner))?;
@@ -921,7 +937,7 @@ mod tests {
                 history: None,
                 meta: None,
             });
-            app.wait_for_turn_persistence();
+            app.wait_for_turn_dispatch();
             let commands = app.drain_engine_sends();
             if cancel {
                 assert!(!app.agent_running());
@@ -1043,7 +1059,7 @@ mod tests {
                         history: None,
                         meta: None,
                     });
-                    app.wait_for_turn_persistence();
+                    app.wait_for_turn_dispatch();
                     assert!(app
                         .drain_engine_sends()
                         .iter()
@@ -1097,6 +1113,43 @@ mod tests {
             ));
             assert!(app.app.host_work.pending.is_none());
         }
+    }
+
+    #[test]
+    fn prepare_request_messages_are_released_when_the_hook_replies() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.start_turn(42);
+        app.app.lua.core_shared().hooks.prepare_request.clear();
+        assert!(app.run_lua(
+            r#"
+            smelt.engine.on_prepare_request(function(request, reply)
+                _G.kept_request = request
+                _G.pending_reply = reply
+            end)
+        "#
+        ));
+        let (reply, mut response) = oneshot::channel();
+        app.dispatch_host_call(HostCall::PrepareRequest {
+            turn_id: 42,
+            messages: PreparedRequestMessages::model_only(vec![Message::user(Content::text(
+                "hello",
+            ))]),
+            estimated_tokens: 0,
+            reply,
+        });
+        assert!(app.run_lua("pending_reply(nil)"));
+        assert!(matches!(
+            response.try_recv().unwrap(),
+            HostRequestDecision::Continue
+        ));
+
+        let error = app
+            .run_lua_result("local _ = kept_request.messages")
+            .unwrap_err();
+        assert!(
+            error.contains("only readable until the hook replies"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1384,9 +1437,17 @@ mod tests {
     fn prepare_request_builds_messages_lazily_on_access() {
         let lua = mlua::Lua::new();
         let messages = vec![Message::user(Content::text("hello"))];
+        let (reply, _response) = oneshot::channel();
+        let owner = Rc::new(RequestHook {
+            turn_id: 0,
+            cancel_generation: 0,
+            reply: RefCell::new(Some(reply)),
+            compaction: RefCell::new(None),
+            messages: RefCell::new(Some(PreparedRequestMessages::model_only(messages))),
+        });
         let request = prepare_request_to_lua(
             &lua,
-            PreparedRequestMessages::model_only(messages),
+            &owner,
             42,
             PrepareContextEstimate::full_request(42, 1),
         )

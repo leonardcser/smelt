@@ -1,10 +1,9 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use protocol::{HistoryItem, ReasoningEffort, TokenUsage, TurnMeta};
 use smelt_core::content::stream_parser::{StreamParser, ToolStart};
-use smelt_core::session::{
-    ContextCheckpoint, ContextTokenIdentity, Session, SessionHeader, SessionStoreAddress,
-};
+use smelt_core::session::{ContextCheckpoint, ContextTokenIdentity, Session};
 use smelt_core::session_runtime::LiveSession;
 use smelt_core::transcript_model::{Block, BlockId, BlockOrigin, ToolOutputRef, ToolStatus};
 
@@ -12,282 +11,119 @@ use crate::app::transcript::{
     RecordSaveBoundsError, TranscriptDocument, TranscriptRecordSaveBounds,
     TranscriptSaveHydrationError,
 };
-use crate::persist::SessionEpoch;
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct PersistenceGeneration(u64);
-
-impl Default for PersistenceGeneration {
-    fn default() -> Self {
-        Self::ZERO
-    }
-}
-
-impl PersistenceGeneration {
-    pub(crate) const ZERO: Self = Self(0);
-
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
-
-    pub(crate) fn checked_next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Save bookkeeping: what changed, what was captured for saving, and what is durable.
+///
+/// Every capture holds only the changes since the previous one. Saves reach the store
+/// in capture order, so the store head after a capture is known when it is taken.
+#[derive(Debug, Default)]
 struct DocumentChanges {
-    current: PersistenceGeneration,
-    durable: PersistenceGeneration,
-    acknowledged_head: smelt_store::StoreHead,
-    published_head: smelt_store::StoreHead,
+    /// Bumped by every change that needs saving.
+    current: u64,
+    /// `current` when the last save was captured.
+    captured: u64,
+    /// `current` of the last durable save.
+    durable: u64,
+    /// Sequence number of the last captured save.
+    seq: u64,
+    /// Store head once every captured save is durable.
+    captured_head: smelt_store::StoreHead,
+    durable_head: smelt_store::StoreHead,
     history_dirty_from: Option<usize>,
+    /// A save failed: the next capture rewrites everything after the durable head.
+    resync: bool,
+    in_flight: VecDeque<InFlightSave>,
+    /// Transcript records made durable since the transcript last learned about them.
+    durable_records: Option<TranscriptRecordSaveBounds>,
+    /// Last captured values, so unchanged ones are not written again.
+    first_user_message: Option<Option<std::sync::Arc<str>>>,
+    checkpoint: Option<Option<serde_json::Value>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InFlightSave {
+    seq: u64,
+    generation: u64,
+    /// Where the save's history suffix starts, if it has one.
+    history_start: Option<usize>,
+    records: Option<TranscriptRecordSaveBounds>,
 }
 
 impl DocumentChanges {
-    fn reserve_generation(&self) -> PersistenceGeneration {
-        self.current
-            .checked_next()
-            .expect("session persistence generation overflow")
+    fn new(head: smelt_store::StoreHead) -> Self {
+        Self {
+            captured_head: head,
+            durable_head: head,
+            ..Self::default()
+        }
     }
 
-    fn record(&mut self, generation: PersistenceGeneration, result: &DocumentChange) {
-        if !result.canonical_changed() {
+    fn record(&mut self, change: &DocumentChange) {
+        if !change.canonical_changed() {
             return;
         }
-        debug_assert_eq!(generation, self.reserve_generation());
-        self.current = generation;
-        if let Some(index) = result.history_dirty_from {
-            self.history_dirty_from = Some(
-                self.history_dirty_from
-                    .map_or(index, |current| current.min(index)),
-            );
+        self.current += 1;
+        if let Some(index) = change.history_dirty_from {
+            self.mark_history_dirty_from(index);
         }
     }
 
-    fn force_dirty(&mut self) {
-        self.current = self.reserve_generation();
+    fn mark_history_dirty_from(&mut self, index: usize) {
+        self.history_dirty_from = Some(self.history_dirty_from.map_or(index, |i| i.min(index)));
     }
 
-    fn force_dirty_from(&mut self, history_index: usize) {
-        self.force_dirty();
-        self.history_dirty_from = Some(
-            self.history_dirty_from
-                .map_or(history_index, |current| current.min(history_index)),
-        );
-    }
-
-    fn install_head(&mut self, head: smelt_store::StoreHead) {
+    /// The store copy at `head` is stale: the next capture rewrites the session.
+    fn rewrite_all(&mut self, head: smelt_store::StoreHead) {
         *self = Self {
-            acknowledged_head: head,
-            published_head: head,
-            ..Self::default()
+            current: 1,
+            seq: self.seq,
+            history_dirty_from: Some(0),
+            resync: true,
+            ..Self::new(head)
         };
-    }
-
-    fn mark_clean(&mut self, head: smelt_store::StoreHead) {
-        self.durable = self.current;
-        self.acknowledged_head = head;
-        self.published_head = head;
-        self.history_dirty_from = None;
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SessionRecordSaveProjection {
-    pub(crate) bounds: Option<TranscriptRecordSaveBounds>,
-    pub(crate) final_len: usize,
+fn merge_record_bounds(
+    current: Option<TranscriptRecordSaveBounds>,
+    next: Option<TranscriptRecordSaveBounds>,
+) -> Option<TranscriptRecordSaveBounds> {
+    match (current, next) {
+        (Some(current), Some(next)) if current.order_start <= next.order_start => {
+            Some(TranscriptRecordSaveBounds {
+                record_end_idx: next.record_end_idx,
+                ..current
+            })
+        }
+        (_, Some(next)) => Some(next),
+        (current, None) => current,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SessionBatchPreparationError {
+pub(crate) enum SaveCaptureError {
     HydrationPending,
     Invalid(String),
 }
 
-impl From<String> for SessionBatchPreparationError {
+impl From<String> for SaveCaptureError {
     fn from(message: String) -> Self {
         Self::Invalid(message)
     }
 }
 
-impl std::fmt::Display for SessionBatchPreparationError {
+impl From<smelt_core::session::SessionStoreError> for SaveCaptureError {
+    fn from(error: smelt_core::session::SessionStoreError) -> Self {
+        Self::Invalid(error.to_string())
+    }
+}
+
+impl std::fmt::Display for SaveCaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HydrationPending => f.write_str("transcript hydration is pending"),
             Self::Invalid(message) => f.write_str(message),
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ProjectedSessionSave {
-    pub(crate) record_projection: SessionRecordSaveProjection,
-    history: smelt_store::HistorySuffix,
-    records: Option<Vec<smelt_core::transcript_model::CapturedTranscriptBlockRecord>>,
-}
-
-impl ProjectedSessionSave {
-    pub(crate) fn prepare_archives(
-        self,
-        session: &Session,
-        expected: smelt_store::StoreHead,
-    ) -> Result<smelt_core::session::PreparedArchiveSave, smelt_store::StoreError> {
-        let archives = session.capture_archive_save(expected, self.history.final_len)?;
-        self.prepare(archives)
-    }
-
-    fn prepare(
-        self,
-        archives: smelt_core::session::CapturedArchiveSave,
-    ) -> Result<smelt_core::session::PreparedArchiveSave, smelt_store::StoreError> {
-        let records = self
-            .records
-            .map(|records| {
-                let bounds = self
-                    .record_projection
-                    .bounds
-                    .expect("captured record bounds");
-                Ok::<_, smelt_store::StoreError>(smelt_store::TranscriptRecordSuffix {
-                    start: smelt_store::TranscriptRecordIndex::new(bounds.record_start_idx as u64),
-                    records: records
-                        .into_iter()
-                        .enumerate()
-                        .map(|(offset, record)| {
-                            transcript_record_row(
-                                bounds.record_start_idx + offset,
-                                &record.prepare(),
-                                &self.history,
-                            )
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
-            })
-            .transpose()?;
-        archives.prepare(self.history, records)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SessionBatch {
-    pub(crate) generation: PersistenceGeneration,
-    pub(crate) record_projection: SessionRecordSaveProjection,
-    content: SessionBatchContent,
-}
-
-#[derive(Clone, Debug)]
-enum SessionBatchContent {
-    Captured(std::sync::Arc<CapturedSessionSave>),
-    Prepared(std::sync::Arc<smelt_core::session::PreparedArchiveSave>),
-}
-
-#[derive(Debug)]
-struct CapturedSessionSave {
-    projection: ProjectedSessionSave,
-    archives: smelt_core::session::CapturedArchiveSave,
-}
-
-impl PartialEq for SessionBatch {
-    fn eq(&self, other: &Self) -> bool {
-        if self.generation != other.generation || self.record_projection != other.record_projection
-        {
-            return false;
-        }
-        match (&self.content, &other.content) {
-            (SessionBatchContent::Captured(left), SessionBatchContent::Captured(right)) => {
-                std::sync::Arc::ptr_eq(left, right)
-                    || (left.archives.same_snapshot(&right.archives)
-                        && left.projection == right.projection)
-            }
-            (SessionBatchContent::Prepared(left), SessionBatchContent::Prepared(right)) => {
-                std::sync::Arc::ptr_eq(left, right) || left.same_snapshot(right)
-            }
-            _ => false,
-        }
-    }
-}
-
-impl SessionBatch {
-    #[cfg(test)]
-    pub(super) fn shares_storage_with(&self, other: &Self) -> bool {
-        match (&self.content, &other.content) {
-            (SessionBatchContent::Captured(left), SessionBatchContent::Captured(right)) => {
-                std::sync::Arc::ptr_eq(left, right)
-            }
-            (SessionBatchContent::Prepared(left), SessionBatchContent::Prepared(right)) => {
-                std::sync::Arc::ptr_eq(left, right)
-            }
-            _ => false,
-        }
-    }
-
-    pub(crate) fn session_id(&self) -> &str {
-        match &self.content {
-            SessionBatchContent::Captured(capture) => capture.archives.session_id(),
-            SessionBatchContent::Prepared(frame) => &frame.command().session_id,
-        }
-    }
-
-    pub(crate) fn matches_archive_base(&self, session: &Session) -> bool {
-        let base = match &self.content {
-            SessionBatchContent::Captured(capture) => capture.archives.archive_base(),
-            SessionBatchContent::Prepared(frame) => frame.command().archive_base.as_ref(),
-        };
-        base == session.archive_base()
-    }
-
-    /// Prepare on the persistence actor, then retain the exact frame for all attempts.
-    pub(crate) fn prepare(&self) -> Result<PreparedSessionBatch, smelt_store::StoreError> {
-        let frame = match &self.content {
-            SessionBatchContent::Captured(capture) => std::sync::Arc::new(
-                capture
-                    .projection
-                    .clone()
-                    .prepare(capture.archives.clone())?,
-            ),
-            SessionBatchContent::Prepared(frame) => frame.clone(),
-        };
-        Ok(PreparedSessionBatch {
-            generation: self.generation,
-            record_projection: self.record_projection,
-            frame,
-        })
-    }
-}
-
-impl From<PreparedSessionBatch> for SessionBatch {
-    fn from(batch: PreparedSessionBatch) -> Self {
-        Self {
-            generation: batch.generation,
-            record_projection: batch.record_projection,
-            content: SessionBatchContent::Prepared(batch.frame),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PreparedSessionBatch {
-    pub(crate) generation: PersistenceGeneration,
-    pub(crate) record_projection: SessionRecordSaveProjection,
-    pub(crate) frame: std::sync::Arc<smelt_core::session::PreparedArchiveSave>,
-}
-
-impl PartialEq for PreparedSessionBatch {
-    fn eq(&self, other: &Self) -> bool {
-        self.generation == other.generation
-            && self.record_projection == other.record_projection
-            && (std::sync::Arc::ptr_eq(&self.frame, &other.frame)
-                || self.frame.same_snapshot(&other.frame))
-    }
-}
-
-impl PreparedSessionBatch {
-    pub(crate) fn command(&self) -> &smelt_store::CompactSessionCommit {
-        self.frame.command()
     }
 }
 
@@ -309,7 +145,6 @@ pub(crate) struct TuiSessionDocument {
     pub(crate) live_session: Option<LiveSession>,
     pub(crate) navigation: smelt_core::session_runtime::HistoryNavigation,
     changes: DocumentChanges,
-    persistence_epoch: Option<SessionEpoch>,
     change_tracking: ChangeTracking,
 }
 
@@ -320,22 +155,13 @@ impl TuiSessionDocument {
             live_session: None,
             navigation: Default::default(),
             changes: DocumentChanges::default(),
-            persistence_epoch: None,
             change_tracking: ChangeTracking::Enabled,
         }
     }
 
-    fn reserved_generation(&self) -> Option<PersistenceGeneration> {
-        (self.change_tracking == ChangeTracking::Enabled).then(|| self.changes.reserve_generation())
-    }
-
-    fn record_change(
-        &mut self,
-        generation: Option<PersistenceGeneration>,
-        change: &DocumentChange,
-    ) {
-        if let Some(generation) = generation {
-            self.changes.record(generation, change);
+    fn record_change(&mut self, change: &DocumentChange) {
+        if self.change_tracking == ChangeTracking::Enabled {
+            self.changes.record(change);
         }
     }
 
@@ -352,7 +178,6 @@ impl TuiSessionDocument {
         session: &mut Session,
         mutation: HistoryMutation,
     ) -> DocumentChange {
-        let generation = self.reserved_generation();
         let change = SessionDocument::apply_history(
             session,
             self.live_session.as_mut(),
@@ -373,14 +198,13 @@ impl TuiSessionDocument {
                 }
             }
         }
-        self.record_change(generation, &change);
+        self.record_change(&change);
         change
     }
 
     pub(super) fn apply_transcript(&mut self, mutation: TranscriptMutation) -> DocumentChange {
-        let generation = self.reserved_generation();
         let change = SessionDocument::apply_to_transcript(&mut self.transcript, mutation);
-        self.record_change(generation, &change);
+        self.record_change(&change);
         change
     }
 
@@ -389,9 +213,8 @@ impl TuiSessionDocument {
         parser: &mut StreamParser,
         mutation: StreamMutation,
     ) -> DocumentChange {
-        let generation = self.reserved_generation();
         let change = SessionDocument::apply_stream(parser, &mut self.transcript, mutation);
-        self.record_change(generation, &change);
+        self.record_change(&change);
         change
     }
 
@@ -400,9 +223,8 @@ impl TuiSessionDocument {
         session: &mut Session,
         mutation: UsageMutation,
     ) -> DocumentChange {
-        let generation = self.reserved_generation();
         let change = SessionDocument::apply_usage(session, mutation);
-        self.record_change(generation, &change);
+        self.record_change(&change);
         change
     }
 
@@ -422,9 +244,8 @@ impl TuiSessionDocument {
         session: &mut Session,
         mutation: MetadataMutation,
     ) -> DocumentChange {
-        let generation = self.reserved_generation();
         let change = SessionDocument::apply_metadata(session, mutation);
-        self.record_change(generation, &change);
+        self.record_change(&change);
         change
     }
 
@@ -433,64 +254,43 @@ impl TuiSessionDocument {
         session: &mut Session,
         mutation: TurnStateMutation,
     ) -> DocumentChange {
-        let generation = self.reserved_generation();
         let change = SessionDocument::apply_turn_state(session, mutation);
-        self.record_change(generation, &change);
+        self.record_change(&change);
         change
     }
 
-    pub(crate) fn has_session_work(&self) -> bool {
+    /// Whether some change is not durable yet.
+    pub(crate) fn has_unsaved_work(&self) -> bool {
         self.changes.current > self.changes.durable
+            || self.changes.resync
+            || self.transcript.history().record_dirty_from().is_some()
     }
 
-    pub(crate) fn generation(&self) -> PersistenceGeneration {
-        self.changes.current
-    }
-
-    pub(crate) fn durable_generation(&self) -> PersistenceGeneration {
-        self.changes.durable
+    /// Whether some change is not captured into a save yet.
+    pub(crate) fn has_uncaptured_work(&self) -> bool {
+        self.changes.current > self.changes.captured
+            || self.changes.resync
+            || self.transcript.history().record_dirty_from().is_some()
     }
 
     pub(crate) fn records_persisted(&self) -> bool {
         self.transcript.history().record_dirty_from().is_none()
-            && self.changes.current == self.changes.durable
+            && self.changes.in_flight.is_empty()
+            && !self.changes.resync
     }
 
-    pub(crate) fn published_head(&self) -> smelt_store::StoreHead {
-        self.changes.published_head
+    pub(crate) fn durable_head(&self) -> smelt_store::StoreHead {
+        self.changes.durable_head
     }
 
-    pub(crate) fn adopt_archive_publication(
-        &mut self,
-        acknowledgement: &crate::persist::PersistenceAcknowledgement,
-        session: &mut Session,
-    ) -> bool {
-        if self.persistence_epoch != Some(acknowledgement.epoch)
-            || !session.acknowledge_archive_save(&acknowledgement.frame, &acknowledgement.result)
-        {
-            return false;
-        }
-        self.changes.published_head = acknowledgement.result.receipt.current;
-        if let Some(live) = self.live_session.as_mut() {
-            live.header.revision = self.changes.published_head.revision.get();
-        }
-        true
+    /// Advances with every change that needs saving.
+    pub(crate) fn revision(&self) -> u64 {
+        self.changes.current
     }
 
-    pub(crate) fn bind_persistence(&mut self, epoch: SessionEpoch) {
-        self.persistence_epoch = Some(epoch);
-    }
-
-    pub(crate) fn unbind_persistence(&mut self, epoch: SessionEpoch) {
-        if self.persistence_epoch == Some(epoch) {
-            self.persistence_epoch = None;
-        }
-    }
-
+    /// The store holds nothing of this session: the next save writes all of it.
     pub(crate) fn mark_session_unpersisted(&mut self) {
-        self.persistence_epoch = None;
-        self.changes.install_head(smelt_store::StoreHead::default());
-        self.changes.force_dirty_from(0);
+        self.changes.rewrite_all(smelt_store::StoreHead::default());
         self.transcript.history_mut().require_record_resave_from(0);
     }
 
@@ -498,9 +298,6 @@ impl TuiSessionDocument {
         if records_persisted {
             self.transcript.history_mut().clear_record_dirty();
         } else {
-            if self.transcript.history().record_dirty_from().is_none() {
-                self.changes.force_dirty();
-            }
             self.transcript.history_mut().require_record_resave_from(0);
         }
     }
@@ -514,16 +311,15 @@ impl TuiSessionDocument {
             .install_rewind_prefix(transcript, record_count);
     }
 
+    /// Installs a session whose store copy at `store_head` the next save rewrites.
     pub(crate) fn install_loaded_full_session(
         &mut self,
         transcript: crate::app::transcript::LoadedTranscript,
-        store_head: Option<smelt_store::StoreHead>,
+        store_head: smelt_store::StoreHead,
     ) {
         self.live_session = None;
         self.transcript.replace_loaded_transcript(transcript);
-        self.changes.install_head(store_head.unwrap_or_default());
-        self.persistence_epoch = None;
-        self.changes.force_dirty_from(0);
+        self.changes.rewrite_all(store_head);
         self.transcript.history_mut().require_record_resave_from(0);
     }
 
@@ -535,18 +331,18 @@ impl TuiSessionDocument {
     ) {
         debug_assert_eq!(
             store_head.history_len.as_usize(),
-            Some(live_session.history_len())
+            live_session.history_len()
         );
         self.live_session = Some(live_session);
         self.navigation = Default::default();
         self.transcript.replace_loaded_transcript(transcript);
-        self.changes.install_head(store_head);
-        self.persistence_epoch = None;
+        self.changes = DocumentChanges::new(store_head);
     }
 
     #[cfg(test)]
     pub(crate) fn set_history_resave_from_for_test(&mut self, history_index: usize) {
-        self.changes.force_dirty_from(history_index);
+        self.changes.current += 1;
+        self.changes.mark_history_dirty_from(history_index);
     }
 
     #[cfg(test)]
@@ -554,301 +350,349 @@ impl TuiSessionDocument {
         self.changes.history_dirty_from
     }
 
-    pub(crate) fn capture_event_batch(
+    /// Captures every change since the previous capture as one save.
+    pub(crate) fn capture_save(
         &mut self,
         session: &mut Session,
         metadata: RuntimeSessionMetadata,
-    ) -> Result<Option<SessionBatch>, SessionBatchPreparationError> {
-        let _perf = smelt_perf::perf::begin("session:capture_save_batch");
-        let Some(projection) = self.project_save_with_history(session, metadata, None)? else {
-            return Ok(None);
-        };
-        let archives = session
-            .capture_archive_save(self.changes.published_head, projection.history.final_len)
-            .map_err(|error| error.to_string())?;
-        Ok(Some(SessionBatch {
-            generation: self.changes.current,
-            record_projection: projection.record_projection,
-            content: SessionBatchContent::Captured(std::sync::Arc::new(CapturedSessionSave {
-                projection,
-                archives,
-            })),
-        }))
-    }
-
-    #[cfg(test)]
-    fn prepare_event_batch(
-        &mut self,
-        session: &mut Session,
-        metadata: RuntimeSessionMetadata,
-    ) -> Result<Option<PreparedSessionBatch>, SessionBatchPreparationError> {
-        self.capture_event_batch(session, metadata)?
-            .map(|capture| capture.prepare().map_err(|error| error.to_string().into()))
-            .transpose()
-    }
-
-    pub(crate) fn prepare_fork_save(
-        &mut self,
-        session: &mut Session,
-        metadata: RuntimeSessionMetadata,
-        source_history: &[HistoryItem],
-    ) -> Result<Option<ProjectedSessionSave>, SessionBatchPreparationError> {
-        let _perf = smelt_perf::perf::begin("session:prepare_save_batch");
-        self.project_save_with_history(session, metadata, Some(source_history))
-    }
-
-    fn project_save_with_history(
-        &mut self,
-        session: &mut Session,
-        metadata: RuntimeSessionMetadata,
-        source_history: Option<&[HistoryItem]>,
-    ) -> Result<Option<ProjectedSessionSave>, SessionBatchPreparationError> {
-        let history = SessionHistoryRef::for_save(
-            self.live_session.as_ref(),
-            &session.history,
-            source_history,
-        );
-        let history_len = history.len();
-        let record_dirty = self.transcript.history().record_dirty_from().is_some();
-        if self.changes.current == self.changes.durable && !record_dirty {
+    ) -> Result<Option<crate::persist::SessionSave>, SaveCaptureError> {
+        let _perf = smelt_perf::perf::begin("session:capture_save");
+        if !self.has_uncaptured_work() {
             return Ok(None);
         }
-        if self.changes.acknowledged_head == smelt_store::StoreHead::default()
+        let history_len =
+            SessionHistoryRef::new(self.live_session.as_ref(), &session.history).len();
+        if self.changes.captured_head == smelt_store::StoreHead::default()
             && history_len == 0
             && self.transcript.is_empty()
         {
             return Ok(None);
         }
-
         self.apply_runtime_metadata(session, metadata);
-        let history = SessionHistoryRef::for_save(
-            self.live_session.as_ref(),
-            &session.history,
-            source_history,
-        );
-        let history_len = history.len();
-        let acknowledged_history_len = self
-            .changes
-            .acknowledged_head
-            .history_len
-            .as_usize()
-            .ok_or_else(|| "acknowledged history length exceeds platform limits".to_string())?;
-        // Records are validated against the head this commit is based on.
-        let base_record_len = self
-            .changes
-            .published_head
-            .transcript_record_count
-            .as_usize()
-            .ok_or_else(|| "published record length exceeds platform limits".to_string())?;
-        let history_start = self
-            .changes
-            .history_dirty_from
-            .map_or(acknowledged_history_len, |dirty| {
-                dirty.min(acknowledged_history_len)
-            })
-            .min(history_len);
-        let history_items = history.range(history_start..history_len)?;
-        let history = smelt_store::HistorySuffix {
-            start: smelt_store::HistoryIndex::new(history_start as u64),
-            final_len: smelt_store::HistoryLen::new(history_len as u64),
-            items: history_items,
+        let resync = self.changes.resync;
+        let base = if resync {
+            self.changes.durable_head
+        } else {
+            self.changes.captured_head
         };
-        let record_bounds = self
-            .transcript
-            .record_save_bounds_at_or_before(self.changes.history_dirty_from, base_record_len)
-            .map_err(|error| match error {
-                RecordSaveBoundsError::DetachedTail => {
-                    SessionBatchPreparationError::HydrationPending
-                }
-                RecordSaveBoundsError::Invalid(message) => {
-                    SessionBatchPreparationError::Invalid(message)
-                }
-            })?;
-        let record_projection = SessionRecordSaveProjection {
-            bounds: record_bounds,
-            final_len: record_bounds.map_or(base_record_len, |bounds| bounds.record_end_idx),
+        let suffix = capture_suffix(
+            &mut self.transcript,
+            SessionHistoryRef::new(self.live_session.as_ref(), &session.history),
+            base,
+            self.changes.history_dirty_from,
+        )?;
+
+        if resync {
+            session.turn_metas.mark_all_dirty();
+            session.metadata_snapshots.mark_all_dirty();
+            session.context_snapshots.mark_all_dirty();
+            session.checkpoint_events.mark_all_dirty();
+        }
+        let encode = |error: serde_json::Error| format!("encode session rows: {error}");
+        let first_user_message = Some(session.first_user_message.clone());
+        let checkpoint = Some(smelt_core::session::store_checkpoint(
+            session.checkpoint.as_ref(),
+            history_len,
+        )?);
+        let history_start = suffix
+            .history
+            .as_ref()
+            .map(|history| history.start as usize);
+        let commit = smelt_store::SessionCommit {
+            metadata: smelt_core::session::store_metadata(session)?,
+            first_user_message: (resync || first_user_message != self.changes.first_user_message)
+                .then(|| {
+                    first_user_message
+                        .clone()
+                        .flatten()
+                        .map(|text| text.to_string())
+                }),
+            checkpoint: (resync || checkpoint != self.changes.checkpoint)
+                .then(|| checkpoint.clone().flatten()),
+            history: suffix.history,
+            turn_metas: session.turn_metas.take_changes().map_err(encode)?,
+            metadata_snapshots: session.metadata_snapshots.take_changes().map_err(encode)?,
+            context_snapshots: session.context_snapshots.take_changes().map_err(encode)?,
+            checkpoint_events: session.checkpoint_events.take_changes().map_err(encode)?,
+            transcript: suffix.transcript,
         };
-        self.transcript
-            .pin_record_suffix_for_save(record_bounds)
-            .map_err(|error| match error {
-                TranscriptSaveHydrationError::Pending => {
-                    SessionBatchPreparationError::HydrationPending
-                }
-                TranscriptSaveHydrationError::Failed => SessionBatchPreparationError::Invalid(
-                    "hydrate canonical transcript record suffix".to_owned(),
-                ),
-            })?;
-        let records = record_bounds.map(|bounds| {
-            self.transcript
-                .history()
-                .capture_block_records_with_ids_from(bounds.order_start)
+
+        let changes = &mut self.changes;
+        changes.seq += 1;
+        changes.captured = changes.current;
+        changes.captured_head = suffix.head;
+        changes.history_dirty_from = None;
+        changes.resync = false;
+        changes.first_user_message = first_user_message;
+        changes.checkpoint = checkpoint;
+        changes.in_flight.push_back(InFlightSave {
+            seq: changes.seq,
+            generation: changes.current,
+            history_start,
+            records: suffix.records,
         });
-        self.transcript.unpin_record_suffix_after_save();
-        Ok(Some(ProjectedSessionSave {
-            record_projection,
-            history,
-            records,
+        if suffix.records.is_some() {
+            // Released records are read back from the store, which lags this capture.
+            self.transcript.suspend_compaction();
+        }
+        self.transcript.history_mut().clear_record_dirty();
+        Ok(Some(crate::persist::SessionSave {
+            seq: changes.seq,
+            resync,
+            identity: smelt_core::session::store_identity(session),
+            commit,
         }))
     }
 
-    pub(crate) fn capture_turn_batch(
+    /// The commit that brings a fresh copy of the durable session up to `forked`,
+    /// a fork of this document's session. Leaves the document unchanged.
+    pub(crate) fn capture_fork_commit(
         &mut self,
-        session: &mut Session,
+        forked: &mut Session,
         metadata: RuntimeSessionMetadata,
-    ) -> Result<SessionBatch, SessionBatchPreparationError> {
-        if self.changes.current == self.changes.durable
-            && self.transcript.history().record_dirty_from().is_none()
-        {
-            self.changes.force_dirty();
+        source_history: &[HistoryItem],
+    ) -> Result<smelt_store::SessionCommit, SaveCaptureError> {
+        let _perf = smelt_perf::perf::begin("session:capture_fork_commit");
+        // An in-flight save could land in the source after the fork copies it.
+        // A resync is fine: it already marks everything after the durable head.
+        if !self.changes.in_flight.is_empty() {
+            return Err(SaveCaptureError::Invalid(
+                "the source session has saves in flight".into(),
+            ));
         }
-        self.capture_event_batch(session, metadata)?.ok_or_else(|| {
-            SessionBatchPreparationError::Invalid(
-                "a canonical turn update requires persisted session history".to_string(),
-            )
-        })
+        SessionDocument::apply_metadata(forked, metadata.into_mutation());
+        let history = SessionHistoryRef::new(self.live_session.as_ref(), source_history);
+        let suffix = capture_suffix(
+            &mut self.transcript,
+            history,
+            self.changes.durable_head,
+            self.changes.history_dirty_from,
+        )?;
+        let mut commit = smelt_core::session::full_commit(forked)?;
+        commit.checkpoint = Some(smelt_core::session::store_checkpoint(
+            forked.checkpoint.as_ref(),
+            history.len(),
+        )?);
+        commit.history = suffix.history;
+        commit.transcript = suffix.transcript;
+        Ok(commit)
     }
 
-    pub(crate) fn acknowledge_startup_recovery(
-        &mut self,
-        epoch: SessionEpoch,
-        session: &mut Session,
-        result: &smelt_store::StartupRecoveryResult,
-    ) -> bool {
-        let receipt = &result.session.receipt;
-        if self.persistence_epoch != Some(epoch)
-            || receipt.previous != self.changes.published_head
-            || !session.acknowledge_startup_recovery(result)
-        {
-            return false;
-        }
-        if let Some(live) = self.live_session.as_mut() {
-            live.header.revision = receipt.current.revision.get();
-        }
-        if self.changes.acknowledged_head == receipt.previous {
-            self.changes.acknowledged_head = receipt.current;
-        }
-        self.changes.published_head = receipt.current;
-        true
-    }
-
-    #[cfg(test)]
+    /// Applies the store's report that every save through `durable.seq` is durable.
+    /// Memory then keeps only the model context and what is not saved yet.
     pub(crate) fn acknowledge(
         &mut self,
-        acknowledgement: &crate::persist::PersistenceAcknowledgement,
+        durable: crate::persist::DurableSave,
         session: &mut Session,
-        history_len: usize,
     ) -> bool {
-        if !self.adopt_archive_publication(acknowledgement, session) {
-            return false;
-        }
-        self.acknowledge_from(
-            acknowledgement,
-            false,
-            &session.id,
-            history_len,
-            session.checkpoint.as_ref(),
-        )
-    }
-
-    pub(crate) fn acknowledge_coalesced_batch(
-        &mut self,
-        acknowledgement: &crate::persist::PersistenceAcknowledgement,
-        session_id: &str,
-        history_len: usize,
-        checkpoint: Option<&ContextCheckpoint>,
-    ) -> bool {
-        self.acknowledge_from(acknowledgement, true, session_id, history_len, checkpoint)
-    }
-
-    fn acknowledge_from(
-        &mut self,
-        acknowledgement: &crate::persist::PersistenceAcknowledgement,
-        coalesced: bool,
-        session_id: &str,
-        history_len: usize,
-        checkpoint: Option<&ContextCheckpoint>,
-    ) -> bool {
-        if self.persistence_epoch != Some(acknowledgement.epoch)
-            || acknowledgement.generation != self.changes.current
+        let changes = &mut self.changes;
+        let mut acknowledged = None;
+        while let Some(save) = changes
+            .in_flight
+            .front()
+            .copied()
+            .filter(|save| save.seq <= durable.seq)
         {
-            return false;
+            changes.in_flight.pop_front();
+            changes.durable_records = merge_record_bounds(changes.durable_records, save.records);
+            acknowledged = Some(save);
         }
-        let record_projection = acknowledgement.record_projection;
-        let previous = acknowledgement.previous;
-        let receipt = &acknowledgement.result.receipt;
-        let expected_record_len = record_projection.final_len;
-        let revision_advanced_once = receipt
-            .previous
-            .revision
-            .checked_add(1)
-            .is_some_and(|revision| revision == receipt.current.revision);
-        let revision_valid = if coalesced {
-            receipt.previous.revision.get() >= previous.revision.get()
-                && receipt.current.revision.get() >= receipt.previous.revision.get()
-        } else {
-            receipt.previous == previous
-                && (receipt.current.revision == receipt.previous.revision || revision_advanced_once)
+        let Some(save) = acknowledged else {
+            return false;
         };
-        if receipt.session_id != session_id
-            || receipt.current.history_len.as_usize() != Some(history_len)
-            || receipt.current.transcript_record_count.as_usize() != Some(expected_record_len)
-            || previous != self.changes.acknowledged_head
-            || !revision_valid
-        {
-            return false;
+        changes.durable = save.generation;
+        changes.durable_head = durable.head;
+        if !changes.in_flight.is_empty() {
+            return true;
         }
-        if let Some(live_session) = self.live_session.as_mut() {
-            live_session.compact_saved_prefix(
-                history_len,
-                receipt.current.revision.get(),
-                checkpoint,
-            );
-        }
-        if let Some(live_session) = self.live_session.as_ref() {
+        debug_assert_eq!(durable.head, changes.captured_head);
+        let record_len = durable.head.transcript_record_count.as_usize();
+        let records = changes.durable_records.take();
+        if let Some(bounds) = records {
             self.transcript
-                .set_store_address(live_session.store_address.as_ref().map(|store| {
-                    super::transcript::TranscriptStoreAddress::new(
-                        store.sessions_root.clone(),
-                        store.session_id.clone(),
-                        store.lineage_id.clone(),
-                    )
-                }));
-        }
-        if let Some(bounds) = record_projection.bounds {
-            self.transcript
-                .apply_persisted_record_suffix(bounds, expected_record_len);
+                .apply_persisted_record_suffix(bounds, record_len);
         }
         self.transcript
-            .schedule_durable_compaction(expected_record_len, record_projection.bounds);
-        self.transcript.history_mut().clear_record_dirty();
-        self.changes.mark_clean(receipt.current);
+            .schedule_durable_compaction(record_len, records);
+        self.adopt_stored_history(session);
+        if let Some(live) = self.live_session.as_mut() {
+            let keep_from = live
+                .model_context_start(session.checkpoint.as_ref())
+                .min(durable.head.history_len.as_usize())
+                .min(self.changes.history_dirty_from.unwrap_or(usize::MAX));
+            live.release_before(keep_from);
+        }
         true
     }
 
-    pub(crate) fn mark_ephemeral_persisted(&mut self) {
-        self.changes.durable = self.changes.current;
-        self.changes.history_dirty_from = None;
-        self.transcript.history_mut().clear_record_dirty();
+    /// Moves the history of a session that now exists in the store into a
+    /// store-backed live session, like a resumed one, so durable items can leave memory.
+    fn adopt_stored_history(&mut self, session: &mut Session) {
+        if self.live_session.is_some() {
+            return;
+        }
+        let Some(address) = self
+            .transcript
+            .store_address()
+            .filter(|address| address.session_id == session.id)
+            .cloned()
+        else {
+            return;
+        };
+        let mut live = LiveSession::from_parts(
+            address.session_id.clone(),
+            address.artifact_dir(),
+            Some(address),
+            0,
+            0,
+        );
+        for item in std::mem::take(&mut session.history) {
+            live.append_history(item);
+        }
+        self.navigation = Default::default();
+        self.live_session = Some(live);
     }
 
-    pub(crate) fn has_unflushed_work(&self, _session: &Session) -> bool {
-        self.changes.current > self.changes.durable
+    /// Every save in flight was dropped: rewrite everything after the durable head.
+    pub(crate) fn fail_all_in_flight(&mut self) {
+        self.fail_save(u64::MAX);
+    }
+
+    /// Saves from `seq` on were dropped: rewrite everything after the durable head.
+    /// Returns false when this failure was already handled.
+    pub(crate) fn fail_save(&mut self, seq: u64) -> bool {
+        let changes = &mut self.changes;
+        if changes.in_flight.front().is_none_or(|save| save.seq > seq) {
+            return false;
+        }
+        let failed: Vec<_> = changes.in_flight.drain(..).collect();
+        if let Some(order_start) = failed
+            .iter()
+            .filter_map(|save| save.records.map(|bounds| bounds.order_start))
+            .min()
+        {
+            self.transcript
+                .history_mut()
+                .require_record_resave_from(order_start);
+        }
+        changes.resync = true;
+        changes.captured_head = changes.durable_head;
+        let history_start = failed
+            .iter()
+            .filter_map(|save| save.history_start)
+            .min()
+            .unwrap_or(usize::MAX);
+        changes.mark_history_dirty_from(
+            history_start.min(changes.durable_head.history_len.as_usize()),
+        );
+        changes.first_user_message = None;
+        changes.checkpoint = None;
+        true
+    }
+
+    /// Ephemeral sessions are never saved; treat every change as durable.
+    pub(crate) fn mark_ephemeral_persisted(&mut self) {
+        self.changes.captured = self.changes.current;
+        self.changes.durable = self.changes.current;
+        self.changes.history_dirty_from = None;
+        self.changes.resync = false;
+        self.transcript.history_mut().clear_record_dirty();
     }
 
     fn apply_runtime_metadata(&mut self, session: &mut Session, metadata: RuntimeSessionMetadata) {
-        let generation = self.changes.reserve_generation();
-        let result = SessionDocument::apply_metadata(
-            session,
-            MetadataMutation::UpdateRuntime {
-                updated_at_ms: metadata.updated_at_ms,
-                mode: metadata.mode,
-                reasoning_effort: metadata.reasoning_effort,
-                model: metadata.model,
-                fast_mode: metadata.fast_mode,
-            },
-        );
-        self.changes.record(generation, &result);
+        let change = SessionDocument::apply_metadata(session, metadata.into_mutation());
+        self.changes.record(&change);
     }
+}
+
+fn capture_suffix(
+    transcript: &mut TranscriptDocument,
+    source_history: SessionHistoryRef<'_>,
+    base: smelt_store::StoreHead,
+    history_dirty_from: Option<usize>,
+) -> Result<CapturedSuffix, SaveCaptureError> {
+    let history_len = source_history.len();
+    let base_history_len = base.history_len.as_usize();
+    let history_start = history_dirty_from
+        .map_or(base_history_len, |dirty| dirty.min(base_history_len))
+        .min(history_len);
+    let history = (history_start < history_len || history_len != base_history_len)
+        .then(|| {
+            Ok::<_, String>(smelt_store::HistorySuffix {
+                start: history_start as u64,
+                items: source_history.range(history_start..history_len)?,
+            })
+        })
+        .transpose()?;
+
+    let base_record_len = base.transcript_record_count.as_usize();
+    // A record's stored origin depends on the history saved with it, so records
+    // that point into a rewritten history suffix are rewritten too.
+    let origins_dirty_from = history.as_ref().map(|suffix| suffix.start as usize);
+    let records = transcript
+        .record_save_bounds_at_or_before(origins_dirty_from, base_record_len)
+        .map_err(|error| match error {
+            RecordSaveBoundsError::DetachedTail => SaveCaptureError::HydrationPending,
+            RecordSaveBoundsError::Invalid(message) => SaveCaptureError::Invalid(message),
+        })?;
+    transcript
+        .pin_record_suffix_for_save(records)
+        .map_err(|error| match error {
+            TranscriptSaveHydrationError::Pending => SaveCaptureError::HydrationPending,
+            TranscriptSaveHydrationError::Failed => {
+                SaveCaptureError::Invalid("hydrate canonical transcript record suffix".to_owned())
+            }
+        })?;
+    let captured = records.map(|bounds| {
+        transcript
+            .history()
+            .capture_block_records_with_ids_from(bounds.order_start)
+    });
+    transcript.unpin_record_suffix_after_save();
+    let transcript_suffix =
+        records
+            .zip(captured)
+            .map(|(bounds, captured)| {
+                let mut rows = Vec::with_capacity(captured.len());
+                for (offset, record) in captured.into_iter().enumerate() {
+                    let mut record = record.prepare();
+                    // The store keeps only origins that name a history item. The
+                    // in-memory origin stays: a pending rebuild may still need it.
+                    if record.record.origin.is_some_and(|origin| {
+                        !origin_matches(&record.record, origin, source_history)
+                    }) {
+                        record.record.origin = None;
+                    }
+                    rows.push(transcript_record_row(
+                        bounds.record_start_idx + offset,
+                        &record,
+                    )?);
+                }
+                Ok::<_, smelt_store::StoreError>(smelt_store::TranscriptRecordSuffix {
+                    start: bounds.record_start_idx as u64,
+                    records: rows,
+                })
+            })
+            .transpose()
+            .map_err(|error| format!("encode transcript records: {error}"))?;
+    Ok(CapturedSuffix {
+        history,
+        transcript: transcript_suffix,
+        records,
+        head: smelt_store::StoreHead {
+            history_len: history_len.into(),
+            transcript_record_count: records
+                .map_or(base_record_len, |bounds| bounds.record_end_idx)
+                .into(),
+        },
+    })
+}
+
+struct CapturedSuffix {
+    history: Option<smelt_store::HistorySuffix>,
+    transcript: Option<smelt_store::TranscriptRecordSuffix>,
+    records: Option<TranscriptRecordSaveBounds>,
+    head: smelt_store::StoreHead,
 }
 
 pub(crate) struct FullSessionDocument {
@@ -870,15 +714,8 @@ enum SessionHistoryRef<'a> {
 }
 
 impl<'a> SessionHistoryRef<'a> {
-    fn for_save(
-        live_session: Option<&'a LiveSession>,
-        session_history: &'a [HistoryItem],
-        source_history: Option<&'a [HistoryItem]>,
-    ) -> Self {
-        live_session.map_or_else(
-            || Self::Materialized(source_history.unwrap_or(session_history)),
-            Self::StoreBacked,
-        )
+    fn new(live_session: Option<&'a LiveSession>, session_history: &'a [HistoryItem]) -> Self {
+        live_session.map_or(Self::Materialized(session_history), Self::StoreBacked)
     }
 
     fn len(self) -> usize {
@@ -891,11 +728,19 @@ impl<'a> SessionHistoryRef<'a> {
     fn range(self, range: std::ops::Range<usize>) -> Result<Vec<HistoryItem>, String> {
         match self {
             SessionHistoryRef::Materialized(history) => {
-                let end = range.end.min(history.len());
-                let start = range.start.min(end);
-                Ok(history[start..end].to_vec())
+                Ok(history.get(range).unwrap_or_default().to_vec())
             }
             SessionHistoryRef::StoreBacked(live) => live.history_range(range),
+        }
+    }
+
+    /// The item at `index`, if it is held in memory.
+    fn in_memory(self, index: usize) -> Option<&'a HistoryItem> {
+        match self {
+            SessionHistoryRef::Materialized(history) => history.get(index),
+            SessionHistoryRef::StoreBacked(live) => index
+                .checked_sub(live.live_start)
+                .and_then(|offset| live.live_history().get(offset)),
         }
     }
 }
@@ -907,6 +752,18 @@ pub(crate) struct RuntimeSessionMetadata {
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) model: Option<String>,
     pub(crate) fast_mode: bool,
+}
+
+impl RuntimeSessionMetadata {
+    pub(crate) fn into_mutation(self) -> MetadataMutation {
+        MetadataMutation::UpdateRuntime {
+            updated_at_ms: self.updated_at_ms,
+            mode: self.mode,
+            reasoning_effort: self.reasoning_effort,
+            model: self.model,
+            fast_mode: self.fast_mode,
+        }
+    }
 }
 
 pub(crate) enum HistoryMutation {
@@ -1196,18 +1053,11 @@ impl SessionDocument {
     }
 
     pub(crate) fn from_store(
-        header: SessionHeader,
         session: Session,
-        store_address: SessionStoreAddress,
+        live_session: LiveSession,
         store_head: smelt_store::StoreHead,
         transcript: crate::app::transcript::LoadedTranscript,
-        user_turn_count: usize,
     ) -> Self {
-        let live_session = smelt_core::session_runtime::LiveSession::from_store(
-            header,
-            store_address,
-            user_turn_count,
-        );
         Self {
             session,
             transcript,
@@ -1870,57 +1720,32 @@ impl SessionDocument {
     }
 }
 
+/// Whether a history origin names a history item of the block's kind. Items
+/// outside memory are durable and were checked when their records were saved.
+fn origin_matches(
+    record: &smelt_core::TranscriptBlockRecord,
+    origin: BlockOrigin,
+    history: SessionHistoryRef<'_>,
+) -> bool {
+    let BlockOrigin::History(index) = origin else {
+        return true;
+    };
+    index < history.len()
+        && history.in_memory(index).is_none_or(|item| {
+            protocol::transcript_block_kind_matches_history_item(record.block.kind(), item)
+        })
+}
+
 fn transcript_record_row(
     record_idx: usize,
     record: &smelt_core::TranscriptBlockRecordWithId,
-    history: &smelt_store::HistorySuffix,
 ) -> Result<smelt_store::StoredTranscriptBlock, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:project_transcript_record");
-    let owned_record;
-    let record_ref = match record.record.origin {
-        Some(BlockOrigin::History(index))
-            if !history_suffix_contains_matching_record_origin(history, index, record) =>
-        {
-            owned_record = smelt_core::TranscriptBlockRecord {
-                origin: None,
-                ..record.record.clone()
-            };
-            &owned_record
-        }
-        _ => &record.record,
-    };
     smelt_core::transcript_model::transcript_block_row_with_block_idx(
         record_idx,
         record.block_id.get(),
-        record_ref,
+        &record.record,
     )
-}
-
-fn history_suffix_contains_matching_record_origin(
-    history: &smelt_store::HistorySuffix,
-    history_idx: usize,
-    record: &smelt_core::TranscriptBlockRecordWithId,
-) -> bool {
-    let history_start = history
-        .start
-        .as_usize()
-        .expect("prepared history start originated as usize");
-    let history_len = history
-        .final_len
-        .as_usize()
-        .expect("prepared history length originated as usize");
-    if history_idx >= history_len {
-        return false;
-    }
-    if history_idx < history_start {
-        return true;
-    }
-    history
-        .items
-        .get(history_idx - history_start)
-        .is_some_and(|item| {
-            protocol::transcript_block_kind_matches_history_item(record.record.block.kind(), item)
-        })
 }
 
 #[cfg(test)]
@@ -1977,16 +1802,11 @@ mod tests {
         let mut meta = meta_with_token_identity();
         meta.id = session.id.clone();
         meta.history_len = Some(history_len);
-        let header = SessionHeader {
-            meta,
-            history_len,
-            revision: 0,
-            degraded_warnings: Vec::new(),
-        };
         LiveSession::from_parts(
-            header,
+            meta.id,
             std::path::PathBuf::new(),
             None,
+            history_len,
             session
                 .history
                 .iter()
@@ -2535,7 +2355,7 @@ mod tests {
                 .history_len(),
             1
         );
-        assert_eq!(document.generation(), PersistenceGeneration::new(1));
+        assert_eq!(document.revision(), 1);
         assert_eq!(document.dirty_history_from_for_test(), Some(0));
     }
 
@@ -2553,7 +2373,7 @@ mod tests {
 
         assert!(result.transcript_dirty);
         assert_eq!(document.transcript.history().record_dirty_from(), Some(0));
-        assert_eq!(document.generation(), PersistenceGeneration::new(1));
+        assert_eq!(document.revision(), 1);
     }
 
     #[test]
@@ -3032,1156 +2852,367 @@ mod tests {
         }
     }
 
-    fn native_writer(session: &Session) -> (tempfile::TempDir, smelt_store::OwnedLineageWriter) {
-        let root = tempfile::tempdir().unwrap();
-        let writer = smelt_store::OwnedLineageWriter::open(root.path(), &session.id).unwrap();
-        (root, writer)
+    /// A store the test writes to directly, standing in for the persist actor.
+    struct TestStore {
+        _root: tempfile::TempDir,
+        store: smelt_store::Store,
     }
 
-    fn publish(
-        intent: &PreparedSessionBatch,
-        writer: &mut smelt_store::OwnedLineageWriter,
-    ) -> smelt_store::SessionCommitResult {
-        writer.commit_compact_session(intent.command()).unwrap()
-    }
-
-    fn acknowledgement_for(
-        epoch: SessionEpoch,
-        intent: &PreparedSessionBatch,
-        result: smelt_store::SessionCommitResult,
-    ) -> crate::persist::PersistenceAcknowledgement {
-        crate::persist::PersistenceAcknowledgement {
-            epoch,
-            generation: intent.generation,
-            record_projection: intent.record_projection,
-            previous: result.receipt.previous,
-            frame: intent.frame.clone(),
-            result,
+    impl TestStore {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = smelt_store::Store::new(root.path());
+            Self { _root: root, store }
         }
-    }
 
-    #[test]
-    fn startup_recovery_advances_owned_heads_without_acknowledging_pending_edits() {
-        let root = tempfile::tempdir().unwrap();
-        let storage = smelt_core::session::SessionStorage::new(root.path().to_path_buf());
-        let mut original = Session::new(1, std::path::PathBuf::from("/synthetic"));
-        original
-            .history
-            .push(HistoryItem::user(Content::text("saved request")));
-        storage.save_result(&original).unwrap();
-        let mut writer =
-            smelt_store::SessionWriter::open(storage.sessions_dir(), &original.id).unwrap();
-        let mut command =
-            smelt_core::session::initial_store_commit_from_session(&original).unwrap();
-        command.expected = writer.store_head().unwrap();
-        writer
-            .submit_turn(&smelt_store::SubmitTurn {
-                session: command,
-                turn: smelt_store::NewTurn {
-                    kind: smelt_store::TurnKind::Command,
-                    submitted_history_idx: smelt_store::HistoryIndex::ZERO,
-                    continuation_of: None,
-                    created_at_ms: original.updated_at_ms,
-                },
-            })
-            .unwrap();
-        writer.release().unwrap();
-        let resume = storage
-            .load_store_resume_result(&original.id, 80, 24)
-            .unwrap()
-            .unwrap();
-        let mut session = resume.session;
-        let base = session.archive_base().unwrap().clone();
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.changes.install_head(resume.head);
-        document.live_session = Some(LiveSession::from_store(
-            resume.header,
-            resume.store_address,
-            resume.user_turn_count,
-        ));
-        let epoch = SessionEpoch::new(7);
-        document.bind_persistence(epoch);
-        document.apply_metadata(
-            &mut session,
-            MetadataMutation::SetTitle {
-                title: "pending title".into(),
-                slug: "pending-title".into(),
-                snapshot_history_len: 1,
-            },
-        );
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("unsaved request")),
-            },
-        );
-        document.apply_transcript(TranscriptMutation::AppendBlock {
-            block: Block::Text {
-                content: "unsaved display record".into(),
-            },
-        });
-        let pending = document.changes;
-        let history = document
-            .live_session
-            .as_ref()
-            .unwrap()
-            .live_history()
-            .to_vec();
-        let record_dirty = document.transcript.history().record_dirty_from();
-        assert!(record_dirty.is_some());
-        let writer =
-            smelt_store::SessionWriter::open_existing(storage.sessions_dir(), &original.id)
+        fn commit(&self, save: &crate::persist::SessionSave) -> crate::persist::DurableSave {
+            let head = self
+                .store
+                .writer(&save.identity.id)
+                .unwrap()
+                .commit(&save.identity, &save.commit)
                 .unwrap();
-        let recovery = writer.startup_recovery().unwrap();
-        assert_eq!(recovery.session.receipt.previous, resume.head);
-        assert_eq!(recovery.session.revision_id, base.revision_id);
-
-        assert!(!document.acknowledge_startup_recovery(
-            SessionEpoch::new(8),
-            &mut session,
-            recovery
-        ));
-        assert_eq!(document.changes, pending);
-        assert_eq!(session.archive_base(), Some(&base));
-        let mut foreign = recovery.clone();
-        foreign.session.revision_id = "0".repeat(64);
-        assert!(!document.acknowledge_startup_recovery(epoch, &mut session, &foreign));
-        assert_eq!(document.changes, pending);
-        assert_eq!(session.archive_base(), Some(&base));
-        assert!(document.acknowledge_startup_recovery(epoch, &mut session, recovery));
-        assert_eq!(
-            document.changes,
-            DocumentChanges {
-                acknowledged_head: recovery.head(),
-                published_head: recovery.head(),
-                ..pending
+            crate::persist::DurableSave {
+                seq: save.seq,
+                head,
             }
-        );
-        assert_eq!(
-            session.archive_base().unwrap().branch_sequence,
-            recovery.head().revision
-        );
-        assert_eq!(
-            session.archive_base().unwrap().revision_id,
-            base.revision_id
-        );
-        assert_eq!(session.title.as_deref(), Some("pending title"));
-        let live = document.live_session.as_ref().unwrap();
-        assert_eq!(live.header.revision, recovery.head().revision.get());
-        assert_eq!(live.live_history(), history);
-        assert_eq!(live.history_len(), 2);
-        assert_eq!(
-            document.transcript.history().record_dirty_from(),
-            record_dirty
-        );
-        assert!(document.has_session_work());
-        assert!(!document.acknowledge_startup_recovery(epoch, &mut session, recovery));
-        assert!(document.has_session_work());
-    }
-
-    #[test]
-    fn persistence_generation_is_checked() {
-        assert_eq!(
-            PersistenceGeneration::new(41).checked_next(),
-            Some(PersistenceGeneration::new(42))
-        );
-        assert_eq!(PersistenceGeneration::new(u64::MAX).checked_next(), None);
-    }
-
-    #[test]
-    fn no_op_canonical_mutation_does_not_advance_generation() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.updated_at_ms = 20;
-        session.mode = Some("agent".into());
-        session.reasoning_effort = Some(ReasoningEffort::Low);
-        session.model = Some("model-a".into());
-        session.fast_mode = Some(false);
-        session.cwd = Some("/tmp".into());
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-
-        let changes = [
-            document.apply_metadata(
-                &mut session,
-                MetadataMutation::SetFastMode { enabled: false },
-            ),
-            document.apply_metadata(
-                &mut session,
-                MetadataMutation::SetCwd { cwd: "/tmp".into() },
-            ),
-            document.apply_metadata(
-                &mut session,
-                MetadataMutation::UpdateRuntime {
-                    updated_at_ms: 20,
-                    mode: "agent".into(),
-                    reasoning_effort: ReasoningEffort::Low,
-                    model: Some("model-a".into()),
-                    fast_mode: false,
-                },
-            ),
-            document.apply_history(
-                &mut session,
-                HistoryMutation::TruncateFrom {
-                    index: 0,
-                    user_turn_count: None,
-                    identity: token_identity(),
-                },
-            ),
-            document.apply_transcript(TranscriptMutation::Clear),
-        ];
-        assert!(changes.iter().all(|change| !change.canonical_changed()));
-        assert_eq!(document.generation(), PersistenceGeneration::ZERO);
-    }
-
-    #[test]
-    fn materialized_intent_is_cumulative_and_matching_acknowledgement_cleans() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("first")),
-            },
-        );
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("second")),
-            },
-        );
-
-        let (_root, mut writer) = native_writer(&session);
-        let intent = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .expect("prepare batch")
-            .expect("dirty batch");
-        assert_eq!(
-            intent.command().history.start,
-            smelt_store::HistoryIndex::ZERO
-        );
-        assert_eq!(
-            intent.command().history.final_len,
-            smelt_store::HistoryLen::new(2)
-        );
-        assert_eq!(intent.command().history.items.len(), 2);
-
-        let epoch = SessionEpoch::new(7);
-        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
-        document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &mut session, 2));
-        assert_eq!(document.durable_generation(), intent.generation);
-        assert_eq!(document.dirty_history_from_for_test(), None);
-        assert!(!document.has_session_work());
-    }
-
-    #[test]
-    fn prepared_record_rows_are_immutable_and_reused_at_different_dispatch_heads() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.apply_history(
-            &mut session,
-            HistoryMutation::CommitRequestItem {
-                item: HistoryItem::user(Content::text("submitted α\nrequest")),
-                block: Some(Box::new(Block::User {
-                    text: "submitted α\nrequest".into(),
-                    image_labels: Vec::new(),
-                    command: false,
-                    sent_at_ms: None,
-                })),
-                first_user_message: Some("submitted α\nrequest".into()),
-            },
-        );
-        let prepared = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .unwrap()
-            .unwrap();
-        let suffix = prepared.command().transcript_records.as_ref().unwrap();
-        assert_eq!(suffix.records.len(), 1);
-        assert_eq!(suffix.records[0].history_idx, Some(0));
-        assert_eq!(suffix.records[0].kind, "user");
-        let bytes = serde_json::to_vec(suffix).unwrap();
-        document.apply_transcript(TranscriptMutation::AppendBlock {
-            block: Block::Text {
-                content: "later display-only record".into(),
-            },
-        });
-        let (_root, mut writer) = native_writer(&session);
-        let result = publish(&prepared, &mut writer);
-        let finalized = prepared
-            .frame
-            .as_ref()
-            .clone()
-            .finalize_after(&prepared.frame, &result)
-            .unwrap();
-        assert_eq!(finalized.command().expected, result.receipt.current);
-        for frame in [prepared.frame.as_ref(), &finalized] {
-            assert_eq!(
-                serde_json::to_vec(frame.command().transcript_records.as_ref().unwrap()).unwrap(),
-                bytes
-            );
         }
-        writer.commit_compact_session(finalized.command()).unwrap();
-        assert!(document.generation() > prepared.generation);
+
+        /// What one full write of `session` and `transcript` stores, under a fresh id.
+        fn reference(
+            &self,
+            session: &Session,
+            transcript: &TranscriptDocument,
+        ) -> (
+            smelt_store::SessionState,
+            Vec<HistoryItem>,
+            Vec<smelt_store::StoredTranscriptBlock>,
+        ) {
+            let mut reference = session.clone();
+            reference.id = "f".repeat(64);
+            let mut commit = smelt_core::session::full_commit(&reference).unwrap();
+            commit.transcript = Some(smelt_store::TranscriptRecordSuffix {
+                start: 0,
+                records: expected_records(transcript, &session.history),
+            });
+            self.store
+                .writer(&reference.id)
+                .unwrap()
+                .commit(&smelt_core::session::store_identity(&reference), &commit)
+                .unwrap();
+            let stored = self.stored(&reference.id);
+            self.store.delete(&reference.id).unwrap();
+            stored
+        }
+
+        fn stored(
+            &self,
+            id: &str,
+        ) -> (
+            smelt_store::SessionState,
+            Vec<HistoryItem>,
+            Vec<smelt_store::StoredTranscriptBlock>,
+        ) {
+            let reader = self.store.reader(id).unwrap();
+            let state = reader.state().unwrap();
+            let history = reader
+                .history_range(0, state.head.history_len.get())
+                .unwrap();
+            let transcript = reader
+                .transcript_range(0, state.head.transcript_record_count.get())
+                .unwrap();
+            (state, history, transcript)
+        }
     }
 
-    #[test]
-    fn acknowledgement_uses_submitted_record_projection() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.apply_transcript(TranscriptMutation::AppendBlock {
-            block: Block::Text {
-                content: "durable record".into(),
-            },
-        });
-
-        let (_root, mut writer) = native_writer(&session);
-        let intent = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .expect("prepare batch")
-            .expect("dirty batch");
-        assert!(intent.record_projection.bounds.is_some());
-        document.transcript.history_mut().clear_record_dirty();
-
-        let epoch = SessionEpoch::new(8);
-        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
-        document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &mut session, 0));
-        assert_eq!(document.durable_generation(), intent.generation);
+    fn expected_records(
+        transcript: &TranscriptDocument,
+        history: &[HistoryItem],
+    ) -> Vec<smelt_store::StoredTranscriptBlock> {
+        transcript
+            .history()
+            .block_records_with_ids()
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let mut record = record.clone();
+                if record.record.origin.is_some_and(|origin| {
+                    !origin_matches(
+                        &record.record,
+                        origin,
+                        SessionHistoryRef::Materialized(history),
+                    )
+                }) {
+                    record.record.origin = None;
+                }
+                transcript_record_row(index, &record).unwrap()
+            })
+            .collect()
     }
 
-    #[test]
-    fn receipt_schedules_compaction_but_operation_pin_delays_dematerialization() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.apply_history(
-            &mut session,
-            HistoryMutation::CommitRequestItem {
-                item: HistoryItem::user(Content::text("durable prompt")),
-                block: Some(Box::new(Block::User {
-                    text: "durable prompt".into(),
-                    image_labels: Vec::new(),
-                    command: false,
-                    sent_at_ms: None,
-                })),
-                first_user_message: Some("durable prompt".into()),
-            },
-        );
-        let id = document.transcript.history().order[0];
-
-        assert!(!document.transcript.drain_compaction_slice());
-        assert!(document.transcript.history().is_live(id));
-        assert!(document.transcript.pin_operation_blocks(&[id]));
-
-        let (_root, mut writer) = native_writer(&session);
-        let intent = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .expect("prepare batch")
-            .expect("dirty batch");
-        let epoch = SessionEpoch::new(9);
-        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
-        document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &mut session, 1));
-
-        assert!(!document.transcript.drain_compaction_slice());
-        assert!(document.transcript.history().is_live(id));
-        document.transcript.unpin_operation_blocks(&[id]);
-        assert!(document.transcript.drain_compaction_slice());
-        assert!(!document.transcript.history().is_materialized(id));
-        assert_eq!(
-            document.transcript.memory_snapshot().dematerialized_entries,
-            1
-        );
+    /// The stored session matches one full write of the document, ignoring only
+    /// the session id.
+    fn assert_store_matches_document(
+        store: &TestStore,
+        session: &Session,
+        document: &TuiSessionDocument,
+        context: &str,
+    ) {
+        let (mut state, history, transcript) = store.stored(&session.id);
+        let (mut expected, expected_history, expected_transcript) =
+            store.reference(session, &document.transcript);
+        state.identity.id.clear();
+        expected.identity.id.clear();
+        assert_eq!(history, expected_history, "{context}: history");
+        assert_eq!(transcript, expected_transcript, "{context}: transcript");
+        assert_eq!(state, expected, "{context}: session state");
     }
 
-    #[test]
-    fn acknowledgement_rejects_wrong_scope_and_head() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("dirty")),
-            },
-        );
-        let (_root, mut writer) = native_writer(&session);
-        let intent = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .expect("prepare batch")
-            .expect("dirty batch");
-        let epoch = SessionEpoch::new(3);
-        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
-        document.bind_persistence(epoch);
-
-        let mut wrong_epoch = acknowledgement.clone();
-        wrong_epoch.epoch = SessionEpoch::new(4);
-        assert!(!document.acknowledge(&wrong_epoch, &mut session, 1));
-        let mut older_generation = acknowledgement.clone();
-        older_generation.generation = PersistenceGeneration::new(intent.generation.get() - 1);
-        assert!(!document.acknowledge(&older_generation, &mut session, 1));
-        let mut newer_generation = acknowledgement.clone();
-        newer_generation.generation = PersistenceGeneration::new(intent.generation.get() + 1);
-        assert!(!document.acknowledge(&newer_generation, &mut session, 1));
-        assert!(!document.acknowledge(&acknowledgement, &mut session, 2));
-        let mut wrong_session = acknowledgement.clone();
-        wrong_session.result.receipt.session_id = "different-session".into();
-        assert!(!document.acknowledge(&wrong_session, &mut session, 1));
-        let mut wrong_record_len = acknowledgement.clone();
-        wrong_record_len
-            .result
-            .receipt
-            .current
-            .transcript_record_count = smelt_store::TranscriptRecordCount::new(1);
-        assert!(!document.acknowledge(&wrong_record_len, &mut session, 1));
-        let mut wrong_head = acknowledgement.clone();
-        wrong_head.result.receipt.previous.revision = smelt_store::Revision::new(9);
-        assert!(!document.acknowledge(&wrong_head, &mut session, 1));
-        let mut skipped_revision = acknowledgement.clone();
-        skipped_revision.result.receipt.current.revision = skipped_revision
-            .result
-            .receipt
-            .previous
-            .revision
-            .checked_add(2)
-            .expect("revision");
-        assert!(!document.acknowledge(&skipped_revision, &mut session, 1));
-        assert!(document.has_session_work());
+    fn user_block(text: &str) -> Block {
+        Block::User {
+            text: text.into(),
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: None,
+        }
     }
 
-    #[test]
-    fn captured_save_prepares_exact_records_and_archives_after_newer_document_edits() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        let epoch = SessionEpoch::new(7);
-        document.bind_persistence(epoch);
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("captured request")),
-            },
-        );
-        document.apply_transcript(TranscriptMutation::AppendBlock {
-            block: Block::Text {
-                content: "captured display".into(),
-            },
-        });
-        document.apply_metadata(
-            &mut session,
-            MetadataMutation::SetTitle {
-                title: "captured title".into(),
-                slug: "captured-title".into(),
-                snapshot_history_len: 1,
-            },
-        );
-        let capture = document
-            .capture_event_batch(&mut session, runtime_metadata())
-            .unwrap()
-            .unwrap();
-        let expected = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .unwrap()
-            .unwrap();
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("newer request")),
-            },
-        );
-        document.apply_transcript(TranscriptMutation::AppendBlock {
-            block: Block::Text {
-                content: "newer display".into(),
-            },
-        });
-        document.apply_metadata(
-            &mut session,
-            MetadataMutation::SetTitle {
-                title: "newer title".into(),
-                slug: "newer-title".into(),
-                snapshot_history_len: 2,
-            },
-        );
-        let prepared = capture.prepare().unwrap();
-        assert_eq!(prepared, expected);
-        assert_eq!(prepared.command(), expected.command());
-        let (_root, mut writer) = native_writer(&session);
-        let acknowledgement =
-            acknowledgement_for(epoch, &prepared, publish(&prepared, &mut writer));
-        assert!(!document.acknowledge(&acknowledgement, &mut session, 2));
-        assert_eq!(session.title.as_deref(), Some("newer title"));
-        assert_eq!(session.history.len(), 2);
-        assert!(document.has_session_work());
-        assert!(session.metadata_snapshots.changed_suffix().is_some());
-        assert_eq!(
-            session.archive_base().unwrap().revision_id,
-            acknowledgement.result.revision_id
-        );
-    }
-
-    #[test]
-    fn native_archive_adoption_preserves_newer_edits_and_invalidates_runtime_proofs() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.created_at_ms = 1;
-        session.updated_at_ms = 1;
-        session.first_user_message = Some(std::sync::Arc::from("synthetic message".repeat(4096)));
-        let message = session.first_user_message.clone().unwrap();
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        let epoch = SessionEpoch::new(7);
-        document.bind_persistence(epoch);
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("first")),
-            },
-        );
-        document.apply_transcript(TranscriptMutation::AppendBlock {
-            block: Block::Text {
-                content: "first display".into(),
-            },
-        });
-        let first = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .unwrap()
-            .unwrap();
-        let foreign_frame = session
-            .clone()
-            .prepare_archive_save(
-                first.command().expected,
-                first.command().history.clone(),
-                first.command().transcript_records.clone(),
-            )
-            .unwrap();
-        assert!(!first.frame.same_snapshot(&foreign_frame));
-        let (_root, mut writer) = native_writer(&session);
-        let first_ack = acknowledgement_for(epoch, &first, publish(&first, &mut writer));
-
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("second")),
-            },
-        );
-        document.apply_transcript(TranscriptMutation::AppendBlock {
-            block: Block::Text {
-                content: "second display".into(),
-            },
-        });
-        document.apply_metadata(
-            &mut session,
-            MetadataMutation::SetTitle {
-                title: "newer title".into(),
-                slug: "newer-title".into(),
-                snapshot_history_len: 2,
-            },
-        );
-        let queued = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .unwrap()
-            .unwrap();
-        let pending = document.changes;
-        let record_dirty = document.transcript.history().record_dirty_from();
-        let mut wrong_epoch = first_ack.clone();
-        wrong_epoch.epoch = SessionEpoch::new(8);
-        assert!(!document.adopt_archive_publication(&wrong_epoch, &mut session));
-        assert_eq!(document.changes, pending);
-        assert!(session.archive_base().is_none());
-        let mut foreign = first_ack.clone();
-        foreign.frame = std::sync::Arc::new(foreign_frame);
-        assert!(!document.adopt_archive_publication(&foreign, &mut session));
-        assert_eq!(document.changes, pending);
-        assert!(session.archive_base().is_none());
-
-        assert!(!document.acknowledge(&first_ack, &mut session, 2));
-        assert_eq!(
-            document.changes,
-            DocumentChanges {
-                published_head: first_ack.result.receipt.current,
-                ..pending
+    fn apply_generated_mutation(
+        document: &mut TuiSessionDocument,
+        session: &mut Session,
+        state: u64,
+        label: &str,
+    ) {
+        let history_len = session.history.len();
+        match state % 7 {
+            0 | 1 => {
+                document.apply_history(
+                    session,
+                    HistoryMutation::CommitRequestItem {
+                        item: HistoryItem::user(Content::text(label)),
+                        block: Some(Box::new(user_block(label))),
+                        first_user_message: Some(label.into()),
+                    },
+                );
             }
-        );
-        assert_eq!(
-            document.transcript.history().record_dirty_from(),
-            record_dirty
-        );
-        assert_eq!(session.history.len(), 2);
-        assert_eq!(session.title.as_deref(), Some("newer title"));
-        assert!(std::sync::Arc::ptr_eq(
-            session.first_user_message.as_ref().unwrap(),
-            &message
-        ));
-        assert_eq!(
-            session.archive_base().unwrap().revision_id,
-            first_ack.result.revision_id
-        );
-        assert!(!SessionBatch::from(queued.clone()).matches_archive_base(&session));
-        let refreshed = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .unwrap()
-            .unwrap();
-        assert!(SessionBatch::from(refreshed.clone()).matches_archive_base(&session));
-        assert_eq!(queued, refreshed);
-        assert_ne!(queued.command(), refreshed.command());
-
-        let finalized = queued
-            .frame
-            .as_ref()
-            .clone()
-            .finalize_after(&first_ack.frame, &first_ack.result)
-            .unwrap();
-        let prepared = PreparedSessionBatch {
-            frame: std::sync::Arc::new(finalized),
-            ..queued
-        };
-        let mut latest = acknowledgement_for(epoch, &prepared, publish(&prepared, &mut writer));
-        latest.previous = first_ack.previous;
-        assert!(document.adopt_archive_publication(&latest, &mut session));
-        assert!(document.acknowledge_coalesced_batch(
-            &latest,
-            &session.id,
-            2,
-            session.checkpoint.as_ref()
-        ));
-        assert!(!document.has_session_work());
-        assert_eq!(document.published_head(), latest.result.receipt.current);
-        assert_eq!(
-            session.archive_base().unwrap().revision_id,
-            latest.result.revision_id
-        );
-        assert_eq!(
-            writer.snapshot().unwrap().metadata.title.as_deref(),
-            Some("newer title")
-        );
+            2 => {
+                document.apply_history(
+                    session,
+                    HistoryMutation::AppendItem {
+                        item: HistoryItem::assistant(protocol::AssistantStep::terminal(
+                            Some(Content::text(label)),
+                            None,
+                            Vec::new(),
+                        )),
+                    },
+                );
+            }
+            3 => {
+                document.apply_transcript(TranscriptMutation::AppendBlock {
+                    block: Block::Text {
+                        content: label.into(),
+                    },
+                });
+            }
+            4 => {
+                document.apply_history(
+                    session,
+                    HistoryMutation::TruncateFrom {
+                        index: (state as usize >> 8) % (history_len + 1),
+                        user_turn_count: None,
+                        identity: token_identity(),
+                    },
+                );
+            }
+            5 => {
+                document.apply_metadata(
+                    session,
+                    MetadataMutation::SetTitle {
+                        title: label.into(),
+                        slug: label.into(),
+                        snapshot_history_len: history_len,
+                    },
+                );
+            }
+            _ => {
+                document.apply_metadata(
+                    session,
+                    MetadataMutation::SetCwd {
+                        cwd: format!("/tmp/{label}"),
+                    },
+                );
+            }
+        }
     }
 
     #[test]
-    fn empty_unpublished_draft_does_not_build_intent() {
-        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.apply_metadata(
-            &mut session,
-            MetadataMutation::SetFastMode { enabled: true },
-        );
-
-        assert!(document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .expect("prepare draft")
-            .is_none());
-        assert!(document.has_session_work());
-    }
-
-    #[test]
-    fn generated_mutation_sequences_build_complete_cumulative_intents() {
-        for seed in 0..64_u64 {
+    fn pipelined_saves_with_failures_converge_on_the_document() {
+        for seed in 0..48_u64 {
+            let store = TestStore::new();
             let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
             let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+            let mut queued: VecDeque<crate::persist::SessionSave> = VecDeque::new();
+            let mut writer_failed = false;
             let mut state = seed.wrapping_add(1);
-            for step in 0..24 {
+            for step in 0..40 {
                 state = state
                     .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                let history_len = session.history.len();
-                match state % 5 {
-                    0 => {
-                        document.apply_history(
-                            &mut session,
-                            HistoryMutation::AppendItem {
-                                item: HistoryItem::user(Content::text(format!("{seed}:{step}"))),
-                            },
-                        );
-                    }
-                    1 => {
-                        document.apply_history(
-                            &mut session,
-                            HistoryMutation::TruncateFrom {
-                                index: (state as usize) % (history_len + 1),
-                                user_turn_count: None,
-                                identity: token_identity(),
-                            },
-                        );
-                    }
-                    2 => {
-                        document.apply_metadata(
-                            &mut session,
-                            MetadataMutation::SetFastMode {
-                                enabled: state & 1 == 0,
-                            },
-                        );
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let label = format!("{seed}:{step}");
+                match (state >> 33) % 6 {
+                    0..=2 => {
+                        apply_generated_mutation(&mut document, &mut session, state >> 3, &label)
                     }
                     3 => {
-                        document.apply_metadata(
-                            &mut session,
-                            MetadataMutation::SetCwd {
-                                cwd: format!("/tmp/{seed}/{step}"),
-                            },
-                        );
+                        if let Some(save) = document
+                            .capture_save(&mut session, runtime_metadata())
+                            .unwrap()
+                        {
+                            queued.push_back(save);
+                        }
+                    }
+                    4 => {
+                        // The actor commits the oldest save, skipping ones that build
+                        // on a failure until a resync arrives.
+                        if let Some(save) = queued.pop_front() {
+                            if writer_failed && !save.resync {
+                                continue;
+                            }
+                            writer_failed = false;
+                            let durable = store.commit(&save);
+                            assert!(document.acknowledge(durable, &mut session));
+                        }
                     }
                     _ => {
-                        document.apply_metadata(
-                            &mut session,
-                            MetadataMutation::SetTitle {
-                                title: format!("title-{seed}-{step}"),
-                                slug: format!("title-{seed}-{step}"),
-                                snapshot_history_len: history_len,
-                            },
-                        );
+                        if let Some(save) = queued.pop_front() {
+                            if !writer_failed || save.resync {
+                                writer_failed = true;
+                                document.fail_save(save.seq);
+                            }
+                        }
                     }
                 }
             }
-            document.apply_history(
-                &mut session,
-                HistoryMutation::AppendItem {
-                    item: HistoryItem::user(Content::text(format!("final-{seed}"))),
-                },
-            );
-
-            let intent = document
-                .prepare_event_batch(&mut session, runtime_metadata())
-                .expect("prepare generated intent")
-                .expect("generated session has content");
-            let history_len = session.history.len();
-            assert_eq!(
-                intent.command().history.start,
-                smelt_store::HistoryIndex::ZERO
-            );
-            assert_eq!(
-                intent.command().history.final_len,
-                smelt_store::HistoryLen::new(history_len as u64)
-            );
-            assert_eq!(intent.command().history.items, session.history);
-            assert_eq!(
-                intent.command().identity,
-                smelt_core::session::store_identity_from_session(&session).unwrap()
-            );
-            let (_root, mut writer) = native_writer(&session);
-            publish(&intent, &mut writer);
-            let stored = writer.snapshot().unwrap();
-            assert_eq!(
-                stored.metadata,
-                smelt_core::session::store_metadata_from_session(&session, history_len).unwrap()
-            );
-            assert_eq!(
-                stored.side_tables,
-                smelt_core::session::store_side_table_suffixes_from_session_at(
-                    &session,
-                    0,
-                    history_len,
-                )
-                .unwrap()
-            );
+            loop {
+                if let Some(save) = document
+                    .capture_save(&mut session, runtime_metadata())
+                    .unwrap()
+                {
+                    queued.push_back(save);
+                }
+                let Some(save) = queued.pop_front() else {
+                    break;
+                };
+                if writer_failed && !save.resync {
+                    continue;
+                }
+                writer_failed = false;
+                let durable = store.commit(&save);
+                document.acknowledge(durable, &mut session);
+            }
+            assert!(!document.has_unsaved_work(), "seed {seed}");
+            if store.store.exists(&session.id).unwrap() {
+                assert_store_matches_document(&store, &session, &document, &format!("seed {seed}"));
+            }
         }
     }
 
     #[test]
-    fn sparse_record_save_bridges_the_acknowledged_store_head() {
-        use crate::app::transcript::{
-            seed_test_transcript_rows, LoadedTranscript, TEST_LINEAGE_SESSION_ID,
-        };
+    fn unchanged_document_captures_nothing() {
+        let store = TestStore::new();
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        assert!(document
+            .capture_save(&mut session, runtime_metadata())
+            .unwrap()
+            .is_none());
+        apply_generated_mutation(&mut document, &mut session, 0, "first");
+        let save = document
+            .capture_save(&mut session, runtime_metadata())
+            .unwrap()
+            .expect("first change is captured");
+        assert!(document.has_unsaved_work());
+        assert!(!document.has_uncaptured_work());
+        document.acknowledge(store.commit(&save), &mut session);
+        assert!(!document.has_unsaved_work());
+        assert!(document
+            .capture_save(&mut session, runtime_metadata())
+            .unwrap()
+            .is_none());
+    }
 
-        let source_root = tempfile::tempdir().expect("source session root");
-        let target_root = tempfile::tempdir().expect("target state root");
-        let target_sessions_root = target_root.path().join("sessions");
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
-        for index in 0..320 {
-            transcript.push(Block::Text {
-                content: format!("block {index}").into(),
-            });
+    #[test]
+    fn a_save_writes_only_the_changed_suffix() {
+        let store = TestStore::new();
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
+        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
+        for index in 0..32 {
+            apply_generated_mutation(&mut document, &mut session, 0, &format!("user {index}"));
         }
-        let records = transcript
-            .history
-            .block_records()
-            .iter()
-            .enumerate()
-            .map(|(index, record)| {
-                smelt_core::transcript_model::transcript_block_row_with_block_idx(
-                    index,
-                    index as u64,
-                    record,
-                )
-                .expect("transcript row")
-            })
-            .collect::<Vec<_>>();
-        let source_session_dir = seed_test_transcript_rows(source_root.path(), records.clone());
-        seed_test_transcript_rows(&target_sessions_root, records[..316].to_vec());
+        let save = document
+            .capture_save(&mut session, runtime_metadata())
+            .unwrap()
+            .unwrap();
+        document.acknowledge(store.commit(&save), &mut session);
 
-        let source_reader = smelt_store::LineageSessionReader::open_existing(
-            source_root.path(),
-            TEST_LINEAGE_SESSION_ID,
-        )
-        .expect("source reader");
-        let slice = source_reader
-            .transcript_record_slice_with_total((300..320).into(), 320)
-            .expect("sparse transcript tail");
-        drop(source_reader);
-        let loaded = LoadedTranscript::from_record_slice(slice, source_session_dir)
-            .expect("loaded sparse tail");
-        let target_reader = smelt_store::LineageSessionReader::open_existing(
-            &target_sessions_root,
-            TEST_LINEAGE_SESSION_ID,
-        )
-        .expect("target reader");
-        let target_snapshot = target_reader.snapshot().expect("target snapshot");
-        drop(target_reader);
-        let target_head = target_snapshot.head;
-        assert_eq!(target_head.transcript_record_count.get(), 316);
-
-        let mut session =
-            smelt_core::session::SessionStorage::new(target_root.path().to_path_buf())
-                .load_store_resume_result(TEST_LINEAGE_SESSION_ID, 80, 24)
-                .unwrap()
-                .unwrap()
-                .session;
-        let mut document =
-            TuiSessionDocument::new(TranscriptDocument::from_loaded_transcript(loaded));
-        document.changes.install_head(target_head);
-        document.changes.force_dirty();
-        document
-            .transcript
-            .history_mut()
-            .require_record_resave_from(18);
-
-        let mut metadata = runtime_metadata();
-        metadata.updated_at_ms = session.created_at_ms.saturating_add(1);
-        assert!(matches!(
-            document.prepare_event_batch(&mut session, metadata.clone()),
-            Err(SessionBatchPreparationError::HydrationPending)
-        ));
-        let request = document
-            .transcript
-            .take_pending_hydration_request()
-            .expect("sparse save hydration request");
-        let result = crate::app::transcript_hydration::execute_hydration_request_for_test(request)
-            .expect("sparse save hydration result");
-        document.transcript.install_hydration_result(result);
-        let intent = document
-            .prepare_event_batch(&mut session, metadata)
-            .expect("prepare hydrated sparse save")
-            .expect("dirty sparse save");
-        let suffix = intent
-            .command()
-            .transcript_records
-            .as_ref()
-            .expect("record suffix");
-        assert_eq!(suffix.start.get(), 300);
-        assert_eq!(suffix.records.len(), 20);
-
-        let generation = intent.generation;
-        let mut persistence = crate::persist::SessionPersistence::spawn(
-            smelt_core::session::SessionStorage::new(target_root.path().to_path_buf()),
-            smelt_core::session_id::SessionId::parse(TEST_LINEAGE_SESSION_ID).expect("session id"),
-            SessionEpoch::new(1),
-            PersistenceGeneration::ZERO,
-            target_head,
-            None,
-            std::sync::Arc::default(),
-        )
-        .expect("persistence actor");
-        persistence.submit(intent).expect("submit sparse save");
-        let close = persistence.close(
-            generation,
-            Instant::now() + Duration::from_secs(5),
-            crate::persist::ClosePolicy::RequireDurable,
+        apply_generated_mutation(&mut document, &mut session, 0, "next");
+        let save = document
+            .capture_save(&mut session, runtime_metadata())
+            .unwrap()
+            .unwrap();
+        let history = save.commit.history.as_ref().expect("history suffix");
+        assert_eq!(history.start, 32);
+        assert_eq!(history.items.len(), 1);
+        let transcript = save.commit.transcript.as_ref().expect("transcript suffix");
+        assert_eq!(transcript.start, 32);
+        assert_eq!(transcript.records.len(), 1);
+        assert!(
+            save.commit.first_user_message.is_none(),
+            "unchanged first message is not rewritten"
         );
         assert!(
-            close.cause.is_none(),
-            "sparse save failed: {:?}",
-            close.cause
+            save.commit.checkpoint.is_none(),
+            "unchanged checkpoint is not rewritten"
         );
-
-        let saved = smelt_store::LineageSessionReader::open_existing(
-            &target_sessions_root,
-            TEST_LINEAGE_SESSION_ID,
-        )
-        .expect("saved reader")
-        .transcript_record_slice_with_total((300..320).into(), 320)
-        .expect("saved transcript tail");
-        assert_eq!(saved.records.len(), 20);
-        assert_eq!(saved.records[18].block_idx, 318);
+        document.acknowledge(store.commit(&save), &mut session);
+        assert_store_matches_document(&store, &session, &document, "suffix save");
     }
 
     #[test]
-    fn scrolled_back_save_appends_live_tail_without_truncating_store() {
-        use crate::app::transcript::{
-            seed_test_transcript_rows, LoadedTranscript, TEST_LINEAGE_SESSION_ID,
-        };
-
-        let root = tempfile::tempdir().expect("state root");
-        let sessions_root = root.path().join("sessions");
-        let mut transcript = smelt_core::content::transcript::Transcript::new();
-        for index in 0..300 {
-            transcript.push(Block::Text {
-                content: format!("block {index}").into(),
-            });
-        }
-        let records = transcript
-            .history
-            .block_records()
-            .iter()
-            .enumerate()
-            .map(|(index, record)| {
-                smelt_core::transcript_model::transcript_block_row_with_block_idx(
-                    index,
-                    index as u64,
-                    record,
-                )
-                .expect("transcript row")
-            })
-            .collect::<Vec<_>>();
-        let session_dir = seed_test_transcript_rows(&sessions_root, records);
-        let reader = smelt_store::LineageSessionReader::open_existing(
-            &sessions_root,
-            TEST_LINEAGE_SESSION_ID,
-        )
-        .expect("reader");
-        let head = reader.snapshot().expect("snapshot").head;
-        let tail = reader
-            .transcript_record_slice_with_total((280..300).into(), 300)
-            .expect("sparse tail");
-        drop(reader);
-
-        let mut session = smelt_core::session::SessionStorage::new(root.path().to_path_buf())
-            .load_store_resume_result(TEST_LINEAGE_SESSION_ID, 80, 24)
-            .unwrap()
-            .unwrap()
-            .session;
-        let loaded = LoadedTranscript::from_record_slice(tail, session_dir).expect("loaded tail");
-        let mut document =
-            TuiSessionDocument::new(TranscriptDocument::from_loaded_transcript(loaded));
-        document.changes.install_head(head);
-        for index in 300..302 {
-            document.transcript.push(Block::Text {
-                content: format!("streamed {index}").into(),
-            });
-        }
-        document.changes.force_dirty();
-        let earlier = document
-            .transcript
-            .load_record_window((100..120).into())
-            .expect("earlier window");
-        assert!(document.transcript.merge_record_window(earlier));
-
-        let mut metadata = runtime_metadata();
-        metadata.updated_at_ms = session.created_at_ms.saturating_add(1);
-        let intent = document
-            .prepare_event_batch(&mut session, metadata)
-            .expect("prepare scrolled-back save")
-            .expect("dirty live tail");
-        let generation = intent.generation;
-        let mut persistence = crate::persist::SessionPersistence::spawn(
-            smelt_core::session::SessionStorage::new(root.path().to_path_buf()),
-            smelt_core::session_id::SessionId::parse(TEST_LINEAGE_SESSION_ID).expect("session id"),
-            SessionEpoch::new(1),
-            PersistenceGeneration::ZERO,
-            head,
-            None,
-            std::sync::Arc::default(),
-        )
-        .expect("persistence actor");
-        persistence.submit(intent).expect("submit save");
-        let close = persistence.close(
-            generation,
-            Instant::now() + Duration::from_secs(5),
-            crate::persist::ClosePolicy::RequireDurable,
-        );
-        assert!(close.cause.is_none(), "save failed: {:?}", close.cause);
-
-        let reader = smelt_store::LineageSessionReader::open_existing(
-            &sessions_root,
-            TEST_LINEAGE_SESSION_ID,
-        )
-        .expect("saved reader");
-        assert_eq!(
-            reader
-                .snapshot()
-                .expect("saved snapshot")
-                .head
-                .transcript_record_count
-                .get(),
-            302
-        );
-        let saved = reader
-            .transcript_record_slice_with_total((298..302).into(), 302)
-            .expect("saved tail");
-        let texts = saved
-            .records
-            .iter()
-            .map(|record| record.preview_text.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            texts,
-            ["block 298", "block 299", "streamed 300", "streamed 301"]
-        );
-    }
-
-    #[test]
-    fn store_backed_cumulative_intent_spans_lineage_prefix_and_live_suffix() {
-        const ID: &str = "7777777777777777777777777777777777777777777777777777777777777777";
-        let root = tempfile::tempdir().expect("session root");
-        let mut stored = Session::new(1, std::path::PathBuf::from("/tmp"));
-        stored.id = ID.into();
-        stored.history = vec![
-            HistoryItem::user(Content::text("stored-0")),
-            HistoryItem::user(Content::text("stored-1")),
-        ];
-        let sessions_root = root.path().join("sessions");
-        let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, ID).expect("writer");
-        let command = smelt_core::session::initial_store_commit_from_session(&stored)
-            .expect("initial commit");
-        let receipt = writer.commit_session(&command).expect("store prefix");
-        let mut meta = meta_with_token_identity();
-        meta.id = ID.into();
-        meta.history_len = Some(2);
-        let header = SessionHeader {
-            meta,
-            history_len: 2,
-            revision: receipt.current.revision.get(),
-            degraded_warnings: Vec::new(),
-        };
-        let store_address =
-            SessionStoreAddress::new(sessions_root, ID.into(), writer.lineage_id().to_string());
-        let mut session = smelt_core::session::SessionStorage::new(root.path().to_path_buf())
-            .load_store_resume_result(ID, 80, 24)
-            .unwrap()
-            .unwrap()
-            .session;
+    fn a_failed_save_resyncs_everything_after_the_durable_head() {
+        let store = TestStore::new();
+        let mut session = Session::new(1, std::path::PathBuf::from("/tmp"));
         let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.live_session = Some(LiveSession::from_store(header, store_address, 2));
-        document.changes.install_head(receipt.current);
-        document.set_history_resave_from_for_test(0);
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("live-2")),
-            },
-        );
-
-        let intent = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .expect("prepare batch")
-            .expect("dirty batch");
-        assert_eq!(
-            intent.command().history.start,
-            smelt_store::HistoryIndex::ZERO
-        );
-        assert_eq!(
-            intent.command().history.final_len,
-            smelt_store::HistoryLen::new(3)
-        );
-        assert_eq!(
-            intent.command().history.items,
-            vec![
-                HistoryItem::user(Content::text("stored-0")),
-                HistoryItem::user(Content::text("stored-1")),
-                HistoryItem::user(Content::text("live-2")),
-            ]
-        );
-        writer.release().expect("release writer");
-    }
-
-    #[test]
-    fn matching_store_backed_acknowledgement_compacts_live_suffix() {
-        let root = tempfile::tempdir().unwrap();
-        let storage = smelt_core::session::SessionStorage::new(root.path().to_path_buf());
-        let mut original = Session::new(1, std::path::PathBuf::from("/tmp"));
-        original.created_at_ms = 1;
-        original.updated_at_ms = 1;
-        original.history = vec![
-            HistoryItem::user(Content::text("stored-0")),
-            HistoryItem::user(Content::text("stored-1")),
-        ];
-        storage.save_result(&original).unwrap();
-        let resume = storage
-            .load_store_resume_result(&original.id, 80, 24)
+        apply_generated_mutation(&mut document, &mut session, 0, "durable");
+        let save = document
+            .capture_save(&mut session, runtime_metadata())
             .unwrap()
             .unwrap();
-        let mut writer =
-            smelt_store::OwnedLineageWriter::open_existing(storage.sessions_dir(), &original.id)
-                .unwrap();
-        let mut session = resume.session;
-        let mut document = TuiSessionDocument::new(TranscriptDocument::new());
-        document.live_session = Some(LiveSession::from_store(
-            resume.header,
-            resume.store_address,
-            resume.user_turn_count,
-        ));
-        document.changes.install_head(resume.head);
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("live")),
-            },
-        );
+        document.acknowledge(store.commit(&save), &mut session);
 
-        let intent = document
-            .prepare_event_batch(&mut session, runtime_metadata())
-            .expect("prepare batch")
-            .expect("dirty batch");
-        assert_eq!(
-            intent.command().history.start,
-            smelt_store::HistoryIndex::new(2)
-        );
-        assert_eq!(intent.command().history.items.len(), 1);
-        let epoch = SessionEpoch::new(9);
-        let acknowledgement = acknowledgement_for(epoch, &intent, publish(&intent, &mut writer));
-        document.bind_persistence(epoch);
-        assert!(document.acknowledge(&acknowledgement, &mut session, 3));
-        assert_eq!(
-            document
-                .live_session
-                .as_ref()
-                .unwrap()
-                .navigation()
-                .user_turn_count(),
-            3
-        );
-        assert_eq!(
-            document
-                .live_session
-                .as_ref()
-                .expect("live session")
-                .live_suffix_len(),
-            0
-        );
-        document.apply_metadata(
-            &mut session,
-            MetadataMutation::SetTitle {
-                title: "metadata only".into(),
-                slug: "metadata-only".into(),
-                snapshot_history_len: 3,
-            },
-        );
-        let metadata = document
-            .prepare_event_batch(&mut session, runtime_metadata())
+        apply_generated_mutation(&mut document, &mut session, 0, "lost");
+        let lost = document
+            .capture_save(&mut session, runtime_metadata())
             .unwrap()
             .unwrap();
-        let acknowledgement =
-            acknowledgement_for(epoch, &metadata, publish(&metadata, &mut writer));
-        assert!(document.acknowledge(&acknowledgement, &mut session, 3));
-        assert_eq!(
-            document
-                .live_session
-                .as_ref()
-                .unwrap()
-                .navigation()
-                .user_turn_count(),
-            3
-        );
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("fourth")),
-            },
-        );
-        let old = document
-            .prepare_event_batch(&mut session, runtime_metadata())
+        apply_generated_mutation(&mut document, &mut session, 0, "queued after loss");
+        let skipped = document
+            .capture_save(&mut session, runtime_metadata())
             .unwrap()
             .unwrap();
-        let acknowledgement = acknowledgement_for(epoch, &old, publish(&old, &mut writer));
-        document.apply_history(
-            &mut session,
-            HistoryMutation::AppendItem {
-                item: HistoryItem::user(Content::text("fifth")),
-            },
-        );
-        assert!(!document.acknowledge(&acknowledgement, &mut session, 5));
-        let live = document.live_session.as_ref().unwrap();
-        assert_eq!(live.navigation().user_turn_count(), 5);
-        assert_eq!(live.live_suffix_len(), 2);
+        assert!(!skipped.resync);
+        assert!(document.fail_save(lost.seq));
+        assert!(!document.fail_save(skipped.seq), "one failure resyncs once");
+        assert!(document.has_uncaptured_work());
+
+        let resync = document
+            .capture_save(&mut session, runtime_metadata())
+            .unwrap()
+            .unwrap();
+        assert!(resync.resync);
+        assert_eq!(resync.commit.history.as_ref().unwrap().start, 1);
+        document.acknowledge(store.commit(&resync), &mut session);
+        assert!(!document.has_unsaved_work());
+        assert_store_matches_document(&store, &session, &document, "after resync");
     }
 }

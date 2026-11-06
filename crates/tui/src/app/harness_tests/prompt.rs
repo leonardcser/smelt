@@ -397,7 +397,7 @@ fn fast_slash_command_enables_the_next_turn_payload() {
     app.press(KeyCode::Enter);
     app.type_text("verify fast request");
     app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
 
     let fast_mode = app
@@ -463,7 +463,7 @@ fn fast_mode_is_restored_per_loaded_session() {
             crate::app::transcript::LoadedTranscript::full(
                 smelt_core::content::transcript::Transcript::new(),
             ),
-            crate::app::history::live_session_for_test("fast-enabled".into(), 0, None),
+            crate::app::history::live_session_for_test("fast-enabled".into(), 0),
             smelt_store::StoreHead::default(),
         ),
     );
@@ -479,7 +479,7 @@ fn fast_mode_is_restored_per_loaded_session() {
             crate::app::transcript::LoadedTranscript::full(
                 smelt_core::content::transcript::Transcript::new(),
             ),
-            crate::app::history::live_session_for_test("fast-disabled".into(), 0, None),
+            crate::app::history::live_session_for_test("fast-disabled".into(), 0),
             smelt_store::StoreHead::default(),
         ),
     );
@@ -510,7 +510,7 @@ fn unknown_slash_prompt_submits_as_user_message() {
 
     app.type_text("/not-a-command please answer normally");
     app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     app.feed_one(SourceEvent::Tick(0));
 
     assert!(app.agent_running());
@@ -538,7 +538,7 @@ fn unknown_slash_prompt_submits_as_user_message() {
 }
 
 #[test]
-fn enter_renders_user_message_and_dispatches_only_after_durable_turn() {
+fn enter_renders_user_message_and_dispatches_turn() {
     let mut app = TestApp::builder().build();
 
     app.type_text("durable echo");
@@ -549,24 +549,14 @@ fn enter_renders_user_message_and_dispatches_only_after_durable_turn() {
         app.render_to_frame().text().contains("durable echo"),
         "submitted text should be visible in the transcript after Enter"
     );
-    app.wait_for_turn_persistence();
-    app.feed_one(SourceEvent::Tick(0));
-    let payload = app.actions().iter().find_map(|action| match action {
-        Action::EngineSend(cmd) => match cmd.as_ref() {
-            protocol::UiCommand::StartTurn(payload) => Some(payload),
-            _ => None,
-        },
-        _ => None,
+    let dispatched = app.actions().iter().any(|action| {
+        matches!(
+            action,
+            Action::EngineSend(cmd)
+                if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(_))
+        )
     });
-    let payload = payload.expect("Enter dispatches a provider turn");
-    assert!(
-        payload.persistence.required_generation > 0,
-        "provider dispatch must require a durable document generation"
-    );
-    assert!(
-        payload.persistence.store_revision > 0,
-        "provider dispatch must carry the durable store revision"
-    );
+    assert!(dispatched, "Enter dispatches a provider turn");
 }
 
 #[test]
@@ -611,7 +601,7 @@ fn queued_turn_preserves_work_elapsed() {
         history: None,
         meta: None,
     }));
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     let after = app.working_probe().elapsed().expect("queued turn elapsed");
 
     let saved_elapsed_ms = app
@@ -691,7 +681,7 @@ fn queued_timestamp_survives_waiting_and_promotion() {
                 app.press(KeyCode::Enter);
             }
         }
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(SourceEvent::Tick(0));
         let input = app
             .actions()
@@ -744,7 +734,7 @@ fn command_timestamp_survives_queueing_and_coroutine_yields() {
             app.feed_one(SourceEvent::Tick(60_000));
             assert!(app.finish_turn());
         }
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         app.feed_one(SourceEvent::Tick(0));
         let input = app
             .actions()

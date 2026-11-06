@@ -1,9 +1,9 @@
-use crate::session::{ContextCheckpoint, Session, SessionHeader, SessionStoreAddress};
+use crate::session::{ContextCheckpoint, Session, SessionStoreAddress};
 use protocol::{history_item_message_count, HistoryItem};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-struct LiveStoreReader(smelt_store::LineageSessionReader);
+struct LiveStoreReader(smelt_store::SessionReader);
 
 impl LiveStoreReader {
     fn read_history_items_range(
@@ -54,9 +54,6 @@ impl LiveStoreReader {
         self.0.history_any_transcript_visible_before(end as u64)
     }
 }
-
-#[derive(Clone, Debug, Default)]
-pub struct LiveSideTables;
 
 /// A lightweight navigation row, maintained when history changes.
 #[derive(Clone, Debug)]
@@ -112,7 +109,7 @@ pub enum EffectiveModePlan {
 }
 
 impl EffectiveModePlan {
-    pub fn resolve(self, reader: &smelt_store::LineageSessionReader) -> Result<String, String> {
+    pub fn resolve(self, reader: &smelt_store::SessionReader) -> Result<String, String> {
         match self {
             Self::Ready(mode) => Ok(mode),
             Self::Stored {
@@ -273,52 +270,65 @@ impl HistoryNavigation {
     }
 }
 
+/// The history of an open session. The model context since the last checkpoint
+/// stays in memory, so requests never read storage; older history is read from
+/// the store when the user looks at it.
 #[derive(Clone, Debug)]
 pub struct LiveSession {
-    pub header: SessionHeader,
-    pub artifact_dir: PathBuf,
+    id: String,
+    artifact_dir: PathBuf,
     pub store_address: Option<SessionStoreAddress>,
+    /// History index of `live_history[0]`. Earlier items are only in the store.
     pub live_start: usize,
     live_history: Vec<HistoryItem>,
     navigation: HistoryNavigation,
-    pub side_tables: LiveSideTables,
 }
 
 impl LiveSession {
-    pub fn from_store(
-        header: SessionHeader,
+    /// A resumed session holding `context`, the history from `context_start` on.
+    pub fn from_resume(
         store: SessionStoreAddress,
+        context_start: usize,
+        context: Vec<HistoryItem>,
         user_turn_count: usize,
     ) -> Self {
-        let artifact_dir =
-            smelt_store::SessionStoreLayout::from_sessions_root(&store.sessions_root)
-                .session_artifact_dir(&store.session_id);
-        Self::from_parts(header, artifact_dir, Some(store), user_turn_count)
+        let mut live = Self::from_parts(
+            store.session_id.clone(),
+            store.artifact_dir(),
+            Some(store),
+            context_start,
+            user_turn_count,
+        );
+        for item in context {
+            live.append_history(item);
+        }
+        live
     }
 
+    /// A session whose first `history_len` items, holding `user_turn_count`
+    /// user turns, are only in the store.
     pub fn from_parts(
-        header: SessionHeader,
+        id: String,
         artifact_dir: PathBuf,
         store_address: Option<SessionStoreAddress>,
+        history_len: usize,
         user_turn_count: usize,
     ) -> Self {
-        let live_start = header.history_len;
         Self {
-            header,
+            id,
             artifact_dir,
             store_address,
-            live_start,
+            live_start: history_len,
             live_history: Vec::new(),
             navigation: HistoryNavigation {
                 stored_user_count: user_turn_count,
                 ..Default::default()
             },
-            side_tables: LiveSideTables,
         }
     }
 
     pub fn id(&self) -> &str {
-        &self.header.meta.id
+        &self.id
     }
 
     pub fn artifact_dir(&self) -> &Path {
@@ -397,29 +407,51 @@ impl LiveSession {
         debug_assert_eq!(self.navigation.user_turn_count(), count);
     }
 
-    pub fn compact_saved_prefix(
-        &mut self,
-        saved_history_len: usize,
-        revision: u64,
-        checkpoint: Option<&ContextCheckpoint>,
-    ) {
-        let saved_history_len = saved_history_len.min(self.history_len());
-        assert!(
-            saved_history_len >= self.live_start,
-            "compaction must not retreat behind the stored prefix"
-        );
-        self.navigation.compact(saved_history_len);
-        let drop_count = saved_history_len - self.live_start;
-        if drop_count >= self.live_history.len() {
-            self.live_history.clear();
-        } else {
-            self.live_history.drain(..drop_count);
+    /// Drops items before `index` from memory. They must already be stored.
+    pub fn release_before(&mut self, index: usize) {
+        let index = index.min(self.history_len());
+        if index <= self.live_start {
+            return;
         }
-        self.live_start = saved_history_len;
-        self.header.history_len = saved_history_len;
-        self.header.revision = revision;
-        self.header.meta.history_len = Some(saved_history_len);
-        self.header.meta.checkpoint = checkpoint.cloned();
+        self.navigation.compact(index);
+        self.live_history.drain(..index - self.live_start);
+        self.live_start = index;
+    }
+
+    /// Reads stored items so that memory holds history from `index` on.
+    pub fn load_from(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.live_start {
+            return Ok(());
+        }
+        let _perf = smelt_perf::perf::begin("session:live:load_from");
+        let store = self.open_store()?;
+        let (count, mut items) = store
+            .0
+            .read_snapshot(|reader| {
+                Ok((
+                    reader.history_user_turn_count_before(index as u64)?,
+                    reader.history_range(index as u64, self.live_start as u64)?,
+                ))
+            })
+            .map_err(|err| format!("read session history: {err}"))?;
+        if items.len() != self.live_start - index {
+            return Err(format!(
+                "read session history {index}..{}: found {} items",
+                self.live_start,
+                items.len()
+            ));
+        }
+        items.append(&mut self.live_history);
+        self.live_start = index;
+        self.navigation = HistoryNavigation {
+            stored_user_count: count as usize,
+            ..Default::default()
+        };
+        for (offset, item) in items.iter().enumerate() {
+            self.navigation.append(index + offset, item);
+        }
+        self.live_history = items;
+        Ok(())
     }
 
     pub fn history_range(&self, range: Range<usize>) -> Result<Vec<HistoryItem>, String> {
@@ -599,47 +631,40 @@ impl LiveSession {
             plan => self
                 .open_store()?
                 .0
-                .read_snapshot(|reader| plan.resolve(reader))
+                .read_snapshot(|reader| Ok(plan.resolve(reader)))
                 .map_err(|error| format!("read session mode snapshot: {error}"))?,
         }
     }
 
+    /// The history index where the model context starts.
+    pub fn model_context_start(&self, checkpoint: Option<&ContextCheckpoint>) -> usize {
+        checkpoint
+            .map_or(0, |checkpoint| checkpoint.first_live_index)
+            .min(self.history_len())
+    }
+
+    /// The provider history: the checkpoint summary, then the history since it.
+    /// Context not in memory is read from storage.
     pub fn model_history_source(
         &self,
         checkpoint: Option<&ContextCheckpoint>,
-    ) -> protocol::ModelHistorySource {
-        let (prefix, first_live_index) = if let Some(checkpoint) = checkpoint {
-            (
-                vec![HistoryItem::user(protocol::compaction_summary_content(
-                    &checkpoint.summary,
-                ))],
-                checkpoint.first_live_index,
-            )
-        } else {
-            (Vec::new(), 0)
-        };
-        let store_end_index = self.live_start;
-        let store_start_index = first_live_index.min(store_end_index);
-        let suffix_start = first_live_index.saturating_sub(self.live_start);
-        let suffix = self
-            .live_history
-            .get(suffix_start..)
-            .unwrap_or(&[])
-            .to_vec();
-        let lineage_id = self
-            .store_address
-            .as_ref()
-            .expect("store-backed live session has a store address")
-            .lineage_id
-            .clone();
-        protocol::ModelHistorySource::store_with_suffix(
-            prefix,
-            lineage_id,
-            store_start_index,
-            store_end_index,
-            suffix,
-            first_live_index,
-        )
+    ) -> Result<protocol::ModelHistorySource, String> {
+        let first_live_index = self.model_context_start(checkpoint);
+        if first_live_index < self.live_start {
+            smelt_perf::perf::record_value("live_session:context_storage_read", 1);
+        }
+        let mut items = Vec::new();
+        if let Some(checkpoint) = checkpoint {
+            items.push(HistoryItem::user(protocol::compaction_summary_content(
+                &checkpoint.summary,
+            )));
+        }
+        let prefix_len = items.len();
+        items.extend(self.history_range(first_live_index..self.history_len())?);
+        Ok(protocol::ModelHistorySource::projected_items(
+            items,
+            protocol::ModelHistoryCoordinates::projected(prefix_len, first_live_index),
+        ))
     }
 
     pub fn first_live_history_index_for_model_message(
@@ -714,20 +739,10 @@ impl LiveSession {
 fn open_store(store: Option<&SessionStoreAddress>, id: &str) -> Result<LiveStoreReader, String> {
     let _perf = smelt_perf::perf::begin("session:live_store:open");
     let store = store.ok_or_else(|| format!("session {id} has no storage root"))?;
-    let root = store.sessions_root.as_path();
-    let session_id = store.session_id.as_str();
-    smelt_store::LineageSessionReader::open_existing_in_lineage(
-        root,
-        store.lineage_id.as_str(),
-        session_id,
-    )
-    .map(LiveStoreReader)
-    .map_err(|error| {
-        format!(
-            "open lineage session {session_id} in {}: {error}",
-            root.display()
-        )
-    })
+    store
+        .reader()
+        .map(LiveStoreReader)
+        .map_err(|error| format!("open session {}: {error}", store.session_id))
 }
 
 /// A history read captured from a live session. Rows still in memory are
@@ -934,49 +949,43 @@ mod tests {
         id: &str,
         mode: Option<&str>,
         history: Vec<HistoryItem>,
-    ) -> String {
-        let command = smelt_store::SessionCommit {
-            session_id: id.into(),
-            expected: smelt_store::StoreHead::default(),
-            identity: smelt_store::SessionIdentity {
-                id: id.into(),
-                created_at: 1,
-                parent_id: None,
-            },
-            metadata: smelt_store::SessionMetadata {
-                title: None,
-                slug: None,
-                first_user_message: None,
-                cwd: None,
-                mode: mode.map(str::to_owned),
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                accounting_json: None,
-                checkpoint_json: None,
-                checkpoint_events_json: None,
-                context_tokens: None,
-                context_tokens_history_len: None,
-                display_context_tokens: None,
-                session_cost_usd: smelt_store::SessionCostUsd::new(0.0).unwrap(),
-                updated_at: 2,
-            },
-            history: smelt_store::HistorySuffix {
-                start: smelt_store::HistoryIndex::ZERO,
-                final_len: smelt_store::HistoryLen::new(history.len() as u64),
-                items: history,
-            },
-            side_tables: smelt_store::SideTableSuffixes::default(),
-            transcript_records: None,
-        };
-        let mut writer =
-            smelt_store::OwnedLineageWriter::open(root, id).expect("open lineage session store");
-        writer
-            .commit_session(&command)
-            .expect("seed lineage session store");
-        let lineage_id = writer.lineage_id().to_string();
-        writer.release().expect("release lineage session store");
-        lineage_id
+    ) -> SessionStoreAddress {
+        let store = smelt_store::Store::new(root);
+        store
+            .writer(id)
+            .and_then(|mut writer| {
+                writer.commit(
+                    &smelt_store::SessionIdentity {
+                        id: id.into(),
+                        created_at: 1,
+                        parent_id: None,
+                    },
+                    &smelt_store::SessionCommit {
+                        metadata: smelt_store::SessionMetadata {
+                            mode: mode.map(str::to_owned),
+                            updated_at: 2,
+                            ..Default::default()
+                        },
+                        history: Some(smelt_store::HistorySuffix {
+                            start: 0,
+                            items: history,
+                        }),
+                        ..Default::default()
+                    },
+                )
+            })
+            .expect("seed session store");
+        SessionStoreAddress::new(store, id.into())
+    }
+
+    fn stored_live(address: SessionStoreAddress, history_len: usize, users: usize) -> LiveSession {
+        LiveSession::from_parts(
+            SESSION_ID.into(),
+            address.artifact_dir(),
+            Some(address),
+            history_len,
+            users,
+        )
     }
 
     fn apply_planned_append(
@@ -1006,38 +1015,9 @@ mod tests {
             HistoryItem::user(protocol::Content::text("one")),
             HistoryItem::user(protocol::Content::text("two")),
         ];
-        let lineage_id = seed_store(dir.path(), SESSION_ID, None, persisted);
+        let address = seed_store(dir.path(), SESSION_ID, None, persisted);
 
-        let header = SessionHeader {
-            meta: crate::session::SessionMeta {
-                id: SESSION_ID.into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                created_at_ms: 1,
-                updated_at_ms: 2,
-                mode: None,
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                cwd: None,
-                parent_id: None,
-                authoritative_context_tokens: None,
-                display_context_tokens: None,
-                history_len: Some(2),
-                checkpoint: None,
-                checkpoint_events: Default::default(),
-                text_bytes: None,
-            },
-            history_len: 2,
-            revision: 1,
-            degraded_warnings: Vec::new(),
-        };
-        let mut live = LiveSession::from_store(
-            header,
-            SessionStoreAddress::new(dir.path().to_path_buf(), SESSION_ID.into(), lineage_id),
-            2,
-        );
+        let mut live = stored_live(address, 2, 2);
         assert_eq!(live.navigation().user_turn_count(), 2);
         assert_eq!(live.local_user_turn_count_before(1), None);
         assert_eq!(live.user_turn_count_before(1).unwrap(), 1);
@@ -1064,42 +1044,29 @@ mod tests {
             .history_tail(3, Some(newest_bytes.saturating_sub(1)))
             .unwrap()
             .is_empty());
-        let source = live.model_history_source(None);
-        match source {
-            protocol::ModelHistorySource::Store {
-                first_live_index,
-                end_index,
-                suffix,
-                ..
-            } => {
-                assert_eq!(first_live_index, 0);
-                assert_eq!(end_index, 2);
-                assert_eq!(suffix.len(), 1);
-            }
-            protocol::ModelHistorySource::Items { .. } => {
-                panic!("expected store-backed model history")
-            }
-        }
-
         let checkpoint = ContextCheckpoint {
-            summary: "summary through live suffix".into(),
-            first_live_index: 3,
+            summary: "summary".into(),
+            first_live_index: 2,
             ..Default::default()
         };
-        let source = live.model_history_source(Some(&checkpoint));
-        assert_eq!(source.coordinates().canonical_start().get(), 3);
-        assert_eq!(source.coordinates().model_prefix_len(), 1);
-        assert!(matches!(
-            source,
-            protocol::ModelHistorySource::Store {
-                first_live_index: 2,
-                ref suffix,
-                ..
-            } if suffix.is_empty()
-        ));
+        let source = live.model_history_source(Some(&checkpoint)).unwrap();
+        assert_eq!(source.coordinates.canonical_start().get(), 2);
+        assert_eq!(source.coordinates.model_prefix_len(), 1);
+        assert_eq!(source.items.len(), 2);
+        assert_eq!(live.live_start, 2);
 
-        // A metadata-only publication preserves both the stored count and newer live rows.
-        live.compact_saved_prefix(2, 2, None);
+        // Context before the memory window is read from the store, and stays
+        // there until loaded.
+        let source = live.model_history_source(None).unwrap();
+        assert_eq!(source.items, live.history_range(0..3).unwrap());
+        assert_eq!(live.live_start, 2);
+        live.load_from(live.model_context_start(None)).unwrap();
+        assert_eq!(live.live_start, 0);
+        assert_eq!(live.model_history_source(None).unwrap().items, source.items);
+        assert_eq!(live.local_user_turn_count_before(1), Some(1));
+        assert_eq!(live.navigation().user_turn_count(), 3);
+
+        live.release_before(2);
         assert_eq!(live.live_suffix_len(), 1);
         assert_eq!(live.navigation().user_turn_count(), 3);
         live.append_history(HistoryItem::user(protocol::compaction_summary_content(
@@ -1108,7 +1075,7 @@ mod tests {
         live.append_history(HistoryItem::user(protocol::Content::text("four")));
         assert_eq!(live.navigation().user_turn_count(), 4);
         assert_eq!(live.local_user_turn_count_before(4), Some(3));
-        live.compact_saved_prefix(4, 3, None);
+        live.release_before(4);
         assert_eq!(live.live_suffix_len(), 1);
         assert_eq!(live.navigation().user_turn_count(), 4);
         live.truncate_from(4, None);
@@ -1119,8 +1086,8 @@ mod tests {
         assert_eq!(live.navigation().user_turn_count(), 1);
         live.append_history(HistoryItem::user(protocol::Content::text("new branch")));
         assert_eq!(live.navigation().user_turn_count(), 2);
-        live.compact_saved_prefix(2, 4, None);
-        live.compact_saved_prefix(2, 5, None);
+        live.release_before(2);
+        live.release_before(2);
         assert_eq!(live.navigation().user_turn_count(), 2);
         live.truncate_from(0, None);
         assert_eq!(live.navigation().user_turn_count(), 0);
@@ -1136,37 +1103,8 @@ mod tests {
             )),
             HistoryItem::user(protocol::Content::text("after mode")),
         ];
-        let lineage_id = seed_store(dir.path(), SESSION_ID, Some("normal"), history);
-        let header = SessionHeader {
-            meta: crate::session::SessionMeta {
-                id: SESSION_ID.into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                created_at_ms: 1,
-                updated_at_ms: 2,
-                mode: Some("normal".into()),
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                cwd: None,
-                parent_id: None,
-                authoritative_context_tokens: None,
-                display_context_tokens: None,
-                history_len: Some(3),
-                checkpoint: None,
-                checkpoint_events: Default::default(),
-                text_bytes: None,
-            },
-            history_len: 3,
-            revision: 1,
-            degraded_warnings: Vec::new(),
-        };
-        let live = LiveSession::from_store(
-            header,
-            SessionStoreAddress::new(dir.path().to_path_buf(), SESSION_ID.into(), lineage_id),
-            2,
-        );
+        let address = seed_store(dir.path(), SESSION_ID, Some("normal"), history);
+        let live = stored_live(address, 3, 2);
 
         assert!(live.any_transcript_visible_before(2).unwrap());
         assert!(live.any_transcript_visible_before(3).unwrap());
@@ -1185,37 +1123,8 @@ mod tests {
         history.extend(
             (0..130).map(|index| HistoryItem::user(protocol::Content::text(index.to_string()))),
         );
-        let lineage_id = seed_store(dir.path(), SESSION_ID, Some("normal"), history.clone());
-        let header = SessionHeader {
-            meta: crate::session::SessionMeta {
-                id: SESSION_ID.into(),
-                title: None,
-                slug: None,
-                first_user_message: None,
-                created_at_ms: 1,
-                updated_at_ms: 2,
-                mode: Some("normal".into()),
-                reasoning_effort: None,
-                model: None,
-                fast_mode: None,
-                cwd: None,
-                parent_id: None,
-                authoritative_context_tokens: None,
-                display_context_tokens: None,
-                history_len: Some(history.len()),
-                checkpoint: None,
-                checkpoint_events: Default::default(),
-                text_bytes: None,
-            },
-            history_len: history.len(),
-            revision: 1,
-            degraded_warnings: Vec::new(),
-        };
-        let mut live = LiveSession::from_store(
-            header,
-            SessionStoreAddress::new(dir.path().to_path_buf(), SESSION_ID.into(), lineage_id),
-            130,
-        );
+        let address = seed_store(dir.path(), SESSION_ID, Some("normal"), history.clone());
+        let mut live = stored_live(address, history.len(), 130);
 
         let duplicate_context = protocol::HistoryAppend::set_context(
             HistoryItem::note(protocol::HistoryNote::context("old context")),

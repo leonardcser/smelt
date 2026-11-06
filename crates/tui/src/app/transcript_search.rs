@@ -70,7 +70,7 @@ pub(super) struct TranscriptSearchIndex {
 
 pub(super) struct TranscriptSearchStore {
     store_address: super::transcript::TranscriptStoreAddress,
-    reader: smelt_store::LineageSessionReader,
+    reader: smelt_store::SessionReader,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,10 +124,9 @@ fn transcript_search_worker_loop(
         }
         let candidates = match store
             .as_ref()
-            .map(|store| persistent_transcript_candidate_blocks(store, &request, &cancelled))
+            .map(|store| persistent_transcript_candidate_blocks(store, &request))
         {
             Some(Ok(candidates)) => candidates,
-            Some(Err(smelt_store::StoreError::Cancelled)) => continue,
             Some(Err(_)) | None => SqliteTranscriptCandidateBlocks::default(),
         };
         if cancelled() {
@@ -153,7 +152,6 @@ fn transcript_search_worker_loop(
 fn persistent_transcript_candidate_blocks(
     store: &TranscriptSearchStore,
     request: &TranscriptSearchWorkerRequest,
-    cancelled: &dyn Fn() -> bool,
 ) -> smelt_store::Result<SqliteTranscriptCandidateBlocks> {
     let store_direction = match request.direction {
         SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
@@ -165,7 +163,6 @@ fn persistent_transcript_candidate_blocks(
         request.origin_block_idx,
         store_direction,
         limit,
-        cancelled,
     )?;
     if request.origin_block_idx.is_some() && page.len() < limit {
         let wrapped = store.search_candidate_page(
@@ -173,7 +170,6 @@ fn persistent_transcript_candidate_blocks(
             None,
             store_direction,
             limit - page.len(),
-            cancelled,
         )?;
         for candidate in wrapped {
             if !page
@@ -195,13 +191,7 @@ fn persistent_transcript_candidate_blocks(
 
 impl TranscriptSearchStore {
     fn open(store_address: super::transcript::TranscriptStoreAddress) -> smelt_store::Result<Self> {
-        let reader = smelt_store::LineageSessionReader::try_open_existing(
-            &store_address.sessions_root,
-            &store_address.session_id,
-        )?
-        .ok_or_else(|| {
-            smelt_store::StoreError::Integrity("lineage session does not exist".into())
-        })?;
+        let reader = store_address.reader()?;
         Ok(Self {
             store_address,
             reader,
@@ -214,24 +204,13 @@ impl TranscriptSearchStore {
         origin_block_idx: Option<u64>,
         direction: smelt_store::TranscriptSearchDirection,
         limit: usize,
-        cancelled: &dyn Fn() -> bool,
     ) -> smelt_store::Result<Vec<smelt_store::TranscriptSearchCandidate>> {
         self.reader
-            .search_transcript_candidate_page_with_cancellation(
-                query,
-                origin_block_idx,
-                direction,
-                limit,
-                cancelled,
-            )
+            .search_transcript_candidate_page(query, origin_block_idx, direction, limit)
     }
 
     fn record_count(&self) -> smelt_store::Result<usize> {
-        usize::try_from(self.reader.snapshot()?.transcript_len).map_err(|_| {
-            smelt_store::StoreError::Integrity(
-                "lineage transcript length exceeds platform limits".into(),
-            )
-        })
+        Ok(self.reader.head()?.transcript_record_count.as_usize())
     }
 }
 
@@ -483,10 +462,6 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
     ) -> SqliteTranscriptCandidateBlocks {
-        smelt_perf::perf::record_value(
-            "search:transcript:projection_requested",
-            u64::from(self.conversation.request_search_projection()),
-        );
         let dirty_blocks = self.dirty_transcript_candidate_blocks(query);
         let needle = SearchPattern::parse(query).needle;
         let width = self.transcript_width() as u16;
@@ -507,17 +482,11 @@ impl TuiApp {
         let records_persisted = self.conversation.transcript_records_persisted();
         let sqlite_candidates = self.transcript_search_store().and_then(|db| {
             let mut page = db
-                .search_candidate_page(needle, origin_block, store_direction, limit, &|| false)
+                .search_candidate_page(needle, origin_block, store_direction, limit)
                 .ok()?;
             if origin_block.is_some() && page.len() < limit {
                 let wrapped = db
-                    .search_candidate_page(
-                        needle,
-                        None,
-                        store_direction,
-                        limit - page.len(),
-                        &|| false,
-                    )
+                    .search_candidate_page(needle, None, store_direction, limit - page.len())
                     .ok()?;
                 for candidate in wrapped {
                     if !page
@@ -1237,8 +1206,7 @@ mod tests {
                 session_id: "1".repeat(64),
             },
             store_address: crate::app::transcript::TranscriptStoreAddress::new(
-                store_address.path().to_path_buf(),
-                "1".repeat(64),
+                smelt_store::Store::new(store_address.path()),
                 "1".repeat(64),
             ),
             query: "needle".into(),

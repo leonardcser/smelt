@@ -226,29 +226,19 @@ database size.
 ## Direct suites
 
 ```bash
-# Sparse store indexes at 10K, 100K, and 1M records; must load zero payloads.
-SMELT_SPARSE_INDEX_BENCH_RUNS=1001 \
-cargo test --release -p smelt-store sparse_index_scaling_benchmark_suite \
-  -- --ignored --nocapture
-
 # Sparse watcher dispatch; must reuse one metadata and one hydration reader.
 cargo xtask bench-transcript-layout --suite sparse-watch
 
 # Sparse versus hydrated autonomous frames.
 cargo xtask bench-transcript-layout --suite sparse-idle
-
-# Session catalog queries at 1K and 100K rows.
-SMELT_CATALOG_BENCH_ROWS=100000 SMELT_CATALOG_BENCH_RUNS=101 \
-cargo test --release -p smelt-store catalog_query_benchmark_suite \
-  -- --ignored --nocapture
 ```
 
 ## Session storage resource acceptance
 
 Run before landing changes to fork capture, retained archives, or metadata
-persistence. These tests check root reuse, allocation bounds independent of
-archive bytes/record count, exact forked/source content, and title-save storage
-growth. They are resource contracts, not timing benchmarks. Their larger fixtures
+persistence. These tests check allocation bounds independent of archive bytes and
+record count, exact forked and source content, and title-save storage growth.
+They are resource contracts, not timing benchmarks. Their larger fixtures
 and process-wide allocation samples require isolated processes, so use nextest:
 
 ```bash
@@ -267,9 +257,8 @@ the standard suite. Do not add these acceptance runs to commit/push hooks.
   viewer frames, and stage/unstage interaction.
 - `cargo xtask bench-search`: incremental viewer search with distant/absent matches.
 - `cargo xtask bench-file-search --help`: fuzzy ranking over a generated path tree.
-- `cargo run --release -p xtask -- bench-lineage-search --help`: derived history
-  search latency, memory, verification work and storage over an isolated corpus.
-  This command builds its search projection; never point it at live sessions.
+- `cargo run --release -p xtask -- bench-session-search --help`: saved transcript
+  search latency and peak memory over a state directory, including a full-scan miss.
 - [Cross-agent memory/install](../benchmarks/memory/README.md): reproducible
   published comparisons with versioned data, not a product gate.
 

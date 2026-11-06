@@ -1152,13 +1152,9 @@ impl TuiApp {
             EngineEvent::TurnPreparationError {
                 turn_id: failed_turn,
                 session_id,
-                persistence,
                 message,
             } => {
-                if failed_turn != turn_id
-                    || session_id != self.conversation.session().id.as_str()
-                    || persistence.epoch != self.conversation.persistence_scope().epoch
-                {
+                if failed_turn != turn_id || session_id != self.conversation.session().id.as_str() {
                     SessionControl::Continue
                 } else {
                     return self.handle_engine_event(

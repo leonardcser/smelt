@@ -480,6 +480,7 @@ impl TranscriptPresentationState {
     }
 }
 
+/// Nodes `0..len` are unchanged since scene `revision`.
 #[derive(Clone, Copy, Debug)]
 struct TranscriptScenePrefix {
     len: usize,
@@ -520,7 +521,7 @@ pub(crate) struct TranscriptScene {
     node_index: RenderNodeIndex,
     grouped_block_index_by_id: HashMap<BlockId, usize>,
     pub(crate) revision: u64,
-    append_prefix: Option<TranscriptScenePrefix>,
+    stable_prefix: Option<TranscriptScenePrefix>,
 }
 
 impl TranscriptScene {
@@ -537,7 +538,7 @@ impl TranscriptScene {
             node_index: RenderNodeIndex::default(),
             grouped_block_index_by_id: HashMap::new(),
             revision: 0,
-            append_prefix: None,
+            stable_prefix: None,
         }
     }
 
@@ -683,7 +684,7 @@ impl TranscriptScene {
         self.history_record_generation = history.record_dirty_generation();
         self.history_patch_revision = history.patch_revision();
         if scene_changed {
-            self.append_prefix = None;
+            self.stable_prefix = None;
             self.revision = self.revision.wrapping_add(1);
         }
         Some(content)
@@ -726,7 +727,7 @@ impl TranscriptScene {
             node_index,
             grouped_block_index_by_id,
             revision: 1,
-            append_prefix: None,
+            stable_prefix: None,
         }
     }
 
@@ -747,25 +748,16 @@ impl TranscriptScene {
             return None;
         }
         let old_order_len = self.history_order_len;
-        if old_order_len > history.order.len()
-            || history.record_changed_from_since(self.history_record_generation)? < old_order_len
-        {
+        if old_order_len > history.order.len() {
             return None;
         }
-        let rebuild_from_block = if groups.is_empty() {
-            old_order_len
-        } else {
-            group_append_recompute_start(history, groups, old_order_len)
-        };
-        let truncate_from_node = if rebuild_from_block == old_order_len {
-            self.nodes.len()
-        } else {
-            let id = history.order.get(rebuild_from_block).copied()?;
-            self.index_for_block(id)?
-        };
+        let changed_from = history
+            .record_changed_from_since(self.history_record_generation)?
+            .min(old_order_len);
+        let (rebuild_from_block, truncate_from_node) =
+            self.rebuild_start(history, groups, changed_from, old_order_len)?;
         let old_revision = self.revision;
         let old_node_len = self.nodes.len();
-        let pure_append = truncate_from_node == old_node_len && rebuild_from_block == old_order_len;
         let prune_required = truncate_from_node < old_node_len;
         self.truncate_from(truncate_from_node);
         {
@@ -781,11 +773,46 @@ impl TranscriptScene {
         self.group_generation = group_generation;
         self.group_cache_key = group_cache_key;
         self.revision = self.revision.wrapping_add(1);
-        self.append_prefix = pure_append.then_some(TranscriptScenePrefix {
-            len: old_node_len,
+        self.stable_prefix = Some(TranscriptScenePrefix {
+            len: truncate_from_node,
             revision: old_revision,
         });
         Some(prune_required)
+    }
+
+    /// The first block to rebuild and the first node to drop when blocks from
+    /// `changed_from` on may differ. Restarts at the beginning of any existing
+    /// node or group run that reaches into the changed suffix.
+    fn rebuild_start(
+        &self,
+        history: &BlockHistory,
+        groups: &[TranscriptGroupSpec],
+        changed_from: usize,
+        old_order_len: usize,
+    ) -> Option<(usize, usize)> {
+        let mut start = changed_from;
+        loop {
+            if !groups.is_empty() {
+                start = group_append_recompute_start(history, groups, start);
+            }
+            if start >= old_order_len {
+                return Some((old_order_len, self.nodes.len()));
+            }
+            let node = self.index_for_block(*history.order.get(start)?)?;
+            let first = match self.nodes.get(node)? {
+                RenderNode::Block { .. } => start,
+                RenderNode::Group(group) => {
+                    let first_id = group.children.first()?.id;
+                    history.order[..=start]
+                        .iter()
+                        .rposition(|id| *id == first_id)?
+                }
+            };
+            if first == start {
+                return Some((start, node));
+            }
+            start = first;
+        }
     }
 
     fn push_node(&mut self, node: RenderNode) {
@@ -810,8 +837,9 @@ impl TranscriptScene {
         self.nodes.len()
     }
 
-    pub(crate) fn append_prefix(&self) -> Option<(usize, u64)> {
-        self.append_prefix
+    /// The node count and revision of the prefix the last refresh kept.
+    pub(crate) fn stable_prefix(&self) -> Option<(usize, u64)> {
+        self.stable_prefix
             .map(|prefix| (prefix.len, prefix.revision))
     }
 
@@ -1850,6 +1878,87 @@ mod tests {
         assert!(
             matches!(plan.nodes.as_slice(), [RenderNode::Group(group)] if group.child_range == (0..3))
         );
+    }
+
+    fn assistant_blocks_spec() -> TranscriptGroupSpec {
+        TranscriptGroupSpec {
+            name: "assistant-blocks".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 0,
+            min: 2,
+            default_view: None,
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("assistant".into()),
+                name: None,
+                names: Vec::new(),
+                terminal: None,
+                fields: Vec::new(),
+            },
+            bucket: None,
+        }
+    }
+
+    fn user_block(text: &str) -> Block {
+        Block::User {
+            text: text.into(),
+            image_labels: Vec::new(),
+            command: false,
+            sent_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn suffix_change_with_append_keeps_the_unchanged_prefix() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        for index in 0..4 {
+            transcript.push(user_block(&format!("prompt {index}")));
+        }
+        let last = *transcript.history.order.last().unwrap();
+        let mut scene = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        let revision = scene.revision;
+
+        transcript.history.rewrite(last, user_block("committed"));
+        transcript.push(user_block("next"));
+        let refresh = scene.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+
+        assert!(refresh.structure_changed);
+        assert_eq!(scene.stable_prefix(), Some((3, revision)));
+        let full = TranscriptScene::for_history_with_groups(&transcript.history, &[], 0, None);
+        assert_eq!(scene.nodes, full.nodes);
+    }
+
+    #[test]
+    fn suffix_change_that_splits_a_group_rebuilds_from_the_group_start() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(user_block("prompt"));
+        transcript.push(Block::Text {
+            content: "first".into(),
+        });
+        transcript.push(Block::Text {
+            content: "second".into(),
+        });
+        let second = *transcript.history.order.last().unwrap();
+        let spec = assistant_blocks_spec();
+        let groups = std::slice::from_ref(&spec);
+        let mut scene =
+            TranscriptScene::for_history_with_groups(&transcript.history, groups, 1, None);
+        assert!(matches!(
+            scene.nodes.as_slice(),
+            [RenderNode::Block { .. }, RenderNode::Group(_)]
+        ));
+        let revision = scene.revision;
+
+        transcript.history.rewrite(second, user_block("split"));
+        transcript.push(Block::Text {
+            content: "third".into(),
+        });
+        scene.refresh_for_history_with_groups(&transcript.history, groups, 1, None);
+
+        assert_eq!(scene.stable_prefix(), Some((1, revision)));
+        let full = TranscriptScene::for_history_with_groups(&transcript.history, groups, 1, None);
+        assert_eq!(scene.nodes, full.nodes);
+        assert_eq!(scene.len(), 4);
     }
 
     #[test]

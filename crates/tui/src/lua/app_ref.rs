@@ -768,7 +768,6 @@ impl AgentLuaHost<'_> {
             reasoning_effort: protocol::ReasoningEffort::Off,
             fast_mode: false,
             session_id: self.app.conversation.session().id.clone(),
-            persistence: self.app.conversation.persistence_scope(),
         };
         self.dispatch_ask(context, request)
     }
@@ -789,7 +788,6 @@ impl AgentLuaHost<'_> {
             reasoning_effort: self.app.core.config.reasoning_effort.clone(),
             fast_mode: self.app.fast_mode(),
             session_id: self.app.conversation.session().id.clone(),
-            persistence: self.app.conversation.persistence_scope(),
         };
         self.dispatch_ask(context, request)
     }
@@ -1293,7 +1291,10 @@ impl UiLuaHost<'_> {
 
         let known = self.app.paint_registry.contains(paint);
         if known {
-            let urgency = after.map_or(FrameUrgency::Urgent, FrameUrgency::Animation);
+            let now = self.app.core.clock.instant_now();
+            let urgency = after.map_or(FrameUrgency::Urgent, |after| {
+                FrameUrgency::Animation(now + after)
+            });
             // Frame paints draw over the composed screen, so they only
             // present again. A leaf paints while the screen composes.
             if self.app.paint_registry.leaf(paint).is_some() {
@@ -1526,7 +1527,7 @@ impl SessionLuaHost<'_> {
     }
 
     pub(crate) fn context_breakdown(&self) -> serde_json::Value {
-        let app = &self.app;
+        let app = &*self.app;
         let model = app.core.config.active_model();
         let native =
             model.is_some_and(|m| smelt_provider::BackendKind::is_claude_code(&m.provider_type));
@@ -1899,25 +1900,23 @@ impl SessionLuaHost<'_> {
 
     pub(crate) fn list_session_entries(
         &self,
-    ) -> smelt_core::session::SessionStoreResult<Vec<smelt_core::session::SessionListEntry>> {
-        self.app
-            .conversation
-            .sessions()
-            .list_session_entries_result()
+    ) -> smelt_core::session::SessionStoreResult<Vec<smelt_core::session::SessionListMeta>> {
+        self.app.conversation.sessions().list_all_sessions()
     }
 
     pub(crate) fn list_session_page(
         &self,
         query: smelt_core::session::SessionListQuery,
     ) -> smelt_core::session::SessionStoreResult<smelt_core::session::SessionListPage> {
-        self.app
-            .conversation
-            .sessions()
-            .list_session_page_result(query)
+        self.app.conversation.sessions().list_page(query)
     }
 
     pub(crate) fn session_conversation_text(&self, id: &str) -> Option<String> {
-        self.app.conversation.sessions().load_conversation_text(id)
+        self.app
+            .conversation
+            .sessions()
+            .load_conversation_text(id)
+            .ok()
     }
 
     pub(crate) fn session_storage(&self) -> smelt_core::session::SessionStorage {
@@ -1933,13 +1932,6 @@ impl SessionLuaHost<'_> {
             .map_err(|error| error.to_string())?;
         if target.as_str() == self.app.conversation.session().id {
             return Err("cannot delete the active session".to_owned());
-        }
-        if self
-            .app
-            .conversation
-            .delete_branch_through_persistence(&target)?
-        {
-            return Ok(());
         }
         self.app
             .conversation

@@ -1,179 +1,157 @@
+//! Session storage: one SQLite database holding every session as flat rows.
+//!
+//! History, transcript records and side tables are sequences keyed by session and
+//! position. A save replaces the changed suffix of each sequence in one transaction,
+//! so its cost follows the new content, not the session size. Readers query rows
+//! by position or by indexed columns and never decode more than they return.
+
 mod catalog;
-mod compression;
-mod diagnostics;
+mod db;
 mod error;
-mod filesystem;
+mod export;
 mod history;
-mod jsonl_export;
-mod lineage;
-mod lineage_access;
-mod lineage_search;
-mod meta;
-mod object;
-mod request_audit;
-mod schema;
-mod session_command;
-mod session_commit;
-mod session_compact;
-mod session_writer;
-mod snapshot;
-mod sql;
-mod write_transaction;
+mod lock;
+mod reader;
+mod requests;
+mod transcript;
+mod types;
+mod writer;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionStoreLayout {
-    sessions_root: std::path::PathBuf,
-}
+use std::path::{Path, PathBuf};
 
-impl SessionStoreLayout {
-    pub fn from_sessions_root(sessions_root: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            sessions_root: sessions_root.into(),
-        }
-    }
-
-    pub fn from_state_root(state_root: impl AsRef<std::path::Path>) -> Self {
-        Self::from_sessions_root(state_root.as_ref().join("sessions"))
-    }
-
-    pub fn sessions_root(&self) -> &std::path::Path {
-        &self.sessions_root
-    }
-
-    pub fn catalog_path(&self) -> std::path::PathBuf {
-        self.sessions_root.join("catalog.db")
-    }
-
-    pub fn catalog_pending_dir(&self) -> std::path::PathBuf {
-        self.sessions_root.join(".catalog-pending")
-    }
-
-    pub fn catalog_pending_path(&self, session_id: &str) -> std::path::PathBuf {
-        self.catalog_pending_dir().join(session_id)
-    }
-
-    pub fn locks_dir(&self) -> std::path::PathBuf {
-        self.sessions_root.join(".locks")
-    }
-
-    pub fn journals_dir(&self) -> std::path::PathBuf {
-        self.sessions_root.join(".journals")
-    }
-
-    pub fn session_journal_path(&self, session_id: &str) -> std::path::PathBuf {
-        self.journals_dir().join(format!("{session_id}.jsonl"))
-    }
-
-    pub fn lineage_lock_path(&self, lineage_id: &str) -> std::path::PathBuf {
-        self.locks_dir().join(format!("{lineage_id}.lock"))
-    }
-
-    pub fn catalog_marker_lock_path(&self, session_id: &str) -> std::path::PathBuf {
-        self.locks_dir()
-            .join(format!("{session_id}.catalog-marker.lock"))
-    }
-
-    pub fn trash_dir(&self) -> std::path::PathBuf {
-        self.sessions_root.join(".trash")
-    }
-
-    pub fn artifacts_dir(&self) -> std::path::PathBuf {
-        self.sessions_root.join(".artifacts")
-    }
-
-    pub fn session_artifact_dir(&self, session_id: &str) -> std::path::PathBuf {
-        self.artifacts_dir().join(session_id)
-    }
-
-    pub fn lineage_dir(&self, lineage_id: &str) -> std::path::PathBuf {
-        self.sessions_root.join(lineage_id)
-    }
-
-    pub fn lineage_database_path(&self, lineage_id: &str) -> std::path::PathBuf {
-        self.lineage_dir(lineage_id).join("lineage.db")
-    }
-
-    pub fn lineage_search_path(&self, lineage_id: &str) -> std::path::PathBuf {
-        self.lineage_dir(lineage_id).join("search.db")
-    }
-
-    pub fn staging_lineage_dir(&self, lineage_id: &str) -> std::path::PathBuf {
-        self.sessions_root.join(format!(".staging-{lineage_id}"))
-    }
-
-    pub fn staging_lineage_database_path(&self, lineage_id: &str) -> std::path::PathBuf {
-        self.staging_lineage_dir(lineage_id).join("lineage.db")
-    }
-}
-
-pub use catalog::{
-    catalog_session_pending_token, clear_catalog_session_pending, pending_catalog_session_ids,
-    Catalog, CatalogAvailability, CatalogCursor, CatalogMarkerLock, CatalogMetadata, CatalogPage,
-    CatalogQuery, CatalogReader, CatalogReconciliation, CatalogSession, CATALOG_SCHEMA_VERSION,
-    MAX_CATALOG_PAGE_SIZE,
-};
-pub use compression::{
-    ObjectCompression, DEFAULT_ZSTD_LEVEL, DEFAULT_ZSTD_MIN_BYTES, DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
-};
-pub use diagnostics::{DoctorReport, StorageStats};
+pub use catalog::{CatalogCursor, CatalogPage, CatalogQuery, CatalogSession};
+pub use db::{create_private_dir_all, SCHEMA_VERSION};
 pub use error::{Result, StoreError};
-pub use history::{
-    transcript_text_extent_profile, StoredTranscriptBlock, TranscriptBlockLookup,
-    TranscriptBlockMetadataRecord, TranscriptExtentProfile, TranscriptNavigationRecord,
-    TranscriptRecordHydration, TranscriptRecordOffset, TranscriptRecordProfile,
-    TranscriptRecordRange, TranscriptRecordSlice, TranscriptSearchCandidate,
-    TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
-};
-pub use lineage_access::{
-    cleanup_abandoned_lineages, lineage_session_ids, lineage_session_locations,
-    maintain_idle_lineages, verify_lineage_backup, IdleMaintenance, LineageReclamation,
-    LineageSessionLocation, LineageSessionReader, LineageSessionState, LineageVacuum,
-    OwnedLineageWriter, RECLAMATION_STEP_ROWS,
-};
-pub use lineage_search::{
-    LineageSearchProjector, SearchProjectionState, SearchProjectionStatus, SEARCH_FORMAT_VERSION,
-};
-pub use meta::{SessionCostUsd, SessionIdentity, SessionMetadata};
-pub use object::{ObjectCodec, ObjectMeta, StoredObject, MAX_OBJECT_RAW_SIZE};
-pub use request_audit::{
+pub use history::is_user_turn;
+pub use reader::{SessionReader, StorageStats};
+pub use requests::{
     RequestAuditOrder, RequestAuditPayloadMode, RequestAuditPayloads, RequestAuditQuery,
     RequestAuditStats, RequestAuditSummary, ResponsePayloadKind,
 };
-pub use schema::LINEAGE_SCHEMA_VERSION;
-pub use session_command::{
-    session_commit_fingerprint, submit_turn_fingerprint, turn_transition_fingerprint,
+pub use transcript::{
+    transcript_role, transcript_text_extent_profile, StoredTranscriptBlock, TranscriptBlockLookup,
+    TranscriptExtentProfile, TranscriptNavigationRecord, TranscriptRecordOffset,
+    TranscriptRecordProfile, TranscriptRecordRange, TranscriptRecordSlice,
+    TranscriptSearchCandidate, TranscriptSearchDirection, TRANSCRIPT_EXTENT_PROFILE_WIDTHS,
 };
-pub use session_commit::{
-    HistoryIndex, HistoryIndexBound, HistoryLen, HistorySuffix, NewTurn, Revision, SaveReceipt,
-    SessionCommit, SessionCommitFailure, SessionCommitResult, SessionForkResult, SideTableSuffixes,
-    StartupRecoveryReceipt, StartupRecoveryResult, StoreHead, StoredTurn, SubmitTurn,
-    SubmitTurnReceipt, TranscriptRecordCount, TranscriptRecordIndex, TranscriptRecordSuffix,
-    TurnId, TurnKind, TurnState, TurnTransition, TurnTransitionReceipt,
+pub use types::{
+    HistoryLen, HistorySuffix, SessionCommit, SessionIdentity, SessionMetadata, SessionState,
+    SideRows, StoreHead, TranscriptRecordCount, TranscriptRecordSuffix,
 };
-pub use session_compact::{
-    compact_session_commit_fingerprint, compact_submit_turn_fingerprint,
-    compact_turn_transition_fingerprint, ArchiveEdit, ArchiveRow, CheckpointEdit,
-    CheckpointEventsEdit, CheckpointRecord, CheckpointSummary, CompactSessionArchives,
-    CompactSessionCommit, CompactSubmitTurn, CompactSubmitTurnResult, CompactTurnTransition,
-    CompactTurnTransitionResult, MetadataArchiveRow, MetadataMessage, SessionAccounting,
-    SessionArchiveBase, SessionContextIdentity, SessionScalars, SessionTokenUsage, ValueEdit,
-};
-pub use session_writer::{
-    SessionBatchBarrier, SessionEventBatch, SessionEventCommand, SessionEventReceipt,
-    SessionJournalRecovery, SessionWriter,
-};
-pub use snapshot::{FullSession, SessionResumeSnapshot, StoredSession};
+pub use writer::SessionWriter;
 
-/// Dies abruptly without destructors. SIGKILL skips the host crash reporter
-/// that `abort` triggers, which can stall each exit for about a second.
-#[cfg(all(test, unix))]
-pub(crate) fn crash_process() -> ! {
-    unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
-    unreachable!("SIGKILL is delivered before kill returns")
+/// Where session data lives under the state directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Store {
+    root: PathBuf,
 }
 
-/// Dies abruptly without destructors.
-#[cfg(all(test, not(unix)))]
-pub(crate) fn crash_process() -> ! {
-    std::process::abort()
+impl Store {
+    pub fn new(sessions_root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: sessions_root.into(),
+        }
+    }
+
+    pub fn from_state_root(state_root: impl AsRef<Path>) -> Self {
+        Self::new(state_root.as_ref().join("sessions"))
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn database_path(&self) -> PathBuf {
+        self.root.join("sessions.db")
+    }
+
+    pub fn locks_dir(&self) -> PathBuf {
+        self.root.join("locks")
+    }
+
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.root.join("artifacts")
+    }
+
+    pub fn session_artifact_dir(&self, session_id: &str) -> PathBuf {
+        self.artifacts_dir().join(session_id)
+    }
+
+    pub(crate) fn connect(&self) -> Result<rusqlite::Connection> {
+        db::open(&self.database_path())
+    }
+
+    /// Opens a session for reading. Fails with [`StoreError::NotFound`] if it was never saved.
+    pub fn reader(&self, session_id: &str) -> Result<SessionReader> {
+        SessionReader::open(self, session_id)
+    }
+
+    /// Takes ownership of a session for writing. Its first commit creates it.
+    pub fn writer(&self, session_id: &str) -> Result<SessionWriter> {
+        SessionWriter::open(self, session_id)
+    }
+
+    pub fn exists(&self, session_id: &str) -> Result<bool> {
+        Ok(db::session_key(&self.connect()?, session_id)?.is_some())
+    }
+
+    pub fn list(&self, query: &CatalogQuery) -> Result<CatalogPage> {
+        catalog::list(&self.connect()?, query)
+    }
+
+    pub fn session(&self, session_id: &str) -> Result<Option<CatalogSession>> {
+        catalog::session(&self.connect()?, session_id)
+    }
+
+    pub fn ids_with_prefix(&self, prefix: &str, limit: u32) -> Result<Vec<String>> {
+        catalog::ids_with_prefix(&self.connect()?, prefix, limit)
+    }
+
+    /// Copies a saved session into a new one that names it as parent.
+    pub fn fork(&self, source_id: &str, target_id: &str, created_at: i64) -> Result<StoreHead> {
+        let _target = lock::SessionLock::acquire(self, target_id)?;
+        writer::fork(&mut self.connect()?, source_id, target_id, created_at)
+    }
+
+    /// SQLite's own consistency check of the whole database.
+    pub fn integrity_issues(&self) -> Result<Vec<String>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare("PRAGMA quick_check")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let issues = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(issues.into_iter().filter(|issue| issue != "ok").collect())
+    }
+
+    /// Writes a consistent, compacted copy of the whole store to a new private file.
+    pub fn backup_to(&self, output: &Path) -> Result<()> {
+        let target = output.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("backup path is not UTF-8: {}", output.display()),
+            )
+        })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        drop(options.open(output)?);
+        let result = self
+            .connect()
+            .and_then(|conn| Ok(conn.execute("VACUUM INTO ?1", [target])?));
+        if result.is_err() {
+            let _ = std::fs::remove_file(output);
+        }
+        result.map(drop)
+    }
+
+    /// Deletes a session nobody has open.
+    pub fn delete(&self, session_id: &str) -> Result<()> {
+        let _lock = lock::SessionLock::acquire(self, session_id)?;
+        writer::delete(&self.connect()?, session_id)?;
+        let _ = std::fs::remove_dir_all(self.session_artifact_dir(session_id));
+        Ok(())
+    }
 }

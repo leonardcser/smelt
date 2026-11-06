@@ -46,7 +46,7 @@ impl Archive {
                 };
                 let result = (|| -> Result<(), String> {
                     storage
-                        .save_result(&snapshot.session)
+                        .save(&snapshot.session)
                         .map_err(|error| error.to_string())?;
                     let path = storage
                         .artifact_dir_for_id(&snapshot.saved.session_id)
@@ -129,62 +129,34 @@ pub(super) fn load(
     storage: &SessionStorage,
     parent_id: &str,
 ) -> Result<Vec<(SavedAgent, Session)>, String> {
-    if !storage.wait_for_session_catalog(std::time::Duration::from_secs(10)) {
-        return Err("agent session catalog readiness timed out".into());
-    }
-    let mut cursor = None;
     let mut restored = Vec::new();
-    loop {
-        let page = storage
-            .list_session_page_result(crate::session::SessionListQuery {
-                limit: 512,
-                cursor,
-                ..Default::default()
-            })
+    for meta in storage
+        .children(parent_id)
+        .map_err(|error| error.to_string())?
+    {
+        let path = storage
+            .artifact_dir_for_id(&meta.id)
+            .join("agent-view.json");
+        let bytes = match storage.read_private_file(&path, 1024 * 1024) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut saved: SavedAgent =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if saved.parent_session_id != parent_id || saved.session_id != meta.id {
+            return Err("agent observation identity mismatch".into());
+        }
+        saved.info.capabilities = Default::default();
+        if !saved.info.status.is_terminal() {
+            saved.info.status = protocol::AgentStatus::Cancelled;
+            saved.info.error =
+                Some("Agent execution was interrupted before its outcome was recorded".into());
+        }
+        let session = storage
+            .load_full(&meta.id)
             .map_err(|error| error.to_string())?;
-        if let Some(error) = page.catalog.last_error {
-            return Err(error);
-        }
-        if page.catalog.state != crate::session::SessionCatalogState::Ready {
-            return Err("agent session catalog is not ready; retry restoration".into());
-        }
-        for entry in page.entries {
-            let crate::session::SessionListStatus::Available(meta) = entry.status else {
-                continue;
-            };
-            if meta.parent_id.as_deref() != Some(parent_id) {
-                continue;
-            }
-            let path = storage
-                .artifact_dir_for_id(&meta.id)
-                .join("agent-view.json");
-            let bytes = match storage.read_private_file(&path, 1024 * 1024) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.to_string()),
-            };
-            let mut saved: SavedAgent =
-                serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-            if saved.parent_session_id != parent_id || saved.session_id != meta.id {
-                return Err("agent observation identity mismatch".into());
-            }
-            saved.info.capabilities = Default::default();
-            if !saved.info.status.is_terminal() {
-                saved.info.status = protocol::AgentStatus::Cancelled;
-                saved.info.error =
-                    Some("Agent execution was interrupted before its outcome was recorded".into());
-            }
-            if let Some(session) = storage
-                .load_full_result(&meta.id)
-                .map_err(|error| error.to_string())?
-            {
-                restored.push((saved, session));
-            }
-        }
-        cursor = page.next_cursor;
-        if cursor.is_none() {
-            break;
-        }
+        restored.push((saved, session));
     }
     Ok(restored)
 }

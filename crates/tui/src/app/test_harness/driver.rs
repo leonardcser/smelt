@@ -439,17 +439,16 @@ impl TestApp {
         }
     }
 
-    /// Drain queued `UiCommand`s from the engine channel and return them.
-    /// Useful for host-hook tests that need to inspect background
-    /// `EngineAsk` requests directly without going through `feed_one`.
+    /// Takes every `UiCommand` sent to the engine since the last drain, whether
+    /// still buffered on the channel or already moved into the action log.
     pub fn drain_engine_sends(&mut self) -> Vec<UiCommand> {
-        self.wait_for_writer_startup();
-        let Some(cmd_rx) = self.cmd_rx.as_mut() else {
-            return Vec::new();
-        };
+        self.drain_cmd();
         let mut out = Vec::new();
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            out.push(cmd);
+        for action in std::mem::take(&mut self.actions) {
+            match action {
+                Action::EngineSend(cmd) => out.push(*cmd),
+                action => self.actions.push(action),
+            }
         }
         out
     }

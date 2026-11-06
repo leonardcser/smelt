@@ -14,11 +14,9 @@ pub fn directory(sessions_root: &Path, session_id: &str) -> Result<PathBuf, Stri
     {
         return Err("Invalid session ID for Claude Code plan artifacts".into());
     }
-    Ok(
-        smelt_store::SessionStoreLayout::from_sessions_root(sessions_root)
-            .session_artifact_dir(session_id)
-            .join("claude-code-plans"),
-    )
+    Ok(smelt_store::Store::new(sessions_root)
+        .session_artifact_dir(session_id)
+        .join("claude-code-plans"))
 }
 
 pub(super) struct Plans {

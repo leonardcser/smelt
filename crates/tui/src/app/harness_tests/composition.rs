@@ -493,3 +493,87 @@ fn gallery_api_consumers() {
         app.assert_invariants();
     }
 }
+
+#[test]
+fn tool_turns_extend_the_row_index_without_rebuilding_it() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(120, 40);
+    smelt_perf::perf::set_enabled(true);
+    for turn in 1..=4u64 {
+        smelt_perf::perf::clear();
+        app.push_user_block(&format!("turn {turn} prompt"));
+        app.start_turn(turn);
+        for step in 0..3 {
+            app.engine_event(protocol::EngineEvent::TextDelta {
+                delta: "checking the fixture ".into(),
+            });
+            app.render_silent();
+            let call = format!("call-{turn}-{step}");
+            let id = app.tool_started(
+                call.clone(),
+                "bash",
+                std::collections::HashMap::from([("command".into(), serde_json::json!("cat"))]),
+            );
+            app.render_silent();
+            app.tool_finished(
+                id,
+                call,
+                protocol::ToolOutcome::new("fixture output\n".repeat(8), false, None),
+                Some(10),
+            );
+            app.render_silent();
+        }
+        app.engine_event(protocol::EngineEvent::TextDelta {
+            delta: "done".into(),
+        });
+        app.finish_turn();
+        app.render_silent();
+        let rebuilds = smelt_perf::perf::snapshot()
+            .durations
+            .iter()
+            .find(|row| row.label == "transcript:prepare_row_index:rebuild_index")
+            .map_or(0, |row| row.count);
+        if turn > 1 {
+            assert_eq!(rebuilds, 0, "turn {turn} rebuilt the whole row index");
+        }
+    }
+    smelt_perf::perf::set_enabled(false);
+}
+
+#[test]
+fn transcript_cache_budgets_follow_the_viewport_until_pinned() {
+    let budgets = |app: &TestApp| {
+        let memory = app
+            .app
+            .conversation
+            .transcript_memory_snapshot_for_harness();
+        (
+            memory.hydrated_budget_bytes,
+            memory.record_budget_bytes,
+            memory.rendered_budget_bytes,
+        )
+    };
+    let mut app = TestApp::builder().build();
+    app.push_user_block("prompt");
+    app.set_terminal_size(80, 24);
+    app.render_silent();
+    let small = budgets(&app);
+    app.set_terminal_size(240, 80);
+    app.render_silent();
+    let large = budgets(&app);
+    assert!(large.0 > small.0 && large.1 > small.1 && large.2 > small.2);
+    let default = crate::app::transcript::TranscriptMemoryBudget::default();
+    assert!(large.0 < default.hydrated_blocks, "{large:?}");
+
+    let pinned = crate::app::transcript::TranscriptMemoryBudget {
+        hydrated_blocks: 3 << 20,
+        record_windows: 2 << 20,
+        rendered_rows: 5 << 20,
+    };
+    app.app
+        .conversation
+        .set_transcript_memory_budget_for_harness(pinned);
+    app.set_terminal_size(100, 30);
+    app.render_silent();
+    assert_eq!(budgets(&app), (3 << 20, 2 << 20, 5 << 20));
+}

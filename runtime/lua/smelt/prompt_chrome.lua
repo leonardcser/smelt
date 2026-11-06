@@ -172,7 +172,7 @@ local SWEEP_MS = 2200
 local SWEEP_STEP_MS = 110
 local FLARE_COOL_MS = 650
 local PAUSED_LEVEL = 0.4
-local FRAME_MS = 22
+local FRAME_MS = 44
 
 local function mix(a, b, t)
   t = math.max(0, math.min(t, 1))

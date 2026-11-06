@@ -1871,8 +1871,9 @@ impl StoredBlockKind {
 pub struct StoredBlockRef {
     pub record_index: usize,
     pub kind: StoredBlockKind,
-    pub preview: String,
     pub estimated_text_bytes: u64,
+    /// First non-empty line of the block's indexed text, shown by turn navigation.
+    first_line: Box<str>,
     /// Row estimate profile, identical to what the store aggregates.
     pub extent: smelt_store::TranscriptExtentProfile,
     pub content_hash: u64,
@@ -1909,6 +1910,11 @@ impl StoredBlockRef {
             indexed_text,
             estimated_text_bytes,
         );
+        let first_line: Box<str> = preview
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+            .into();
         let tool_state = record.tool_state.as_ref();
         let kind = StoredBlockKind::from_kind(block.kind())
             .expect("transcript blocks use a known block kind");
@@ -1948,7 +1954,7 @@ impl StoredBlockRef {
             _ => false,
         };
         let retained_bytes = std::mem::size_of::<Self>()
-            .saturating_add(preview.capacity())
+            .saturating_add(first_line.len())
             .saturating_add(tool_call_id.as_ref().map_or(0, String::capacity))
             .saturating_add(tool_name.as_ref().map_or(0, String::capacity))
             .saturating_add(group_summary_text.as_ref().map_or(0, String::capacity))
@@ -1979,8 +1985,8 @@ impl StoredBlockRef {
             Arc::new(Self {
                 record_index,
                 kind,
-                preview,
                 estimated_text_bytes,
+                first_line,
                 extent,
                 content_hash: if record.content_hash == 0 {
                     block.content_hash()
@@ -2022,10 +2028,7 @@ impl StoredBlockRef {
     }
 
     pub fn first_line(&self) -> &str {
-        self.preview
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("")
+        &self.first_line
     }
 
     fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
@@ -2440,7 +2443,7 @@ impl BlockEntry {
             let Self::Stored(stored) = self else {
                 return None;
             };
-            (!stored.preview.is_empty()).then_some(BlockText::Plain(stored.preview.as_str()))
+            (!stored.first_line.is_empty()).then_some(BlockText::Plain(&stored.first_line))
         })
     }
 
@@ -2530,6 +2533,8 @@ pub struct BlockHistory {
     persisted_block_count: usize,
     /// Hydrated entries and their retained memory, maintained across entry transitions.
     hydrated_ids: HashSet<BlockId>,
+    /// Bumped whenever `hydrated_ids` gains or loses a block.
+    hydrated_revision: u64,
     hydrated_block_bytes: usize,
     hydrated_tool_state_bytes: usize,
     /// Earliest transcript order index whose persisted block may be stale.
@@ -2564,6 +2569,7 @@ impl BlockHistory {
             navigation_generation: 0,
             persisted_block_count: 0,
             hydrated_ids: HashSet::new(),
+            hydrated_revision: 0,
             hydrated_block_bytes: 0,
             hydrated_tool_state_bytes: 0,
             record_dirty_from: None,
@@ -2744,7 +2750,7 @@ impl BlockHistory {
     }
 
     fn recount_hydrated_entries(&mut self) {
-        self.hydrated_ids.clear();
+        self.clear_hydrated_ids();
         self.hydrated_block_bytes = 0;
         self.hydrated_tool_state_bytes = 0;
         for id in &self.order {
@@ -2809,15 +2815,31 @@ impl BlockHistory {
                 .saturating_sub(previous.hydrated_tool_state_weight());
         }
         if hydrated {
-            self.hydrated_ids.insert(id);
+            self.mark_hydrated(id, true);
             self.hydrated_block_bytes = self.hydrated_block_bytes.saturating_add(block_bytes);
             self.hydrated_tool_state_bytes = self
                 .hydrated_tool_state_bytes
                 .saturating_add(tool_state_bytes);
         } else {
-            self.hydrated_ids.remove(&id);
+            self.mark_hydrated(id, false);
         }
         previous
+    }
+
+    fn mark_hydrated(&mut self, id: BlockId, hydrated: bool) {
+        let changed = if hydrated {
+            self.hydrated_ids.insert(id)
+        } else {
+            self.hydrated_ids.remove(&id)
+        };
+        if changed {
+            self.hydrated_revision = self.hydrated_revision.wrapping_add(1);
+        }
+    }
+
+    fn clear_hydrated_ids(&mut self) {
+        self.hydrated_ids.clear();
+        self.hydrated_revision = self.hydrated_revision.wrapping_add(1);
     }
 
     fn remove_entry(&mut self, id: BlockId) -> Option<BlockEntry> {
@@ -2830,7 +2852,7 @@ impl BlockHistory {
         if entry.is_persisted_block() {
             self.persisted_block_count = self.persisted_block_count.saturating_sub(1);
         }
-        self.hydrated_ids.remove(&id);
+        self.mark_hydrated(id, false);
         self.hydrated_block_bytes = self
             .hydrated_block_bytes
             .saturating_sub(entry.hydrated_block_weight());
@@ -3661,6 +3683,11 @@ impl BlockHistory {
         self.hydrated_ids.len()
     }
 
+    /// Changes whenever a block becomes hydrated or stops being hydrated.
+    pub fn hydrated_revision(&self) -> u64 {
+        self.hydrated_revision
+    }
+
     pub fn block_id_at(&self, i: usize) -> Option<BlockId> {
         let id = self.order.get(i).copied()?;
         assert!(
@@ -4427,7 +4454,7 @@ impl BlockHistory {
             self.entries.clear();
             self.content_store.clear();
             self.persisted_block_count = 0;
-            self.hydrated_ids.clear();
+            self.clear_hydrated_ids();
             self.hydrated_block_bytes = 0;
             self.hydrated_tool_state_bytes = 0;
             self.next_id = 0;
@@ -4441,7 +4468,7 @@ impl BlockHistory {
         self.entries.clear();
         self.content_store.clear();
         self.persisted_block_count = 0;
-        self.hydrated_ids.clear();
+        self.clear_hydrated_ids();
         self.hydrated_block_bytes = 0;
         self.hydrated_tool_state_bytes = 0;
         self.next_id = 0;

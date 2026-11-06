@@ -363,7 +363,8 @@ impl TranscriptHeightIndex {
         self.mark_prefix_dirty_from(0);
     }
 
-    /// Reuse an unchanged index or extend it for a structural append.
+    /// Reuse an unchanged index, or keep the scene's stable prefix and
+    /// rebuild only the nodes after it.
     fn try_reuse_or_extend(
         &mut self,
         history: &BlockHistory,
@@ -377,9 +378,6 @@ impl TranscriptHeightIndex {
         if self.renderer_generation != key.renderer_generation
             || self.renderer_cache_key != key.renderer_cache_key
         {
-            return false;
-        }
-        if old_len > plan.len() {
             return false;
         }
         if old_len == plan.len()
@@ -401,9 +399,10 @@ impl TranscriptHeightIndex {
             return true;
         }
         if self.width == key.width && self.presentation_generation == key.presentation_generation {
-            if let Some((prefix_len, prefix_revision)) = plan.append_prefix() {
-                if old_len == prefix_len && self.generation == prefix_revision {
-                    for index in old_len..plan.len() {
+            if let Some((prefix_len, prefix_revision)) = plan.stable_prefix() {
+                if old_len >= prefix_len && self.generation == prefix_revision {
+                    self.nodes.truncate(prefix_len);
+                    for index in prefix_len..plan.len() {
                         let Some(id) = plan.node_id(index) else {
                             return false;
                         };
@@ -425,7 +424,7 @@ impl TranscriptHeightIndex {
                     self.renderer_generation = key.renderer_generation;
                     self.renderer_cache_key = key.renderer_cache_key;
                     self.presentation_generation = key.presentation_generation;
-                    self.mark_prefix_dirty_from(old_len);
+                    self.mark_prefix_dirty_from(prefix_len);
                     return true;
                 }
             }
@@ -1776,6 +1775,38 @@ impl TranscriptProjection {
             self.counters.layout_cache += compiled;
         }
         let _ = compiled;
+    }
+
+    /// Recompiles a measured node whose layout the render cache evicted,
+    /// keeping its measured key so row coordinates stay valid. The node stays
+    /// pinned until the caller restores the returned pins after rendering it.
+    fn recompile_evicted_node(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &BlockHistory,
+        index: usize,
+    ) -> Option<HashSet<RenderNodeId>> {
+        let row = self.measurements.active.nodes.get(index)?;
+        let (id, key) = (row.id, row.key);
+        if self
+            .layout_cache
+            .has_layout(id, key, env.renderer_generation, env.renderer_cache_key)
+        {
+            return None;
+        }
+        let node = self.transcript_scene.node(index)?.clone();
+        let caller_pins = self.layout_cache.pinned_nodes();
+        self.layout_cache
+            .set_pinned_nodes(caller_pins.iter().copied().chain([id]));
+        let jobs = self.layout_cache.collect_compile_jobs(
+            history,
+            &self.default_view_policy,
+            env.renderer_generation,
+            env.renderer_cache_key,
+            [(index, node, key)],
+        );
+        self.finish_compile_jobs(env, jobs);
+        Some(caller_pins)
     }
 
     fn refresh_measurement_node_key(&mut self, history: &BlockHistory, index: usize) {
@@ -3650,10 +3681,11 @@ impl TranscriptProjection {
             };
 
             let block_indices = start..end;
-            let _ = self.exactify_node_indices(env, history, block_indices.clone());
+            let _ = self.exactify_node_indices(env.clone(), history, block_indices.clone());
             for block_index in block_indices {
                 let id = self.measurements.active.nodes[block_index].id;
                 let key = self.measurements.active.nodes[block_index].key;
+                let caller_pins = self.recompile_evicted_node(env.clone(), history, block_index);
                 self.append_projected_node(
                     history,
                     theme,
@@ -3663,6 +3695,9 @@ impl TranscriptProjection {
                     row_clip.as_ref(),
                     &mut rows,
                 );
+                if let Some(pins) = caller_pins {
+                    self.layout_cache.set_pinned_nodes(pins);
+                }
             }
             rows.finish_texts();
         }
@@ -8512,15 +8547,15 @@ pub(crate) mod tests {
         target_bytes: usize,
     ) -> (usize, usize, f64) {
         let setup_start = std::time::Instant::now();
-        let mut writer = smelt_store::OwnedLineageWriter::open(
-            sessions.sessions_dir(),
-            session.id.clone(),
-        )
-        .expect("open record resume fixture lineage");
-        let command = smelt_core::session::initial_store_commit_from_session(session)
+        let mut writer = sessions
+            .store()
+            .writer(&session.id)
+            .expect("open record resume fixture writer");
+        let identity = smelt_core::session::store_identity(session);
+        let commit = smelt_core::session::full_commit(session)
             .expect("prepare record resume fixture state");
-        writer
-            .commit_session(&command)
+        let mut head = writer
+            .commit(&identity, &commit)
             .expect("initialize record resume fixture state");
         let target_bytes = target_bytes.max(RESUME_RECORD_BLOCK_TEXT_BYTES);
         let mut generated_bytes = 0usize;
@@ -8533,29 +8568,19 @@ pub(crate) mod tests {
                 records.push(resume_block_record(record_count, content));
                 record_count += 1;
             }
-            let head = writer.store_head().expect("read record resume fixture head");
-            let mut command =
-                smelt_core::session::initial_store_commit_from_session(session)
-                    .expect("prepare record resume fixture append");
-            command.expected = head;
-            command.history.start = smelt_store::HistoryIndex::new(head.history_len.get());
-            command.history.final_len = head.history_len;
-            command.history.items.clear();
-            command.side_tables = smelt_store::SideTableSuffixes {
-                start: smelt_store::HistoryIndex::new(head.history_len.get()),
-                ..smelt_store::SideTableSuffixes::default()
+            let chunk = smelt_store::SessionCommit {
+                metadata: commit.metadata.clone(),
+                transcript: Some(smelt_store::TranscriptRecordSuffix {
+                    start: head.transcript_record_count.get(),
+                    records,
+                }),
+                ..Default::default()
             };
-            command.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-                start: smelt_store::TranscriptRecordIndex::new(
-                    head.transcript_record_count.get(),
-                ),
-                records,
-            });
-            writer
-                .commit_session(&command)
+            head = writer
+                .commit(&identity, &chunk)
                 .expect("write record resume fixture chunk");
         }
-        writer.release().expect("release record resume fixture");
+        drop(writer);
         let setup_ms = elapsed_ms(setup_start.elapsed());
         (record_count, generated_bytes, setup_ms)
     }
@@ -8590,8 +8615,10 @@ pub(crate) mod tests {
         let tail_load_ms = elapsed_ms(tail_load_start.elapsed());
         let mut tail_buf = Buffer::new(crate::smelt_edit::BufId(94), Default::default());
         let tail_render_start = std::time::Instant::now();
-        let tail_plan = tail_document
-            .plan_viewport_projection_measured(
+        // The tail slice carries record profiles; the first frame hydrates the
+        // blocks it shows, as the app's hydration worker does.
+        let tail_plan = loop {
+            match tail_document.plan_viewport_projection_measured(
                 &lua,
                 100,
                 &theme,
@@ -8602,8 +8629,14 @@ pub(crate) mod tests {
                     previous_width: None,
                 },
                 40,
-            )
-            .expect("resume benchmark projection hydration");
+            ) {
+                Ok(plan) => break plan,
+                Err(error) => assert!(
+                    tail_document.service_pending_hydration_for_test(),
+                    "resume benchmark projection hydration: {error:?}"
+                ),
+            }
+        };
         let tail_rows = tail_document
             .project_applied_viewport(&lua, &mut tail_buf, &theme, tail_plan)
             .materialized_rows;
@@ -9316,6 +9349,39 @@ pub(crate) mod tests {
                 acc += 1; // '\n'
             }
         }
+    }
+
+    #[test]
+    fn range_rows_render_blocks_the_layout_cache_evicted() {
+        let mut transcript = Transcript::new();
+        for index in 0..40 {
+            transcript.push(Block::Text {
+                content: format!("block {index}").into(),
+            });
+        }
+        let lua = test_lua();
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        projection.set_memory_budget(1);
+        projection.rebuild_row_index(&lua, &mut transcript.history, 80);
+        let start = projection.measurements.active.prefix_row(10);
+        let end = projection.measurements.active.prefix_row(11);
+        projection.layout_cache.set_pinned_nodes(std::iter::empty());
+        assert_eq!(projection.layout_cache.len(), 0);
+
+        let display = projection.display_rows_for_range(
+            &lua,
+            &mut transcript.history,
+            80,
+            &theme,
+            start..end,
+        );
+
+        assert!(
+            display.rows.iter().any(|row| row.text.contains("block 10")),
+            "rows: {:?}",
+            display.rows
+        );
     }
 
     #[test]

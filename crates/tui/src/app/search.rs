@@ -32,6 +32,12 @@ impl SearchDirection {
 }
 
 pub(super) enum PendingTranscriptSearch {
+    /// A live search result that waits for hydration. Retrying re-applies it
+    /// while its generation is still current, so a miss restores the preview.
+    Live {
+        generation: u64,
+        candidates: SqliteTranscriptCandidateBlocks,
+    },
     Submit {
         target: WinId,
         direction: SearchDirection,
@@ -373,10 +379,6 @@ impl TuiApp {
             return;
         }
 
-        smelt_perf::perf::record_value(
-            "search:transcript:projection_requested",
-            u64::from(self.conversation.request_search_projection()),
-        );
         if !self.conversation.transcript_records_persisted() {
             // Every record is dirty, so the dirty scan is a complete candidate set.
             let complete = self.conversation.transcript().history().record_dirty_from() == Some(0);
@@ -445,6 +447,8 @@ impl TuiApp {
         candidates.block_indices.sort_unstable();
         candidates.block_indices.dedup();
         candidates.available |= !candidates.block_indices.is_empty();
+        let retry = candidates.clone();
+        let mut deferred = false;
         if let Some(mut transcript_session) = self.new_transcript_search_session_with_candidates(
             &query,
             live.original.origin,
@@ -461,9 +465,7 @@ impl TuiApp {
                 direction,
                 None,
             );
-            let deferred_query = (current.is_none()
-                && self.conversation.transcript_hydration_is_pending())
-            .then(|| query.clone());
+            deferred = current.is_none() && self.conversation.transcript_hydration_is_pending();
             self.overlays.install_search_session(SearchSession {
                 target: live.target,
                 target_buf: live.target_buf,
@@ -473,16 +475,19 @@ impl TuiApp {
             });
             if let Some(matched) = current {
                 self.jump_to_transcript_search_match(matched);
-            } else if let Some(query) = deferred_query {
-                self.defer_transcript_search(live.target, direction, query);
-            } else {
+            } else if !deferred {
                 self.restore_search_preview_anchor(live.original);
             }
         } else if self.conversation.transcript_hydration_is_pending() {
-            self.defer_transcript_search(live.target, direction, query);
+            deferred = true;
         } else {
             self.clear_search();
             self.restore_search_preview_anchor(live.original);
+        }
+        if deferred {
+            // Stay live, so a confirm during hydration waits for this result.
+            self.defer_live_transcript_search(generation, retry);
+            return;
         }
 
         let search = self.overlays.search_state_mut();
@@ -611,6 +616,20 @@ impl TuiApp {
         self.request_urgent_render();
     }
 
+    fn defer_live_transcript_search(
+        &mut self,
+        generation: u64,
+        candidates: SqliteTranscriptCandidateBlocks,
+    ) {
+        self.conversation
+            .defer_transcript_projection_until_hydrated();
+        self.pending_transcript_search = Some(PendingTranscriptSearch::Live {
+            generation,
+            candidates,
+        });
+        self.request_urgent_render();
+    }
+
     fn defer_transcript_search_repeat(&mut self, target: WinId, reverse: bool) {
         self.conversation
             .defer_transcript_projection_until_hydrated();
@@ -623,6 +642,25 @@ impl TuiApp {
             return;
         };
         match pending {
+            PendingTranscriptSearch::Live {
+                generation,
+                candidates,
+            } => {
+                let Some(live) = self
+                    .overlays
+                    .search_state()
+                    .live
+                    .as_ref()
+                    .filter(|live| live.generation == generation)
+                else {
+                    return;
+                };
+                let (context, query, direction) =
+                    (live.context.clone(), live.query.clone(), live.direction);
+                self.apply_live_transcript_candidates(
+                    generation, context, query, direction, candidates,
+                );
+            }
             PendingTranscriptSearch::Submit {
                 target,
                 direction,

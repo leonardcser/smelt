@@ -86,7 +86,7 @@ fn double_esc_can_rewind_after_cancelling_quota_pause() {
 
         app.press(KeyCode::Esc);
         app.press(KeyCode::Esc);
-        app.wait_for_turn_persistence();
+        app.wait_for_turn_dispatch();
         drive_lua_tasks(&mut app);
         assert!(
             app.state().active_modal.is_none(),
@@ -152,7 +152,7 @@ fn escape_unqueues_before_cancelling_or_rewinding_quota_pause() {
                     kind: Some(protocol::EngineAskErrorKind::Quota),
                     retry_at_ms: Some(123_000),
                 }));
-                app.wait_for_turn_persistence();
+                app.wait_for_turn_dispatch();
                 if cancelled {
                     assert!(app.run_lua("smelt.engine.cancel()"));
                 }

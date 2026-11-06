@@ -269,14 +269,6 @@ impl PromptRuntime {
         queued
     }
 
-    pub(crate) fn try_queue_replacement(&mut self, queued: QueuedInput) -> bool {
-        let queued = self.queues.try_push_replacement(queued);
-        if queued {
-            self.bump_queue_revision();
-        }
-        queued
-    }
-
     pub(crate) fn try_queue_request(&mut self, queued: QueuedInput) -> bool {
         let queued = self.queues.try_push_request(queued);
         if queued {

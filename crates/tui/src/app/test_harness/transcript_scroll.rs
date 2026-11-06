@@ -86,32 +86,13 @@ impl SparseTranscriptFixture {
         let session_id = "f".repeat(64);
         let mut session = smelt_core::session::Session::new(1, root.clone());
         session.id = session_id.clone();
-        let mut initial = smelt_core::session::initial_store_commit_from_session(&session)
-            .expect("build initial transcript fixture");
-        initial.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-            start: smelt_store::TranscriptRecordIndex::new(0),
-            records: records
-                .iter()
-                .enumerate()
-                .map(|(index, record)| {
-                    smelt_core::transcript_model::transcript_block_row_with_block_idx(
-                        index,
-                        index as u64,
-                        record,
-                    )
-                })
-                .collect::<Result<_, _>>()
-                .expect("encode transcript fixture records"),
-        });
-        let mut writer = smelt_store::OwnedLineageWriter::open(&root, &session_id)
-            .expect("open transcript fixture writer");
-        writer
-            .commit_session(&initial)
-            .expect("commit initial transcript fixture");
-        let lineage_id = writer.lineage_id().to_string();
-        writer.release().expect("release transcript fixture writer");
-        let store =
-            smelt_core::session::SessionStoreAddress::new(root.clone(), session_id, lineage_id);
+        let sessions = smelt_core::session::SessionStorage::new(root.clone());
+        sessions
+            .save(&session)
+            .expect("write transcript fixture session");
+        let store = sessions.address(session_id);
+        crate::persist::write_transcript_record_suffix(&store, 0, records)
+            .expect("write transcript fixture records");
         Self { root, store }
     }
 

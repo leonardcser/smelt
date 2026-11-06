@@ -12,14 +12,12 @@ fn sparse_display_only_search_app() -> TestApp {
     let mut app = TestApp::builder().with_vim(true).build();
     app.set_terminal_size(80, 16);
     let session_id = app.session_snapshot().id.clone();
-    let sessions_root = app.core_probe().sessions.sessions_dir();
     let mut session =
         smelt_core::session::Session::new(app.core_probe().env.pid(), app.core_probe().env.cwd());
     session.id = session_id.clone();
     session.history = (0..200)
         .map(|idx| protocol::HistoryItem::user(protocol::Content::text(format!("item {idx}"))))
         .collect();
-    let mut commit = smelt_core::session::initial_store_commit_from_session(&session).unwrap();
     let records = (0..200)
         .map(|idx| {
             let content = match idx {
@@ -30,81 +28,36 @@ fn sparse_display_only_search_app() -> TestApp {
             test_block_record(idx, &content)
         })
         .collect::<Vec<_>>();
-    commit.transcript_records = Some(smelt_store::TranscriptRecordSuffix {
-        start: smelt_store::TranscriptRecordIndex::ZERO,
-        records,
-    });
-    let mut writer = smelt_store::OwnedLineageWriter::open(&sessions_root, &session_id).unwrap();
-    let lineage_id = writer.lineage_id().to_string();
-    let receipt = writer.commit_session(&commit).unwrap();
-    let store_address = smelt_core::session::SessionStoreAddress::new(
-        sessions_root.clone(),
-        session_id.clone(),
-        writer.lineage_id().to_string(),
-    );
-    let projector = writer.spawn_search_projector().unwrap();
-    projector.request();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !projector.is_idle() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "search fixture projection did not complete"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert_eq!(projector.latest_error(), None);
-    projector.stop();
-    writer.release().unwrap();
+    let mut commit = smelt_core::session::full_commit(&session).unwrap();
+    commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
+    let sessions = app.core_probe().sessions.clone();
+    let head = sessions
+        .store()
+        .writer(&session_id)
+        .unwrap()
+        .commit(&smelt_core::session::store_identity(&session), &commit)
+        .unwrap();
+    let store_address = sessions.address(session_id.clone());
 
-    let loaded = crate::app::transcript::LoadedTranscript::tail_from_sqlite(store_address, 80, 16)
-        .expect("display-only transcript tail");
-    let resume = app
-        .core_probe()
-        .sessions
-        .load_store_resume_result(&session_id, 80, 16)
-        .expect("load verified sparse session owner")
-        .expect("sparse session exists");
-    assert_eq!(resume.head, receipt.current);
+    let loaded =
+        crate::app::transcript::LoadedTranscript::tail_from_sqlite(store_address.clone(), 80, 16)
+            .expect("display-only transcript tail");
+    let resume = sessions
+        .load_resume(&session_id, 80, 16)
+        .expect("load sparse session");
+    assert_eq!(resume.head, head);
     app.load_store_backed_session(
         crate::app::session_document::StoreBackedSessionDocument::new(
             resume.session,
             loaded,
-            crate::app::history::store_backed_live_session_for_test(
-                session_id.clone(),
-                200,
-                None,
-                smelt_core::session::SessionStoreAddress::new(
-                    sessions_root,
-                    session_id,
-                    lineage_id,
-                ),
-            ),
-            receipt.current,
+            crate::app::history::store_backed_live_session_for_test(store_address, 200),
+            head,
         ),
     );
     app.focus_transcript();
     app.configure_transcript_vim(true, VimMode::Normal);
     app.render_silent();
     app
-}
-
-fn wait_for_agent_turn(app: &mut TestApp) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if app.agent_running() {
-            return;
-        }
-        if let Some(event) = app.try_recv_app_event() {
-            app.app.handle_app_event(event);
-        }
-        app.app.drain_persist_reports();
-        app.render_silent();
-        assert!(
-            std::time::Instant::now() < deadline,
-            "deferred canonical turn did not start"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
 }
 
 fn wait_for_live_search(app: &mut TestApp) {
@@ -154,6 +107,28 @@ fn wait_for_search_query(app: &mut TestApp, query: &str) {
     }
 }
 
+/// Deliver events until no transcript search waits for hydration.
+fn settle_search(app: &mut TestApp) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        app.render_silent();
+        if app.app.pending_transcript_search.is_none()
+            && !app.app.conversation.transcript_hydration_is_pending()
+        {
+            return;
+        }
+        if let Some(event) = app.try_recv_app_event() {
+            app.app.handle_app_event(event);
+            continue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "deferred transcript search did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 fn drain_app_events_for(app: &mut TestApp, duration: std::time::Duration) {
     let deadline = std::time::Instant::now() + duration;
     while std::time::Instant::now() < deadline {
@@ -174,95 +149,12 @@ fn begin_slow_persisted_search(app: &mut TestApp) {
 }
 
 #[test]
-fn cancelling_hydration_pending_submit_rolls_back_without_dispatch() {
-    let mut app = sparse_display_only_search_app();
-    app.focus_prompt();
-    app.app
-        .conversation
-        .require_transcript_record_resave_from_for_harness(0);
-    let initial_history_len = app.session_message_count();
-
-    app.type_text("cancel before hydration");
-    app.press(KeyCode::Enter);
-    assert!(app.app.turn_submission_is_pending());
-    assert!(!app.agent_running());
-    assert_eq!(app.session_message_count(), initial_history_len + 2);
-
-    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(!app.app.turn_submission_is_pending());
-    assert!(!app.agent_running());
-    assert_eq!(app.session_message_count(), initial_history_len + 1);
-
-    drain_app_events_for(&mut app, std::time::Duration::from_millis(100));
-    assert!(!app.app.turn_submission_is_pending());
-    assert!(!app.agent_running());
-    assert!(!app.session_is_read_only());
-}
-
-#[test]
-fn hydration_preserves_terminal_transition_before_following_submit() {
-    let mut app = sparse_display_only_search_app();
-    app.focus_prompt();
-    app.type_text("first ordered turn");
-    app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
-    assert!(app.agent_running());
-    let _ = app.app.flush_persist();
-    app.feed_one(crate::app::test_harness::SourceEvent::engine(
-        protocol::EngineEvent::ToolStarted {
-            invocation_id: protocol::InvocationId::new(1),
-            call_id: "call-1".into(),
-            tool_name: "read_file".into(),
-            args: std::collections::HashMap::new(),
-            called_at_ms: 1,
-        },
-    ));
-
-    app.app
-        .conversation
-        .require_transcript_record_resave_from_for_harness(0);
-    app.app.discard_turn(crate::app::TurnEnd::Cancelled);
-    assert!(!app.agent_running());
-    assert!(app.app.conversation.canonical_operations_are_pending());
-
-    assert!(app
-        .app
-        .begin_agent_turn(
-            "second ordered turn",
-            protocol::Content::text("second ordered turn"),
-            0,
-        )
-        .is_none());
-    assert!(app.app.turn_submission_is_pending());
-
-    wait_for_agent_turn(&mut app);
-    let _ = app.app.flush_persist();
-    let reader = smelt_store::LineageSessionReader::open_existing(
-        app.app.core.sessions.sessions_dir(),
-        &app.app.conversation.session().id,
-    )
-    .expect("open ordered canonical lineage");
-    let turns = reader.turns().expect("read ordered canonical turns");
-    assert_eq!(turns.len(), 2);
-    assert_eq!(turns[0].state, smelt_store::TurnState::Cancelled);
-    assert!(matches!(
-        turns[1].state,
-        smelt_store::TurnState::Ready | smelt_store::TurnState::Running
-    ));
-    assert_eq!(
-        turns[1].submitted_revision.get(),
-        turns[0].submitted_revision.get() + 3,
-        "running and terminal transitions must commit before the following submit"
-    );
-}
-
-#[test]
-fn sparse_transcript_hydrates_interrupted_tool_turn_before_persisting() {
+fn interrupted_tool_turn_in_a_sparse_transcript_saves_after_hydration() {
     let mut app = sparse_display_only_search_app();
     app.focus_prompt();
     app.type_text("first turn");
     app.press(KeyCode::Enter);
-    app.wait_for_turn_persistence();
+    app.wait_for_turn_dispatch();
     assert!(app.agent_running());
     let _ = app.app.flush_persist();
     app.feed_one(crate::app::test_harness::SourceEvent::engine(
@@ -284,12 +176,7 @@ fn sparse_transcript_hydrates_interrupted_tool_turn_before_persisting() {
     assert_eq!(app.state().queued_inputs, vec!["next turn"]);
 
     app.press(KeyCode::Enter);
-    assert!(!app.agent_running());
-    assert!(!app.session_is_read_only());
-    assert!(app.state().queued_inputs.is_empty());
-    assert!(app.app.turn_submission_is_pending());
-
-    wait_for_agent_turn(&mut app);
+    assert!(app.agent_running());
     assert!(!app.session_is_read_only());
     assert!(app.state().queued_inputs.is_empty());
 
@@ -298,11 +185,29 @@ fn sparse_transcript_hydrates_interrupted_tool_turn_before_persisting() {
         "writable-sparse-interrupt".into(),
         None,
     );
-    let _ = app.app.flush_persist();
+    // The save waits for the sparse records it rewrites to hydrate.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.app.session_document_has_unflushed_work() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "deferred save never finished"
+        );
+        app.app.save_session_and_flush();
+        app.render_silent();
+        drain_app_events_for(&mut app, std::time::Duration::from_millis(10));
+    }
+    let id = app.session_snapshot().id.clone();
+    let reader = app.app.core.sessions.reader(&id).unwrap();
+    let state = reader.state().unwrap();
     assert_eq!(
-        app.session_snapshot().title.as_deref(),
+        state.metadata.title.as_deref(),
         Some("Writable sparse interrupt")
     );
+    let history = reader
+        .history_range(0, state.head.history_len.get())
+        .unwrap();
+    assert!(history.iter().any(|item| matches!(item,
+        protocol::HistoryItem::User { content, .. } if content.text_content() == "next turn")));
 }
 
 #[test]
@@ -484,12 +389,65 @@ fn transcript_search_no_match_clears_preview_and_restores_original_anchor() {
     }
     app.type_text("absent query");
     wait_for_search_query(&mut app, "absent query");
+    settle_search(&mut app);
 
     let session = app
         .overlays_probe()
         .search_session()
         .expect("current no-match search session");
     assert!(session.current_range().is_none());
+    assert_eq!(transcript_row_cursor_row(&app), original_row);
+    assert_eq!(app.transcript_window().scroll_top, original_scroll_top);
+    assert!(app.state().cmdline_open);
+}
+
+#[test]
+fn transcript_search_no_match_during_hydration_restores_original_anchor() {
+    let mut app = sparse_display_only_search_app();
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+    let original_row = transcript_row_cursor_row(&app);
+    let original_scroll_top = app.transcript_window().scroll_top;
+
+    app.type_char('/');
+    app.type_text("tail needle");
+    wait_for_live_search(&mut app);
+    for _ in 0.."tail needle".len() {
+        app.press(KeyCode::Backspace);
+    }
+    // The emptied query restores the original rows, which start hydrating.
+    app.render_unsettled_silent();
+    app.type_text("absent query");
+
+    // Hold hydration back so the miss lands while the original rows load.
+    let mut held = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app
+        .overlays_probe()
+        .search_session()
+        .is_none_or(|session| session.query != "absent query")
+    {
+        match app.try_recv_app_event() {
+            Some(event @ crate::app::AppEvent::TranscriptHydrationCompleted(_)) => held.push(event),
+            Some(event) => app.app.handle_app_event(event),
+            None => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "no-match search did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+    assert!(app.app.conversation.transcript_hydration_is_pending());
+
+    for event in held {
+        app.app.handle_app_event(event);
+    }
+    settle_search(&mut app);
+
+    assert!(app.app.pending_transcript_search.is_none());
     assert_eq!(transcript_row_cursor_row(&app), original_row);
     assert_eq!(app.transcript_window().scroll_top, original_scroll_top);
     assert!(app.state().cmdline_open);

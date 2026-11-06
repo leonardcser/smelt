@@ -360,6 +360,12 @@ impl ProviderClient {
             error_body: Option<&'a str>,
         }
 
+        let body = {
+            let _perf = smelt_perf::perf::begin("provider:request:serialize_json");
+            bytes::Bytes::from(
+                serde_json::to_vec(&request.body).expect("JSON values always serialize"),
+            )
+        };
         let emit_attempt = |event: AttemptEvent<'_>| {
             if let Some(cb) = opts.on_attempt {
                 cb(RequestAttemptInfo {
@@ -367,6 +373,7 @@ impl ProviderClient {
                     provider_kind: request.provider_kind,
                     model: request.model,
                     body: &request.body,
+                    body_bytes: body.len(),
                     attempt: event.attempt.saturating_add(1),
                     elapsed_ms: event.elapsed_ms,
                     result: event.result,
@@ -381,10 +388,11 @@ impl ProviderClient {
         loop {
             let attempt = retry_state.request_attempt;
             let request_start = std::time::Instant::now();
-            let mut req = {
-                let _perf = smelt_perf::perf::begin("provider:request:serialize_json");
-                self.client.post(&request.url).json(&request.body)
-            };
+            let mut req = self
+                .client
+                .post(&request.url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone());
             if let Some(headers) = request.kimi_headers {
                 req = kimi_code::apply_default_headers(req, headers);
             }
@@ -890,6 +898,8 @@ pub struct RequestAttemptInfo<'a> {
     pub provider_kind: ProviderKind,
     pub model: &'a str,
     pub body: &'a serde_json::Value,
+    /// Size of `body` as sent, in bytes.
+    pub body_bytes: usize,
     /// One-based number of this attempt within the logical request.
     pub attempt: u32,
     pub elapsed_ms: u64,

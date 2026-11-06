@@ -12,9 +12,8 @@ smelt config default
 smelt export history [--output <PATH>] <SESSION>
 smelt export requests [--output <PATH>] <SESSION>
 smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
-smelt session doctor [<SESSION>|--all] [--json]
-smelt session backup <SESSION> <OUTPUT>
-smelt session compact <SESSION>
+smelt session doctor [<SESSION>] [--json]
+smelt session backup <OUTPUT>
 smelt status (--pid <PID> | --all) [--json]
 smelt status --pid <PID> --file
 smelt status --dir
@@ -52,9 +51,8 @@ use a neutral filename.
 | `smelt export history`           | Export semantic history rows for a saved session as JSONL                                           |
 | `smelt export requests`          | Export request audit entries for a saved session as JSONL                                           |
 | `smelt inspect`                  | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
-| `smelt session doctor`           | Check canonical lineage and derived-search health without changing data                              |
-| `smelt session backup`           | Create and verify a transactionally consistent lineage backup                                       |
-| `smelt session compact`          | Reclaim unreachable rows, objects, and search segments, then return free pages to the filesystem     |
+| `smelt session doctor`           | Check session database integrity and storage sizes without changing data                            |
+| `smelt session backup`           | Copy every saved session into a new consistent database file                                        |
 | `smelt status`                   | Read the public status of one or all running smelt processes                                        |
 | `smelt upgrade`                  | Check for and install the newest smelt build                                                        |
 | `smelt upgrade check`            | Check for updates without installing                                                                |
@@ -78,21 +76,19 @@ use a neutral filename.
 
 ### Session maintenance
 
-A session and its forks share one database. All commands accept a full session id
-or an unambiguous prefix.
+All saved sessions share one SQLite database. smelt returns freed pages to the
+filesystem as it deletes data, so no manual compaction step exists.
 
 | Command | Behavior |
 | ------- | -------- |
-| `session doctor <SESSION>` | Read-only schema, SQLite integrity, reference, derived-search, and storage-size checks |
-| `session doctor --all` | Check every visible session; cannot be combined with a session id |
-| `session doctor ... --json` | Emit a JSON array suitable for automation |
-| `session backup <SESSION> <OUTPUT>` | Copy and verify a consistent snapshot of the session's complete lineage; write `<OUTPUT>.manifest.json`; overwrite neither output |
-| `session compact <SESSION>` | Reclaim unreachable revisions, sequence rows, objects, and derived-search segments in bounded transactions, then return free pages to the filesystem |
+| `session doctor` | Read-only schema and SQLite integrity check of the session database |
+| `session doctor <SESSION>` | Also report the row counts and stored bytes of one session (id or unique prefix) |
+| `session doctor ... --json` | Emit one JSON object suitable for automation |
+| `session backup <OUTPUT>` | Copy every saved session into a new database file with mode `0600`; never overwrite `<OUTPUT>` |
 
-`doctor` and `backup` are safe on a live session. `compact` needs exclusive access:
-close every smelt process using any branch of that session first, or it fails.
-`doctor` exits non-zero if any selected session is unavailable or degraded, so
-`smelt session doctor --all --json` works as a health check.
+Both commands are safe while smelt runs. `doctor` exits non-zero when the
+integrity check finds issues, so `smelt session doctor --json` works as a health
+check.
 
 After a crash, turns that were in flight are marked `interrupted` on the next
 writable start. smelt never resends them automatically, because the provider may

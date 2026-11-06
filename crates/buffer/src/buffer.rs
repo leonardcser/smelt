@@ -338,6 +338,10 @@ pub struct RenderedRowMetadata {
 }
 
 impl RenderedRowMetadata {
+    fn retained_bytes(&self) -> usize {
+        vec_bytes(&self.highlights) + vec_bytes(&self.row_starts) + vec_bytes(&self.decorations)
+    }
+
     pub fn push_highlight(
         &mut self,
         row: usize,
@@ -665,6 +669,13 @@ struct NamespaceState {
 }
 
 impl NamespaceState {
+    /// Payload strings such as virtual text are not counted.
+    fn retained_bytes(&self) -> usize {
+        btree_map_bytes::<ExtmarkId, Extmark>(self.extmarks.len())
+            + btree_map_bytes::<usize, Vec<ExtmarkId>>(self.by_row.len())
+            + self.by_row.values().map(vec_bytes).sum::<usize>()
+    }
+
     fn insert_mark(&mut self, id: ExtmarkId, mark: Extmark) {
         let row = mark.start_row;
         if let Some(prev) = self.extmarks.insert(id, mark) {
@@ -700,6 +711,22 @@ impl NamespaceState {
     }
 }
 
+fn vec_bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity() * std::mem::size_of::<T>()
+}
+
+/// Estimated heap bytes of a `BTreeMap` holding `len` entries. Leaves hold up
+/// to 11 entries and splits leave them about half full.
+fn btree_map_bytes<K, V>(len: usize) -> usize {
+    const LEAF_CAPACITY: usize = 11;
+    if len == 0 {
+        return 0;
+    }
+    let leaf = 2 * std::mem::size_of::<usize>()
+        + LEAF_CAPACITY * (std::mem::size_of::<K>() + std::mem::size_of::<V>());
+    len.div_ceil(LEAF_CAPACITY / 2 + 1) * leaf
+}
+
 #[derive(Default, Clone)]
 struct ExtmarkStore {
     /// `BTreeMap` so iteration is sorted by `NsId`, matching the priority/ns/id
@@ -708,6 +735,15 @@ struct ExtmarkStore {
 }
 
 impl ExtmarkStore {
+    fn retained_bytes(&self) -> usize {
+        btree_map_bytes::<NsId, NamespaceState>(self.namespaces.len())
+            + self
+                .namespaces
+                .values()
+                .map(NamespaceState::retained_bytes)
+                .sum::<usize>()
+    }
+
     fn create_namespace(&mut self, name: &str) -> NsId {
         let id = create_namespace(name);
         self.namespaces.entry(id).or_default();
@@ -831,6 +867,19 @@ impl Buffer {
     /// Convenience namespace for `set_virtual_text`. Production virt-text
     /// uses per-feature namespaces via `set_extmark` + `ExtmarkOpts::virt_text`.
     pub const NS_VIRT_TEXT: &'static str = "buffer.virt_text";
+
+    /// Estimated heap bytes this buffer owns, for cache budgets. Undo
+    /// history and parser state are not counted.
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + vec_bytes(&self.lines)
+            + self.lines.iter().map(String::capacity).sum::<usize>()
+            + self.rendered_rows.retained_bytes()
+            + self.extmarks.retained_bytes()
+            + self.source.capacity()
+            + vec_bytes(&self.attachment_ids)
+            + self.range_layers.iter().map(vec_bytes).sum::<usize>()
+    }
 
     pub fn new(id: BufId, _opts: BufCreateOpts) -> Self {
         let mut extmarks = ExtmarkStore::default();

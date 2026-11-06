@@ -75,7 +75,7 @@ impl TestApp {
         let sent_at_ms = engine::clock::unix_time_ms(self.app.core.clock.as_ref());
         let turn = self.app.begin_custom_command_turn(command, sent_at_ms);
         self.app.conversation.set_active(turn);
-        self.wait_for_turn_persistence();
+        self.wait_for_turn_dispatch();
         self.agent_running()
     }
 
@@ -98,7 +98,7 @@ impl TestApp {
             engine::clock::unix_time_ms(self.app.core.clock.as_ref()),
         );
         self.app.conversation.set_active(turn);
-        self.wait_for_turn_persistence();
+        self.wait_for_turn_dispatch();
         self.agent_running()
     }
 
@@ -604,11 +604,8 @@ impl TestApp {
             ));
     }
 
-    /// Seed one canonical database-backed session and publish its catalog overlay.
+    /// Saves one session described by `meta` to the store.
     pub fn seed_session_meta(&self, meta: &smelt_core::session::SessionMeta) {
-        let mut writer =
-            smelt_store::OwnedLineageWriter::open(self.app.core.sessions.sessions_dir(), &meta.id)
-                .expect("create session fixture database");
         let history = if let Some(text_bytes) = meta.text_bytes.filter(|bytes| *bytes > 0) {
             let mut remaining = usize::try_from(text_bytes).expect("fixture text size fits usize");
             let mut history = Vec::new();
@@ -629,77 +626,35 @@ impl TestApp {
                 })
                 .collect::<Vec<_>>()
         };
-        let history_len = history.len();
-        let command = smelt_store::SessionCommit {
-            session_id: meta.id.clone(),
-            expected: smelt_store::StoreHead::default(),
-            identity: smelt_store::SessionIdentity {
-                id: meta.id.clone(),
-                created_at: i64::try_from(meta.created_at_ms).expect("fixture created_at fits i64"),
-                parent_id: meta.parent_id.clone(),
-            },
-            metadata: smelt_store::SessionMetadata {
-                title: meta.title.clone(),
-                slug: meta.slug.clone(),
-                first_user_message: meta.first_user_message.as_deref().map(str::to_owned),
-                cwd: meta.cwd.clone(),
-                mode: meta.mode.clone(),
-                reasoning_effort: meta
-                    .reasoning_effort
-                    .as_ref()
-                    .map(|effort| effort.label().to_string()),
-                model: meta.model.clone(),
-                fast_mode: meta.fast_mode,
-                accounting_json: Some(serde_json::json!({
-                    "session_usage": {},
-                    "context_token_identity": meta
-                        .authoritative_context_tokens
-                        .as_ref()
-                        .map(|context| &context.identity),
-                    "display_context_token_identity": meta
-                        .display_context_tokens
-                        .as_ref()
-                        .and_then(|context| context.identity.as_ref()),
-                })),
-                checkpoint_json: meta
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| serde_json::to_value(checkpoint).expect("valid checkpoint")),
-                checkpoint_events_json: (!meta.checkpoint_events.is_empty()).then(|| {
-                    serde_json::to_value(&meta.checkpoint_events).expect("valid checkpoint events")
-                }),
-                context_tokens: meta
-                    .authoritative_context_tokens
-                    .as_ref()
-                    .map(|context| u64::from(context.tokens)),
-                context_tokens_history_len: meta.authoritative_context_tokens.as_ref().map(
-                    |context| {
-                        u64::try_from(context.history_len)
-                            .expect("fixture history coordinate fits u64")
-                    },
-                ),
-                display_context_tokens: meta
-                    .display_context_tokens
-                    .as_ref()
-                    .map(|context| u64::from(context.tokens)),
-                session_cost_usd: smelt_store::SessionCostUsd::new(0.0)
-                    .expect("valid fixture cost"),
-                updated_at: i64::try_from(meta.updated_at_ms).expect("fixture updated_at fits i64"),
-            },
-            history: smelt_store::HistorySuffix {
-                start: smelt_store::HistoryIndex::ZERO,
-                final_len: smelt_store::HistoryLen::new(
-                    u64::try_from(history_len).expect("fixture history length fits u64"),
-                ),
-                items: history,
-            },
-            side_tables: smelt_store::SideTableSuffixes::default(),
-            transcript_records: None,
-        };
-        let receipt = writer
-            .commit_session(&command)
-            .expect("write canonical session fixture");
-        writer.release().expect("release session fixture database");
-        self.publish_session_catalog_commit(&command, &receipt);
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::new());
+        session.id = meta.id.clone();
+        session.parent_id = meta.parent_id.clone();
+        session.title = meta.title.clone();
+        session.slug = meta.slug.clone();
+        session.first_user_message = meta.first_user_message.clone();
+        session.created_at_ms = meta.created_at_ms;
+        session.updated_at_ms = meta.updated_at_ms;
+        session.mode = meta.mode.clone();
+        session.reasoning_effort = meta.reasoning_effort.clone();
+        session.model = meta.model.clone();
+        session.fast_mode = meta.fast_mode;
+        session.cwd = meta.cwd.clone();
+        session.checkpoint = meta.checkpoint.clone();
+        session.checkpoint_events = meta.checkpoint_events.clone();
+        if let Some(context) = &meta.authoritative_context_tokens {
+            session.context_tokens = Some(context.tokens);
+            session.context_tokens_history_len = Some(context.history_len);
+            session.context_token_identity = Some(context.identity.clone());
+        }
+        if let Some(context) = &meta.display_context_tokens {
+            session.display_context_tokens = Some(context.tokens);
+            session.display_context_token_identity = context.identity.clone();
+        }
+        session.history = history;
+        self.app
+            .core
+            .sessions
+            .save(&session)
+            .expect("write session fixture");
     }
 }

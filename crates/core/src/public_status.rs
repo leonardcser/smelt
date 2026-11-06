@@ -320,7 +320,7 @@ fn status_dir_in(runtime_root: &Path) -> PathBuf {
     runtime_root.join("smelt").join("status")
 }
 
-fn runtime_root() -> PathBuf {
+pub(crate) fn runtime_root() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
