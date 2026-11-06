@@ -9,6 +9,8 @@ use crate::error::{Result, StoreError};
 pub const SCHEMA_VERSION: i32 = 1;
 const SCHEMA: &str = include_str!("schema.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// SQLite keeps a checkpointed WAL at its largest size unless this caps it.
+const WAL_SIZE_LIMIT: i64 = 1024 * 1024;
 
 /// Opens the shared database, creating it and its schema on first use.
 pub(crate) fn open(path: &Path) -> Result<Connection> {
@@ -35,6 +37,7 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
          PRAGMA foreign_keys = ON;
          PRAGMA temp_store = MEMORY;",
     )?;
+    conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
     match version {
         SCHEMA_VERSION => Ok(conn),
         0 => {
@@ -190,6 +193,31 @@ mod tests {
             .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
             .unwrap();
         assert_eq!(mode, 2);
+    }
+
+    #[test]
+    fn checkpointed_wal_shrinks_to_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("smelt.db");
+        let conn = open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE filler (body BLOB)")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO filler VALUES (zeroblob(?1))",
+            [4 * WAL_SIZE_LIMIT],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)")
+            .unwrap();
+        conn.execute("INSERT INTO filler VALUES (zeroblob(1))", [])
+            .unwrap();
+
+        let wal = std::fs::metadata(dir.path().join("smelt.db-wal")).unwrap();
+        assert!(
+            wal.len() <= WAL_SIZE_LIMIT as u64,
+            "WAL is {} bytes",
+            wal.len()
+        );
     }
 
     #[test]
