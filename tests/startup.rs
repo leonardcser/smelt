@@ -595,10 +595,11 @@ smelt.tools.register({ name = "fixture_dialog_state", permission_defaults = { no
                     "Ephemeral turn persisted a native session: {launch}"
                 );
             }
-            assert!(!root
-                .path()
-                .join("state/smelt/sessions/claude-code")
-                .exists());
+            let artifacts = root.path().join("state/smelt/artifacts");
+            assert!(std::fs::read_dir(&artifacts)
+                .into_iter()
+                .flatten()
+                .all(|dir| !dir.unwrap().path().join("claude-code.json").exists()));
             master.write_all(b"\x03").unwrap();
             break;
         }
@@ -822,7 +823,7 @@ smelt.provider.register("probe", {
         );
     }
     let id = session.id.clone();
-    let sessions_root = root.path().join("state/smelt/sessions");
+    let state_root = root.path().join("state/smelt");
     let records = transcript
         .history
         .block_records()
@@ -837,7 +838,7 @@ smelt.provider.register("probe", {
             .unwrap()
         })
         .collect();
-    commit_session_fixture(&sessions_root, &session, records);
+    commit_session_fixture(&state_root, &session, records);
     drop(session);
     let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
     command
@@ -2389,7 +2390,7 @@ end)
         .push(protocol::HistoryItem::user(protocol::Content::text(
             transcript_marker,
         )));
-    let sessions_root = state_home.join("smelt/sessions");
+    let state_root = state_home.join("smelt");
     let mut transcript = smelt_core::content::transcript::Transcript::new();
     transcript.push(smelt_core::Block::Text {
         content: transcript_marker.into(),
@@ -2408,7 +2409,7 @@ end)
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("build transcript fixture");
-    commit_session_fixture(&sessions_root, &session, records);
+    commit_session_fixture(&state_root, &session, records);
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_smelt"));
     command
@@ -2749,7 +2750,7 @@ impl LifecycleBenchmark<'_> {
             std::fs::create_dir_all(root.join(name)).expect("create benchmark runtime directory");
         }
         if let Some(fixture) = self.fixture {
-            copy_fixture_directory(fixture, &state_home.join("smelt/sessions"));
+            copy_fixture_directory(fixture, &state_home.join("smelt"));
         }
 
         let mut command = Command::new(self.binary);
@@ -2864,7 +2865,7 @@ fn interactive_lifecycle_benchmark_suite() {
     let fixture = std::env::var_os("SMELT_LIFECYCLE_BENCH_FIXTURE").map(std::path::PathBuf::from);
     let session_id = fixture.as_ref().map(|_| {
         std::env::var("SMELT_LIFECYCLE_BENCH_SESSION_ID")
-            .expect("SMELT_LIFECYCLE_BENCH_SESSION_ID must identify a lineage fixture branch")
+            .expect("SMELT_LIFECYCLE_BENCH_SESSION_ID must identify a session in the fixture")
     });
     let fixture_database =
         fixture
@@ -5182,13 +5183,13 @@ fn headless_config_errors_prevent_shell_dispatch() {
 
 /// Saves `session` with the given transcript rows as a fresh stored session.
 fn commit_session_fixture(
-    sessions_root: &std::path::Path,
+    state_root: &std::path::Path,
     session: &smelt_core::session::Session,
     records: Vec<smelt_store::StoredTranscriptBlock>,
 ) {
     let mut commit = smelt_core::session::full_commit(session).expect("build session fixture");
     commit.transcript = Some(smelt_store::TranscriptRecordSuffix { start: 0, records });
-    smelt_store::Store::new(sessions_root)
+    smelt_store::Store::new(state_root)
         .writer(&session.id)
         .expect("own session fixture")
         .commit(&smelt_core::session::store_identity(session), &commit)

@@ -50,8 +50,6 @@ enum FuzzCommand {
     Prepare,
     /// Prepare, build, and replay regressions
     Verify(replay_regression::Options),
-    /// Import legacy corpus, artifacts, and coverage history
-    ImportData { source: Option<PathBuf> },
     /// Minimize a crash and verify its failure identity
     Triage(triage::Options),
     /// Replay tracked seeds with an independent watchdog per input
@@ -91,7 +89,6 @@ fn dispatch(root: PathBuf, cli: Cli) -> Result<()> {
         FuzzCommand::CoverageSnapshot(options) => coverage::run(&project, options),
         FuzzCommand::Status => status::run(&project),
         FuzzCommand::Prepare => prepare(&project),
-        FuzzCommand::ImportData { source } => import_data(&project, source),
     })();
     project.runner.check_cancelled()?;
     result
@@ -454,86 +451,6 @@ fn stable_path_hash(path: &Path) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     hash_bytes(&mut hash, path.as_os_str().as_encoded_bytes());
     hash
-}
-
-fn import_data(project: &build::Project, source: Option<PathBuf>) -> Result<()> {
-    let source = match source {
-        Some(path) => path,
-        None => git_common_dir(project)?
-            .parent()
-            .context("repository has no parent")?
-            .join("fuzz"),
-    };
-    let source = if source.join("fuzz/corpus").is_dir() {
-        source.join("fuzz")
-    } else {
-        source
-    };
-    let source = source
-        .canonicalize()
-        .context("locate legacy fuzz directory")?;
-    let data = FuzzData::for_repo(project)?;
-    std::fs::create_dir_all(&data.root)?;
-    let destination = data.root.canonicalize()?;
-    if destination.starts_with(&source) || source.starts_with(&destination) {
-        bail!("import source and destination must not overlap");
-    }
-    let mut copied = 0;
-    let mut existing = 0;
-    for name in ["corpus", "artifacts", "coverage-history"] {
-        merge_tree(
-            &source.join(name),
-            &destination.join(name),
-            &mut copied,
-            &mut existing,
-            &project.runner,
-        )?;
-    }
-    println!("fuzz data: {}", data.root.display());
-    println!("imported: {copied}, already present: {existing}");
-    Ok(())
-}
-
-fn merge_tree(
-    from: &Path,
-    to: &Path,
-    copied: &mut usize,
-    existing: &mut usize,
-    runner: &process::Runner,
-) -> Result<()> {
-    for source in input_files(from)? {
-        runner.check_cancelled()?;
-        let destination = to.join(source.strip_prefix(from)?);
-        // Validate each directory before descending. create_dir_all alone follows
-        // existing symlinks and could publish outside the selected data root.
-        let directories: Vec<_> = destination
-            .parent()
-            .context("destination has no parent")?
-            .ancestors()
-            .take_while(|path| path.starts_with(to))
-            .collect();
-        for directory in directories.into_iter().rev() {
-            match std::fs::create_dir(directory) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("create {}", directory.display()))
-                }
-            }
-            if !std::fs::symlink_metadata(directory)?.is_dir() {
-                bail!(
-                    "expected import directory, not a symlink or file: {}",
-                    directory.display()
-                );
-            }
-        }
-        if copy_noclobber(&source, &destination, runner)? {
-            *copied += 1;
-        } else {
-            *existing += 1;
-        }
-    }
-    Ok(())
 }
 
 /// Publish a complete copy without replacing existing data. Return whether added.

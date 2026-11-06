@@ -1,5 +1,4 @@
 use crate::log;
-use crate::paths::{cache_dir, state_dir};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -46,7 +45,7 @@ impl EngineKimiEnv {
 }
 
 fn token_path() -> PathBuf {
-    state_dir().join("kimi_code_auth.json")
+    crate::paths::auth_path("kimi-code.json")
 }
 
 fn save_tokens_to(tokens: &KimiCodeTokens, store: &CredStore) -> Result<(), String> {
@@ -92,7 +91,7 @@ pub fn api_base() -> String {
 }
 
 fn device_id_path() -> PathBuf {
-    state_dir().join("kimi_code_device_id")
+    crate::paths::auth_path("kimi-code-device-id")
 }
 
 fn create_device_id() -> String {
@@ -281,7 +280,7 @@ async fn authenticated_request_with_env(
 }
 
 fn models_cache_path() -> PathBuf {
-    cache_dir().join("kimi_code_models.json")
+    crate::paths::model_cache_path("kimi-code.json")
 }
 
 pub fn load_cached_model_info() -> Vec<KimiCodeModelInfo> {

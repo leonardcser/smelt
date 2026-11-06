@@ -11,23 +11,33 @@ specific operating system.
 
 On Linux and macOS they follow the XDG base directories:
 
-| Directory                           | Contents |
-| ----------------------------------- | -------- |
-| `$XDG_CONFIG_HOME/smelt/`           | `early.lua`, `init.lua`, `plugins/`, `lua/`, `commands/`, `skills/`, `AGENTS.md` |
-| `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions and the session list |
-| `$XDG_STATE_HOME/smelt/*_auth.json` | OAuth credentials for Codex, Copilot and Kimi Code |
-| `$XDG_STATE_HOME/smelt/recent.json` | Last-used model, mode and reasoning effort |
-| `$XDG_STATE_HOME/smelt/workspaces/` | Saved permissions per workspace |
-| `$XDG_STATE_HOME/smelt/history`     | Prompt history |
-| `$XDG_STATE_HOME/smelt/trust.json`  | Hashes of trusted project `.smelt/` directories |
-| `$XDG_STATE_HOME/smelt/logs/`       | Rotated log files |
-| `$XDG_DATA_HOME/smelt/builtins/`    | Read-only copy of the bundled Lua runtime and type stubs |
-| `$XDG_DATA_HOME/smelt/runtime/`     | Optional overlay searched before the bundled Lua runtime |
-| `$XDG_CACHE_HOME/smelt/`            | HTTP, pricing and model caches |
+| Directory                             | Contents |
+| ------------------------------------- | -------- |
+| `$XDG_CONFIG_HOME/smelt/`             | `early.lua`, `init.lua`, `plugins/`, `lua/`, `commands/`, `skills/`, `AGENTS.md` |
+| `$XDG_STATE_HOME/smelt/smelt.db`      | Saved sessions, prompt history and token usage |
+| `$XDG_STATE_HOME/smelt/artifacts/`    | Files owned by a saved session, such as plans |
+| `$XDG_STATE_HOME/smelt/auth/`         | OAuth credentials for Codex, Copilot and Kimi Code |
+| `$XDG_STATE_HOME/smelt/recent.json`   | Last-used model, mode and reasoning effort |
+| `$XDG_STATE_HOME/smelt/workspaces/`   | Saved permissions per workspace |
+| `$XDG_STATE_HOME/smelt/plugins/`      | State saved by Lua plugins |
+| `$XDG_STATE_HOME/smelt/trust.json`    | Hashes of trusted project `.smelt/` directories |
+| `$XDG_STATE_HOME/smelt/logs/`         | Rotated log files |
+| `$XDG_DATA_HOME/smelt/builtins/`      | Read-only copy of the bundled Lua runtime and type stubs |
+| `$XDG_DATA_HOME/smelt/runtime/`       | Optional overlay searched before the bundled Lua runtime |
+| `$XDG_CACHE_HOME/smelt/models/`       | Model lists of Codex, Copilot, Kimi Code and Claude Code |
+| `$XDG_CACHE_HOME/smelt/`              | HTTP and pricing caches |
 
 Windows uses `%APPDATA%\smelt` for config and `%LOCALAPPDATA%\smelt\state`,
 `\cache` and `\data` for the rest. Explicit XDG variables override these defaults
 on every platform.
+
+## Upgrading from smelt 0.7
+
+On its first start, smelt 0.8 moves the 0.7 session files, prompt history and
+usage log into `$XDG_STATE_HOME/smelt/v0.7/` and imports them into `smelt.db`. It
+prints progress while it works, then lists any session it could not import. Run
+`smelt session migrate` to retry those. Delete `v0.7/` once you no longer need
+the originals.
 
 ## Credentials
 

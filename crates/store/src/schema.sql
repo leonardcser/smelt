@@ -140,3 +140,25 @@ CREATE TABLE requests (
     error BLOB
 );
 CREATE INDEX requests_by_session ON requests (sid, started_at, id);
+
+-- Prompts the user submitted, oldest first, for input recall.
+CREATE TABLE prompts (
+    id INTEGER PRIMARY KEY,
+    text TEXT NOT NULL
+);
+
+-- Token usage per model call. Calls before yesterday are folded into one row
+-- per UTC day and model.
+CREATE TABLE usage (
+    id INTEGER PRIMARY KEY,
+    timestamp_ms INTEGER NOT NULL,
+    calls INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL,
+    completion_tokens INTEGER NOT NULL,
+    cost_usd REAL,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    reasoning_tokens INTEGER
+);
+CREATE INDEX usage_by_time ON usage (timestamp_ms);

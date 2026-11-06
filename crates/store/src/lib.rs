@@ -11,10 +11,12 @@ mod error;
 mod export;
 mod history;
 mod lock;
+mod prompts;
 mod reader;
 mod requests;
 mod transcript;
 mod types;
+mod usage;
 mod writer;
 
 use std::path::{Path, PathBuf};
@@ -38,23 +40,20 @@ pub use types::{
     HistoryLen, HistorySuffix, SessionCommit, SessionIdentity, SessionMetadata, SessionState,
     SideRows, StoreHead, TranscriptRecordCount, TranscriptRecordSuffix,
 };
+pub use usage::UsageEntry;
 pub use writer::SessionWriter;
 
-/// Where session data lives under the state directory.
+/// The database and session files under the state directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Store {
     root: PathBuf,
 }
 
 impl Store {
-    pub fn new(sessions_root: impl Into<PathBuf>) -> Self {
+    pub fn new(state_root: impl Into<PathBuf>) -> Self {
         Self {
-            root: sessions_root.into(),
+            root: state_root.into(),
         }
-    }
-
-    pub fn from_state_root(state_root: impl AsRef<Path>) -> Self {
-        Self::new(state_root.as_ref().join("sessions"))
     }
 
     pub fn root(&self) -> &Path {
@@ -62,7 +61,7 @@ impl Store {
     }
 
     pub fn database_path(&self) -> PathBuf {
-        self.root.join("sessions.db")
+        self.root.join("smelt.db")
     }
 
     pub fn locks_dir(&self) -> PathBuf {
@@ -79,6 +78,15 @@ impl Store {
 
     pub(crate) fn connect(&self) -> Result<rusqlite::Connection> {
         db::open(&self.database_path())
+    }
+
+    /// A connection for ledgers such as prompts and usage, which run on the UI
+    /// thread. In WAL mode their commits skip the fsync; a crash keeps them,
+    /// only a power loss can drop the latest rows.
+    pub(crate) fn connect_ledger(&self) -> Result<rusqlite::Connection> {
+        let conn = self.connect()?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        Ok(conn)
     }
 
     /// Opens a session for reading. Fails with [`StoreError::NotFound`] if it was never saved.

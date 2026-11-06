@@ -15,10 +15,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "entries",
-        "Return entries from the on-disk metrics ledger. Recent entries are single calls; entries older than yesterday are per-day, per-model totals whose `calls` field counts the calls they summarize. Lua commands aggregate and render these records into UI.",
+        "Return entries from the usage ledger. Recent entries are single calls; entries older than yesterday are per-day, per-model totals whose `calls` field counts the calls they summarize. Lua commands aggregate and render these records into UI.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let entries = crate::lua::try_with_platform_host(|host| host.metrics_entries())
+            let entries = crate::lua::try_with_platform_host(|host| host.usage_entries())
                 .unwrap_or_default();
             let out = lua.create_table()?;
             for (i, e) in entries.iter().enumerate() {

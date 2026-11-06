@@ -4286,7 +4286,7 @@ fn copied_hot_path_fixture_app(fixture: &std::path::Path) -> TestApp {
     );
     let session_id = hot_path_fixture_session_id();
     let mut app = TestApp::builder().build();
-    let destination_root = app.app.core.sessions.sessions_dir();
+    let destination_root = app.app.core.sessions.state_root().to_path_buf();
     let started = std::time::Instant::now();
     let copied_bytes = copy_fixture_tree(fixture, &destination_root);
     eprintln!(

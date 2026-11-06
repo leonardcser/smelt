@@ -269,10 +269,6 @@ jobs:
             exit 1
           }
           cp "${ARCHIVES[@]}" release/
-          # COMPAT(linux-gnu-asset): glibc-linked installs upgrade by this name.
-          for archive in release/smelt-*-unknown-linux-musl.tar.gz; do
-            cp "$archive" "${archive%-musl.tar.gz}-gnu.tar.gz"
-          done
           (cd release && sha256sum smelt-*.tar.gz > SHA256SUMS)
 
       - name: Create Release

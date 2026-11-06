@@ -612,7 +612,7 @@ fn loaded_session(app: &TestApp, id: &str) -> smelt_core::session::Session {
     crate::app::history::load_saved_session(&app.core_probe().sessions, id).expect("session saved")
 }
 
-fn lineage_reader(id: &str) -> smelt_store::SessionReader {
+fn session_reader(id: &str) -> smelt_store::SessionReader {
     smelt_core::session::storage().reader(id).unwrap()
 }
 
@@ -911,7 +911,7 @@ fn record_only_change_is_saved_once() {
     app.session_append_history(HistoryItem::user(Content::text("persisted history")));
     app.save_session_and_flush();
     let before = durable_saves(&app);
-    let records_before = lineage_reader(&session_id)
+    let records_before = session_reader(&session_id)
         .head()
         .unwrap()
         .transcript_record_count;
@@ -926,7 +926,7 @@ fn record_only_change_is_saved_once() {
 
     assert_eq!(durable_saves(&app), before + 1);
     assert!(
-        lineage_reader(&session_id)
+        session_reader(&session_id)
             .head()
             .unwrap()
             .transcript_record_count
@@ -1107,7 +1107,7 @@ fn compacted_record_suffix_stays_saveable_after_inserting_a_prefix() {
         app.overlays_probe().notification()
     );
 
-    let reader = lineage_reader(&session_id);
+    let reader = session_reader(&session_id);
     let state = reader.state().unwrap();
     let durable_previews = reader
         .transcript_range(0, state.head.transcript_record_count.get())
@@ -1251,12 +1251,12 @@ fn no_op_save_writes_nothing() {
     app.session_append_history(HistoryItem::user(Content::text("persisted history")));
     app.save_session_and_flush();
     let before = durable_saves(&app);
-    let head = lineage_reader(&session_id).head().unwrap();
+    let head = session_reader(&session_id).head().unwrap();
 
     app.save_session_and_flush();
 
     assert_eq!(durable_saves(&app), before);
-    assert_eq!(lineage_reader(&session_id).head().unwrap(), head);
+    assert_eq!(session_reader(&session_id).head().unwrap(), head);
 }
 
 #[test]
@@ -1308,7 +1308,7 @@ fn rewind_truncates_the_stored_suffix_across_restart() {
         }),
     );
     let retained_block_len = app.transcript_block_count();
-    let retained = lineage_reader(&session_id).state().unwrap();
+    let retained = session_reader(&session_id).state().unwrap();
     let retained_history_len = retained.head.history_len.as_usize();
 
     app.commit_request_history_item(
@@ -1332,12 +1332,12 @@ fn rewind_truncates_the_stored_suffix_across_restart() {
     );
     let sessions = smelt_core::session::storage();
     let store = sessions.store();
-    assert!(lineage_reader(&session_id).head().unwrap().history_len > retained.head.history_len);
+    assert!(session_reader(&session_id).head().unwrap().history_len > retained.head.history_len);
 
     app.rewind_to_history_index(Some(retained_history_len), false);
     app.save_session_and_flush();
 
-    let rewound_reader = lineage_reader(&session_id);
+    let rewound_reader = session_reader(&session_id);
     let rewound = rewound_reader.state().unwrap();
     let rewound_stats = rewound_reader.storage_stats(store).unwrap();
     assert_eq!(rewound.head, retained.head);
@@ -1351,7 +1351,7 @@ fn rewind_truncates_the_stored_suffix_across_restart() {
 
     let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
     resumed.load_session_by_id(&session_id);
-    assert_eq!(lineage_reader(&session_id).head().unwrap(), retained.head);
+    assert_eq!(session_reader(&session_id).head().unwrap(), retained.head);
     assert_eq!(resumed.session_message_count(), 2);
     assert_eq!(resumed.transcript_block_count(), retained_block_len);
 }
@@ -1592,9 +1592,9 @@ fn shutdown_keeps_permanent_storage_failure_visible_and_dirty() {
     let guard = test_home_guard();
     let mut app = TestApp::builder().build_with_test_home_guard(&guard);
     let session_id = app.session_snapshot().id.clone();
-    let sessions_root = smelt_core::session::sessions_dir();
-    let locks_dir = smelt_core::session::storage().store().locks_dir();
-    std::fs::create_dir_all(&sessions_root).unwrap();
+    let store = smelt_core::session::storage().store().clone();
+    let locks_dir = store.locks_dir();
+    std::fs::create_dir_all(store.root()).unwrap();
     std::fs::write(&locks_dir, "permanently blocks directory creation").unwrap();
     app.session_append_history(HistoryItem::user(Content::text("cannot save")));
 
@@ -1638,7 +1638,7 @@ fn request_audit_with_equal_body_and_response_keeps_both() {
     });
     app.flush_persist();
 
-    let reader = lineage_reader(&session_id);
+    let reader = session_reader(&session_id);
     let requests = reader
         .requests(&smelt_store::RequestAuditQuery::default())
         .unwrap();
@@ -1669,7 +1669,7 @@ fn stale_request_audit_after_session_switch_is_dropped() {
     app.flush_persist();
 
     for id in [&old_id, &new_id] {
-        assert!(lineage_reader(id)
+        assert!(session_reader(id)
             .requests(&smelt_store::RequestAuditQuery::default())
             .unwrap()
             .is_empty());
@@ -1700,7 +1700,7 @@ fn sparse_fork_publishes_a_complete_destination() {
         "fork should become active: {:?}",
         resumed.overlays_probe().notification()
     );
-    let reader = lineage_reader(&fork_id);
+    let reader = session_reader(&fork_id);
     let stored = reader.state().unwrap();
     assert_eq!(stored.identity.id, fork_id);
     assert_eq!(
@@ -1732,10 +1732,10 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
         "fork should become active: {:?}",
         resumed.overlays_probe().notification()
     );
-    let source_head = lineage_reader(&source_id).head().unwrap();
+    let source_head = session_reader(&source_id).head().unwrap();
     resumed.session_append_history(HistoryItem::user(Content::text("fork only")));
     resumed.save_session_and_flush();
-    let fork_head = lineage_reader(&fork_id).head().unwrap();
+    let fork_head = session_reader(&fork_id).head().unwrap();
 
     assert!(
         resumed.load_session_by_id(&source_id),
@@ -1743,7 +1743,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
     );
     assert_eq!(resumed.session_snapshot().id, source_id);
     assert_eq!(resumed.app.session_history_len(), 1);
-    assert_eq!(lineage_reader(&source_id).head().unwrap(), source_head);
+    assert_eq!(session_reader(&source_id).head().unwrap(), source_head);
 
     assert!(
         resumed.load_session_by_id(&fork_id),
@@ -1752,7 +1752,7 @@ fn branch_switching_resumes_each_branch_at_its_exact_root() {
     );
     assert_eq!(resumed.session_snapshot().id, fork_id);
     assert_eq!(resumed.app.session_history_len(), 2);
-    assert_eq!(lineage_reader(&fork_id).head().unwrap(), fork_head);
+    assert_eq!(session_reader(&fork_id).head().unwrap(), fork_head);
 }
 
 #[test]
@@ -1790,7 +1790,7 @@ fn deleting_source_branch_leaves_active_fork_intact() {
         "deleted source branch is no longer visible"
     );
     assert_eq!(resumed.session_snapshot().id, fork_id);
-    let fork = lineage_reader(&fork_id);
+    let fork = session_reader(&fork_id);
     assert_eq!(
         fork.history_range(0, 1).unwrap(),
         vec![HistoryItem::user(Content::text("shared fork history"))]
@@ -1866,7 +1866,7 @@ fn transcript_save_preparation_failure_blocks_retry_loop_and_session_replacement
     assert!(!app.session_document_has_unflushed_work());
     assert!(!has_sticky_session_save_failure(&app, &session_id));
     assert_eq!(
-        lineage_reader(&session_id)
+        session_reader(&session_id)
             .state()
             .unwrap()
             .head
@@ -1907,7 +1907,7 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
     app.render_silent();
 
     let source_id = app.session_snapshot().id.clone();
-    let source = lineage_reader(&source_id);
+    let source = session_reader(&source_id);
     let source_state = source.state().unwrap();
     let source_history = source.history_range(0, ROW_COUNT as u64).unwrap();
     let source_records = source
@@ -1948,7 +1948,7 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
         "fork failed to save: {:?}",
         app.overlays_probe().notification()
     );
-    let fork = lineage_reader(&fork_id);
+    let fork = session_reader(&fork_id);
     let fork_state = fork.state().unwrap();
     assert_eq!(
         fork.history_range(0, ROW_COUNT as u64).unwrap(),
@@ -1966,7 +1966,7 @@ fn current_compacted_read_only_session_forks_without_hydrating_or_cloning_histor
     );
     drop(fork);
 
-    let retained_source = lineage_reader(&source_id);
+    let retained_source = session_reader(&source_id);
     let retained_state = retained_source.state().unwrap();
     assert_eq!(
         retained_source.history_range(0, ROW_COUNT as u64).unwrap(),
@@ -1998,7 +1998,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
         app.save_session_and_flush();
         app.session_snapshot().id.clone()
     };
-    let source = lineage_reader(&session_id);
+    let source = session_reader(&session_id);
     let source_state = source.state().unwrap();
     let source_history = source.history_range(0, 700).unwrap();
     let source_records = source
@@ -2037,7 +2037,7 @@ fn large_sparse_fork_preserves_every_canonical_history_and_record_row() {
     resumed.wait_for_session_lifecycle();
     let fork_id = resumed.session_snapshot().id.clone();
     assert_ne!(fork_id, session_id);
-    let fork = lineage_reader(&fork_id);
+    let fork = session_reader(&fork_id);
     let fork_state = fork.state().unwrap();
     assert_eq!(fork_state.head, source_state.head);
     assert_eq!(fork.history_range(0, 700).unwrap(), source_history);
@@ -2072,7 +2072,7 @@ fn shutdown_flushes_record_only_transcript_blocks() {
     });
     app.save_session_and_flush();
 
-    let reader = lineage_reader(&session_id);
+    let reader = session_reader(&session_id);
     let state = reader.state().unwrap();
     let rows = reader
         .transcript_range(0, state.head.transcript_record_count.get())
@@ -2128,7 +2128,7 @@ fn record_resume_interrupt_save_compacts_and_appends_again() {
     );
     drop(resumed);
 
-    let reader = lineage_reader(&session_id);
+    let reader = session_reader(&session_id);
     let state = reader.state().unwrap();
     assert_eq!(state.head.transcript_record_count.get(), 3);
     assert_eq!(
@@ -2155,7 +2155,7 @@ fn record_resume_interrupt_save_compacts_and_appends_again() {
         resumed.overlays_probe().notification()
     );
 
-    let reader = lineage_reader(&session_id);
+    let reader = session_reader(&session_id);
     let state = reader.state().unwrap();
     let rows = reader
         .transcript_range(0, state.head.transcript_record_count.get())
@@ -2289,7 +2289,7 @@ fn store_backed_usage_records_canonical_history_coordinate() {
     });
     resumed.save_session_and_flush();
 
-    let stored = lineage_reader(&session_id).state().unwrap();
+    let stored = session_reader(&session_id).state().unwrap();
     assert_eq!(stored.head.history_len.get(), 2);
     assert_eq!(stored.metadata.context_tokens, Some(200));
     assert_eq!(stored.metadata.context_tokens_history_len, Some(2));
@@ -2805,7 +2805,7 @@ fn read_only_session_can_fork_while_its_owner_keeps_writing() {
     assert!(!reader.session_is_read_only());
     assert!(!owner.session_is_read_only());
     assert_eq!(
-        lineage_reader(&fork_id).history_range(0, 1).unwrap(),
+        session_reader(&fork_id).history_range(0, 1).unwrap(),
         vec![HistoryItem::user(Content::text("shared history"))]
     );
     owner.session_append_history(HistoryItem::user(Content::text("parent continues")));
@@ -2813,11 +2813,11 @@ fn read_only_session_can_fork_while_its_owner_keeps_writing() {
     reader.session_append_history(HistoryItem::user(Content::text("fork continues")));
     reader.save_session_and_flush();
     assert_eq!(
-        lineage_reader(&source_id).history_range(1, 2).unwrap(),
+        session_reader(&source_id).history_range(1, 2).unwrap(),
         vec![HistoryItem::user(Content::text("parent continues"))]
     );
     assert_eq!(
-        lineage_reader(&fork_id).history_range(1, 2).unwrap(),
+        session_reader(&fork_id).history_range(1, 2).unwrap(),
         vec![HistoryItem::user(Content::text("fork continues"))]
     );
 }
@@ -2930,14 +2930,14 @@ fn resuming_fork_while_parent_has_active_writer_is_writable() {
         assert!(!app.session_document_has_unflushed_work());
     }
     assert_eq!(
-        lineage_reader(&parent_id).history_range(0, 2).unwrap(),
+        session_reader(&parent_id).history_range(0, 2).unwrap(),
         vec![
             HistoryItem::user(Content::text("shared history")),
             HistoryItem::user(Content::text("parent suffix")),
         ]
     );
     assert_eq!(
-        lineage_reader(&fork_id).history_range(0, 2).unwrap(),
+        session_reader(&fork_id).history_range(0, 2).unwrap(),
         vec![
             HistoryItem::user(Content::text("shared history")),
             HistoryItem::user(Content::text("fork suffix")),
@@ -2969,7 +2969,7 @@ fn resuming_session_with_active_writer_is_read_only() {
     save_full_history_fixture(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
-    let before = lineage_reader(&session_id).state().unwrap();
+    let before = session_reader(&session_id).state().unwrap();
     let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
     reader.load_session_by_id(&session_id);
 
@@ -3006,7 +3006,7 @@ fn resuming_session_with_active_writer_is_read_only() {
     assert_eq!(result, HistoryAppendResult::Unchanged);
     reader.save_session_and_flush();
 
-    let after_reader = lineage_reader(&session_id);
+    let after_reader = session_reader(&session_id);
     let after = after_reader.state().unwrap();
     assert_eq!(after.head, before.head);
     assert_eq!(
@@ -3046,7 +3046,7 @@ fn read_only_session_becomes_writable_after_owner_closes() {
     assert!(reader.current_turn_id().is_some());
     assert!(!reader.session_is_read_only());
     reader.save_session_and_flush();
-    let stored = lineage_reader(&session_id);
+    let stored = session_reader(&session_id);
     let history = stored
         .history_range(0, stored.state().unwrap().head.history_len.get())
         .unwrap();
@@ -3240,7 +3240,7 @@ fn competing_readers_recover_latest_history_in_sequence() {
     wait_for_ownership_recovery(waiter);
     assert_eq!(waiter.session_message_count(), 2);
     assert_eq!(
-        lineage_reader(&session_id).history_range(0, 2).unwrap(),
+        session_reader(&session_id).history_range(0, 2).unwrap(),
         vec![
             HistoryItem::user(Content::text("shared history")),
             HistoryItem::user(Content::text("winner continues")),
@@ -3515,7 +3515,7 @@ fn ownership_loss_with_dirty_state_can_fork_to_a_writable_session() {
     assert!(!resumed.session_document_has_unflushed_work());
     assert!(resumed.app.conversation.session().history.is_empty());
     assert!(resumed.conversation_probe().has_live_session());
-    let reader = lineage_reader(&fork_id);
+    let reader = session_reader(&fork_id);
     let state = reader.state().unwrap();
     let record_rows = reader
         .transcript_range(0, state.head.transcript_record_count.get())
@@ -3857,7 +3857,7 @@ fn sparse_resume_compaction_keeps_completed_marker_at_tail() {
     );
     resumed.save_session_and_flush();
 
-    let reader = lineage_reader(&session_id);
+    let reader = session_reader(&session_id);
     let state = reader.state().unwrap();
     let durable_marker = reader
         .transcript_range(0, state.head.transcript_record_count.get())
@@ -3990,7 +3990,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
     save_full_history_fixture(&mut writer);
 
     let session_id = writer.session_snapshot().id.clone();
-    let before = lineage_reader(&session_id).state().unwrap();
+    let before = session_reader(&session_id).state().unwrap();
     for idx in 0..5 {
         let mut reader = TestApp::builder().build_without_test_home_reset(&guard);
         reader.load_session_by_id(&session_id);
@@ -4006,7 +4006,7 @@ fn repeated_read_only_resumes_do_not_modify_writer_session() {
         reader.save_session_and_flush();
     }
 
-    let after_reader = lineage_reader(&session_id);
+    let after_reader = session_reader(&session_id);
     let after = after_reader.state().unwrap();
     assert_eq!(after.head, before.head);
     assert_eq!(

@@ -66,26 +66,26 @@ pub(super) fn history_digest(history: &[HistoryItem]) -> String {
     digest(&serde_json::to_vec(&conversation).expect("history is JSON serializable"))
 }
 
-fn link_path(root: &Path, id: &str) -> PathBuf {
-    root.join("claude-code")
-        .join(format!("{}.json", digest(id.as_bytes())))
+/// The link lives with the session's other files, so it goes when the session does.
+fn link_path(artifact_dir: &Path) -> PathBuf {
+    artifact_dir.join("claude-code.json")
 }
 
-fn read(root: &Path, id: &str) -> Option<SessionLink> {
-    let bytes = std::fs::read(link_path(root, id)).ok()?;
+fn read(artifact_dir: &Path) -> Option<SessionLink> {
+    let bytes = std::fs::read(link_path(artifact_dir)).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-fn write(root: &Path, id: &str, link: &SessionLink) -> Result<(), String> {
+fn write(artifact_dir: &Path, link: &SessionLink) -> Result<(), String> {
     let bytes = serde_json::to_vec(link).map_err(|e| e.to_string())?;
-    crate::paths::write_atomic(&link_path(root, id), &bytes)
+    crate::paths::write_atomic(&link_path(artifact_dir), &bytes)
         .map_err(|e| format!("could not save Claude Code session link: {e}"))
 }
 
 /// Resumes the whole native session when it matches `history`, or forks it at
 /// the checkpoint that does, as after a rewind.
-pub(super) fn load(root: &Path, id: &str, cwd: &Path, history: &[HistoryItem]) -> Option<Resume> {
-    let mut link = read(root, id)?;
+pub(super) fn load(artifact_dir: &Path, cwd: &Path, history: &[HistoryItem]) -> Option<Resume> {
+    let mut link = read(artifact_dir)?;
     if link.cwd != cwd
         || link.config_dir != std::env::var("CLAUDE_CONFIG_DIR").ok()
         || !valid_native_id(&link.native_id)
@@ -115,8 +115,7 @@ pub(super) fn load(root: &Path, id: &str, cwd: &Path, history: &[HistoryItem]) -
 }
 
 pub(super) fn save(
-    root: &Path,
-    id: &str,
+    artifact_dir: &Path,
     native_id: &str,
     cwd: &Path,
     history: &[HistoryItem],
@@ -127,8 +126,7 @@ pub(super) fn save(
         return Err("Claude Code returned an invalid session ID".into());
     }
     write(
-        root,
-        id,
+        artifact_dir,
         &SessionLink {
             native_id: native_id.into(),
             history_digest: Some(history_digest(history)),
@@ -143,16 +141,16 @@ pub(super) fn save(
 /// A cancelled or failed native turn may have committed more than its UI
 /// mirror. Never blindly resume it and resurrect unseen tool execution; only
 /// its checkpoints, which predate that work, stay usable.
-pub(super) fn invalidate(root: &Path, id: &str) {
-    match read(root, id) {
+pub(super) fn invalidate(artifact_dir: &Path) {
+    match read(artifact_dir) {
         Some(mut link) if !link.checkpoints.is_empty() => {
             link.history_digest = None;
-            if write(root, id, &link).is_err() {
-                let _ = std::fs::remove_file(link_path(root, id));
+            if write(artifact_dir, &link).is_err() {
+                let _ = std::fs::remove_file(link_path(artifact_dir));
             }
         }
         _ => {
-            let _ = std::fs::remove_file(link_path(root, id));
+            let _ = std::fs::remove_file(link_path(artifact_dir));
         }
     }
 }
@@ -180,7 +178,6 @@ mod tests {
         let history = vec![HistoryItem::user(protocol::Content::text("one"))];
         save(
             root.path(),
-            "../../unsafe",
             NATIVE,
             root.path(),
             &history,
@@ -188,19 +185,13 @@ mod tests {
             &[],
         )
         .unwrap();
-        let resume = load(root.path(), "../../unsafe", root.path(), &history).unwrap();
+        let resume = load(root.path(), root.path(), &history).unwrap();
         assert_eq!(resume.plan_path.as_deref(), Some(Path::new("active.md")));
         assert_eq!(resume.at, None);
-        assert!(load(
-            root.path(),
-            "../../unsafe",
-            Path::new("/different"),
-            &history
-        )
-        .is_none());
-        assert!(load(root.path(), "../../unsafe", root.path(), &[]).is_none());
-        invalidate(root.path(), "../../unsafe");
-        assert!(load(root.path(), "../../unsafe", root.path(), &history).is_none());
+        assert!(load(root.path(), Path::new("/different"), &history).is_none());
+        assert!(load(root.path(), root.path(), &[]).is_none());
+        invalidate(root.path());
+        assert!(load(root.path(), root.path(), &history).is_none());
     }
 
     #[test]
@@ -213,23 +204,14 @@ mod tests {
             Checkpoint::new(&one, "first-answer".into()),
             Checkpoint::new(&two, "second-answer".into()),
         ];
-        save(
-            root.path(),
-            "s",
-            NATIVE,
-            root.path(),
-            &two,
-            None,
-            &checkpoints,
-        )
-        .unwrap();
-        invalidate(root.path(), "s");
-        assert!(load(root.path(), "s", root.path(), &two)
+        save(root.path(), NATIVE, root.path(), &two, None, &checkpoints).unwrap();
+        invalidate(root.path());
+        assert!(load(root.path(), root.path(), &two)
             .is_some_and(|resume| resume.at.as_deref() == Some("second-answer")));
-        let resume = load(root.path(), "s", root.path(), &one).unwrap();
+        let resume = load(root.path(), root.path(), &one).unwrap();
         assert_eq!(resume.native_id, NATIVE);
         assert_eq!(resume.at.as_deref(), Some("first-answer"));
         assert_eq!(resume.checkpoints, checkpoints[..1]);
-        assert!(load(root.path(), "s", root.path(), &[]).is_none());
+        assert!(load(root.path(), root.path(), &[]).is_none());
     }
 }

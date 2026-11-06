@@ -1,7 +1,6 @@
 //! GitHub Copilot authentication storage and cached model access.
 
 use crate::log;
-use crate::paths::state_dir;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -21,7 +20,7 @@ fn cred_store() -> &'static CredStore {
         CredStore::production(
             "smelt-copilot-auth",
             "default",
-            state_dir().join("copilot_auth.json"),
+            crate::paths::auth_path("copilot.json"),
             COPILOT_TOKENS_ENV,
         )
     })
@@ -147,7 +146,7 @@ async fn ensure_access_token_full_with_env(
 }
 
 fn cache_path() -> PathBuf {
-    crate::paths::cache_dir().join("copilot_models.json")
+    crate::paths::model_cache_path("copilot.json")
 }
 
 pub(crate) fn load_cached_models() -> Vec<CopilotModel> {

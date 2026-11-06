@@ -725,9 +725,11 @@ impl TuiApp {
                 if !self.session_is_read_only() {
                     self.conversation.accumulate_usage(usage.clone(), cost);
                 }
-                crate::metrics::append(
-                    self.core.sessions.state_root(),
-                    &crate::metrics::MetricsEntry {
+                let _ = self
+                    .core
+                    .sessions
+                    .store()
+                    .record_usage(&smelt_store::UsageEntry {
                         timestamp_ms: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -744,8 +746,7 @@ impl TuiApp {
                         cache_read_tokens: usage.cache_read_tokens.map(u64::from),
                         cache_write_tokens: usage.cache_write_tokens.map(u64::from),
                         reasoning_tokens: usage.reasoning_tokens.map(u64::from),
-                    },
-                );
+                    });
                 SessionControl::Continue
             }
             EngineEvent::ContextTokens { tokens } => {

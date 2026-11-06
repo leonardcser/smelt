@@ -192,7 +192,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     // `width`/`height` resolve the overlay rect per-frame against the
     // terminal extent. Reuse the same constraint parser as `layout.vbox`
     // items so `"70%"`, `"max:60"`, `"fit"`, integer cells, etc. all work.
-    // Default `Fit` matches the legacy "size from layout.natural" path.
+    // Default `Fit` sizes the overlay from its natural layout.
     let width = parse_overlay_constraint(&opts, "width", "overlay.width")?;
     let height = parse_overlay_constraint(&opts, "height", "overlay.height")?;
     // `max_width`/`max_height` are optional upper bounds applied after the

@@ -8,7 +8,7 @@
 ---@class smelt.session
 local session = {}
 
---- Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.
+--- Absolute path for artifacts owned by the current session, such as plans. Saved sessions keep them in `artifacts/<id>/` under the state directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.
 ---@type fun(): string
 session.artifact_dir = nil
 
@@ -96,11 +96,11 @@ session.id = nil
 ---@type fun(): table
 session.info = nil
 
---- List canonical lineage sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.
+--- List saved sessions other than the current one, newest first. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd }`, returns `{ entries, next_cursor }`.
 ---@type fun(opts: table?): table
 session.list = nil
 
---- Request a UI switch to canonical lineage session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.
+--- Request a UI switch to saved session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.
 ---@type fun(id: string): nil
 session.load = nil
 
@@ -119,7 +119,7 @@ session.render_preview_into = nil
 session.reset = nil
 
 --- Classification: Advanced - Documented low-level capability for plugins that need full control. It may evolve more freely than the Supported facade.
---- Explicitly reconcile and retry blocked session persistence. Retained turns remain undispatched until their canonical operation is durable. Returns true when the retry request is accepted. No automatic retry timer is used.
+--- Retry saving the session after a save failure. Returns true when a save was submitted. No automatic retry timer is used.
 ---@type fun(): boolean
 session.retry_persistence = nil
 

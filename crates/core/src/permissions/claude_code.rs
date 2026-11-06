@@ -9,12 +9,9 @@ use std::collections::HashMap;
 /// mode/tool/access grants as smelt's saved-plan plugin.
 pub fn grant_plan_artifacts(
     permissions: &super::PermissionsHandle,
-    sessions_root: &std::path::Path,
-    session_id: &str,
+    artifact_dir: &std::path::Path,
 ) {
-    let Ok(directory) = engine::claude_code_plan_directory(sessions_root, session_id) else {
-        return;
-    };
+    let directory = engine::claude_code_plan_directory(artifact_dir);
     let approvals = permissions.approvals();
     let mut approvals = approvals.write().unwrap_or_else(|error| error.into_inner());
     for (tool, access) in [

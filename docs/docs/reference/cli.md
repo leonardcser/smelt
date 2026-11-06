@@ -14,6 +14,7 @@ smelt export requests [--output <PATH>] <SESSION>
 smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
 smelt session doctor [<SESSION>] [--json]
 smelt session backup <OUTPUT>
+smelt session migrate
 smelt status (--pid <PID> | --all) [--json]
 smelt status --pid <PID> --file
 smelt status --dir
@@ -53,6 +54,7 @@ use a neutral filename.
 | `smelt inspect`                  | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
 | `smelt session doctor`           | Check session database integrity and storage sizes without changing data                            |
 | `smelt session backup`           | Copy every saved session into a new consistent database file                                        |
+| `smelt session migrate`          | Import sessions saved by smelt 0.7 that are not imported yet                                        |
 | `smelt status`                   | Read the public status of one or all running smelt processes                                        |
 | `smelt upgrade`                  | Check for and install the newest smelt build                                                        |
 | `smelt upgrade check`            | Check for updates without installing                                                                |
@@ -85,6 +87,7 @@ filesystem as it deletes data, so no manual compaction step exists.
 | `session doctor <SESSION>` | Also report the row counts and stored bytes of one session (id or unique prefix) |
 | `session doctor ... --json` | Emit one JSON object suitable for automation |
 | `session backup <OUTPUT>` | Copy every saved session into a new database file with mode `0600`; never overwrite `<OUTPUT>` |
+| `session migrate` | Import the smelt 0.7 sessions in `<state>/v0.7/` that are not in the database yet; smelt runs this on its first start |
 
 Both commands are safe while smelt runs. `doctor` exits non-zero when the
 integrity check finds issues, so `smelt session doctor --json` works as a health

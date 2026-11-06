@@ -651,7 +651,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "artifact_dir",
-        "Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
+        "Absolute path for artifacts owned by the current session, such as plans. Saved sessions keep them in `artifacts/<id>/` under the state directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.",
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(

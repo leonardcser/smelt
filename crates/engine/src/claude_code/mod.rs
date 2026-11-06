@@ -382,7 +382,7 @@ impl Runtime<'_> {
             Ok::<_, String>((
                 prompt_content(&self.payload.input)?,
                 catalog::Catalog::new(&self.payload.tools, self.payload.tool_visibility)?,
-                plan_directory(&self.payload.sessions_root, &self.payload.session_id)?,
+                plan_directory(&self.payload.artifact_dir),
             ))
         })();
         let (mut content, catalog, plans_directory) = match setup {
@@ -428,14 +428,7 @@ impl Runtime<'_> {
         }
         if !reuse {
             let link = (!self.payload.ephemeral)
-                .then(|| {
-                    session::load(
-                        &self.payload.sessions_root,
-                        &self.payload.session_id,
-                        &self.config.cwd,
-                        &history,
-                    )
-                })
+                .then(|| session::load(&self.payload.artifact_dir, &self.config.cwd, &history))
                 .flatten();
             // A provider switch or edited history cannot reuse a native
             // transcript. Import its readable context into a fresh native session.
@@ -640,7 +633,7 @@ impl Runtime<'_> {
         self.history.append(&mut self.transcript.committed);
         if self.turn.as_ref().is_some_and(|turn| turn.stage.prompted()) && !self.payload.ephemeral {
             // It may have done more than smelt saw, so it is never resumed past.
-            session::invalidate(&self.payload.sessions_root, &self.payload.session_id);
+            session::invalidate(&self.payload.artifact_dir);
         }
         if let Some(turn) = self.turn.take() {
             emit_complete(self.tx, turn.id, turn.started.elapsed(), true);
@@ -751,8 +744,7 @@ impl Runtime<'_> {
             }
         }
         if let Err(message) = session::save(
-            &self.payload.sessions_root,
-            &self.payload.session_id,
+            &self.payload.artifact_dir,
             native_id,
             &self.config.cwd,
             &self.history,
@@ -786,7 +778,7 @@ impl Runtime<'_> {
         let prompted = self.turn.as_ref().is_some_and(|turn| turn.stage.prompted());
         if error.is_some() || prompted || !self.quiet() || self.native.moving.is_some() {
             if !self.payload.ephemeral {
-                session::invalidate(&self.payload.sessions_root, &self.payload.session_id);
+                session::invalidate(&self.payload.artifact_dir);
             }
         } else {
             self.commit();

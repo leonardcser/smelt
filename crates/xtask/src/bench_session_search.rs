@@ -99,7 +99,7 @@ fn run_benchmark(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
-    let store = smelt_store::Store::from_state_root(&options.state_dir);
+    let store = smelt_store::Store::new(&options.state_dir);
     let sessions = match &options.session {
         Some(session) => vec![session.clone()],
         None => store.ids_with_prefix("", u32::MAX)?,

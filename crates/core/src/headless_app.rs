@@ -602,8 +602,7 @@ impl HeadlessApp {
         if claude_code {
             crate::permissions::claude_code::grant_plan_artifacts(
                 &self.core.permissions,
-                &self.core.sessions.sessions_dir(),
-                &self.session.id,
+                &self.core.sessions.artifact_dir_for(&self.session),
             );
         }
         let fast_mode = self
@@ -625,7 +624,7 @@ impl HeadlessApp {
                 control_env: self.core.session_control.agent_env(),
                 history: protocol::ModelHistorySource::items(history),
                 session_id: self.session.id.clone(),
-                sessions_root: self.core.sessions.sessions_dir(),
+                artifact_dir: self.core.sessions.artifact_dir_for(&self.session),
                 // One-shot headless history is not persisted.
                 ephemeral: true,
                 permission_overrides: None,

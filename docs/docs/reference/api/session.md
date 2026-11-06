@@ -17,7 +17,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 fun(): string
 ```
 
-Absolute path for artifacts owned by the current session, such as plans. Persistent artifacts are separate from canonical lineage storage. Ephemeral sessions return a temporary directory that is removed when smelt exits.
+Absolute path for artifacts owned by the current session, such as plans. Saved sessions keep them in `artifacts/<id>/` under the state directory. Ephemeral sessions return a temporary directory that is removed when smelt exits.
 
 ## `smelt.session.checkpoint`
 
@@ -172,7 +172,7 @@ Return current session metadata as a table. Includes id, title, slug, timestamps
 fun(opts: table?): table
 ```
 
-List canonical lineage sessions other than the current one from the read-only derived catalog. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd, availability }`, returns `{ entries, next_cursor, catalog }`; `availability` is `available` or `unavailable`.
+List saved sessions other than the current one, newest first. Without `opts`, returns all rows. With `opts = { limit, cursor, cwd }`, returns `{ entries, next_cursor }`.
 
 ## `smelt.session.load`
 
@@ -180,7 +180,7 @@ List canonical lineage sessions other than the current one from the read-only de
 fun(id: string): nil
 ```
 
-Request a UI switch to canonical lineage session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.
+Request a UI switch to saved session `id`. Reads and prepares persisted state in the background, then resets transient state when the destination is ready.
 
 ## `smelt.session.model_messages`
 
@@ -218,7 +218,7 @@ fun(): boolean
 
 **Advanced:** Low-level building block for plugins that need full control. It may change more freely than the rest of the API.
 
-Explicitly reconcile and retry blocked session persistence. Retained turns remain undispatched until their canonical operation is durable. Returns true when the retry request is accepted. No automatic retry timer is used.
+Retry saving the session after a save failure. Returns true when a save was submitted. No automatic retry timer is used.
 
 ## `smelt.session.rewind_to`
 

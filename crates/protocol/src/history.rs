@@ -1156,14 +1156,17 @@ mod tests {
     use crate::message::FunctionCall;
 
     #[test]
-    fn image_placement_round_trips_and_legacy_user_omits_it() {
+    fn image_placement_round_trips_and_is_omitted_when_absent() {
         let mut item = HistoryItem::user(Content::with_images(
             "look".into(),
             vec![("pic.png".into(), "data:image/png;base64,AAA".into())],
         ));
-        let legacy = serde_json::to_value(&item).unwrap();
-        assert!(legacy.get("image_placement").is_none());
-        assert_eq!(serde_json::from_value::<HistoryItem>(legacy).unwrap(), item);
+        let unplaced = serde_json::to_value(&item).unwrap();
+        assert!(unplaced.get("image_placement").is_none());
+        assert_eq!(
+            serde_json::from_value::<HistoryItem>(unplaced).unwrap(),
+            item
+        );
 
         let placement = ImagePlacement {
             source: format!(
@@ -1354,14 +1357,14 @@ mod tests {
             invocation
         );
 
-        let legacy = serde_json::json!({
+        let untimed = serde_json::json!({
             "call_id": "call-1",
             "name": "f",
             "arguments": "{}",
             "result": { "content": "ok", "is_error": false },
         });
         assert_eq!(
-            serde_json::from_value::<ToolInvocation>(legacy)
+            serde_json::from_value::<ToolInvocation>(untimed)
                 .unwrap()
                 .called_at_ms,
             None
@@ -1450,11 +1453,11 @@ mod tests {
     }
 
     #[test]
-    fn transcript_block_compatibility_uses_semantic_history_projection() {
+    fn transcript_block_kinds_follow_semantic_history_projection() {
         let user = HistoryItem::user(Content::text("follow up"));
-        let legacy_mode =
+        let encoded_mode =
             HistoryItem::user(Content::text(crate::note::mode_change_note("apply mode")));
-        let legacy_process = HistoryItem::user(Content::text(crate::note::process_status_note(
+        let encoded_process = HistoryItem::user(Content::text(crate::note::process_status_note(
             "process finished",
         )));
         let mode = HistoryItem::note(HistoryNote::mode_change("apply mode"));
@@ -1463,15 +1466,15 @@ mod tests {
 
         for (kind, item) in [
             ("user", &user),
-            ("mode", &legacy_mode),
-            ("process_status", &legacy_process),
+            ("mode", &encoded_mode),
+            ("process_status", &encoded_process),
             ("mode", &mode),
             ("process_status", &process),
         ] {
             assert!(transcript_block_kind_matches_history_item(kind, item));
         }
         for (kind, item) in [
-            ("user", &legacy_mode),
+            ("user", &encoded_mode),
             ("mode", &process),
             ("process_status", &mode),
             ("user", &context),
@@ -1670,13 +1673,13 @@ mod tests {
             crate::note::process_status_note(note.text())
         );
 
-        let legacy: HistoryNote = serde_json::from_value(serde_json::json!({
+        let without_output: HistoryNote = serde_json::from_value(serde_json::json!({
             "note_kind": "process_status",
             "text": "finished"
         }))
         .unwrap();
-        assert_eq!(legacy.process_output(), None);
-        assert!(serde_json::to_value(legacy)
+        assert_eq!(without_output.process_output(), None);
+        assert!(serde_json::to_value(without_output)
             .unwrap()
             .get("output")
             .is_none());

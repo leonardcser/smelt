@@ -2070,7 +2070,7 @@ impl TuiApp {
         let auto_reload_enabled = runtime_state.settings.auto_reload;
         let mut session = smelt_core::session::Session::new(env.pid(), env.cwd());
         session.fast_mode = Some(runtime_state.settings.fast_mode);
-        let prompt_history = History::load_from_state_root(env.state_dir().clone());
+        let prompt_history = History::load(smelt_store::Store::new(env.state_dir()));
         let prompt_inputs =
             prompt_inputs.unwrap_or_else(|| crate::prompt_inputs::PromptInputs::for_runtime(&env));
         let mut core = smelt_core::Core::new(

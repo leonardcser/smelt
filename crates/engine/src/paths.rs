@@ -57,6 +57,16 @@ pub fn data_dir() -> PathBuf {
     xdg_app_dir("XDG_DATA_HOME").unwrap_or_else(default_data_dir)
 }
 
+/// Where a provider's credentials live, such as `codex.json`.
+pub fn auth_path(file: &str) -> PathBuf {
+    state_dir().join("auth").join(file)
+}
+
+/// Where a provider's model list is cached, such as `codex.json`.
+pub fn model_cache_path(file: &str) -> PathBuf {
+    cache_dir().join("models").join(file)
+}
+
 #[cfg(windows)]
 fn default_config_dir() -> PathBuf {
     dirs::config_dir()

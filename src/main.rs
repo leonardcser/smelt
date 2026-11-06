@@ -208,6 +208,8 @@ enum SessionCommand {
     Doctor(SessionDoctorArgs),
     /// Copy every saved session into a new consistent database file
     Backup(SessionBackupArgs),
+    /// Import sessions saved by smelt 0.7 that are not imported yet
+    Migrate,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -567,11 +569,51 @@ async fn run_session_command(args: SessionArgs) {
             .backup_to(&args.output)
             .map(|()| println!("backup: {}", args.output.display()))
             .map_err(|err| format!("failed to back up sessions: {err}")),
+        SessionCommand::Migrate => migrate_v07(&engine::env::RuntimeEnv::snapshot(), true),
     };
     if let Err(err) = result {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
+}
+
+/// Imports state saved by smelt 0.7, reporting progress on stderr. Prints
+/// nothing when there was nothing to import, unless `verbose`.
+// COMPAT(state-v0.7)
+fn migrate_v07(env: &engine::env::RuntimeEnv, verbose: bool) -> Result<(), String> {
+    use std::io::Write;
+    let report =
+        smelt_core::migrate_v07::run(env.state_dir(), env.cache_dir(), &mut |done, total| {
+            if total > 0 {
+                eprint!("\rsmelt: importing smelt 0.7 sessions {done}/{total}");
+                let _ = std::io::stderr().flush();
+                if done == total {
+                    eprintln!();
+                }
+            }
+        })
+        .map_err(|err| format!("failed to import smelt 0.7 data: {err}"))?;
+    if report.is_empty() && !verbose {
+        return Ok(());
+    }
+    eprintln!(
+        "smelt: imported {} sessions ({} already imported), {} prompts and {} usage entries",
+        report.sessions, report.skipped, report.prompts, report.usage
+    );
+    for failure in &report.failures {
+        eprintln!("smelt: not imported: {failure}");
+    }
+    if !report.failures.is_empty() {
+        eprintln!("smelt: run `smelt session migrate` to retry");
+    }
+    let archive = env.state_dir().join(smelt_core::migrate_v07::ARCHIVE);
+    if archive.is_dir() {
+        eprintln!(
+            "smelt: the original sessions are in {}; delete it once you no longer need them",
+            archive.display()
+        );
+    }
+    Ok(())
 }
 
 fn maybe_run_fast_status_command() -> bool {
@@ -733,6 +775,20 @@ async fn async_main() {
     }
     lua_runtime.freeze_launch_inputs();
     drop(cli_parse_startup);
+
+    // COMPAT(state-v0.7): `session migrate` runs the import itself.
+    let migrating = matches!(
+        &args.command,
+        Some(Commands::Session(SessionArgs {
+            command: SessionCommand::Migrate
+        }))
+    );
+    if !migrating && smelt_core::migrate_v07::pending(env.state_dir(), env.cache_dir()) {
+        if let Err(err) = migrate_v07(&env, false) {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    }
 
     if let Some(command) = args.command.take() {
         match command {

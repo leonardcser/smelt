@@ -413,30 +413,26 @@ fn coverage_renders_and_publishes_one_typed_result_per_target() {
 }
 
 #[test]
-fn coverage_status_reads_nested_imported_history() {
+fn coverage_status_reads_nested_history() {
     let fixture = Fixture::new();
-    let legacy = fixture.root().join("legacy");
-    let nested = legacy.join("coverage-history/archived");
+    let history = fixture
+        .root()
+        .join("invocation/relative data/coverage-history");
+    let nested = history.join("archived");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(
         nested.join("snapshot.txt"),
-        "# fuzz coverage snapshot\ndate: fixture\ncommit: fixture\nbranch: fixture\n\ntext_ops: imported coverage\n",
+        "# fuzz coverage snapshot\ndate: fixture\ncommit: fixture\nbranch: fixture\n\ntext_ops: nested coverage\n",
     )
     .unwrap();
-    fixture
-        .run(&["import-data", legacy.to_str().unwrap()], "ok")
-        .success("import nested history")
-        .unwrap();
-    let staging = fixture
-        .root()
-        .join("invocation/relative data/coverage-history/.pending/result");
+    let staging = history.join(".pending/result");
     std::fs::create_dir_all(&staging).unwrap();
     std::os::unix::fs::symlink(staging.join("not-ready"), staging.join("summary.txt")).unwrap();
     let output = fixture
         .run(&["status"], "ok")
-        .success("read imported history")
+        .success("read nested history")
         .unwrap();
-    assert!(output.stdout.text().contains("text_ops: imported coverage"));
+    assert!(output.stdout.text().contains("text_ops: nested coverage"));
 }
 
 #[test]
@@ -661,52 +657,11 @@ fn cmin_rejects_competing_minimizers_empty_results_and_publication_conflicts() {
 }
 
 #[test]
-fn import_is_idempotent_and_rejects_conflicts_and_overlap() {
-    let fixture = Fixture::new();
-    let source = fixture.root().join("legacy/corpus/text_ops");
-    std::fs::create_dir_all(&source).unwrap();
-    std::fs::write(source.join("seed"), b"seed").unwrap();
-    let args = ["import-data", "../legacy"];
-    fixture.run(&args, "ok").success("first import").unwrap();
-    let output = fixture.run(&args, "ok").success("repeat import").unwrap();
-    assert!(output.stdout.text().contains("already present: 1"));
-    std::fs::write(source.join("seed"), b"different").unwrap();
-    assert_eq!(fixture.run(&args, "ok").termination.code(), 2);
-    let destination = fixture
-        .root()
-        .join("invocation/relative data/corpus/text_ops/seed");
-    assert_eq!(std::fs::read(destination).unwrap(), b"seed");
-    assert_eq!(
-        fixture
-            .run(&["import-data", "relative data"], "ok")
-            .termination
-            .code(),
-        2
-    );
-}
-
-#[test]
 fn run_rejects_worker_counts_that_overflow_libfuzzer() {
     let fixture = Fixture::new();
     let output = fixture.run(&["run", "text_ops", "--fork", "4294967295"], "ok");
     assert_eq!(output.termination.code(), 2);
     assert!(!fixture.root().join("replays").exists());
-}
-
-#[test]
-fn import_rejects_symlinked_destination_directories() {
-    let fixture = Fixture::new();
-    let source = fixture.root().join("legacy/corpus/text_ops/nested");
-    let destination = fixture.root().join("invocation/relative data/corpus");
-    let outside = fixture.root().join("outside");
-    for path in [&source, &destination, &outside] {
-        std::fs::create_dir_all(path).unwrap();
-    }
-    std::fs::write(source.join("seed"), b"seed").unwrap();
-    std::os::unix::fs::symlink(&outside, destination.join("text_ops")).unwrap();
-    let output = fixture.run(&["import-data", "../legacy"], "ok");
-    assert_eq!(output.termination.code(), 2, "{}", output.stderr.text());
-    assert!(!outside.join("nested/seed").exists());
 }
 
 #[test]
@@ -900,34 +855,6 @@ fn byte_triage_bounds_the_entire_shrink_loop_and_rejects_nonshrinking_outputs() 
     assert!(output.stderr.text().contains("minimizer did not shrink"));
     assert!(fixture.triage_results().is_empty());
     assert_eq!(std::fs::read(artifact).unwrap(), b"original");
-}
-
-#[test]
-fn cancellation_is_preserved_during_filesystem_only_import() {
-    let fixture = Fixture::new();
-    let source = fixture.root().join("legacy/corpus/text_ops");
-    std::fs::create_dir_all(&source).unwrap();
-    for index in 0..10000 {
-        std::fs::write(source.join(format!("{index:05}")), b"seed").unwrap();
-    }
-    let root = fixture.root().to_path_buf();
-    let worker = std::thread::spawn(move || {
-        let ready = root.join("invocation/relative data/corpus/text_ops/00000");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !ready.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert!(ready.exists(), "import did not start");
-        let pid: i32 = std::fs::read_to_string(root.join("cli.pid"))
-            .unwrap()
-            .parse()
-            .unwrap();
-        // SAFETY: this is the isolated CLI fixture's PID.
-        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
-    });
-    let output = fixture.run(&["import-data", "../legacy"], "ok");
-    worker.join().unwrap();
-    assert_eq!(output.termination.code(), 143, "{}", output.stderr.text());
 }
 
 #[test]

@@ -23,13 +23,15 @@ Switch both dependencies together using Cargo, update both lockfiles, and retain
 a resolved-runtime parity check. See `fuzz/README.md` for source provenance and
 update instructions.
 
-## `linux-gnu-asset`
+## `state-v0.7`
 
-Linux releases are statically linked musl builds published as
-`smelt-<arch>-unknown-linux-musl.tar.gz`. Builds from glibc-linked releases ask
-`smelt upgrade` for `smelt-<arch>-unknown-linux-gnu.tar.gz`, so the release
-job also publishes each musl archive under that name. After the upgrade,
-the installed binary reports the musl target and requests the new name.
+smelt 0.8 keeps sessions, prompts and usage in one `smelt.db` and renames
+credential and cache files. On first start, smelt moves the 0.7 files into
+`<state>/v0.7/` and imports them; `smelt session migrate` retries sessions that
+failed. The importer reads 0.7 sessions through the `smelt-store` crate pinned
+at the `v0.7.0` tag (`smelt-store-v07` in `crates/core/Cargo.toml`).
 
-Remove the copy loop in the release job once alpha users have upgraded past the
-last glibc-linked release.
+Remove `crates/core/src/migrate_v07.rs`, its startup hook and `session migrate`
+command in `src/main.rs`, the store's `import_prompts` and `import_usage`, and
+the `smelt-store-v07` dependency of `smelt-core` in the next minor release after
+0.8.

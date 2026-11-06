@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_lock_without_snapshot_is_reported_as_starting() {
+    fn lock_without_snapshot_is_reported_as_starting() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("smelt");
         let lock = InstallLock::try_acquire(&exe).unwrap().unwrap();

@@ -105,7 +105,7 @@ fn payload(root: &Path, turn: u64, history: Vec<HistoryItem>) -> UiCommand {
         control_env: Default::default(),
         history: protocol::ModelHistorySource::items(history),
         session_id: "test-session".into(),
-        sessions_root: root.join("sessions"),
+        artifact_dir: root.join("artifacts/test-session"),
         ephemeral: false,
         permission_overrides: None,
         system_prompt: None,
@@ -357,8 +357,7 @@ async fn background_child_outlives_parent_result_without_polluting_parent_histor
 
     assert!(
         session::load(
-            &fixture.root.path().join("sessions"),
-            "test-session",
+            &fixture.root.path().join("artifacts/test-session"),
             fixture.root.path(),
             &history
         )
@@ -513,7 +512,7 @@ async fn resumed_native_plan_uses_the_saved_acknowledged_write() {
     // The turn ends once Claude Code is idle, so stopping it keeps the session.
     finish(&mut handle, &mut history).await;
     drop(handle);
-    let directory = plan_directory(&fixture.root.path().join("sessions"), "test-session").unwrap();
+    let directory = plan_directory(&fixture.root.path().join("artifacts/test-session"));
     std::fs::write(directory.join("unrelated.md"), "# Unrelated plan").unwrap();
     std::env::set_var("SMELT_CLAUDE_FIXTURE", "plan-resume");
     let mut handle = fixture.handle();
@@ -1615,8 +1614,7 @@ async fn workspace_change_moves_claude_code_and_continues_the_turn() {
             .as_str()
             .is_some_and(|text| text.contains(destination.to_str().unwrap()))));
     assert!(session::load(
-        &fixture.root.path().join("sessions"),
-        "test-session",
+        &fixture.root.path().join("artifacts/test-session"),
         &destination,
         &history
     )

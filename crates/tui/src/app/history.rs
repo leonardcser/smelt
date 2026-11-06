@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn display_only_lineage_load_reads_bounded_tail_records() {
+    fn display_only_load_reads_bounded_tail_records() {
         let dir = tempfile::tempdir().unwrap();
         let records = (0..200)
             .map(|idx| test_record_record(idx, &format!("block {idx}")))
@@ -1351,7 +1351,7 @@ mod tests {
     }
 
     #[test]
-    fn display_only_lineage_load_counts_non_dense_record_rows() {
+    fn display_only_load_counts_non_dense_record_rows() {
         let dir = tempfile::tempdir().unwrap();
         let records = vec![
             test_record_record(70, "visible old tail"),
@@ -3019,7 +3019,7 @@ mod checkpoint_tests {
     use protocol::Content;
     use smelt_core::ContextCheckpoint;
 
-    fn lineage_reader(
+    fn session_reader(
         app: &crate::app::test_harness::TestApp,
         session_id: &str,
     ) -> smelt_store::SessionReader {
@@ -3027,20 +3027,20 @@ mod checkpoint_tests {
             .core
             .sessions
             .reader(session_id)
-            .expect("open canonical lineage session")
+            .expect("open stored session")
     }
 
-    fn lineage_history(reader: &smelt_store::SessionReader) -> Vec<protocol::HistoryItem> {
-        let state = reader.state().expect("read lineage state");
+    fn stored_history(reader: &smelt_store::SessionReader) -> Vec<protocol::HistoryItem> {
+        let state = reader.state().expect("read session state");
         reader
             .history_range(0, state.head.history_len.get())
             .expect("read canonical history")
     }
 
-    fn lineage_transcript(
+    fn stored_transcript(
         reader: &smelt_store::SessionReader,
     ) -> Vec<smelt_store::StoredTranscriptBlock> {
-        let state = reader.state().expect("read lineage state");
+        let state = reader.state().expect("read session state");
         reader
             .transcript_range(0, state.head.transcript_record_count.get())
             .expect("read canonical transcript")
@@ -3321,7 +3321,7 @@ mod checkpoint_tests {
             .render_unsettled_silent()
             .text()
             .contains("replacement user"));
-        let source = lineage_transcript(&lineage_reader(&app, &source_id));
+        let source = stored_transcript(&session_reader(&app, &source_id));
         assert!(source
             .iter()
             .any(|record| record.preview_text.contains("last source message")));
@@ -3350,8 +3350,8 @@ mod checkpoint_tests {
         app.app.restore_screen();
         app.app.save_session_and_flush();
 
-        let reader = lineage_reader(&app, &id);
-        let history = lineage_history(&reader);
+        let reader = session_reader(&app, &id);
+        let history = stored_history(&reader);
         assert_eq!(
             history,
             vec![user("replacement user"), assistant("replacement assistant")]
@@ -3478,8 +3478,8 @@ mod checkpoint_tests {
             app.app.overlays.notification()
         );
 
-        let reader = lineage_reader(&app, &id);
-        let rows = lineage_history(&reader);
+        let reader = session_reader(&app, &id);
+        let rows = stored_history(&reader);
         assert_eq!(
             rows,
             vec![
@@ -3488,7 +3488,7 @@ mod checkpoint_tests {
                 user("new user")
             ]
         );
-        let records = lineage_transcript(&reader);
+        let records = stored_transcript(&reader);
         assert!(records.iter().any(|record| record.history_idx == Some(2)));
     }
 
@@ -3519,8 +3519,8 @@ mod checkpoint_tests {
         assert_eq!(source.items.len(), 2, "the context precedes the new item");
         assert_eq!(app.app.conversation.session().history.len(), 3);
 
-        let reader = lineage_reader(&app, &id);
-        let rows = lineage_history(&reader);
+        let reader = session_reader(&app, &id);
+        let rows = stored_history(&reader);
         assert_eq!(
             rows,
             vec![
@@ -3529,7 +3529,7 @@ mod checkpoint_tests {
                 user("new user")
             ]
         );
-        let records = lineage_transcript(&reader);
+        let records = stored_transcript(&reader);
         assert!(records.iter().any(|record| record.history_idx == Some(2)));
     }
 
@@ -3565,7 +3565,7 @@ mod checkpoint_tests {
         );
         assert_no_full_store_reads();
 
-        let reader = lineage_reader(&app, &id);
+        let reader = session_reader(&app, &id);
         let after = reader.state().expect("read appended canonical session");
         assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
         assert_eq!(
@@ -3574,7 +3574,7 @@ mod checkpoint_tests {
                 .expect("read persisted history tail"),
             vec![user("new user")]
         );
-        let records = lineage_transcript(&reader);
+        let records = stored_transcript(&reader);
         assert_eq!(records.len(), OLD_HISTORY_LEN + 1);
         assert_eq!(
             records.last().and_then(|row| row.history_idx),
@@ -3914,7 +3914,7 @@ mod checkpoint_tests {
         assert_eq!(app.prompt_source(), "old user 0");
         app.app.flush_persist();
 
-        let snapshot = lineage_reader(&app, &id)
+        let snapshot = session_reader(&app, &id)
             .state()
             .expect("read rewound session");
         assert_eq!(snapshot.head.history_len.get(), 0);
@@ -4021,7 +4021,7 @@ mod checkpoint_tests {
         let session_id = app.app.conversation.session().id.clone();
 
         assert!(app.load_session_by_id(&session_id));
-        let slice = lineage_reader(&app, &session_id)
+        let slice = session_reader(&app, &session_id)
             .transcript_record_slice_with_total(
                 smelt_store::TranscriptRecordRange::from(
                     TARGET_HISTORY_INDEX..TARGET_HISTORY_INDEX + 12,
@@ -4078,7 +4078,7 @@ mod checkpoint_tests {
             !matches!(origin, smelt_core::BlockOrigin::History(index) if *index >= TARGET_HISTORY_INDEX)
         }));
         app.app.flush_persist();
-        let rewound = lineage_reader(&app, &session_id)
+        let rewound = session_reader(&app, &session_id)
             .state()
             .expect("read first rewind");
         assert_eq!(
@@ -4141,7 +4141,7 @@ mod checkpoint_tests {
         const TARGET_HISTORY_INDEX: usize = 98;
         let mut app = large_saved_session_app(HISTORY_LEN);
         let id = app.app.conversation.session().id.clone();
-        let expected_record_prefix = lineage_transcript(&lineage_reader(&app, &id))
+        let expected_record_prefix = stored_transcript(&session_reader(&app, &id))
             .into_iter()
             .take(TARGET_HISTORY_INDEX)
             .collect::<Vec<_>>();
@@ -4194,7 +4194,7 @@ mod checkpoint_tests {
         app.app.sync_session_snapshot();
         app.app.save_session_and_flush();
 
-        let reader = lineage_reader(&app, &id);
+        let reader = session_reader(&app, &id);
         let snapshot = reader.state().expect("read replaced session");
         assert_eq!(
             snapshot.head.history_len.get() as usize,
@@ -4204,7 +4204,7 @@ mod checkpoint_tests {
             snapshot.head.transcript_record_count.get() as usize,
             TARGET_HISTORY_INDEX + 2
         );
-        let records = lineage_transcript(&reader);
+        let records = stored_transcript(&reader);
         assert_eq!(
             &records[..TARGET_HISTORY_INDEX],
             expected_record_prefix.as_slice()
@@ -4392,7 +4392,7 @@ mod checkpoint_tests {
         assert!(app.app.conversation.session().history.is_empty());
         assert_no_full_store_reads();
 
-        let reader = lineage_reader(&app, &id);
+        let reader = session_reader(&app, &id);
         let after = reader.state().expect("read appended canonical session");
         assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
         let tail = reader
@@ -4460,7 +4460,7 @@ mod checkpoint_tests {
         );
         assert_no_full_store_reads();
 
-        let reader = lineage_reader(&app, &id);
+        let reader = session_reader(&app, &id);
         let after = reader.state().expect("read appended canonical session");
         assert_eq!(after.head.history_len.get(), OLD_HISTORY_LEN as u64 + 1);
         assert_eq!(
@@ -4475,7 +4475,7 @@ mod checkpoint_tests {
     fn no_op_save_leaves_the_store_unchanged() {
         let mut app = large_saved_session_app(256);
         let id = app.app.conversation.session().id.clone();
-        let before = lineage_reader(&app, &id)
+        let before = session_reader(&app, &id)
             .state()
             .expect("read canonical session before no-op save");
 
@@ -4491,7 +4491,7 @@ mod checkpoint_tests {
             "no-op save did not take the unchanged fast path"
         );
         assert_no_full_store_reads();
-        let after = lineage_reader(&app, &id)
+        let after = session_reader(&app, &id)
             .state()
             .expect("read canonical session after no-op save");
         assert_eq!(after.head, before.head);
@@ -4513,9 +4513,9 @@ mod checkpoint_tests {
             Some("new user".into()),
         );
 
-        let reader = lineage_reader(&app, &id);
+        let reader = session_reader(&app, &id);
         let snapshot = reader.state().expect("read canonical session");
-        assert_eq!(lineage_history(&reader), vec![user("new user")]);
+        assert_eq!(stored_history(&reader), vec![user("new user")]);
         assert_eq!(snapshot.metadata_snapshots.len(), 1);
         assert_eq!(snapshot.metadata_snapshots[0].0, 1);
         assert_eq!(
@@ -4542,10 +4542,10 @@ mod checkpoint_tests {
         app.app.save_session();
         app.app.flush_persist();
 
-        let reader = lineage_reader(&app, &id);
+        let reader = session_reader(&app, &id);
         let state = reader.state().expect("read rewound state");
-        assert!(lineage_history(&reader).is_empty());
-        assert!(lineage_transcript(&reader).is_empty());
+        assert!(stored_history(&reader).is_empty());
+        assert!(stored_transcript(&reader).is_empty());
         assert_eq!(state.head.history_len.get(), 0);
         assert_eq!(state.head.transcript_record_count.get(), 0);
     }
@@ -5549,7 +5549,7 @@ mod checkpoint_tests {
         app.save_session_and_flush();
 
         let session_id = app.app.conversation.session().id.clone();
-        let expected_record_prefix = lineage_transcript(&lineage_reader(&app, &session_id))
+        let expected_record_prefix = stored_transcript(&session_reader(&app, &session_id))
             .into_iter()
             .take(TARGET_HISTORY_INDEX)
             .collect::<Vec<_>>();
@@ -5638,14 +5638,14 @@ mod checkpoint_tests {
             "save race should not surface a persistence failure: {:?}",
             app.overlays_probe().notification()
         );
-        let reader = lineage_reader(&app, &session_id);
-        let state = reader.state().expect("read rewound lineage state");
+        let reader = session_reader(&app, &session_id);
+        let state = reader.state().expect("read rewound session state");
         assert_eq!(state.head.history_len.get() as usize, TARGET_HISTORY_INDEX);
         assert_eq!(
             state.head.transcript_record_count.get() as usize,
             TARGET_HISTORY_INDEX + 1
         );
-        let records = lineage_transcript(&reader);
+        let records = stored_transcript(&reader);
         assert_eq!(records.len(), TARGET_HISTORY_INDEX + 1);
         assert_eq!(
             &records[..TARGET_HISTORY_INDEX],

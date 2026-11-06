@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cached_model_preserves_unknown_fast_capability() {
+    fn model_without_capability_fields_leaves_them_unknown() {
         let model: CodexModel = serde_json::from_value(serde_json::json!({
             "slug": "gpt-5.6-sol",
             "display_name": "GPT-5.6-Sol",

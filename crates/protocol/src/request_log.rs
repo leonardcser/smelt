@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_audit_payloads_omit_missing_diagnostics() {
+    fn audit_payloads_without_diagnostics_round_trip_unchanged() {
         let response: RequestResponse = serde_json::from_value(json!({"content": "done"})).unwrap();
         assert_eq!(
             serde_json::to_value(response).unwrap(),

@@ -6,17 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn directory(sessions_root: &Path, session_id: &str) -> Result<PathBuf, String> {
-    if session_id.is_empty()
-        || !session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err("Invalid session ID for Claude Code plan artifacts".into());
-    }
-    Ok(smelt_store::Store::new(sessions_root)
-        .session_artifact_dir(session_id)
-        .join("claude-code-plans"))
+/// Where Claude Code writes the plans of the session with `artifact_dir`.
+pub fn directory(artifact_dir: &Path) -> PathBuf {
+    artifact_dir.join("claude-code-plans")
 }
 
 pub(super) struct Plans {
@@ -172,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn active_plan_is_an_acknowledged_write_and_survives_resume() {
         let root = tempfile::tempdir().unwrap();
-        let dir = directory(root.path(), "session").unwrap();
+        let dir = directory(root.path());
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("plan.md");
         std::fs::write(&path, "# Native plan").unwrap();
@@ -214,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn saved_plan_references_cannot_escape_the_artifact_directory() {
         let root = tempfile::tempdir().unwrap();
-        let dir = directory(root.path(), "session").unwrap();
+        let dir = directory(root.path());
         std::fs::create_dir_all(&dir).unwrap();
         let outside = dir.parent().unwrap().join("outside.md");
         std::fs::write(&outside, "unrelated").unwrap();
@@ -230,6 +222,5 @@ mod tests {
                 .unwrap_err()
                 .contains("escapes"));
         }
-        assert!(directory(root.path(), "../escape").is_err());
     }
 }

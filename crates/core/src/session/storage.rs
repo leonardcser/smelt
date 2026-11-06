@@ -72,7 +72,7 @@ impl SessionStorage {
     }
 
     pub fn new(state_root: PathBuf) -> Self {
-        let store = smelt_store::Store::from_state_root(&state_root);
+        let store = smelt_store::Store::new(&state_root);
         Self {
             inner: Arc::new(Inner { state_root, store }),
         }
@@ -84,10 +84,6 @@ impl SessionStorage {
 
     pub fn store(&self) -> &smelt_store::Store {
         &self.inner.store
-    }
-
-    pub fn sessions_dir(&self) -> PathBuf {
-        self.store().root().to_path_buf()
     }
 
     pub fn create_private_dir_all(&self, path: &Path) -> std::io::Result<()> {
@@ -403,10 +399,6 @@ pub fn storage() -> SessionStorage {
         Some(storage) if storage.state_root() == state_root => storage.clone(),
         _ => current.insert(SessionStorage::new(state_root)).clone(),
     }
-}
-
-pub fn sessions_dir() -> PathBuf {
-    storage().sessions_dir()
 }
 
 // Conversions between sessions and stored rows.

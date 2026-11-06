@@ -51,6 +51,7 @@ ratex-parser = "0.1.14"
 ratex-font = "0.1.14"
 mimalloc = "0.1.52"
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+smelt-store-v07 = { git = "https://github.com/leonardcser/smelt", tag = "v0.7.0", version = "0.0.0-dev", package = "smelt-store" }
 
 # musl's malloc maps and unmaps large blocks on every call. Overriding the C
 # allocator routes bundled C libraries such as SQLite through mimalloc too.

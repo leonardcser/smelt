@@ -248,9 +248,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_model_metadata_is_picker_visible() {
+    fn metadata_without_catalog_fields_is_picker_visible() {
         let metadata: ModelMetadata = serde_json::from_value(serde_json::json!({
-            "id": "legacy",
+            "id": "plain",
             "display_name": null,
             "context_window": null,
             "supports_reasoning": null

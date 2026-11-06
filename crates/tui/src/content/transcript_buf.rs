@@ -6199,7 +6199,7 @@ pub(crate) mod tests {
             )),
         });
         transcript.push(Block::ProcessStatus {
-            text: "legacy process note".into(),
+            text: "untyped process note".into(),
             event: None,
             output: None,
         });
@@ -6220,7 +6220,7 @@ pub(crate) mod tests {
                 .any(|line| line
                     == "background processes finished: 2, 1 failed: 2 exited with code 7")
         );
-        assert!(rows.iter().any(|line| line == "legacy process note"));
+        assert!(rows.iter().any(|line| line == "untyped process note"));
     }
 
     #[test]
@@ -8508,7 +8508,7 @@ pub(crate) mod tests {
 
     fn resume_record_content(block_idx: usize) -> String {
         let mut content = format!("# Resume benchmark response {block_idx}\n\n");
-        let paragraph = "This record-backed resume fixture stores full transcript text in lineage storage without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
+        let paragraph = "This record-backed resume fixture stores full transcript text in session storage without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
         while content.len() < RESUME_RECORD_BLOCK_TEXT_BYTES {
             content.push_str(paragraph);
         }

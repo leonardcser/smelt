@@ -18,7 +18,7 @@ struct Cache {
 }
 
 fn cache_path() -> PathBuf {
-    crate::paths::cache_dir().join("claude-code-models.json")
+    crate::paths::model_cache_path("claude-code.json")
 }
 
 fn load() -> Option<Cache> {

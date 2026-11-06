@@ -207,7 +207,7 @@ before wrapping it with `/usr/bin/time -v`, or rustc dominates peak RSS.
 cargo test --profile release-fast --test startup \
   interactive_lifecycle_benchmark_suite --no-run
 
-SMELT_LIFECYCLE_BENCH_FIXTURE="$HOME/tmp/session-fixtures/sessions" \
+SMELT_LIFECYCLE_BENCH_FIXTURE="$HOME/tmp/session-fixtures/state" \
 SMELT_LIFECYCLE_BENCH_SESSION_ID='<session-id>' \
 SMELT_LIFECYCLE_BENCH_READY_TEXT='<unique visible tail text>' \
 SMELT_LIFECYCLE_BENCH_RUNS=10 \

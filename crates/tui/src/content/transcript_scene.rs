@@ -1358,7 +1358,7 @@ mod tests {
             )),
         });
         transcript.push(Block::ProcessStatus {
-            text: "legacy process status".into(),
+            text: "untyped process status".into(),
             event: None,
             output: None,
         });

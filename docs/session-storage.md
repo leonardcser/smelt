@@ -1,7 +1,7 @@
 # Session storage
 
-Every saved session lives in one SQLite database, `<state>/sessions/sessions.db`,
-defined by `crates/store/src/schema.sql`. Sessions are flat rows keyed by session
+Every saved session lives in one SQLite database, `<state>/smelt.db`, defined by
+`crates/store/src/schema.sql`. Sessions are flat rows keyed by session
 and position. A save replaces only the changed suffix of each sequence, so its cost
 follows the new content, not the session size.
 
@@ -15,11 +15,16 @@ follows the new content, not the session size.
 | `side_rows` | Turn metadata, metadata snapshots, context snapshots and checkpoint events, keyed by history position |
 | `transcript` | One row per transcript block, with cumulative row estimates at six widths, a preview and search text |
 | `requests` | Request audit entries with flat `body`, `response` and `error` payloads |
+| `prompts` | Submitted prompts for input history recall |
+| `usage` | Tokens and cost per model call; calls before yesterday fold into one row per day and model |
+
+Files a session owns, such as Claude Code plans and its native session link, live in
+`<state>/artifacts/<id>/`.
 
 Large bodies are stored with zstd when that saves at least an eighth. Readers query
 rows by position or by indexed columns and decode only the rows they return.
 
-Each session has an exclusive writer lock at `<state>/sessions/locks/<id>.lock`. A
+Each session has an exclusive writer lock at `<state>/locks/<id>.lock`. A
 second process that opens the same session gets `StoreError::Owned` and opens it
 read-only. Readers never take the lock.
 
@@ -137,10 +142,12 @@ created with the current schema; any other version is refused without writing.
 ```sh
 smelt session doctor [<SESSION>] [--json]
 smelt session backup <OUTPUT>
+smelt session migrate
 ```
 
 `doctor` runs `PRAGMA quick_check` and, for one session, reports its row counts and
 stored bytes. `backup` writes a consistent copy of the whole database with
 `VACUUM INTO` and never overwrites an existing file. Both are safe while smelt
-runs. Session bodies, credentials and real-data errors must not appear in
+runs. `migrate` imports smelt 0.7 sessions from `<state>/v0.7/`; smelt also runs
+it on its first start. Session bodies, credentials and real-data errors must not appear in
 evidence logs.

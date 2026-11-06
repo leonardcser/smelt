@@ -949,8 +949,8 @@ impl PlatformLuaHost<'_> {
         self.app.inspect_server_url()
     }
 
-    pub(crate) fn metrics_entries(&self) -> Vec<crate::metrics::MetricsEntry> {
-        crate::metrics::load(self.app.core.sessions.state_root())
+    pub(crate) fn usage_entries(&self) -> Vec<smelt_store::UsageEntry> {
+        self.app.core.sessions.store().usage().unwrap_or_default()
     }
 
     pub(crate) fn sync_permissions(

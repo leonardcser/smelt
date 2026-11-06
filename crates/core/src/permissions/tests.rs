@@ -77,12 +77,12 @@ fn claude_code_native_file_tools_honor_policy_and_workspace() {
 #[test]
 fn claude_code_plan_grants_do_not_allow_workspace_writes_or_path_escapes() {
     let root = tempfile::tempdir().unwrap();
-    let sessions = tempfile::tempdir().unwrap();
+    let artifacts = tempfile::tempdir().unwrap();
     let mut mode = mode_perms(HashMap::new(), &[]);
     mode.effects.write = Some(Decision::Deny);
     let permissions = PermissionsHandle::new(permissions_from_mode(mode, true, root.path().into()));
-    super::claude_code::grant_plan_artifacts(&permissions, sessions.path(), "session");
-    let directory = engine::claude_code_plan_directory(sessions.path(), "session").unwrap();
+    super::claude_code::grant_plan_artifacts(&permissions, artifacts.path());
+    let directory = engine::claude_code_plan_directory(artifacts.path());
     std::fs::create_dir_all(&directory).unwrap();
     let artifact = directory.join("plan.md");
     let outside = root.path().join("workspace.txt");

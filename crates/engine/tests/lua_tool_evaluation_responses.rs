@@ -243,7 +243,7 @@ async fn lua_tool_evaluation_error_rejects_without_started_flash() {
         control_env: Default::default(),
         history: protocol::ModelHistorySource::items(Vec::new()),
         session_id: "sess".into(),
-        sessions_root: PathBuf::from("/tmp"),
+        artifact_dir: PathBuf::from("/tmp"),
         ephemeral: false,
         permission_overrides: None,
         native_prompt: None,
@@ -345,7 +345,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 control_env: Default::default(),
                 history: protocol::ModelHistorySource::items(Vec::new()),
                 session_id: "sess".into(),
-                sessions_root: PathBuf::from("/tmp"),
+                artifact_dir: PathBuf::from("/tmp"),
                 ephemeral: false,
                 permission_overrides: Some(protocol::PermissionOverrides {
                     tools: Some(protocol::RuleSetOverride {

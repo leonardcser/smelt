@@ -837,8 +837,8 @@ pub struct StartTurnPayload {
     pub history: ModelHistorySource,
     /// Stable identity for storage and provider cache routing.
     pub session_id: String,
-    /// Root of session storage, for per-session artifacts.
-    pub sessions_root: std::path::PathBuf,
+    /// Directory for this session's files, such as native plans.
+    pub artifact_dir: std::path::PathBuf,
     /// Do not persist agent-backend conversations or session links for this turn.
     #[serde(default)]
     pub ephemeral: bool,
@@ -1237,7 +1237,7 @@ mod tests {
             control_env: Default::default(),
             history: ModelHistorySource::default(),
             session_id: "s".into(),
-            sessions_root: std::path::PathBuf::from("/tmp"),
+            artifact_dir: std::path::PathBuf::from("/tmp"),
             ephemeral: false,
             permission_overrides: None,
             system_prompt: None,

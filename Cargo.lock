@@ -1190,6 +1190,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1425,6 +1435,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
 ]
 
 [[package]]
@@ -3531,10 +3552,10 @@ dependencies = [
  "sha2",
  "smelt-core",
  "smelt-engine",
- "smelt-perf",
- "smelt-protocol",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
  "smelt-provider",
- "smelt-store",
+ "smelt-store 0.0.0-dev",
  "smelt-test-support",
  "smelt-tui",
  "tempfile",
@@ -3547,7 +3568,7 @@ dependencies = [
 name = "smelt-ansi"
 version = "0.5.0"
 dependencies = [
- "smelt-style",
+ "smelt-style 0.6.0",
 ]
 
 [[package]]
@@ -3557,9 +3578,22 @@ dependencies = [
  "base64 0.22.1",
  "serde",
  "sha2",
- "smelt-perf",
- "smelt-style",
+ "smelt-perf 0.3.0",
+ "smelt-style 0.6.0",
  "tempfile",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "smelt-buffer"
+version = "0.0.0-dev"
+source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "sha2",
+ "smelt-perf 0.3.0 (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
+ "smelt-style 0.6.0 (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
  "unicode-segmentation",
 ]
 
@@ -3598,13 +3632,14 @@ dependencies = [
  "shellexpand",
  "similar 3.2.1",
  "smelt-ansi",
- "smelt-buffer",
+ "smelt-buffer 0.0.0-dev",
  "smelt-engine",
  "smelt-lua-doc-derive",
- "smelt-perf",
- "smelt-protocol",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
  "smelt-provider",
- "smelt-store",
+ "smelt-store 0.0.0-dev",
+ "smelt-store 0.0.0-dev (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
  "smelt-test-support",
  "syntect",
  "tempfile",
@@ -3620,7 +3655,7 @@ name = "smelt-edit"
 version = "0.0.0-dev"
 dependencies = [
  "crossterm",
- "smelt-buffer",
+ "smelt-buffer 0.0.0-dev",
  "smelt-term",
 ]
 
@@ -3641,11 +3676,11 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2",
- "smelt-buffer",
- "smelt-perf",
- "smelt-protocol",
+ "smelt-buffer 0.0.0-dev",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
  "smelt-provider",
- "smelt-store",
+ "smelt-store 0.0.0-dev",
  "smelt-test-support",
  "tempfile",
  "thiserror 2.0.21",
@@ -3670,12 +3705,27 @@ name = "smelt-perf"
 version = "0.3.0"
 
 [[package]]
+name = "smelt-perf"
+version = "0.3.0"
+source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
+
+[[package]]
 name = "smelt-protocol"
 version = "0.0.0-dev"
 dependencies = [
  "serde",
  "serde_json",
- "smelt-buffer",
+ "smelt-buffer 0.0.0-dev",
+]
+
+[[package]]
+name = "smelt-protocol"
+version = "0.0.0-dev"
+source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
+dependencies = [
+ "serde",
+ "serde_json",
+ "smelt-buffer 0.0.0-dev (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
 ]
 
 [[package]]
@@ -3694,9 +3744,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "smelt-buffer",
- "smelt-perf",
- "smelt-protocol",
+ "smelt-buffer 0.0.0-dev",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3714,16 +3764,44 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "smelt-buffer",
- "smelt-perf",
- "smelt-protocol",
+ "smelt-buffer 0.0.0-dev",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
  "tempfile",
+ "zstd",
+]
+
+[[package]]
+name = "smelt-store"
+version = "0.0.0-dev"
+source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
+dependencies = [
+ "fs4",
+ "getrandom 0.4.3",
+ "hostname",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smelt-buffer 0.0.0-dev (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
+ "smelt-perf 0.3.0 (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
+ "smelt-protocol 0.0.0-dev (git+https://github.com/leonardcser/smelt?tag=v0.7.0)",
  "zstd",
 ]
 
 [[package]]
 name = "smelt-style"
 version = "0.6.0"
+dependencies = [
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "smelt-style"
+version = "0.6.0"
+source = "git+https://github.com/leonardcser/smelt?tag=v0.7.0#55764e2a0c6f7d06634810230010375d3f097df9"
 dependencies = [
  "unicode-segmentation",
  "unicode-width",
@@ -3737,7 +3815,7 @@ dependencies = [
  "crossterm",
  "insta",
  "smelt-ansi",
- "smelt-style",
+ "smelt-style 0.6.0",
  "unicode-width",
 ]
 
@@ -3767,15 +3845,15 @@ dependencies = [
  "serde",
  "serde_json",
  "shlex",
- "smelt-buffer",
+ "smelt-buffer 0.0.0-dev",
  "smelt-core",
  "smelt-edit",
  "smelt-engine",
  "smelt-lua-doc-derive",
- "smelt-perf",
- "smelt-protocol",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
  "smelt-provider",
- "smelt-store",
+ "smelt-store 0.0.0-dev",
  "smelt-term",
  "smelt-test-support",
  "tempfile",
@@ -4872,10 +4950,10 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-core",
- "smelt-perf",
- "smelt-protocol",
+ "smelt-perf 0.3.0",
+ "smelt-protocol 0.0.0-dev",
  "smelt-provider",
- "smelt-store",
+ "smelt-store 0.0.0-dev",
  "smelt-tui",
  "tempfile",
  "tokio",

@@ -38,6 +38,7 @@ pub mod lua;
 pub mod managed_models;
 pub mod mcp;
 pub mod messages;
+pub mod migrate_v07;
 pub mod notebook;
 pub mod output_limit;
 pub mod path;

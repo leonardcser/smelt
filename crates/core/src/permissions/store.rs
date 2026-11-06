@@ -777,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_store_without_revision_loads_at_zero_and_upgrades_on_mutation() {
+    fn store_without_revision_loads_at_zero_and_gains_one_on_mutation() {
         let state = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let store = PermissionStore::new(state.path().to_path_buf());

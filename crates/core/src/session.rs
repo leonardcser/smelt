@@ -1505,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_unknown_context_tokens_are_stale_for_display() {
+    fn display_tokens_without_identity_are_stale_unless_zero() {
         let mut s = fixture_session();
         s.display_context_tokens = Some(100);
         s.display_context_token_identity = None;

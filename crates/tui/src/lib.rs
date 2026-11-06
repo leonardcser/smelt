@@ -26,7 +26,6 @@ pub use lua::{
 };
 pub use smelt_core::mcp;
 pub use smelt_core::permissions;
-pub(crate) mod metrics;
 pub(crate) mod persist;
 pub(crate) mod picker;
 pub mod prompt_inputs;

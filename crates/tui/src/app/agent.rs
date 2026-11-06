@@ -989,8 +989,10 @@ impl TuiApp {
         if smelt_provider::BackendKind::is_claude_code(&turn.model_target.provider_type) {
             smelt_core::permissions::claude_code::grant_plan_artifacts(
                 &self.core.permissions,
-                &self.core.sessions.sessions_dir(),
-                &self.conversation.session().id,
+                &self
+                    .core
+                    .sessions
+                    .artifact_dir_for(self.conversation.session()),
             );
         }
         let permissions = turn.permissions.clone();
@@ -1008,7 +1010,10 @@ impl TuiApp {
             control_env: self.core.session_control.agent_env(),
             history: turn.history,
             session_id: self.conversation.session().id.clone(),
-            sessions_root: self.core.sessions.sessions_dir(),
+            artifact_dir: self
+                .core
+                .sessions
+                .artifact_dir_for(self.conversation.session()),
             ephemeral: self.ephemeral(),
             permission_overrides: turn.permission_overrides,
             system_prompt: Some(system_prompt),
@@ -2478,15 +2483,15 @@ pub(crate) fn lookup_api_key(
 mod tests {
     use super::*;
 
-    fn lineage_reader(app: &crate::app::test_harness::TestApp) -> smelt_store::SessionReader {
+    fn session_reader(app: &crate::app::test_harness::TestApp) -> smelt_store::SessionReader {
         app.app
             .core
             .sessions
             .reader(&app.app.conversation.session().id)
-            .expect("open canonical lineage session")
+            .expect("open stored session")
     }
 
-    fn lineage_history(reader: &smelt_store::SessionReader) -> Vec<protocol::HistoryItem> {
+    fn stored_history(reader: &smelt_store::SessionReader) -> Vec<protocol::HistoryItem> {
         let head = reader.head().expect("read session head");
         reader
             .history_range(0, head.history_len.get())
@@ -2494,7 +2499,7 @@ mod tests {
     }
 
     fn stored_last_turn_id(app: &crate::app::test_harness::TestApp) -> u64 {
-        lineage_reader(app)
+        session_reader(app)
             .state()
             .expect("read session state")
             .metadata
@@ -2915,7 +2920,7 @@ mod tests {
 
         assert_eq!(stored_last_turn_id(&app), turn_id);
         assert!(matches!(
-            lineage_history(&lineage_reader(&app)).last(),
+            stored_history(&session_reader(&app)).last(),
             Some(HistoryItem::Assistant { .. })
         ));
     }
@@ -3016,7 +3021,7 @@ mod tests {
             "rewind waited {elapsed:?} for canonical turn cancellation"
         );
         app.app.flush_persist();
-        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 0);
+        assert_eq!(stored_history(&session_reader(&app)).len(), 0);
     }
 
     #[test]
@@ -3047,7 +3052,7 @@ mod tests {
         );
         release.send(()).expect("resume persistence actor");
         app.app.flush_persist();
-        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 2);
+        assert_eq!(stored_history(&session_reader(&app)).len(), 2);
     }
 
     #[test]
@@ -3088,7 +3093,7 @@ mod tests {
         );
         release.send(()).expect("resume persistence actor");
         app.app.flush_persist();
-        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 2);
+        assert_eq!(stored_history(&session_reader(&app)).len(), 2);
     }
 
     #[test]
@@ -3136,7 +3141,7 @@ mod tests {
         );
         release.send(()).expect("resume persistence actor");
         app.app.flush_persist();
-        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 2);
+        assert_eq!(stored_history(&session_reader(&app)).len(), 2);
     }
 
     #[test]
@@ -3162,7 +3167,7 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert!(app.app.core.sessions.reader(&source_id).is_err());
         app.app.flush_persist();
-        assert_eq!(lineage_history(&lineage_reader(&app)).len(), 1);
+        assert_eq!(stored_history(&session_reader(&app)).len(), 1);
     }
 
     #[test]
@@ -3525,7 +3530,7 @@ mod tests {
         assert_eq!(app.session_snapshot().id, source_id);
         assert_eq!(app.app.session_history_len(), 1);
         app.save_session_and_flush();
-        assert_eq!(lineage_reader(&app).head().unwrap().history_len.get(), 1);
+        assert_eq!(session_reader(&app).head().unwrap().history_len.get(), 1);
         app.assert_invariants();
     }
 

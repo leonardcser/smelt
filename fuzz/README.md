@@ -42,14 +42,6 @@ cargo xtask fuzz prepare
 ```
 
 `run`, `coverage-snapshot`, and `verify` also prepare the corpora they need.
-Import corpus and artifacts from the old checkout-local layout once:
-
-```sh
-cargo xtask fuzz import-data
-# Or import from another clone or checkout:
-cargo xtask fuzz import-data /path/to/repository/fuzz
-```
-
 ## Day-to-day
 
 Build all real fuzz targets without accidentally building helper bins:
